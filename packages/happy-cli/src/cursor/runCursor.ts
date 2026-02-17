@@ -14,6 +14,8 @@ import React from 'react';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import { join } from 'node:path';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { configuration } from '@/configuration';
 
 import { ApiClient } from '@/api/api';
 import { logger } from '@/ui/logger';
@@ -31,7 +33,6 @@ import { registerKillSessionHandler } from '@/claude/registerKillSessionHandler'
 import { stopCaffeinate } from '@/utils/caffeinate';
 import { connectionState } from '@/utils/serverConnectionErrors';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
-import { CHANGE_TITLE_INSTRUCTION } from '@/gemini/constants';
 import type { ApiSessionClient } from '@/api/apiSession';
 import type { PermissionMode } from '@/api/types';
 
@@ -40,9 +41,63 @@ import type { PermissionMode } from '@/api/types';
  * because the mobile app has dedicated handling for codex messages.
  */
 
+import { createEnvelope } from '@slopus/happy-wire';
+import { createId } from '@paralleldrive/cuid2';
 import { CursorProcess } from './cursorProcess';
 import { parseCursorMessage, type CursorParsedMessage } from './cursorMessageParser';
 import type { CursorStreamMessage, CursorMode } from './types';
+
+const CURSOR_SESSION_TAG_FILE = 'cursor-session-tag';
+
+/**
+ * Map Cursor tool name/args to Codex/app shape so the mobile app shows readable titles
+ * instead of a raw object (e.g. CodexBash → "$ command", Read → file path).
+ */
+function toCodexToolShape(
+  toolName: string,
+  args: Record<string, unknown>,
+): { codexName: string; codexInput: Record<string, unknown> } {
+  if (toolName === 'CursorBash') {
+    const cmd =
+      typeof args?.command === 'string'
+        ? args.command
+        : Array.isArray(args?.command)
+          ? (args.command as string[]).join(' ')
+          : '';
+    return {
+      codexName: 'CodexBash',
+      codexInput: {
+        command: [cmd],
+        parsed_cmd: [{ type: 'bash', cmd }],
+      },
+    };
+  }
+  if (toolName === 'CursorRead') {
+    const path = (args?.path ?? args?.file_path) as string | undefined;
+    return {
+      codexName: 'Read',
+      codexInput: { file_path: path ?? '' },
+    };
+  }
+  if (toolName === 'CursorWrite') {
+    const path = (args?.path ?? args?.file_path) as string | undefined;
+    const content = (args?.content as string) ?? '';
+    return {
+      codexName: 'Write',
+      codexInput: { file_path: path ?? '', content },
+    };
+  }
+  if (toolName === 'CursorEdit') {
+    const file_path = (args?.path ?? args?.file_path ?? args?.filePath) as string | undefined;
+    const old_string = (args?.old_string ?? args?.oldString ?? args?.oldText) as string | undefined;
+    const new_string = (args?.new_string ?? args?.newString ?? args?.newText) as string | undefined;
+    return {
+      codexName: 'Edit',
+      codexInput: { file_path: file_path ?? '', old_string: old_string ?? '', new_string: new_string ?? '' },
+    };
+  }
+  return { codexName: toolName, codexInput: args };
+}
 
 /**
  * Main entry point for the cursor command with ink UI.
@@ -52,7 +107,20 @@ export async function runCursor(opts: {
   startedBy?: 'daemon' | 'terminal';
 }): Promise<void> {
 
-  const sessionTag = randomUUID();
+  // Reuse last session tag so restart reconnects to the same session (set HAPPY_CURSOR_NEW_SESSION=1 for a new one)
+  const tagPath = join(configuration.happyHomeDir, CURSOR_SESSION_TAG_FILE);
+  let sessionTag: string;
+  if (process.env.HAPPY_CURSOR_NEW_SESSION === '1') {
+    sessionTag = randomUUID();
+  } else if (existsSync(tagPath)) {
+    try {
+      sessionTag = readFileSync(tagPath, 'utf8').trim() || randomUUID();
+    } catch {
+      sessionTag = randomUUID();
+    }
+  } else {
+    sessionTag = randomUUID();
+  }
 
   // Set backend for offline warnings
   connectionState.setBackend('Cursor');
@@ -85,6 +153,20 @@ export async function runCursor(opts: {
     startedBy: opts.startedBy,
   });
   const response = await api.getOrCreateSession({ tag: sessionTag, metadata, state });
+
+  const tagReused = existsSync(tagPath) && process.env.HAPPY_CURSOR_NEW_SESSION !== '1';
+  const sessionId = response?.id ?? `offline-${sessionTag}`;
+  logger.debug(`[cursor] Session: ${sessionId} (tag: ${sessionTag.slice(0, 8)}..., reused: ${tagReused})`);
+  if (tagReused) {
+    logger.debug('[cursor] Reusing session – open this same conversation in the app (or tap "It\'s ready!" push) so CLI and phone stay in sync.');
+  }
+
+  // Persist session tag so next restart reuses this session
+  try {
+    writeFileSync(tagPath, sessionTag, 'utf8');
+  } catch (e) {
+    logger.debug('[cursor] Could not write session tag file:', e);
+  }
 
   // Handle server unreachable - offline stub with hot reconnection
   let session: ApiSessionClient;
@@ -153,7 +235,6 @@ export async function runCursor(opts: {
     session.keepAlive(thinking, 'remote');
   }, 2000);
 
-  let isFirstMessage = true;
 
   const sendReady = () => {
     session.sendSessionEvent({ type: 'ready' });
@@ -289,36 +370,39 @@ export async function runCursor(opts: {
       messageBuffer.addMessage(userMessage, 'user');
       logger.debug(`[cursor] Received message (length: ${userMessage.length})`);
 
-      // Build the prompt
-      let prompt = userMessage;
-      if (first && isFirstMessage) {
-        // Append change_title instruction on first message (like Codex/Gemini)
-        prompt = userMessage + '\n\n' + CHANGE_TITLE_INSTRUCTION;
-        isFirstMessage = false;
-      }
+      // Cursor has no change_title MCP tool, so don't append that instruction (unlike Codex/Gemini)
+      const prompt = userMessage;
 
       // Accumulated response text for final message to mobile
       let accumulatedResponse = '';
       let hadToolCalls = false;
       // Queue to pair tool_call_start with tool_call_end (parser emits different callIds per message)
       const pendingToolCallIds: string[] = [];
+      const turnId = createId();
 
       try {
         thinking = true;
         session.keepAlive(thinking, 'remote');
 
-        // Send task_started (ACP only, like Gemini)
+        // Send task_started (codex) and turn-start (session protocol) so mobile starts timer
         session.sendCodexMessage( {
           type: 'task_started',
           id: randomUUID(),
         });
+        session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'turn-start' }, { turn: turnId }));
         messageBuffer.addMessage('Thinking...', 'system');
 
-        // Spawn cursor-agent process
+        // Spawn cursor-agent process (second+ turn uses --resume so cursor-agent continues same chat)
         const cursorModel = process.env.CURSOR_MODEL || 'auto';
+        const resumeId = cursorChatId || undefined;
+        if (resumeId) {
+          logger.debug(`[cursor] Resuming chat: ${resumeId}`);
+        } else {
+          logger.debug('[cursor] First turn, no resume');
+        }
         const cursorProc = new CursorProcess({
           cwd: process.cwd(),
-          resumeChatId: cursorChatId || undefined,
+          resumeChatId: resumeId,
           model: cursorModel,
           signal: abortController.signal,
           timeoutMs: 300000,
@@ -364,11 +448,13 @@ export async function runCursor(opts: {
               pendingToolCallIds.push(toolCallId);
               const toolArgs = JSON.stringify(msg.args).slice(0, 100);
               messageBuffer.addMessage(`Executing: ${msg.toolName} ${toolArgs}`, 'tool');
+              // Normalize to Codex shape so mobile shows "$ command" + output instead of raw object
+              const { codexName, codexInput } = toCodexToolShape(msg.toolName, msg.args);
               session.sendCodexMessage( {
                 type: 'tool-call',
-                name: msg.toolName,
+                name: codexName,
                 callId: toolCallId,
-                input: msg.args,
+                input: codexInput,
                 id: randomUUID(),
               });
               break;
@@ -439,11 +525,14 @@ export async function runCursor(opts: {
           });
         }
 
-        // Send task_complete (ACP only, like Gemini)
+        // Send task_complete (codex) and turn-end (session protocol) so mobile stops timer
         session.sendCodexMessage( {
           type: 'task_complete',
           id: randomUUID(),
         });
+        session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'turn-end', status: 'completed' }, { turn: turnId }));
+
+        await session.flush();
 
         thinking = false;
         session.keepAlive(thinking, 'remote');

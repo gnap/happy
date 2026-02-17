@@ -122,7 +122,8 @@ export class ApiSessionClient extends EventEmitter {
             encryptionVariant: this.encryptionVariant,
             logger: (msg, data) => logger.debug(msg, data)
         });
-        registerCommonHandlers(this.rpcHandlerManager, this.metadata.path);
+        const workingDir = this.metadata?.path ?? process.cwd();
+        registerCommonHandlers(this.rpcHandlerManager, workingDir);
 
         //
         // Create socket
@@ -181,18 +182,17 @@ export class ApiSessionClient extends EventEmitter {
 
                 if (data.body.t === 'new-message') {
                     const messageSeq = data.body.message?.seq;
-                    if (this.lastSeq === 0) {
-                        this.receiveSync.invalidate();
+                    const isEncrypted = data.body.message?.content?.t === 'encrypted';
+                    const acceptSeq = typeof messageSeq === 'number' && (this.lastSeq === 0 || messageSeq === this.lastSeq + 1);
+                    if (isEncrypted && acceptSeq) {
+                        const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.message.content.c));
+                        logger.debugLargeJson('[SOCKET] [UPDATE] Received update:', body);
+                        this.routeIncomingMessage(body);
+                        this.lastSeq = messageSeq;
                         return;
                     }
-                    if (typeof messageSeq !== 'number' || messageSeq !== this.lastSeq + 1 || data.body.message.content.t !== 'encrypted') {
-                        this.receiveSync.invalidate();
-                        return;
-                    }
-                    const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.message.content.c));
-                    logger.debugLargeJson('[SOCKET] [UPDATE] Received update:', body)
-                    this.routeIncomingMessage(body);
-                    this.lastSeq = messageSeq;
+                    this.receiveSync.invalidate();
+                    return;
                 } else if (data.body.t === 'update-session') {
                     if (data.body.metadata && data.body.metadata.version > this.metadataVersion) {
                         this.metadata = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.metadata.value));
@@ -314,24 +314,31 @@ export class ApiSessionClient extends EventEmitter {
         }
 
         const batch = this.pendingOutbox.slice();
-        const response = await axios.post<V3PostSessionMessagesResponse>(
-            `${configuration.serverUrl}/v3/sessions/${encodeURIComponent(this.sessionId)}/messages`,
-            {
-                messages: batch
-            },
-            {
-                headers: this.authHeaders(),
-                timeout: 60000
-            }
-        );
+        try {
+            const response = await axios.post<V3PostSessionMessagesResponse>(
+                `${configuration.serverUrl}/v3/sessions/${encodeURIComponent(this.sessionId)}/messages`,
+                {
+                    messages: batch
+                },
+                {
+                    headers: this.authHeaders(),
+                    timeout: 60000
+                }
+            );
 
-        this.pendingOutbox.splice(0, batch.length);
+            this.pendingOutbox.splice(0, batch.length);
 
-        const messages = Array.isArray(response.data.messages) ? response.data.messages : [];
-        const maxSeq = messages.reduce((acc, message) => (
-            message.seq > acc ? message.seq : acc
-        ), this.lastSeq);
-        this.lastSeq = maxSeq;
+            const messages = Array.isArray(response.data.messages) ? response.data.messages : [];
+            const maxSeq = messages.reduce((acc, message) => (
+                message.seq > acc ? message.seq : acc
+            ), this.lastSeq);
+            this.lastSeq = maxSeq;
+        } catch (error: unknown) {
+            const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+            const data = axios.isAxiosError(error) ? error.response?.data : undefined;
+            logger.debug('[API] flushOutbox failed', { sessionId: this.sessionId, batchLength: batch.length, status, data, error });
+            throw error;
+        }
     }
 
     private enqueueMessage(content: unknown, invalidate: boolean = true) {
@@ -422,6 +429,21 @@ export class ApiSessionClient extends EventEmitter {
         }
 
         this.enqueueSessionProtocolEnvelope(envelope);
+    }
+
+    /**
+     * Send a turn-end (or turn-start) session envelope in the shape the app expects for
+     * lifecycle/thinking timer: content.content.type === 'session' and content.content.data.ev.t.
+     * Use this only for turn-end/turn-start so the mobile app stops the timer; other session
+     * messages keep the normal envelope shape.
+     */
+    sendSessionLifecycleEnvelope(envelope: SessionEnvelope) {
+        const content = {
+            role: 'session',
+            content: { type: 'session', data: envelope },
+            meta: { sentFrom: 'cli' },
+        };
+        this.enqueueMessage(content);
     }
 
     /**
