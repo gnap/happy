@@ -1,8 +1,8 @@
 /**
  * CursorProcess - Spawns cursor-agent with a PTY wrapper
  *
- * cursor-agent requires a TTY to produce output. We use macOS `script` command
- * to create a pseudo-TTY, similar to the approach in openclaw's cursor-wrapper.js.
+ * cursor-agent requires a TTY to produce output. We use the `script` command
+ * to create a pseudo-TTY (tested on macOS; Linux has `script` but args may differ).
  *
  * Each user message spawns a new cursor-agent process:
  * - First message: cursor-agent --print --output-format stream-json --force "prompt"

@@ -42,12 +42,7 @@ import type { PermissionMode } from '@/api/types';
 
 import { CursorProcess } from './cursorProcess';
 import { parseCursorMessage, type CursorParsedMessage } from './cursorMessageParser';
-import { mapCursorMessageToSessionEnvelopes, type CursorTurnState } from './sessionProtocolMapper';
-import type { CursorStreamMessage } from './types';
-
-interface CursorMode {
-  permissionMode: PermissionMode;
-}
+import type { CursorStreamMessage, CursorMode } from './types';
 
 /**
  * Main entry point for the cursor command with ink UI.
@@ -273,12 +268,6 @@ export async function runCursor(opts: {
   const happyServer = await startHappyServer(session);
 
   //
-  // Session protocol state
-  //
-
-  let turnState: CursorTurnState = { currentTurnId: null };
-
-  //
   // Main loop
   //
 
@@ -311,6 +300,8 @@ export async function runCursor(opts: {
       // Accumulated response text for final message to mobile
       let accumulatedResponse = '';
       let hadToolCalls = false;
+      // Queue to pair tool_call_start with tool_call_end (parser emits different callIds per message)
+      const pendingToolCallIds: string[] = [];
 
       try {
         thinking = true;
@@ -369,18 +360,21 @@ export async function runCursor(opts: {
 
             case 'tool_call_start':
               hadToolCalls = true;
+              const toolCallId = randomUUID();
+              pendingToolCallIds.push(toolCallId);
               const toolArgs = JSON.stringify(msg.args).slice(0, 100);
               messageBuffer.addMessage(`Executing: ${msg.toolName} ${toolArgs}`, 'tool');
               session.sendCodexMessage( {
                 type: 'tool-call',
                 name: msg.toolName,
-                callId: msg.callId,
+                callId: toolCallId,
                 input: msg.args,
                 id: randomUUID(),
               });
               break;
 
             case 'tool_call_end':
+              const pairedCallId = pendingToolCallIds.shift() ?? msg.callId;
               const resultText = typeof msg.result === 'string'
                 ? msg.result.slice(0, 200)
                 : JSON.stringify(msg.result).slice(0, 200);
@@ -390,7 +384,7 @@ export async function runCursor(opts: {
               );
               session.sendCodexMessage( {
                 type: 'tool-result',
-                callId: msg.callId,
+                callId: pairedCallId,
                 output: msg.result,
                 id: randomUUID(),
               });
@@ -426,7 +420,7 @@ export async function runCursor(opts: {
         const isAbortError = error instanceof Error && error.name === 'AbortError';
         if (isAbortError) {
           messageBuffer.addMessage('Aborted by user', 'status');
-          session.sendSessionEvent({ type: 'message', message: 'Aborted by user' });
+          session.sendCodexMessage({ type: 'message', message: 'Aborted by user' });
         } else {
           const errorMsg = error instanceof Error ? error.message : 'Process error';
           logger.debug('[cursor] Error:', error);
