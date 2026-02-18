@@ -44,7 +44,7 @@ import type { PermissionMode } from '@/api/types';
 import { createEnvelope } from '@slopus/happy-wire';
 import { createId } from '@paralleldrive/cuid2';
 import { CursorProcess } from './cursorProcess';
-import { parseCursorMessage, type CursorParsedMessage } from './cursorMessageParser';
+import { CursorMessageParser, type CursorParsedMessage } from './cursorMessageParser';
 import type { CursorStreamMessage, CursorMode } from './types';
 
 const CURSOR_SESSION_TAG_FILE = 'cursor-session-tag';
@@ -376,9 +376,10 @@ export async function runCursor(opts: {
       // Accumulated response text for final message to mobile
       let accumulatedResponse = '';
       let hadToolCalls = false;
-      // Queue to pair tool_call_start with tool_call_end (parser emits different callIds per message)
-      const pendingToolCallIds: string[] = [];
       const turnId = createId();
+      const messageParser = new CursorMessageParser();
+      // Codex messages have both callId and id; app may match by id to stop timer
+      const codexIdByCallId = new Map<string, string>();
 
       try {
         thinking = true;
@@ -412,7 +413,7 @@ export async function runCursor(opts: {
         cursorProc.on('message', (rawMsg: CursorStreamMessage) => {
           logger.debug(`[cursor] Raw message: ${JSON.stringify(rawMsg).slice(0, 200)}`);
 
-          const parsed = parseCursorMessage(rawMsg);
+          const parsed = messageParser.parse(rawMsg);
           for (const msg of parsed) {
             handleParsedMessage(msg);
           }
@@ -444,23 +445,34 @@ export async function runCursor(opts: {
 
             case 'tool_call_start':
               hadToolCalls = true;
-              const toolCallId = randomUUID();
-              pendingToolCallIds.push(toolCallId);
               const toolArgs = JSON.stringify(msg.args).slice(0, 100);
               messageBuffer.addMessage(`Executing: ${msg.toolName} ${toolArgs}`, 'tool');
-              // Normalize to Codex shape so mobile shows "$ command" + output instead of raw object
               const { codexName, codexInput } = toCodexToolShape(msg.toolName, msg.args);
+              const codexId = randomUUID();
+              codexIdByCallId.set(msg.callId, codexId);
               session.sendCodexMessage( {
                 type: 'tool-call',
                 name: codexName,
-                callId: toolCallId,
+                callId: msg.callId,
                 input: codexInput,
-                id: randomUUID(),
+                id: codexId,
               });
+              // Session protocol: timer uses tool-call-start / tool-call-end to stop
+              const cmd = Array.isArray((codexInput as { command?: unknown })?.command)
+                ? (codexInput as { command: string[] }).command.join(' ')
+                : (codexInput as { command?: string })?.command ?? '';
+              const toolTitle = cmd ? `Run \`${cmd.length > 80 ? cmd.slice(0, 77) + '...' : cmd}\`` : `${codexName} call`;
+              session.sendSessionProtocolMessage(createEnvelope('agent', {
+                t: 'tool-call-start',
+                call: msg.callId,
+                name: codexName,
+                title: toolTitle,
+                description: toolTitle,
+                args: codexInput,
+              }, { turn: turnId }));
               break;
 
             case 'tool_call_end':
-              const pairedCallId = pendingToolCallIds.shift() ?? msg.callId;
               const resultText = typeof msg.result === 'string'
                 ? msg.result.slice(0, 200)
                 : JSON.stringify(msg.result).slice(0, 200);
@@ -468,12 +480,15 @@ export async function runCursor(opts: {
                 msg.success ? `Result: ${resultText}` : `Error: ${resultText}`,
                 'result',
               );
+              const sameId = codexIdByCallId.get(msg.callId) ?? randomUUID();
+              codexIdByCallId.delete(msg.callId);
               session.sendCodexMessage( {
-                type: 'tool-result',
-                callId: pairedCallId,
+                type: 'tool-call-result',
+                callId: msg.callId,
                 output: msg.result,
-                id: randomUUID(),
+                id: sameId,
               });
+              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId }, { turn: turnId }));
               break;
 
             case 'task_complete':
@@ -533,6 +548,9 @@ export async function runCursor(opts: {
         session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'turn-end', status: 'completed' }, { turn: turnId }));
 
         await session.flush();
+
+        // Clear parser state for next turn
+        messageParser.clear();
 
         thinking = false;
         session.keepAlive(thinking, 'remote');
