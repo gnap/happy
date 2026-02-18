@@ -354,6 +354,9 @@ export async function runCursor(opts: {
 
   let first = true;
 
+  // Send "It's ready!" once on startup so mobile can open this session (critical when reusing session after restart)
+  emitReadyIfIdle();
+
   try {
     while (!shouldExit) {
       const waitSignal = abortController.signal;
