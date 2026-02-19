@@ -49,6 +49,7 @@ import type { CursorStreamMessage, CursorMode } from './types';
 
 const CURSOR_SESSION_TAG_FILE = 'cursor-session-tag';
 const CURSOR_SESSION_WORKSPACE_FILE = 'cursor-session-workspace';
+const CURSOR_SESSION_KEY_FILE = 'cursor-session-key';
 
 /**
  * Map Cursor tool name/args to Codex/app shape so the mobile app shows readable titles
@@ -134,6 +135,17 @@ export async function runCursor(opts: {
     }
   }
 
+  // Load existing encryption key when reusing session to avoid key mismatch
+  const keyPath = join(configuration.happyHomeDir, CURSOR_SESSION_KEY_FILE);
+  let existingEncryptionKey: Uint8Array | undefined;
+  if (tagReused) {
+    try {
+      if (existsSync(keyPath)) {
+        existingEncryptionKey = new Uint8Array(Buffer.from(readFileSync(keyPath, 'utf8').trim(), 'base64'));
+      }
+    } catch { /* ignore */ }
+  }
+
   // Set backend for offline warnings
   connectionState.setBackend('Cursor');
 
@@ -165,7 +177,7 @@ export async function runCursor(opts: {
     startedBy: opts.startedBy,
     path: workspacePath,
   });
-  const response = await api.getOrCreateSession({ tag: sessionTag, metadata, state });
+  const response = await api.getOrCreateSession({ tag: sessionTag, metadata, state, existingEncryptionKey });
 
   const sessionId = response?.id ?? `offline-${sessionTag}`;
   logger.debug(`[cursor] Session: ${sessionId} (tag: ${sessionTag.slice(0, 8)}..., reused: ${tagReused})`);
@@ -174,12 +186,15 @@ export async function runCursor(opts: {
     logger.debug('[cursor] Reusing session – open this same conversation in the app (or tap "It\'s ready!" push) so CLI and phone stay in sync.');
   }
 
-  // Persist session tag and workspace so next restart reuses only when same workspace
+  // Persist session tag, workspace, and encryption key so next restart reuses correctly
   try {
     writeFileSync(tagPath, sessionTag, 'utf8');
     writeFileSync(workspacePathFile, workspacePath, 'utf8');
+    if (response) {
+      writeFileSync(keyPath, Buffer.from(response.encryptionKey).toString('base64'), 'utf8');
+    }
   } catch (e) {
-    logger.debug('[cursor] Could not write session tag/workspace file:', e);
+    logger.debug('[cursor] Could not write session tag/workspace/key file:', e);
   }
 
   // Handle server unreachable - offline stub with hot reconnection
@@ -190,6 +205,7 @@ export async function runCursor(opts: {
     metadata,
     state,
     response,
+    existingEncryptionKey,
     onSessionSwap: (newSession) => {
       session = newSession;
     },
