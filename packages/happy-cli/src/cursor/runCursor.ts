@@ -13,7 +13,7 @@ import { render } from 'ink';
 import React from 'react';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { configuration } from '@/configuration';
 
@@ -48,6 +48,7 @@ import { CursorMessageParser, type CursorParsedMessage } from './cursorMessagePa
 import type { CursorStreamMessage, CursorMode } from './types';
 
 const CURSOR_SESSION_TAG_FILE = 'cursor-session-tag';
+const CURSOR_SESSION_WORKSPACE_FILE = 'cursor-session-workspace';
 
 /**
  * Map Cursor tool name/args to Codex/app shape so the mobile app shows readable titles
@@ -106,20 +107,31 @@ export async function runCursor(opts: {
   credentials: Credentials;
   startedBy?: 'daemon' | 'terminal';
 }): Promise<void> {
+  const workspacePath = process.cwd();
 
-  // Reuse last session tag so restart reconnects to the same session (set HAPPY_CURSOR_NEW_SESSION=1 for a new one)
+  // Reuse session only when workspace unchanged; workspace change => new session
   const tagPath = join(configuration.happyHomeDir, CURSOR_SESSION_TAG_FILE);
+  const workspacePathFile = join(configuration.happyHomeDir, CURSOR_SESSION_WORKSPACE_FILE);
   let sessionTag: string;
+  let tagReused = false;
   if (process.env.HAPPY_CURSOR_NEW_SESSION === '1') {
     sessionTag = randomUUID();
-  } else if (existsSync(tagPath)) {
+  } else {
+    let savedTag: string | null = null;
+    let savedWorkspace: string | null = null;
     try {
-      sessionTag = readFileSync(tagPath, 'utf8').trim() || randomUUID();
+      if (existsSync(tagPath)) savedTag = readFileSync(tagPath, 'utf8').trim() || null;
+      if (existsSync(workspacePathFile)) savedWorkspace = readFileSync(workspacePathFile, 'utf8').trim() || null;
     } catch {
+      /* ignore */
+    }
+    const sameWorkspace = savedWorkspace != null && resolve(savedWorkspace) === resolve(workspacePath);
+    if (savedTag && sameWorkspace) {
+      sessionTag = savedTag;
+      tagReused = true;
+    } else {
       sessionTag = randomUUID();
     }
-  } else {
-    sessionTag = randomUUID();
   }
 
   // Set backend for offline warnings
@@ -151,21 +163,23 @@ export async function runCursor(opts: {
     flavor: 'codex', // Disguised as codex until mobile app supports 'cursor'
     machineId,
     startedBy: opts.startedBy,
+    path: workspacePath,
   });
   const response = await api.getOrCreateSession({ tag: sessionTag, metadata, state });
 
-  const tagReused = existsSync(tagPath) && process.env.HAPPY_CURSOR_NEW_SESSION !== '1';
   const sessionId = response?.id ?? `offline-${sessionTag}`;
   logger.debug(`[cursor] Session: ${sessionId} (tag: ${sessionTag.slice(0, 8)}..., reused: ${tagReused})`);
+  logger.debug(`[cursor] Workspace: ${workspacePath}`);
   if (tagReused) {
     logger.debug('[cursor] Reusing session – open this same conversation in the app (or tap "It\'s ready!" push) so CLI and phone stay in sync.');
   }
 
-  // Persist session tag so next restart reuses this session
+  // Persist session tag and workspace so next restart reuses only when same workspace
   try {
     writeFileSync(tagPath, sessionTag, 'utf8');
+    writeFileSync(workspacePathFile, workspacePath, 'utf8');
   } catch (e) {
-    logger.debug('[cursor] Could not write session tag file:', e);
+    logger.debug('[cursor] Could not write session tag/workspace file:', e);
   }
 
   // Handle server unreachable - offline stub with hot reconnection
@@ -405,7 +419,7 @@ export async function runCursor(opts: {
           logger.debug('[cursor] First turn, no resume');
         }
         const cursorProc = new CursorProcess({
-          cwd: process.cwd(),
+          cwd: workspacePath,
           resumeChatId: resumeId,
           model: cursorModel,
           signal: abortController.signal,
