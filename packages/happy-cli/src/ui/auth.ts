@@ -13,6 +13,7 @@ import { AuthSelector, AuthMethod } from "./ink/AuthSelector";
 import { render } from 'ink';
 import React from 'react';
 import { randomUUID } from 'node:crypto';
+import chalk from 'chalk';
 import { logger } from './logger';
 
 export async function doAuth(): Promise<Credentials | null> {
@@ -263,8 +264,11 @@ async function waitForAuthentication(keypair: tweetnacl.BoxKeyPair): Promise<Cre
                         return null;
                     }
                 }
-            } catch (error) {
+            } catch (error: unknown) {
+                const err = error as { code?: string; message?: string };
+                logger.debug('[AUTH] Poll error:', err?.code ?? err?.message ?? error);
                 console.log('\n\nFailed to check authentication status. Please try again.');
+                console.log(chalk.gray('  Error: ' + (err?.code ?? err?.message ?? String(error))));
                 return null;
             }
 
