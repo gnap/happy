@@ -5,7 +5,7 @@ import { ApiSessionClient } from './apiSession';
 import { ApiMachineClient } from './apiMachine';
 import { decodeBase64, encodeBase64, getRandomBytes, encrypt, decrypt, libsodiumEncryptForPublicKey } from './encryption';
 import { PushNotificationClient } from './pushNotifications';
-import { configuration } from '@/configuration';
+import { configuration, serverHttpsAgent } from '@/configuration';
 import chalk from 'chalk';
 import { Credentials } from '@/persistence';
 import { connectionState, isNetworkError } from '@/utils/serverConnectionErrors';
@@ -71,7 +71,8 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json'
           },
-          timeout: 60000 // 1 minute timeout for very bad network connections
+          timeout: 60000,
+          httpsAgent: serverHttpsAgent,
         }
       )
 
@@ -191,7 +192,8 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json'
           },
-          timeout: 60000 // 1 minute timeout for very bad network connections
+          timeout: 60000,
+          httpsAgent: serverHttpsAgent,
         }
       );
 
@@ -302,7 +304,8 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json'
           },
-          timeout: 5000
+          timeout: 5000,
+          httpsAgent: serverHttpsAgent,
         }
       );
 
@@ -330,7 +333,8 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json'
           },
-          timeout: 5000
+          timeout: 5000,
+          httpsAgent: serverHttpsAgent,
         }
       );
 

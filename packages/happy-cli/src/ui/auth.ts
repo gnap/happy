@@ -1,5 +1,5 @@
 import { decodeBase64, encodeBase64, encodeBase64Url } from "@/api/encryption";
-import { configuration } from "@/configuration";
+import { configuration, serverHttpsAgent } from "@/configuration";
 import { randomBytes } from "node:crypto";
 import tweetnacl from 'tweetnacl';
 import axios from 'axios';
@@ -34,18 +34,38 @@ export async function doAuth(): Promise<Credentials | null> {
             console.log(`[AUTH DEBUG] Sending auth request to: ${configuration.serverUrl}/v1/auth/request`);
             console.log(`[AUTH DEBUG] Public key: ${encodeBase64(keypair.publicKey).substring(0, 20)}...`);
         }
-        await axios.post(`${configuration.serverUrl}/v1/auth/request`, {
-            publicKey: encodeBase64(keypair.publicKey),
-            supportsV2: true
-        });
+        await axios.post(
+            `${configuration.serverUrl}/v1/auth/request`,
+            {
+                publicKey: encodeBase64(keypair.publicKey),
+                supportsV2: true
+            },
+            {
+                timeout: 30_000,
+                httpsAgent: serverHttpsAgent,
+            }
+        );
         if (process.env.DEBUG) {
             console.log(`[AUTH DEBUG] Auth request sent successfully`);
         }
-    } catch (error) {
+    } catch (error: unknown) {
+        const err = error as { code?: string; message?: string; response?: { status?: number; data?: unknown } };
+        const detail = err.code
+            ? ` (${err.code}${err.message ? ': ' + err.message : ''})`
+            : err.response
+              ? ` (HTTP ${err.response.status})`
+              : err.message
+                ? ` (${err.message})`
+                : '';
+        logger.debug(`[AUTH] Failed to create auth request to ${configuration.serverUrl}/v1/auth/request${detail}`, err);
         if (process.env.DEBUG) {
             console.log(`[AUTH DEBUG] Failed to send auth request:`, error);
         }
-        console.log('Failed to create authentication request, please try again later.');
+        if (err.code === 'ETIMEDOUT' || err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND') {
+            console.log(`Failed to reach server (${err.code}). Check network or HAPPY_SERVER_URL.`);
+        } else {
+            console.log('Failed to create authentication request, please try again later.');
+        }
         return null;
     }
 
@@ -155,10 +175,17 @@ async function waitForAuthentication(keypair: tweetnacl.BoxKeyPair): Promise<Cre
     try {
         while (!cancelled) {
             try {
-                const response = await axios.post(`${configuration.serverUrl}/v1/auth/request`, {
-                    publicKey: encodeBase64(keypair.publicKey),
-                    supportsV2: true
-                });
+                const response = await axios.post(
+                    `${configuration.serverUrl}/v1/auth/request`,
+                    {
+                        publicKey: encodeBase64(keypair.publicKey),
+                        supportsV2: true
+                    },
+                    {
+                        timeout: 30_000,
+                        httpsAgent: serverHttpsAgent,
+                    }
+                );
                 if (response.data.state === 'authorized') {
                     let token = response.data.token as string;
                     let r = decodeBase64(response.data.response);

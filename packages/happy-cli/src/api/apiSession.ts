@@ -4,7 +4,7 @@ import { io, Socket } from 'socket.io-client'
 import { AgentState, ClientToServerEvents, Metadata, ServerToClientEvents, Session, Update, UserMessage, UserMessageSchema, Usage } from './types'
 import { decodeBase64, decrypt, encodeBase64, encrypt } from './encryption';
 import { backoff, delay } from '@/utils/time';
-import { configuration } from '@/configuration';
+import { configuration, serverHttpsAgent } from '@/configuration';
 import { RawJSONLines } from '@/claude/types';
 import { randomUUID } from 'node:crypto';
 import { AsyncLock } from '@/utils/lock';
@@ -142,7 +142,8 @@ export class ApiSessionClient extends EventEmitter {
             reconnectionDelayMax: 5000,
             transports: ['websocket'],
             withCredentials: true,
-            autoConnect: false
+            autoConnect: false,
+            ...(typeof process !== 'undefined' && process.versions?.node && { agent: serverHttpsAgent }),
         });
 
         //
@@ -264,7 +265,8 @@ export class ApiSessionClient extends EventEmitter {
                         limit: 100
                     },
                     headers: this.authHeaders(),
-                    timeout: 60000
+                    timeout: 60000,
+                    httpsAgent: serverHttpsAgent,
                 }
             );
 
@@ -308,36 +310,49 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
+    private static readonly MAX_BATCH_SIZE = 80;
+
     private async flushOutbox() {
         if (this.pendingOutbox.length === 0) {
             return;
         }
 
-        const batch = this.pendingOutbox.slice();
-        try {
-            const response = await axios.post<V3PostSessionMessagesResponse>(
-                `${configuration.serverUrl}/v3/sessions/${encodeURIComponent(this.sessionId)}/messages`,
-                {
-                    messages: batch
-                },
-                {
-                    headers: this.authHeaders(),
-                    timeout: 60000
-                }
-            );
+        let flushed = 0;
+        const total = this.pendingOutbox.length;
 
-            this.pendingOutbox.splice(0, batch.length);
+        while (this.pendingOutbox.length > 0) {
+            const chunk = this.pendingOutbox.slice(0, ApiSessionClient.MAX_BATCH_SIZE);
+            try {
+                const response = await axios.post<V3PostSessionMessagesResponse>(
+                    `${configuration.serverUrl}/v3/sessions/${encodeURIComponent(this.sessionId)}/messages`,
+                    {
+                        messages: chunk
+                    },
+                    {
+                        headers: this.authHeaders(),
+                        timeout: 60000,
+                        httpsAgent: serverHttpsAgent,
+                    }
+                );
 
-            const messages = Array.isArray(response.data.messages) ? response.data.messages : [];
-            const maxSeq = messages.reduce((acc, message) => (
-                message.seq > acc ? message.seq : acc
-            ), this.lastSeq);
-            this.lastSeq = maxSeq;
-        } catch (error: unknown) {
-            const status = axios.isAxiosError(error) ? error.response?.status : undefined;
-            const data = axios.isAxiosError(error) ? error.response?.data : undefined;
-            logger.debug('[API] flushOutbox failed', { sessionId: this.sessionId, batchLength: batch.length, status, data, error });
-            throw error;
+                this.pendingOutbox.splice(0, chunk.length);
+                flushed += chunk.length;
+
+                const messages = Array.isArray(response.data.messages) ? response.data.messages : [];
+                const maxSeq = messages.reduce((acc, message) => (
+                    message.seq > acc ? message.seq : acc
+                ), this.lastSeq);
+                this.lastSeq = maxSeq;
+            } catch (error: unknown) {
+                const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+                const data = axios.isAxiosError(error) ? error.response?.data : undefined;
+                logger.debug('[API] flushOutbox failed', { sessionId: this.sessionId, batchLength: chunk.length, flushed, total, status, data, error });
+                throw error;
+            }
+        }
+
+        if (total > ApiSessionClient.MAX_BATCH_SIZE) {
+            logger.debug(`[API] flushOutbox chunked: ${total} messages in ${Math.ceil(total / ApiSessionClient.MAX_BATCH_SIZE)} batches`);
         }
     }
 

@@ -6,9 +6,13 @@
  */
 
 import { existsSync, mkdirSync } from 'node:fs'
+import https from 'node:https'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import packageJson from '../package.json'
+
+/** HTTPS agent that forces IPv4 for server requests (avoids ETIMEDOUT on IPv6-unreachable hosts). */
+export const serverHttpsAgent = new https.Agent({ family: 4 })
 
 class Configuration {
   public readonly serverUrl: string
