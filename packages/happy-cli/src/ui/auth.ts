@@ -214,10 +214,15 @@ async function waitForAuthentication(keypair: tweetnacl.BoxKeyPair): Promise<Cre
         supportsV2: true
     });
 
+    const retryableErrors = new Set(['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED']);
+    const maxRetries = 8;
+    let consecutiveErrors = 0;
+
     try {
         while (!cancelled) {
             try {
                 const data = await checkAuthStatusWithHttps(authRequestUrl, authRequestBody);
+                consecutiveErrors = 0; // reset on success
                 if (data.state === 'authorized') {
                     let token = data.token as string;
                     let r = decodeBase64(data.response);
@@ -266,10 +271,16 @@ async function waitForAuthentication(keypair: tweetnacl.BoxKeyPair): Promise<Cre
                 }
             } catch (error: unknown) {
                 const err = error as { code?: string; message?: string };
-                logger.debug('[AUTH] Poll error:', err?.code ?? err?.message ?? error);
-                console.log('\n\nFailed to check authentication status. Please try again.');
-                console.log(chalk.gray('  Error: ' + (err?.code ?? err?.message ?? String(error))));
-                return null;
+                const code = err?.code ?? (err?.message === 'ETIMEDOUT' ? 'ETIMEDOUT' : undefined);
+                logger.debug('[AUTH] Poll error:', code ?? err?.message ?? error);
+                if (code && retryableErrors.has(code) && consecutiveErrors < maxRetries) {
+                    consecutiveErrors++;
+                    logger.debug(`[AUTH] Retrying after ${code} (${consecutiveErrors}/${maxRetries})`);
+                } else {
+                    console.log('\n\nFailed to check authentication status. Please try again.');
+                    console.log(chalk.gray('  Error: ' + (code ?? err?.message ?? String(error))));
+                    return null;
+                }
             }
 
             // Animate waiting dots
