@@ -197,6 +197,30 @@ export async function runCursor(opts: {
     logger.debug('[cursor] Could not write session tag/workspace/key file:', e);
   }
 
+  // Message queue and user-message handler (must exist before setupOfflineReconnection so onSessionSwap can re-register)
+  const messageQueue = new MessageQueue2<CursorMode>((mode) => hashObject({
+    permissionMode: mode.permissionMode,
+  }));
+  let currentPermissionMode: PermissionMode | undefined = undefined;
+  const handleUserMessage = (message: { content: { text: string }; meta?: { permissionMode?: string } }) => {
+    let messagePermissionMode = currentPermissionMode;
+    if (message.meta?.permissionMode) {
+      const validModes: PermissionMode[] = ['default', 'read-only', 'safe-yolo', 'yolo'];
+      if (validModes.includes(message.meta.permissionMode as PermissionMode)) {
+        messagePermissionMode = message.meta.permissionMode as PermissionMode;
+        currentPermissionMode = messagePermissionMode;
+        logger.debug(`[Cursor] Permission mode: ${currentPermissionMode}`);
+      }
+    }
+    if (currentPermissionMode === undefined) {
+      currentPermissionMode = 'default';
+    }
+    const mode: CursorMode = {
+      permissionMode: messagePermissionMode || 'default',
+    };
+    messageQueue.push(message.content.text, mode);
+  };
+
   // Handle server unreachable - offline stub with hot reconnection
   let session: ApiSessionClient;
   const { session: initialSession, reconnectionHandle } = setupOfflineReconnection({
@@ -208,9 +232,11 @@ export async function runCursor(opts: {
     existingEncryptionKey,
     onSessionSwap: (newSession) => {
       session = newSession;
+      newSession.onUserMessage(handleUserMessage);
     },
   });
   session = initialSession;
+  session.onUserMessage(handleUserMessage);
 
   // Report to daemon
   if (response) {
@@ -225,35 +251,9 @@ export async function runCursor(opts: {
     }
   }
 
-  //
-  // Message queue
-  //
-
-  const messageQueue = new MessageQueue2<CursorMode>((mode) => hashObject({
-    permissionMode: mode.permissionMode,
-  }));
-
-  let currentPermissionMode: PermissionMode | undefined = undefined;
-
-  session.onUserMessage((message) => {
-    let messagePermissionMode = currentPermissionMode;
-    if (message.meta?.permissionMode) {
-      const validModes: PermissionMode[] = ['default', 'read-only', 'safe-yolo', 'yolo'];
-      if (validModes.includes(message.meta.permissionMode as PermissionMode)) {
-        messagePermissionMode = message.meta.permissionMode as PermissionMode;
-        currentPermissionMode = messagePermissionMode;
-        logger.debug(`[Cursor] Permission mode: ${currentPermissionMode}`);
-      }
-    }
-    if (currentPermissionMode === undefined) {
-      currentPermissionMode = 'default';
-    }
-
-    const mode: CursorMode = {
-      permissionMode: messagePermissionMode || 'default',
-    };
-    messageQueue.push(message.content.text, mode);
-  });
+</think>
+<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>
+Read
 
   //
   // Keep-alive
@@ -387,6 +387,15 @@ export async function runCursor(opts: {
   // Send "It's ready!" once on startup so mobile can open this session (critical when reusing session after restart)
   emitReadyIfIdle();
 
+  // Log connection state after a short delay (helps debug remote/SSH: socket vs HTTP fallback)
+  setTimeout(() => {
+    const connected = session.isSocketConnected();
+    logger.debug(`[cursor] Session real-time: ${connected ? 'socket connected' : 'disconnected (using HTTP poll)'} sessionId=${sessionId}`);
+    if (!connected) {
+      logger.debug('[cursor] If remote/SSH: ensure outbound access to HAPPY_SERVER_URL. App↔CLI messages still work via HTTP fallback.');
+    }
+  }, 3500);
+
   try {
     while (!shouldExit) {
       const waitSignal = abortController.signal;
@@ -411,8 +420,17 @@ export async function runCursor(opts: {
       let hadToolCalls = false;
       const turnId = createId();
       const messageParser = new CursorMessageParser();
-      // Codex messages have both callId and id; app may match by id to stop timer
       const codexIdByCallId = new Map<string, string>();
+
+      const flushAccumulatedText = () => {
+        if (accumulatedResponse.trim()) {
+          session.sendCodexMessage({
+            type: 'message',
+            message: accumulatedResponse,
+          });
+          accumulatedResponse = '';
+        }
+      };
 
       try {
         thinking = true;
@@ -465,7 +483,6 @@ export async function runCursor(opts: {
               accumulatedResponse += msg.text;
               messageBuffer.removeLastMessage('system');
               messageBuffer.addMessage(msg.text, 'assistant');
-              // Text is accumulated and sent as one ACP message in finally block
               break;
 
             case 'thinking_delta':
@@ -477,6 +494,7 @@ export async function runCursor(opts: {
               break;
 
             case 'tool_call_start':
+              flushAccumulatedText();
               hadToolCalls = true;
               const toolArgs = JSON.stringify(msg.args).slice(0, 100);
               messageBuffer.addMessage(`Executing: ${msg.toolName} ${toolArgs}`, 'tool');
@@ -565,13 +583,7 @@ export async function runCursor(opts: {
           });
         }
       } finally {
-        // Send accumulated response to mobile
-        if (accumulatedResponse.trim()) {
-          session.sendCodexMessage( {
-            type: 'message',
-            message: accumulatedResponse,
-          });
-        }
+        flushAccumulatedText();
 
         // Send task_complete (codex) and turn-end (session protocol) so mobile stops timer
         session.sendCodexMessage( {

@@ -97,7 +97,7 @@ export class ApiSessionClient extends EventEmitter {
         startedSubagents: new Set<string>(),
         activeSubagents: new Set<string>(),
     };
-    private lastSeq = 0;
+    private lastSeq: number;
     private pendingOutbox: Array<{ content: string; localId: string }> = [];
     private readonly sendSync: InvalidateSync;
     private readonly receiveSync: InvalidateSync;
@@ -113,6 +113,7 @@ export class ApiSessionClient extends EventEmitter {
         this.agentStateVersion = session.agentStateVersion;
         this.encryptionKey = session.encryptionKey;
         this.encryptionVariant = session.encryptionVariant;
+        this.lastSeq = session.seq ?? 0;
         this.sendSync = new InvalidateSync(() => this.flushOutbox());
         this.receiveSync = new InvalidateSync(() => this.fetchMessages());
 
@@ -170,7 +171,11 @@ export class ApiSessionClient extends EventEmitter {
         })
 
         this.socket.on('connect_error', (error) => {
-            logger.debug('[API] Socket connection error:', error);
+            const msg = error?.message ?? String(error);
+            logger.debug('[API] Socket connection error:', msg);
+            if (msg && msg.length < 200) {
+                logger.debug('[API] If running remotely (SSH/devcontainer), ensure outbound HTTPS/WSS to server is allowed. Using HTTP fallback for messages.');
+            }
             this.rpcHandlerManager.onSocketDisconnect();
             this.startFallbackPoll();
         })
@@ -195,6 +200,15 @@ export class ApiSessionClient extends EventEmitter {
                         this.routeIncomingMessage(body);
                         this.lastSeq = messageSeq;
                         return;
+                    }
+                    if (!acceptSeq) {
+                        logger.debug('[API] new-message skipped (seq mismatch or missing seq), will fetch via HTTP', {
+                            messageSeq,
+                            lastSeq: this.lastSeq,
+                            expectedNext: this.lastSeq + 1,
+                        });
+                    } else if (!isEncrypted) {
+                        logger.debug('[API] new-message skipped (content not encrypted), will fetch via HTTP');
                     }
                     this.receiveSync.invalidate();
                     return;
@@ -248,6 +262,7 @@ export class ApiSessionClient extends EventEmitter {
     private routeIncomingMessage(message: unknown) {
         const userResult = UserMessageSchema.safeParse(message);
         if (userResult.success) {
+            logger.debug('[API] User message from app received, routing to CLI');
             if (this.pendingMessageCallback) {
                 this.pendingMessageCallback(userResult.data);
             } else {
@@ -255,7 +270,47 @@ export class ApiSessionClient extends EventEmitter {
             }
             return;
         }
+        // Relaxed fallback: if it looks like a user text message (e.g. app sends content.type !== 'text'), normalize and route
+        const relaxed = this.normalizeToUserMessage(message);
+        if (relaxed) {
+            logger.debug('[API] User message from app received (relaxed parse), routing to CLI');
+            if (this.pendingMessageCallback) {
+                this.pendingMessageCallback(relaxed);
+            } else {
+                this.pendingMessages.push(relaxed);
+            }
+            return;
+        }
+        // Message from app didn't match UserMessageSchema - CLI won't show reply flow; log for debugging
+        logger.debug('[API] Incoming message not parsed as user message (no reply will be triggered)', {
+            parseError: userResult.error?.message,
+            receivedKeys: message && typeof message === 'object' ? Object.keys(message as object) : [],
+            contentType: message && typeof message === 'object' && (message as any).content ? (message as any).content?.type : undefined,
+        });
         this.emit('message', message);
+    }
+
+    /** Normalize app payload to UserMessage when strict schema fails (e.g. content.type is 'input' or missing). */
+    private normalizeToUserMessage(raw: unknown): UserMessage | null {
+        if (!raw || typeof raw !== 'object') return null;
+        const o = raw as Record<string, unknown>;
+        if (o.role !== 'user') return null;
+        const content = o.content;
+        if (!content || typeof content !== 'object') return null;
+        const c = content as Record<string, unknown>;
+        const text = typeof c.text === 'string' ? c.text : undefined;
+        if (text === undefined) return null;
+        return {
+            role: 'user',
+            content: { type: 'text', text },
+            localKey: typeof o.localKey === 'string' ? o.localKey : undefined,
+            meta: o.meta && typeof o.meta === 'object' ? (o.meta as UserMessage['meta']) : undefined,
+        };
+    }
+
+    /** For debugging: whether the real-time socket to the server is connected (vs HTTP fallback polling). */
+    isSocketConnected(): boolean {
+        return this.socket?.connected === true;
     }
 
     private async fetchMessages() {
@@ -315,6 +370,9 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     private static readonly MAX_BATCH_SIZE = 80;
+    private static readonly FLUSH_RETRY_STATUSES = [502, 503, 504];
+    private static readonly FLUSH_RETRY_MAX = 3;
+    private static readonly FLUSH_RETRY_BASE_MS = 1000;
 
     private async flushOutbox() {
         if (this.pendingOutbox.length === 0) {
@@ -326,32 +384,45 @@ export class ApiSessionClient extends EventEmitter {
 
         while (this.pendingOutbox.length > 0) {
             const chunk = this.pendingOutbox.slice(0, ApiSessionClient.MAX_BATCH_SIZE);
-            try {
-                const response = await axios.post<V3PostSessionMessagesResponse>(
-                    `${configuration.serverUrl}/v3/sessions/${encodeURIComponent(this.sessionId)}/messages`,
-                    {
-                        messages: chunk
-                    },
-                    {
-                        headers: this.authHeaders(),
-                        timeout: 60000,
-                        httpsAgent: serverHttpsAgent,
+            for (let attempt = 0; attempt <= ApiSessionClient.FLUSH_RETRY_MAX; attempt++) {
+                try {
+                    if (attempt > 0) {
+                        const delayMs = ApiSessionClient.FLUSH_RETRY_BASE_MS * Math.pow(2, attempt - 1);
+                        logger.debug(`[API] flushOutbox retry ${attempt}/${ApiSessionClient.FLUSH_RETRY_MAX} after ${delayMs}ms`);
+                        await new Promise((r) => setTimeout(r, delayMs));
                     }
-                );
+                    const response = await axios.post<V3PostSessionMessagesResponse>(
+                        `${configuration.serverUrl}/v3/sessions/${encodeURIComponent(this.sessionId)}/messages`,
+                        {
+                            messages: chunk
+                        },
+                        {
+                            headers: this.authHeaders(),
+                            timeout: 60000,
+                            httpsAgent: serverHttpsAgent,
+                        }
+                    );
 
-                this.pendingOutbox.splice(0, chunk.length);
-                flushed += chunk.length;
+                    this.pendingOutbox.splice(0, chunk.length);
+                    flushed += chunk.length;
 
-                const messages = Array.isArray(response.data.messages) ? response.data.messages : [];
-                const maxSeq = messages.reduce((acc, message) => (
-                    message.seq > acc ? message.seq : acc
-                ), this.lastSeq);
-                this.lastSeq = maxSeq;
-            } catch (error: unknown) {
-                const status = axios.isAxiosError(error) ? error.response?.status : undefined;
-                const data = axios.isAxiosError(error) ? error.response?.data : undefined;
-                logger.debug('[API] flushOutbox failed', { sessionId: this.sessionId, batchLength: chunk.length, flushed, total, status, data, error });
-                throw error;
+                    const messages = Array.isArray(response.data.messages) ? response.data.messages : [];
+                    const maxSeq = messages.reduce((acc, message) => (
+                        message.seq > acc ? message.seq : acc
+                    ), this.lastSeq);
+                    this.lastSeq = maxSeq;
+                    logger.debug(`[API] flushOutbox: sent ${chunk.length} message(s) to server (replies visible in app)`);
+                    break;
+                } catch (error: unknown) {
+                    const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+                    const isRetryable = status !== undefined && ApiSessionClient.FLUSH_RETRY_STATUSES.includes(status);
+                    if (!isRetryable || attempt === ApiSessionClient.FLUSH_RETRY_MAX) {
+                        const data = axios.isAxiosError(error) ? error.response?.data : undefined;
+                        logger.debug('[API] flushOutbox failed', { sessionId: this.sessionId, batchLength: chunk.length, flushed, total, status, data, error });
+                        throw error;
+                    }
+                    logger.debug('[API] flushOutbox retryable error', { status, attempt: attempt + 1, maxRetries: ApiSessionClient.FLUSH_RETRY_MAX });
+                }
             }
         }
 
