@@ -223,7 +223,7 @@ async function waitForAuthentication(keypair: tweetnacl.BoxKeyPair): Promise<Cre
             try {
                 const data = await checkAuthStatusWithHttps(authRequestUrl, authRequestBody);
                 consecutiveErrors = 0; // reset on success
-                if (data.state === 'authorized') {
+                if (data.state === 'authorized' && data.token && data.response) {
                     let token = data.token as string;
                     let r = decodeBase64(data.response);
                     let decrypted = decryptWithEphemeralKey(r, keypair.secretKey);

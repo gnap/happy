@@ -144,7 +144,7 @@ export class ApiSessionClient extends EventEmitter {
             transports: ['polling', 'websocket'],
             withCredentials: true,
             autoConnect: false,
-            ...(typeof process !== 'undefined' && process.versions?.node && { agent: serverHttpsAgent }),
+            ...(typeof process !== 'undefined' && process.versions?.node && { agent: serverHttpsAgent as any }),
         });
 
         //

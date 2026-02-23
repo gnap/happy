@@ -228,7 +228,7 @@ export class ApiMachineClient {
             reconnection: true,
             reconnectionDelay: 1000,
             reconnectionDelayMax: 5000,
-            ...(typeof process !== 'undefined' && process.versions?.node && { agent: serverHttpsAgent }),
+            ...(typeof process !== 'undefined' && process.versions?.node && { agent: serverHttpsAgent as any }),
         });
 
         this.socket.on('connect', () => {
