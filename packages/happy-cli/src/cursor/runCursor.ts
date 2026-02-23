@@ -251,9 +251,6 @@ export async function runCursor(opts: {
     }
   }
 
-</think>
-<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>
-Read
 
   //
   // Keep-alive
