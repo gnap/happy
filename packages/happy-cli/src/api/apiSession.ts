@@ -101,6 +101,7 @@ export class ApiSessionClient extends EventEmitter {
     private pendingOutbox: Array<{ content: string; localId: string }> = [];
     private readonly sendSync: InvalidateSync;
     private readonly receiveSync: InvalidateSync;
+    private fallbackPollInterval: ReturnType<typeof setInterval> | null = null;
 
     constructor(token: string, session: Session) {
         super()
@@ -140,7 +141,7 @@ export class ApiSessionClient extends EventEmitter {
             reconnectionAttempts: Infinity,
             reconnectionDelay: 1000,
             reconnectionDelayMax: 5000,
-            transports: ['websocket'],
+            transports: ['polling', 'websocket'],
             withCredentials: true,
             autoConnect: false,
             ...(typeof process !== 'undefined' && process.versions?.node && { agent: serverHttpsAgent }),
@@ -152,6 +153,7 @@ export class ApiSessionClient extends EventEmitter {
 
         this.socket.on('connect', () => {
             logger.debug('Socket connected successfully');
+            this.stopFallbackPoll();
             this.rpcHandlerManager.onSocketConnect(this.socket);
             this.receiveSync.invalidate();
         })
@@ -164,11 +166,13 @@ export class ApiSessionClient extends EventEmitter {
         this.socket.on('disconnect', (reason) => {
             logger.debug('[API] Socket disconnected:', reason);
             this.rpcHandlerManager.onSocketDisconnect();
+            this.startFallbackPoll();
         })
 
         this.socket.on('connect_error', (error) => {
             logger.debug('[API] Socket connection error:', error);
             this.rpcHandlerManager.onSocketDisconnect();
+            this.startFallbackPoll();
         })
 
         // Server events
@@ -632,8 +636,31 @@ export class ApiSessionClient extends EventEmitter {
         });
     }
 
+    private startFallbackPoll() {
+        if (this.fallbackPollInterval !== null) return;
+        const intervalMs = 8000;
+        logger.debug(`[API] Socket disconnected, starting fallback HTTP poll every ${intervalMs}ms`);
+        this.receiveSync.invalidate();
+        this.fallbackPollInterval = setInterval(() => {
+            if (this.socket.connected) {
+                this.stopFallbackPoll();
+                return;
+            }
+            this.receiveSync.invalidate();
+        }, intervalMs);
+    }
+
+    private stopFallbackPoll() {
+        if (this.fallbackPollInterval !== null) {
+            clearInterval(this.fallbackPollInterval);
+            this.fallbackPollInterval = null;
+            logger.debug('[API] Stopped fallback HTTP poll');
+        }
+    }
+
     async close() {
         logger.debug('[API] socket.close() called');
+        this.stopFallbackPoll();
         this.sendSync.stop();
         this.receiveSync.stop();
         this.socket.close();
