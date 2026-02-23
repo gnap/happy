@@ -35,6 +35,7 @@ export interface CursorProcessEvents {
   message: (msg: CursorStreamMessage) => void;
   error: (err: Error) => void;
   exit: (code: number | null) => void;
+  subprocessError: (err: Error) => void;
 }
 
 /**
@@ -76,10 +77,12 @@ export class CursorProcess extends EventEmitter {
 
     logger.debug(`[cursor] Spawning: ${fullCommand.slice(0, 200)}...`);
 
-    // Use macOS `script` command to provide a PTY
-    const scriptArgs = ['-q', '/dev/null', '/bin/bash', '-c', fullCommand];
+    // Use script + bash for PTY. Use login shell (-l) so .profile/.bash_profile
+    // is sourced and PATH includes ~/.local/bin (where cursor-agent is often installed).
+    const scriptArgs = ['-q', '/dev/null', '/bin/bash', '-l', '-c', fullCommand];
 
     return new Promise<void>((resolve, reject) => {
+      let subprocessError: Error | null = null;
       const child = spawn('script', scriptArgs, {
         stdio: ['ignore', 'pipe', 'pipe'],
         cwd: this.options.cwd,
@@ -127,6 +130,10 @@ export class CursorProcess extends EventEmitter {
         }
       });
 
+      this.once('subprocessError', (err: Error) => {
+        subprocessError = err;
+      });
+
       child.on('close', (code) => {
         this.cleanup();
         // Process remaining buffer
@@ -136,7 +143,11 @@ export class CursorProcess extends EventEmitter {
         }
         logger.debug(`[cursor] Process exited with code: ${code}`);
         this.emit('exit', code);
-        resolve();
+        if (subprocessError) {
+          reject(subprocessError);
+        } else {
+          resolve();
+        }
       });
 
       child.on('error', (err) => {
@@ -192,8 +203,13 @@ export class CursorProcess extends EventEmitter {
       const msg = JSON.parse(trimmed) as CursorStreamMessage;
       this.emit('message', msg);
     } catch {
-      // Not JSON - could be ANSI escape sequences or other noise from PTY
+      // Not JSON - could be shell error (e.g. command not found)
       logger.debug(`[cursor] Non-JSON line: ${trimmed.slice(0, 100)}`);
+      if (/command not found|cursor-agent.*not found|not found/i.test(trimmed)) {
+        this.emit('subprocessError', new Error(
+          'cursor-agent not found. Install Cursor CLI on this machine (see https://docs.cursor.com) or set CURSOR_AGENT_PATH to the binary path.'
+        ));
+      }
     }
   }
 }
