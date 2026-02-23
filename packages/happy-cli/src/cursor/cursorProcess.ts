@@ -79,12 +79,20 @@ export class CursorProcess extends EventEmitter {
 
     // Use script + bash for PTY. Use login shell (-l) so .profile/.bash_profile
     // is sourced and PATH includes ~/.local/bin (where cursor-agent is often installed).
-    // Use -- so Linux script does not treat bash's -l as script's option.
-    const scriptArgs = ['-q', '/dev/null', '--', '/bin/bash', '-l', '-c', fullCommand];
+    // macOS script: script -q /dev/null command [args]
+    // Linux script: script -q /dev/null -c command
+    // On Linux when stdout is a pipe, script buffers output; wrap with stdbuf -o0 so we get stream-json lines promptly.
+    const isLinux = process.platform === 'linux';
+    const scriptArgs = isLinux
+      ? ['-q', '/dev/null', '-c', `${'/bin/bash'} -l -c ${JSON.stringify(fullCommand)}`]
+      : ['-q', '/dev/null', '/bin/bash', '-l', '-c', fullCommand];
+
+    const spawnCmd = isLinux ? 'stdbuf' : 'script';
+    const spawnArgs = isLinux ? ['-o0', 'script', ...scriptArgs] : scriptArgs;
 
     return new Promise<void>((resolve, reject) => {
       let subprocessError: Error | null = null;
-      const child = spawn('script', scriptArgs, {
+      const child = spawn(spawnCmd, spawnArgs, {
         stdio: ['ignore', 'pipe', 'pipe'],
         cwd: this.options.cwd,
         env: {
