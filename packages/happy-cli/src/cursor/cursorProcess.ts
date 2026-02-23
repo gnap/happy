@@ -79,7 +79,8 @@ export class CursorProcess extends EventEmitter {
 
     // Use script + bash for PTY. Use login shell (-l) so .profile/.bash_profile
     // is sourced and PATH includes ~/.local/bin (where cursor-agent is often installed).
-    const scriptArgs = ['-q', '/dev/null', '/bin/bash', '-l', '-c', fullCommand];
+    // Use -- so Linux script does not treat bash's -l as script's option.
+    const scriptArgs = ['-q', '/dev/null', '--', '/bin/bash', '-l', '-c', fullCommand];
 
     return new Promise<void>((resolve, reject) => {
       let subprocessError: Error | null = null;
