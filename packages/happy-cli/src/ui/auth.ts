@@ -1,6 +1,7 @@
 import { decodeBase64, encodeBase64, encodeBase64Url } from "@/api/encryption";
 import { configuration, serverHttpsAgent } from "@/configuration";
 import { randomBytes } from "node:crypto";
+import https from "node:https";
 import tweetnacl from 'tweetnacl';
 import axios from 'axios';
 import { displayQRCode } from "./qrcode";
@@ -156,6 +157,40 @@ async function doWebAuth(keypair: tweetnacl.BoxKeyPair): Promise<Credentials | n
 }
 
 /**
+ * Poll auth status using native https with serverHttpsAgent (IPv4) to avoid axios timeout issues.
+ */
+function checkAuthStatusWithHttps(url: string, body: string): Promise<{ state?: string; token?: string; response?: string }> {
+    return new Promise((resolve, reject) => {
+        const u = new URL(url);
+        const req = https.request(
+            {
+                hostname: u.hostname,
+                port: u.port || 443,
+                path: u.pathname,
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+                agent: serverHttpsAgent,
+            },
+            (res) => {
+                let data = '';
+                res.on('data', (chunk) => { data += chunk; });
+                res.on('end', () => {
+                    try {
+                        resolve(JSON.parse(data || '{}'));
+                    } catch {
+                        reject(new Error('Invalid JSON'));
+                    }
+                });
+            }
+        );
+        req.on('error', reject);
+        req.setTimeout(30_000, () => { req.destroy(); reject(new Error('ETIMEDOUT')); });
+        req.write(body);
+        req.end();
+    });
+}
+
+/**
  * Wait for authentication to complete and return credentials
  */
 async function waitForAuthentication(keypair: tweetnacl.BoxKeyPair): Promise<Credentials | null> {
@@ -172,23 +207,19 @@ async function waitForAuthentication(keypair: tweetnacl.BoxKeyPair): Promise<Cre
 
     process.on('SIGINT', handleInterrupt);
 
+    const authRequestUrl = `${configuration.serverUrl}/v1/auth/request`;
+    const authRequestBody = JSON.stringify({
+        publicKey: encodeBase64(keypair.publicKey),
+        supportsV2: true
+    });
+
     try {
         while (!cancelled) {
             try {
-                const response = await axios.post(
-                    `${configuration.serverUrl}/v1/auth/request`,
-                    {
-                        publicKey: encodeBase64(keypair.publicKey),
-                        supportsV2: true
-                    },
-                    {
-                        timeout: 30_000,
-                        httpsAgent: serverHttpsAgent,
-                    }
-                );
-                if (response.data.state === 'authorized') {
-                    let token = response.data.token as string;
-                    let r = decodeBase64(response.data.response);
+                const data = await checkAuthStatusWithHttps(authRequestUrl, authRequestBody);
+                if (data.state === 'authorized') {
+                    let token = data.token as string;
+                    let r = decodeBase64(data.response);
                     let decrypted = decryptWithEphemeralKey(r, keypair.secretKey);
                     if (decrypted) {
                         if (decrypted.length === 32) {
