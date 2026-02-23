@@ -14,6 +14,11 @@ import packageJson from '../package.json'
 /** HTTPS agent that forces IPv4 for server requests (avoids ETIMEDOUT on IPv6-unreachable hosts). */
 export const serverHttpsAgent = new https.Agent({ family: 4 })
 
+// Force all HTTPS in this process to use IPv4 (catches axios, socket.io, etc. that do not pass agent).
+if (typeof process !== 'undefined' && process.versions?.node) {
+  (https as any).globalAgent = serverHttpsAgent
+}
+
 class Configuration {
   public readonly serverUrl: string
   public readonly webappUrl: string

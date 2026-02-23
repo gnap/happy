@@ -153,9 +153,11 @@ export function startOfflineReconnection<TSession>(
      * Only 5xx or network errors trigger retry.
      */
     const defaultHealthCheck = async () => {
+        const { serverHttpsAgent } = await import('@/configuration');
         await axios.get(`${config.serverUrl}/v1/sessions`, {
             timeout: 5000,
-            validateStatus: (status) => status < 500 // 4xx = server is up, 5xx = server error
+            validateStatus: (status) => status < 500, // 4xx = server is up, 5xx = server error
+            httpsAgent: serverHttpsAgent,
         });
     };
 
