@@ -123,6 +123,16 @@ export class CursorMessageParser {
               callId,
               success,
             });
+          } else if (msg.subtype) {
+            // cancelled, failed, timeout, or any other non-started non-completed: treat as ended without success
+            const callId = this.shiftCallId(key);
+            results.push({
+              type: 'tool_call_end',
+              toolName: 'CursorBash',
+              result: { cancelled: true, subtype: msg.subtype },
+              callId,
+              success: false,
+            });
           }
         }
 
@@ -145,6 +155,15 @@ export class CursorMessageParser {
               result: tc.readToolCall.result,
               callId,
               success: true,
+            });
+          } else if (msg.subtype) {
+            const callId = this.shiftCallId(key);
+            results.push({
+              type: 'tool_call_end',
+              toolName: 'CursorRead',
+              result: { cancelled: true, subtype: msg.subtype },
+              callId,
+              success: false,
             });
           }
         }
@@ -169,6 +188,15 @@ export class CursorMessageParser {
               callId,
               success: true,
             });
+          } else if (msg.subtype) {
+            const callId = this.shiftCallId(key);
+            results.push({
+              type: 'tool_call_end',
+              toolName: 'CursorWrite',
+              result: { cancelled: true, subtype: msg.subtype },
+              callId,
+              success: false,
+            });
           }
         }
 
@@ -191,6 +219,15 @@ export class CursorMessageParser {
               result: tc.editToolCall.result,
               callId,
               success: true,
+            });
+          } else if (msg.subtype) {
+            const callId = this.shiftCallId(key);
+            results.push({
+              type: 'tool_call_end',
+              toolName: 'CursorEdit',
+              result: { cancelled: true, subtype: msg.subtype },
+              callId,
+              success: false,
             });
           }
         }

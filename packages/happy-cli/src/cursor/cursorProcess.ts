@@ -25,7 +25,11 @@ export interface CursorProcessOptions {
   resumeChatId?: string;
   /** Model to use (e.g., 'auto', 'sonnet-4.5', 'opus-4.6-thinking') */
   model?: string;
-  /** Timeout in ms (default: 300000 = 5 min) */
+  /**
+   * Process-level safety timeout in ms. Only kills the process if it runs longer than this.
+   * Long tool calls are handled by per-tool timeout in runCursor (stop timer, continue conversation).
+   * Default from CURSOR_AGENT_PROCESS_TIMEOUT_MS env or 3600000 (1 hour). Set to 0 to disable.
+   */
   timeoutMs?: number;
   /** Abort signal */
   signal?: AbortSignal;
@@ -120,12 +124,14 @@ export class CursorProcess extends EventEmitter {
         });
       }
 
-      // Timeout
-      const timeoutMs = this.options.timeoutMs ?? 300000;
-      this.timeoutHandle = setTimeout(() => {
-        logger.debug(`[cursor] Timeout after ${timeoutMs}ms`);
-        this.kill();
-      }, timeoutMs);
+      // Safety-only process timeout (default 1h); per-tool timeout in runCursor stops UI timer without killing process
+      const timeoutMs = this.options.timeoutMs ?? 3600000;
+      if (timeoutMs > 0) {
+        this.timeoutHandle = setTimeout(() => {
+          logger.debug(`[cursor] Process safety timeout after ${timeoutMs}ms`);
+          this.kill();
+        }, timeoutMs);
+      }
 
       child.stdout?.on('data', (data: Buffer) => {
         this.processChunk(data.toString());

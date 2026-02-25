@@ -28,10 +28,10 @@ export interface CursorAssistantMessage {
     };
 }
 
-/** Tool call completed message */
+/** Tool call message (started, completed, or other e.g. cancelled/failed so we send tool_call_end) */
 export interface CursorToolCallMessage {
     type: 'tool_call';
-    subtype: 'completed' | 'started';
+    subtype: 'completed' | 'started' | string;
     tool_call: {
         shellToolCall?: {
             args?: { command?: string };

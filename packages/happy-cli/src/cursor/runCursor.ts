@@ -418,6 +418,10 @@ export async function runCursor(opts: {
       const turnId = createId();
       const messageParser = new CursorMessageParser();
       const codexIdByCallId = new Map<string, string>();
+      /** Per-tool timeout: when fired we send tool_call_end (running in background) so App stops timer; process keeps running. */
+      const toolCallTimeoutHandles = new Map<string, ReturnType<typeof setTimeout>>();
+      let turnCompletedNormally = false;
+      let turnEndStatus: 'completed' | 'failed' | 'cancelled' = 'completed';
 
       const flushAccumulatedText = () => {
         if (accumulatedResponse.trim()) {
@@ -449,17 +453,27 @@ export async function runCursor(opts: {
         } else {
           logger.debug('[cursor] First turn, no resume');
         }
+        // Process timeout: safety net only (default 1h). Long tool calls are handled by per-tool timeout below.
+        const processTimeoutMs = process.env.CURSOR_AGENT_PROCESS_TIMEOUT_MS
+          ? parseInt(process.env.CURSOR_AGENT_PROCESS_TIMEOUT_MS, 10)
+          : 3600000; // 1 hour; set to 0 to disable
         const cursorProc = new CursorProcess({
           cwd: workspacePath,
           resumeChatId: resumeId,
           model: cursorModel,
           signal: abortController.signal,
-          timeoutMs: 300000,
+          timeoutMs: processTimeoutMs,
         });
+        // Per-tool timeout: after this we send tool_call_end (running in background) so App stops timer; process keeps running.
+        const perToolTimeoutMs = process.env.CURSOR_TOOL_CALL_TIMEOUT_MS
+          ? parseInt(process.env.CURSOR_TOOL_CALL_TIMEOUT_MS, 10)
+          : 600000; // 10 min; long builds e.g. yarn ios:dev may exceed, but timer stops and conversation continues
 
         // Handle stream-json messages
         cursorProc.on('message', (rawMsg: CursorStreamMessage) => {
-          logger.debug(`[cursor] Raw message: ${JSON.stringify(rawMsg).slice(0, 200)}`);
+          const typeInfo = 'type' in rawMsg ? `${rawMsg.type}` : 'unknown';
+          const subtypeInfo = 'subtype' in rawMsg && rawMsg.subtype ? ` subtype=${rawMsg.subtype}` : '';
+          logger.debug(`[cursor] stream-json: ${typeInfo}${subtypeInfo} (pending tool calls: ${codexIdByCallId.size})`);
 
           const parsed = messageParser.parse(rawMsg);
           for (const msg of parsed) {
@@ -494,6 +508,10 @@ export async function runCursor(opts: {
               flushAccumulatedText();
               hadToolCalls = true;
               const toolArgs = JSON.stringify(msg.args).slice(0, 100);
+              const cmdPreview = (msg.toolName === 'CursorBash' && typeof msg.args?.command === 'string')
+                ? msg.args.command.slice(0, 60) + (msg.args.command.length > 60 ? '...' : '')
+                : toolArgs;
+              logger.debug(`[cursor] Shell/tool started: ${msg.toolName} ${cmdPreview} (callId: ${msg.callId.slice(0, 8)}..., pending: ${codexIdByCallId.size + 1})`);
               messageBuffer.addMessage(`Executing: ${msg.toolName} ${toolArgs}`, 'tool');
               const { codexName, codexInput } = toCodexToolShape(msg.toolName, msg.args);
               const codexId = randomUUID();
@@ -518,9 +536,28 @@ export async function runCursor(opts: {
                 description: toolTitle,
                 args: codexInput,
               }, { turn: turnId }));
+              // Per-tool timeout: stop App timer and show "running in background"; process keeps running, conversation continues
+              const handle = setTimeout(() => {
+                toolCallTimeoutHandles.delete(msg.callId);
+                const bgCodexId = codexIdByCallId.get(msg.callId);
+                const bgResult = { runningInBackground: true, message: 'Tool still running; timer stopped. Response will continue when it completes.' };
+                logger.debug(`[cursor] Per-tool timeout for ${msg.callId.slice(0, 8)}... – sending tool_call_end (running in background)`);
+                messageBuffer.addMessage('Still running (timer stopped)', 'result');
+                if (bgCodexId) {
+                  session.sendCodexMessage( { type: 'tool-call-result', callId: msg.callId, output: bgResult, id: bgCodexId } );
+                }
+                session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId }, { turn: turnId }));
+              }, perToolTimeoutMs);
+              toolCallTimeoutHandles.set(msg.callId, handle);
               break;
 
             case 'tool_call_end':
+              const existingHandle = toolCallTimeoutHandles.get(msg.callId);
+              if (existingHandle) {
+                clearTimeout(existingHandle);
+                toolCallTimeoutHandles.delete(msg.callId);
+              }
+              logger.debug(`[cursor] Shell/tool ended: ${msg.toolName} (callId: ${msg.callId.slice(0, 8)}..., success: ${msg.success}, pending after: ${codexIdByCallId.size - 1})`);
               const resultText = typeof msg.result === 'string'
                 ? msg.result.slice(0, 200)
                 : JSON.stringify(msg.result).slice(0, 200);
@@ -540,14 +577,30 @@ export async function runCursor(opts: {
               break;
 
             case 'task_complete':
-              // Only record metadata here; turn-end envelope is sent in finally block
+              turnCompletedNormally = true;
+              for (const h of toolCallTimeoutHandles.values()) clearTimeout(h);
+              toolCallTimeoutHandles.clear();
               if (msg.sessionId) {
                 cursorChatId = msg.sessionId;
               }
               if (msg.costUsd !== undefined) {
                 logger.debug(`[cursor] Cost: $${msg.costUsd}, Duration: ${msg.durationMs}ms`);
               }
-              // Do NOT send turn-end here - it's handled in the finally block
+              // Close any tool calls that never got tool_call_end (e.g. long-running shell still running when turn ended)
+              // so the App stops their timers as soon as we know the turn is complete
+              const turnEndedResult = { turnEnded: true, message: 'Turn completed; tool did not report end' };
+              for (const [callId, codexId] of codexIdByCallId) {
+                logger.debug(`[cursor] Closing pending tool call ${callId} (turn completed without tool end)`);
+                messageBuffer.addMessage('Ended (turn completed)', 'result');
+                session.sendCodexMessage( {
+                  type: 'tool-call-result',
+                  callId,
+                  output: turnEndedResult,
+                  id: codexId,
+                });
+                session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: callId }, { turn: turnId }));
+              }
+              codexIdByCallId.clear();
               break;
 
             case 'error':
@@ -567,6 +620,7 @@ export async function runCursor(opts: {
 
       } catch (error) {
         const isAbortError = error instanceof Error && error.name === 'AbortError';
+        turnEndStatus = isAbortError ? 'cancelled' : 'failed';
         if (isAbortError) {
           messageBuffer.addMessage('Aborted by user', 'status');
           session.sendCodexMessage({ type: 'message', message: 'Aborted by user' });
@@ -581,13 +635,32 @@ export async function runCursor(opts: {
         }
       } finally {
         flushAccumulatedText();
+        for (const h of toolCallTimeoutHandles.values()) clearTimeout(h);
+        toolCallTimeoutHandles.clear();
 
-        // Send task_complete (codex) and turn-end (session protocol) so mobile stops timer
+        // Close any tool calls that never got tool_call_end (cursor-agent aborted, crashed, or timed out)
+        const abortedResult = { aborted: true, message: 'Tool call ended without result (agent aborted or exited)' };
+        for (const [callId, codexId] of codexIdByCallId) {
+          logger.debug(`[cursor] Closing pending tool call ${callId} (no end from cursor-agent)`);
+          messageBuffer.addMessage('Ended without result (aborted or exited)', 'result');
+          session.sendCodexMessage( {
+            type: 'tool-call-result',
+            callId,
+            output: abortedResult,
+            id: codexId,
+          });
+          session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: callId }, { turn: turnId }));
+        }
+        const hadPendingToolCalls = codexIdByCallId.size > 0;
+        codexIdByCallId.clear();
+
+        const status: 'completed' | 'failed' | 'cancelled' =
+          turnCompletedNormally ? 'completed' : (hadPendingToolCalls ? 'failed' : turnEndStatus);
         session.sendCodexMessage( {
           type: 'task_complete',
           id: randomUUID(),
         });
-        session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'turn-end', status: 'completed' }, { turn: turnId }));
+        session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'turn-end', status }, { turn: turnId }));
 
         await session.flush();
 
