@@ -80,6 +80,20 @@ npm run start:preview
 npm run start:production
 ```
 
+**If the app shows “连不上开发服务器” (can’t connect to dev server):**
+
+1. **Preferred:** Run the app from the CLI so it gets the packager URL automatically:
+   ```bash
+   cd packages/happy-app && yarn ios:dev
+   ```
+   This starts Metro on `127.0.0.1:8081` and launches the app with that URL.
+
+2. **If you already have the app open in the simulator:** Start Metro in a separate terminal and keep it running:
+   ```bash
+   cd packages/happy-app && yarn start:metro
+   ```
+   Then in the app, use “Enter URL manually” (or the dev menu) and enter: `http://127.0.0.1:8081`
+
 ## Visual Differences
 
 Each variant displays a different app name on your device:

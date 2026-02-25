@@ -21,18 +21,14 @@ export type {
 } from '@slopus/happy-wire';
 
 /**
- * Permission mode type - includes both Claude and Codex modes
+ * Permission mode type - includes Claude, Codex, and Cursor modes
  * Must match MessageMetaSchema.permissionMode enum values
  *
- * Claude modes: default, acceptEdits, bypassPermissions, plan
- * Codex modes: read-only, safe-yolo, yolo
- *
- * When calling Claude SDK, Codex modes are mapped at the SDK boundary:
- * - yolo → bypassPermissions
- * - safe-yolo → default
- * - read-only → default
+ * Claude: default, acceptEdits, bypassPermissions, plan
+ * Codex: read-only, safe-yolo, yolo
+ * Cursor: default, plan (--mode plan), ask (--mode ask), force (-f/--force)
  */
-export type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'read-only' | 'safe-yolo' | 'yolo'
+export type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'read-only' | 'safe-yolo' | 'yolo' | 'ask' | 'force'
 
 /**
  * Usage data type from Claude
@@ -174,7 +170,7 @@ export type Machine = {
  */
 export const MessageMetaSchema = z.object({
   sentFrom: z.string().optional(), // Source identifier
-  permissionMode: z.enum(['default', 'acceptEdits', 'bypassPermissions', 'plan', 'read-only', 'safe-yolo', 'yolo']).optional(), // Permission mode for this message
+  permissionMode: z.enum(['default', 'acceptEdits', 'bypassPermissions', 'plan', 'read-only', 'safe-yolo', 'yolo', 'ask', 'force']).optional(), // Permission mode for this message
   model: z.string().nullable().optional(), // Model name for this message (null = reset)
   fallbackModel: z.string().nullable().optional(), // Fallback model for this message (null = reset)
   customSystemPrompt: z.string().nullable().optional(), // Custom system prompt for this message (null = reset)

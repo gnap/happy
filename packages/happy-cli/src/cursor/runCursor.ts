@@ -200,12 +200,14 @@ export async function runCursor(opts: {
   // Message queue and user-message handler (must exist before setupOfflineReconnection so onSessionSwap can re-register)
   const messageQueue = new MessageQueue2<CursorMode>((mode) => hashObject({
     permissionMode: mode.permissionMode,
+    model: mode.model ?? null,
   }));
   let currentPermissionMode: PermissionMode | undefined = undefined;
-  const handleUserMessage = (message: { content: { text: string }; meta?: { permissionMode?: string } }) => {
+  let currentModel: string | undefined = undefined;
+  const handleUserMessage = (message: { content: { text: string }; meta?: { permissionMode?: string; model?: string | null } }) => {
     let messagePermissionMode = currentPermissionMode;
     if (message.meta?.permissionMode) {
-      const validModes: PermissionMode[] = ['default', 'read-only', 'safe-yolo', 'yolo'];
+      const validModes: PermissionMode[] = ['default', 'plan', 'ask', 'force'];
       if (validModes.includes(message.meta.permissionMode as PermissionMode)) {
         messagePermissionMode = message.meta.permissionMode as PermissionMode;
         currentPermissionMode = messagePermissionMode;
@@ -215,8 +217,16 @@ export async function runCursor(opts: {
     if (currentPermissionMode === undefined) {
       currentPermissionMode = 'default';
     }
+    // Resolve model; explicit null from app resets to default (env or 'auto')
+    let messageModel = currentModel;
+    if (message.meta && Object.prototype.hasOwnProperty.call(message.meta, 'model')) {
+      messageModel = message.meta.model ?? undefined;
+      currentModel = messageModel;
+      logger.debug(`[Cursor] Model: ${messageModel ?? 'default (reset)'}`);
+    }
     const mode: CursorMode = {
       permissionMode: messagePermissionMode || 'default',
+      model: messageModel,
     };
     messageQueue.push(message.content.text, mode);
   };
@@ -446,7 +456,7 @@ export async function runCursor(opts: {
         messageBuffer.addMessage('Thinking...', 'system');
 
         // Spawn cursor-agent process (second+ turn uses --resume so cursor-agent continues same chat)
-        const cursorModel = process.env.CURSOR_MODEL || 'auto';
+        const cursorModel = mode.model ?? process.env.CURSOR_MODEL ?? 'auto';
         const resumeId = cursorChatId || undefined;
         if (resumeId) {
           logger.debug(`[cursor] Resuming chat: ${resumeId}`);
@@ -461,6 +471,8 @@ export async function runCursor(opts: {
           cwd: workspacePath,
           resumeChatId: resumeId,
           model: cursorModel,
+          executionMode: mode.permissionMode === 'plan' ? 'plan' : mode.permissionMode === 'ask' ? 'ask' : undefined,
+          force: mode.permissionMode === 'force',
           signal: abortController.signal,
           timeoutMs: processTimeoutMs,
         });

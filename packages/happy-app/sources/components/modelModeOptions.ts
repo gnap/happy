@@ -93,22 +93,35 @@ export function getGeminiModelModes(): ModelMode[] {
     return GEMINI_MODEL_FALLBACKS;
 }
 
+/** Cursor permission modes aligned with cursor-agent: --mode plan, --mode ask, -f/--force */
 export function getCursorPermissionModes(translate: Translate): PermissionMode[] {
     return [
         { key: 'default', name: translate('agentInput.cursorPermissionMode.default'), description: null },
-        { key: 'read-only', name: translate('agentInput.cursorPermissionMode.readOnly'), description: null },
-        { key: 'safe-yolo', name: translate('agentInput.cursorPermissionMode.safeYolo'), description: null },
-        { key: 'yolo', name: translate('agentInput.cursorPermissionMode.yolo'), description: null },
+        { key: 'plan', name: translate('agentInput.cursorPermissionMode.plan'), description: null },
+        { key: 'ask', name: translate('agentInput.cursorPermissionMode.ask'), description: null },
+        { key: 'force', name: translate('agentInput.cursorPermissionMode.force'), description: null },
     ];
 }
 
+/** Cursor-native model IDs and labels (from cursor-agent --list-models). Curated subset for complexity control. */
+const CURSOR_MODELS: ModelMode[] = [
+    { key: 'auto', name: 'Auto', description: null },
+    { key: 'opus-4.6-thinking', name: 'Claude 4.6 Opus (Thinking)', description: null },
+    { key: 'sonnet-4.6-thinking', name: 'Claude 4.6 Sonnet (Thinking)', description: null },
+    { key: 'sonnet-4.5', name: 'Claude 4.5 Sonnet', description: null },
+    { key: 'gpt-5.3-codex-high', name: 'GPT-5.3 Codex High', description: null },
+    { key: 'gpt-5.3-codex', name: 'GPT-5.3 Codex', description: null },
+    { key: 'gpt-5.3-codex-low', name: 'GPT-5.3 Codex Low', description: null },
+    { key: 'gpt-5.2-codex-high', name: 'GPT-5.2 Codex High', description: null },
+    { key: 'composer-1.5', name: 'Composer 1.5', description: null },
+];
+
 export function getCursorModelModes(translate: Translate): ModelMode[] {
-    return [
-        { key: 'default', name: translate('agentInput.cursorModel.default'), description: null },
-        { key: 'gpt-5-codex-high', name: translate('agentInput.codexModel.gpt5CodexHigh'), description: null },
-        { key: 'gpt-5-codex-medium', name: translate('agentInput.codexModel.gpt5CodexMedium'), description: null },
-        { key: 'gpt-5-codex-low', name: translate('agentInput.codexModel.gpt5CodexLow'), description: null },
-    ];
+    return CURSOR_MODELS.map((m) =>
+        m.key === 'auto'
+            ? { ...m, name: translate('agentInput.cursorModel.auto') }
+            : m
+    );
 }
 
 export function getHardcodedPermissionModes(flavor: AgentFlavor, translate: Translate): PermissionMode[] {
@@ -191,7 +204,7 @@ export function getDefaultModelKey(flavor: AgentFlavor): string {
         return 'gpt-5-codex-high';
     }
     if (flavor === 'cursor') {
-        return 'default';
+        return 'auto';
     }
     if (flavor === 'gemini') {
         return 'gemini-2.5-pro';

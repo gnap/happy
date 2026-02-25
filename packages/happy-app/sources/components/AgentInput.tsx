@@ -836,10 +836,12 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                         permissionModeKey === 'acceptEdits' ? theme.colors.permission.acceptEdits :
                                             permissionModeKey === 'bypassPermissions' ? theme.colors.permission.bypass :
                                                 permissionModeKey === 'plan' ? theme.colors.permission.plan :
-                                                    permissionModeKey === 'read-only' ? theme.colors.permission.readOnly :
-                                                        permissionModeKey === 'safe-yolo' ? theme.colors.permission.safeYolo :
-                                                            permissionModeKey === 'yolo' ? theme.colors.permission.yolo :
-                                                                theme.colors.textSecondary, // Use secondary text color for default
+                                                    permissionModeKey === 'ask' ? theme.colors.permission.ask :
+                                                        permissionModeKey === 'read-only' ? theme.colors.permission.readOnly :
+                                                            permissionModeKey === 'safe-yolo' ? theme.colors.permission.safeYolo :
+                                                                permissionModeKey === 'yolo' ? theme.colors.permission.yolo :
+                                                                    permissionModeKey === 'force' ? theme.colors.permission.force :
+                                                                        theme.colors.textSecondary, // Use secondary text color for default
                                     ...Typography.default()
                                 }}>
                                     {withSandboxSuffix(displayPermissionMode.name, permissionModeKey)}
