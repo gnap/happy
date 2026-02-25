@@ -93,9 +93,30 @@ export function getGeminiModelModes(): ModelMode[] {
     return GEMINI_MODEL_FALLBACKS;
 }
 
+export function getCursorPermissionModes(translate: Translate): PermissionMode[] {
+    return [
+        { key: 'default', name: translate('agentInput.cursorPermissionMode.default'), description: null },
+        { key: 'read-only', name: translate('agentInput.cursorPermissionMode.readOnly'), description: null },
+        { key: 'safe-yolo', name: translate('agentInput.cursorPermissionMode.safeYolo'), description: null },
+        { key: 'yolo', name: translate('agentInput.cursorPermissionMode.yolo'), description: null },
+    ];
+}
+
+export function getCursorModelModes(translate: Translate): ModelMode[] {
+    return [
+        { key: 'default', name: translate('agentInput.cursorModel.default'), description: null },
+        { key: 'gpt-5-codex-high', name: translate('agentInput.codexModel.gpt5CodexHigh'), description: null },
+        { key: 'gpt-5-codex-medium', name: translate('agentInput.codexModel.gpt5CodexMedium'), description: null },
+        { key: 'gpt-5-codex-low', name: translate('agentInput.codexModel.gpt5CodexLow'), description: null },
+    ];
+}
+
 export function getHardcodedPermissionModes(flavor: AgentFlavor, translate: Translate): PermissionMode[] {
     if (flavor === 'codex') {
         return getCodexPermissionModes(translate);
+    }
+    if (flavor === 'cursor') {
+        return getCursorPermissionModes(translate);
     }
     if (flavor === 'gemini') {
         return getGeminiPermissionModes(translate);
@@ -106,6 +127,9 @@ export function getHardcodedPermissionModes(flavor: AgentFlavor, translate: Tran
 export function getHardcodedModelModes(flavor: AgentFlavor, translate: Translate): ModelMode[] {
     if (flavor === 'codex') {
         return getCodexModelModes(translate);
+    }
+    if (flavor === 'cursor') {
+        return getCursorModelModes(translate);
     }
     if (flavor === 'gemini') {
         return getGeminiModelModes();
@@ -130,7 +154,7 @@ export function getAvailablePermissionModes(
     metadata: Metadata | null | undefined,
     translate: Translate,
 ): PermissionMode[] {
-    if (flavor === 'claude' || flavor === 'codex') {
+    if (flavor === 'claude' || flavor === 'codex' || flavor === 'cursor') {
         return hackModes(getHardcodedPermissionModes(flavor, translate));
     }
 
@@ -165,6 +189,9 @@ export function resolveCurrentOption<T extends ModeOption>(
 export function getDefaultModelKey(flavor: AgentFlavor): string {
     if (flavor === 'codex') {
         return 'gpt-5-codex-high';
+    }
+    if (flavor === 'cursor') {
+        return 'default';
     }
     if (flavor === 'gemini') {
         return 'gemini-2.5-pro';

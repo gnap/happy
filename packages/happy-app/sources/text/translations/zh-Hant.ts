@@ -339,6 +339,12 @@ export const zhHant: TranslationStructure = {
         claudeCodeSessionId: 'Claude Code 工作階段 ID',
         claudeCodeSessionIdCopied: 'Claude Code 工作階段 ID 已複製到剪貼簿',
         aiProvider: 'AI 提供者',
+        aiProviderName: {
+            claude: 'Claude',
+            codex: 'Codex',
+            cursor: 'Cursor',
+            gemini: 'Gemini',
+        },
         failedToCopyClaudeCodeSessionId: '複製 Claude Code 工作階段 ID 失敗',
         metadataCopied: '中繼資料已複製到剪貼簿',
         failedToCopyMetadata: '複製中繼資料失敗',
@@ -405,6 +411,7 @@ export const zhHant: TranslationStructure = {
         agent: {
             claude: 'Claude',
             codex: 'Codex',
+            cursor: 'Cursor',
             gemini: 'Gemini',
         },
         model: {
@@ -420,6 +427,19 @@ export const zhHant: TranslationStructure = {
             badgeReadOnly: '唯讀模式',
             badgeSafeYolo: '安全 YOLO',
             badgeYolo: 'YOLO',
+        },
+        cursorPermissionMode: {
+            title: 'CURSOR 權限模式',
+            default: 'CLI 設定',
+            readOnly: '唯讀模式',
+            safeYolo: '安全 YOLO',
+            yolo: 'YOLO',
+            badgeReadOnly: '唯讀模式',
+            badgeSafeYolo: '安全 YOLO',
+            badgeYolo: 'YOLO',
+        },
+        cursorModel: {
+            default: '預設',
         },
         codexModel: {
             title: 'CODEX 模型',

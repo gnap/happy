@@ -18,9 +18,10 @@ interface AvatarProps {
     thumbhash?: string | null;
 }
 
-const flavorIcons = {
+const flavorIcons: Record<string, number> = {
     claude: require('@/assets/images/icon-claude.png'),
     codex: require('@/assets/images/icon-gpt.png'),
+    cursor: require('@/assets/images/icon-cursor.png'),
     gemini: require('@/assets/images/icon-gemini.png'),
 };
 
@@ -67,13 +68,15 @@ export const Avatar = React.memo((props: AvatarProps) => {
         // Add flavor icon overlay if enabled
         if (showFlavorIcons && flavor) {
             const effectiveFlavor = flavor || 'claude';
-            const flavorIcon = flavorIcons[effectiveFlavor as keyof typeof flavorIcons] || flavorIcons.claude;
+            const flavorIcon = flavorIcons[effectiveFlavor] ?? flavorIcons.claude;
             const circleSize = Math.round(size * 0.35);
             const iconSize = effectiveFlavor === 'codex'
                 ? Math.round(size * 0.25)
-                : effectiveFlavor === 'claude'
+                : effectiveFlavor === 'cursor'
                     ? Math.round(size * 0.28)
-                    : Math.round(size * 0.35);
+                    : effectiveFlavor === 'claude'
+                        ? Math.round(size * 0.28)
+                        : Math.round(size * 0.35);
 
             return (
                 <View style={[styles.container, { width: size, height: size }]}>
@@ -111,13 +114,11 @@ export const Avatar = React.memo((props: AvatarProps) => {
 
     // Determine flavor icon for generated avatars
     const effectiveFlavor = flavor || 'claude';
-    const flavorIcon = flavorIcons[effectiveFlavor as keyof typeof flavorIcons] || flavorIcons.claude;
-    // Make icons smaller while keeping same circle size
-    // Claude slightly bigger than codex
+    const flavorIcon = flavorIcons[effectiveFlavor] ?? flavorIcons.claude;
     const circleSize = Math.round(size * 0.35);
     const iconSize = effectiveFlavor === 'codex'
         ? Math.round(size * 0.25)
-        : effectiveFlavor === 'claude'
+        : effectiveFlavor === 'cursor' || effectiveFlavor === 'claude'
             ? Math.round(size * 0.28)
             : Math.round(size * 0.35);
 

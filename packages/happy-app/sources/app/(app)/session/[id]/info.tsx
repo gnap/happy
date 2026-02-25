@@ -370,11 +370,12 @@ function SessionInfoContent({ session }: { session: Session }) {
                         <Item
                             title={t('sessionInfo.aiProvider')}
                             subtitle={(() => {
-                                const flavor = session.metadata.flavor || 'claude';
-                                if (flavor === 'claude') return 'Claude';
-                                if (flavor === 'gpt' || flavor === 'openai') return 'Codex';
-                                if (flavor === 'gemini') return 'Gemini';
-                                return flavor;
+                                const flavor = (session.metadata.flavor || 'claude').toLowerCase();
+                                if (flavor === 'claude') return t('sessionInfo.aiProviderName.claude');
+                                if (flavor === 'cursor') return t('sessionInfo.aiProviderName.cursor');
+                                if (flavor === 'gemini') return t('sessionInfo.aiProviderName.gemini');
+                                if (flavor === 'codex' || flavor === 'gpt' || flavor === 'openai') return t('sessionInfo.aiProviderName.codex');
+                                return session.metadata.flavor ?? 'Claude';
                             })()}
                             icon={<Ionicons name="sparkles-outline" size={29} color="#5856D6" />}
                             showChevron={false}

@@ -23,6 +23,7 @@
     "typecheck": "tsc --noEmit",
     "postinstall": "patch-package && npx setup-skia-web public",
     "generate-theme": "tsx sources/theme.gen.ts",
+    "generate:cursor-icon": "node scripts/generate-cursor-icon.mjs",
     "// ==== Development/Preview/Production Variants ====": "",
     "ios:dev": "cross-env APP_ENV=development expo run:ios",
     "ios:preview": "cross-env APP_ENV=preview expo run:ios",
@@ -185,6 +186,7 @@
     "cross-env": "^10.1.0",
     "patch-package": "^8.0.0",
     "react-test-renderer": "19.0.0",
+    "sharp": "^0.34.5",
     "tsx": "^4.20.4",
     "typescript": "5.9.3"
   },
