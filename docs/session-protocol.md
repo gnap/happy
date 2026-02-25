@@ -240,3 +240,12 @@ Examples in this document may use short placeholder ids (for readability), but p
 - `id`: cuid2
 - `turn`: cuid2 (when present)
 - `subagent`: cuid2 (when present)
+
+## App version compatibility
+
+Session protocol messages (decrypted payloads with `role: 'session'` and envelope `ev.t` events) are parsed by the mobile app in `packages/happy-app/sources/sync/typesRaw.ts`:
+
+- **Preprocessing**: `preprocessMessageContent` normalizes both shapes — direct envelope `{ role, content: envelope }` and wrapped `{ role, content: { type: 'session', data: envelope } }` — into the canonical `content: { type: 'session', data }` form.
+- **Parsing**: `raw.role === 'session'` → `normalizeSessionEnvelope(raw.content.data, ...)` produces the normalized chat message (text, thinking, tool-call, turn-end, etc.).
+
+The codebase app version is **1.6.2** (`packages/happy-app/app.config.js`). If the store still shows **1.5.x**, confirm that the 1.5 build includes this sync refactor (the same code that handles `role: 'session'` and `sessionEnvelopeSchema`). The refactor that introduced `typesRaw.ts` and session-envelope handling is the same one that added metadata-driven model/mode selection. If 1.5 was released before that change, 1.5 will not parse session-protocol messages and cursor/codex/ACP flows may show no or incorrect content; in that case users should upgrade to 1.6.

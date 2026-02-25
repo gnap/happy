@@ -218,6 +218,7 @@ export async function runCursor(opts: {
     const mode: CursorMode = {
       permissionMode: messagePermissionMode || 'default',
     };
+    logger.debug(`[cursor] User message queued (length: ${message.content.text.length})`);
     messageQueue.push(message.content.text, mode);
   };
 
@@ -407,7 +408,7 @@ export async function runCursor(opts: {
 
       const { message: userMessage, mode } = batch;
       messageBuffer.addMessage(userMessage, 'user');
-      logger.debug(`[cursor] Received message (length: ${userMessage.length})`);
+      logger.debug(`[cursor] Received message (length: ${userMessage.length}), sending turn-start and spawning cursor-agent`);
 
       // Cursor has no change_title MCP tool, so don't append that instruction (unlike Codex/Gemini)
       const prompt = userMessage;
@@ -424,25 +425,32 @@ export async function runCursor(opts: {
       let turnEndStatus: 'completed' | 'failed' | 'cancelled' = 'completed';
 
       const flushAccumulatedText = () => {
-        if (accumulatedResponse.trim()) {
+        const trimmed = accumulatedResponse.trim();
+        if (trimmed) {
+          accumulatedResponse = '';
+          logger.debug(`[cursor] Sending reply to app (length: ${trimmed.length})`);
           session.sendCodexMessage({
             type: 'message',
-            message: accumulatedResponse,
+            message: trimmed,
           });
-          accumulatedResponse = '';
+          // Session protocol: send full reply so App has it even if no text_delta was streamed (e.g. reply only in result message)
+          session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: trimmed }, { turn: turnId }));
         }
       };
 
+      let flushInterval: ReturnType<typeof setInterval> | null = null;
       try {
         thinking = true;
         session.keepAlive(thinking, 'remote');
 
-        // Send task_started (codex) and turn-start (session protocol) so mobile starts timer
+        // Send task_started (codex) and turn-start (session protocol) so mobile starts timer / thinking state
         session.sendCodexMessage( {
           type: 'task_started',
           id: randomUUID(),
         });
         session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'turn-start' }, { turn: turnId }));
+        logger.debug(`[cursor] Sent task_started + turn-start (turnId: ${turnId.slice(0, 8)}...)`);
+        await session.flush();
         messageBuffer.addMessage('Thinking...', 'system');
 
         // Spawn cursor-agent process (second+ turn uses --resume so cursor-agent continues same chat)
@@ -469,6 +477,12 @@ export async function runCursor(opts: {
           ? parseInt(process.env.CURSOR_TOOL_CALL_TIMEOUT_MS, 10)
           : 600000; // 10 min; long builds e.g. yarn ios:dev may exceed, but timer stops and conversation continues
 
+        // Flush outbox periodically during the turn so App gets turn-start/thinking/text in real time
+        const flushIntervalMs = 2000;
+        flushInterval = setInterval(() => {
+          session.flush().catch((err) => logger.debug('[cursor] Periodic flush error', err));
+        }, flushIntervalMs);
+
         // Handle stream-json messages
         cursorProc.on('message', (rawMsg: CursorStreamMessage) => {
           const typeInfo = 'type' in rawMsg ? `${rawMsg.type}` : 'unknown';
@@ -494,6 +508,8 @@ export async function runCursor(opts: {
               accumulatedResponse += msg.text;
               messageBuffer.removeLastMessage('system');
               messageBuffer.addMessage(msg.text, 'assistant');
+              // Stream reply to App via session protocol so reply appears (periodic flush sends it)
+              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: msg.text }, { turn: turnId }));
               break;
 
             case 'thinking_delta':
@@ -502,6 +518,8 @@ export async function runCursor(opts: {
                 type: 'thinking',
                 text: msg.text,
               });
+              // Session protocol: so App shows thinking state / incremental thinking
+              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: msg.text, thinking: true }, { turn: turnId }));
               break;
 
             case 'tool_call_start':
@@ -634,7 +652,12 @@ export async function runCursor(opts: {
           });
         }
       } finally {
+        if (flushInterval !== null) {
+          clearInterval(flushInterval);
+          flushInterval = null;
+        }
         flushAccumulatedText();
+        await session.flush();
         for (const h of toolCallTimeoutHandles.values()) clearTimeout(h);
         toolCallTimeoutHandles.clear();
 

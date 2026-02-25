@@ -123,11 +123,10 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
     }
     return;
   } else if (subcommand === 'cursor') {
-    // Handle cursor command
     try {
-      const { runCursor } = await import('@/cursor/runCursor');
+      const { runAcp } = await import('@/agent/acp/runAcp');
+      const { CursorBackend } = await import('@/cursor/CursorBackend');
 
-      // Parse startedBy argument
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
       for (let i = 1; i < args.length; i++) {
         if (args[i] === '--started-by') {
@@ -135,11 +134,8 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
         }
       }
 
-      const {
-        credentials
-      } = await authAndSetupMachineIfNeeded();
+      const { credentials } = await authAndSetupMachineIfNeeded();
 
-      // Auto-start daemon (same as codex/gemini)
       logger.debug('Ensuring Happy background service is running & matches our version...');
       if (!(await isDaemonRunningCurrentlyInstalledHappyVersion())) {
         logger.debug('Starting Happy background service...');
@@ -152,13 +148,18 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
         await new Promise(resolve => setTimeout(resolve, 200));
       }
 
-      await runCursor({credentials, startedBy});
+      await runAcp({
+        credentials,
+        agentName: 'cursor',
+        startedBy,
+        backend: new CursorBackend({ cwd: process.cwd() }),
+      });
     } catch (error) {
-      console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
+      console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error');
       if (process.env.DEBUG) {
-        console.error(error)
+        console.error(error);
       }
-      process.exit(1)
+      process.exit(1);
     }
     return;
   } else if (subcommand === 'gemini') {

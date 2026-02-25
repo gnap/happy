@@ -123,20 +123,23 @@ describe('AcpSessionManager turn lifecycle', () => {
 });
 
 describe('AcpSessionManager text mapping', () => {
-  it('accumulates model-output and flushes on endTurn()', () => {
+  it('sends each model-output chunk immediately and endTurn sends turn-end only', () => {
     const mapper = new AcpSessionManager();
     const start = mapper.startTurn()[0];
 
-    // Accumulates - not flushed yet
-    expect(mapper.mapMessage({ type: 'model-output', textDelta: 'hel' })).toHaveLength(0);
-    expect(mapper.mapMessage({ type: 'model-output', textDelta: 'lo' })).toHaveLength(0);
+    // Each chunk is sent immediately (no accumulation)
+    const e1 = mapper.mapMessage({ type: 'model-output', textDelta: 'hel' });
+    expect(e1).toHaveLength(1);
+    expect(e1[0].ev).toEqual({ t: 'text', text: 'hel' });
+    expect(e1[0].turn).toBe(start.turn);
+    const e2 = mapper.mapMessage({ type: 'model-output', textDelta: 'lo' });
+    expect(e2).toHaveLength(1);
+    expect(e2[0].ev).toEqual({ t: 'text', text: 'lo' });
 
-    // Flushed combined output on turn-end
+    // endTurn only flushes turn-end (no accumulated output)
     const envelopes = mapper.endTurn('completed');
-    expect(envelopes).toHaveLength(2);
-    expect(envelopes[0].ev).toEqual({ t: 'text', text: 'hello' });
-    expect(envelopes[0].turn).toBe(start.turn);
-    expect(envelopes[1].ev).toEqual({ t: 'turn-end', status: 'completed' });
+    expect(envelopes).toHaveLength(1);
+    expect(envelopes[0].ev).toEqual({ t: 'turn-end', status: 'completed' });
   });
 
   it('flushes accumulated output when thinking starts', () => {

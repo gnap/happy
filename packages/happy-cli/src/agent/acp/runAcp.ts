@@ -435,24 +435,31 @@ type PendingTurn = {
   timeout: NodeJS.Timeout;
 };
 
-function resolveSessionFlavor(agentName: string): 'gemini' | 'opencode' | 'acp' {
+function resolveSessionFlavor(agentName: string): 'gemini' | 'opencode' | 'cursor' | 'acp' {
   if (agentName === 'gemini') {
     return 'gemini';
   }
   if (agentName === 'opencode') {
     return 'opencode';
   }
+  if (agentName === 'cursor') {
+    return 'cursor';
+  }
   return 'acp';
 }
 
-export async function runAcp(opts: {
+export interface RunAcpOptions {
   credentials: Credentials;
   agentName: string;
-  command: string;
-  args: string[];
+  command?: string;
+  args?: string[];
   startedBy?: 'daemon' | 'terminal';
   verbose?: boolean;
-}): Promise<void> {
+  /** When set, use this backend instead of spawning AcpBackend from command/args. */
+  backend?: import('@/agent/core').AgentBackend;
+}
+
+export async function runAcp(opts: RunAcpOptions): Promise<void> {
   const verbose = opts.verbose === true;
   const sessionTag = randomUUID();
   connectionState.setBackend(opts.agentName);
@@ -525,11 +532,11 @@ export async function runAcp(opts: {
     },
   };
 
-  const backend = new AcpBackend({
+  const backend = opts.backend ?? new AcpBackend({
     agentName: opts.agentName,
     cwd: process.cwd(),
-    command: opts.command,
-    args: opts.args,
+    command: opts.command!,
+    args: opts.args ?? [],
     mcpServers,
     permissionHandler,
     transportHandler: new DefaultTransport(opts.agentName),
@@ -553,6 +560,7 @@ export async function runAcp(opts: {
       current.reject(error);
       return;
     }
+    logger.debug(`[${opts.agentName}] Turn ended, resolving waitForTurnEnd`);
     current.resolve();
   };
 
@@ -585,6 +593,9 @@ export async function runAcp(opts: {
         logAcp('muted', `Incoming raw envelope for ${opts.agentName}: ${formatUnknownForConsole(envelope, ACP_RAW_PREVIEW_CHARS)}`);
       }
     }
+    if (envelopes.length > 0) {
+      session.flush().catch((err) => logger.debug(`[${opts.agentName}] flush after sendEnvelopes failed`, err));
+    }
   };
 
   const switchPermissionModeIfRequested = async (requestedMode: string): Promise<void> => {
@@ -601,7 +612,10 @@ export async function runAcp(opts: {
       if (resolved === modeSelector.currentCode) {
         return;
       }
-      const switched = await backend.setSessionConfigOption(modeSelector.configId, resolved);
+      const switched =
+        'setSessionConfigOption' in backend && typeof (backend as { setSessionConfigOption?: (id: string, value: string) => Promise<boolean> }).setSessionConfigOption === 'function'
+          ? await (backend as { setSessionConfigOption: (id: string, value: string) => Promise<boolean> }).setSessionConfigOption(modeSelector.configId, resolved)
+          : false;
       if (switched) {
         modeSelector.currentCode = resolved;
         return;
@@ -621,7 +635,10 @@ export async function runAcp(opts: {
       return;
     }
 
-    const switched = await backend.setSessionMode(resolvedLegacyMode);
+    const switched =
+      'setSessionMode' in backend && typeof (backend as { setSessionMode?: (mode: string) => Promise<boolean> }).setSessionMode === 'function'
+        ? await (backend as { setSessionMode: (mode: string) => Promise<boolean> }).setSessionMode(resolvedLegacyMode)
+        : false;
     if (switched) {
       legacyModes = {
         ...legacyModes,
@@ -644,7 +661,10 @@ export async function runAcp(opts: {
       if (resolved === modelSelector.currentCode) {
         return;
       }
-      const switched = await backend.setSessionConfigOption(modelSelector.configId, resolved);
+      const switched =
+        'setSessionConfigOption' in backend && typeof (backend as { setSessionConfigOption?: (id: string, value: string) => Promise<boolean> }).setSessionConfigOption === 'function'
+          ? await (backend as { setSessionConfigOption: (id: string, value: string) => Promise<boolean> }).setSessionConfigOption(modelSelector.configId, resolved)
+          : false;
       if (switched) {
         modelSelector.currentCode = resolved;
         return;
@@ -664,7 +684,10 @@ export async function runAcp(opts: {
       return;
     }
 
-    const switched = await backend.setSessionModel(resolvedLegacyModel);
+    const switched =
+      'setSessionModel' in backend && typeof (backend as { setSessionModel?: (model: string) => Promise<boolean> }).setSessionModel === 'function'
+        ? await (backend as { setSessionModel: (model: string) => Promise<boolean> }).setSessionModel(resolvedLegacyModel)
+        : false;
     if (switched) {
       legacyModels = {
         ...legacyModels,
@@ -821,9 +844,12 @@ export async function runAcp(opts: {
 
   session.onUserMessage((message) => {
     if (!message.content.text) {
+      const keys = message?.content && typeof message.content === 'object' ? Object.keys(message.content).join(',') : 'n/a';
+      logger.debug(`[${opts.agentName}] onUserMessage skipped: no text (keys: ${keys})`);
       return;
     }
 
+    logger.debug(`[${opts.agentName}] User message received from app, pushing to queue (len=${message.content.text.length})`);
     if (typeof message.meta?.permissionMode === 'string') {
       currentPermissionMode = message.meta.permissionMode;
       logger.debug(`[${opts.agentName}] Requested ACP permission mode: ${currentPermissionMode}`);
@@ -870,6 +896,30 @@ export async function runAcp(opts: {
   try {
     const started = await backend.startSession();
     acpSessionId = started.sessionId;
+
+    if (opts.agentName === 'cursor') {
+      session.updateMetadata((m) => ({
+        ...m,
+        operatingModes: [
+          { code: 'default', value: 'Default', description: null },
+          { code: 'read-only', value: 'Read only', description: null },
+          { code: 'safe-yolo', value: 'Safe YOLO', description: null },
+          { code: 'yolo', value: 'YOLO', description: null },
+        ],
+        models: [
+          { code: 'auto', value: 'Auto', description: null },
+          { code: 'sonnet-4.5', value: 'Sonnet 4.5', description: null },
+          { code: 'opus-4.6-thinking', value: 'Opus 4.6 Thinking', description: null },
+        ],
+      }));
+      session.sendSessionEvent({ type: 'ready' });
+      try {
+        api.push().sendToAllDevices("It's ready!", "Cursor is waiting for your command", { sessionId: session.sessionId });
+      } catch (pushError) {
+        logger.debug('[cursor] Failed to send ready push', pushError);
+      }
+    }
+
     if (verbose) {
       if (!sawSlashCommands) {
         logAcp('muted', `Outgoing slash commands from ${opts.agentName}: not reported yet`);
@@ -900,6 +950,7 @@ export async function runAcp(opts: {
       }
 
       logAcp('incoming', `Incoming prompt: ${formatUnknownForConsole(batch.message, ACP_EVENT_PREVIEW_CHARS)}`);
+      logger.debug(`[${opts.agentName}] Sending turn-start and starting backend`);
       sendEnvelopes(sessionManager.startTurn());
       const turnEnded = waitForTurnEnd();
       try {
@@ -912,12 +963,14 @@ export async function runAcp(opts: {
         await backend.sendPrompt(acpSessionId, batch.message);
         await turnEnded;
         sendEnvelopes(sessionManager.endTurn('completed'));
+        await session.flush();
         session.sendSessionEvent({ type: 'ready' });
         if (verbose) {
           logAcp('muted', `Outgoing prompt completion from ${opts.agentName}`);
         }
       } catch (error) {
         sendEnvelopes(sessionManager.endTurn('failed'));
+        await session.flush();
         session.sendSessionEvent({ type: 'ready' });
         logAcp('error', `Prompt error from ${opts.agentName}: ${error instanceof Error ? error.message : String(error)}`);
         clearPendingTurn(error instanceof Error ? error : new Error(String(error)));

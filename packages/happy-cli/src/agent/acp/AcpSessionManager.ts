@@ -1,6 +1,7 @@
 import { createId } from '@paralleldrive/cuid2';
 import { createEnvelope, type CreateEnvelopeOptions, type SessionEnvelope } from '@slopus/happy-wire';
 import type { AgentMessage } from '@/agent/core';
+import { logger } from '@/ui/logger';
 
 function turnOptions(turnId: string | null, time: number): CreateEnvelopeOptions {
   return turnId ? { turn: turnId, time } : { time };
@@ -107,19 +108,23 @@ export class AcpSessionManager {
         return [];
       }
 
+      const trimmed = text.replace(/^\n+|\n+$/g, '');
+      if (!trimmed) {
+        return streaming ? [] : this.flush();
+      }
+
       if (streaming) {
-        // Streaming thinking: accumulate, flush if switching from a different type
+        // Send each thinking chunk immediately so the app can show thinking in real time
         const flushed = this.pendingType !== 'thinking' ? this.flush() : [];
         this.pendingType = 'thinking';
-        this.pendingText += text;
-        return flushed;
+        this.pendingText = ''; // don't accumulate; we send now
+        return [
+          ...flushed,
+          createEnvelope('agent', { t: 'text', text: trimmed, thinking: true }, turnOptions(this.currentTurnId, this.nextTime())),
+        ];
       }
 
       // Non-streaming thinking: flush pending, emit immediately
-      const trimmed = text.replace(/^\n+|\n+$/g, '');
-      if (!trimmed) {
-        return this.flush();
-      }
       return [
         ...this.flush(),
         createEnvelope('agent', { t: 'text', text: trimmed, thinking: true }, turnOptions(this.currentTurnId, this.nextTime())),
@@ -135,11 +140,18 @@ export class AcpSessionManager {
       if (!text) {
         return [];
       }
-      // Accumulate output, flush if switching from a different type
+      // Flush pending (e.g. thinking) if switching type; send this chunk immediately so the app shows reply
       const flushed = this.pendingType !== 'output' ? this.flush() : [];
       this.pendingType = 'output';
-      this.pendingText += text;
-      return flushed;
+      this.pendingText = ''; // don't accumulate; we send each chunk now
+      const envelope = createEnvelope('agent', { t: 'text', text }, turnOptions(this.currentTurnId, this.nextTime()));
+      if (process.env.CURSOR_AGENT_VERBOSE === '1') {
+        logger.debug(`[AcpSessionManager] sending text envelope len=${text.length} turn=${!!this.currentTurnId}`);
+      }
+      return [
+        ...flushed,
+        envelope,
+      ];
     }
 
     if (msg.type === 'tool-call') {
