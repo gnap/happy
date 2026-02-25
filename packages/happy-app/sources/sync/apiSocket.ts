@@ -3,6 +3,20 @@ import { TokenStorage } from '@/auth/tokenStorage';
 import { Encryption } from './encryption/encryption';
 
 //
+// Constants (aligned with CLI/daemon reconnection behavior)
+//
+
+/** Min delay before first reconnection attempt (ms) */
+const RECONNECT_DELAY_MIN = 2000;
+/** Max delay between attempts (ms) - caps after several failures */
+const RECONNECT_DELAY_MAX = 30000;
+/** Jitter factor 0–1 to avoid thundering herd */
+const RECONNECT_RANDOMIZATION_FACTOR = 0.5;
+
+/** Network error codes that warrant retry (same idea as CLI NETWORK_ERROR_CODES) */
+const RETRYABLE_ERROR_HINTS = ['ECONNREFUSED', 'ETIMEDOUT', 'ECONNRESET', 'ENETUNREACH', 'timeout', 'Network'];
+
+//
 // Types
 //
 
@@ -11,10 +25,14 @@ export interface SyncSocketConfig {
     token: string;
 }
 
+export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error' | 'auth_error';
+
 export interface SyncSocketState {
     isConnected: boolean;
-    connectionStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
+    connectionStatus: ConnectionStatus;
     lastError: Error | null;
+    /** If true, reconnection was stopped due to auth failure (e.g. 401) */
+    authFailure?: boolean;
 }
 
 export type SyncSocketListener = (state: SyncSocketState) => void;
@@ -31,8 +49,12 @@ class ApiSocket {
     private encryption: Encryption | null = null;
     private messageHandlers: Map<string, (data: any) => void> = new Map();
     private reconnectedListeners: Set<() => void> = new Set();
-    private statusListeners: Set<(status: 'disconnected' | 'connecting' | 'connected' | 'error') => void> = new Set();
-    private currentStatus: 'disconnected' | 'connecting' | 'connected' | 'error' = 'disconnected';
+    private statusListeners: Set<(status: ConnectionStatus) => void> = new Set();
+    private authErrorListeners: Set<() => void> = new Set();
+    private currentStatus: ConnectionStatus = 'disconnected';
+    private lastError: Error | null = null;
+    /** When true, do not reconnect (e.g. after 401) */
+    private reconnectionDisabled = false;
 
     //
     // Initialization
@@ -49,11 +71,19 @@ class ApiSocket {
     //
 
     connect() {
-        if (!this.config || this.socket) {
-            return;
+        if (!this.config) return;
+        if (this.socket) {
+            // Already have a socket; only force reconnect if we had disabled reconnection (e.g. after token refresh)
+            if (this.reconnectionDisabled) {
+                this.reconnectionDisabled = false;
+                this.disconnect();
+            } else {
+                return;
+            }
         }
 
         this.updateStatus('connecting');
+        this.lastError = null;
 
         this.socket = io(this.config.endpoint, {
             path: '/v1/updates',
@@ -62,17 +92,20 @@ class ApiSocket {
                 clientType: 'user-scoped' as const
             },
             transports: ['websocket'],
-            reconnection: true,
-            reconnectionDelay: 1000,
-            reconnectionDelayMax: 5000,
-            reconnectionAttempts: Infinity
+            reconnection: !this.reconnectionDisabled,
+            reconnectionDelay: RECONNECT_DELAY_MIN,
+            reconnectionDelayMax: RECONNECT_DELAY_MAX,
+            reconnectionAttempts: Infinity,
+            randomizationFactor: RECONNECT_RANDOMIZATION_FACTOR,
         });
 
         this.setupEventHandlers();
     }
 
     disconnect() {
+        this.reconnectionDisabled = false;
         if (this.socket) {
+            this.socket.removeAllListeners();
             this.socket.disconnect();
             this.socket = null;
         }
@@ -88,12 +121,20 @@ class ApiSocket {
         return () => this.reconnectedListeners.delete(listener);
     };
 
-    onStatusChange = (listener: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => void) => {
+    onStatusChange = (listener: (status: ConnectionStatus) => void) => {
         this.statusListeners.add(listener);
-        // Immediately notify with current status
         listener(this.currentStatus);
         return () => this.statusListeners.delete(listener);
     };
+
+    /** Called when server returns 401 / auth invalid; reconnection is stopped until token refresh. */
+    onAuthError = (listener: () => void) => {
+        this.authErrorListeners.add(listener);
+        return () => this.authErrorListeners.delete(listener);
+    };
+
+    getLastError = (): Error | null => this.lastError;
+    isAuthFailure = (): boolean => this.currentStatus === 'auth_error';
 
     //
     // Message Handling
@@ -205,11 +246,34 @@ class ApiSocket {
     // Private Methods
     //
 
-    private updateStatus(status: 'disconnected' | 'connecting' | 'connected' | 'error') {
+    private updateStatus(status: ConnectionStatus, error?: Error) {
+        if (error) this.lastError = error;
         if (this.currentStatus !== status) {
             this.currentStatus = status;
             this.statusListeners.forEach(listener => listener(status));
         }
+    }
+
+    /** Stop reconnection and mark as auth failure (e.g. 401). Call from connect_error. */
+    private stopReconnectionAndNotifyAuthError(error: Error) {
+        this.reconnectionDisabled = true;
+        this.lastError = error;
+        if (this.socket) {
+            this.socket.removeAllListeners();
+            this.socket.disconnect();
+            this.socket = null;
+        }
+        this.updateStatus('auth_error', error);
+        this.authErrorListeners.forEach(listener => listener());
+    }
+
+    private isAuthError(error: unknown): boolean {
+        if (!error || typeof error !== 'object') return false;
+        const msg = String((error as Error).message ?? '').toLowerCase();
+        const code = (error as { code?: string; status?: number }).code ?? (error as { status?: number }).status;
+        if (code === 401 || code === 'UNAUTHORIZED') return true;
+        if (msg.includes('401') || msg.includes('unauthorized') || msg.includes('authentication')) return true;
+        return false;
     }
 
     private setupEventHandlers() {
@@ -217,8 +281,7 @@ class ApiSocket {
 
         // Connection events
         this.socket.on('connect', () => {
-            // console.log('🔌 SyncSocket: Connected, recovered: ' + this.socket?.recovered);
-            // console.log('🔌 SyncSocket: Socket ID:', this.socket?.id);
+            this.lastError = null;
             this.updateStatus('connected');
             if (!this.socket?.recovered) {
                 this.reconnectedListeners.forEach(listener => listener());
@@ -226,19 +289,25 @@ class ApiSocket {
         });
 
         this.socket.on('disconnect', (reason) => {
-            // console.log('🔌 SyncSocket: Disconnected', reason);
+            // io server disconnect = server closed the connection (e.g. auth); socket.io may still retry
+            if (this.reconnectionDisabled) return;
             this.updateStatus('disconnected');
         });
 
-        // Error events
-        this.socket.on('connect_error', (error) => {
-            // console.error('🔌 SyncSocket: Connection error', error);
-            this.updateStatus('error');
+        this.socket.on('connect_error', (error: Error & { code?: string; status?: number }) => {
+            if (this.isAuthError(error)) {
+                this.stopReconnectionAndNotifyAuthError(error);
+                return;
+            }
+            this.updateStatus('error', error);
         });
 
-        this.socket.on('error', (error) => {
-            // console.error('🔌 SyncSocket: Error', error);
-            this.updateStatus('error');
+        this.socket.on('error', (error: Error) => {
+            if (this.isAuthError(error)) {
+                this.stopReconnectionAndNotifyAuthError(error);
+                return;
+            }
+            this.updateStatus('error', error);
         });
 
         // Message handling

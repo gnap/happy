@@ -173,6 +173,13 @@ export const SidebarView = React.memo(() => {
                     text: t('status.error'),
                     textColor: styles.statusError.color
                 };
+            case 'auth_error':
+                return {
+                    color: styles.statusError.color,
+                    isPulsing: false,
+                    text: t('status.auth_error'),
+                    textColor: styles.statusError.color
+                };
             default:
                 return {
                     color: styles.statusDefault.color,

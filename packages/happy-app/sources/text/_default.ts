@@ -76,6 +76,7 @@ export const en = {
         connecting: 'connecting',
         disconnected: 'disconnected',
         error: 'error',
+        auth_error: 'Sign in again',
         online: 'online',
         offline: 'offline',
         lastSeen: ({ time }: { time: string }) => `last seen ${time}`,

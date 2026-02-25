@@ -92,7 +92,7 @@ interface StorageState {
     friendsLoaded: boolean;  // True after initial friends fetch
     realtimeStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
     realtimeMode: 'idle' | 'speaking';
-    socketStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
+    socketStatus: 'disconnected' | 'connecting' | 'connected' | 'error' | 'auth_error';
     socketLastConnectedAt: number | null;
     socketLastDisconnectedAt: number | null;
     isDataReady: boolean;
@@ -114,7 +114,7 @@ interface StorageState {
     setRealtimeStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => void;
     setRealtimeMode: (mode: 'idle' | 'speaking', immediate?: boolean) => void;
     clearRealtimeModeDebounce: () => void;
-    setSocketStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => void;
+    setSocketStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error' | 'auth_error') => void;
     getActiveSessions: () => Session[];
     updateSessionDraft: (sessionId: string, draft: string | null) => void;
     updateSessionPermissionMode: (sessionId: string, mode: string) => void;
@@ -718,7 +718,7 @@ export const storage = create<StorageState>()((set, get) => {
                 realtimeModeDebounceTimer = null;
             }
         },
-        setSocketStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => set((state) => {
+        setSocketStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error' | 'auth_error') => set((state) => {
             const now = Date.now();
             const updates: Partial<StorageState> = {
                 socketStatus: status
