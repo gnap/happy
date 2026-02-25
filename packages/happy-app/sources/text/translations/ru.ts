@@ -311,6 +311,12 @@ export const ru: TranslationStructure = {
         claudeCodeSessionId: 'ID сессии Claude Code',
         claudeCodeSessionIdCopied: 'ID сессии Claude Code скопирован в буфер обмена',
         aiProvider: 'Поставщик ИИ',
+        aiProviderName: {
+            claude: 'Claude',
+            codex: 'Codex',
+            cursor: 'Cursor',
+            gemini: 'Gemini',
+        },
         failedToCopyClaudeCodeSessionId: 'Не удалось скопировать ID сессии Claude Code',
         metadataCopied: 'Метаданные скопированы в буфер обмена',
         failedToCopyMetadata: 'Не удалось скопировать метаданные',
@@ -377,6 +383,7 @@ export const ru: TranslationStructure = {
         connecting: 'подключение',
         disconnected: 'отключено',
         error: 'ошибка',
+        auth_error: 'войдите снова',
         online: 'online',
         offline: 'offline',
         lastSeen: ({ time }: { time: string }) => `в сети ${time}`,
@@ -413,6 +420,7 @@ export const ru: TranslationStructure = {
         agent: {
             claude: 'Claude',
             codex: 'Codex',
+            cursor: 'Cursor',
             gemini: 'Gemini',
         },
         model: {
@@ -428,6 +436,19 @@ export const ru: TranslationStructure = {
             badgeReadOnly: 'Только чтение',
             badgeSafeYolo: 'Safe YOLO',
             badgeYolo: 'YOLO',
+        },
+        cursorPermissionMode: {
+            title: 'РЕЖИМ РАЗРЕШЕНИЙ CURSOR',
+            default: 'Настройки CLI',
+            readOnly: 'Read Only Mode',
+            safeYolo: 'Safe YOLO',
+            yolo: 'YOLO',
+            badgeReadOnly: 'Только чтение',
+            badgeSafeYolo: 'Safe YOLO',
+            badgeYolo: 'YOLO',
+        },
+        cursorModel: {
+            default: 'По умолчанию',
         },
         codexModel: {
             title: 'CODEX MODEL',

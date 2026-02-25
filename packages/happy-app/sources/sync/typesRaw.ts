@@ -272,6 +272,28 @@ const rawAgentContentSchema = z.union([
 ]);
 export type RawAgentContent = z.infer<typeof rawAgentContentSchema>;
 
+const codexCursorDataSchema = z.discriminatedUnion('type', [
+    z.object({ type: z.literal('reasoning'), message: z.string() }),
+    z.object({ type: z.literal('message'), message: z.string() }),
+    z.object({ type: z.literal('thinking'), text: z.string() }),
+    z.object({ type: z.literal('task_started'), id: z.string() }),
+    z.object({ type: z.literal('task_complete'), id: z.string() }),
+    z.object({ type: z.literal('turn_aborted'), id: z.string() }),
+    z.object({
+        type: z.literal('tool-call'),
+        callId: z.string(),
+        input: z.any(),
+        name: z.string(),
+        id: z.string()
+    }),
+    z.object({
+        type: z.literal('tool-call-result'),
+        callId: z.string(),
+        output: z.any(),
+        id: z.string()
+    })
+]);
+
 const rawAgentRecordSchema = z.discriminatedUnion('type', [z.object({
     type: z.literal('output'),
     data: z.intersection(z.discriminatedUnion('type', [
@@ -293,27 +315,10 @@ const rawAgentRecordSchema = z.discriminatedUnion('type', [z.object({
     data: agentEventSchema
 }), z.object({
     type: z.literal('codex'),
-    data: z.discriminatedUnion('type', [
-        z.object({ type: z.literal('reasoning'), message: z.string() }),
-        z.object({ type: z.literal('message'), message: z.string() }),
-        z.object({ type: z.literal('thinking'), text: z.string() }),
-        z.object({ type: z.literal('task_started'), id: z.string() }),
-        z.object({ type: z.literal('task_complete'), id: z.string() }),
-        z.object({ type: z.literal('turn_aborted'), id: z.string() }),
-        z.object({
-            type: z.literal('tool-call'),
-            callId: z.string(),
-            input: z.any(),
-            name: z.string(),
-            id: z.string()
-        }),
-        z.object({
-            type: z.literal('tool-call-result'),
-            callId: z.string(),
-            output: z.any(),
-            id: z.string()
-        })
-    ])
+    data: codexCursorDataSchema,
+}), z.object({
+    type: z.literal('cursor'),
+    data: codexCursorDataSchema,
 }), z.object({
     type: z.literal('session'),
     data: sessionEnvelopeSchema
@@ -716,7 +721,15 @@ function normalizeSessionEnvelope(
     return null;
 }
 
-export function normalizeRawMessage(id: string, localId: string | null, createdAt: number, raw: RawRecord): NormalizedMessage | null {
+export type NormalizeRawMessageOptions = { sessionFlavor?: string | null };
+
+export function normalizeRawMessage(
+    id: string,
+    localId: string | null,
+    createdAt: number,
+    raw: RawRecord,
+    options?: NormalizeRawMessageOptions
+): NormalizedMessage | null {
     // Zod transform handles normalization during validation
     let parsed = rawRecordSchema.safeParse(raw);
     if (!parsed.success) {
@@ -894,7 +907,8 @@ export function normalizeRawMessage(id: string, localId: string | null, createdA
                 isSidechain: false,
             };
         }
-        if (raw.content.type === 'codex') {
+        if (raw.content.type === 'codex' || raw.content.type === 'cursor') {
+            const isCursorWire = (raw.content.type === 'cursor');
             if (raw.content.data.type === 'message') {
                 // Cast codex messages to agent text messages
                 return {
@@ -969,19 +983,23 @@ export function normalizeRawMessage(id: string, localId: string | null, createdA
                 } satisfies NormalizedMessage;
             }
             if (raw.content.data.type === 'thinking') {
-                // Codex thinking → show as reasoning text
+                // Codex (main): always text so message list matches upstream. Cursor: wire type 'cursor' → thinking; legacy codex+Cursor session fallback → thinking.
+                const asThinking = isCursorWire || (raw.content.type === 'codex' && options?.sessionFlavor === 'cursor');
                 return {
                     id,
                     localId,
                     createdAt,
                     role: 'agent',
                     isSidechain: false,
-                    content: [{ type: 'text', text: raw.content.data.text }],
+                    content: [asThinking
+                        ? { type: 'thinking' as const, thinking: raw.content.data.text, uuid: id, parentUUID: null }
+                        : { type: 'text' as const, text: raw.content.data.text, uuid: id, parentUUID: null }
+                    ],
                     meta: raw.meta
                 } satisfies NormalizedMessage;
             }
             if (raw.content.data.type === 'task_started' || raw.content.data.type === 'task_complete' || raw.content.data.type === 'turn_aborted') {
-                // Codex lifecycle events; skip for UI (no message to show)
+                // Codex/Cursor lifecycle events; skip for UI (no message to show)
                 return null;
             }
         }

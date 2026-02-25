@@ -147,6 +147,8 @@ export type ReducerState = {
     permissions: Map<string, StoredPermission>; // Store permission details by ID for quick lookup
     localIds: Map<string, string>;
     messageIds: Map<string, string>; // originalId -> internalId
+    /** Last message id that was a thinking message; used to merge streaming thinking chunks into one bubble */
+    lastThinkingMessageId: string | null;
     messages: Map<string, ReducerMessage>;
     sidechains: Map<string, ReducerMessage[]>;
     tracerState: TracerState; // Tracer state for sidechain processing
@@ -177,6 +179,7 @@ export function createReducer(): ReducerState {
         messages: new Map(),
         localIds: new Map(),
         messageIds: new Map(),
+        lastThinkingMessageId: null,
         sidechains: new Map(),
         tracerState: createTracer()
     }
@@ -618,6 +621,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                 state.localIds.set(msg.localId, mid);
             }
             state.messageIds.set(msg.id, mid);
+            state.lastThinkingMessageId = null; // user message ends any streaming thinking
 
             changed.add(mid);
         } else if (msg.role === 'agent') {
@@ -626,19 +630,33 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                 continue;
             }
 
-            // Mark this message as seen
-            state.messageIds.set(msg.id, msg.id);
-
             // Process usage data if present
             if (msg.usage) {
                 processUsageData(state, msg.usage, msg.createdAt);
             }
 
             // Process text and thinking content (tool calls handled in Phase 2)
+            const THINKING_MERGE_WINDOW_MS = 60000; // merge thinking chunks within 60s (same turn)
             for (let c of msg.content) {
                 if (c.type === 'text' || c.type === 'thinking') {
-                    let mid = allocateId();
                     const isThinking = c.type === 'thinking';
+                    if (isThinking && state.lastThinkingMessageId !== null) {
+                        // Merge streaming thinking into the same message (avoid one bubble per token)
+                        const existing = state.messages.get(state.lastThinkingMessageId);
+                        const withinWindow = existing?.createdAt != null && (msg.createdAt - existing.createdAt) <= THINKING_MERGE_WINDOW_MS;
+                        if (existing?.isThinking && existing.text !== null && withinWindow) {
+                            const prev = existing.text.endsWith('*') ? existing.text.slice(0, -1) : existing.text;
+                            existing.text = prev + c.thinking + '*';
+                            state.messageIds.set(msg.id, state.lastThinkingMessageId);
+                            changed.add(state.lastThinkingMessageId);
+                            continue;
+                        }
+                        // Outside window or no existing -> fall through to create new
+                    }
+                    if (!isThinking) {
+                        state.lastThinkingMessageId = null;
+                    }
+                    let mid = allocateId();
                     state.messages.set(mid, {
                         id: mid,
                         realID: msg.id,
@@ -650,6 +668,10 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         event: null,
                         meta: msg.meta,
                     });
+                    if (isThinking) {
+                        state.lastThinkingMessageId = mid;
+                    }
+                    state.messageIds.set(msg.id, mid);
                     changed.add(mid);
                 }
             }

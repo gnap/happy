@@ -106,6 +106,7 @@ export const it: TranslationStructure = {
         connecting: 'connessione in corso',
         disconnected: 'disconnesso',
         error: 'errore',
+        auth_error: 'accedi di nuovo',
         online: 'online',
         offline: 'offline',
         lastSeen: ({ time }: { time: string }) => `visto l'ultima volta ${time}`,
@@ -366,6 +367,12 @@ export const it: TranslationStructure = {
         claudeCodeSessionId: 'ID sessione Claude Code',
         claudeCodeSessionIdCopied: 'ID sessione Claude Code copiato negli appunti',
         aiProvider: 'Provider IA',
+        aiProviderName: {
+            claude: 'Claude',
+            codex: 'Codex',
+            cursor: 'Cursor',
+            gemini: 'Gemini',
+        },
         failedToCopyClaudeCodeSessionId: 'Impossibile copiare l\'ID sessione Claude Code',
         metadataCopied: 'Metadati copiati negli appunti',
         failedToCopyMetadata: 'Impossibile copiare i metadati',
@@ -432,6 +439,7 @@ export const it: TranslationStructure = {
         agent: {
             claude: 'Claude',
             codex: 'Codex',
+            cursor: 'Cursor',
             gemini: 'Gemini',
         },
         model: {
@@ -447,6 +455,19 @@ export const it: TranslationStructure = {
             badgeReadOnly: 'Modalità sola lettura',
             badgeSafeYolo: 'YOLO sicuro',
             badgeYolo: 'YOLO',
+        },
+        cursorPermissionMode: {
+            title: 'MODALITÀ PERMESSI CURSOR',
+            default: 'Impostazioni CLI',
+            readOnly: 'Modalità sola lettura',
+            safeYolo: 'YOLO sicuro',
+            yolo: 'YOLO',
+            badgeReadOnly: 'Modalità sola lettura',
+            badgeSafeYolo: 'YOLO sicuro',
+            badgeYolo: 'YOLO',
+        },
+        cursorModel: {
+            default: 'Predefinito',
         },
         codexModel: {
             title: 'MODELLO CODEX',

@@ -495,6 +495,21 @@ export class ApiSessionClient extends EventEmitter {
         this.enqueueMessage(content);
     }
 
+    /** Same shape as codex but type: 'cursor' so the app normalizes thinking as thinking (no dependency on session.metadata.flavor). */
+    sendCursorMessage(body: Parameters<ApiSessionClient['sendCodexMessage']>[0]) {
+        let content = {
+            role: 'agent',
+            content: {
+                type: 'cursor',
+                data: body
+            },
+            meta: {
+                sentFrom: 'cli'
+            }
+        };
+        this.enqueueMessage(content);
+    }
+
     private enqueueSessionProtocolEnvelope(envelope: SessionEnvelope, invalidate: boolean = true) {
         const content = {
             role: 'session',

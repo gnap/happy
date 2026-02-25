@@ -77,6 +77,7 @@ export const pt: TranslationStructure = {
         connecting: 'conectando',
         disconnected: 'desconectado',
         error: 'erro',
+        auth_error: 'inicie sessão novamente',
         online: 'online',
         offline: 'offline',
         lastSeen: ({ time }: { time: string }) => `visto por último ${time}`,
@@ -337,6 +338,12 @@ export const pt: TranslationStructure = {
         claudeCodeSessionId: 'ID da sessão Claude Code',
         claudeCodeSessionIdCopied: 'ID da sessão Claude Code copiado para a área de transferência',
         aiProvider: 'Provedor de IA',
+        aiProviderName: {
+            claude: 'Claude',
+            codex: 'Codex',
+            cursor: 'Cursor',
+            gemini: 'Gemini',
+        },
         failedToCopyClaudeCodeSessionId: 'Falha ao copiar ID da sessão Claude Code',
         metadataCopied: 'Metadados copiados para a área de transferência',
         failedToCopyMetadata: 'Falha ao copiar metadados',
@@ -403,6 +410,7 @@ export const pt: TranslationStructure = {
         agent: {
             claude: 'Claude',
             codex: 'Codex',
+            cursor: 'Cursor',
             gemini: 'Gemini',
         },
         model: {
@@ -418,6 +426,19 @@ export const pt: TranslationStructure = {
             badgeReadOnly: 'Read Only Mode',
             badgeSafeYolo: 'Safe YOLO',
             badgeYolo: 'YOLO',
+        },
+        cursorPermissionMode: {
+            title: 'MODO DE PERMISSÃO CURSOR',
+            default: 'Configurações do CLI',
+            readOnly: 'Read Only Mode',
+            safeYolo: 'Safe YOLO',
+            yolo: 'YOLO',
+            badgeReadOnly: 'Read Only Mode',
+            badgeSafeYolo: 'Safe YOLO',
+            badgeYolo: 'YOLO',
+        },
+        cursorModel: {
+            default: 'Padrão',
         },
         codexModel: {
             title: 'CODEX MODEL',

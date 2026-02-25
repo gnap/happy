@@ -496,9 +496,11 @@ class Sync {
         };
         const encryptedRawRecord = await encryption.encryptRawRecord(content);
 
-        // Add to messages - normalize the raw record
+        // Add to messages - normalize the raw record (pass session flavor so Cursor thinking is normalized as thinking, Codex unchanged)
         const createdAt = Date.now();
-        const normalizedMessage = normalizeRawMessage(localId, localId, createdAt, content);
+        const normalizedMessage = normalizeRawMessage(localId, localId, createdAt, content, {
+            sessionFlavor: session?.metadata?.flavor ?? undefined,
+        });
         if (normalizedMessage) {
             this.enqueueMessages(sessionId, [normalizedMessage]);
         }
@@ -1619,13 +1621,17 @@ class Sync {
                 }
 
                 const decryptedMessages = await encryption.decryptMessages(messages);
+                const session = storage.getState().sessions[sessionId];
+                const sessionFlavor = session?.metadata?.flavor ?? undefined;
                 const normalizedMessages: NormalizedMessage[] = [];
                 for (let i = 0; i < decryptedMessages.length; i++) {
                     const decrypted = decryptedMessages[i];
                     if (!decrypted) {
                         continue;
                     }
-                    const normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
+                    const normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content, {
+                        sessionFlavor,
+                    });
                     if (normalized) {
                         normalizedMessages.push(normalized);
                     }
@@ -1742,10 +1748,14 @@ class Sync {
 
             // Decrypt message
             let lastMessage: NormalizedMessage | null = null;
+            const sid = updateData.body.sid;
+            const sessionForFlavor = sid ? storage.getState().sessions[sid] : undefined;
             if (updateData.body.message) {
                 const decrypted = await encryption.decryptMessage(updateData.body.message);
                 if (decrypted) {
-                    lastMessage = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
+                    lastMessage = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content, {
+                        sessionFlavor: sessionForFlavor?.metadata?.flavor ?? undefined,
+                    });
 
                     // Check for task lifecycle events to update thinking state
                     // This ensures UI updates even if volatile activity updates are lost
