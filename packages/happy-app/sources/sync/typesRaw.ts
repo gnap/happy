@@ -721,14 +721,11 @@ function normalizeSessionEnvelope(
     return null;
 }
 
-export type NormalizeRawMessageOptions = { sessionFlavor?: string | null };
-
 export function normalizeRawMessage(
     id: string,
     localId: string | null,
     createdAt: number,
-    raw: RawRecord,
-    options?: NormalizeRawMessageOptions
+    raw: RawRecord
 ): NormalizedMessage | null {
     // Zod transform handles normalization during validation
     let parsed = rawRecordSchema.safeParse(raw);
@@ -983,8 +980,8 @@ export function normalizeRawMessage(
                 } satisfies NormalizedMessage;
             }
             if (raw.content.data.type === 'thinking') {
-                // Codex (main): always text so message list matches upstream. Cursor: wire type 'cursor' → thinking; legacy codex+Cursor session fallback → thinking.
-                const asThinking = isCursorWire || (raw.content.type === 'codex' && options?.sessionFlavor === 'cursor');
+                // Codex (main): always text so message list matches upstream. Cursor: wire type 'cursor' → thinking.
+                const asThinking = isCursorWire;
                 return {
                     id,
                     localId,
