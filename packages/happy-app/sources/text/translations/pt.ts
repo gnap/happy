@@ -409,6 +409,20 @@ export const pt: TranslationStructure = {
             badgeSafeYolo: 'Safe YOLO',
             badgeYolo: 'YOLO',
         },
+        cursorPermissionMode: {
+            title: 'MODO DE EXECUÇÃO CURSOR',
+            default: 'Padrão',
+            plan: 'Plano (somente leitura)',
+            ask: 'Perguntas (Q&A)',
+            force: 'Forçar permissões',
+            badgePlan: 'Plano',
+            badgeAsk: 'Perguntas',
+            badgeForce: 'Forçar',
+        },
+        cursorModel: {
+            default: 'Padrão',
+            auto: 'Auto',
+        },
         codexModel: {
             title: 'CODEX MODEL',
             gpt5CodexLow: 'gpt-5-codex low',

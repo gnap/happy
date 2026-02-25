@@ -411,6 +411,20 @@ export const zhHans: TranslationStructure = {
             badgeSafeYolo: 'Safe YOLO',
             badgeYolo: 'YOLO',
         },
+        cursorPermissionMode: {
+            title: 'CURSOR 执行模式',
+            default: '默认',
+            plan: '计划（只读）',
+            ask: '问答',
+            force: '强制允许',
+            badgePlan: '计划',
+            badgeAsk: '问答',
+            badgeForce: '强制',
+        },
+        cursorModel: {
+            default: '默认',
+            auto: '自动',
+        },
         codexModel: {
             title: 'CODEX MODEL',
             gpt5CodexLow: 'gpt-5-codex low',

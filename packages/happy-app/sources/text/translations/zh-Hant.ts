@@ -410,6 +410,20 @@ export const zhHant: TranslationStructure = {
             badgeSafeYolo: '安全 YOLO',
             badgeYolo: 'YOLO',
         },
+        cursorPermissionMode: {
+            title: 'CURSOR 執行模式',
+            default: '預設',
+            plan: '計劃（唯讀）',
+            ask: '問答',
+            force: '強制允許',
+            badgePlan: '計劃',
+            badgeAsk: '問答',
+            badgeForce: '強制',
+        },
+        cursorModel: {
+            default: '預設',
+            auto: '自動',
+        },
         codexModel: {
             title: 'CODEX 模型',
             gpt5CodexLow: 'gpt-5-codex low',

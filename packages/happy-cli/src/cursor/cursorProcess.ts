@@ -16,6 +16,9 @@ import type { CursorStreamMessage } from './types';
 
 const CURSOR_AGENT_BIN = process.env.CURSOR_AGENT_PATH || 'cursor-agent';
 
+/** Execution mode aligned with cursor-agent: --mode plan | ask, or default (no flag) */
+export type CursorExecutionMode = 'default' | 'plan' | 'ask';
+
 export interface CursorProcessOptions {
   /** Working directory */
   cwd: string;
@@ -23,11 +26,11 @@ export interface CursorProcessOptions {
   env?: Record<string, string>;
   /** Resume a previous chat session */
   resumeChatId?: string;
-  /** Model to use (e.g., 'auto', 'sonnet-4.5', 'opus-4.6-thinking') */
+  /** Model to use (e.g., 'auto', 'opus-4.6-thinking', 'gpt-5.3-codex-high') */
   model?: string;
-  /** Execution mode: plan, ask, or default */
-  executionMode?: 'default' | 'plan' | 'ask';
-  /** If true, pass --force to cursor-agent */
+  /** Execution mode: plan (--mode plan), ask (--mode ask), or default (no --mode) */
+  executionMode?: CursorExecutionMode;
+  /** If true, pass -f/--force to cursor-agent (force allow commands) */
   force?: boolean;
   /**
    * Process-level safety timeout in ms. Only kills the process if it runs longer than this.
@@ -70,20 +73,20 @@ export class CursorProcess extends EventEmitter {
       '--output-format', 'stream-json',
     ];
 
-    if (this.options.model) {
-      cursorArgs.push('--model', this.options.model);
+    if (this.options.executionMode === 'plan') {
+      cursorArgs.push('--mode', 'plan');
+    } else if (this.options.executionMode === 'ask') {
+      cursorArgs.push('--mode', 'ask');
+    }
+    if (this.options.force) {
+      cursorArgs.push('--force');
     }
 
     if (this.options.resumeChatId) {
       cursorArgs.push('--resume', this.options.resumeChatId);
     }
-    if (this.options.force !== false) {
-      cursorArgs.push('--force');
-    }
-    if (this.options.executionMode === 'plan') {
-      cursorArgs.push('--mode', 'plan');
-    } else if (this.options.executionMode === 'ask') {
-      cursorArgs.push('--mode', 'ask');
+    if (this.options.model) {
+      cursorArgs.push('--model', this.options.model);
     }
     if (this.options.approveMcps) {
       cursorArgs.push('--approve-mcps');

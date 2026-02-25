@@ -144,6 +144,8 @@ export const lightTheme = {
             readOnly: '#8B8B8D',
             safeYolo: '#FF6B35',
             yolo: '#DC143C',
+            ask: '#8B8B8D',
+            force: '#DC143C',
         },
 
         // Permission button colors
@@ -354,6 +356,8 @@ export const darkTheme = {
             readOnly: '#98989D',
             safeYolo: '#FF7A4C',
             yolo: '#FF453A',
+            ask: '#98989D',
+            force: '#FF453A',
         },
 
         // Permission button colors

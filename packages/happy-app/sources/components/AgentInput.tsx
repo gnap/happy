@@ -937,32 +937,48 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                 </Text>
                             )}
                         </View>
-                        {/* Permission badge — only shown when non-default */}
-                        {displayPermissionMode && permissionModeKey !== 'default' && (() => {
-                            const permColor = isSandboxedYoloMode ? '#4169E1' :
-                                permissionModeKey === 'acceptEdits' ? theme.colors.permission.acceptEdits :
-                                    permissionModeKey === 'bypassPermissions' ? theme.colors.permission.bypass :
-                                        permissionModeKey === 'plan' ? theme.colors.permission.plan :
-                                            permissionModeKey === 'read-only' ? theme.colors.permission.readOnly :
-                                                permissionModeKey === 'safe-yolo' ? theme.colors.permission.safeYolo :
-                                                    permissionModeKey === 'yolo' ? theme.colors.permission.yolo :
-                                                        theme.colors.textSecondary;
-                            const permIcon: 'play-forward' | 'pause' =
-                                permissionModeKey === 'plan' || permissionModeKey === 'read-only'
-                                    ? 'pause' : 'play-forward';
-                            return (
-                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                                    <Ionicons name={permIcon} size={11} color={permColor} />
-                                    <Text style={{
-                                        fontSize: 11,
-                                        color: permColor,
-                                        ...Typography.default()
-                                    }}>
-                                        {withSandboxSuffix(displayPermissionMode.name, permissionModeKey)}
-                                    </Text>
-                                </View>
-                            );
-                        })()}
+                        <View style={{
+                            flexDirection: 'column',
+                            alignItems: 'flex-end',
+                            minWidth: 150, // Fixed minimum width to prevent layout shift
+                        }}>
+                            {displayPermissionMode && permissionModeKey !== 'default' && (() => {
+                                const permColor = isSandboxedYoloMode ? '#4169E1' :
+                                    permissionModeKey === 'acceptEdits' ? theme.colors.permission.acceptEdits :
+                                        permissionModeKey === 'bypassPermissions' ? theme.colors.permission.bypass :
+                                            permissionModeKey === 'plan' ? theme.colors.permission.plan :
+                                                permissionModeKey === 'ask' ? theme.colors.permission.ask :
+                                                    permissionModeKey === 'read-only' ? theme.colors.permission.readOnly :
+                                                        permissionModeKey === 'safe-yolo' ? theme.colors.permission.safeYolo :
+                                                            permissionModeKey === 'yolo' ? theme.colors.permission.yolo :
+                                                                permissionModeKey === 'force' ? theme.colors.permission.force :
+                                                                    theme.colors.textSecondary;
+                                const permIcon: 'play-forward' | 'pause' =
+                                    permissionModeKey === 'plan' || permissionModeKey === 'read-only'
+                                        ? 'pause' : 'play-forward';
+                                return (
+                                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                                        <Ionicons name={permIcon} size={11} color={permColor} />
+                                        <Text style={{
+                                            fontSize: 11,
+                                            color: permColor,
+                                            ...Typography.default()
+                                        }}>
+                                            {withSandboxSuffix(displayPermissionMode.name, permissionModeKey)}
+                                        </Text>
+                                    </View>
+                                );
+                            })()}
+                            {props.modelMode && (
+                                <Text style={{
+                                    fontSize: 11,
+                                    color: theme.colors.textSecondary,
+                                    ...Typography.default()
+                                }}>
+                                    {props.modelMode.name}
+                                </Text>
+                            )}
+                        </View>
                     </View>
                 )}
 

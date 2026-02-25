@@ -411,6 +411,20 @@ export const ja: TranslationStructure = {
             badgeSafeYolo: 'セーフYOLO',
             badgeYolo: 'YOLO',
         },
+        cursorPermissionMode: {
+            title: 'CURSOR実行モード',
+            default: 'デフォルト',
+            plan: '計画（読み取り専用）',
+            ask: '質問（Q&A）',
+            force: '強制許可',
+            badgePlan: '計画',
+            badgeAsk: '質問',
+            badgeForce: '強制',
+        },
+        cursorModel: {
+            default: 'デフォルト',
+            auto: '自動',
+        },
         codexModel: {
             title: 'CODEXモデル',
             gpt5CodexLow: 'gpt-5-codex 低',

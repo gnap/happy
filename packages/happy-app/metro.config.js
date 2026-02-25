@@ -5,6 +5,44 @@ const config = getDefaultConfig(__dirname, {
   isCSSEnabled: true,
 });
 
+// Decode pathname so asset URLs like /assets/.%2Fsources%2F... resolve correctly (ENOENT on brutalist dir).
+// Chain with Expo's rewrite so virtual entry and other Expo rewrites still run.
+const expoRewrite = config.server.rewriteRequestUrl;
+function decodeAssetPath(url) {
+  try {
+    const base = url.startsWith("/") ? "http://localhost" : undefined;
+    const u = new URL(url, base);
+    let decoded = u.pathname;
+    for (let prev = ""; prev !== decoded; ) {
+      prev = decoded;
+      decoded = decoded
+        .split("/")
+        .map((seg) => {
+          try {
+            return decodeURIComponent(seg);
+          } catch {
+            return seg;
+          }
+        })
+        .join("/");
+    }
+    // Normalize /assets/./sources/... -> /assets/sources/...
+    if (decoded.includes("/./")) decoded = decoded.replace(/\/\.\//g, "/");
+    if (decoded !== u.pathname) {
+      const search = u.search || "";
+      const hash = u.hash || "";
+      url = url.startsWith("/") ? decoded + search + hash : u.origin + decoded + search + hash;
+    }
+  } catch {
+    // keep url unchanged
+  }
+  return url;
+}
+config.server.rewriteRequestUrl = (url) => {
+  const decoded = decodeAssetPath(url);
+  return typeof expoRewrite === "function" ? expoRewrite(decoded) : decoded;
+};
+
 // Add support for .wasm files (required by Skia for all platforms)
 // Source: https://shopify.github.io/react-native-skia/docs/getting-started/installation/
 config.resolver.assetExts.push('wasm');

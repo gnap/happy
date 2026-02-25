@@ -416,13 +416,20 @@ export const en: TranslationStructure = {
         },
         codexPermissionMode: {
             title: 'CODEX PERMISSION MODE',
-            default: 'default permissions',
-            readOnly: 'read-only',
-            safeYolo: 'safe yolo',
-            yolo: 'yolo',
-            badgeReadOnly: 'read-only',
-            badgeSafeYolo: 'safe yolo',
-            badgeYolo: 'yolo',
+        },
+        cursorPermissionMode: {
+            title: 'CURSOR EXECUTION MODE',
+            default: 'Default',
+            plan: 'Plan (read-only)',
+            ask: 'Ask (Q&A)',
+            force: 'Force allow',
+            badgePlan: 'Plan',
+            badgeAsk: 'Ask',
+            badgeForce: 'Force',
+        },
+        cursorModel: {
+            default: 'Default',
+            auto: 'Auto',
         },
         codexModel: {
             title: 'CODEX MODEL',

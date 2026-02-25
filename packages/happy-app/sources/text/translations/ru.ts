@@ -419,6 +419,20 @@ export const ru: TranslationStructure = {
             badgeSafeYolo: 'Safe YOLO',
             badgeYolo: 'YOLO',
         },
+        cursorPermissionMode: {
+            title: 'РЕЖИМ ВЫПОЛНЕНИЯ CURSOR',
+            default: 'По умолчанию',
+            plan: 'План (только чтение)',
+            ask: 'Вопросы (Q&A)',
+            force: 'Разрешить принудительно',
+            badgePlan: 'План',
+            badgeAsk: 'Вопросы',
+            badgeForce: 'Принудительно',
+        },
+        cursorModel: {
+            default: 'По умолчанию',
+            auto: 'Авто',
+        },
         codexModel: {
             title: 'CODEX MODEL',
             gpt5CodexLow: 'gpt-5-codex low',
