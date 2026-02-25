@@ -1958,10 +1958,13 @@ class Sync {
                 daemonStateVersion: machine?.daemonStateVersion ?? 0
             };
 
-            // Get machine-specific encryption (might not exist if machine wasn't initialized)
+            // Get machine-specific encryption (might not exist if machine wasn't initialized on this device)
             const machineEncryption = this.encryption.getMachineEncryption(machineId);
             if (!machineEncryption) {
-                console.error(`Machine encryption not found for ${machineId} - cannot decrypt updates`);
+                // Machine was likely registered from another device; skip decrypting this update
+                if (__DEV__) {
+                    console.warn(`Sync: Skipping update-machine for ${machineId} (no encryption key on this device)`);
+                }
                 return;
             }
 

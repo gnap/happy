@@ -296,6 +296,10 @@ const rawAgentRecordSchema = z.discriminatedUnion('type', [z.object({
     data: z.discriminatedUnion('type', [
         z.object({ type: z.literal('reasoning'), message: z.string() }),
         z.object({ type: z.literal('message'), message: z.string() }),
+        z.object({ type: z.literal('thinking'), text: z.string() }),
+        z.object({ type: z.literal('task_started'), id: z.string() }),
+        z.object({ type: z.literal('task_complete'), id: z.string() }),
+        z.object({ type: z.literal('turn_aborted'), id: z.string() }),
         z.object({
             type: z.literal('tool-call'),
             callId: z.string(),
@@ -963,6 +967,22 @@ export function normalizeRawMessage(id: string, localId: string | null, createdA
                     }],
                     meta: raw.meta
                 } satisfies NormalizedMessage;
+            }
+            if (raw.content.data.type === 'thinking') {
+                // Codex thinking → show as reasoning text
+                return {
+                    id,
+                    localId,
+                    createdAt,
+                    role: 'agent',
+                    isSidechain: false,
+                    content: [{ type: 'text', text: raw.content.data.text }],
+                    meta: raw.meta
+                } satisfies NormalizedMessage;
+            }
+            if (raw.content.data.type === 'task_started' || raw.content.data.type === 'task_complete' || raw.content.data.type === 'turn_aborted') {
+                // Codex lifecycle events; skip for UI (no message to show)
+                return null;
             }
         }
         if (raw.content.type === 'session') {
