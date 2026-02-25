@@ -310,6 +310,12 @@ export const zhHant: TranslationStructure = {
         codexThreadId: 'Codex 執行緒 ID',
         codexThreadIdCopied: 'Codex 執行緒 ID 已複製到剪貼簿',
         aiProvider: 'AI 提供者',
+        aiProviderName: {
+            claude: 'Claude',
+            codex: 'Codex',
+            cursor: 'Cursor',
+            gemini: 'Gemini',
+        },
         failedToCopyClaudeCodeSessionId: '複製 Claude Code 工作階段 ID 失敗',
         failedToCopyCodexThreadId: '複製 Codex 執行緒 ID 失敗',
         metadataCopied: '中繼資料已複製到剪貼簿',
@@ -390,6 +396,7 @@ export const zhHant: TranslationStructure = {
         agent: {
             claude: 'Claude',
             codex: 'Codex',
+            cursor: 'Cursor',
             gemini: 'Gemini',
             openclaw: 'OpenClaw',
         },

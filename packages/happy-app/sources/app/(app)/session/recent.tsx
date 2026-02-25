@@ -204,7 +204,7 @@ export default function SessionHistory() {
                     ]}
                     onPress={() => navigateToSession(session.id)}
                 >
-                    <Avatar id={avatarId} size={48} />
+                    <Avatar id={avatarId} size={48} flavor={session.metadata?.flavor} />
                     <View style={styles.sessionContent}>
                         <Text style={styles.sessionTitle} numberOfLines={1}>
                             {sessionName}

@@ -67,7 +67,7 @@ interface AgentInputProps {
     };
     alwaysShowContextSize?: boolean;
     onFileViewerPress?: () => void;
-    agentType?: 'claude' | 'codex' | 'gemini' | 'openclaw';
+    agentType?: 'claude' | 'codex' | 'cursor' | 'gemini' | 'openclaw';
     onAgentClick?: () => void;
     machineName?: string | null;
     onMachineClick?: () => void;
@@ -594,7 +594,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                 {/* Permission Mode Section */}
                                 <View style={styles.overlaySection}>
                                     <Text style={styles.overlaySectionTitle}>
-                                        {isCodex ? t('agentInput.codexPermissionMode.title') : isGemini ? t('agentInput.geminiPermissionMode.title') : t('agentInput.permissionMode.title')}
+                                        {isCodex ? t('agentInput.codexPermissionMode.title') : isCursor ? t('agentInput.cursorPermissionMode.title') : isGemini ? t('agentInput.geminiPermissionMode.title') : t('agentInput.permissionMode.title')}
                                     </Text>
                                     {availableModes.map((mode) => {
                                         const isSelected = permissionModeKey === mode.key;
@@ -1144,7 +1144,15 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                             fontWeight: '600',
                                             ...Typography.default('semiBold'),
                                         }}>
-                                            {props.agentType === 'claude' ? t('agentInput.agent.claude') : props.agentType === 'codex' ? t('agentInput.agent.codex') : props.agentType === 'openclaw' ? t('agentInput.agent.openclaw') : t('agentInput.agent.gemini')}
+                                            {props.agentType === 'claude'
+                                                ? t('agentInput.agent.claude')
+                                                : props.agentType === 'codex'
+                                                    ? t('agentInput.agent.codex')
+                                                    : props.agentType === 'cursor'
+                                                        ? t('agentInput.agent.cursor')
+                                                        : props.agentType === 'openclaw'
+                                                            ? t('agentInput.agent.openclaw')
+                                                            : t('agentInput.agent.gemini')}
                                         </Text>
                                     </Pressable>
                                 )}

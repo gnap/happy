@@ -187,6 +187,7 @@
     "cross-env": "^10.1.0",
     "patch-package": "^8.0.0",
     "react-test-renderer": "19.0.0",
+    "sharp": "^0.34.5",
     "tsx": "^4.20.4",
     "typescript": "5.9.3"
   },

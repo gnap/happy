@@ -324,6 +324,12 @@ export const en: TranslationStructure = {
         codexThreadId: 'Codex Thread ID',
         codexThreadIdCopied: 'Codex Thread ID copied to clipboard',
         aiProvider: 'AI Provider',
+        aiProviderName: {
+            claude: 'Claude',
+            codex: 'Codex',
+            cursor: 'Cursor',
+            gemini: 'Gemini',
+        },
         failedToCopyClaudeCodeSessionId: 'Failed to copy Claude Code Session ID',
         failedToCopyCodexThreadId: 'Failed to copy Codex Thread ID',
         metadataCopied: 'Session metadata copied to clipboard',
@@ -404,6 +410,7 @@ export const en: TranslationStructure = {
         agent: {
             claude: 'Claude',
             codex: 'Codex',
+            cursor: 'Cursor',
             gemini: 'Gemini',
             openclaw: 'OpenClaw',
         },
@@ -430,6 +437,19 @@ export const en: TranslationStructure = {
         cursorModel: {
             default: 'Default',
             auto: 'Auto',
+        },
+        cursorPermissionMode: {
+            title: 'CURSOR PERMISSION MODE',
+            default: 'CLI Settings',
+            readOnly: 'Read Only Mode',
+            safeYolo: 'Safe YOLO',
+            yolo: 'YOLO',
+            badgeReadOnly: 'Read Only Mode',
+            badgeSafeYolo: 'Safe YOLO',
+            badgeYolo: 'YOLO',
+        },
+        cursorModel: {
+            default: 'Default',
         },
         codexModel: {
             title: 'CODEX MODEL',
