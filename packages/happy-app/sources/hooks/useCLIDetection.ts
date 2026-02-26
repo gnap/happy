@@ -57,15 +57,16 @@ export function useCLIDetection(machineId: string | null): CLIAvailability {
             console.log('[useCLIDetection] Starting detection for machineId:', machineId);
 
             try {
-                // Use single bash command to check all CLIs efficiently
-                // command -v is POSIX compliant and more reliable than which
-                // cursor-agent is the Cursor CLI binary used by Happy (see CURSOR_AGENT_PATH)
-                const result = await machineBash(
-                    machineId,
+                // Use login shell so PATH includes ~/.local/bin, /usr/local/bin (daemon may run with minimal env)
+                // command -v is POSIX compliant; for Cursor check cursor-agent or agent (not "cursor"), or CURSOR_AGENT_PATH
+                const inner =
                     '(command -v claude >/dev/null 2>&1 && echo "claude:true" || echo "claude:false") && ' +
                     '(command -v codex >/dev/null 2>&1 && echo "codex:true" || echo "codex:false") && ' +
-                    '(command -v cursor-agent >/dev/null 2>&1 && echo "cursor:true" || echo "cursor:false") && ' +
-                    '(command -v gemini >/dev/null 2>&1 && echo "gemini:true" || echo "gemini:false")',
+                    '((command -v cursor-agent >/dev/null 2>&1 || command -v agent >/dev/null 2>&1 || ([ -n "$CURSOR_AGENT_PATH" ] && test -x "$CURSOR_AGENT_PATH")) && echo "cursor:true" || echo "cursor:false") && ' +
+                    '(command -v gemini >/dev/null 2>&1 && echo "gemini:true" || echo "gemini:false")';
+                const result = await machineBash(
+                    machineId,
+                    `bash -l -c ${JSON.stringify(inner)}`,
                     '/'
                 );
 

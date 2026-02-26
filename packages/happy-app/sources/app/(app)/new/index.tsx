@@ -454,24 +454,26 @@ function NewSessionWizard() {
     // CLI Detection - automatic, non-blocking detection of installed CLIs on selected machine
     const cliAvailability = useCLIDetection(selectedMachineId);
 
-    // Auto-correct invalid agent selection after CLI detection completes
-    // This handles the case where lastUsedAgent was 'codex' but codex is not installed
+    // Auto-correct invalid agent selection only once when detection first completes.
+    // So: when Claude is available we don't keep forcing Claude; user can switch to Cursor and stay there.
+    const lastCorrectedTimestampRef = React.useRef(0);
     React.useEffect(() => {
-        // Only act when detection has completed (timestamp > 0)
-        if (cliAvailability.timestamp === 0) return;
+        if (cliAvailability.timestamp === 0) {
+            lastCorrectedTimestampRef.current = 0;
+            return;
+        }
+        // Only correct once per detection result (same timestamp = already corrected)
+        if (lastCorrectedTimestampRef.current === cliAvailability.timestamp) return;
+        lastCorrectedTimestampRef.current = cliAvailability.timestamp;
 
-        // Check if currently selected agent is available
         const agentAvailable = cliAvailability[agentType];
-
         if (agentAvailable === false) {
-            // Current agent not available - find first available
             const availableAgent: 'claude' | 'codex' | 'cursor' | 'gemini' =
                 cliAvailability.claude === true ? 'claude' :
                 cliAvailability.codex === true ? 'codex' :
                 cliAvailability.cursor === true ? 'cursor' :
                 (cliAvailability.gemini === true && experimentsEnabled) ? 'gemini' :
-                'claude'; // Fallback to claude (will fail at spawn with clear error)
-
+                'claude';
             console.warn(`[AgentSelection] ${agentType} not available, switching to ${availableAgent}`);
             setAgentType(availableAgent);
         }
@@ -1998,7 +2000,7 @@ function NewSessionWizard() {
                             autocompletePrefixes={[]}
                             autocompleteSuggestions={async () => []}
                             agentType={agentType}
-                            onAgentClick={handleAgentInputAgentClick}
+                            onAgentClick={handleAgentClick}
                             permissionMode={permissionMode}
                             availableModes={availableModes}
                             onPermissionModeChange={handleAgentInputPermissionChange}

@@ -51,6 +51,7 @@ interface AgentInputProps {
         cliStatus?: {
             claude: boolean | null;
             codex: boolean | null;
+            cursor?: boolean | null;
             gemini?: boolean | null;
         };
     };
@@ -787,6 +788,28 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                                     codex
                                                 </Text>
                                             </View>
+                                            {props.connectionStatus.cliStatus.cursor !== undefined && (
+                                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                                                    <Text style={{
+                                                        fontSize: 11,
+                                                        color: props.connectionStatus.cliStatus.cursor
+                                                            ? theme.colors.success
+                                                            : theme.colors.textDestructive,
+                                                        ...Typography.default()
+                                                    }}>
+                                                        {props.connectionStatus.cliStatus.cursor ? '✓' : '✗'}
+                                                    </Text>
+                                                    <Text style={{
+                                                        fontSize: 11,
+                                                        color: props.connectionStatus.cliStatus.cursor
+                                                            ? theme.colors.success
+                                                            : theme.colors.textDestructive,
+                                                        ...Typography.default()
+                                                    }}>
+                                                        cursor
+                                                    </Text>
+                                                </View>
+                                            )}
                                             {props.connectionStatus.cliStatus.gemini !== undefined && (
                                                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
                                                     <Text style={{
