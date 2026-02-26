@@ -286,7 +286,8 @@ export const en = {
             notGitRepo: 'Worktrees require a git repository',
             failed: ({ error }: { error: string }) => `Failed to create worktree: ${error}`,
             success: 'Worktree created successfully',
-        }
+        },
+        sessionReadyMessage: 'Session ready. Tap it in the list to open.',
     },
 
     sessionHistory: {
@@ -722,6 +723,8 @@ export const en = {
         createAccount: 'Create account',
         linkOrRestoreAccount: 'Link or restore account',
         loginWithMobileApp: 'Login with mobile app',
+        webViaLanHint: 'You\'re viewing via LAN. Log in or restore here; this session is separate from localhost.',
+        webViaLanAuthHint: 'If login fails when using LAN, open http://localhost:8081 on this computer and try again.',
     },
 
     review: {

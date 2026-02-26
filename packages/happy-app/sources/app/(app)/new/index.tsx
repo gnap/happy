@@ -1035,7 +1035,8 @@ function NewSessionWizard() {
                 }
             }
 
-            const result = await machineSpawnNewSession({
+            // Fire spawn in background; navigate back to list immediately so user is not blocked
+            const spawnPromise = machineSpawnNewSession({
                 machineId: selectedMachineId,
                 directory: actualPath,
                 approvedNewDirectoryCreation: true,
@@ -1043,31 +1044,38 @@ function NewSessionWizard() {
                 environmentVariables
             });
 
-            if ('sessionId' in result && result.sessionId) {
-                // Clear draft state on successful session creation
-                clearNewSessionDraft();
+            setIsCreating(false);
+            router.back();
 
-                await sync.refreshSessions();
-
-                // Set permission mode and model mode on the session
-                storage.getState().updateSessionPermissionMode(result.sessionId, permissionMode.key);
-                if (modelMode) {
-                    storage.getState().updateSessionModelMode(result.sessionId, modelMode.key);
-                }
-
-                // Send initial message if provided
-                if (sessionPrompt.trim()) {
-                    await sync.sendMessage(result.sessionId, sessionPrompt);
-                }
-
-                router.replace(`/session/${result.sessionId}`, {
-                    dangerouslySingular() {
-                        return 'session'
-                    },
+            spawnPromise
+                .then(async (result) => {
+                    if (!('sessionId' in result) || !result.sessionId) {
+                        throw new Error('Session spawning failed - no session ID returned.');
+                    }
+                    const sessionId = result.sessionId;
+                    clearNewSessionDraft();
+                    await sync.refreshSessions();
+                    storage.getState().updateSessionPermissionMode(sessionId, permissionMode.key);
+                    if (modelMode) {
+                        storage.getState().updateSessionModelMode(sessionId, modelMode.key);
+                    }
+                    if (sessionPrompt.trim()) {
+                        await sync.sendMessage(sessionId, sessionPrompt);
+                    }
+                    Modal.alert(t('common.success'), t('newSession.sessionReadyMessage'));
+                })
+                .catch((error) => {
+                    console.error('Failed to start session', error);
+                    let errorMessage = 'Failed to start session. Make sure the daemon is running on the target machine.';
+                    if (error instanceof Error) {
+                        if (error.message.includes('timeout')) {
+                            errorMessage = 'Session startup timed out. The machine may be slow or the daemon may not be responding.';
+                        } else if (error.message.includes('Socket not connected')) {
+                            errorMessage = 'Not connected to server. Check your internet connection.';
+                        }
+                    }
+                    Modal.alert(t('common.error'), errorMessage);
                 });
-            } else {
-                throw new Error('Session spawning failed - no session ID returned.');
-            }
         } catch (error) {
             console.error('Failed to start session', error);
             let errorMessage = 'Failed to start session. Make sure the daemon is running on the target machine.';
