@@ -90,7 +90,7 @@ npm run start:production
 
 2. **If you already have the app open in the simulator:** Start Metro in a separate terminal and keep it running:
    ```bash
-   cd packages/happy-app && yarn start:metro
+   cd packages/happy-app && yarn start
    ```
    Then in the app, use “Enter URL manually” (or the dev menu) and enter: `http://127.0.0.1:8081`
 
@@ -164,6 +164,68 @@ npm run ios:production
 ```
 
 All three apps appear on your device with different icons and names!
+
+## Deploying to iPhone/iPad for Testing (真机部署)
+
+Two ways to get the app onto a physical iPhone or iPad for testing.
+
+### Option 1: USB + local build (recommended for daily dev)
+
+**Prerequisites:** Mac, Xcode, iPhone/iPad connected via USB, Apple ID (free account is enough for development builds).
+
+1. **List devices** (optional):
+   ```bash
+   xcrun devicectl list devices
+   ```
+
+2. **Build and install** (from repo root):
+   ```bash
+   cd packages/happy-app
+   yarn ios:dev -d
+   ```
+   Or use the script that explicitly targets a connected device:
+   ```bash
+   yarn ios:connected-device
+   ```
+   This runs `expo run:ios --device`: builds the **development** variant and installs it on the connected device. First time may ask you to trust the developer certificate on the device (Settings → General → VPN & Device Management).
+
+3. **Other variants on device:**
+   ```bash
+   yarn ios:preview -d   # Preview variant
+   yarn ios:production -d # Production variant
+   ```
+
+4. **Metro:** After install, the app may prompt for the dev server URL. Start Metro (e.g. `cd packages/happy-app && yarn start` from repo root) and enter `http://<your-mac-ip>:8081` so the device can load the bundle over Wi‑Fi (same network as the Mac).
+
+### Option 2: EAS cloud build + install (no USB, share with testers)
+
+**Prerequisites:** [Expo account](https://expo.dev), EAS CLI (`npm i -g eas-cli`), and for **internal** iOS installs typically an **Apple Developer Program** membership (paid) for ad-hoc provisioning.
+
+1. **Login:**
+   ```bash
+   eas login
+   ```
+
+2. **Build for internal testing** (install via link/QR, no App Store):
+   ```bash
+   cd packages/happy-app
+   eas build --profile development --platform ios   # Dev client, internal distribution
+   # or
+   eas build --profile preview --platform ios      # Preview build, internal distribution
+   ```
+   When the build finishes, EAS shows a link/QR code. Open it on the iPhone/iPad and install (device UDID may need to be registered in your Apple Developer account for ad-hoc).
+
+3. **Build for TestFlight** (then invite testers in App Store Connect):
+   ```bash
+   eas build --profile preview-store --platform ios  # or development-store
+   eas submit --platform ios --latest               # Submit the latest build to TestFlight
+   ```
+   Testers install via the TestFlight app.
+
+4. **Profiles in `eas.json`:**
+   - `development` / `preview`: `distribution: "internal"` → install by link.
+   - `development-store` / `preview-store`: `distribution: "store"` → for TestFlight/App Store.
+   - `production`: production release.
 
 ## EAS Build Profiles
 
