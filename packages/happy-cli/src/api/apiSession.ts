@@ -398,7 +398,7 @@ export class ApiSessionClient extends EventEmitter {
                         },
                         {
                             headers: this.authHeaders(),
-                            timeout: 60000,
+                            timeout: 120000, // 2 min so slow server or large cursor reply can complete; timeout is retried
                             httpsAgent: serverHttpsAgent,
                         }
                     );
@@ -415,13 +415,15 @@ export class ApiSessionClient extends EventEmitter {
                     break;
                 } catch (error: unknown) {
                     const status = axios.isAxiosError(error) ? error.response?.status : undefined;
-                    const isRetryable = status !== undefined && ApiSessionClient.FLUSH_RETRY_STATUSES.includes(status);
+                    const isTimeout = axios.isAxiosError(error) && error.code === 'ECONNABORTED';
+                    const isRetryableStatus = status !== undefined && ApiSessionClient.FLUSH_RETRY_STATUSES.includes(status);
+                    const isRetryable = isRetryableStatus || (isTimeout && attempt < ApiSessionClient.FLUSH_RETRY_MAX);
                     if (!isRetryable || attempt === ApiSessionClient.FLUSH_RETRY_MAX) {
                         const data = axios.isAxiosError(error) ? error.response?.data : undefined;
-                        logger.debug('[API] flushOutbox failed', { sessionId: this.sessionId, batchLength: chunk.length, flushed, total, status, data, error });
+                        logger.debug('[API] flushOutbox failed', { sessionId: this.sessionId, batchLength: chunk.length, flushed, total, status, isTimeout, data, error });
                         throw error;
                     }
-                    logger.debug('[API] flushOutbox retryable error', { status, attempt: attempt + 1, maxRetries: ApiSessionClient.FLUSH_RETRY_MAX });
+                    logger.debug('[API] flushOutbox retryable error (will retry)', { status, isTimeout, attempt: attempt + 1, maxRetries: ApiSessionClient.FLUSH_RETRY_MAX });
                 }
             }
         }

@@ -78,7 +78,8 @@ export class RpcHandlerManager {
             this.logger('[RPC] Sending encrypted response', { method: request.method, responseLength: encryptedResponse.length });
             return encryptedResponse;
         } catch (error) {
-            this.logger('[RPC] [ERROR] Error handling request', { error });
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger('[RPC] [ERROR] Error handling request', { error: msg });
             const errorResponse = {
                 error: error instanceof Error ? error.message : 'Unknown error'
             };
