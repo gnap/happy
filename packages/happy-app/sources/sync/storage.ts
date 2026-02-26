@@ -325,13 +325,18 @@ export const storage = create<StorageState>()((set, get) => {
                 // modelMode is local-only (not synced to server); preserve existing so switching model takes effect
                 const existingModelMode = state.sessions[session.id]?.modelMode;
                 const resolvedModelMode = existingModelMode ?? session.modelMode ?? undefined;
+                // todos: derived by replay (reducer) when messages load; not synced to server. Preserve here so
+                // list fetches do not overwrite; replay will update session.todos when that session's messages load.
+                const existingTodos = state.sessions[session.id]?.todos;
+                const resolvedTodos = existingTodos ?? session.todos ?? undefined;
 
                 mergedSessions[session.id] = {
                     ...session,
                     presence,
                     draft: existingDraft || savedDraft || session.draft || null,
                     permissionMode: resolvedPermissionMode,
-                    modelMode: resolvedModelMode
+                    modelMode: resolvedModelMode,
+                    todos: resolvedTodos
                 };
             });
 
