@@ -311,7 +311,7 @@ export const storage = create<StorageState>()((set, get) => {
                 // Use centralized resolver for consistent state management
                 const presence = resolveSessionOnlineState(session);
 
-                // Preserve existing draft and permission mode if they exist, or load from saved data
+                // Preserve existing draft, permission mode, and model mode if they exist, or load from saved data
                 const existingDraft = state.sessions[session.id]?.draft;
                 const savedDraft = savedDrafts[session.id];
                 const existingPermissionMode = state.sessions[session.id]?.permissionMode;
@@ -322,12 +322,16 @@ export const storage = create<StorageState>()((set, get) => {
                     (savedPermissionMode && savedPermissionMode !== 'default' ? savedPermissionMode : undefined) ||
                     (session.permissionMode && session.permissionMode !== 'default' ? session.permissionMode : undefined) ||
                     defaultPermissionMode;
+                // modelMode is local-only (not synced to server); preserve existing so switching model takes effect
+                const existingModelMode = state.sessions[session.id]?.modelMode;
+                const resolvedModelMode = existingModelMode ?? session.modelMode ?? undefined;
 
                 mergedSessions[session.id] = {
                     ...session,
                     presence,
                     draft: existingDraft || savedDraft || session.draft || null,
-                    permissionMode: resolvedPermissionMode
+                    permissionMode: resolvedPermissionMode,
+                    modelMode: resolvedModelMode
                 };
             });
 

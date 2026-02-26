@@ -59,6 +59,34 @@ export interface CursorToolCallMessage {
             args?: Record<string, unknown>;
             result?: unknown;
         };
+        /** Todo/task list updates (cursor-agent stream-json) */
+        updateTodosToolCall?: {
+            args?: {
+                todos?: Array<{
+                    id?: string;
+                    content?: string;
+                    status?: string;
+                    createdAt?: string;
+                    updatedAt?: string;
+                    dependencies?: unknown[];
+                }>;
+                merge?: boolean;
+            };
+            result?: {
+                success?: {
+                    todos?: Array<{
+                        id?: string;
+                        content?: string;
+                        status?: string;
+                        createdAt?: string;
+                        updatedAt?: string;
+                        dependencies?: unknown[];
+                    }>;
+                    totalCount?: number;
+                    wasMerge?: boolean;
+                };
+            };
+        };
     };
 }
 

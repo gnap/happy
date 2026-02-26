@@ -11,6 +11,22 @@ import { createHash } from 'node:crypto';
 import { logger } from '@/ui/logger';
 import type { CursorStreamMessage } from './types';
 
+/** Map cursor-agent todo status to app TodoWrite status */
+function mapCursorTodoStatus(cursorStatus: string | undefined): 'pending' | 'in_progress' | 'completed' {
+  if (cursorStatus === 'TODO_STATUS_IN_PROGRESS') return 'in_progress';
+  if (cursorStatus === 'TODO_STATUS_COMPLETED') return 'completed';
+  return 'pending';
+}
+
+/** Normalize cursor-agent todo item to app TodoWrite shape */
+function normalizeTodoItem(t: { id?: string; content?: string; status?: string; [k: string]: unknown }): { id: string; content: string; status: 'pending' | 'in_progress' | 'completed' } {
+  return {
+    id: typeof t.id === 'string' ? t.id : '',
+    content: typeof t.content === 'string' ? t.content : '',
+    status: mapCursorTodoStatus(t.status),
+  };
+}
+
 /**
  * Internal message types emitted by the parser.
  * These are consumed by runCursor.ts to update the session and UI.
@@ -225,6 +241,43 @@ export class CursorMessageParser {
             results.push({
               type: 'tool_call_end',
               toolName: 'CursorEdit',
+              result: { cancelled: true, subtype: msg.subtype },
+              callId,
+              success: false,
+            });
+          }
+        }
+
+        if (tc.updateTodosToolCall) {
+          const rawTodos = tc.updateTodosToolCall.args?.todos ?? [];
+          const todos = rawTodos.map((t) => normalizeTodoItem(t as Parameters<typeof normalizeTodoItem>[0]));
+          const key = this.toolKey('TodoWrite', { todos });
+          if (msg.subtype === 'started') {
+            const callId = this.pushCallId(key);
+            results.push({
+              type: 'tool_call_start',
+              toolName: 'TodoWrite',
+              args: { todos },
+              callId,
+            });
+          } else if (msg.subtype === 'completed') {
+            const callId = this.shiftCallId(key);
+            const res = tc.updateTodosToolCall.result?.success;
+            const resultTodos = Array.isArray(res?.todos)
+              ? res.todos.map((t) => normalizeTodoItem(t as Parameters<typeof normalizeTodoItem>[0]))
+              : todos;
+            results.push({
+              type: 'tool_call_end',
+              toolName: 'TodoWrite',
+              result: { newTodos: resultTodos },
+              callId,
+              success: true,
+            });
+          } else if (msg.subtype) {
+            const callId = this.shiftCallId(key);
+            results.push({
+              type: 'tool_call_end',
+              toolName: 'TodoWrite',
               result: { cancelled: true, subtype: msg.subtype },
               callId,
               success: false,
