@@ -36,7 +36,7 @@ export const initialMachineMetadata: MachineMetadata = {
 // Get environment variables for a profile, filtered for agent compatibility
 async function getProfileEnvironmentVariablesForAgent(
   profileId: string,
-  agentType: 'claude' | 'codex' | 'gemini'
+  agentType: 'claude' | 'codex' | 'cursor' | 'gemini'
 ): Promise<Record<string, string>> {
   try {
     const settings = await readSettings();
@@ -470,7 +470,7 @@ export async function startDaemon(): Promise<void> {
         if (!useTmux) {
           logger.debug(`[DAEMON RUN] Using regular process spawning`);
 
-          // Construct arguments for the CLI - support claude, codex, and gemini
+          // Construct arguments for the CLI - support claude, codex, cursor, and gemini
           let agentCommand: string;
           switch (options.agent) {
             case 'claude':
@@ -479,6 +479,9 @@ export async function startDaemon(): Promise<void> {
               break;
             case 'codex':
               agentCommand = 'codex';
+              break;
+            case 'cursor':
+              agentCommand = 'cursor';
               break;
             case 'gemini':
               agentCommand = 'gemini';

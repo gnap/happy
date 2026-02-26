@@ -65,7 +65,7 @@ const useProfileMap = (profiles: AIBackendProfile[]) => {
 
 // Environment variable transformation helper
 // Returns ALL profile environment variables - daemon will use them as-is
-const transformProfileToEnvironmentVars = (profile: AIBackendProfile, agentType: 'claude' | 'codex' | 'gemini' = 'claude') => {
+const transformProfileToEnvironmentVars = (profile: AIBackendProfile, agentType: 'claude' | 'codex' | 'cursor' | 'gemini' = 'claude') => {
     // getProfileEnvironmentVariables already returns ALL env vars from profile
     // including custom environmentVariables array and provider-specific configs
     return getProfileEnvironmentVariables(profile);
@@ -316,16 +316,16 @@ function NewSessionWizard() {
         }
         return 'anthropic'; // Default to Anthropic
     });
-    const [agentType, setAgentType] = React.useState<'claude' | 'codex' | 'gemini'>(() => {
+    const [agentType, setAgentType] = React.useState<'claude' | 'codex' | 'cursor' | 'gemini'>(() => {
         // Check if agent type was provided in temp data
         if (tempSessionData?.agentType) {
             // Only allow gemini if experiments are enabled
             if (tempSessionData.agentType === 'gemini' && !experimentsEnabled) {
                 return 'claude';
             }
-            return tempSessionData.agentType;
+            return tempSessionData.agentType as 'claude' | 'codex' | 'cursor' | 'gemini';
         }
-        if (lastUsedAgent === 'claude' || lastUsedAgent === 'codex') {
+        if (lastUsedAgent === 'claude' || lastUsedAgent === 'codex' || lastUsedAgent === 'cursor') {
             return lastUsedAgent;
         }
         // Only allow gemini if experiments are enabled
@@ -335,13 +335,14 @@ function NewSessionWizard() {
         return 'claude';
     });
 
-    // Agent cycling handler (for cycling through claude -> codex -> gemini)
+    // Agent cycling handler (for cycling through claude -> codex -> cursor -> gemini)
     // Note: Does NOT persist immediately - persistence is handled by useEffect below
     const handleAgentClick = React.useCallback(() => {
         setAgentType(prev => {
-            // Cycle: claude -> codex -> gemini (if experiments) -> claude
+            // Cycle: claude -> codex -> cursor -> gemini (if experiments) -> claude
             if (prev === 'claude') return 'codex';
-            if (prev === 'codex') return experimentsEnabled ? 'gemini' : 'claude';
+            if (prev === 'codex') return 'cursor';
+            if (prev === 'cursor') return experimentsEnabled ? 'gemini' : 'claude';
             return 'claude';
         });
     }, [experimentsEnabled]);
@@ -464,16 +465,17 @@ function NewSessionWizard() {
 
         if (agentAvailable === false) {
             // Current agent not available - find first available
-            const availableAgent: 'claude' | 'codex' | 'gemini' =
+            const availableAgent: 'claude' | 'codex' | 'cursor' | 'gemini' =
                 cliAvailability.claude === true ? 'claude' :
                 cliAvailability.codex === true ? 'codex' :
+                cliAvailability.cursor === true ? 'cursor' :
                 (cliAvailability.gemini === true && experimentsEnabled) ? 'gemini' :
                 'claude'; // Fallback to claude (will fail at spawn with clear error)
 
             console.warn(`[AgentSelection] ${agentType} not available, switching to ${availableAgent}`);
             setAgentType(availableAgent);
         }
-    }, [cliAvailability.timestamp, cliAvailability.claude, cliAvailability.codex, cliAvailability.gemini, agentType, experimentsEnabled]);
+    }, [cliAvailability.timestamp, cliAvailability.claude, cliAvailability.codex, cliAvailability.cursor, cliAvailability.gemini, agentType, experimentsEnabled]);
 
     // Extract all ${VAR} references from profiles to query daemon environment
     const envVarRefs = React.useMemo(() => {
@@ -489,10 +491,10 @@ function NewSessionWizard() {
     const { variables: daemonEnv } = useEnvironmentVariables(selectedMachineId, envVarRefs);
 
     // Temporary banner dismissal (X button) - resets when component unmounts or machine changes
-    const [hiddenBanners, setHiddenBanners] = React.useState<{ claude: boolean; codex: boolean; gemini: boolean }>({ claude: false, codex: false, gemini: false });
+    const [hiddenBanners, setHiddenBanners] = React.useState<{ claude: boolean; codex: boolean; cursor: boolean; gemini: boolean }>({ claude: false, codex: false, cursor: false, gemini: false });
 
     // Helper to check if CLI warning has been dismissed (checks both global and per-machine)
-    const isWarningDismissed = React.useCallback((cli: 'claude' | 'codex' | 'gemini'): boolean => {
+    const isWarningDismissed = React.useCallback((cli: 'claude' | 'codex' | 'cursor' | 'gemini'): boolean => {
         // Check global dismissal first
         if (dismissedCLIWarnings.global?.[cli] === true) return true;
         // Check per-machine dismissal
@@ -500,8 +502,8 @@ function NewSessionWizard() {
         return dismissedCLIWarnings.perMachine?.[selectedMachineId]?.[cli] === true;
     }, [selectedMachineId, dismissedCLIWarnings]);
 
-    // Unified dismiss handler for all three button types (easy to use correctly, hard to use incorrectly)
-    const handleCLIBannerDismiss = React.useCallback((cli: 'claude' | 'codex' | 'gemini', type: 'temporary' | 'machine' | 'global') => {
+    // Unified dismiss handler for all CLI banner button types (easy to use correctly, hard to use incorrectly)
+    const handleCLIBannerDismiss = React.useCallback((cli: 'claude' | 'codex' | 'cursor' | 'gemini', type: 'temporary' | 'machine' | 'global') => {
         if (type === 'temporary') {
             // X button: Hide for current session only (not persisted)
             setHiddenBanners(prev => ({ ...prev, [cli]: true }));
@@ -553,7 +555,7 @@ function NewSessionWizard() {
         const supportedCLIs = (Object.entries(profile.compatibility) as [string, boolean][])
             .filter(([, supported]) => supported)
             .map(([agent]) => agent);
-        const requiredCLI = supportedCLIs.length === 1 ? supportedCLIs[0] as 'claude' | 'codex' | 'gemini' : null;
+        const requiredCLI = supportedCLIs.length === 1 ? supportedCLIs[0] as 'claude' | 'codex' | 'cursor' | 'gemini' : null;
 
         if (requiredCLI && cliAvailability[requiredCLI] === false) {
             return {
@@ -678,7 +680,7 @@ function NewSessionWizard() {
                 .map(([agent]) => agent);
 
             if (supportedCLIs.length === 1) {
-                const requiredAgent = supportedCLIs[0] as 'claude' | 'codex' | 'gemini';
+                const requiredAgent = supportedCLIs[0] as 'claude' | 'codex' | 'cursor' | 'gemini';
                 // Check if this agent is available and allowed
                 const isAvailable = cliAvailability[requiredAgent] !== false;
                 const isAllowed = requiredAgent !== 'gemini' || experimentsEnabled;
@@ -705,7 +707,7 @@ function NewSessionWizard() {
                 }
             }
         }
-    }, [profileMap, cliAvailability.claude, cliAvailability.codex, cliAvailability.gemini, experimentsEnabled, availableModes, agentType]);
+    }, [profileMap, cliAvailability.claude, cliAvailability.codex, cliAvailability.cursor, cliAvailability.gemini, experimentsEnabled, availableModes, agentType]);
 
     // Ensure permission mode is valid for current agent, falling back when needed.
     React.useEffect(() => {
@@ -777,7 +779,7 @@ function NewSessionWizard() {
             name: '',
             anthropicConfig: {},
             environmentVariables: [],
-            compatibility: { claude: true, codex: true, gemini: true },
+            compatibility: { claude: true, codex: true, cursor: true, gemini: true },
             isBuiltIn: false,
             createdAt: Date.now(),
             updatedAt: Date.now(),
@@ -817,13 +819,13 @@ function NewSessionWizard() {
         }
 
         // Add CLI type second (before warnings/availability)
-        if (profile.compatibility.claude && profile.compatibility.codex) {
-            parts.push('Claude & Codex CLI');
-        } else if (profile.compatibility.claude) {
-            parts.push('Claude CLI');
-        } else if (profile.compatibility.codex) {
-            parts.push('Codex CLI');
-        }
+        const comp = profile.compatibility;
+        const cliNames: string[] = [];
+        if (comp.claude) cliNames.push('Claude');
+        if (comp.codex) cliNames.push('Codex');
+        if (comp.cursor) cliNames.push('Cursor');
+        if (comp.gemini) cliNames.push('Gemini');
+        if (cliNames.length > 0) parts.push(cliNames.join(' & ') + ' CLI');
 
         // Add availability warning if unavailable
         if (!availability.available && availability.reason) {
@@ -832,7 +834,7 @@ function NewSessionWizard() {
                 parts.push(`⚠️ This profile uses ${required} CLI only`);
             } else if (availability.reason.startsWith('cli-not-detected:')) {
                 const cli = availability.reason.split(':')[1];
-                const cliName = cli === 'claude' ? 'Claude' : 'Codex';
+                const cliName = cli === 'claude' ? 'Claude' : cli === 'codex' ? 'Codex' : cli === 'cursor' ? 'Cursor' : cli === 'gemini' ? 'Gemini' : cli;
                 parts.push(`⚠️ ${cliName} CLI not detected (this profile needs it)`);
             }
         }
@@ -1097,6 +1099,7 @@ function NewSessionWizard() {
             cliStatus: includeCLI ? {
                 claude: cliAvailability.claude,
                 codex: cliAvailability.codex,
+                cursor: cliAvailability.cursor,
                 ...(experimentsEnabled && { gemini: cliAvailability.gemini }),
             } : undefined,
         };
@@ -1251,6 +1254,14 @@ function NewSessionWizard() {
                                                 codex
                                             </Text>
                                         </View>
+                                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                                            <Text style={{ fontSize: 11, color: cliAvailability.cursor ? theme.colors.success : theme.colors.textDestructive, ...Typography.default() }}>
+                                                {cliAvailability.cursor ? '✓' : '✗'}
+                                            </Text>
+                                            <Text style={{ fontSize: 11, color: cliAvailability.cursor ? theme.colors.success : theme.colors.textDestructive, ...Typography.default() }}>
+                                                cursor
+                                            </Text>
+                                        </View>
                                         {experimentsEnabled && (
                                             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
                                                 <Text style={{ fontSize: 11, color: cliAvailability.gemini ? theme.colors.success : theme.colors.textDestructive, ...Typography.default() }}>
@@ -1272,7 +1283,7 @@ function NewSessionWizard() {
                                 <Text style={[styles.sectionHeader, { marginBottom: 0, marginTop: 0 }]}>Choose AI Profile</Text>
                             </View>
                             <Text style={styles.sectionDescription}>
-                                Choose which AI backend runs your session (Claude or Codex). Create custom profiles for alternative APIs.
+                                Choose which AI backend runs your session (Claude, Codex, Cursor, or Gemini). Create custom profiles for alternative APIs.
                             </Text>
 
                             {/* Missing CLI Installation Banners */}
@@ -1342,6 +1353,78 @@ function NewSessionWizard() {
                                         }}>
                                             <Text style={{ fontSize: 11, color: theme.colors.textLink, ...Typography.default() }}>
                                                 View Installation Guide →
+                                            </Text>
+                                        </Pressable>
+                                    </View>
+                                </View>
+                            )}
+
+                            {selectedMachineId && cliAvailability.cursor === false && !isWarningDismissed('cursor') && !hiddenBanners.cursor && (
+                                <View style={{
+                                    backgroundColor: theme.colors.box.warning.background,
+                                    borderRadius: 10,
+                                    padding: 12,
+                                    marginBottom: 12,
+                                    borderWidth: 1,
+                                    borderColor: theme.colors.box.warning.border,
+                                }}>
+                                    <View style={{ flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 6 }}>
+                                        <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginRight: 16 }}>
+                                            <Ionicons name="warning" size={16} color={theme.colors.warning} />
+                                            <Text style={{ fontSize: 13, fontWeight: '600', color: theme.colors.text, ...Typography.default('semiBold') }}>
+                                                Cursor Not Detected
+                                            </Text>
+                                            <View style={{ flex: 1, minWidth: 20 }} />
+                                            <Text style={{ fontSize: 10, color: theme.colors.textSecondary, ...Typography.default() }}>
+                                                Don't show this popup for
+                                            </Text>
+                                            <Pressable
+                                                onPress={() => handleCLIBannerDismiss('cursor', 'machine')}
+                                                style={{
+                                                    borderRadius: 4,
+                                                    borderWidth: 1,
+                                                    borderColor: theme.colors.textSecondary,
+                                                    paddingHorizontal: 8,
+                                                    paddingVertical: 3,
+                                                }}
+                                            >
+                                                <Text style={{ fontSize: 10, color: theme.colors.textSecondary, ...Typography.default() }}>
+                                                    this machine
+                                                </Text>
+                                            </Pressable>
+                                            <Pressable
+                                                onPress={() => handleCLIBannerDismiss('cursor', 'global')}
+                                                style={{
+                                                    borderRadius: 4,
+                                                    borderWidth: 1,
+                                                    borderColor: theme.colors.textSecondary,
+                                                    paddingHorizontal: 8,
+                                                    paddingVertical: 3,
+                                                }}
+                                            >
+                                                <Text style={{ fontSize: 10, color: theme.colors.textSecondary, ...Typography.default() }}>
+                                                    any machine
+                                                </Text>
+                                            </Pressable>
+                                        </View>
+                                        <Pressable
+                                            onPress={() => handleCLIBannerDismiss('cursor', 'temporary')}
+                                            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                                        >
+                                            <Ionicons name="close" size={18} color={theme.colors.textSecondary} />
+                                        </Pressable>
+                                    </View>
+                                    <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
+                                        <Text style={{ fontSize: 11, color: theme.colors.textSecondary, ...Typography.default() }}>
+                                            Install cursor-agent on the machine (e.g. Cursor IDE or set CURSOR_AGENT_PATH).
+                                        </Text>
+                                        <Pressable onPress={() => {
+                                            if (Platform.OS === 'web') {
+                                                window.open('https://docs.cursor.com', '_blank');
+                                            }
+                                        }}>
+                                            <Text style={{ fontSize: 11, color: theme.colors.textLink, ...Typography.default() }}>
+                                                Cursor Docs →
                                             </Text>
                                         </Pressable>
                                     </View>

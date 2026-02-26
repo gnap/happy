@@ -228,6 +228,7 @@ export async function runCursor(opts: {
       permissionMode: messagePermissionMode || 'default',
       model: messageModel,
     };
+    logger.debug(`[cursor] User message queued (length: ${message.content.text.length})`);
     messageQueue.push(message.content.text, mode);
   };
 
@@ -417,7 +418,7 @@ export async function runCursor(opts: {
 
       const { message: userMessage, mode } = batch;
       messageBuffer.addMessage(userMessage, 'user');
-      logger.debug(`[cursor] Received message (length: ${userMessage.length})`);
+      logger.debug(`[cursor] Processing message (length: ${userMessage.length}); spawning cursor-agent`);
 
       // Cursor has no change_title MCP tool, so don't append that instruction (unlike Codex/Gemini)
       const prompt = userMessage;
