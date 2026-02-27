@@ -74,8 +74,15 @@ export async function listDaemonSessions(): Promise<any[]> {
   return result.children || [];
 }
 
-export async function stopDaemonSession(sessionId: string): Promise<boolean> {
-  const result = await daemonPost('/stop-session', { sessionId });
+/**
+ * Stop a session by session id (requires daemon to have it in its mapping)
+ * or by PID (no mapping needed).
+ */
+export async function stopDaemonSession(sessionIdOrPid: string | number): Promise<boolean> {
+  const body = typeof sessionIdOrPid === 'number'
+    ? { pid: sessionIdOrPid }
+    : { sessionId: sessionIdOrPid };
+  const result = await daemonPost('/stop-session', body);
   return result.success || false;
 }
 

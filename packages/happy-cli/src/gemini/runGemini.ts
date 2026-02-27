@@ -14,7 +14,7 @@ import { join, resolve } from 'node:path';
 
 import { ApiClient } from '@/api/api';
 import { logger } from '@/ui/logger';
-import { Credentials, readSettings } from '@/persistence';
+import { Credentials, readSettings, writeSessionPidFile, removeSessionPidFile } from '@/persistence';
 import { createSessionMetadata } from '@/utils/createSessionMetadata';
 import { initialMachineMetadata } from '@/daemon/run';
 import { configuration } from '@/configuration';
@@ -155,6 +155,9 @@ export async function runGemini(opts: {
       if (permissionHandler) {
         permissionHandler.updateSession(pendingSessionSwap);
       }
+      // Re-register run-specific RPC handlers so kill/abort work after reconnect
+      pendingSessionSwap.rpcHandlerManager.registerHandler('abort', handleAbort);
+      registerKillSessionHandler(pendingSessionSwap.rpcHandlerManager, handleKillSession);
       pendingSessionSwap = null;
     }
   };
@@ -177,25 +180,25 @@ export async function runGemini(opts: {
         if (permissionHandler) {
           permissionHandler.updateSession(newSession);
         }
+        // Re-register run-specific RPC handlers so kill/abort work after reconnect
+        newSession.rpcHandlerManager.registerHandler('abort', handleAbort);
+        registerKillSessionHandler(newSession.rpcHandlerManager, handleKillSession);
       }
     }
   });
   session = initialSession;
+  writeSessionPidFile(session.sessionId);
 
-  // Report to daemon (only if we have a real session)
-  if (response) {
-    try {
-      logger.debug(`[START] Reporting session ${response.id} to daemon`);
-      const result = await notifyDaemonSessionStarted(response.id, metadata);
-      if (result.error) {
-        logger.debug(`[START] Failed to report to daemon (may not be running):`, result.error);
-      } else {
-        logger.debug(`[START] Reported session ${response.id} to daemon`);
-      }
-    } catch (error) {
-      logger.debug('[START] Failed to report to daemon (may not be running):', error);
-    }
-  }
+  // Report to daemon (once at start; also retry periodically so daemon sees us if it wasn't running at start)
+  const DAEMON_REPORT_INTERVAL_MS = 60_000;
+  const reportToDaemon = () => {
+    if (!response) return;
+    notifyDaemonSessionStarted(session.sessionId, { ...metadata, hostPid: process.pid }).then((result) => {
+      if (result?.error) logger.debug(`[START] Daemon report failed:`, result.error);
+    }).catch((err) => logger.debug('[START] Daemon report error:', err));
+  };
+  reportToDaemon();
+  setInterval(reportToDaemon, DAEMON_REPORT_INTERVAL_MS);
 
   const messageQueue = new MessageQueue2<GeminiMode>((mode) => hashObject({
     permissionMode: mode.permissionMode,
@@ -368,12 +371,13 @@ export async function runGemini(opts: {
 
   const handleKillSession = async () => {
     logger.debug('[Gemini] Kill session requested - terminating process');
+    removeSessionPidFile();
     await handleAbort();
     logger.debug('[Gemini] Abort completed, proceeding with termination');
 
     try {
       if (session) {
-        session.updateMetadata((currentMetadata) => ({
+        await session.updateMetadata((currentMetadata) => ({
           ...currentMetadata,
           lifecycleState: 'archived',
           lifecycleStateSince: Date.now(),
@@ -403,6 +407,17 @@ export async function runGemini(opts: {
 
   session.rpcHandlerManager.registerHandler('abort', handleAbort);
   registerKillSessionHandler(session.rpcHandlerManager, handleKillSession);
+
+  // Exit handlers: always run cleanup so server gets session-end (反注册)
+  let exitHandled = false;
+  const onExitSignal = () => {
+    if (exitHandled) return;
+    exitHandled = true;
+    void handleKillSession();
+  };
+  process.on('SIGTERM', onExitSignal);
+  process.on('SIGINT', onExitSignal);
+  process.on('SIGHUP', onExitSignal);
 
   //
   // Initialize Ink UI
@@ -1289,6 +1304,7 @@ export async function runGemini(opts: {
   } finally {
     // Clean up resources
     logger.debug('[gemini]: Final cleanup start');
+    removeSessionPidFile();
 
     // Cancel offline reconnection if still running
     if (reconnectionHandle) {

@@ -19,7 +19,7 @@ import { configuration } from '@/configuration';
 
 import { ApiClient } from '@/api/api';
 import { logger } from '@/ui/logger';
-import { Credentials, readSettings } from '@/persistence';
+import { Credentials, readSettings, writeSessionPidFile, removeSessionPidFile } from '@/persistence';
 import { createSessionMetadata } from '@/utils/createSessionMetadata';
 import { initialMachineMetadata } from '@/daemon/run';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
@@ -244,24 +244,25 @@ export async function runCursor(opts: {
     onSessionSwap: (newSession) => {
       session = newSession;
       newSession.onUserMessage(handleUserMessage);
+      // Re-register run-specific RPC handlers so kill/abort work after reconnect (they are not on the new session by default).
+      newSession.rpcHandlerManager.registerHandler('abort', handleAbort);
+      registerKillSessionHandler(newSession.rpcHandlerManager, handleKillSession);
     },
   });
   session = initialSession;
   session.onUserMessage(handleUserMessage);
+  writeSessionPidFile(session.sessionId);
 
-  // Report to daemon
-  if (response) {
-    try {
-      logger.debug(`[START] Reporting session ${response.id} to daemon`);
-      const result = await notifyDaemonSessionStarted(response.id, metadata);
-      if (result.error) {
-        logger.debug(`[START] Failed to report to daemon:`, result.error);
-      }
-    } catch (error) {
-      logger.debug('[START] Failed to report to daemon:', error);
-    }
-  }
-
+  // Report to daemon (once at start; also retry periodically so daemon sees us if it wasn't running at start)
+  const DAEMON_REPORT_INTERVAL_MS = 60_000;
+  const reportToDaemon = () => {
+    if (!response) return;
+    notifyDaemonSessionStarted(session.sessionId, { ...metadata, hostPid: process.pid }).then((result) => {
+      if (result?.error) logger.debug(`[START] Daemon report failed:`, result.error);
+    }).catch((err) => logger.debug('[START] Daemon report error:', err));
+  };
+  reportToDaemon();
+  const daemonReportInterval = setInterval(reportToDaemon, DAEMON_REPORT_INTERVAL_MS);
 
   //
   // Keep-alive
@@ -321,11 +322,12 @@ export async function runCursor(opts: {
 
   const handleKillSession = async () => {
     logger.debug('[Cursor] Kill session requested');
+    removeSessionPidFile();
     await handleAbort();
 
     try {
       if (session) {
-        session.updateMetadata((currentMetadata) => ({
+        await session.updateMetadata((currentMetadata) => ({
           ...currentMetadata,
           lifecycleState: 'archived',
           lifecycleStateSince: Date.now(),
@@ -347,6 +349,17 @@ export async function runCursor(opts: {
 
   session.rpcHandlerManager.registerHandler('abort', handleAbort);
   registerKillSessionHandler(session.rpcHandlerManager, handleKillSession);
+
+  // Exit handlers: always run cleanup so server gets session-end (反注册)
+  let exitHandled = false;
+  const onExitSignal = () => {
+    if (exitHandled) return;
+    exitHandled = true;
+    void handleKillSession();
+  };
+  process.on('SIGTERM', onExitSignal);
+  process.on('SIGINT', onExitSignal);
+  process.on('SIGHUP', onExitSignal);
 
   //
   // Initialize Ink UI (reuse CodexDisplay since layout is similar)
@@ -510,11 +523,8 @@ export async function runCursor(opts: {
               break;
 
             case 'thinking_delta':
+              // Show thinking in CLI only; do not stream thinking content to app (align with Codex: state via task_started/task_complete only).
               messageBuffer.updateLastMessage(`[Thinking] ${msg.text.slice(0, 100)}...`, 'system');
-              session.sendCursorMessage( {
-                type: 'thinking',
-                text: msg.text,
-              });
               break;
 
             case 'tool_call_start':
@@ -691,6 +701,7 @@ export async function runCursor(opts: {
   } finally {
     // Cleanup
     logger.debug('[cursor]: Final cleanup start');
+    removeSessionPidFile();
 
     if (reconnectionHandle) {
       reconnectionHandle.cancel();

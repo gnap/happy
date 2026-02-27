@@ -10,7 +10,7 @@ import type { SessionEnvelope } from '@slopus/happy-wire';
 import { logger } from '@/ui/logger';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
-import { Credentials, readSettings } from '@/persistence';
+import { Credentials, readSettings, writeSessionPidFile, removeSessionPidFile } from '@/persistence';
 import { initialMachineMetadata } from '@/daemon/run';
 import { createSessionMetadata } from '@/utils/createSessionMetadata';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
@@ -840,6 +840,7 @@ export async function runAcp(opts: {
     });
   });
   session.keepAlive(thinking, 'remote');
+  writeSessionPidFile(session.sessionId);
 
   const keepAliveInterval = setInterval(() => {
     session.keepAlive(thinking, 'remote');
@@ -866,6 +867,16 @@ export async function runAcp(opts: {
     clearPendingTurn(new Error('Session terminated'));
     await handleAbort();
   });
+
+  // Exit signals: exit loop so finally runs (session-end 反注册)
+  const triggerExit = () => {
+    shouldExit = true;
+    messageQueue.close();
+    clearPendingTurn(new Error('Exit signal'));
+  };
+  process.on('SIGTERM', triggerExit);
+  process.on('SIGINT', triggerExit);
+  process.on('SIGHUP', triggerExit);
 
   try {
     const started = await backend.startSession();
@@ -925,6 +936,7 @@ export async function runAcp(opts: {
       }
     }
   } finally {
+    removeSessionPidFile();
     clearInterval(keepAliveInterval);
     reconnectionHandle?.cancel();
     clearPendingTurn(new Error('ACP runner shutting down'));
@@ -945,7 +957,7 @@ export async function runAcp(opts: {
     }
 
     try {
-      session.updateMetadata((currentMetadata) => ({
+      await session.updateMetadata((currentMetadata) => ({
         ...currentMetadata,
         lifecycleState: 'archived',
         lifecycleStateSince: Date.now(),

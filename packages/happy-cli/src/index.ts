@@ -7,12 +7,12 @@
  */
 
 // Set IPv4 for all HTTPS before any other imports that may hit the server (auth, api, etc.)
-import '@/configuration'
-
+import { configuration } from '@/configuration'
+import axios from 'axios'
 import chalk from 'chalk'
 import { runClaude, StartOptions } from '@/claude/runClaude'
 import { logger } from './ui/logger'
-import { readCredentials, readSettings } from './persistence'
+import { readCredentials, readSettings, readSessionPidMapping } from './persistence'
 import { authAndSetupMachineIfNeeded } from './ui/auth'
 import packageJson from '../package.json'
 import { z } from 'zod'
@@ -95,6 +95,43 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
   } else if (subcommand === 'bye') {
     console.log('Bye!');
     process.exit(0);
+  } else if (subcommand === 'sessions') {
+    const sessionsSub = args[1];
+    if (sessionsSub === 'list') {
+      const checkId = args[2]; // optional: e.g. 88206
+      const credentials = await readCredentials();
+      if (!credentials) {
+        console.error(chalk.red('Not authenticated. Run happy auth first.'));
+        process.exit(1);
+      }
+      try {
+        const { data } = await axios.get<{ sessions: Array<{ id: string; active: boolean; activeAt: number; createdAt: number }> }>(
+          `${configuration.serverUrl}/v1/sessions`,
+          { headers: { Authorization: `Bearer ${credentials.token}` } }
+        );
+        const sessions = data.sessions ?? [];
+        if (checkId !== undefined) {
+          const found = sessions.find((s) => String(s.id) === String(checkId));
+          if (found) {
+            console.log(`Session ${checkId} exists. active=${found.active} activeAt=${found.activeAt} createdAt=${found.createdAt}`);
+          } else {
+            console.log(`Session ${checkId} not found in server list (${sessions.length} sessions).`);
+          }
+        } else {
+          console.log(`Sessions (${sessions.length}):`);
+          for (const s of sessions) {
+            console.log(`  ${s.id}  active=${s.active}  createdAt=${s.createdAt}`);
+          }
+        }
+      } catch (err: unknown) {
+        const msg = axios.isAxiosError(err) ? (err.response?.data ?? err.message) : (err instanceof Error ? err.message : String(err));
+        console.error(chalk.red('Failed to fetch sessions:'), msg);
+        process.exit(1);
+      }
+      return;
+    }
+    console.error(chalk.red('Usage: happy sessions list [sessionId]'));
+    process.exit(1);
   } else if (subcommand === 'codex') {
     // Handle codex command
     try {
@@ -469,8 +506,15 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
         if (sessions.length === 0) {
           console.log('No active sessions this daemon is aware of (they might have been started by a previous version of the daemon)')
         } else {
-          console.log('Active sessions:')
+          console.log('Active sessions (from daemon):')
           console.log(JSON.stringify(sessions, null, 2))
+        }
+        // PID -> sessionId from CLI files (~/.happy/session-pids/<pid>) so we can see which process manages which session
+        const pidMap = await readSessionPidMapping()
+        if (pidMap.size > 0) {
+          console.log('Session PID mapping (this machine, from CLI files):')
+          const arr = Array.from(pidMap.entries()).map(([pid, sessionId]) => ({ pid, sessionId }))
+          console.log(JSON.stringify(arr, null, 2))
         }
       } catch (error) {
         console.log('No daemon running')
@@ -478,14 +522,26 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
       return
 
     } else if (daemonSubcommand === 'stop-session') {
-      const sessionId = args[2]
-      if (!sessionId) {
-        console.error('Session ID required')
-        process.exit(1)
+      let sessionId: string | undefined;
+      let pid: number | undefined;
+      if (args[2] === '--pid') {
+        const pidArg = args[3];
+        if (pidArg === undefined || !/^\d+$/.test(pidArg)) {
+          console.error('Usage: happy daemon stop-session --pid <pid>')
+          process.exit(1)
+        }
+        pid = parseInt(pidArg, 10);
+      } else {
+        sessionId = args[2];
+        if (!sessionId) {
+          console.error('Usage: happy daemon stop-session <sessionId>  or  happy daemon stop-session --pid <pid>')
+          process.exit(1)
+        }
       }
 
       try {
-        const success = await stopDaemonSession(sessionId)
+        const target: string | number = pid ?? sessionId!;
+        const success = await stopDaemonSession(target);
         console.log(success ? 'Session stopped' : 'Failed to stop session')
       } catch (error) {
         console.log('No daemon running')

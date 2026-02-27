@@ -448,7 +448,7 @@ export async function startDaemon(): Promise<void> {
                   type: 'error',
                   errorMessage: `Session webhook timeout for PID ${tmuxResult.pid} (tmux)`
                 });
-              }, 15_000); // Same timeout as regular sessions
+              }, 30_000); // Same timeout as regular sessions (Cursor cold start can exceed 15s)
 
               // Register awaiter for tmux session (exact same as regular flow)
               pidToAwaiter.set(tmuxResult.pid!, (completedSession) => {
@@ -566,9 +566,7 @@ export async function startDaemon(): Promise<void> {
                 type: 'error',
                 errorMessage: `Session webhook timeout for PID ${happyProcess.pid}`
               });
-              // 15 second timeout - I have seen timeouts on 10 seconds
-              // even though session was still created successfully in ~2 more seconds
-            }, 15_000);
+            }, 30_000); // Cursor cold start can exceed 15s; avoid false timeout to App
 
             // Register awaiter
             pidToAwaiter.set(happyProcess.pid!, (completedSession) => {
@@ -633,6 +631,28 @@ export async function startDaemon(): Promise<void> {
       return false;
     };
 
+    // Stop by PID only (no mapping required) – e.g. happy daemon stop-session --pid 88206
+    // Always try SIGTERM; remove from tracking if present. Success if signal sent or process already gone (ESRCH).
+    const stopSessionByPid = (pid: number): boolean => {
+      logger.debug(`[DAEMON RUN] Stop by PID: ${pid}`);
+      try {
+        process.kill(pid, 'SIGTERM');
+        pidToTrackedSession.delete(pid);
+        logger.debug(`[DAEMON RUN] Sent SIGTERM to PID ${pid}`);
+        return true;
+      } catch (err: unknown) {
+        const code = err && typeof err === 'object' && 'code' in err ? (err as NodeJS.ErrnoException).code : undefined;
+        if (code === 'ESRCH') {
+          // Process does not exist – already stopped
+          pidToTrackedSession.delete(pid);
+          logger.debug(`[DAEMON RUN] PID ${pid} already gone (ESRCH)`);
+          return true;
+        }
+        logger.debug(`[DAEMON RUN] Failed to kill PID ${pid}:`, err);
+        return false;
+      }
+    };
+
     // Handle child process exit
     const onChildExited = (pid: number) => {
       logger.debug(`[DAEMON RUN] Removing exited process PID ${pid} from tracking`);
@@ -643,6 +663,7 @@ export async function startDaemon(): Promise<void> {
     const { port: controlPort, stop: stopControlServer } = await startDaemonControlServer({
       getChildren: getCurrentChildren,
       stopSession,
+      stopSessionByPid,
       spawnSession,
       requestShutdown: () => requestShutdown('happy-cli'),
       onHappySessionWebhook

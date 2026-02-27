@@ -14,12 +14,14 @@ import { SpawnSessionOptions, SpawnSessionResult } from '@/modules/common/regist
 export function startDaemonControlServer({
   getChildren,
   stopSession,
+  stopSessionByPid,
   spawnSession,
   requestShutdown,
   onHappySessionWebhook
 }: {
   getChildren: () => TrackedSession[];
   stopSession: (sessionId: string) => boolean;
+  stopSessionByPid: (pid: number) => boolean;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
   requestShutdown: () => void;
   onHappySessionWebhook: (sessionId: string, metadata: Metadata) => void;
@@ -83,12 +85,13 @@ export function startDaemonControlServer({
       }
     });
 
-    // Stop specific session
+    // Stop specific session (by sessionId from mapping, or by pid without mapping)
     typed.post('/stop-session', {
       schema: {
         body: z.object({
-          sessionId: z.string()
-        }),
+          sessionId: z.string().optional(),
+          pid: z.number().int().positive().optional()
+        }).refine((b) => (b.sessionId != null) !== (b.pid != null), { message: 'Provide exactly one of sessionId or pid' }),
         response: {
           200: z.object({
             success: z.boolean()
@@ -96,10 +99,12 @@ export function startDaemonControlServer({
         }
       }
     }, async (request) => {
-      const { sessionId } = request.body;
+      const { sessionId, pid } = request.body;
 
-      logger.debug(`[CONTROL SERVER] Stop session request: ${sessionId}`);
-      const success = stopSession(sessionId);
+      const success = pid != null
+        ? stopSessionByPid(pid)
+        : stopSession(sessionId!);
+      logger.debug(`[CONTROL SERVER] Stop session request: ${pid != null ? `pid=${pid}` : `sessionId=${sessionId}`} -> ${success}`);
       return { success };
     });
 
