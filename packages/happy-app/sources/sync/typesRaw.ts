@@ -762,6 +762,10 @@ export function normalizeRawMessage(
     }
     if (raw.role === 'agent') {
         if (raw.content.type === 'output') {
+            // When session protocol is enabled we already show content from session envelopes; skip output to avoid duplicate bubbles
+            if (isSessionProtocolSendEnabled()) {
+                return null;
+            }
 
             // Skip Meta messages
             if (raw.content.data.isMeta) {
