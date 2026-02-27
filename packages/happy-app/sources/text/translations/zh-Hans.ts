@@ -726,8 +726,6 @@ export const zhHans: TranslationStructure = {
         createAccount: '创建账户',
         linkOrRestoreAccount: '链接或恢复账户',
         loginWithMobileApp: '使用移动应用登录',
-        webViaLanHint: '当前通过局域网访问。在此登录或恢复；与 localhost 为不同会话。',
-        webViaLanAuthHint: '通过局域网访问时可能无法完成登录。请在本机打开 http://localhost:8081 再试。',
     },
 
     review: {

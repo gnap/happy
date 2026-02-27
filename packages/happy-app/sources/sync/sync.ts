@@ -76,6 +76,7 @@ class Sync {
     private pendingOutbox = new Map<string, OutboxMessage[]>();
     private sessionMessageQueue = new Map<string, NormalizedMessage[]>();
     private sessionQueueProcessing = new Set<string>();
+    private _loggedMissingSessionForSid = new Set<string>();
     private sessionMessageLocks = new Map<string, AsyncLock>();
     private sessionDataKeys = new Map<string, Uint8Array>(); // Store session data encryption keys internally
     private machineDataKeys = new Map<string, Uint8Array>(); // Store machine data encryption keys internally
@@ -763,7 +764,7 @@ class Sync {
         // Apply to storage
         this.applySessions(decryptedSessions);
         log.log(`📥 fetchSessions completed - processed ${decryptedSessions.length} sessions`);
-
+        this._loggedMissingSessionForSid.clear();
     }
 
     public refreshMachines = async () => {
@@ -1734,9 +1735,13 @@ class Sync {
 
             // Get encryption
             const encryption = this.encryption.getSessionEncryption(updateData.body.sid);
-            if (!encryption) { // Should never happen
-                console.error(`Session ${updateData.body.sid} not found`);
-                this.fetchSessions(); // Just fetch sessions again
+            if (!encryption) {
+                // Session not in local store yet (e.g. list not fetched); recover by refetching. Log at most once per sid to avoid flood.
+                if (!this._loggedMissingSessionForSid.has(updateData.body.sid)) {
+                    this._loggedMissingSessionForSid.add(updateData.body.sid);
+                    log.log(`Session ${updateData.body.sid} not found (refetching sessions)`);
+                }
+                this.fetchSessions();
                 return;
             }
 
