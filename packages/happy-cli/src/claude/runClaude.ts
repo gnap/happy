@@ -6,7 +6,7 @@ import { logger } from '@/ui/logger';
 import { loop } from '@/claude/loop';
 import { AgentState, Metadata } from '@/api/types';
 import packageJson from '../../package.json';
-import { Credentials, readSettings } from '@/persistence';
+import { Credentials, readSettings, writeSessionPidFile, removeSessionPidFile } from '@/persistence';
 import { EnhancedMode, PermissionMode } from './loop';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
@@ -196,6 +196,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
 
     // Create realtime session
     const session = api.sessionSyncClient(response);
+    writeSessionPidFile(session.sessionId);
 
     // Start Happy MCP server
     const happyServer = await startHappyServer(session);
@@ -387,18 +388,19 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     // Setup signal handlers for graceful shutdown
     const cleanup = async () => {
         logger.debug('[START] Received termination signal, cleaning up...');
+        removeSessionPidFile();
 
         try {
             // Update lifecycle state to archived before closing
             if (session) {
-                session.updateMetadata((currentMetadata) => ({
+                await session.updateMetadata((currentMetadata) => ({
                     ...currentMetadata,
                     lifecycleState: 'archived',
                     lifecycleStateSince: Date.now(),
                     archivedBy: 'cli',
                     archiveReason: 'User terminated'
                 }));
-                
+
                 // Cleanup session resources (intervals, callbacks)
                 currentSession?.cleanup();
 
@@ -426,9 +428,10 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         }
     };
 
-    // Handle termination signals
+    // Handle termination signals (反注册: send session-end on exit)
     process.on('SIGTERM', cleanup);
     process.on('SIGINT', cleanup);
+    process.on('SIGHUP', cleanup);
 
     // Handle uncaught exceptions and rejections
     process.on('uncaughtException', (error) => {
@@ -480,6 +483,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     // Cleanup session resources (intervals, callbacks) - prevents memory leak
     // Note: currentSession is set by onSessionReady callback during loop()
     (currentSession as Session | null)?.cleanup();
+
+    removeSessionPidFile();
 
     // Send session death message
     session.sendSessionDeath();

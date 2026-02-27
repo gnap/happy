@@ -7,7 +7,7 @@ import { ReasoningProcessor } from './utils/reasoningProcessor';
 import { DiffProcessor } from './utils/diffProcessor';
 import { randomUUID } from 'node:crypto';
 import { logger } from '@/ui/logger';
-import { Credentials, readSettings } from '@/persistence';
+import { Credentials, readSettings, writeSessionPidFile, removeSessionPidFile } from '@/persistence';
 import { initialMachineMetadata } from '@/daemon/run';
 import { configuration } from '@/configuration';
 import packageJson from '../../package.json';
@@ -137,24 +137,24 @@ export async function runCodex(opts: {
             if (permissionHandler) {
                 permissionHandler.updateSession(newSession);
             }
+            // Re-register run-specific RPC handlers so kill/abort work after reconnect
+            newSession.rpcHandlerManager.registerHandler('abort', handleAbort);
+            registerKillSessionHandler(newSession.rpcHandlerManager, handleKillSession);
         }
     });
     session = initialSession;
+    writeSessionPidFile(session.sessionId);
 
-    // Always report to daemon if it exists (skip if offline)
-    if (response) {
-        try {
-            logger.debug(`[START] Reporting session ${response.id} to daemon`);
-            const result = await notifyDaemonSessionStarted(response.id, metadata);
-            if (result.error) {
-                logger.debug(`[START] Failed to report to daemon (may not be running):`, result.error);
-            } else {
-                logger.debug(`[START] Reported session ${response.id} to daemon`);
-            }
-        } catch (error) {
-            logger.debug('[START] Failed to report to daemon (may not be running):', error);
-        }
-    }
+    // Report to daemon (once at start; also retry periodically so daemon sees us if it wasn't running at start)
+    const DAEMON_REPORT_INTERVAL_MS = 60_000;
+    const reportToDaemon = () => {
+        if (!response) return;
+        notifyDaemonSessionStarted(session.sessionId, { ...metadata, hostPid: process.pid }).then((result) => {
+            if (result?.error) logger.debug(`[START] Daemon report failed:`, result.error);
+        }).catch((err) => logger.debug('[START] Daemon report error:', err));
+    };
+    reportToDaemon();
+    setInterval(reportToDaemon, DAEMON_REPORT_INTERVAL_MS);
 
     const messageQueue = new MessageQueue2<EnhancedMode>((mode) => hashObject({
         permissionMode: mode.permissionMode,
@@ -278,20 +278,21 @@ export async function runCodex(opts: {
      */
     const handleKillSession = async () => {
         logger.debug('[Codex] Kill session requested - terminating process');
+        removeSessionPidFile();
         await handleAbort();
         logger.debug('[Codex] Abort completed, proceeding with termination');
 
         try {
             // Update lifecycle state to archived before closing
             if (session) {
-                session.updateMetadata((currentMetadata) => ({
+                await session.updateMetadata((currentMetadata) => ({
                     ...currentMetadata,
                     lifecycleState: 'archived',
                     lifecycleStateSince: Date.now(),
                     archivedBy: 'cli',
                     archiveReason: 'User terminated'
                 }));
-                
+
                 // Send session death message
                 session.sendSessionDeath();
                 await session.flush();
@@ -323,6 +324,17 @@ export async function runCodex(opts: {
     session.rpcHandlerManager.registerHandler('abort', handleAbort);
 
     registerKillSessionHandler(session.rpcHandlerManager, handleKillSession);
+
+    // Exit handlers: always run cleanup so server gets session-end (反注册)
+    let exitHandled = false;
+    const onExitSignal = () => {
+        if (exitHandled) return;
+        exitHandled = true;
+        void handleKillSession();
+    };
+    process.on('SIGTERM', onExitSignal);
+    process.on('SIGINT', onExitSignal);
+    process.on('SIGHUP', onExitSignal);
 
     //
     // Initialize Ink UI
@@ -701,6 +713,7 @@ export async function runCodex(opts: {
     } finally {
         // Clean up resources when main loop exits
         logger.debug('[codex]: Final cleanup start');
+        removeSessionPidFile();
         logActiveHandles('cleanup-start');
 
         // Cancel offline reconnection if still running
