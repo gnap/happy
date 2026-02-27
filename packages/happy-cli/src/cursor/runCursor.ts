@@ -14,7 +14,7 @@ import React from 'react';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import { join, resolve } from 'node:path';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { configuration } from '@/configuration';
 
 import { ApiClient } from '@/api/api';
@@ -50,6 +50,30 @@ import type { CursorStreamMessage, CursorMode } from './types';
 const CURSOR_SESSION_TAG_FILE = 'cursor-session-tag';
 const CURSOR_SESSION_WORKSPACE_FILE = 'cursor-session-workspace';
 const CURSOR_SESSION_KEY_FILE = 'cursor-session-key';
+
+/** Ensure workspace .cursor/mcp.json has mcpServers.happy.url so cursor-agent can load Happy MCP. Merges with existing. */
+function ensureCursorMcpHappy(workspacePath: string, happyUrl: string): void {
+  const dir = join(workspacePath, '.cursor');
+  const path = join(dir, 'mcp.json');
+  let mcp: { mcpServers?: Record<string, { url?: string; command?: string; args?: string[] }> } = {};
+  try {
+    if (existsSync(path)) {
+      const raw = readFileSync(path, 'utf8');
+      mcp = JSON.parse(raw) as typeof mcp;
+    }
+  } catch {
+    /* use empty */
+  }
+  if (!mcp.mcpServers) mcp.mcpServers = {};
+  mcp.mcpServers.happy = { url: happyUrl };
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path, JSON.stringify(mcp, null, 2), 'utf8');
+    logger.debug(`[cursor] Wrote .cursor/mcp.json with happy url for MCP`);
+  } catch (e) {
+    logger.debug('[cursor] Could not write .cursor/mcp.json:', e);
+  }
+}
 
 /**
  * Map Cursor tool name/args to Codex/app shape so the mobile app shows readable titles
@@ -411,10 +435,11 @@ export async function runCursor(opts: {
   }
 
   //
-  // Start Happy MCP server
+  // Start Happy MCP server and register it for cursor-agent via .cursor/mcp.json
   //
 
   const happyServer = await startHappyServer(session);
+  ensureCursorMcpHappy(workspacePath, happyServer.url);
 
   //
   // Main loop
@@ -502,6 +527,7 @@ export async function runCursor(opts: {
           force: mode.permissionMode === 'force',
           signal: abortController.signal,
           timeoutMs: processTimeoutMs,
+          approveMcps: true, // load Happy MCP from .cursor/mcp.json without prompting
         });
         // Per-tool timeout: after this we send tool_call_end (running in background) so App stops timer; process keeps running.
         const perToolTimeoutMs = process.env.CURSOR_TOOL_CALL_TIMEOUT_MS

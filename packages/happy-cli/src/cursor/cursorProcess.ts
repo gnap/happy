@@ -40,6 +40,8 @@ export interface CursorProcessOptions {
   timeoutMs?: number;
   /** Abort signal */
   signal?: AbortSignal;
+  /** If true, pass --approve-mcps so cursor-agent loads MCPs from .cursor/mcp.json without prompting */
+  approveMcps?: boolean;
 }
 
 export interface CursorProcessEvents {
@@ -87,6 +89,9 @@ export class CursorProcess extends EventEmitter {
 
     if (this.options.resumeChatId) {
       cursorArgs.push('--resume', this.options.resumeChatId);
+    }
+    if (this.options.approveMcps) {
+      cursorArgs.push('--approve-mcps');
     }
 
     cursorArgs.push(prompt);
