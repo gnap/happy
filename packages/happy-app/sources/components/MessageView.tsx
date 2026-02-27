@@ -110,6 +110,10 @@ function AgentEventBlock(props: {
   event: AgentEvent;
   metadata: Metadata | null;
 }) {
+  // Session protocol turn-end maps to ready; reducer filters it but guard here so nothing is rendered if it ever appears
+  if (props.event.type === 'ready') {
+    return null;
+  }
   if (props.event.type === 'switch') {
     return (
       <View style={styles.agentEventContainer}>
