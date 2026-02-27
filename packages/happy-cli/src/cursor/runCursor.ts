@@ -181,9 +181,9 @@ export async function runCursor(opts: {
   // Create session
   //
 
-  // Pretend Claude: session protocol only + flavor 'claude' so new App shows "Claude" and old App may show session (if it hides cursor)
+  // flavor 'cursor' – revert to real flavor; was 'claude' temporarily so old App would show session
   const { state, metadata } = createSessionMetadata({
-    flavor: 'claude',
+    flavor: 'cursor',
     machineId,
     startedBy: opts.startedBy,
     path: workspacePath,
