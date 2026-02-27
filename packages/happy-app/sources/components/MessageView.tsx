@@ -85,6 +85,17 @@ function UserTextBlock(props: {
   );
 }
 
+/** Do not render CLI system/placeholder tool-result text as bubbles (new App). */
+function isHiddenSystemToolResultText(text: string): boolean {
+  if (!text || typeof text !== 'string') return true;
+  const t = text.trim();
+  if (t === '{"stdout":""}' || t === '{"stdout":"","exitCode":0}') return true;
+  if (t.includes('"turnEnded":true') && t.includes('Turn completed; tool did not report end')) return true;
+  if (t.includes('"aborted":true') && t.includes('Tool call ended without result')) return true;
+  if (t.includes('"runningInBackground":true')) return true;
+  return false;
+}
+
 function AgentTextBlock(props: {
   message: AgentTextMessage;
   sessionId: string;
@@ -96,6 +107,9 @@ function AgentTextBlock(props: {
 
   // Hide thinking messages unless experiments is enabled
   if (props.message.isThinking && !experiments) {
+    return null;
+  }
+  if (isHiddenSystemToolResultText(props.message.text)) {
     return null;
   }
 

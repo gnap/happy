@@ -162,6 +162,8 @@ export default {
             router: {
                 root: "./sources/app"
             },
+            // New App (dev/preview): only render session protocol; drop output/codex/cursor to avoid duplicate text/tools
+            enableSessionProtocolSend: variant !== 'production',
             eas: {
                 projectId: "4558dd3d-cd5a-47cd-bad9-e591a241cc06"
             },

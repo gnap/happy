@@ -23,7 +23,13 @@ function isSessionProtocolSendEnabled(): boolean {
         ?? process.env.ENABLE_SESSION_PROTOCOL_SEND
         ?? ''
     ).toLowerCase();
-    return raw === '1' || raw === 'true' || raw === 'yes';
+    if (raw === '1' || raw === 'true' || raw === 'yes') return true;
+    try {
+        const Constants = require('expo-constants').default;
+        return Constants.expoConfig?.extra?.enableSessionProtocolSend === true;
+    } catch {
+        return false;
+    }
 }
 
 const agentEventSchema = z.discriminatedUnion('type', [z.object({
@@ -909,6 +915,10 @@ export function normalizeRawMessage(
             };
         }
         if (raw.content.type === 'codex' || raw.content.type === 'cursor') {
+            // New App: when session protocol is enabled, only render session envelopes; skip codex/cursor to avoid duplicate text and tool bubbles
+            if (isSessionProtocolSendEnabled()) {
+                return null;
+            }
             const isCursorWire = (raw.content.type === 'cursor');
             if (raw.content.data.type === 'message') {
                 // Cast codex messages to agent text messages
