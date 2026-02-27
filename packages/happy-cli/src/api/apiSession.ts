@@ -47,6 +47,11 @@ export type ACPMessageData =
 
 export type ACPProvider = 'gemini' | 'codex' | 'claude' | 'opencode';
 
+/** Legacy Claude "output" format data shape for old App compatibility. App requires uuid or message is dropped. */
+export type OutputFormatData =
+    | { type: 'assistant'; uuid: string; parentUuid?: string | null; message: { role: 'assistant'; model: string; content: Array<{ type: 'text'; text: string } | { type: 'tool_use'; id: string; name: string; input: unknown }> } }
+    | { type: 'user'; uuid: string; parentUuid?: string | null; message: { role: 'user'; content: Array<{ type: 'tool_result'; tool_use_id: string; content: unknown; is_error?: boolean }> } };
+
 type V3SessionMessage = {
     id: string;
     seq: number;
@@ -510,6 +515,22 @@ export class ApiSessionClient extends EventEmitter {
             meta: {
                 sentFrom: 'cli'
             }
+        };
+        this.enqueueMessage(content);
+    }
+
+    /**
+     * Send message in legacy Claude "output" format (role: 'agent', content.type: 'output', data: body).
+     * Used for old App compatibility; dual-send alongside session protocol when needed.
+     */
+    sendOutputFormatMessage(data: OutputFormatData) {
+        const content = {
+            role: 'agent' as const,
+            content: {
+                type: 'output' as const,
+                data,
+            },
+            meta: { sentFrom: 'cli' as const },
         };
         this.enqueueMessage(content);
     }
