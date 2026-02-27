@@ -55,6 +55,16 @@ const CURSOR_SESSION_KEY_FILE = 'cursor-session-key';
  * Map Cursor tool name/args to Codex/app shape so the mobile app shows readable titles
  * instead of a raw object (e.g. CodexBash → "$ command", Read → file path).
  */
+/** Format tool result for session protocol (ev.t 'text') so old client can show it. */
+function formatToolResultForSession(output: unknown): string {
+  if (typeof output === 'string') return output;
+  try {
+    return JSON.stringify(output);
+  } catch {
+    return String(output);
+  }
+}
+
 function toCodexToolShape(
   toolName: string,
   args: Record<string, unknown>,
@@ -171,8 +181,9 @@ export async function runCursor(opts: {
   // Create session
   //
 
+  // Pretend Claude: session protocol only + flavor 'claude' so new App shows "Claude" and old App may show session (if it hides cursor)
   const { state, metadata } = createSessionMetadata({
-    flavor: 'cursor',
+    flavor: 'claude',
     machineId,
     startedBy: opts.startedBy,
     path: workspacePath,
@@ -306,10 +317,11 @@ export async function runCursor(opts: {
 
   async function handleAbort() {
     logger.debug('[Cursor] Abort requested');
-    session.sendCursorMessage( {
-      type: 'turn_aborted',
-      id: randomUUID(),
-    });
+    // Cursor format disabled: only send session protocol (old App / pretend Claude)
+    // session.sendCursorMessage( {
+    //   type: 'turn_aborted',
+    //   id: randomUUID(),
+    // });
     try {
       abortController.abort();
       messageQueue.reset();
@@ -449,11 +461,11 @@ export async function runCursor(opts: {
 
       const flushAccumulatedText = () => {
         if (accumulatedResponse.trim()) {
-          session.sendCursorMessage({
-            type: 'message',
-            message: accumulatedResponse,
-          });
+          const text = accumulatedResponse;
           accumulatedResponse = '';
+          // Dual-send: output (old App) + session (new App)
+          session.sendOutputFormatMessage({ type: 'assistant', uuid: randomUUID(), message: { role: 'assistant', model: 'cursor', content: [{ type: 'text', text }] } });
+          session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text }, { turn: turnId }));
         }
       };
 
@@ -461,11 +473,8 @@ export async function runCursor(opts: {
         thinking = true;
         session.keepAlive(thinking, 'remote');
 
-        // Send task_started (codex) and turn-start (session protocol) so mobile starts timer
-        session.sendCursorMessage( {
-          type: 'task_started',
-          id: randomUUID(),
-        });
+        // Send turn-start (session protocol) so mobile starts timer; Cursor format disabled
+        // session.sendCursorMessage( { type: 'task_started', id: randomUUID() });
         session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'turn-start' }, { turn: turnId }));
         messageBuffer.addMessage('Thinking...', 'system');
 
@@ -539,13 +548,8 @@ export async function runCursor(opts: {
               const { codexName, codexInput } = toCodexToolShape(msg.toolName, msg.args);
               const codexId = randomUUID();
               codexIdByCallId.set(msg.callId, codexId);
-              session.sendCursorMessage( {
-                type: 'tool-call',
-                name: codexName,
-                callId: msg.callId,
-                input: codexInput,
-                id: codexId,
-              });
+              // Dual-send: output (old App) + session (new App)
+              session.sendOutputFormatMessage({ type: 'assistant', uuid: randomUUID(), message: { role: 'assistant', model: 'cursor', content: [{ type: 'tool_use', id: msg.callId, name: codexName, input: codexInput }] } });
               // Session protocol: timer uses tool-call-start / tool-call-end to stop
               const cmd = Array.isArray((codexInput as { command?: unknown })?.command)
                 ? (codexInput as { command: string[] }).command.join(' ')
@@ -567,8 +571,9 @@ export async function runCursor(opts: {
                 logger.debug(`[cursor] Per-tool timeout for ${msg.callId.slice(0, 8)}... – sending tool_call_end (running in background)`);
                 messageBuffer.addMessage('Still running (timer stopped)', 'result');
                 if (bgCodexId) {
-                  session.sendCursorMessage( { type: 'tool-call-result', callId: msg.callId, output: bgResult, id: bgCodexId } );
+                  session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: msg.callId, content: bgResult, is_error: false }] } });
                 }
+                session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: formatToolResultForSession(bgResult) }, { turn: turnId }));
                 session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId }, { turn: turnId }));
               }, perToolTimeoutMs);
               toolCallTimeoutHandles.set(msg.callId, handle);
@@ -590,12 +595,8 @@ export async function runCursor(opts: {
               );
               const sameId = codexIdByCallId.get(msg.callId) ?? randomUUID();
               codexIdByCallId.delete(msg.callId);
-              session.sendCursorMessage( {
-                type: 'tool-call-result',
-                callId: msg.callId,
-                output: msg.result,
-                id: sameId,
-              });
+              session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: msg.callId, content: msg.result, is_error: !msg.success }] } });
+              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: formatToolResultForSession(msg.result) }, { turn: turnId }));
               session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId }, { turn: turnId }));
               break;
 
@@ -615,12 +616,8 @@ export async function runCursor(opts: {
               for (const [callId, codexId] of codexIdByCallId) {
                 logger.debug(`[cursor] Closing pending tool call ${callId} (turn completed without tool end)`);
                 messageBuffer.addMessage('Ended (turn completed)', 'result');
-                session.sendCursorMessage( {
-                  type: 'tool-call-result',
-                  callId,
-                  output: turnEndedResult,
-                  id: codexId,
-                });
+                session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: callId, content: turnEndedResult, is_error: false }] } });
+                session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: formatToolResultForSession(turnEndedResult) }, { turn: turnId }));
                 session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: callId }, { turn: turnId }));
               }
               codexIdByCallId.clear();
@@ -628,10 +625,9 @@ export async function runCursor(opts: {
 
             case 'error':
               messageBuffer.addMessage(`Error: ${msg.message}`, 'status');
-              session.sendCursorMessage( {
-                type: 'message',
-                message: `Error: ${msg.message}`,
-              });
+              const errorText = `Error: ${msg.message}`;
+              session.sendOutputFormatMessage({ type: 'assistant', uuid: randomUUID(), message: { role: 'assistant', model: 'cursor', content: [{ type: 'text', text: errorText }] } });
+              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: errorText }, { turn: turnId }));
               break;
           }
         }
@@ -646,15 +642,14 @@ export async function runCursor(opts: {
         turnEndStatus = isAbortError ? 'cancelled' : 'failed';
         if (isAbortError) {
           messageBuffer.addMessage('Aborted by user', 'status');
-          session.sendCursorMessage({ type: 'message', message: 'Aborted by user' });
+          session.sendOutputFormatMessage({ type: 'assistant', uuid: randomUUID(), message: { role: 'assistant', model: 'cursor', content: [{ type: 'text', text: 'Aborted by user' }] } });
+          session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: 'Aborted by user' }, { turn: turnId }));
         } else {
           const errorMsg = error instanceof Error ? error.message : 'Process error';
           logger.debug('[cursor] Error:', error);
           messageBuffer.addMessage(errorMsg, 'status');
-          session.sendCursorMessage( {
-            type: 'message',
-            message: errorMsg,
-          });
+          session.sendOutputFormatMessage({ type: 'assistant', uuid: randomUUID(), message: { role: 'assistant', model: 'cursor', content: [{ type: 'text', text: errorMsg }] } });
+          session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: errorMsg }, { turn: turnId }));
         }
       } finally {
         flushAccumulatedText();
@@ -666,12 +661,8 @@ export async function runCursor(opts: {
         for (const [callId, codexId] of codexIdByCallId) {
           logger.debug(`[cursor] Closing pending tool call ${callId} (no end from cursor-agent)`);
           messageBuffer.addMessage('Ended without result (aborted or exited)', 'result');
-          session.sendCursorMessage( {
-            type: 'tool-call-result',
-            callId,
-            output: abortedResult,
-            id: codexId,
-          });
+          session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: callId, content: abortedResult, is_error: false }] } });
+          session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: formatToolResultForSession(abortedResult) }, { turn: turnId }));
           session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: callId }, { turn: turnId }));
         }
         const hadPendingToolCalls = codexIdByCallId.size > 0;
@@ -679,10 +670,7 @@ export async function runCursor(opts: {
 
         const status: 'completed' | 'failed' | 'cancelled' =
           turnCompletedNormally ? 'completed' : (hadPendingToolCalls ? 'failed' : turnEndStatus);
-        session.sendCursorMessage( {
-          type: 'task_complete',
-          id: randomUUID(),
-        });
+        // Cursor format disabled: session.sendCursorMessage({ type: 'task_complete', id: randomUUID() });
         session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'turn-end', status }, { turn: turnId }));
 
         await session.flush();
