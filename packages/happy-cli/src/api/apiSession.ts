@@ -50,6 +50,7 @@ export type ACPProvider = 'gemini' | 'codex' | 'claude' | 'opencode';
 /** Legacy Claude "output" format data shape for old App compatibility. App requires uuid or message is dropped. */
 export type OutputFormatData =
     | { type: 'assistant'; uuid: string; parentUuid?: string | null; message: { role: 'assistant'; model: string; content: Array<{ type: 'text'; text: string } | { type: 'tool_use'; id: string; name: string; input: unknown }> } }
+    | { type: 'user'; uuid: string; parentUuid?: string | null; message: { role: 'user'; content: string } }
     | { type: 'user'; uuid: string; parentUuid?: string | null; message: { role: 'user'; content: Array<{ type: 'tool_result'; tool_use_id: string; content: unknown; is_error?: boolean }> } };
 
 type V3SessionMessage = {

@@ -490,6 +490,10 @@ export async function runCursor(opts: {
       let hadToolCalls = false;
       const turnId = createId();
       currentTurnIdRef = turnId;
+
+      // Send user message so both old and new App show it in the session message list
+      session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: userMessage } });
+      session.sendSessionProtocolMessage(createEnvelope('user', { t: 'text', text: userMessage }, { turn: turnId }));
       const messageParser = new CursorMessageParser();
       const codexIdByCallId = new Map<string, string>();
       /** Per-tool timeout: when fired we send tool_call_end (running in background) so App stops timer; process keeps running. */
