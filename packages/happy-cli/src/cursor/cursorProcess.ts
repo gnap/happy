@@ -93,6 +93,8 @@ export class CursorProcess extends EventEmitter {
     if (this.options.approveMcps) {
       cursorArgs.push('--approve-mcps');
     }
+    // Ensure cursor-agent reads .cursor/mcp.json from our workspace (where we wrote Happy MCP URL)
+    cursorArgs.push('--workspace', this.options.cwd);
 
     cursorArgs.push(prompt);
 
