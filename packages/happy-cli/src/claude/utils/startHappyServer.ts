@@ -111,19 +111,31 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
                 };
             }
             const subagentId = createId();
-            const send = (ev: Parameters<typeof createEnvelope>[1]) => {
+            const sendChild = (ev: Parameters<typeof createEnvelope>[1]) => {
                 ctx.sendSessionEnvelope(createEnvelope('agent', ev, { turn: turnId, subagent: subagentId }));
             };
-            send({ t: 'start', ...(args.title ? { title: args.title } : {}) });
+            const sendParent = (ev: Parameters<typeof createEnvelope>[1]) => {
+                ctx.sendSessionEnvelope(createEnvelope('agent', ev, { turn: turnId }));
+            };
+
+            // Open a Task tool-call in the main stream so the App nests child messages inside it.
+            sendParent({
+                t: 'tool-call-start',
+                call: subagentId,
+                name: 'Task',
+                title: args.title || 'Sub-agent',
+                description: args.prompt.slice(0, 200),
+                args: { prompt: args.prompt },
+            });
             logger.debug(`[happyMCP] spawn_subagent start subagentId=${subagentId.slice(0, 8)}... prompt length=${args.prompt.length}`);
             try {
                 const result = await runSubagent({
                     cwd: ctx.workspacePath,
                     prompt: args.prompt,
                     signal: ctx.getAbortSignal?.(),
-                    onEvent: (ev) => send(ev),
+                    onEvent: (ev) => sendChild(ev),
                 });
-                send({ t: 'stop' });
+                sendParent({ t: 'tool-call-end', call: subagentId });
                 if (result.success) {
                     return {
                         content: [
@@ -147,7 +159,7 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
                     isError: true,
                 };
             } catch (err) {
-                send({ t: 'stop' });
+                sendParent({ t: 'tool-call-end', call: subagentId });
                 const msg = err instanceof Error ? err.message : String(err);
                 logger.debug('[happyMCP] spawn_subagent error:', err);
                 return {
