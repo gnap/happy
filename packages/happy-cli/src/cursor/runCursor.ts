@@ -7,6 +7,12 @@
  * - Message queue for user prompts from mobile/web
  * - PTY-wrapped cursor-agent process per turn
  * - Stream-json output parsed into session protocol envelopes
+ *
+ * Dual send for old vs new App:
+ * - Old App uses output format: sendOutputFormatMessage (assistant/user with content, tool_result in content).
+ * - New App uses session protocol: sendSessionProtocolMessage (t: 'text' | 'tool-call' | 'tool-call-end' etc).
+ * - For tool results: old App gets full tool_result in output; new App gets only tool-call-result + tool-call-end
+ *   (result is shown in tool card), no session t:'text' for tool result — avoids duplicate in new App.
  */
 
 import { render } from 'ink';
@@ -69,7 +75,7 @@ function ensureCursorMcpHappy(workspacePath: string, happyUrl: string): void {
   try {
     mkdirSync(dir, { recursive: true });
     writeFileSync(path, JSON.stringify(mcp, null, 2), 'utf8');
-    logger.debug(`[cursor] Wrote .cursor/mcp.json with happy url for MCP`);
+    logger.debug(`[cursor] MCP: wrote ${path} with happy url=${happyUrl} (cursor-agent will use --workspace + --approve-mcps)`);
   } catch (e) {
     logger.debug('[cursor] Could not write .cursor/mcp.json:', e);
   }
@@ -79,21 +85,6 @@ function ensureCursorMcpHappy(workspacePath: string, happyUrl: string): void {
  * Map Cursor tool name/args to Codex/app shape so the mobile app shows readable titles
  * instead of a raw object (e.g. CodexBash → "$ command", Read → file path).
  */
-/** Format tool result for session protocol (ev.t 'text'). Returns '' for system/empty so new App does not show raw JSON bubbles. */
-function formatToolResultForSession(output: unknown): string {
-  if (typeof output === 'string') return output;
-  if (output !== null && typeof output === 'object') {
-    const o = output as Record<string, unknown>;
-    if (o.turnEnded === true || o.aborted === true || o.runningInBackground === true) return '';
-    if ('stdout' in o && o.stdout === '' && (!('stderr' in o) || o.stderr === '')) return '';
-  }
-  try {
-    return JSON.stringify(output);
-  } catch {
-    return String(output);
-  }
-}
-
 function toCodexToolShape(
   toolName: string,
   args: Record<string, unknown>,
@@ -613,8 +604,7 @@ export async function runCursor(opts: {
                 logger.debug(`[cursor] codex/cursor tool-call-result callId=${msg.callId.slice(0, 8)}... (timeout)`);
                 session.sendCodexMessage(timeoutResultPayload);
                 session.sendCursorMessage(timeoutResultPayload);
-                const timeoutText = formatToolResultForSession(bgResult);
-                if (timeoutText) session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: timeoutText }, { turn: turnId }));
+                // New App: session only tool-call-end; no t:'text' for tool result
                 session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId }, { turn: turnId }));
               }, perToolTimeoutMs);
               toolCallTimeoutHandles.set(msg.callId, handle);
@@ -641,8 +631,7 @@ export async function runCursor(opts: {
               logger.debug(`[cursor] codex/cursor tool-call-result callId=${msg.callId.slice(0, 8)}... success=${msg.success}`);
               session.sendCodexMessage(resultPayload);
               session.sendCursorMessage(resultPayload);
-              const resultTextFormatted = formatToolResultForSession(msg.result);
-              if (resultTextFormatted) session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: resultTextFormatted }, { turn: turnId }));
+              // New App: session only gets tool-call-end; result is in tool card (no t:'text' for tool result)
               session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId }, { turn: turnId }));
               session.flush().catch(() => {});
               break;
@@ -668,8 +657,7 @@ export async function runCursor(opts: {
                 logger.debug(`[cursor] codex/cursor tool-call-result callId=${callId.slice(0, 8)}... (turn ended)`);
                 session.sendCodexMessage(turnEndPayload);
                 session.sendCursorMessage(turnEndPayload);
-                const turnEndText = formatToolResultForSession(turnEndedResult);
-                if (turnEndText) session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: turnEndText }, { turn: turnId }));
+                // New App: session only tool-call-end; no t:'text' for tool result
                 session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: callId }, { turn: turnId }));
               }
               codexIdByCallId.clear();
@@ -718,8 +706,7 @@ export async function runCursor(opts: {
           logger.debug(`[cursor] codex/cursor tool-call-result callId=${callId.slice(0, 8)}... (aborted)`);
           session.sendCodexMessage(abortedPayload);
           session.sendCursorMessage(abortedPayload);
-          const abortedText = formatToolResultForSession(abortedResult);
-          if (abortedText) session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: abortedText }, { turn: turnId }));
+          // New App: session only tool-call-end; no t:'text' for tool result
           session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: callId }, { turn: turnId }));
         }
         const hadPendingToolCalls = codexIdByCallId.size > 0;
