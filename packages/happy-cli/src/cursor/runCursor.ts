@@ -541,9 +541,11 @@ export async function runCursor(opts: {
           approveMcps: true, // load Happy MCP from .cursor/mcp.json without prompting
         });
         // Per-tool timeout: after this we send tool_call_end (running in background) so App stops timer; process keeps running.
-        const perToolTimeoutMs = process.env.CURSOR_TOOL_CALL_TIMEOUT_MS
-          ? parseInt(process.env.CURSOR_TOOL_CALL_TIMEOUT_MS, 10)
-          : 600000; // 10 min; long builds e.g. yarn ios:dev may exceed, but timer stops and conversation continues
+        // 0 = disabled (Codex-style: no per-tool cutoff, only process timeout or natural tool_call_end).
+        const perToolTimeoutMsRaw = process.env.CURSOR_TOOL_CALL_TIMEOUT_MS;
+        const perToolTimeoutMs = perToolTimeoutMsRaw === undefined || perToolTimeoutMsRaw === ''
+          ? 600000 // default 10 min
+          : Math.max(0, parseInt(perToolTimeoutMsRaw, 10));
 
         // Handle stream-json messages
         cursorProc.on('message', (rawMsg: CursorStreamMessage) => {
@@ -610,24 +612,25 @@ export async function runCursor(opts: {
               session.sendCodexMessage(toolCallPayload);
               session.sendCursorMessage(toolCallPayload);
               session.flush().catch(() => {});
-              // Per-tool timeout: stop App timer and show "running in background"; process keeps running, conversation continues
-              const handle = setTimeout(() => {
-                toolCallTimeoutHandles.delete(msg.callId);
-                const bgCodexId = codexIdByCallId.get(msg.callId);
-                const bgResult = { runningInBackground: true, message: 'Tool still running; timer stopped. Response will continue when it completes.' };
-                logger.debug(`[cursor] Per-tool timeout for ${msg.callId.slice(0, 8)}... – sending tool_call_end (running in background)`);
-                messageBuffer.addMessage('Still running (timer stopped)', 'result');
-                if (bgCodexId) {
-                  session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: msg.callId, content: bgResult, is_error: false }] } });
-                }
-                const timeoutResultPayload = { type: 'tool-call-result' as const, callId: msg.callId, id: msg.callId, output: bgResult, is_error: false };
-                logger.debug(`[cursor] codex/cursor tool-call-result callId=${msg.callId.slice(0, 8)}... (timeout)`);
-                session.sendCodexMessage(timeoutResultPayload);
-                session.sendCursorMessage(timeoutResultPayload);
-                // New App: session only tool-call-end; no t:'text' for tool result
-                session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId }, { turn: turnId }));
-              }, perToolTimeoutMs);
-              toolCallTimeoutHandles.set(msg.callId, handle);
+              // Per-tool timeout (Codex-style: 0 = disabled). When > 0: stop App timer and show "running in background"; process keeps running.
+              if (perToolTimeoutMs > 0) {
+                const handle = setTimeout(() => {
+                  toolCallTimeoutHandles.delete(msg.callId);
+                  const bgCodexId = codexIdByCallId.get(msg.callId);
+                  const bgResult = { runningInBackground: true, message: 'Tool still running; timer stopped. Response will continue when it completes.' };
+                  logger.debug(`[cursor] Per-tool timeout for ${msg.callId.slice(0, 8)}... – sending tool_call_end (running in background)`);
+                  messageBuffer.addMessage('Still running (timer stopped)', 'result');
+                  if (bgCodexId) {
+                    session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: msg.callId, content: bgResult, is_error: false }] } });
+                  }
+                  const timeoutResultPayload = { type: 'tool-call-result' as const, callId: msg.callId, id: msg.callId, output: bgResult, is_error: false };
+                  logger.debug(`[cursor] codex/cursor tool-call-result callId=${msg.callId.slice(0, 8)}... (timeout)`);
+                  session.sendCodexMessage(timeoutResultPayload);
+                  session.sendCursorMessage(timeoutResultPayload);
+                  session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId }, { turn: turnId }));
+                }, perToolTimeoutMs);
+                toolCallTimeoutHandles.set(msg.callId, handle);
+              }
               break;
 
             case 'tool_call_end':
