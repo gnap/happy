@@ -491,8 +491,7 @@ export async function runCursor(opts: {
       const turnId = createId();
       currentTurnIdRef = turnId;
 
-      // Send user message so both old and new App show it in the session message list
-      session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: userMessage } });
+      // Send user message: session protocol only. Store (old) App already has the user message from app send; dual-send output format would duplicate it. New App renders from this envelope.
       session.sendSessionProtocolMessage(createEnvelope('user', { t: 'text', text: userMessage }, { turn: turnId }));
       const messageParser = new CursorMessageParser();
       const codexIdByCallId = new Map<string, string>();

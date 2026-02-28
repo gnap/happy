@@ -238,7 +238,8 @@ export function startOfflineReconnection<TSession>(
 /** All network error codes that trigger offline mode */
 export const NETWORK_ERROR_CODES = [
     'ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT',
-    'ECONNRESET', 'EHOSTUNREACH', 'ENETUNREACH'
+    'ECONNRESET', 'EHOSTUNREACH', 'ENETUNREACH',
+    'ECONNABORTED'  // axios request timeout
 ] as const;
 
 /** Check if error code indicates server unreachable */
@@ -255,6 +256,7 @@ export const ERROR_DESCRIPTIONS: Record<string, string> = {
     ECONNRESET: 'connection reset by server',
     EHOSTUNREACH: 'server host unreachable',
     ENETUNREACH: 'network unreachable',
+    ECONNABORTED: 'request timed out',
     // HTTP errors
     '401': 'authentication failed - run `happy auth`',
     '403': 'access forbidden',
