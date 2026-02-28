@@ -455,7 +455,7 @@ export class ApiSessionClient extends EventEmitter {
      * Send message to session
      * @param body - Message body (can be MessageContent or raw content for agent messages)
      */
-    sendClaudeSessionMessage(body: RawJSONLines) {
+    sendClaudeSessionMessage(body: RawJSONLines): void | Promise<void> {
         const mapped = mapClaudeLogMessageToSessionEnvelopes(body, this.claudeSessionProtocolState);
         this.claudeSessionProtocolState.currentTurnId = mapped.currentTurnId;
         for (const envelope of mapped.envelopes) {
@@ -470,9 +470,9 @@ export class ApiSessionClient extends EventEmitter {
             }
         }
 
-        // Update metadata with summary if this is a summary message
+        // Update metadata with summary if this is a summary message (await so change_title can report failure)
         if (body.type === 'summary' && 'summary' in body && 'leafUuid' in body) {
-            this.updateMetadata((metadata) => ({
+            return this.updateMetadata((metadata) => ({
                 ...metadata,
                 summary: {
                     text: body.summary,
@@ -680,6 +680,9 @@ export class ApiSessionClient extends EventEmitter {
      */
     updateMetadata(handler: (metadata: Metadata) => Metadata): Promise<void> {
         return this.metadataLock.inLock(async () => {
+            if (!this.socket.connected) {
+                throw new Error('Session real-time disconnected; title update requires WebSocket (check network / HAPPY_SERVER_URL)');
+            }
             await backoff(async () => {
                 let updated = handler(this.metadata!); // Weird state if metadata is null - should never happen but here we are
                 const answer = await this.socket.emitWithAck('update-metadata', { sid: this.sessionId, expectedVersion: this.metadataVersion, metadata: encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, updated)) });
@@ -693,7 +696,7 @@ export class ApiSessionClient extends EventEmitter {
                     }
                     throw new Error('Metadata version mismatch');
                 } else if (answer.result === 'error') {
-                    // Hard error - ignore
+                    throw new Error('Server rejected metadata update');
                 }
             });
         });

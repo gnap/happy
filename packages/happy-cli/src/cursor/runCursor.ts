@@ -137,8 +137,10 @@ function toCodexToolShape(
 export async function runCursor(opts: {
   credentials: Credentials;
   startedBy?: 'daemon' | 'terminal';
+  /** Workspace root for session, .cursor/mcp.json, and cursor-agent cwd. Defaults to process.cwd(). Set via --cwd or HAPPY_CURSOR_WORKSPACE when running from monorepo so MCP is under repo root. */
+  workspaceRoot?: string;
 }): Promise<void> {
-  const workspacePath = process.cwd();
+  const workspacePath = opts.workspaceRoot != null ? resolve(opts.workspaceRoot) : process.cwd();
 
   // Reuse session only when workspace unchanged; workspace change => new session
   const tagPath = join(configuration.happyHomeDir, CURSOR_SESSION_TAG_FILE);
@@ -215,6 +217,10 @@ export async function runCursor(opts: {
   logger.debug(`[cursor] Workspace: ${workspacePath}`);
   if (tagReused) {
     logger.debug('[cursor] Reusing session – open this same conversation in the app (or tap "It\'s ready!" push) so CLI and phone stay in sync.');
+  } else if (response && process.stdout.isTTY) {
+    // New session: show in terminal so user can refresh App list or tap push
+    console.log(`[cursor] New session created: ${sessionId}`);
+    console.log('[cursor] In the App: pull-to-refresh the session list, or tap the "It\'s ready!" push to open this session.');
   }
 
   // Persist session tag, workspace, and encryption key so next restart reuses correctly
@@ -427,10 +433,20 @@ export async function runCursor(opts: {
 
   //
   // Start Happy MCP server and register it for cursor-agent via .cursor/mcp.json
+  // Expose current turn id and session send so spawn_subagent can emit subagent envelopes.
   //
 
-  const happyServer = await startHappyServer(session);
+  let currentTurnIdRef: string | null = null;
+  const happyServer = await startHappyServer(session, {
+    cursorContext: {
+      getCurrentTurnId: () => currentTurnIdRef,
+      sendSessionEnvelope: (envelope) => session.sendSessionProtocolMessage(envelope),
+      workspacePath,
+      getAbortSignal: () => abortController.signal,
+    },
+  });
   ensureCursorMcpHappy(workspacePath, happyServer.url);
+  logger.debug(`[cursor] Happy MCP: url=${happyServer.url}, workspacePath=${workspacePath}, cursor-agent will be spawned with --approve-mcps`);
 
   //
   // Main loop
@@ -473,6 +489,7 @@ export async function runCursor(opts: {
       let accumulatedResponse = '';
       let hadToolCalls = false;
       const turnId = createId();
+      currentTurnIdRef = turnId;
       const messageParser = new CursorMessageParser();
       const codexIdByCallId = new Map<string, string>();
       /** Per-tool timeout: when fired we send tool_call_end (running in background) so App stops timer; process keeps running. */
@@ -728,6 +745,7 @@ export async function runCursor(opts: {
 
         // Clear parser state for next turn
         messageParser.clear();
+        currentTurnIdRef = null;
         emitReadyIfIdle();
 
         logger.debug(`[cursor] Turn completed (queue: ${messageQueue.size()})`);
