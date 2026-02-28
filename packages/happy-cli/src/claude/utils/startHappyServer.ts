@@ -2,11 +2,16 @@
  * Happy MCP server
  * Provides Happy CLI specific tools including chat session title management
  * and (when cursorContext is provided) spawn_subagent for Cursor.
+ *
+ * spawn_subagent uses MCP Tasks (experimental) so the SDK handles polling
+ * server-side: cursor-agent sees a single blocking tool call that resolves
+ * when the sub-agent finishes, removing the need for manual get_subagent polling.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createServer } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { InMemoryTaskStore, InMemoryTaskMessageQueue } from "@modelcontextprotocol/sdk/experimental/tasks";
 import { AddressInfo } from "node:net";
 import { z } from "zod";
 import { createId } from "@paralleldrive/cuid2";
@@ -55,9 +60,20 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
     // Create the MCP server
     //
 
+    const taskStore = new InMemoryTaskStore();
+    const taskMessageQueue = new InMemoryTaskMessageQueue();
+
     const mcp = new McpServer({
         name: "Happy MCP",
         version: "1.0.0",
+    }, {
+        taskStore,
+        taskMessageQueue,
+        capabilities: {
+            tasks: {
+                requests: { tools: { call: {} } },
+            },
+        },
     });
 
     mcp.registerTool('change_title', {
@@ -98,6 +114,9 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
     if (options?.cursorContext) {
         const ctx = options.cursorContext;
 
+        // Map subagent id → MCP task id so onTurnDone can complete the task.
+        const pendingSpawnTasks = new Map<string, string>();
+
         subagentManager = new SubagentManager({
             cwd: ctx.workspacePath,
             onChildEvent: (agentId, ev) => {
@@ -108,51 +127,70 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
             onTurnDone: (info) => {
                 const turnId = ctx.getCurrentTurnId();
                 if (!turnId) return;
-                // When a turn completes, close the Task card in the App.
                 if (info.status !== 'running') {
                     ctx.sendSessionEnvelope(createEnvelope('agent', { t: 'tool-call-end', call: info.id }, { turn: turnId }));
                 }
+
+                const taskId = pendingSpawnTasks.get(info.id);
+                if (taskId) {
+                    const status = info.error ? 'failed' : 'completed';
+                    const result = info.error
+                        ? { content: [{ type: 'text' as const, text: `Error: ${info.error}` }], isError: true }
+                        : { content: [{ type: 'text' as const, text: info.summary || 'Task completed.' }], isError: false };
+                    taskStore.storeTaskResult(taskId, status, result).catch(e => {
+                        logger.debug(`[happyMCP] storeTaskResult error: ${e}`);
+                    });
+                    pendingSpawnTasks.delete(info.id);
+                }
+
                 logger.debug(`[happyMCP] subagent turn done id=${info.id.slice(0, 8)} status=${info.status} summary=${(info.summary ?? '').slice(0, 80)}`);
             },
         });
 
-        // ── spawn_subagent ──────────────────────────────────────────────
-        mcp.registerTool('spawn_subagent', {
+        // ── spawn_subagent (task-augmented) ─────────────────────────────
+        // Uses MCP Tasks so the SDK polls server-side; cursor-agent sees
+        // a single blocking tool call that resolves when the sub-agent finishes.
+        mcp.experimental.tasks.registerToolTask('spawn_subagent', {
+            title: 'Spawn Sub-agent',
             description: 'Run a sub-agent to complete a subtask. Returns immediately with {id, status}. '
                 + 'You MUST then call get_subagent(id) to poll until status is idle/completed/error, then reply to the user with the summary. '
-                + 'Do not leave the user without a reply: after spawning, call get_subagent(id) (retry every few seconds if status is "running") until you get a result, then answer the user.',
-            title: 'Spawn Sub-agent',
+                + 'Do not leave the user without a reply: after spawning, call get_subagent(id) (retry every few seconds if status is "running") until you get a result, then answer the user. '
+                + 'If the result is returned directly (without needing to poll), use it immediately.',
             inputSchema: {
                 prompt: z.string().describe('The task or question to send to the sub-agent'),
                 title: z.string().optional().describe('Optional short title for the sub-agent (e.g. "Find auth code")'),
             },
-        }, async (args) => {
-            const turnId = ctx.getCurrentTurnId();
-            if (!turnId) {
-                return { content: [{ type: 'text', text: 'No active turn; cannot spawn sub-agent.' }], isError: true };
-            }
-            const id = createId();
-            const title = args.title || 'Sub-agent';
+            execution: { taskSupport: 'optional' },
+        }, {
+            createTask: async (args: { prompt: string; title?: string }, extra: any) => {
+                const turnId = ctx.getCurrentTurnId();
+                if (!turnId) throw new Error('No active turn; cannot spawn sub-agent.');
 
-            // Open a Task card in the App's main stream.
-            ctx.sendSessionEnvelope(createEnvelope('agent', {
-                t: 'tool-call-start',
-                call: id,
-                name: 'Task',
-                title,
-                description: args.prompt.slice(0, 200),
-                args: { prompt: args.prompt },
-            }, { turn: turnId }));
+                const task = await extra.taskStore.createTask({});
+                const id = createId();
+                const title = args.title || 'Sub-agent';
 
-            const info = subagentManager!.spawn(id, args.prompt, title);
-            logger.debug(`[happyMCP] spawn_subagent id=${id.slice(0, 8)} prompt=${args.prompt.length}chars`);
+                ctx.sendSessionEnvelope(createEnvelope('agent', {
+                    t: 'tool-call-start',
+                    call: id,
+                    name: 'Task',
+                    title,
+                    description: args.prompt.slice(0, 200),
+                    args: { prompt: args.prompt },
+                }, { turn: turnId }));
 
-            const payload = { id: info.id, status: info.status, title: info.title };
-            const text = JSON.stringify(payload) + '\n\nNext: call get_subagent(id) to get the result, then reply to the user with the summary.';
-            return {
-                content: [{ type: 'text', text }],
-                isError: false,
-            };
+                pendingSpawnTasks.set(id, task.taskId);
+                subagentManager!.spawn(id, args.prompt, title);
+                logger.debug(`[happyMCP] spawn_subagent (task) id=${id.slice(0, 8)} taskId=${task.taskId.slice(0, 8)}`);
+
+                return { task };
+            },
+            getTask: async (_args: any, extra: any) => {
+                return await extra.taskStore.getTask(extra.taskId);
+            },
+            getTaskResult: async (_args: any, extra: any) => {
+                return await extra.taskStore.getTaskResult(extra.taskId);
+            },
         });
         toolNames.push('spawn_subagent');
 
