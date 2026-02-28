@@ -1055,6 +1055,15 @@ function NewSessionWizard() {
                     const sessionId = result.sessionId;
                     clearNewSessionDraft();
                     await sync.refreshSessions();
+                    // Server may not have indexed the new session yet; retry so it appears in the list
+                    if (!storage.getState().sessions[sessionId]) {
+                        await new Promise((r) => setTimeout(r, 2000));
+                        await sync.refreshSessions();
+                        if (!storage.getState().sessions[sessionId]) {
+                            await new Promise((r) => setTimeout(r, 2000));
+                            await sync.refreshSessions();
+                        }
+                    }
                     storage.getState().updateSessionPermissionMode(sessionId, permissionMode.key);
                     if (modelMode) {
                         storage.getState().updateSessionModelMode(sessionId, modelMode.key);

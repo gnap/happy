@@ -85,7 +85,7 @@ function UserTextBlock(props: {
   );
 }
 
-/** Do not render CLI system/placeholder tool-result text as bubbles (new App). */
+/** Hide only known CLI/system placeholders that should never be shown as bubbles (e.g. empty tool result). */
 function isHiddenSystemToolResultText(text: string): boolean {
   if (!text || typeof text !== 'string') return true;
   const t = text.trim();

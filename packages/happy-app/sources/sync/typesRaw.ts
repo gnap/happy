@@ -915,11 +915,12 @@ export function normalizeRawMessage(
             };
         }
         if (raw.content.type === 'codex' || raw.content.type === 'cursor') {
-            // New App: when session protocol is enabled, only render session envelopes; skip codex/cursor to avoid duplicate text and tool bubbles
-            if (isSessionProtocolSendEnabled()) {
-                return null;
-            }
             const isCursorWire = (raw.content.type === 'cursor');
+            // New App: when session protocol is enabled, skip codex/cursor text only (avoid duplicate bubbles); still accept tool-call/tool-call-result so tool cards get output
+            if (isSessionProtocolSendEnabled()) {
+                const t = raw.content.data.type;
+                if (t === 'message' || t === 'reasoning' || t === 'thinking') return null;
+            }
             if (raw.content.data.type === 'message') {
                 // Cast codex messages to agent text messages
                 return {
