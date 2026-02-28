@@ -560,6 +560,7 @@ describe('isNetworkError', () => {
         expect(isNetworkError('ECONNRESET')).toBe(true);
         expect(isNetworkError('EHOSTUNREACH')).toBe(true);
         expect(isNetworkError('ENETUNREACH')).toBe(true);
+        expect(isNetworkError('ECONNABORTED')).toBe(true);
     });
 
     it('should return false for non-network error codes', () => {
@@ -577,13 +578,14 @@ describe('isNetworkError', () => {
         expect(isNetworkError('')).toBe(false);
     });
 
-    it('should have exactly 6 network error codes', () => {
-        expect(NETWORK_ERROR_CODES).toHaveLength(6);
+    it('should have exactly 7 network error codes', () => {
+        expect(NETWORK_ERROR_CODES).toHaveLength(7);
         expect(NETWORK_ERROR_CODES).toContain('ECONNREFUSED');
         expect(NETWORK_ERROR_CODES).toContain('ENOTFOUND');
         expect(NETWORK_ERROR_CODES).toContain('ETIMEDOUT');
         expect(NETWORK_ERROR_CODES).toContain('ECONNRESET');
         expect(NETWORK_ERROR_CODES).toContain('EHOSTUNREACH');
         expect(NETWORK_ERROR_CODES).toContain('ENETUNREACH');
+        expect(NETWORK_ERROR_CODES).toContain('ECONNABORTED');
     });
 });
