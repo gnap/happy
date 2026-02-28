@@ -14,7 +14,7 @@ import { createEnvelope, type SessionEnvelope } from "@slopus/happy-wire";
 import { logger } from "@/ui/logger";
 import { ApiSessionClient } from "@/api/apiSession";
 import { randomUUID } from "node:crypto";
-import { runSubagent } from "@/cursor/runSubagent";
+import { SubagentManager } from "@/cursor/subagentManager";
 
 export interface HappyServerCursorContext {
     getCurrentTurnId: () => string | null;
@@ -93,10 +93,34 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
 
     const toolNames: string[] = ['change_title'];
 
+    let subagentManager: SubagentManager | null = null;
+
     if (options?.cursorContext) {
         const ctx = options.cursorContext;
+
+        subagentManager = new SubagentManager({
+            cwd: ctx.workspacePath,
+            onChildEvent: (agentId, ev) => {
+                const turnId = ctx.getCurrentTurnId();
+                if (!turnId) return;
+                ctx.sendSessionEnvelope(createEnvelope('agent', ev, { turn: turnId, subagent: agentId }));
+            },
+            onTurnDone: (info) => {
+                const turnId = ctx.getCurrentTurnId();
+                if (!turnId) return;
+                // When a turn completes, close the Task card in the App.
+                if (info.status !== 'running') {
+                    ctx.sendSessionEnvelope(createEnvelope('agent', { t: 'tool-call-end', call: info.id }, { turn: turnId }));
+                }
+                logger.debug(`[happyMCP] subagent turn done id=${info.id.slice(0, 8)} status=${info.status} summary=${(info.summary ?? '').slice(0, 80)}`);
+            },
+        });
+
+        // ── spawn_subagent ──────────────────────────────────────────────
         mcp.registerTool('spawn_subagent', {
-            description: 'Run a sub-agent to complete a subtask. The sub-agent\'s output is shown nested in this conversation. Use this when you want to delegate a focused task (e.g. research, refactor one module) and then use its result.',
+            description: 'Run a sub-agent to complete a subtask. Returns immediately with {id, status}. '
+                + 'You MUST then call get_subagent(id) to poll until status is idle/completed/error, then reply to the user with the summary. '
+                + 'Do not leave the user without a reply: after spawning, call get_subagent(id) (retry every few seconds if status is "running") until you get a result, then answer the user.',
             title: 'Spawn Sub-agent',
             inputSchema: {
                 prompt: z.string().describe('The task or question to send to the sub-agent'),
@@ -105,70 +129,106 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
         }, async (args) => {
             const turnId = ctx.getCurrentTurnId();
             if (!turnId) {
-                return {
-                    content: [{ type: 'text', text: 'No active turn; cannot spawn sub-agent.' }],
-                    isError: true,
-                };
+                return { content: [{ type: 'text', text: 'No active turn; cannot spawn sub-agent.' }], isError: true };
             }
-            const subagentId = createId();
-            const sendChild = (ev: Parameters<typeof createEnvelope>[1]) => {
-                ctx.sendSessionEnvelope(createEnvelope('agent', ev, { turn: turnId, subagent: subagentId }));
-            };
-            const sendParent = (ev: Parameters<typeof createEnvelope>[1]) => {
-                ctx.sendSessionEnvelope(createEnvelope('agent', ev, { turn: turnId }));
-            };
+            const id = createId();
+            const title = args.title || 'Sub-agent';
 
-            // Open a Task tool-call in the main stream so the App nests child messages inside it.
-            sendParent({
+            // Open a Task card in the App's main stream.
+            ctx.sendSessionEnvelope(createEnvelope('agent', {
                 t: 'tool-call-start',
-                call: subagentId,
+                call: id,
                 name: 'Task',
-                title: args.title || 'Sub-agent',
+                title,
                 description: args.prompt.slice(0, 200),
                 args: { prompt: args.prompt },
-            });
-            logger.debug(`[happyMCP] spawn_subagent start subagentId=${subagentId.slice(0, 8)}... prompt length=${args.prompt.length}`);
-            try {
-                const result = await runSubagent({
-                    cwd: ctx.workspacePath,
-                    prompt: args.prompt,
-                    signal: ctx.getAbortSignal?.(),
-                    onEvent: (ev) => sendChild(ev),
-                });
-                sendParent({ t: 'tool-call-end', call: subagentId });
-                if (result.success) {
-                    return {
-                        content: [
-                            {
-                                type: 'text',
-                                text: result.summary
-                                    ? `Sub-agent completed.\n\nSummary: ${result.summary}`
-                                    : 'Sub-agent completed.',
-                            },
-                        ],
-                        isError: false,
-                    };
-                }
-                return {
-                    content: [
-                        {
-                            type: 'text',
-                            text: `Sub-agent failed: ${result.error}${result.summary ? `\n\nOutput so far: ${result.summary}` : ''}`,
-                        },
-                    ],
-                    isError: true,
-                };
-            } catch (err) {
-                sendParent({ t: 'tool-call-end', call: subagentId });
-                const msg = err instanceof Error ? err.message : String(err);
-                logger.debug('[happyMCP] spawn_subagent error:', err);
-                return {
-                    content: [{ type: 'text', text: `Sub-agent error: ${msg}` }],
-                    isError: true,
-                };
-            }
+            }, { turn: turnId }));
+
+            const info = subagentManager!.spawn(id, args.prompt, title);
+            logger.debug(`[happyMCP] spawn_subagent id=${id.slice(0, 8)} prompt=${args.prompt.length}chars`);
+
+            const payload = { id: info.id, status: info.status, title: info.title };
+            const text = JSON.stringify(payload) + '\n\nNext: call get_subagent(id) to get the result, then reply to the user with the summary.';
+            return {
+                content: [{ type: 'text', text }],
+                isError: false,
+            };
         });
         toolNames.push('spawn_subagent');
+
+        // ── message_subagent ────────────────────────────────────────────
+        mcp.registerTool('message_subagent', {
+            description: 'Send a follow-up message to an existing sub-agent for multi-turn conversation. '
+                + 'Only works when the sub-agent is idle (finished its previous turn). Returns immediately.',
+            title: 'Message Sub-agent',
+            inputSchema: {
+                id: z.string().describe('The sub-agent ID returned by spawn_subagent'),
+                message: z.string().describe('The follow-up message to send'),
+            },
+        }, async (args) => {
+            const turnId = ctx.getCurrentTurnId();
+            if (!turnId) {
+                return { content: [{ type: 'text', text: 'No active turn.' }], isError: true };
+            }
+            const result = subagentManager!.message(args.id, args.message);
+            if (!result.ok) {
+                return { content: [{ type: 'text', text: result.error }], isError: true };
+            }
+            const info = result.info;
+
+            // Do not send another tool-call-start: same call id would create a second Task message and break sidechain (children would stay on the first message, so toolbox disappears).
+            logger.debug(`[happyMCP] message_subagent id=${args.id.slice(0, 8)} turn=${info.turnCount}`);
+            return {
+                content: [{ type: 'text', text: JSON.stringify({ id: info.id, status: info.status, turnCount: info.turnCount }) }],
+                isError: false,
+            };
+        });
+        toolNames.push('message_subagent');
+
+        // ── get_subagent ────────────────────────────────────────────────
+        mcp.registerTool('get_subagent', {
+            description: 'Get the status and result of sub-agent(s). Call this after spawn_subagent(id) to poll for the result. '
+                + 'When status is idle or completed, use the summary field to reply to the user. If status is running, call again after a short wait. '
+                + 'If id is omitted, returns all sub-agents.',
+            title: 'Get Sub-agent Status',
+            inputSchema: {
+                id: z.string().optional().describe('Sub-agent ID. Omit to list all sub-agents.'),
+            },
+        }, async (args) => {
+            const agents = subagentManager!.get(args.id);
+            if (args.id && agents.length === 0) {
+                return { content: [{ type: 'text', text: `Sub-agent ${args.id} not found.` }], isError: true };
+            }
+            return {
+                content: [{ type: 'text', text: JSON.stringify({ agents }) }],
+                isError: false,
+            };
+        });
+        toolNames.push('get_subagent');
+
+        // ── stop_subagent ───────────────────────────────────────────────
+        mcp.registerTool('stop_subagent', {
+            description: 'Stop a running sub-agent. Use this to cancel a sub-agent that is no longer needed.',
+            title: 'Stop Sub-agent',
+            inputSchema: {
+                id: z.string().describe('The sub-agent ID to stop'),
+            },
+        }, async (args) => {
+            const turnId = ctx.getCurrentTurnId();
+            const result = subagentManager!.stop(args.id);
+            if (!result.ok) {
+                return { content: [{ type: 'text', text: result.error }], isError: true };
+            }
+            if (turnId) {
+                ctx.sendSessionEnvelope(createEnvelope('agent', { t: 'tool-call-end', call: args.id }, { turn: turnId }));
+            }
+            logger.debug(`[happyMCP] stop_subagent id=${args.id.slice(0, 8)}`);
+            return {
+                content: [{ type: 'text', text: JSON.stringify({ id: result.info.id, status: result.info.status }) }],
+                isError: false,
+            };
+        });
+        toolNames.push('stop_subagent');
     }
 
     const transport = new StreamableHTTPServerTransport({
@@ -207,6 +267,7 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
         toolNames,
         stop: () => {
             logger.debug(`[happyMCP] server:stop sessionId=${client.sessionId}`);
+            subagentManager?.dispose();
             mcp.close();
             server.close();
         }

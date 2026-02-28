@@ -135,7 +135,11 @@ export function runSubagent(opts: RunSubagentOptions): Promise<RunSubagentResult
       timeoutMs: timeoutMs ?? 600_000, // 10 min default for subagent
     });
 
+    let eventCount = 0;
     proc.on('message', (rawMsg: CursorStreamMessage) => {
+      const typeInfo = 'type' in rawMsg ? rawMsg.type : 'unknown';
+      const subtypeInfo = 'subtype' in rawMsg && rawMsg.subtype ? `.${rawMsg.subtype}` : '';
+      logger.debug(`[subagent] message: ${typeInfo}${subtypeInfo}`);
       const parsed = parser.parse(rawMsg);
       for (const msg of parsed) {
         if (msg.type === 'text_delta') lastText = msg.text;
@@ -144,11 +148,16 @@ export function runSubagent(opts: RunSubagentOptions): Promise<RunSubagentResult
           errorMessage = msg.message;
         }
         const ev = parsedMessageToSessionEvent(msg);
-        if (ev) onEvent(ev);
+        if (ev) {
+          eventCount++;
+          logger.debug(`[subagent] emit event #${eventCount}: ${ev.t}`);
+          onEvent(ev);
+        }
       }
     });
 
     proc.on('exit', (code) => {
+      logger.debug(`[subagent] exit code=${code}, events=${eventCount}, lastText=${lastText.length}chars, hadError=${hadError}`);
       if (hadError) {
         finish({ success: false, error: errorMessage, summary: lastText.slice(0, 500) });
       } else if (code !== 0) {

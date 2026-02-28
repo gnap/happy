@@ -16,18 +16,17 @@ interface FilteredTool {
 export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages }) => {
     const { theme } = useUnistyles();
     const filtered: FilteredTool[] = [];
+    let lastAgentText: string | null = null;
 
     for (let m of messages) {
         if (m.kind === 'tool-call') {
             const knownTool = knownTools[m.tool.name as keyof typeof knownTools] as any;
             
-            // Extract title using extractDescription if available, otherwise use title
             let title = m.tool.name;
             if (knownTool) {
                 if ('extractDescription' in knownTool && typeof knownTool.extractDescription === 'function') {
                     title = knownTool.extractDescription({ tool: m.tool, metadata });
                 } else if (knownTool.title) {
-                    // Handle optional title and function type
                     if (typeof knownTool.title === 'function') {
                         title = knownTool.title({ tool: m.tool, metadata });
                     } else {
@@ -43,6 +42,9 @@ export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages })
                     state: m.tool.state
                 });
             }
+        }
+        if (m.kind === 'agent-text' && m.text) {
+            lastAgentText = m.text;
         }
     }
 
@@ -90,9 +92,15 @@ export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages })
             fontStyle: 'italic',
             opacity: 0.7,
         },
+        summaryText: {
+            fontSize: 14,
+            color: theme.colors.textSecondary,
+            paddingHorizontal: 4,
+            paddingTop: 4,
+        },
     });
 
-    if (filtered.length === 0) {
+    if (filtered.length === 0 && !lastAgentText) {
         return null;
     }
 
@@ -123,6 +131,11 @@ export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages })
                         {t('tools.taskView.moreTools', { count: remainingCount })}
                     </Text>
                 </View>
+            )}
+            {lastAgentText != null && (
+                <Text style={styles.summaryText} numberOfLines={4}>
+                    {lastAgentText}
+                </Text>
             )}
         </View>
     );
