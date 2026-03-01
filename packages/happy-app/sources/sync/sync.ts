@@ -78,6 +78,10 @@ class Sync {
     private sessionQueueProcessing = new Set<string>();
     private _loggedMissingSessionForSid = new Set<string>();
     private sessionMessageLocks = new Map<string, AsyncLock>();
+    /** Limit concurrent message fetches to avoid network congestion (e.g. 150 sessions all requesting at once on reconnect). */
+    private static readonly MAX_CONCURRENT_MESSAGE_FETCHES = 5;
+    private messageFetchRunning = 0;
+    private messageFetchQueue: (() => void)[] = [];
     private sessionDataKeys = new Map<string, Uint8Array>(); // Store session data encryption keys internally
     private machineDataKeys = new Map<string, Uint8Array>(); // Store machine data encryption keys internally
     private artifactDataKeys = new Map<string, Uint8Array>(); // Store artifact data encryption keys internally
@@ -1590,64 +1594,88 @@ class Sync {
         }
     }
 
+    private acquireMessageFetchSlot = (): Promise<void> => {
+        if (this.messageFetchRunning < Sync.MAX_CONCURRENT_MESSAGE_FETCHES) {
+            this.messageFetchRunning++;
+            return Promise.resolve();
+        }
+        return new Promise<void>((resolve) => {
+            this.messageFetchQueue.push(resolve);
+        });
+    };
+
+    private releaseMessageFetchSlot = (): void => {
+        if (this.messageFetchQueue.length > 0) {
+            const next = this.messageFetchQueue.shift();
+            if (next) next();
+        } else {
+            this.messageFetchRunning--;
+        }
+    };
+
     private fetchMessages = async (sessionId: string) => {
         log.log(`💬 fetchMessages starting for session ${sessionId} - acquiring lock`);
         const lock = this.getSessionMessageLock(sessionId);
         await lock.inLock(async () => {
-            const encryption = this.encryption.getSessionEncryption(sessionId);
-            if (!encryption) {
-                log.log(`💬 fetchMessages: Session encryption not ready for ${sessionId}, will retry`);
-                throw new Error(`Session encryption not ready for ${sessionId}`);
+            await this.acquireMessageFetchSlot();
+            try {
+                const encryption = this.encryption.getSessionEncryption(sessionId);
+                if (!encryption) {
+                    log.log(`💬 fetchMessages: Session encryption not ready for ${sessionId}, will retry`);
+                    throw new Error(`Session encryption not ready for ${sessionId}`);
+                }
+
+                let afterSeq = this.sessionLastSeq.get(sessionId) ?? 0;
+                let hasMore = true;
+                let totalNormalized = 0;
+
+                while (hasMore) {
+                    const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
+                    if (!response.ok) {
+                        throw new Error(`Failed to fetch messages for ${sessionId}: ${response.status}`);
+                    }
+                    const data = await response.json() as V3GetSessionMessagesResponse;
+                    const messages = Array.isArray(data.messages) ? data.messages : [];
+
+                    let maxSeq = afterSeq;
+                    for (const message of messages) {
+                        if (message.seq > maxSeq) {
+                            maxSeq = message.seq;
+                        }
+                    }
+
+                    const decryptedMessages = await encryption.decryptMessages(messages);
+                    const normalizedMessages: NormalizedMessage[] = [];
+                    for (let i = 0; i < decryptedMessages.length; i++) {
+                        const decrypted = decryptedMessages[i];
+                        if (!decrypted) {
+                            continue;
+                        }
+                        const normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
+                        if (normalized) {
+                            normalizedMessages.push(normalized);
+                        }
+                    }
+
+                    if (normalizedMessages.length > 0) {
+                        totalNormalized += normalizedMessages.length;
+                        this.enqueueMessages(sessionId, normalizedMessages);
+                    }
+
+                    this.sessionLastSeq.set(sessionId, maxSeq);
+                    hasMore = !!data.hasMore;
+                    if (hasMore && maxSeq === afterSeq) {
+                        log.log(`💬 fetchMessages: pagination stalled for ${sessionId}, stopping to avoid infinite loop`);
+                        break;
+                    }
+                    afterSeq = maxSeq;
+                }
+
+                storage.getState().applyMessagesLoaded(sessionId);
+                log.log(`💬 fetchMessages completed for session ${sessionId} - processed ${totalNormalized} messages`);
+            } finally {
+                this.releaseMessageFetchSlot();
             }
-
-            let afterSeq = this.sessionLastSeq.get(sessionId) ?? 0;
-            let hasMore = true;
-            let totalNormalized = 0;
-
-            while (hasMore) {
-                const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
-                if (!response.ok) {
-                    throw new Error(`Failed to fetch messages for ${sessionId}: ${response.status}`);
-                }
-                const data = await response.json() as V3GetSessionMessagesResponse;
-                const messages = Array.isArray(data.messages) ? data.messages : [];
-
-                let maxSeq = afterSeq;
-                for (const message of messages) {
-                    if (message.seq > maxSeq) {
-                        maxSeq = message.seq;
-                    }
-                }
-
-                const decryptedMessages = await encryption.decryptMessages(messages);
-                const normalizedMessages: NormalizedMessage[] = [];
-                for (let i = 0; i < decryptedMessages.length; i++) {
-                    const decrypted = decryptedMessages[i];
-                    if (!decrypted) {
-                        continue;
-                    }
-                    const normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
-                    if (normalized) {
-                        normalizedMessages.push(normalized);
-                    }
-                }
-
-                if (normalizedMessages.length > 0) {
-                    totalNormalized += normalizedMessages.length;
-                    this.enqueueMessages(sessionId, normalizedMessages);
-                }
-
-                this.sessionLastSeq.set(sessionId, maxSeq);
-                hasMore = !!data.hasMore;
-                if (hasMore && maxSeq === afterSeq) {
-                    log.log(`💬 fetchMessages: pagination stalled for ${sessionId}, stopping to avoid infinite loop`);
-                    break;
-                }
-                afterSeq = maxSeq;
-            }
-
-            storage.getState().applyMessagesLoaded(sessionId);
-            log.log(`💬 fetchMessages completed for session ${sessionId} - processed ${totalNormalized} messages`);
         });
     }
 
@@ -1704,15 +1732,38 @@ class Sync {
             this.friendsSync.invalidate();
             this.friendRequestsSync.invalidate();
             this.feedSync.invalidate();
-            const sessionsData = storage.getState().sessionsData;
-            if (sessionsData) {
-                for (const item of sessionsData) {
-                    if (typeof item !== 'string') {
-                        this.getMessagesSync(item.id).invalidate();
-                        // Also invalidate git status on reconnection
-                        gitStatusSync.invalidate(item.id);
+            // Invalidate message sync for all sessions: active first so they get the concurrency slots
+            try {
+                const state = storage.getState();
+                const activeIds = new Set(state.getActiveSessions().map(s => s.id));
+                const sessionsData = state.sessionsData;
+                let active: string[] = [];
+                let inactive: string[] = [];
+                if (Array.isArray(sessionsData)) {
+                    for (const item of sessionsData) {
+                        if (typeof item !== 'string' && item?.id) {
+                            if (activeIds.has(item.id)) active.push(item.id);
+                            else inactive.push(item.id);
+                        }
+                    }
+                } else {
+                    // Fallback when sessionsData not yet populated (e.g. before first fetchSessions)
+                    const sessions = Object.values(state.sessions);
+                    for (const s of sessions) {
+                        if (activeIds.has(s.id)) active.push(s.id);
+                        else inactive.push(s.id);
                     }
                 }
+                for (const sessionId of active) {
+                    this.getMessagesSync(sessionId).invalidate();
+                    gitStatusSync.invalidate(sessionId);
+                }
+                for (const sessionId of inactive) {
+                    this.getMessagesSync(sessionId).invalidate();
+                    gitStatusSync.invalidate(sessionId);
+                }
+            } catch (e) {
+                log.log('🔄 reconnect: error invalidating message syncs:', String(e));
             }
             for (const sync of this.sendSync.values()) {
                 sync.invalidate();
