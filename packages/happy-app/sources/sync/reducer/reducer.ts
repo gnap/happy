@@ -822,6 +822,16 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     message.tool.result = c.content;
                     message.tool.completedAt = msg.createdAt;
 
+                    // TodoWrite result carries the authoritative list (including completed); session list counts from this
+                    if (message.tool.name === 'TodoWrite' && !c.is_error && c.content?.newTodos && Array.isArray(c.content.newTodos)) {
+                        if (!state.latestTodos || msg.createdAt >= state.latestTodos.timestamp) {
+                            state.latestTodos = {
+                                todos: c.content.newTodos,
+                                timestamp: msg.createdAt
+                            };
+                        }
+                    }
+
                     // Update permission data if provided by backend
                     if (c.permissions) {
                         // Merge with existing permission to preserve decision field from agentState
