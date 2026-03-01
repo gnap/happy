@@ -69,6 +69,7 @@ export class CursorProcess extends EventEmitter {
     const cursorArgs = [
       '--print',
       '--output-format', 'stream-json',
+      '--trust',  // Non-interactive: avoid "Workspace Trust Required" prompt (user already chose this dir in Happy)
     ];
 
     if (this.options.executionMode === 'plan') {
@@ -171,7 +172,7 @@ export class CursorProcess extends EventEmitter {
           this.parseLine(this.buffer);
           this.buffer = '';
         }
-        logger.debug(`[cursor] Process exited with code: ${code}`);
+        logger.debug(`[cursor] cursor-agent process exited with code: ${code}`);
         this.emit('exit', code);
         if (subprocessError) {
           reject(subprocessError);
@@ -234,11 +235,13 @@ export class CursorProcess extends EventEmitter {
       this.emit('message', msg);
     } catch {
       // Not JSON - could be shell error (e.g. command not found)
-      logger.debug(`[cursor] Non-JSON line: ${trimmed.slice(0, 100)}`);
+      logger.debug(`[cursor] Non-JSON stdout line: ${trimmed.slice(0, 150)}`);
       if (/command not found|cursor-agent.*not found|not found/i.test(trimmed)) {
-        this.emit('subprocessError', new Error(
+        const err = new Error(
           'cursor-agent not found. Install Cursor CLI on this machine (see https://docs.cursor.com) or set CURSOR_AGENT_PATH to the binary path.'
-        ));
+        );
+        logger.debug(`[cursor] ${err.message}`);
+        this.emit('subprocessError', err);
       }
     }
   }
