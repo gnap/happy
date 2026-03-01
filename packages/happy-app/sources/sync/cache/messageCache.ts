@@ -50,6 +50,23 @@ export interface LoadedCache {
 // ---------------------------------------------------------------------------
 
 /**
+ * Preload the session cache DB (and expo-sqlite) so the first open of a session
+ * doesn't block on native module load. Call once at app startup (e.g. in sync init).
+ */
+export async function preloadSessionCacheDB(): Promise<void> {
+    const start = Date.now();
+    try {
+        const db = getSessionCacheDB();
+        await db.initialize();
+        const ms = Date.now() - start;
+        log.log(`📦 messageCache: session cache DB preloaded in ${ms}ms`);
+    } catch (e) {
+        const ms = Date.now() - start;
+        log.log(`📦 messageCache: preloadSessionCacheDB failed after ${ms}ms (non-fatal): ${e}`);
+    }
+}
+
+/**
  * Try to load the cached messages and reducer state for a session.
  * Returns null if the cache is empty, stale, or disabled for this session.
  */
@@ -65,7 +82,14 @@ export async function loadMessageCache(session: Session): Promise<LoadedCache | 
 
     try {
         const db = getSessionCacheDB();
-        const cacheRow = await db.getSessionCache(session.id);
+        // Don't block fetchMessages if DB is still initializing (e.g. preload not done). Skip cache after timeout.
+        const CACHE_LOAD_TIMEOUT_MS = 3000;
+        const cacheRow = await Promise.race([
+            db.getSessionCache(session.id),
+            new Promise<null>((_, reject) =>
+                setTimeout(() => reject(new Error('cache load timeout')), CACHE_LOAD_TIMEOUT_MS)
+            ),
+        ]);
         if (!cacheRow) {
             log.log(`📦 messageCache: no cache row for ${session.id}`);
             return null;
@@ -83,7 +107,12 @@ export async function loadMessageCache(session: Session): Promise<LoadedCache | 
         log.log(`📦 messageCache: loaded ${messages.length} messages for ${session.id} (lastSeq=${cacheRow.lastSeq})`);
         return { messages, reducerState, lastSeq: cacheRow.lastSeq };
     } catch (err) {
-        log.log(`📦 messageCache: load error for ${session.id}: ${err}`);
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg === 'cache load timeout') {
+            log.log(`📦 messageCache: skip load for ${session.id} (DB not ready in time, will fetch from server)`);
+        } else {
+            log.log(`📦 messageCache: load error for ${session.id}: ${msg}`);
+        }
         return null;
     }
 }

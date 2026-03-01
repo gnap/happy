@@ -12,6 +12,7 @@
 
 import type { Message } from '../typesMessage';
 import { log } from '@/log';
+import * as SQLite from 'expo-sqlite';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -99,10 +100,13 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
     }
 
     private async _doInitialize(): Promise<void> {
-        // Dynamic import to keep the module tree clean for non-native targets
-        const SQLite = await import('expo-sqlite');
+        log.log('📦 sessionCacheDB: _doInitialize started');
+        const t0 = Date.now();
+        // Static import so expo-sqlite loads with app bundle (avoids cold-start hang on first session open)
         this.db = await SQLite.openDatabaseAsync(DB_NAME);
+        log.log(`📦 sessionCacheDB: openDatabaseAsync took ${Date.now() - t0}ms`);
 
+        const t2 = Date.now();
         await this.db.execAsync(`
             PRAGMA journal_mode = WAL;
 
@@ -125,8 +129,10 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
             CREATE INDEX IF NOT EXISTS idx_session_messages_session
                 ON session_messages(session_id, created_at);
         `);
+        log.log(`📦 sessionCacheDB: execAsync (schema) took ${Date.now() - t2}ms`);
 
         this.initialized = true;
+        log.log(`📦 sessionCacheDB: full init took ${Date.now() - t0}ms total`);
     }
 
     private async ensureReady(): Promise<void> {
