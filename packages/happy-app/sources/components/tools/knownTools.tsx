@@ -441,15 +441,27 @@ export const knownTools = {
     },
     'CodexBash': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            // Check if this is a single read command
+            // Prefer session-provided description (CLI sends "Run `cmd`") — main session & 1.5.0 can show command
+            if (opts.tool.description?.startsWith('Run `') && opts.tool.description.endsWith('`')) {
+                return opts.tool.description.slice(5, -1);
+            }
+            // Single read: show file path
             if (opts.tool.input?.parsed_cmd && 
                 Array.isArray(opts.tool.input.parsed_cmd) && 
                 opts.tool.input.parsed_cmd.length === 1 && 
                 opts.tool.input.parsed_cmd[0].type === 'read' &&
                 opts.tool.input.parsed_cmd[0].name) {
-                // Display the file name being read
                 const path = resolvePath(opts.tool.input.parsed_cmd[0].name, opts.metadata);
                 return path;
+            }
+            // From input for older messages or when description not set
+            if (opts.tool.input?.parsed_cmd?.[0]?.cmd) {
+                const cmd = opts.tool.input.parsed_cmd[0].cmd;
+                return cmd.length > 60 ? cmd.substring(0, 60) + '…' : cmd;
+            }
+            if (opts.tool.input?.command) {
+                const cmd = Array.isArray(opts.tool.input.command) ? (opts.tool.input.command as string[]).join(' ') : String(opts.tool.input.command);
+                if (cmd) return cmd.length > 60 ? cmd.substring(0, 60) + '…' : cmd;
             }
             return t('tools.names.terminal');
         },
@@ -501,11 +513,9 @@ export const knownTools = {
             // Provide a description based on the parsed command type
             if (opts.tool.input?.parsed_cmd && 
                 Array.isArray(opts.tool.input.parsed_cmd) && 
-                opts.tool.input.parsed_cmd.length === 1) {
+                opts.tool.input.parsed_cmd.length >= 1) {
                 const parsedCmd = opts.tool.input.parsed_cmd[0];
                 if (parsedCmd.type === 'read' && parsedCmd.name) {
-                    // For single read commands, show "Reading" as simple description
-                    // The file path is already in the title
                     const path = resolvePath(parsedCmd.name, opts.metadata);
                     const basename = path.split('/').pop() || path;
                     return t('tools.desc.readingFile', { file: basename });
@@ -513,6 +523,19 @@ export const knownTools = {
                     const path = resolvePath(parsedCmd.name, opts.metadata);
                     const basename = path.split('/').pop() || path;
                     return t('tools.desc.writingFile', { file: basename });
+                }
+                // For bash/shell: show the actual command (e.g. in Task card)
+                if (parsedCmd.cmd) {
+                    const cmd = parsedCmd.cmd;
+                    return cmd.length > 60 ? cmd.substring(0, 60) + '…' : cmd;
+                }
+            }
+            if (opts.tool.input?.command) {
+                const cmd = Array.isArray(opts.tool.input.command)
+                    ? (opts.tool.input.command as string[]).join(' ')
+                    : String(opts.tool.input.command);
+                if (cmd) {
+                    return cmd.length > 60 ? cmd.substring(0, 60) + '…' : cmd;
                 }
             }
             return t('tools.names.terminal');

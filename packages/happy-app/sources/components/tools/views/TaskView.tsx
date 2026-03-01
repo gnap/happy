@@ -13,7 +13,7 @@ interface FilteredTool {
     state: 'running' | 'completed' | 'error';
 }
 
-export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages }) => {
+export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages, compact }) => {
     const { theme } = useUnistyles();
     const filtered: FilteredTool[] = [];
     let lastAgentText: string | null = null;
@@ -36,9 +36,14 @@ export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages })
             }
 
             if (m.tool.state === 'running' || m.tool.state === 'completed' || m.tool.state === 'error') {
+                // Prefer session-provided description (e.g. "Run `ls -la`") when title is generic "终端"
+                let displayTitle = title;
+                if (title === t('tools.names.terminal') && m.tool.description?.startsWith('Run `') && m.tool.description.endsWith('`')) {
+                    displayTitle = m.tool.description.slice(5, -1);
+                }
                 filtered.push({
                     tool: m.tool,
-                    title,
+                    title: displayTitle,
                     state: m.tool.state
                 });
             }
@@ -59,6 +64,9 @@ export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages })
             paddingVertical: 4,
             paddingLeft: 4,
             paddingRight: 2
+        },
+        toolIconWrap: {
+            marginRight: 8,
         },
         toolTitle: {
             fontSize: 14,
@@ -106,12 +114,17 @@ export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages })
 
     const visibleTools = filtered.slice(filtered.length - 3);
     const remainingCount = filtered.length - 3;
+    const iconSize = 16;
 
     return (
         <View style={styles.container}>
-            {visibleTools.map((item, index) => (
+            {visibleTools.map((item, index) => {
+                const knownTool = knownTools[item.tool.name as keyof typeof knownTools] as any;
+                const icon = knownTool?.icon ? knownTool.icon(iconSize, theme.colors.textSecondary) : null;
+                return (
                 <View key={`${item.tool.name}-${index}`} style={styles.toolItem}>
-                    <Text style={styles.toolTitle}>{item.title}</Text>
+                    {icon != null && <View style={styles.toolIconWrap}>{icon}</View>}
+                    <Text style={styles.toolTitle} numberOfLines={1}>{item.title}</Text>
                     <View style={styles.statusContainer}>
                         {item.state === 'running' && (
                             <ActivityIndicator size={Platform.OS === 'ios' ? "small" : 14 as any} color={theme.colors.warning} />
@@ -124,7 +137,8 @@ export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages })
                         )}
                     </View>
                 </View>
-            ))}
+                );
+            })}
             {remainingCount > 0 && (
                 <View style={styles.moreToolsItem}>
                     <Text style={styles.moreToolsText}>
@@ -133,7 +147,7 @@ export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages })
                 </View>
             )}
             {lastAgentText != null && (
-                <Text style={styles.summaryText} numberOfLines={4}>
+                <Text style={styles.summaryText} numberOfLines={compact ? 4 : undefined}>
                     {lastAgentText}
                 </Text>
             )}

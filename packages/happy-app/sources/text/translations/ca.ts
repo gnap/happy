@@ -287,7 +287,8 @@ export const ca: TranslationStructure = {
             notGitRepo: 'Els worktrees requereixen un repositori git',
             failed: ({ error }: { error: string }) => `Error en crear el worktree: ${error}`,
             success: 'Worktree creat amb èxit',
-        }
+        },
+        sessionReadyMessage: 'Sessió llesta. Toca-la a la llista per obrir-la.',
     },
 
     sessionHistory: {

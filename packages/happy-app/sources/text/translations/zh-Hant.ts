@@ -288,7 +288,8 @@ export const zhHant: TranslationStructure = {
             notGitRepo: 'Worktree 需要 git 倉庫',
             failed: ({ error }: { error: string }) => `建立 worktree 失敗：${error}`,
             success: 'Worktree 建立成功',
-        }
+        },
+        sessionReadyMessage: '工作階段已就緒，在列表中點擊即可開啟。',
     },
 
     sessionHistory: {

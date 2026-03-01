@@ -302,7 +302,8 @@ export const en: TranslationStructure = {
             notGitRepo: 'Worktrees require a git repository',
             failed: ({ error }: { error: string }) => `Failed to create worktree: ${error}`,
             success: 'Worktree created successfully',
-        }
+        },
+        sessionReadyMessage: 'Session ready. Tap it in the list to open.',
     },
 
     sessionHistory: {

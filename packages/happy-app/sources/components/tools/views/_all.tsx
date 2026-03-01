@@ -23,6 +23,8 @@ export type ToolViewProps = {
     metadata: Metadata | null;
     messages: Message[];
     sessionId?: string;
+    /** When true, used in session card: truncate summary (e.g. numberOfLines). When false/undefined, used in detail: show full content. */
+    compact?: boolean;
 }
 
 // Type for tool view components
@@ -50,7 +52,8 @@ export const toolViewRegistry: Record<string, ToolViewComponent> = {
 export const toolFullViewRegistry: Record<string, ToolViewComponent> = {
     Bash: BashViewFull,
     Edit: EditViewFull,
-    MultiEdit: MultiEditViewFull
+    MultiEdit: MultiEditViewFull,
+    Task: TaskView, // Task output is in children (sidechain agent-text), not tool.result
 };
 
 // Helper function to get the appropriate view component for a tool

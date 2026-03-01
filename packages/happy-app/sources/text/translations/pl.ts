@@ -298,7 +298,8 @@ export const pl: TranslationStructure = {
             notGitRepo: 'Worktree wymaga repozytorium git',
             failed: ({ error }: { error: string }) => `Nie udało się utworzyć worktree: ${error}`,
             success: 'Worktree został utworzony pomyślnie',
-        }
+        },
+        sessionReadyMessage: 'Sesja gotowa. Dotknij jej na liście, aby otworzyć.',
     },
 
     sessionHistory: {
