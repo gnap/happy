@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { TokenStorage, AuthCredentials } from '@/auth/tokenStorage';
 import { syncCreate } from '@/sync/sync';
+import { clearAllMessageCaches } from '@/sync/cache/messageCache';
 import * as Updates from 'expo-updates';
 import { clearPersistence } from '@/sync/persistence';
 import { Platform } from 'react-native';
@@ -39,6 +40,7 @@ export function AuthProvider({ children, initialCredentials }: { children: React
     const logout = async () => {
         trackLogout();
         clearPersistence();
+        await clearAllMessageCaches();
         await TokenStorage.removeCredentials();
         
         // Update React state to ensure UI consistency

@@ -1,0 +1,149 @@
+/**
+ * Message Cache Service
+ *
+ * High-level orchestration for the session message cache. Only active for
+ * Cursor agent sessions (flavor === 'cursor'). Other agents are intentionally
+ * excluded because their message formats or session lifecycles differ.
+ *
+ * Responsibilities:
+ *  - Determine whether caching is enabled for a session
+ *  - Load cached messages + ReducerState on cold start
+ *  - Save updated messages + ReducerState after each fetch cycle
+ *  - Clear the cache for a single session (rebuild) or all sessions (logout)
+ */
+
+import { getSessionCacheDB } from './sessionCacheDB';
+import {
+    serializeReducerStateToJson,
+    deserializeReducerStateOrCreate,
+    SERIALIZER_SCHEMA_VERSION,
+} from './reducerStateSerializer';
+import type { ReducerState } from '../reducer/reducer';
+import type { Message } from '../typesMessage';
+import type { Session } from '../storageTypes';
+import { log } from '@/log';
+
+// ---------------------------------------------------------------------------
+// Guard: only Cursor sessions use the cache
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true if the message cache should be used for this session.
+ * Currently restricted to sessions with flavor === 'cursor'.
+ */
+export function isCacheEnabled(session: Session | null | undefined): boolean {
+    return session?.metadata?.flavor === 'cursor';
+}
+
+// ---------------------------------------------------------------------------
+// Loaded cache result
+// ---------------------------------------------------------------------------
+
+export interface LoadedCache {
+    messages: Message[];
+    reducerState: ReducerState;
+    lastSeq: number;
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/**
+ * Try to load the cached messages and reducer state for a session.
+ * Returns null if the cache is empty, stale, or disabled for this session.
+ */
+export async function loadMessageCache(session: Session): Promise<LoadedCache | null> {
+    if (!session) {
+        log.log('📦 messageCache: skip load (no session)');
+        return null;
+    }
+    if (!isCacheEnabled(session)) {
+        log.log(`📦 messageCache: skip load for ${session.id} (flavor=${session.metadata?.flavor ?? 'none'}, not cursor)`);
+        return null;
+    }
+
+    try {
+        const db = getSessionCacheDB();
+        const cacheRow = await db.getSessionCache(session.id);
+        if (!cacheRow) {
+            log.log(`📦 messageCache: no cache row for ${session.id}`);
+            return null;
+        }
+
+        if (cacheRow.schemaVersion !== SERIALIZER_SCHEMA_VERSION) {
+            log.log(`📦 messageCache: schema mismatch for ${session.id}, clearing stale cache`);
+            await db.clearSessionCache(session.id);
+            return null;
+        }
+
+        const messages = await db.getSessionMessages(session.id);
+        const reducerState = deserializeReducerStateOrCreate(cacheRow.reducerStateJson);
+
+        log.log(`📦 messageCache: loaded ${messages.length} messages for ${session.id} (lastSeq=${cacheRow.lastSeq})`);
+        return { messages, reducerState, lastSeq: cacheRow.lastSeq };
+    } catch (err) {
+        log.log(`📦 messageCache: load error for ${session.id}: ${err}`);
+        return null;
+    }
+}
+
+/**
+ * Persist the current messages and reducer state for a session after a fetch cycle.
+ * No-op if caching is disabled for this session.
+ */
+export async function saveMessageCache(
+    session: Session,
+    messages: Message[],
+    reducerState: ReducerState,
+    lastSeq: number,
+): Promise<void> {
+    if (!isCacheEnabled(session)) {
+        log.log(`📦 messageCache: skip save for ${session.id} (flavor=${session.metadata?.flavor ?? 'none'}, not cursor)`);
+        return;
+    }
+
+    try {
+        const db = getSessionCacheDB();
+        await db.saveSessionCache(
+            {
+                sessionId: session.id,
+                lastSeq,
+                schemaVersion: SERIALIZER_SCHEMA_VERSION,
+                cachedAt: Date.now(),
+                reducerStateJson: serializeReducerStateToJson(reducerState),
+            },
+            messages,
+        );
+        log.log(`📦 messageCache: saved ${messages.length} messages for ${session.id} (lastSeq=${lastSeq})`);
+    } catch (err) {
+        log.log(`📦 messageCache: save error for ${session.id}: ${err}`);
+    }
+}
+
+/**
+ * Clear the cache for a single session. Used by "Rebuild Message Cache" and
+ * when a session is deleted.
+ */
+export async function clearMessageCache(sessionId: string): Promise<void> {
+    try {
+        const db = getSessionCacheDB();
+        await db.clearSessionCache(sessionId);
+        log.log(`📦 messageCache: cleared cache for ${sessionId}`);
+    } catch (err) {
+        log.log(`📦 messageCache: clear error for ${sessionId}: ${err}`);
+    }
+}
+
+/**
+ * Clear all session caches. Used on logout.
+ */
+export async function clearAllMessageCaches(): Promise<void> {
+    try {
+        const db = getSessionCacheDB();
+        await db.clearAllCaches();
+        log.log('📦 messageCache: cleared all caches');
+    } catch (err) {
+        log.log(`📦 messageCache: clearAll error: ${err}`);
+    }
+}

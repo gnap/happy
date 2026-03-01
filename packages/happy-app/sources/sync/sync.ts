@@ -40,6 +40,8 @@ import { fetchFeed } from './apiFeed';
 import { FeedItem } from './feedTypes';
 import { UserProfile } from './friendTypes';
 import { resolveMessageModeMeta } from './messageMeta';
+import { loadMessageCache, saveMessageCache, clearMessageCache, clearAllMessageCaches } from './cache/messageCache';
+import { overrideSessionCacheDB, MemorySessionCacheDB } from './cache/sessionCacheDB';
 
 type V3GetSessionMessagesResponse = {
     messages: ApiMessage[];
@@ -104,6 +106,11 @@ class Sync {
     private lastRecalculationTime = 0;
 
     constructor() {
+        // On web, expo-sqlite is unavailable – use in-memory cache instead
+        if (Platform.OS === 'web') {
+            overrideSessionCacheDB(new MemorySessionCacheDB());
+        }
+
         this.sessionsSync = new InvalidateSync(this.fetchSessions);
         this.settingsSync = new InvalidateSync(this.syncSettings);
         this.profileSync = new InvalidateSync(this.fetchProfile);
@@ -236,6 +243,26 @@ class Sync {
         if (session) {
             voiceHooks.onSessionFocus(sessionId, session.metadata || undefined);
         }
+    }
+
+    /**
+     * Clear the local message cache for a session and trigger a full refetch.
+     * Only meaningful for Cursor sessions; safe to call on any session.
+     */
+    rebuildMessageCache = async (sessionId: string): Promise<void> => {
+        log.log(`🔄 rebuildMessageCache: clearing cache for ${sessionId}`);
+
+        // Clear the persisted cache
+        await clearMessageCache(sessionId);
+
+        // Reset in-memory seq so the next fetch starts from 0
+        this.sessionLastSeq.delete(sessionId);
+
+        // Clear the in-memory Zustand messages so the UI shows a loading state
+        storage.getState().deleteSessionMessages(sessionId);
+
+        // Trigger a fresh full fetch
+        this.onSessionVisible(sessionId);
     }
 
     private getMessagesSync(sessionId: string): InvalidateSync {
@@ -1600,6 +1627,18 @@ class Sync {
                 throw new Error(`Session encryption not ready for ${sessionId}`);
             }
 
+            // --- Cache: cold-start hydration (Cursor sessions only) ---
+            const session = storage.getState().sessions[sessionId];
+            const existingSessionMessages = storage.getState().sessionMessages[sessionId];
+            if (!existingSessionMessages?.isLoaded) {
+                const cached = await loadMessageCache(session);
+                if (cached) {
+                    storage.getState().applyHydratedCache(sessionId, cached.messages, cached.reducerState);
+                    this.sessionLastSeq.set(sessionId, cached.lastSeq);
+                    log.log(`💬 fetchMessages: hydrated from cache for ${sessionId} (lastSeq=${cached.lastSeq})`);
+                }
+            }
+
             let afterSeq = this.sessionLastSeq.get(sessionId) ?? 0;
             let hasMore = true;
             let totalNormalized = 0;
@@ -1646,8 +1685,31 @@ class Sync {
                 afterSeq = maxSeq;
             }
 
+            // Process any enqueued messages inline while we still hold the lock, so that
+            // applyMessagesLoaded sees the final state (avoids showing "loaded" with no messages).
+            const pending = this.sessionMessageQueue.get(sessionId);
+            if (pending && pending.length > 0) {
+                const batch = pending.splice(0, pending.length);
+                this.applyMessages(sessionId, batch);
+                this.sessionQueueProcessing.delete(sessionId);
+            }
+
             storage.getState().applyMessagesLoaded(sessionId);
             log.log(`💬 fetchMessages completed for session ${sessionId} - processed ${totalNormalized} messages`);
+
+            // --- Cache: persist updated state after successful fetch ---
+            // We re-read session here (metadata might have arrived after init)
+            const updatedSession = storage.getState().sessions[sessionId];
+            const sessionMsgs = storage.getState().sessionMessages[sessionId];
+            if (updatedSession && sessionMsgs) {
+                const finalSeq = this.sessionLastSeq.get(sessionId) ?? 0;
+                void saveMessageCache(
+                    updatedSession,
+                    sessionMsgs.messages,
+                    sessionMsgs.reducerState,
+                    finalSeq,
+                );
+            }
         });
     }
 
@@ -1851,6 +1913,9 @@ class Sync {
             this.sessionMessageLocks.delete(sessionId);
             this.sessionMessageQueue.delete(sessionId);
             this.sessionQueueProcessing.delete(sessionId);
+
+            // Clear local message cache for the deleted session
+            void clearMessageCache(sessionId);
 
             log.log(`🗑️ Session ${sessionId} deleted from local storage`);
         } else if (updateData.body.t === 'update-session') {

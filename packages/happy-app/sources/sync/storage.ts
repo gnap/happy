@@ -103,6 +103,7 @@ interface StorageState {
     applyReady: () => void;
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => { changed: string[], hasReadyEvent: boolean };
     applyMessagesLoaded: (sessionId: string) => void;
+    applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState) => void;
     applySettings: (settings: Settings, version: number) => void;
     applySettingsLocal: (settings: Partial<Settings>) => void;
     applyLocalSettings: (settings: Partial<LocalSettings>) => void;
@@ -125,6 +126,7 @@ interface StorageState {
     updateArtifact: (artifact: DecryptedArtifact) => void;
     deleteArtifact: (artifactId: string) => void;
     deleteSession: (sessionId: string) => void;
+    deleteSessionMessages: (sessionId: string) => void;
     // Project management methods
     getProjects: () => import('./projectManager').Project[];
     getProject: (projectId: string) => import('./projectManager').Project | null;
@@ -636,6 +638,26 @@ export const storage = create<StorageState>()((set, get) => {
 
             return result;
         }),
+        applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState) => set((state) => {
+            const messagesMap: Record<string, Message> = {};
+            for (const msg of messages) {
+                messagesMap[msg.id] = msg;
+            }
+            const sorted = [...messages].sort((a, b) => b.createdAt - a.createdAt);
+
+            return {
+                ...state,
+                sessionMessages: {
+                    ...state.sessionMessages,
+                    [sessionId]: {
+                        messages: sorted,
+                        messagesMap,
+                        reducerState,
+                        isLoaded: true,
+                    } satisfies SessionMessages,
+                },
+            };
+        }),
         applySettingsLocal: (settings: Partial<Settings>) => set((state) => {
             saveSettings(applySettings(state.settings, settings), state.settingsVersion ?? 0);
             return {
@@ -920,6 +942,10 @@ export const storage = create<StorageState>()((set, get) => {
                 ...state,
                 artifacts: remainingArtifacts
             };
+        }),
+        deleteSessionMessages: (sessionId: string) => set((state) => {
+            const { [sessionId]: _deleted, ...remaining } = state.sessionMessages;
+            return { ...state, sessionMessages: remaining };
         }),
         deleteSession: (sessionId: string) => set((state) => {
             // Remove session from sessions

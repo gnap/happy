@@ -8,6 +8,7 @@ import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Avatar } from '@/components/Avatar';
 import { useSession, useIsDataReady } from '@/sync/storage';
+import { sync } from '@/sync/sync';
 import { getSessionName, useSessionStatus, formatOSPlatform, formatPathRelativeToHome, getSessionAvatarId } from '@/utils/sessionUtils';
 import * as Clipboard from 'expo-clipboard';
 import { Modal } from '@/modal';
@@ -200,6 +201,25 @@ function SessionInfoContent({ session }: { session: Session }) {
         );
     }, [performDelete]);
 
+    const [rebuildingCache, performRebuildCache] = useHappyAction(async () => {
+        await sync.rebuildMessageCache(session.id);
+    });
+
+    const handleRebuildMessageCache = useCallback(() => {
+        Modal.alert(
+            t('sessionInfo.rebuildMessageCache'),
+            t('sessionInfo.rebuildMessageCacheConfirm'),
+            [
+                { text: t('common.cancel'), style: 'cancel' },
+                {
+                    text: t('sessionInfo.rebuildMessageCache'),
+                    style: 'destructive',
+                    onPress: performRebuildCache
+                }
+            ]
+        );
+    }, [performRebuildCache]);
+
     const formatDate = useCallback((timestamp: number) => {
         return new Date(timestamp).toLocaleString();
     }, []);
@@ -331,6 +351,14 @@ function SessionInfoContent({ session }: { session: Session }) {
                             subtitle={t('sessionInfo.deleteSessionSubtitle')}
                             icon={<Ionicons name="trash-outline" size={29} color="#FF3B30" />}
                             onPress={handleDeleteSession}
+                        />
+                    )}
+                    {session.metadata?.flavor === 'cursor' && (
+                        <Item
+                            title={t('sessionInfo.rebuildMessageCache')}
+                            subtitle={t('sessionInfo.rebuildMessageCacheSubtitle')}
+                            icon={<Ionicons name="refresh-outline" size={29} color="#FF9500" />}
+                            onPress={handleRebuildMessageCache}
                         />
                     )}
                 </ItemGroup>
