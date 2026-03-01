@@ -55,9 +55,14 @@ const CURSOR_SESSION_KEY_FILE = 'cursor-session-key';
  * Map Cursor tool name/args to Codex/app shape so the mobile app shows readable titles
  * instead of a raw object (e.g. CodexBash → "$ command", Read → file path).
  */
-/** Format tool result for session protocol (ev.t 'text') so old client can show it. */
+/** Format tool result for session protocol (ev.t 'text'). Returns '' for system/empty so new App does not show raw JSON bubbles. */
 function formatToolResultForSession(output: unknown): string {
   if (typeof output === 'string') return output;
+  if (output !== null && typeof output === 'object') {
+    const o = output as Record<string, unknown>;
+    if (o.turnEnded === true || o.aborted === true || o.runningInBackground === true) return '';
+    if ('stdout' in o && o.stdout === '' && (!('stderr' in o) || o.stderr === '')) return '';
+  }
   try {
     return JSON.stringify(output);
   } catch {
@@ -582,7 +587,8 @@ export async function runCursor(opts: {
                 logger.debug(`[cursor] codex/cursor tool-call-result callId=${msg.callId.slice(0, 8)}... (timeout)`);
                 session.sendCodexMessage(timeoutResultPayload);
                 session.sendCursorMessage(timeoutResultPayload);
-                session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: formatToolResultForSession(bgResult) }, { turn: turnId }));
+                const timeoutText = formatToolResultForSession(bgResult);
+                if (timeoutText) session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: timeoutText }, { turn: turnId }));
                 session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId }, { turn: turnId }));
               }, perToolTimeoutMs);
               toolCallTimeoutHandles.set(msg.callId, handle);
@@ -609,7 +615,8 @@ export async function runCursor(opts: {
               logger.debug(`[cursor] codex/cursor tool-call-result callId=${msg.callId.slice(0, 8)}... success=${msg.success}`);
               session.sendCodexMessage(resultPayload);
               session.sendCursorMessage(resultPayload);
-              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: formatToolResultForSession(msg.result) }, { turn: turnId }));
+              const resultTextFormatted = formatToolResultForSession(msg.result);
+              if (resultTextFormatted) session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: resultTextFormatted }, { turn: turnId }));
               session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId }, { turn: turnId }));
               session.flush().catch(() => {});
               break;
@@ -635,7 +642,8 @@ export async function runCursor(opts: {
                 logger.debug(`[cursor] codex/cursor tool-call-result callId=${callId.slice(0, 8)}... (turn ended)`);
                 session.sendCodexMessage(turnEndPayload);
                 session.sendCursorMessage(turnEndPayload);
-                session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: formatToolResultForSession(turnEndedResult) }, { turn: turnId }));
+                const turnEndText = formatToolResultForSession(turnEndedResult);
+                if (turnEndText) session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: turnEndText }, { turn: turnId }));
                 session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: callId }, { turn: turnId }));
               }
               codexIdByCallId.clear();
@@ -684,7 +692,8 @@ export async function runCursor(opts: {
           logger.debug(`[cursor] codex/cursor tool-call-result callId=${callId.slice(0, 8)}... (aborted)`);
           session.sendCodexMessage(abortedPayload);
           session.sendCursorMessage(abortedPayload);
-          session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: formatToolResultForSession(abortedResult) }, { turn: turnId }));
+          const abortedText = formatToolResultForSession(abortedResult);
+          if (abortedText) session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: abortedText }, { turn: turnId }));
           session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: callId }, { turn: turnId }));
         }
         const hadPendingToolCalls = codexIdByCallId.size > 0;
