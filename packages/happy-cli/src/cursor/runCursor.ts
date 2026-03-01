@@ -139,17 +139,17 @@ export async function runCursor(opts: {
   startedBy?: 'daemon' | 'terminal';
   /** Workspace root for session, .cursor/mcp.json, and cursor-agent cwd. Defaults to process.cwd(). Set via --cwd or HAPPY_CURSOR_WORKSPACE when running from monorepo so MCP is under repo root. */
   workspaceRoot?: string;
+  /** Resume last session for same workspace (--resume / -r). Default: false (new session). */
+  resumeSession?: boolean;
 }): Promise<void> {
   const workspacePath = opts.workspaceRoot != null ? resolve(opts.workspaceRoot) : process.cwd();
 
-  // Reuse session only when workspace unchanged; workspace change => new session
+  // Default: new session. Resume only with --resume/-r.
   const tagPath = join(configuration.happyHomeDir, CURSOR_SESSION_TAG_FILE);
   const workspacePathFile = join(configuration.happyHomeDir, CURSOR_SESSION_WORKSPACE_FILE);
   let sessionTag: string;
   let tagReused = false;
-  if (process.env.HAPPY_CURSOR_NEW_SESSION === '1') {
-    sessionTag = randomUUID();
-  } else {
+  if (opts.resumeSession) {
     let savedTag: string | null = null;
     let savedWorkspace: string | null = null;
     try {
@@ -165,6 +165,8 @@ export async function runCursor(opts: {
     } else {
       sessionTag = randomUUID();
     }
+  } else {
+    sessionTag = randomUUID();
   }
 
   // Load existing encryption key when reusing session to avoid key mismatch

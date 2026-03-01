@@ -164,14 +164,17 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
     try {
       const { runCursor } = await import('@/cursor/runCursor');
 
-      // Parse cursor options: --started-by, --cwd (workspace root for .cursor/mcp.json and agent cwd)
+      // Parse cursor options: --started-by, --cwd, --resume/-r
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
       let workspaceRoot: string | undefined = process.env.HAPPY_CURSOR_WORKSPACE;
+      let resumeSession = false;
       for (let i = 1; i < args.length; i++) {
         if (args[i] === '--started-by') {
           startedBy = args[++i] as 'daemon' | 'terminal';
         } else if (args[i] === '--cwd' && args[i + 1]) {
           workspaceRoot = args[++i];
+        } else if (args[i] === '--resume' || args[i] === '-r') {
+          resumeSession = true;
         }
       }
 
@@ -192,7 +195,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
         await new Promise(resolve => setTimeout(resolve, 200));
       }
 
-      await runCursor({ credentials, startedBy, workspaceRoot });
+      await runCursor({ credentials, startedBy, workspaceRoot, resumeSession });
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
       if (process.env.DEBUG) {
