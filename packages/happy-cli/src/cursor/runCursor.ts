@@ -172,7 +172,7 @@ export async function runCursor(opts: {
   //
 
   const { state, metadata } = createSessionMetadata({
-    flavor: 'codex', // Disguised as codex until mobile app supports 'cursor'
+    flavor: 'cursor',
     machineId,
     startedBy: opts.startedBy,
     path: workspacePath,
