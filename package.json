@@ -5,8 +5,7 @@
         "cli": "yarn workspace happy-coder cli",
         "release": "node ./scripts/release.cjs",
         "web": "yarn workspace happy-app web",
-        "postinstall": "patch-package && node ./scripts/postinstall.cjs",
-        "start:api-proxy": "node ./scripts/api-cors-proxy.js"
+        "postinstall": "patch-package && node ./scripts/postinstall.cjs"
     },
     "workspaces": {
         "packages": [
