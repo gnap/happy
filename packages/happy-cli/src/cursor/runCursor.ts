@@ -294,7 +294,7 @@ export async function runCursor(opts: {
 
   async function handleAbort() {
     logger.debug('[Cursor] Abort requested');
-    session.sendCodexMessage( {
+    session.sendCursorMessage( {
       type: 'turn_aborted',
       id: randomUUID(),
     });
@@ -425,7 +425,7 @@ export async function runCursor(opts: {
 
       const flushAccumulatedText = () => {
         if (accumulatedResponse.trim()) {
-          session.sendCodexMessage({
+          session.sendCursorMessage({
             type: 'message',
             message: accumulatedResponse,
           });
@@ -438,7 +438,7 @@ export async function runCursor(opts: {
         session.keepAlive(thinking, 'remote');
 
         // Send task_started (codex) and turn-start (session protocol) so mobile starts timer
-        session.sendCodexMessage( {
+        session.sendCursorMessage( {
           type: 'task_started',
           id: randomUUID(),
         });
@@ -498,7 +498,7 @@ export async function runCursor(opts: {
 
             case 'thinking_delta':
               messageBuffer.updateLastMessage(`[Thinking] ${msg.text.slice(0, 100)}...`, 'system');
-              session.sendCodexMessage( {
+              session.sendCursorMessage( {
                 type: 'thinking',
                 text: msg.text,
               });
@@ -516,7 +516,7 @@ export async function runCursor(opts: {
               const { codexName, codexInput } = toCodexToolShape(msg.toolName, msg.args);
               const codexId = randomUUID();
               codexIdByCallId.set(msg.callId, codexId);
-              session.sendCodexMessage( {
+              session.sendCursorMessage( {
                 type: 'tool-call',
                 name: codexName,
                 callId: msg.callId,
@@ -544,7 +544,7 @@ export async function runCursor(opts: {
                 logger.debug(`[cursor] Per-tool timeout for ${msg.callId.slice(0, 8)}... – sending tool_call_end (running in background)`);
                 messageBuffer.addMessage('Still running (timer stopped)', 'result');
                 if (bgCodexId) {
-                  session.sendCodexMessage( { type: 'tool-call-result', callId: msg.callId, output: bgResult, id: bgCodexId } );
+                  session.sendCursorMessage( { type: 'tool-call-result', callId: msg.callId, output: bgResult, id: bgCodexId } );
                 }
                 session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId }, { turn: turnId }));
               }, perToolTimeoutMs);
@@ -567,7 +567,7 @@ export async function runCursor(opts: {
               );
               const sameId = codexIdByCallId.get(msg.callId) ?? randomUUID();
               codexIdByCallId.delete(msg.callId);
-              session.sendCodexMessage( {
+              session.sendCursorMessage( {
                 type: 'tool-call-result',
                 callId: msg.callId,
                 output: msg.result,
@@ -592,7 +592,7 @@ export async function runCursor(opts: {
               for (const [callId, codexId] of codexIdByCallId) {
                 logger.debug(`[cursor] Closing pending tool call ${callId} (turn completed without tool end)`);
                 messageBuffer.addMessage('Ended (turn completed)', 'result');
-                session.sendCodexMessage( {
+                session.sendCursorMessage( {
                   type: 'tool-call-result',
                   callId,
                   output: turnEndedResult,
@@ -605,7 +605,7 @@ export async function runCursor(opts: {
 
             case 'error':
               messageBuffer.addMessage(`Error: ${msg.message}`, 'status');
-              session.sendCodexMessage( {
+              session.sendCursorMessage( {
                 type: 'message',
                 message: `Error: ${msg.message}`,
               });
@@ -623,12 +623,12 @@ export async function runCursor(opts: {
         turnEndStatus = isAbortError ? 'cancelled' : 'failed';
         if (isAbortError) {
           messageBuffer.addMessage('Aborted by user', 'status');
-          session.sendCodexMessage({ type: 'message', message: 'Aborted by user' });
+          session.sendCursorMessage({ type: 'message', message: 'Aborted by user' });
         } else {
           const errorMsg = error instanceof Error ? error.message : 'Process error';
           logger.debug('[cursor] Error:', error);
           messageBuffer.addMessage(errorMsg, 'status');
-          session.sendCodexMessage( {
+          session.sendCursorMessage( {
             type: 'message',
             message: errorMsg,
           });
@@ -643,7 +643,7 @@ export async function runCursor(opts: {
         for (const [callId, codexId] of codexIdByCallId) {
           logger.debug(`[cursor] Closing pending tool call ${callId} (no end from cursor-agent)`);
           messageBuffer.addMessage('Ended without result (aborted or exited)', 'result');
-          session.sendCodexMessage( {
+          session.sendCursorMessage( {
             type: 'tool-call-result',
             callId,
             output: abortedResult,
@@ -656,7 +656,7 @@ export async function runCursor(opts: {
 
         const status: 'completed' | 'failed' | 'cancelled' =
           turnCompletedNormally ? 'completed' : (hadPendingToolCalls ? 'failed' : turnEndStatus);
-        session.sendCodexMessage( {
+        session.sendCursorMessage( {
           type: 'task_complete',
           id: randomUUID(),
         });
