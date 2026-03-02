@@ -5,25 +5,50 @@ const config = getDefaultConfig(__dirname, {
   isCSSEnabled: true,
 });
 
-// Decode pathname so asset URLs like /assets/.%2Fsources%2F... resolve correctly (ENOENT on brutalist dir).
+// Decode pathname and unstable_path so asset URLs like /assets/.%2Fsources%2F... resolve correctly (ENOENT on brutalist dir).
+// When asset path comes from query param unstable_path, Metro does not decode it; undecoded path crashes Metro (uncaught ENOENT).
 const expoRewrite = config.server.rewriteRequestUrl;
+function safeDecodeSegment(seg) {
+  let s = seg;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const n = decodeURIComponent(s);
+      if (n === s) break;
+      s = n;
+    } catch {
+      break;
+    }
+  }
+  return s;
+}
 function decodeAssetPath(url) {
   try {
     const base = url.startsWith("/") ? "http://localhost" : undefined;
     const u = new URL(url, base);
-    let decoded = u.pathname
-      .split("/")
-      .map((seg) => {
-        try {
-          return decodeURIComponent(seg);
-        } catch {
-          return seg;
-        }
-      })
-      .join("/");
-    // Normalize /assets/./sources/... -> /assets/sources/...
+    // Multi-pass decode so double-encoded paths (e.g. .%252F) resolve; then normalize /.\//
+    let decoded = u.pathname;
+    for (let i = 0; i < 3; i++) {
+      const next = decoded.split("/").map(safeDecodeSegment).join("/");
+      if (next === decoded) break;
+      decoded = next;
+    }
     decoded = decoded.replace(/\/\.\//g, "/");
-    const search = u.search || "";
+    let search = u.search || "";
+    const unstablePath = u.searchParams.get("unstable_path");
+    if (unstablePath) {
+      try {
+        let decodedPath = unstablePath;
+        for (let i = 0; i < 3; i++) {
+          const n = decodeURIComponent(decodedPath);
+          if (n === decodedPath) break;
+          decodedPath = n;
+        }
+        u.searchParams.set("unstable_path", decodedPath);
+        search = "?" + u.searchParams.toString();
+      } catch {
+        // keep search unchanged
+      }
+    }
     const hash = u.hash || "";
     url = url.startsWith("/") ? decoded + search + hash : u.origin + decoded + search + hash;
   } catch {
