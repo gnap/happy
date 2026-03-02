@@ -1838,13 +1838,13 @@ class Sync {
                         console.log(`🔄 [Sync] Updating thinking state: isTaskComplete=${isTaskComplete}, isTaskStarted=${isTaskStarted}`);
                     }
 
-                    // Update session
+                    // Update session (use body.message.seq = session-internal seq, same as GET /v1/sessions; do not use updateData.seq which is global user seq)
                     const session = storage.getState().sessions[updateData.body.sid];
                     if (session) {
                         this.applySessions([{
                             ...session,
                             updatedAt: updateData.createdAt,
-                            seq: updateData.seq,
+                            seq: updateData.body.message.seq,
                             // Update thinking state based on task lifecycle events
                             ...(isTaskComplete ? { thinking: false } : {}),
                             ...(isTaskStarted ? { thinking: true } : {})
@@ -1921,6 +1921,7 @@ class Sync {
                     ? await sessionEncryption.decryptMetadata(updateData.body.metadata.version, updateData.body.metadata.value)
                     : session.metadata;
 
+                // Do not set seq from updateData.seq (global); keep session.seq as session-internal so it matches GET /v1/sessions
                 this.applySessions([{
                     ...session,
                     agentState,
@@ -1931,8 +1932,7 @@ class Sync {
                     metadataVersion: updateData.body.metadata
                         ? updateData.body.metadata.version
                         : session.metadataVersion,
-                    updatedAt: updateData.createdAt,
-                    seq: updateData.seq
+                    updatedAt: updateData.createdAt
                 }]);
 
                 // Invalidate git status when agent state changes (files may have been modified)

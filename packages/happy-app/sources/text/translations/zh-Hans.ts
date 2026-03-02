@@ -356,6 +356,7 @@ export const zhHans: TranslationStructure = {
         created: '创建时间',
         lastUpdated: '最后更新',
         sequence: '序列',
+        sequenceSubtitle: '会话内消息序列（仅在本会话内单调递增；与服务端 Session.seq 一致）',
         quickActions: '快速操作',
         viewMachine: '查看设备',
         viewMachineSubtitle: '查看设备详情和会话',

@@ -355,6 +355,7 @@ export const zhHant: TranslationStructure = {
         created: '建立時間',
         lastUpdated: '最後更新',
         sequence: '序列',
+        sequenceSubtitle: '會話內消息序列（僅在本會話內單調遞增；與服務端 Session.seq 一致）',
         quickActions: '快速操作',
         viewMachine: '查看裝置',
         viewMachineSubtitle: '查看裝置詳情和工作階段',

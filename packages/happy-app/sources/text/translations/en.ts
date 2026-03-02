@@ -369,6 +369,7 @@ export const en: TranslationStructure = {
         created: 'Created',
         lastUpdated: 'Last Updated',
         sequence: 'Sequence',
+        sequenceSubtitle: 'Session-internal message seq (monotonic per session; same as server Session.seq)',
         quickActions: 'Quick Actions',
         viewMachine: 'View Machine',
         viewMachineSubtitle: 'View machine details and sessions',

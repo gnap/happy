@@ -301,6 +301,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                     />
                     <Item
                         title={t('sessionInfo.sequence')}
+                        subtitle={t('sessionInfo.sequenceSubtitle')}
                         detail={session.seq.toString()}
                         icon={<Ionicons name="git-commit-outline" size={29} color="#007AFF" />}
                         showChevron={false}
