@@ -40,7 +40,7 @@ import { fetchFeed } from './apiFeed';
 import { FeedItem } from './feedTypes';
 import { UserProfile } from './friendTypes';
 import { resolveMessageModeMeta } from './messageMeta';
-import { loadMessageCache, saveMessageCache, clearMessageCache, clearAllMessageCaches, preloadSessionCacheDB } from './cache/messageCache';
+import { loadMessageCache, saveMessageCache, clearMessageCache, clearAllMessageCaches, preloadSessionCacheDB, getCachedLastSeq } from './cache/messageCache';
 import { overrideSessionCacheDB, MemorySessionCacheDB } from './cache/sessionCacheDB';
 
 type V3GetSessionMessagesResponse = {
@@ -821,6 +821,22 @@ class Sync {
             this.applySessions(decryptedSessions);
             log.log(`📥 fetchSessions completed - processed ${decryptedSessions.length} sessions`);
             this._loggedMissingSessionForSid.clear();
+
+            // When cached lastSeq < session.seq, trigger message fetch so cache catches up
+            void (async () => {
+                for (const session of decryptedSessions) {
+                    if (session.metadata?.flavor !== 'cursor') continue;
+                    try {
+                        const cached = await getCachedLastSeq(session.id);
+                        if (cached != null && cached < session.seq) {
+                            log.log(`📥 fetchSessions: cached lastSeq ${cached} < session.seq ${session.seq} for ${session.id}, invalidating message sync`);
+                            this.getMessagesSync(session.id).invalidate();
+                        }
+                    } catch (e) {
+                        log.log(`📥 fetchSessions: getCachedLastSeq for ${session.id}: ${e}`);
+                    }
+                }
+            })();
         } catch (err) {
             log.log(`📥 fetchSessions failed: ${err instanceof Error ? err.message : String(err)}`);
             // Apply empty list so UI shows empty state instead of endless spinner
@@ -1741,7 +1757,13 @@ class Sync {
 
                     if (normalizedMessages.length > 0) {
                         totalNormalized += normalizedMessages.length;
-                        this.enqueueMessages(sessionId, normalizedMessages);
+                        this.applyMessages(sessionId, normalizedMessages);
+                        // Persist cache after each page so UI (e.g. session info "已缓存最新 seq") can show progress in real time.
+                        const pageSession = storage.getState().sessions[sessionId];
+                        const pageMsgs = storage.getState().sessionMessages[sessionId];
+                        if (pageSession && pageMsgs) {
+                            void saveMessageCache(pageSession, pageMsgs.messages, pageMsgs.reducerState, maxSeq);
+                        }
                     }
 
                     this.sessionLastSeq.set(sessionId, maxSeq);
@@ -1752,15 +1774,6 @@ class Sync {
                         break;
                     }
                     afterSeq = maxSeq;
-                }
-
-                // Process any enqueued messages inline while we still hold the lock, so that
-                // applyMessagesLoaded sees the final state (avoids showing "loaded" with no messages).
-                const pending = this.sessionMessageQueue.get(sessionId);
-                if (pending && pending.length > 0) {
-                    const batch = pending.splice(0, pending.length);
-                    this.applyMessages(sessionId, batch);
-                    this.sessionQueueProcessing.delete(sessionId);
                 }
 
                 log.log(`💬 fetchMessages completed for session ${sessionId} - processed ${totalNormalized} messages`);

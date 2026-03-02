@@ -117,6 +117,31 @@ export async function loadMessageCache(session: Session): Promise<LoadedCache | 
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cache progress subscription (for UI to show real-time "已缓存最新 seq")
+// ---------------------------------------------------------------------------
+
+export type CachedLastSeqListener = (sessionId: string, lastSeq: number | null) => void;
+const cachedLastSeqListeners: CachedLastSeqListener[] = [];
+
+export function subscribeToCachedLastSeq(listener: CachedLastSeqListener): () => void {
+    cachedLastSeqListeners.push(listener);
+    return () => {
+        const i = cachedLastSeqListeners.indexOf(listener);
+        if (i !== -1) cachedLastSeqListeners.splice(i, 1);
+    };
+}
+
+function notifyCachedLastSeq(sessionId: string, lastSeq: number | null): void {
+    for (const fn of cachedLastSeqListeners) {
+        try {
+            fn(sessionId, lastSeq);
+        } catch (e) {
+            log.log(`📦 messageCache: listener error: ${e}`);
+        }
+    }
+}
+
 /**
  * Return the cached lastSeq for a session (from DB), or null if no cache row.
  * Used by UI to show "已缓存最新 seq" in rebuild-cache quick action.
@@ -164,6 +189,7 @@ export async function saveMessageCache(
             messages,
         );
         log.log(`📦 messageCache: saved ${messages.length} messages for ${session.id} (lastSeq=${lastSeq})`);
+        notifyCachedLastSeq(session.id, lastSeq);
     } catch (err) {
         log.log(`📦 messageCache: save error for ${session.id}: ${err}`);
     }
@@ -178,6 +204,7 @@ export async function clearMessageCache(sessionId: string): Promise<void> {
         const db = getSessionCacheDB();
         await db.clearSessionCache(sessionId);
         log.log(`📦 messageCache: cleared cache for ${sessionId}`);
+        notifyCachedLastSeq(sessionId, null);
     } catch (err) {
         log.log(`📦 messageCache: clear error for ${sessionId}: ${err}`);
     }

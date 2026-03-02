@@ -21,7 +21,7 @@ import { CodeView } from '@/components/CodeView';
 import { Session } from '@/sync/storageTypes';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { HappyError } from '@/utils/errors';
-import { getCachedLastSeq } from '@/sync/cache/messageCache';
+import { getCachedLastSeq, subscribeToCachedLastSeq } from '@/sync/cache/messageCache';
 
 // Animated status dot component
 function StatusDot({ color, isPulsing, size = 8 }: { color: string; isPulsing?: boolean; size?: number }) {
@@ -209,6 +209,10 @@ function SessionInfoContent({ session }: { session: Session }) {
             return;
         }
         getCachedLastSeq(session.id).then(setCachedLastSeq);
+        const unsubscribe = subscribeToCachedLastSeq((sessionId, lastSeq) => {
+            if (sessionId === session.id) setCachedLastSeq(lastSeq);
+        });
+        return unsubscribe;
     }, [session?.id, session?.metadata?.flavor]);
 
     const [rebuildingCache, performRebuildCache] = useHappyAction(async () => {
@@ -333,7 +337,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                     <Item
                         title={t('sessionInfo.sequence')}
                         subtitle={t('sessionInfo.sequenceSubtitle')}
-                        detail={session.seq.toString()}
+                        detail={cachedLastSeq != null && cachedLastSeq !== session.seq ? `${cachedLastSeq}/${session.seq}` : session.seq.toString()}
                         icon={<Ionicons name="git-commit-outline" size={29} color="#007AFF" />}
                         showChevron={false}
                     />
@@ -368,7 +372,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                     {session.metadata?.flavor === 'cursor' && (
                         <Item
                             title={t('sessionInfo.rebuildMessageCache')}
-                            subtitle={cachedLastSeq != null ? `${t('sessionInfo.rebuildMessageCacheSubtitle')} · ${t('sessionInfo.cachedLastSeq', { seq: cachedLastSeq })}` : t('sessionInfo.rebuildMessageCacheSubtitle')}
+                            subtitle={t('sessionInfo.rebuildMessageCacheSubtitle')}
                             icon={<Ionicons name="refresh-outline" size={29} color="#FF9500" />}
                             onPress={handleRebuildMessageCache}
                         />
