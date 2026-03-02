@@ -1,3 +1,10 @@
+/**
+ * Two distinct seq spaces (do not mix in clients):
+ * - User seq (Account.seq): global per account, used in realtime payload envelope (payload.seq).
+ *   Allocate via allocateUserSeq(accountId). Monotonic across all sessions/artifacts/machines.
+ * - Session seq (Session.seq): per-session message seq. GET /v1/sessions returns Session.seq.
+ *   Realtime new-message sends body.message.seq = this. App should display Session.seq (session-internal), not envelope seq.
+ */
 import { db } from "@/storage/db";
 import type { Prisma } from "@prisma/client";
 

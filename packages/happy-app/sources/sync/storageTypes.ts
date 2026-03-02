@@ -70,6 +70,7 @@ export type AgentState = z.infer<typeof AgentStateSchema>;
 
 export interface Session {
     id: string,
+    /** Session-internal message seq (matches server Session.seq and body.message.seq; do not use envelope seq) */
     seq: number,
     createdAt: number,
     updatedAt: number,
