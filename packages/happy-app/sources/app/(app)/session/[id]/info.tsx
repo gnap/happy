@@ -1,4 +1,4 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { View, Text, Animated } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -21,6 +21,7 @@ import { CodeView } from '@/components/CodeView';
 import { Session } from '@/sync/storageTypes';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { HappyError } from '@/utils/errors';
+import { getCachedLastSeq } from '@/sync/cache/messageCache';
 
 // Animated status dot component
 function StatusDot({ color, isPulsing, size = 8 }: { color: string; isPulsing?: boolean; size?: number }) {
@@ -201,8 +202,18 @@ function SessionInfoContent({ session }: { session: Session }) {
         );
     }, [performDelete]);
 
+    const [cachedLastSeq, setCachedLastSeq] = useState<number | null>(null);
+    useEffect(() => {
+        if (session?.metadata?.flavor !== 'cursor') {
+            setCachedLastSeq(null);
+            return;
+        }
+        getCachedLastSeq(session.id).then(setCachedLastSeq);
+    }, [session?.id, session?.metadata?.flavor]);
+
     const [rebuildingCache, performRebuildCache] = useHappyAction(async () => {
         await sync.rebuildMessageCache(session.id);
+        setCachedLastSeq(null);
     });
 
     const handleRebuildMessageCache = useCallback(() => {
@@ -321,6 +332,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                     />
                     <Item
                         title={t('sessionInfo.sequence')}
+                        subtitle={t('sessionInfo.sequenceSubtitle')}
                         detail={session.seq.toString()}
                         icon={<Ionicons name="git-commit-outline" size={29} color="#007AFF" />}
                         showChevron={false}
@@ -356,7 +368,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                     {session.metadata?.flavor === 'cursor' && (
                         <Item
                             title={t('sessionInfo.rebuildMessageCache')}
-                            subtitle={t('sessionInfo.rebuildMessageCacheSubtitle')}
+                            subtitle={cachedLastSeq != null ? `${t('sessionInfo.rebuildMessageCacheSubtitle')} · ${t('sessionInfo.cachedLastSeq', { seq: cachedLastSeq })}` : t('sessionInfo.rebuildMessageCacheSubtitle')}
                             icon={<Ionicons name="refresh-outline" size={29} color="#FF9500" />}
                             onPress={handleRebuildMessageCache}
                         />

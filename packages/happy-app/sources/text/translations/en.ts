@@ -369,6 +369,7 @@ export const en: TranslationStructure = {
         created: 'Created',
         lastUpdated: 'Last Updated',
         sequence: 'Sequence',
+        sequenceSubtitle: 'Session-internal message seq (monotonic per session; same as server Session.seq)',
         quickActions: 'Quick Actions',
         viewMachine: 'View Machine',
         viewMachineSubtitle: 'View machine details and sessions',
@@ -400,6 +401,7 @@ export const en: TranslationStructure = {
         sessionDeleted: 'Session deleted successfully',
         rebuildMessageCache: 'Rebuild Message Cache',
         rebuildMessageCacheSubtitle: 'Clear cached messages and refetch from server',
+        cachedLastSeq: ({ seq }: { seq: number }) => `Cached last seq: ${seq}`,
         rebuildMessageCacheConfirm: 'This will clear the local message cache and reload all messages from the server. Continue?',
 
     },

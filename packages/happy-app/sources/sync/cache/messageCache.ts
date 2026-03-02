@@ -118,6 +118,25 @@ export async function loadMessageCache(session: Session): Promise<LoadedCache | 
 }
 
 /**
+ * Return the cached lastSeq for a session (from DB), or null if no cache row.
+ * Used by UI to show "已缓存最新 seq" in rebuild-cache quick action.
+ */
+export async function getCachedLastSeq(sessionId: string): Promise<number | null> {
+    try {
+        const db = getSessionCacheDB();
+        const row = await Promise.race([
+            db.getSessionCache(sessionId),
+            new Promise<null>((_, reject) =>
+                setTimeout(() => reject(new Error('timeout')), 3000)
+            ),
+        ]);
+        return row?.lastSeq ?? null;
+    } catch {
+        return null;
+    }
+}
+
+/**
  * Persist the current messages and reducer state for a session after a fetch cycle.
  * No-op if caching is disabled for this session.
  */
