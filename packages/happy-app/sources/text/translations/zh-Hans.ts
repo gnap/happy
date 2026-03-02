@@ -358,6 +358,7 @@ export const zhHans: TranslationStructure = {
         sequence: '序列',
         sequenceSubtitle: '会话内消息序列（仅在本会话内单调递增；与服务端 Session.seq 一致）',
         quickActions: '快速操作',
+        cachedLastSeq: ({ seq }: { seq: number }) => `已缓存最新 seq: ${seq}`,
         viewMachine: '查看设备',
         viewMachineSubtitle: '查看设备详情和会话',
         killSessionSubtitle: '立即终止会话',

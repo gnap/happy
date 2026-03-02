@@ -40,6 +40,8 @@ import { fetchFeed } from './apiFeed';
 import { FeedItem } from './feedTypes';
 import { UserProfile } from './friendTypes';
 import { resolveMessageModeMeta } from './messageMeta';
+import { loadMessageCache, saveMessageCache, clearMessageCache, clearAllMessageCaches, preloadSessionCacheDB, getCachedLastSeq } from './cache/messageCache';
+import { overrideSessionCacheDB, MemorySessionCacheDB } from './cache/sessionCacheDB';
 
 type V3GetSessionMessagesResponse = {
     messages: ApiMessage[];
@@ -108,6 +110,11 @@ class Sync {
     private lastRecalculationTime = 0;
 
     constructor() {
+        // On web, expo-sqlite is unavailable – use in-memory cache instead
+        if (Platform.OS === 'web') {
+            overrideSessionCacheDB(new MemorySessionCacheDB());
+        }
+
         this.sessionsSync = new InvalidateSync(this.fetchSessions);
         this.settingsSync = new InvalidateSync(this.syncSettings);
         this.profileSync = new InvalidateSync(this.fetchProfile);
@@ -188,6 +195,9 @@ class Sync {
     }
 
     async #init() {
+        // Preload session cache DB (expo-sqlite) in background so opening a session doesn't block on first use.
+        // Must not await here or init never completes and UI stays black (setInitState never runs).
+        void preloadSessionCacheDB();
 
         // Subscribe to updates
         this.subscribeToUpdates();
@@ -217,14 +227,25 @@ class Sync {
         this.feedSync.invalidate();
         log.log('🔄 #init: All syncs invalidated, including artifacts');
 
-        // Wait for both sessions and machines to load, then mark as ready
-        Promise.all([
+        // Wait for both sessions and machines to load, then mark as ready.
+        // Use a timeout so we still call applyReady() if fetch keeps failing (e.g. network/401);
+        // otherwise the UI would stay in loading state forever because backoff retries indefinitely.
+        const READY_TIMEOUT_MS = 20_000;
+        const readyPromise = Promise.all([
             this.sessionsSync.awaitQueue(),
             this.machinesSync.awaitQueue()
-        ]).then(() => {
+        ]);
+        const timeoutPromise = new Promise<void>((resolve) => {
+            setTimeout(() => {
+                log.log('🔄 #init: ready timeout reached, applying ready anyway so UI can show');
+                resolve();
+            }, READY_TIMEOUT_MS);
+        });
+        Promise.race([readyPromise, timeoutPromise]).then(() => {
             storage.getState().applyReady();
         }).catch((error) => {
-            console.error('Failed to load initial data:', error);
+            log.log('🔄 #init: initial sync error, applying ready so UI can show:', String(error));
+            storage.getState().applyReady();
         });
     }
 
@@ -240,6 +261,26 @@ class Sync {
         if (session) {
             voiceHooks.onSessionFocus(sessionId, session.metadata || undefined);
         }
+    }
+
+    /**
+     * Clear the local message cache for a session and trigger a full refetch.
+     * Only meaningful for Cursor sessions; safe to call on any session.
+     */
+    rebuildMessageCache = async (sessionId: string): Promise<void> => {
+        log.log(`🔄 rebuildMessageCache: clearing cache for ${sessionId}`);
+
+        // Clear the persisted cache
+        await clearMessageCache(sessionId);
+
+        // Reset in-memory seq so the next fetch starts from 0
+        this.sessionLastSeq.delete(sessionId);
+
+        // Clear the in-memory Zustand messages so the UI shows a loading state
+        storage.getState().deleteSessionMessages(sessionId);
+
+        // Trigger a fresh full fetch
+        this.onSessionVisible(sessionId);
     }
 
     private getMessagesSync(sessionId: string): InvalidateSync {
@@ -691,84 +732,116 @@ class Sync {
     //
 
     private fetchSessions = async () => {
-        if (!this.credentials) return;
-
-        const API_ENDPOINT = getServerUrl();
-        const response = await fetch(`${API_ENDPOINT}/v1/sessions`, {
-            headers: {
-                'Authorization': `Bearer ${this.credentials.token}`,
-                'Content-Type': 'application/json'
-            }
-        });
-
-        if (!response.ok) {
-            throw new Error(`Failed to fetch sessions: ${response.status}`);
+        if (!this.credentials) {
+            log.log('📥 fetchSessions: no credentials, skipping');
+            return;
         }
 
-        const data = await response.json();
-        const sessions = data.sessions as Array<{
-            id: string;
-            tag: string;
-            seq: number;
-            metadata: string;
-            metadataVersion: number;
-            agentState: string | null;
-            agentStateVersion: number;
-            dataEncryptionKey: string | null;
-            active: boolean;
-            activeAt: number;
-            createdAt: number;
-            updatedAt: number;
-            lastMessage: ApiMessage | null;
-        }>;
+        try {
+            const API_ENDPOINT = getServerUrl();
+            log.log(`📥 fetchSessions: GET ${API_ENDPOINT}/v1/sessions`);
+            const response = await fetch(`${API_ENDPOINT}/v1/sessions`, {
+                headers: {
+                    'Authorization': `Bearer ${this.credentials.token}`,
+                    'Content-Type': 'application/json'
+                }
+            });
 
-        // Initialize all session encryptions first
-        const sessionKeys = new Map<string, Uint8Array | null>();
-        for (const session of sessions) {
-            if (session.dataEncryptionKey) {
-                let decrypted = await this.encryption.decryptEncryptionKey(session.dataEncryptionKey);
-                if (!decrypted) {
-                    console.error(`Failed to decrypt data encryption key for session ${session.id}`);
+            if (!response.ok) {
+                const body = await response.text();
+                log.log(`📥 fetchSessions: failed status=${response.status} body=${body.slice(0, 200)}`);
+                throw new Error(`Failed to fetch sessions: ${response.status}`);
+            }
+
+            const data = await response.json();
+            const rawSessions = data.sessions;
+            if (!Array.isArray(rawSessions)) {
+                log.log(`📥 fetchSessions: API did not return sessions array (got ${typeof rawSessions})`);
+            }
+            const sessions = (rawSessions ?? []) as Array<{
+                id: string;
+                tag: string;
+                seq: number;
+                metadata: string;
+                metadataVersion: number;
+                agentState: string | null;
+                agentStateVersion: number;
+                dataEncryptionKey: string | null;
+                active: boolean;
+                activeAt: number;
+                createdAt: number;
+                updatedAt: number;
+                lastMessage: ApiMessage | null;
+            }>;
+
+            // Initialize all session encryptions first
+            const sessionKeys = new Map<string, Uint8Array | null>();
+            for (const session of sessions) {
+                if (session.dataEncryptionKey) {
+                    let decrypted = await this.encryption.decryptEncryptionKey(session.dataEncryptionKey);
+                    if (!decrypted) {
+                        console.error(`Failed to decrypt data encryption key for session ${session.id}`);
+                        continue;
+                    }
+                    sessionKeys.set(session.id, decrypted);
+                } else {
+                    sessionKeys.set(session.id, null);
+                }
+            }
+            await this.encryption.initializeSessions(sessionKeys);
+
+            // Decrypt sessions
+            let decryptedSessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[] = [];
+            for (const session of sessions) {
+                // Get session encryption (should always exist after initialization)
+                const sessionEncryption = this.encryption.getSessionEncryption(session.id);
+                if (!sessionEncryption) {
+                    console.error(`Session encryption not found for ${session.id} - this should never happen`);
                     continue;
                 }
-                sessionKeys.set(session.id, decrypted);
-            } else {
-                sessionKeys.set(session.id, null);
+
+                // Decrypt metadata using session-specific encryption
+                let metadata = await sessionEncryption.decryptMetadata(session.metadataVersion, session.metadata);
+
+                // Decrypt agent state using session-specific encryption
+                let agentState = await sessionEncryption.decryptAgentState(session.agentStateVersion, session.agentState);
+
+                // Put it all together
+                const processedSession = {
+                    ...session,
+                    thinking: false,
+                    thinkingAt: 0,
+                    metadata,
+                    agentState
+                };
+                decryptedSessions.push(processedSession);
             }
+
+            // Apply to storage
+            this.applySessions(decryptedSessions);
+            log.log(`📥 fetchSessions completed - processed ${decryptedSessions.length} sessions`);
+            this._loggedMissingSessionForSid.clear();
+
+            // When cached lastSeq < session.seq, trigger message fetch so cache catches up
+            void (async () => {
+                for (const session of decryptedSessions) {
+                    if (session.metadata?.flavor !== 'cursor') continue;
+                    try {
+                        const cached = await getCachedLastSeq(session.id);
+                        if (cached != null && cached < session.seq) {
+                            log.log(`📥 fetchSessions: cached lastSeq ${cached} < session.seq ${session.seq} for ${session.id}, invalidating message sync`);
+                            this.getMessagesSync(session.id).invalidate();
+                        }
+                    } catch (e) {
+                        log.log(`📥 fetchSessions: getCachedLastSeq for ${session.id}: ${e}`);
+                    }
+                }
+            })();
+        } catch (err) {
+            log.log(`📥 fetchSessions failed: ${err instanceof Error ? err.message : String(err)}`);
+            // Apply empty list so UI shows empty state instead of endless spinner
+            this.applySessions([]);
         }
-        await this.encryption.initializeSessions(sessionKeys);
-
-        // Decrypt sessions
-        let decryptedSessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[] = [];
-        for (const session of sessions) {
-            // Get session encryption (should always exist after initialization)
-            const sessionEncryption = this.encryption.getSessionEncryption(session.id);
-            if (!sessionEncryption) {
-                console.error(`Session encryption not found for ${session.id} - this should never happen`);
-                continue;
-            }
-
-            // Decrypt metadata using session-specific encryption
-            let metadata = await sessionEncryption.decryptMetadata(session.metadataVersion, session.metadata);
-
-            // Decrypt agent state using session-specific encryption
-            let agentState = await sessionEncryption.decryptAgentState(session.agentStateVersion, session.agentState);
-
-            // Put it all together
-            const processedSession = {
-                ...session,
-                thinking: false,
-                thinkingAt: 0,
-                metadata,
-                agentState
-            };
-            decryptedSessions.push(processedSession);
-        }
-
-        // Apply to storage
-        this.applySessions(decryptedSessions);
-        log.log(`📥 fetchSessions completed - processed ${decryptedSessions.length} sessions`);
-        this._loggedMissingSessionForSid.clear();
     }
 
     public refreshMachines = async () => {
@@ -1064,10 +1137,13 @@ class Sync {
     }
 
     private fetchMachines = async () => {
-        if (!this.credentials) return;
+        if (!this.credentials) {
+            log.log('🖥️ fetchMachines: no credentials, skipping');
+            return;
+        }
 
-        console.log('📊 Sync: Fetching machines...');
         const API_ENDPOINT = getServerUrl();
+        log.log(`🖥️ fetchMachines: GET ${API_ENDPOINT}/v1/machines`);
         const response = await fetch(`${API_ENDPOINT}/v1/machines`, {
             headers: {
                 'Authorization': `Bearer ${this.credentials.token}`,
@@ -1076,12 +1152,14 @@ class Sync {
         });
 
         if (!response.ok) {
-            console.error(`Failed to fetch machines: ${response.status}`);
+            const body = await response.text();
+            log.log(`🖥️ fetchMachines: failed status=${response.status} body=${body.slice(0, 200)}`);
             return;
         }
 
         const data = await response.json();
-        console.log(`📊 Sync: Fetched ${Array.isArray(data) ? data.length : 0} machines from server`);
+        const count = Array.isArray(data) ? data.length : 0;
+        log.log(`🖥️ fetchMachines: got ${count} machines from server`);
         const machines = data as Array<{
             id: string;
             metadata: string;
@@ -1618,6 +1696,7 @@ class Sync {
         const lock = this.getSessionMessageLock(sessionId);
         await lock.inLock(async () => {
             await this.acquireMessageFetchSlot();
+            log.log(`💬 fetchMessages: got lock for ${sessionId}`);
             try {
                 const encryption = this.encryption.getSessionEncryption(sessionId);
                 if (!encryption) {
@@ -1625,11 +1704,30 @@ class Sync {
                     throw new Error(`Session encryption not ready for ${sessionId}`);
                 }
 
+                // --- Cache: cold-start hydration (Cursor sessions only) ---
+                // Persistence design: we load from persisted lastSeq so we only fetch new messages.
+                // Cursor sessions: lastSeq comes from loadMessageCache (DB). Others: sessionLastSeq
+                // stays 0 until we fetch, so we request from after_seq=0 (full fetch).
+                const session = storage.getState().sessions[sessionId];
+                const existingSessionMessages = storage.getState().sessionMessages[sessionId];
+                if (!existingSessionMessages?.isLoaded) {
+                    const cached = await loadMessageCache(session);
+                    if (cached) {
+                        storage.getState().applyHydratedCache(sessionId, cached.messages, cached.reducerState);
+                        this.sessionLastSeq.set(sessionId, cached.lastSeq);
+                        log.log(`💬 fetchMessages: hydrated from cache for ${sessionId} (lastSeq=${cached.lastSeq}, ${cached.messages.length} messages)`);
+                    } else {
+                        log.log(`💬 fetchMessages: no cache for ${sessionId} (will fetch from server)`);
+                    }
+                }
+
                 let afterSeq = this.sessionLastSeq.get(sessionId) ?? 0;
+                log.log(`💬 fetchMessages: loading from after_seq=${afterSeq} for ${sessionId}`);
                 let hasMore = true;
                 let totalNormalized = 0;
 
                 while (hasMore) {
+                    log.log(`💬 fetchMessages: requesting page after_seq=${afterSeq} for ${sessionId}`);
                     const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
                     if (!response.ok) {
                         throw new Error(`Failed to fetch messages for ${sessionId}: ${response.status}`);
@@ -1659,11 +1757,18 @@ class Sync {
 
                     if (normalizedMessages.length > 0) {
                         totalNormalized += normalizedMessages.length;
-                        this.enqueueMessages(sessionId, normalizedMessages);
+                        this.applyMessages(sessionId, normalizedMessages);
+                        // Persist cache after each page so UI (e.g. session info "已缓存最新 seq") can show progress in real time.
+                        const pageSession = storage.getState().sessions[sessionId];
+                        const pageMsgs = storage.getState().sessionMessages[sessionId];
+                        if (pageSession && pageMsgs) {
+                            void saveMessageCache(pageSession, pageMsgs.messages, pageMsgs.reducerState, maxSeq);
+                        }
                     }
 
                     this.sessionLastSeq.set(sessionId, maxSeq);
                     hasMore = !!data.hasMore;
+                    log.log(`💬 fetchMessages: page done for ${sessionId} got ${messages.length} messages, hasMore=${hasMore}, totalNormalized=${totalNormalized}`);
                     if (hasMore && maxSeq === afterSeq) {
                         log.log(`💬 fetchMessages: pagination stalled for ${sessionId}, stopping to avoid infinite loop`);
                         break;
@@ -1671,9 +1776,31 @@ class Sync {
                     afterSeq = maxSeq;
                 }
 
-                storage.getState().applyMessagesLoaded(sessionId);
                 log.log(`💬 fetchMessages completed for session ${sessionId} - processed ${totalNormalized} messages`);
+
+                // --- Cache: persist updated state after successful fetch ---
+                // We re-read session here (metadata might have arrived after init)
+                const updatedSession = storage.getState().sessions[sessionId];
+                const sessionMsgs = storage.getState().sessionMessages[sessionId];
+                if (updatedSession && sessionMsgs) {
+                    const finalSeq = this.sessionLastSeq.get(sessionId) ?? 0;
+                    void saveMessageCache(
+                        updatedSession,
+                        sessionMsgs.messages,
+                        sessionMsgs.reducerState,
+                        finalSeq,
+                    );
+                }
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                log.log(`💬 fetchMessages failed for session ${sessionId}: ${msg}`);
+                if (err instanceof Error && err.stack) {
+                    log.log(`💬 fetchMessages stack: ${err.stack}`);
+                }
+                // Fall through to finally so UI stops spinning
             } finally {
+                // Always mark as loaded so message page shows empty state instead of infinite spinner
+                storage.getState().applyMessagesLoaded(sessionId);
                 this.releaseMessageFetchSlot();
             }
         });
@@ -1902,6 +2029,9 @@ class Sync {
             this.sessionMessageLocks.delete(sessionId);
             this.sessionMessageQueue.delete(sessionId);
             this.sessionQueueProcessing.delete(sessionId);
+
+            // Clear local message cache for the deleted session
+            void clearMessageCache(sessionId);
 
             log.log(`🗑️ Session ${sessionId} deleted from local storage`);
         } else if (updateData.body.t === 'update-session') {

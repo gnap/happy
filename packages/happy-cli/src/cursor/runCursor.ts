@@ -48,6 +48,24 @@ import type { PermissionMode } from '@/api/types';
  */
 
 import { createEnvelope } from '@slopus/happy-wire';
+
+/**
+ * Convert tool result to App output-format shape: content must be string (or array of { type, text }).
+ * App schema does not accept object (e.g. { stdout, exitCode }); non-zero exitCode is treated as error.
+ */
+function toolResultForOutputFormat(result: unknown, isError: boolean): { content: string; is_error: boolean } {
+  if (typeof result === 'string') return { content: result, is_error: isError };
+  if (result && typeof result === 'object') {
+    const o = result as Record<string, unknown>;
+    if (typeof o.stdout === 'string') {
+      const exitCode = typeof o.exitCode === 'number' ? o.exitCode : 0;
+      return { content: o.stdout, is_error: isError || exitCode !== 0 };
+    }
+    if (typeof o.message === 'string') return { content: o.message, is_error: isError };
+    if (typeof o.stderr === 'string' && isError) return { content: o.stderr, is_error: true };
+  }
+  return { content: JSON.stringify(result ?? ''), is_error: isError };
+}
 import { createId } from '@paralleldrive/cuid2';
 import { CursorProcess } from './cursorProcess';
 import { CursorMessageParser, type CursorParsedMessage } from './cursorMessageParser';
@@ -621,7 +639,8 @@ export async function runCursor(opts: {
                   logger.debug(`[cursor] Per-tool timeout for ${msg.callId.slice(0, 8)}... – sending tool_call_end (running in background)`);
                   messageBuffer.addMessage('Still running (timer stopped)', 'result');
                   if (bgCodexId) {
-                    session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: msg.callId, content: bgResult, is_error: false }] } });
+                    const out = toolResultForOutputFormat(bgResult, false);
+                    session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: msg.callId, content: out.content, is_error: out.is_error }] } });
                   }
                   const timeoutResultPayload = { type: 'tool-call-result' as const, callId: msg.callId, id: msg.callId, output: bgResult, is_error: false };
                   logger.debug(`[cursor] codex/cursor tool-call-result callId=${msg.callId.slice(0, 8)}... (timeout)`);
@@ -649,8 +668,9 @@ export async function runCursor(opts: {
               );
               const sameId = codexIdByCallId.get(msg.callId) ?? randomUUID();
               codexIdByCallId.delete(msg.callId);
-              session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: msg.callId, content: msg.result, is_error: !msg.success }] } });
-              const resultPayload = { type: 'tool-call-result' as const, callId: msg.callId, id: msg.callId, output: msg.result, is_error: !msg.success };
+              const out = toolResultForOutputFormat(msg.result, !msg.success);
+              session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: msg.callId, content: out.content, is_error: out.is_error }] } });
+              const resultPayload = { type: 'tool-call-result' as const, callId: msg.callId, id: msg.callId, output: msg.result, is_error: out.is_error };
               logger.debug(`[cursor] codex/cursor tool-call-result callId=${msg.callId.slice(0, 8)}... success=${msg.success}`);
               session.sendCodexMessage(resultPayload);
               session.sendCursorMessage(resultPayload);
@@ -675,7 +695,8 @@ export async function runCursor(opts: {
               for (const [callId, codexId] of codexIdByCallId) {
                 logger.debug(`[cursor] Closing pending tool call ${callId} (turn completed without tool end)`);
                 messageBuffer.addMessage('Ended (turn completed)', 'result');
-                session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: callId, content: turnEndedResult, is_error: false }] } });
+                const out = toolResultForOutputFormat(turnEndedResult, false);
+                session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: callId, content: out.content, is_error: out.is_error }] } });
                 const turnEndPayload = { type: 'tool-call-result' as const, callId, id: callId, output: turnEndedResult, is_error: false };
                 logger.debug(`[cursor] codex/cursor tool-call-result callId=${callId.slice(0, 8)}... (turn ended)`);
                 session.sendCodexMessage(turnEndPayload);
@@ -724,7 +745,8 @@ export async function runCursor(opts: {
         for (const [callId, codexId] of codexIdByCallId) {
           logger.debug(`[cursor] Closing pending tool call ${callId} (no end from cursor-agent)`);
           messageBuffer.addMessage('Ended without result (aborted or exited)', 'result');
-          session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: callId, content: abortedResult, is_error: false }] } });
+          const out = toolResultForOutputFormat(abortedResult, false);
+          session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: callId, content: out.content, is_error: out.is_error }] } });
           const abortedPayload = { type: 'tool-call-result' as const, callId, id: callId, output: abortedResult, is_error: false };
           logger.debug(`[cursor] codex/cursor tool-call-result callId=${callId.slice(0, 8)}... (aborted)`);
           session.sendCodexMessage(abortedPayload);

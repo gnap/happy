@@ -399,6 +399,10 @@ export const en: TranslationStructure = {
         deleteSessionWarning: 'This action cannot be undone. All messages and data associated with this session will be permanently deleted.',
         failedToDeleteSession: 'Failed to delete session',
         sessionDeleted: 'Session deleted successfully',
+        rebuildMessageCache: 'Rebuild Message Cache',
+        rebuildMessageCacheSubtitle: 'Clear cached messages and refetch from server',
+        cachedLastSeq: ({ seq }: { seq: number }) => `Cached last seq: ${seq}`,
+        rebuildMessageCacheConfirm: 'This will clear the local message cache and reload all messages from the server. Continue?',
 
     },
 

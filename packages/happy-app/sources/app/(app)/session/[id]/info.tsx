@@ -1,4 +1,4 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { View, Text, Animated } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -8,6 +8,7 @@ import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Avatar } from '@/components/Avatar';
 import { useSession, useIsDataReady } from '@/sync/storage';
+import { sync } from '@/sync/sync';
 import { getSessionName, useSessionStatus, formatOSPlatform, formatPathRelativeToHome, getSessionAvatarId } from '@/utils/sessionUtils';
 import * as Clipboard from 'expo-clipboard';
 import { Modal } from '@/modal';
@@ -20,6 +21,7 @@ import { CodeView } from '@/components/CodeView';
 import { Session } from '@/sync/storageTypes';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { HappyError } from '@/utils/errors';
+import { getCachedLastSeq, subscribeToCachedLastSeq } from '@/sync/cache/messageCache';
 
 // Animated status dot component
 function StatusDot({ color, isPulsing, size = 8 }: { color: string; isPulsing?: boolean; size?: number }) {
@@ -200,6 +202,39 @@ function SessionInfoContent({ session }: { session: Session }) {
         );
     }, [performDelete]);
 
+    const [cachedLastSeq, setCachedLastSeq] = useState<number | null>(null);
+    useEffect(() => {
+        if (session?.metadata?.flavor !== 'cursor') {
+            setCachedLastSeq(null);
+            return;
+        }
+        getCachedLastSeq(session.id).then(setCachedLastSeq);
+        const unsubscribe = subscribeToCachedLastSeq((sessionId, lastSeq) => {
+            if (sessionId === session.id) setCachedLastSeq(lastSeq);
+        });
+        return unsubscribe;
+    }, [session?.id, session?.metadata?.flavor]);
+
+    const [rebuildingCache, performRebuildCache] = useHappyAction(async () => {
+        await sync.rebuildMessageCache(session.id);
+        setCachedLastSeq(null);
+    });
+
+    const handleRebuildMessageCache = useCallback(() => {
+        Modal.alert(
+            t('sessionInfo.rebuildMessageCache'),
+            t('sessionInfo.rebuildMessageCacheConfirm'),
+            [
+                { text: t('common.cancel'), style: 'cancel' },
+                {
+                    text: t('sessionInfo.rebuildMessageCache'),
+                    style: 'destructive',
+                    onPress: performRebuildCache
+                }
+            ]
+        );
+    }, [performRebuildCache]);
+
     const formatDate = useCallback((timestamp: number) => {
         return new Date(timestamp).toLocaleString();
     }, []);
@@ -302,7 +337,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                     <Item
                         title={t('sessionInfo.sequence')}
                         subtitle={t('sessionInfo.sequenceSubtitle')}
-                        detail={session.seq.toString()}
+                        detail={cachedLastSeq != null && cachedLastSeq !== session.seq ? `${cachedLastSeq}/${session.seq}` : session.seq.toString()}
                         icon={<Ionicons name="git-commit-outline" size={29} color="#007AFF" />}
                         showChevron={false}
                     />
@@ -332,6 +367,14 @@ function SessionInfoContent({ session }: { session: Session }) {
                             subtitle={t('sessionInfo.deleteSessionSubtitle')}
                             icon={<Ionicons name="trash-outline" size={29} color="#FF3B30" />}
                             onPress={handleDeleteSession}
+                        />
+                    )}
+                    {session.metadata?.flavor === 'cursor' && (
+                        <Item
+                            title={t('sessionInfo.rebuildMessageCache')}
+                            subtitle={t('sessionInfo.rebuildMessageCacheSubtitle')}
+                            icon={<Ionicons name="refresh-outline" size={29} color="#FF9500" />}
+                            onPress={handleRebuildMessageCache}
                         />
                     )}
                 </ItemGroup>
