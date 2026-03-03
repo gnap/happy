@@ -41,7 +41,7 @@ import { FeedItem } from './feedTypes';
 import { UserProfile } from './friendTypes';
 import { resolveMessageModeMeta } from './messageMeta';
 import { loadMessageCache, saveMessageCache, clearMessageCache, clearAllMessageCaches, preloadSessionCacheDB, getCachedLastSeq } from './cache/messageCache';
-import { overrideSessionCacheDB, MemorySessionCacheDB } from './cache/sessionCacheDB';
+import { overrideSessionCacheDB, IndexedDBSessionCacheDB } from './cache/sessionCacheDB';
 
 type V3GetSessionMessagesResponse = {
     messages: ApiMessage[];
@@ -110,9 +110,10 @@ class Sync {
     private lastRecalculationTime = 0;
 
     constructor() {
-        // On web, expo-sqlite is unavailable – use in-memory cache instead
+        // On web (browser + Tauri/Linux), expo-sqlite is unavailable – use IndexedDB for persistent cache
+        // so desktop/Linux doesn't refetch on every launch (same behaviour as iOS SQLite cache).
         if (Platform.OS === 'web') {
-            overrideSessionCacheDB(new MemorySessionCacheDB());
+            overrideSessionCacheDB(new IndexedDBSessionCacheDB());
         }
 
         this.sessionsSync = new InvalidateSync(this.fetchSessions);
