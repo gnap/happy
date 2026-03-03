@@ -224,11 +224,13 @@ export async function runCursor(opts: {
   //
 
   // flavor 'cursor' – revert to real flavor; was 'claude' temporarily so old App would show session
+  // dangerouslySkipPermissions: false until user sends message with permissionMode (force => true); align with Claude/yolo
   const { state, metadata } = createSessionMetadata({
     flavor: 'cursor',
     machineId,
     startedBy: opts.startedBy,
     path: workspacePath,
+    dangerouslySkipPermissions: false,
   });
   const response = await api.getOrCreateSession({ tag: sessionTag, metadata, state, existingEncryptionKey });
 
@@ -262,10 +264,12 @@ export async function runCursor(opts: {
   let currentPermissionMode: PermissionMode | undefined = undefined;
   let currentModel: string | undefined = undefined;
   const syncModeToSessionMetadata = (permissionMode: PermissionMode, model: string | undefined) => {
+    const dangerouslySkipPermissions = permissionMode === 'force';
     session.updateMetadata((m) => ({
       ...m,
       currentOperatingModeCode: permissionMode,
       currentModelCode: model ?? undefined,
+      dangerouslySkipPermissions,
     })).catch((err) => logger.debug('[Cursor] Failed to sync mode to session metadata', err));
   };
 
