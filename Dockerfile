@@ -1,91 +1,57 @@
-# Stage 1: Building the application
-FROM node:20-alpine AS builder
+# Standalone happy-server: single container, no external dependencies
+# Uses PGlite (embedded Postgres), local filesystem storage, no Redis
 
-# Build argument for PostHog API key with default empty value
-ARG POSTHOG_API_KEY=""
-ARG REVENUE_CAT_STRIPE=""
+# Stage 1: install dependencies
+FROM node:20 AS deps
 
-WORKDIR /app
+RUN apt-get update && apt-get install -y python3 make g++ build-essential && rm -rf /var/lib/apt/lists/*
 
-# Copy package.json and yarn.lock
-COPY patches ./patches
+WORKDIR /repo
+
 COPY package.json yarn.lock ./
+COPY scripts ./scripts
 
-# Install dependencies
-RUN yarn install --frozen-lockfile --ignore-engines
+RUN mkdir -p packages/happy-app packages/happy-server packages/happy-cli packages/happy-agent packages/happy-wire
 
-# Copy the rest of the application code
-COPY sources ./sources
-COPY public ./public
-COPY plugins ./plugins
-COPY * ./
+COPY packages/happy-app/package.json packages/happy-app/
+COPY packages/happy-server/package.json packages/happy-server/
+COPY packages/happy-cli/package.json packages/happy-cli/
+COPY packages/happy-agent/package.json packages/happy-agent/
+COPY packages/happy-wire/package.json packages/happy-wire/
 
-# Build the application for web in production mode
+# Workspace postinstall requirements
+COPY packages/happy-app/patches packages/happy-app/patches
+COPY packages/happy-server/prisma packages/happy-server/prisma
+COPY packages/happy-cli/scripts packages/happy-cli/scripts
+COPY packages/happy-cli/tools packages/happy-cli/tools
+
+RUN SKIP_HAPPY_WIRE_BUILD=1 yarn install --frozen-lockfile --ignore-engines
+
+# Stage 2: copy source and type-check
+FROM deps AS builder
+
+COPY packages/happy-wire ./packages/happy-wire
+COPY packages/happy-server ./packages/happy-server
+
+RUN yarn workspace @slopus/happy-wire build
+RUN yarn workspace happy-server build
+
+# Stage 3: runtime
+FROM node:20-slim AS runner
+
+WORKDIR /repo
+
+RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+
 ENV NODE_ENV=production
-ENV APP_ENV=production
-ENV EXPO_PUBLIC_POSTHOG_API_KEY=$POSTHOG_API_KEY
-ENV EXPO_PUBLIC_REVENUE_CAT_STRIPE=$REVENUE_CAT_STRIPE
-RUN yarn expo export --platform web --output-dir dist
+ENV DATA_DIR=/data
+ENV PGLITE_DIR=/data/pglite
 
-# Debug: List what's in dist to see if public files are there
-RUN ls -la dist/
-RUN ls -la public/
+COPY --from=builder /repo/node_modules /repo/node_modules
+COPY --from=builder /repo/packages/happy-wire /repo/packages/happy-wire
+COPY --from=builder /repo/packages/happy-server /repo/packages/happy-server
 
-# Stage 2: Runtime with Nginx
-FROM nginx:alpine AS runner
+VOLUME /data
+EXPOSE 3005
 
-# Copy the built static files from builder stage to nginx html directory
-COPY --from=builder /app/dist /usr/share/nginx/html
-
-# Remove default nginx configuration
-RUN rm /etc/nginx/conf.d/default.conf
-
-# Create custom nginx configuration directly in the Dockerfile
-RUN echo 'server { \
-    listen 80; \
-    \
-    location /_expo/ { \
-        root   /usr/share/nginx/html; \
-        try_files $uri =404; \
-    } \
-    \
-    location /assets/ { \
-        root   /usr/share/nginx/html; \
-        try_files $uri =404; \
-    } \
-    \
-    location /.well-known/ { \
-        root   /usr/share/nginx/html; \
-        try_files $uri =404; \
-    } \
-    \
-    location / { \
-        root   /usr/share/nginx/html; \
-        index  index.html index.htm; \
-        try_files $uri $uri.html $uri/index.html $uri/index.htm $uri/ /index.html /index.htm =404; \
-    } \
-    \
-    error_page 500 502 503 504 /50x.html; \
-    location = /50x.html { \
-        root /usr/share/nginx/html; \
-        try_files $uri @redirect_to_index; \
-        internal; \
-    } \
-    \
-    error_page 404 = @handle_404; \
-    \
-    location @handle_404 { \
-        root /usr/share/nginx/html; \
-        try_files /404.html @redirect_to_index; \
-        internal; \
-    } \
-    \
-    location @redirect_to_index { \
-        return 302 /; \
-    } \
-}' > /etc/nginx/conf.d/default.conf
-
-# Expose the standard nginx port
-EXPOSE 80
-
-# Nginx starts automatically in the foreground with CMD ["nginx", "-g", "daemon off;"] 
+CMD ["sh", "-c", "node_modules/.bin/tsx packages/happy-server/sources/standalone.ts migrate && exec node_modules/.bin/tsx packages/happy-server/sources/standalone.ts serve"]

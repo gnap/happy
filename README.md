@@ -1,4 +1,4 @@
-<div align="center"><img src="/logo.png" width="200" title="Happy Coder" alt="Happy Coder"/></div>
+<div align="center"><img src="/.github/logotype-dark.png" width="400" title="Happy Coder" alt="Happy Coder"/></div>
 
 <h1 align="center">
   Mobile and Web Client for Claude Code & Codex
@@ -14,7 +14,7 @@ Use Claude Code or Codex from anywhere with end-to-end encryption.
 
 </div>
 
-<img width="5178" height="2364" alt="github" src="https://github.com/user-attachments/assets/14d517e9-71a8-4fcb-98ae-9ebf9f7c149f" />
+<img width="5178" height="2364" alt="github" src="/.github/header.png" />
 
 
 <h3 align="center">
@@ -31,6 +31,25 @@ Step 2: Install CLI on your computer
 
 ```bash
 npm install -g happy-coder
+```
+
+<h3 align="center">
+Run From Source (Repo Checkout)
+</h3>
+
+```bash
+# from repository root
+yarn cli --help
+yarn cli codex
+```
+
+<h3 align="center">
+Release (Maintainers)
+</h3>
+
+```bash
+# from repository root
+yarn release
 ```
 
 <h3 align="center">
@@ -51,6 +70,8 @@ happy codex
 
 ```
 
+<div align="center"><img src="/.github/mascot.png" width="200" title="Happy Coder" alt="Happy Coder"/></div>
+
 ## How does it work?
 
 On your computer, run `happy` instead of `claude` or `happy codex` instead of `codex` to start your AI through our wrapper. When you want to control your coding agent from your phone, it restarts the session in remote mode. To switch back to your computer, just press any key on your keyboard.
@@ -65,9 +86,10 @@ On your computer, run `happy` instead of `claude` or `happy codex` instead of `c
 
 ## 📦 Project Components
 
-- **[happy-cli](https://github.com/slopus/happy-cli)** - Command-line interface for Claude Code and Codex
-- **[happy-server](https://github.com/slopus/happy-server)** - Backend server for encrypted sync
-- **happy-coder** - This mobile client (you are here)
+- **[Happy App](https://github.com/slopus/happy/tree/main/packages/happy-app)** - Web UI + mobile client (Expo)
+- **[Happy CLI](https://github.com/slopus/happy/tree/main/packages/happy-cli)** - Command-line interface for Claude Code and Codex
+- **[Happy Agent](https://github.com/slopus/happy/tree/main/packages/happy-agent)** - Remote agent control CLI (create, send, monitor sessions)
+- **[Happy Server](https://github.com/slopus/happy/tree/main/packages/happy-server)** - Backend server for encrypted sync
 
 ## 🏠 Who We Are
 
@@ -76,6 +98,7 @@ We're engineers scattered across Bay Area coffee shops and hacker houses, consta
 ## 📚 Documentation & Contributing
 
 - **[Documentation Website](https://happy.engineering/docs/)** - Learn how to use Happy Coder effectively
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** - Development setup including iOS, Android, and macOS desktop variant builds
 - **[Edit docs at github.com/slopus/slopus.github.io](https://github.com/slopus/slopus.github.io)** - Help improve our documentation and guides
 
 ## License

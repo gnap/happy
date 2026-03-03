@@ -1,0 +1,49 @@
+diff --git a/node_modules/metro/src/Assets.js b/node_modules/metro/src/Assets.js
+index 0870a4c..a90f4b4 100644
+--- a/node_modules/metro/src/Assets.js
++++ b/node_modules/metro/src/Assets.js
+@@ -109,6 +109,7 @@ function getAssetKey(assetName, platform) {
+   }
+ }
+ async function getAbsoluteAssetRecord(assetPath, platform = null) {
++  assetPath = decodeAssetPathIfEncoded(assetPath);
+   const filename = _path.default.basename(assetPath);
+   const dir = _path.default.dirname(assetPath);
+   const files = await _fs.default.promises.readdir(dir);
+@@ -199,6 +200,28 @@ async function getAssetFiles(assetPath, platform = null) {
+   const assetData = await getAbsoluteAssetRecord(assetPath, platform);
+   return assetData.files;
+ }
++function decodeAssetPathIfEncoded(pathStr) {
++  if (typeof pathStr !== "string" || !pathStr.includes("%")) {
++    return pathStr;
++  }
++  try {
++    const decoded = pathStr
++      .split("/")
++      .map((seg) => {
++        try {
++          return decodeURIComponent(seg);
++        } catch {
++          return seg;
++        }
++      })
++      .join("/")
++      .replace(/\/\.\//g, "/");
++    return decoded.replace(/^\.\//, "");
++  } catch {
++    return pathStr;
++  }
++}
++
+ async function getAsset(
+   relativePath,
+   projectRoot,
+@@ -206,6 +229,7 @@ async function getAsset(
+   platform = null,
+   assetExts,
+ ) {
++  relativePath = decodeAssetPathIfEncoded(relativePath);
+   const assetData = AssetPaths.parse(
+     relativePath,
+     new Set(platform != null ? [platform] : []),
