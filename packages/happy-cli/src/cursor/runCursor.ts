@@ -222,11 +222,13 @@ export async function runCursor(opts: {
   //
 
   // flavor 'cursor' – revert to real flavor; was 'claude' temporarily so old App would show session
+  // dangerouslySkipPermissions: false until user sends message with permissionMode (force => true); align with Claude/yolo
   const { state, metadata } = createSessionMetadata({
     flavor: 'cursor',
     machineId,
     startedBy: opts.startedBy,
     path: workspacePath,
+    dangerouslySkipPermissions: false,
   });
   const response = await api.getOrCreateSession({ tag: sessionTag, metadata, state, existingEncryptionKey });
 
@@ -283,6 +285,14 @@ export async function runCursor(opts: {
       permissionMode: messagePermissionMode || 'default',
       model: messageModel,
     };
+    // Persist permission/model and dangerouslySkipPermissions to session metadata so App can read them on next fetch (align with Claude: force = skip permissions)
+    const metaChanged = message.meta?.permissionMode !== undefined || (message.meta && Object.prototype.hasOwnProperty.call(message.meta, 'model'));
+    if (metaChanged) {
+      const effectivePermission = messagePermissionMode || 'default';
+      const effectiveModel = messageModel ?? 'default';
+      const dangerouslySkipPermissions = effectivePermission === 'force';
+      session.updateMetadata((m) => ({ ...m, currentOperatingModeCode: effectivePermission, currentModelCode: effectiveModel, dangerouslySkipPermissions })).catch((err) => logger.debug('[Cursor] Failed to persist permission/model to session metadata', err));
+    }
     logger.debug(`[cursor] User message queued (length: ${message.content.text.length})`);
     messageQueue.push(message.content.text, mode);
   };
