@@ -261,6 +261,14 @@ export async function runCursor(opts: {
   }));
   let currentPermissionMode: PermissionMode | undefined = undefined;
   let currentModel: string | undefined = undefined;
+  const syncModeToSessionMetadata = (permissionMode: PermissionMode, model: string | undefined) => {
+    session.updateMetadata((m) => ({
+      ...m,
+      currentOperatingModeCode: permissionMode,
+      currentModelCode: model ?? undefined,
+    })).catch((err) => logger.debug('[Cursor] Failed to sync mode to session metadata', err));
+  };
+
   const handleUserMessage = (message: { content: { text: string }; meta?: { permissionMode?: string; model?: string | null } }) => {
     let messagePermissionMode = currentPermissionMode;
     if (message.meta?.permissionMode) {
@@ -285,6 +293,7 @@ export async function runCursor(opts: {
       permissionMode: messagePermissionMode || 'default',
       model: messageModel,
     };
+    syncModeToSessionMetadata(mode.permissionMode, mode.model);
     logger.debug(`[cursor] User message queued (length: ${message.content.text.length})`);
     messageQueue.push(message.content.text, mode);
   };
@@ -309,6 +318,8 @@ export async function runCursor(opts: {
   session = initialSession;
   session.onUserMessage(handleUserMessage);
   writeSessionPidFile(session.sessionId);
+  // Persist initial default mode so app reload can restore it
+  syncModeToSessionMetadata('default', undefined);
 
   // Report to daemon (once at start; also retry periodically so daemon sees us if it wasn't running at start)
   const DAEMON_REPORT_INTERVAL_MS = 60_000;
