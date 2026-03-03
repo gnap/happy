@@ -1,5 +1,23 @@
 import 'react-native-quick-base64';
 import '../theme.css';
+
+// Polyfill for WebKit2GTK (Linux/Tauri): screen.orientation is undefined
+if (typeof screen !== 'undefined' && !screen.orientation) {
+  Object.defineProperty(screen, 'orientation', {
+    value: {
+      type: 'portrait-primary' as OrientationType,
+      angle: 0,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => true,
+      onchange: null,
+      lock: () => Promise.resolve(),
+      unlock: () => {},
+    },
+    writable: true,
+    configurable: true,
+  });
+}
 import * as React from 'react';
 import * as SplashScreen from 'expo-splash-screen';
 import * as Fonts from 'expo-font';
