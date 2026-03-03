@@ -7,7 +7,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:8081",
     "beforeDevCommand": "yarn start",
-    "beforeBuildCommand": "yarn expo export --platform web --output-dir dist && node scripts/patch-web-dist.js"
+    "beforeBuildCommand": "yarn expo export --platform web --output-dir dist --clear && node scripts/patch-web-dist.js"
   },
   "app": {
     "windows": [
