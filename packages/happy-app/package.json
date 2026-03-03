@@ -185,6 +185,7 @@
     "@expo/ngrok": "^4.1.0",
     "@material/material-color-utilities": "^0.3.0",
     "@stablelib/hex": "^2.0.1",
+    "@tauri-apps/api": "2.10.1",
     "@types/react": "~19.1.10",
     "babel-plugin-transform-remove-console": "^6.9.4",
     "cross-env": "^10.1.0",
