@@ -157,17 +157,17 @@ export async function runCursor(opts: {
   startedBy?: 'daemon' | 'terminal';
   /** Workspace root for session, .cursor/mcp.json, and cursor-agent cwd. Defaults to process.cwd(). Set via --cwd or HAPPY_CURSOR_WORKSPACE when running from monorepo so MCP is under repo root. */
   workspaceRoot?: string;
+  /** Resume last session for same workspace (--resume / -r). Default: false (new session). */
+  resumeSession?: boolean;
 }): Promise<void> {
   const workspacePath = opts.workspaceRoot != null ? resolve(opts.workspaceRoot) : process.cwd();
 
-  // Reuse session only when workspace unchanged; workspace change => new session
+  // Default: new session. Resume only with --resume/-r.
   const tagPath = join(configuration.happyHomeDir, CURSOR_SESSION_TAG_FILE);
   const workspacePathFile = join(configuration.happyHomeDir, CURSOR_SESSION_WORKSPACE_FILE);
   let sessionTag: string;
   let tagReused = false;
-  if (process.env.HAPPY_CURSOR_NEW_SESSION === '1') {
-    sessionTag = randomUUID();
-  } else {
+  if (opts.resumeSession) {
     let savedTag: string | null = null;
     let savedWorkspace: string | null = null;
     try {
@@ -183,6 +183,8 @@ export async function runCursor(opts: {
     } else {
       sessionTag = randomUUID();
     }
+  } else {
+    sessionTag = randomUUID();
   }
 
   // Load existing encryption key when reusing session to avoid key mismatch
@@ -259,6 +261,14 @@ export async function runCursor(opts: {
   }));
   let currentPermissionMode: PermissionMode | undefined = undefined;
   let currentModel: string | undefined = undefined;
+  const syncModeToSessionMetadata = (permissionMode: PermissionMode, model: string | undefined) => {
+    session.updateMetadata((m) => ({
+      ...m,
+      currentOperatingModeCode: permissionMode,
+      currentModelCode: model ?? undefined,
+    })).catch((err) => logger.debug('[Cursor] Failed to sync mode to session metadata', err));
+  };
+
   const handleUserMessage = (message: { content: { text: string }; meta?: { permissionMode?: string; model?: string | null } }) => {
     let messagePermissionMode = currentPermissionMode;
     if (message.meta?.permissionMode) {
@@ -283,6 +293,7 @@ export async function runCursor(opts: {
       permissionMode: messagePermissionMode || 'default',
       model: messageModel,
     };
+    syncModeToSessionMetadata(mode.permissionMode, mode.model);
     logger.debug(`[cursor] User message queued (length: ${message.content.text.length})`);
     messageQueue.push(message.content.text, mode);
   };
@@ -307,6 +318,8 @@ export async function runCursor(opts: {
   session = initialSession;
   session.onUserMessage(handleUserMessage);
   writeSessionPidFile(session.sessionId);
+  // Persist initial default mode so app reload can restore it
+  syncModeToSessionMetadata('default', undefined);
 
   // Report to daemon (once at start; also retry periodically so daemon sees us if it wasn't running at start)
   const DAEMON_REPORT_INTERVAL_MS = 60_000;

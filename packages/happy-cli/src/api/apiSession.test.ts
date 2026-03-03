@@ -41,7 +41,8 @@ vi.mock('axios', () => ({
 vi.mock('@/configuration', () => ({
     configuration: {
         serverUrl: 'https://server.test'
-    }
+    },
+    serverHttpsAgent: undefined
 }));
 
 vi.mock('@/ui/logger', () => ({
@@ -747,15 +748,10 @@ describe('ApiSessionClient v3 messages API migration', () => {
         expect(mockAxiosGet.mock.calls[0][1].params.after_seq).toBe(1);
     });
 
-    it('invalidates receive sync on first message when lastSeq is 0', async () => {
+    it('accepts first message on fast path when lastSeq is 0 and message seq is 1 (no fetch)', async () => {
         const client = new ApiSessionClient('fake-token', session);
-
-        mockAxiosGet.mockResolvedValueOnce({
-            data: {
-                messages: [],
-                hasMore: false
-            }
-        });
+        const onUserMessage = vi.fn();
+        client.onUserMessage(onUserMessage);
 
         emitSocketEvent('update', createNewMessageUpdate(1, encryptContent(session, {
             role: 'user',
@@ -763,9 +759,14 @@ describe('ApiSessionClient v3 messages API migration', () => {
         })));
 
         await waitForCheck(() => {
-            expect(mockAxiosGet).toHaveBeenCalledTimes(1);
+            expect(onUserMessage).toHaveBeenCalledTimes(1);
+            expect(onUserMessage).toHaveBeenCalledWith(expect.objectContaining({
+                role: 'user',
+                content: { type: 'text', text: 'first' }
+            }));
         });
-        expect(mockAxiosGet.mock.calls[0][1].params.after_seq).toBe(0);
+        expect((client as any).lastSeq).toBe(1);
+        expect(mockAxiosGet).not.toHaveBeenCalled();
     });
 
     it('invalidates receive sync for duplicate and stale seq values', async () => {
