@@ -1,18 +1,12 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { ToolCall } from '@/sync/typesMessage';
-import { Metadata } from '@/sync/storageTypes';
+import { ToolViewProps } from './_all';
 import { knownTools } from '@/components/tools/knownTools';
 import { toolFullViewStyles } from '../ToolFullView';
 import { ToolDiffView } from '@/components/tools/ToolDiffView';
 import { trimIdent } from '@/utils/trimIdent';
 
-interface EditViewFullProps {
-    tool: ToolCall;
-    metadata: Metadata | null;
-}
-
-export const EditViewFull = React.memo<EditViewFullProps>(({ tool, metadata }) => {
+export const EditViewFull = React.memo<ToolViewProps>(({ tool, metadata }) => {
     const { input } = tool;
 
     // Parse the input

@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { View, Text, StyleSheet, ScrollView } from 'react-native';
-import { ToolCall } from '@/sync/typesMessage';
-import { Metadata } from '@/sync/storageTypes';
+import { ToolViewProps } from './_all';
 import { knownTools } from '@/components/tools/knownTools';
 import { toolFullViewStyles } from '../ToolFullView';
 import { DiffView } from '@/components/diff/DiffView';
@@ -9,12 +8,7 @@ import { trimIdent } from '@/utils/trimIdent';
 import { t } from '@/text';
 import { useSetting } from '@/sync/storage';
 
-interface MultiEditViewFullProps {
-    tool: ToolCall;
-    metadata: Metadata | null;
-}
-
-export const MultiEditViewFull = React.memo<MultiEditViewFullProps>(({ tool, metadata }) => {
+export const MultiEditViewFull = React.memo<ToolViewProps>(({ tool, metadata }) => {
     const { input } = tool;
     const wrapLinesInDiffs = useSetting('wrapLinesInDiffs');
 

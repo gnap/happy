@@ -1,17 +1,11 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { ToolCall } from '@/sync/typesMessage';
-import { Metadata } from '@/sync/storageTypes';
+import { ToolViewProps } from './_all';
 import { toolFullViewStyles } from '../ToolFullView';
 import { ToolDiffView } from '@/components/tools/ToolDiffView';
 import { trimIdent } from '@/utils/trimIdent';
 
-interface CursorEditViewFullProps {
-    tool: ToolCall;
-    metadata: Metadata | null;
-}
-
-export const CursorEditViewFull = React.memo<CursorEditViewFullProps>(({ tool }) => {
+export const CursorEditViewFull = React.memo<ToolViewProps>(({ tool }) => {
     const { input, result } = tool;
 
     // Prefer full-file before/after from result (Cursor agent provides these).

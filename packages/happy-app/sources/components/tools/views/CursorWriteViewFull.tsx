@@ -1,16 +1,10 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { ToolCall } from '@/sync/typesMessage';
-import { Metadata } from '@/sync/storageTypes';
+import { ToolViewProps } from './_all';
 import { toolFullViewStyles } from '../ToolFullView';
 import { ToolDiffView } from '@/components/tools/ToolDiffView';
 
-interface CursorWriteViewFullProps {
-    tool: ToolCall;
-    metadata: Metadata | null;
-}
-
-export const CursorWriteViewFull = React.memo<CursorWriteViewFullProps>(({ tool }) => {
+export const CursorWriteViewFull = React.memo<ToolViewProps>(({ tool }) => {
     const { input, result } = tool;
 
     // Prefer afterFullFileContent from result (Cursor agent provides full file content).
