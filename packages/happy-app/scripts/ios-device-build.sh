@@ -10,6 +10,24 @@ export DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM:-WNNK7EH57R}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 IOS_DIR="$APP_DIR/ios"
+# Monorepo root (for yarn workspaces)
+ROOT_DIR="$(cd "$APP_DIR/../.." && pwd)"
+
+# Install yarn dependencies before build (so node_modules and patches are up to date)
+if [[ -f "$ROOT_DIR/package.json" ]]; then
+  echo "Installing yarn dependencies..."
+  (cd "$ROOT_DIR" && yarn install)
+  echo ""
+fi
+
+# Prebuild: regenerate native ios/android from app config (optional; set RUN_PREBUILD=1 to enable).
+# Skip by default because prebuild overwrites custom ios files (e.g. Happydev-NoPush.entitlements).
+if [[ "$RUN_PREBUILD" == "1" ]]; then
+  echo "Running prebuild (expo prebuild)..."
+  (cd "$APP_DIR" && yarn prebuild)
+  echo ""
+fi
+
 cd "$IOS_DIR"
 
 # Use device name or UDID. Example: ./ios-device-build.sh 00008140-001E55691160801C

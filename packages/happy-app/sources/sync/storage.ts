@@ -10,7 +10,7 @@ import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
 import { Profile } from "./profile";
 import { UserProfile, RelationshipUpdatedEvent } from "./friendTypes";
-import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes } from "./persistence";
+import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes } from "./persistence";
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 import type { CustomerInfo } from './revenueCat/types';
 import React from "react";
@@ -253,6 +253,7 @@ export const storage = create<StorageState>()((set, get) => {
     let profile = loadProfile();
     let sessionDrafts = loadSessionDrafts();
     let sessionPermissionModes = loadSessionPermissionModes();
+    let sessionModelModes = loadSessionModelModes();
     return {
         settings,
         settingsVersion: version,
@@ -301,9 +302,10 @@ export const storage = create<StorageState>()((set, get) => {
             return Object.values(state.sessions).filter(s => s.active);
         },
         applySessions: (sessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[]) => set((state) => {
-            // Load drafts and permission modes if sessions are empty (initial load)
+            // Drafts: only from MMKV on initial load. Permission/model: read MMKV every time so restart/refresh keeps selection (metadata first, then existing, then MMKV, then server).
             const savedDrafts = Object.keys(state.sessions).length === 0 ? sessionDrafts : {};
-            const savedPermissionModes = Object.keys(state.sessions).length === 0 ? sessionPermissionModes : {};
+            const savedPermissionModes = loadSessionPermissionModes();
+            const savedModelModes = loadSessionModelModes();
 
             // Merge new sessions with existing ones
             const mergedSessions: Record<string, Session> = { ...state.sessions };
@@ -313,20 +315,24 @@ export const storage = create<StorageState>()((set, get) => {
                 // Use centralized resolver for consistent state management
                 const presence = resolveSessionOnlineState(session);
 
-                // Preserve existing draft, permission mode, and model mode if they exist, or load from saved data
+                // Draft: existing || saved || session. Permission/model: metadata first, then existing, then MMKV, then server.
                 const existingDraft = state.sessions[session.id]?.draft;
                 const savedDraft = savedDrafts[session.id];
                 const existingPermissionMode = state.sessions[session.id]?.permissionMode;
                 const savedPermissionMode = savedPermissionModes[session.id];
                 const defaultPermissionMode: PermissionModeKey = isSandboxEnabled(session.metadata) ? 'bypassPermissions' : 'default';
+                const metadataPermission = session.metadata?.currentOperatingModeCode?.trim();
                 const resolvedPermissionMode: PermissionModeKey =
+                    (metadataPermission && metadataPermission !== 'default' ? metadataPermission : undefined) ||
                     (existingPermissionMode && existingPermissionMode !== 'default' ? existingPermissionMode : undefined) ||
                     (savedPermissionMode && savedPermissionMode !== 'default' ? savedPermissionMode : undefined) ||
                     (session.permissionMode && session.permissionMode !== 'default' ? session.permissionMode : undefined) ||
+                    (metadataPermission ? metadataPermission : undefined) ||
                     defaultPermissionMode;
-                // modelMode is local-only (not synced to server); preserve existing so switching model takes effect
+                const metadataModel = session.metadata?.currentModelCode?.trim();
                 const existingModelMode = state.sessions[session.id]?.modelMode;
-                const resolvedModelMode = existingModelMode ?? session.modelMode ?? undefined;
+                const savedModelMode = savedModelModes[session.id];
+                const resolvedModelMode = (metadataModel && metadataModel !== '' ? metadataModel : undefined) ?? existingModelMode ?? savedModelMode ?? session.modelMode ?? undefined;
                 // todos: derived by replay (reducer) when messages load; not synced to server. Preserve here so
                 // list fetches do not overwrite; replay will update session.todos when that session's messages load.
                 const existingTodos = state.sessions[session.id]?.todos;
@@ -812,7 +818,6 @@ export const storage = create<StorageState>()((set, get) => {
             const session = state.sessions[sessionId];
             if (!session) return state;
 
-            // Update the session with the new permission mode
             const updatedSessions = {
                 ...state.sessions,
                 [sessionId]: {
@@ -820,19 +825,14 @@ export const storage = create<StorageState>()((set, get) => {
                     permissionMode: mode
                 }
             };
-
-            // Collect all permission modes for persistence
             const allModes: Record<string, string> = {};
             Object.entries(updatedSessions).forEach(([id, sess]) => {
                 if (sess.permissionMode && sess.permissionMode !== 'default') {
                     allModes[id] = sess.permissionMode;
                 }
             });
-
-            // Persist permission modes (only non-default values to save space)
             saveSessionPermissionModes(allModes);
 
-            // No need to rebuild sessionListViewData since permission mode doesn't affect the list display
             return {
                 ...state,
                 sessions: updatedSessions
@@ -842,7 +842,6 @@ export const storage = create<StorageState>()((set, get) => {
             const session = state.sessions[sessionId];
             if (!session) return state;
 
-            // Update the session with the new model mode
             const updatedSessions = {
                 ...state.sessions,
                 [sessionId]: {
@@ -850,8 +849,14 @@ export const storage = create<StorageState>()((set, get) => {
                     modelMode: mode
                 }
             };
+            const allModelModes: Record<string, string> = {};
+            Object.entries(updatedSessions).forEach(([id, sess]) => {
+                if (sess.modelMode != null && sess.modelMode !== '') {
+                    allModelModes[id] = sess.modelMode;
+                }
+            });
+            saveSessionModelModes(allModelModes);
 
-            // No need to rebuild sessionListViewData since model mode doesn't affect the list display
             return {
                 ...state,
                 sessions: updatedSessions
@@ -957,15 +962,17 @@ export const storage = create<StorageState>()((set, get) => {
             // Remove session git status if it exists
             const { [sessionId]: deletedGitStatus, ...remainingGitStatus } = state.sessionGitStatus;
             
-            // Clear drafts and permission modes from persistent storage
+            // Clear drafts and permission/model from MMKV
             const drafts = loadSessionDrafts();
             delete drafts[sessionId];
             saveSessionDrafts(drafts);
-            
             const modes = loadSessionPermissionModes();
             delete modes[sessionId];
             saveSessionPermissionModes(modes);
-            
+            const modelModes = loadSessionModelModes();
+            delete modelModes[sessionId];
+            saveSessionModelModes(modelModes);
+
             // Rebuild sessionListViewData without the deleted session
             const sessionListViewData = buildSessionListViewData(remainingSessions);
             

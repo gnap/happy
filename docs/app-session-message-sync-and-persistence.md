@@ -155,7 +155,8 @@
 | `purchases`              | RevenueCat 购买状态 |
 | `profile`               | 用户 profile |
 | `session-drafts`        | 各会话输入框草稿 `Record<sessionId, string>` |
-| `session-permission-modes` | 各会话的 permission mode 偏好 |
+| `session-permission-modes` | 各会话 permission mode 偏好（解析时 **metadata 优先**，无 metadata 时用此 fallback） |
+| `session-model-modes`   | 各会话 model 偏好（同上，metadata 优先） |
 | `new-session-draft-v1`   | 新建会话向导的草稿（机器、路径、agent 类型等） |
 | `temp_text_*`           | 临时大文本（用后即删） |
 

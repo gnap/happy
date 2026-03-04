@@ -108,7 +108,7 @@ function formatDangerouslySkipPermissionsMetadata(
         return value ? 'Enabled' : 'Disabled';
     }
 
-    if (permissionMode === 'bypassPermissions' || permissionMode === 'yolo') {
+    if (permissionMode === 'bypassPermissions' || permissionMode === 'yolo' || permissionMode === 'force') {
         return 'Enabled';
     }
 
