@@ -1977,6 +1977,9 @@ class Sync {
                             ...(isTaskComplete ? { thinking: false } : {}),
                             ...(isTaskStarted ? { thinking: true } : {})
                         }])
+                        if (isTaskComplete) {
+                            storage.getState().finalizeRunningTools(updateData.body.sid);
+                        }
                     } else {
                         // Fetch sessions again if we don't have this session
                         this.fetchSessions();

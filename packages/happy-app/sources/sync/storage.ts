@@ -112,6 +112,7 @@ interface StorageState {
     applyGitStatus: (sessionId: string, status: GitStatus | null) => void;
     applyNativeUpdateStatus: (status: { available: boolean; updateUrl?: string } | null) => void;
     isMutableToolCall: (sessionId: string, callId: string) => boolean;
+    finalizeRunningTools: (sessionId: string) => void;
     setRealtimeStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => void;
     setRealtimeMode: (mode: 'idle' | 'speaking', immediate?: boolean) => void;
     clearRealtimeModeDebounce: () => void;
@@ -297,6 +298,40 @@ export const storage = create<StorageState>()((set, get) => {
             }
             return toolCallMessage.tool?.name ? isMutableTool(toolCallMessage.tool?.name) : true;
         },
+        finalizeRunningTools: (sessionId: string) => set((state) => {
+            const sessionMessages = state.sessionMessages[sessionId];
+            if (!sessionMessages) return state;
+
+            const now = Date.now();
+            let anyChanged = false;
+            const newMessagesMap = { ...sessionMessages.messagesMap };
+
+            for (const [id, msg] of Object.entries(newMessagesMap)) {
+                if (msg.kind === 'tool-call' && msg.tool?.state === 'running') {
+                    newMessagesMap[id] = {
+                        ...msg,
+                        tool: { ...msg.tool, state: 'completed', completedAt: now },
+                    };
+                    // Mirror into reducerState so incremental processing stays consistent
+                    const reducerMsg = sessionMessages.reducerState.messages.get(id);
+                    if (reducerMsg?.tool) {
+                        reducerMsg.tool.state = 'completed';
+                        reducerMsg.tool.completedAt = now;
+                    }
+                    anyChanged = true;
+                }
+            }
+
+            if (!anyChanged) return state;
+
+            return {
+                ...state,
+                sessionMessages: {
+                    ...state.sessionMessages,
+                    [sessionId]: { ...sessionMessages, messagesMap: newMessagesMap },
+                },
+            };
+        }),
         getActiveSessions: () => {
             const state = get();
             return Object.values(state.sessions).filter(s => s.active);

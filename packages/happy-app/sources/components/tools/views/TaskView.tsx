@@ -6,6 +6,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { ToolCall } from '@/sync/typesMessage';
 import { useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
+import { MarkdownView } from '@/components/markdown/MarkdownView';
 
 interface FilteredTool {
     tool: ToolCall;
@@ -100,9 +101,7 @@ export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages, c
             fontStyle: 'italic',
             opacity: 0.7,
         },
-        summaryText: {
-            fontSize: 14,
-            color: theme.colors.textSecondary,
+        summaryContainer: {
             paddingHorizontal: 4,
             paddingTop: 4,
         },
@@ -146,10 +145,10 @@ export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages, c
                     </Text>
                 </View>
             )}
-            {lastAgentText != null && (
-                <Text style={styles.summaryText} numberOfLines={compact ? 4 : undefined}>
-                    {lastAgentText}
-                </Text>
+            {!compact && lastAgentText != null && (
+                <View style={styles.summaryContainer}>
+                    <MarkdownView markdown={lastAgentText} />
+                </View>
             )}
         </View>
     );
