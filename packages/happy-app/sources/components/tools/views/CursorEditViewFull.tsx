@@ -12,10 +12,17 @@ interface CursorEditViewFullProps {
 }
 
 export const CursorEditViewFull = React.memo<CursorEditViewFullProps>(({ tool }) => {
-    const { input } = tool;
+    const { input, result } = tool;
 
-    const oldString = trimIdent(typeof input?.old_string === 'string' ? input.old_string : '');
-    const newString = trimIdent(typeof input?.new_string === 'string' ? input.new_string : '');
+    // Prefer full-file before/after from result (Cursor agent provides these).
+    // Fall back to input old_string/new_string for any legacy format.
+    const successResult = result?.success ?? result;
+    const oldString = typeof successResult?.beforeFullFileContent === 'string'
+        ? successResult.beforeFullFileContent
+        : trimIdent(typeof input?.old_string === 'string' ? input.old_string : '');
+    const newString = typeof successResult?.afterFullFileContent === 'string'
+        ? successResult.afterFullFileContent
+        : trimIdent(typeof input?.new_string === 'string' ? input.new_string : '');
 
     return (
         <View style={toolFullViewStyles.sectionFullWidth}>

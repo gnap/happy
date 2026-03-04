@@ -189,7 +189,8 @@ export class CursorMessageParser {
 
         if (tc.writeToolCall) {
           const filePath = tc.writeToolCall.args?.path || '';
-          const content = tc.writeToolCall.args?.content ?? '';
+          const rawWriteArgs = tc.writeToolCall.args as Record<string, unknown> | undefined ?? {};
+          const content = (rawWriteArgs.content ?? rawWriteArgs.streamContent ?? '') as string;
           const key = this.toolKey('CursorWrite', { path: filePath });
           if (msg.subtype === 'started') {
             const callId = this.pushCallId(key);
@@ -225,7 +226,8 @@ export class CursorMessageParser {
           const editPath = (rawArgs.path ?? rawArgs.file_path ?? rawArgs.filePath ?? '') as string;
           const oldString = (rawArgs.old_string ?? rawArgs.oldString ?? rawArgs.oldText ?? '') as string;
           const newString = (rawArgs.new_string ?? rawArgs.newString ?? rawArgs.newText ?? '') as string;
-          const normalizedEditArgs = { path: editPath, old_string: oldString, new_string: newString };
+          const streamContent = (rawArgs.streamContent ?? rawArgs.content ?? '') as string;
+          const normalizedEditArgs = { path: editPath, old_string: oldString, new_string: newString, streamContent };
           const key = this.toolKey('CursorEdit', normalizedEditArgs);
           if (msg.subtype === 'started') {
             const callId = this.pushCallId(key);

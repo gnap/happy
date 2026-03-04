@@ -21,6 +21,8 @@ import { CodexDiffView } from './CodexDiffView';
 import { AskUserQuestionView } from './AskUserQuestionView';
 import { GeminiEditView } from './GeminiEditView';
 import { GeminiExecuteView } from './GeminiExecuteView';
+import { CursorEditView } from './CursorEditView';
+import { CursorWriteView } from './CursorWriteView';
 
 export type ToolViewProps = {
     tool: ToolCall;
@@ -37,10 +39,10 @@ export type ToolViewComponent = React.ComponentType<ToolViewProps>;
 // Registry of tool-specific view components
 export const toolViewRegistry: Record<string, ToolViewComponent> = {
     Edit: EditView,
-    CursorEdit: EditView,
+    CursorEdit: CursorEditView,
     Bash: BashView,
     CursorBash: BashView,
-    CursorWrite: WriteView,
+    CursorWrite: CursorWriteView,
     CodexBash: CodexBashView,
     CodexPatch: CodexPatchView,
     CodexDiff: CodexDiffView,
@@ -99,3 +101,5 @@ export { TaskView } from './TaskView';
 export { AskUserQuestionView } from './AskUserQuestionView';
 export { GeminiEditView } from './GeminiEditView';
 export { GeminiExecuteView } from './GeminiExecuteView';
+export { CursorEditView } from './CursorEditView';
+export { CursorWriteView } from './CursorWriteView';

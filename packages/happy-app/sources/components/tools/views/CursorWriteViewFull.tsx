@@ -11,9 +11,16 @@ interface CursorWriteViewFullProps {
 }
 
 export const CursorWriteViewFull = React.memo<CursorWriteViewFullProps>(({ tool }) => {
-    const { input } = tool;
+    const { input, result } = tool;
 
-    const contents = typeof input?.content === 'string' ? input.content : '';
+    // Prefer afterFullFileContent from result (Cursor agent provides full file content).
+    // Fall back to input.content or input.streamContent.
+    const successResult = result?.success ?? result;
+    const contents = typeof successResult?.afterFullFileContent === 'string'
+        ? successResult.afterFullFileContent
+        : typeof input?.content === 'string' ? input.content
+        : typeof input?.streamContent === 'string' ? input.streamContent
+        : '';
 
     return (
         <View style={toolFullViewStyles.sectionFullWidth}>
