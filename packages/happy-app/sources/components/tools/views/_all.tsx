@@ -13,6 +13,7 @@ import { EditViewFull } from './EditViewFull';
 import { MultiEditViewFull } from './MultiEditViewFull';
 import { CodexBashView } from './CodexBashView';
 import { CodexPatchView } from './CodexPatchView';
+import { CursorBashViewFull } from './CursorBashViewFull';
 import { CodexDiffView } from './CodexDiffView';
 import { AskUserQuestionView } from './AskUserQuestionView';
 import { GeminiEditView } from './GeminiEditView';
@@ -51,6 +52,7 @@ export const toolViewRegistry: Record<string, ToolViewComponent> = {
 
 export const toolFullViewRegistry: Record<string, ToolViewComponent> = {
     Bash: BashViewFull,
+    CursorBash: CursorBashViewFull,
     Edit: EditViewFull,
     MultiEdit: MultiEditViewFull,
     Task: TaskView, // Task output is in children (sidechain agent-text), not tool.result

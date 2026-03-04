@@ -987,7 +987,7 @@ export function normalizeRawMessage(
                         type: 'tool-result',
                         tool_use_id: raw.content.data.callId,
                         content: raw.content.data.output,
-                        is_error: false,
+                        is_error: raw.content.data.is_error ?? false,
                         uuid: raw.content.data.id,
                         parentUUID: null
                     }],
