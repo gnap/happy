@@ -474,21 +474,23 @@ export async function runCursor(opts: {
   }
 
   //
-  // Start Happy MCP server and register it for cursor-agent via .cursor/mcp.json
-  // Expose current turn id and session send so spawn_subagent can emit subagent envelopes.
+  // Start Happy MCP server and register it for cursor-agent via .cursor/mcp.json.
+  // Subagent tools (spawn_subagent etc.) are only injected when HAPPY_SUBAGENT_MCP=1,
+  // as the cursor-agent native taskToolCall is preferred and doesn't need them.
   //
 
   let currentTurnIdRef: string | null = null;
-  const happyServer = await startHappyServer(session, {
+  const enableSubagentMcp = process.env.HAPPY_SUBAGENT_MCP === '1';
+  const happyServer = await startHappyServer(session, enableSubagentMcp ? {
     cursorContext: {
       getCurrentTurnId: () => currentTurnIdRef,
       sendSessionEnvelope: (envelope) => session.sendSessionProtocolMessage(envelope),
       workspacePath,
       getAbortSignal: () => abortController.signal,
     },
-  });
+  } : {});
   ensureCursorMcpHappy(workspacePath, happyServer.url);
-  logger.debug(`[cursor] Happy MCP: url=${happyServer.url}, workspacePath=${workspacePath}, cursor-agent will be spawned with --approve-mcps`);
+  logger.debug(`[cursor] Happy MCP: url=${happyServer.url}, workspacePath=${workspacePath}, subagentMcp=${enableSubagentMcp}`);
 
   //
   // Main loop
@@ -621,7 +623,37 @@ export async function runCursor(opts: {
               messageBuffer.updateLastMessage(`[Thinking] ${msg.text.slice(0, 100)}...`, 'system');
               break;
 
+            case 'subagent_start':
+              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'start' }, { turn: turnId, subagent: msg.subagentId }));
+              break;
+
+            case 'subagent_stop':
+              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'stop' }, { turn: turnId, subagent: msg.subagentId }));
+              break;
+
+            case 'subagent_text': {
+              const ev = msg.thinking
+                ? { t: 'text' as const, text: msg.text, thinking: true }
+                : { t: 'text' as const, text: msg.text };
+              session.sendSessionProtocolMessage(createEnvelope('agent', ev, { turn: turnId, subagent: msg.subagentId }));
+              break;
+            }
+
             case 'tool_call_start':
+              // Sidechain tool calls (from taskToolCall conversationSteps) — only send session envelope with subagent
+              if (msg.subagentId) {
+                const sidechainTitle = msg.description
+                  ?? (typeof msg.args?.command === 'string' ? `Run \`${(msg.args.command as string).slice(0, 80)}\`` : `${msg.toolName} call`);
+                session.sendSessionProtocolMessage(createEnvelope('agent', {
+                  t: 'tool-call-start',
+                  call: msg.callId,
+                  name: msg.toolName,
+                  title: sidechainTitle,
+                  description: sidechainTitle,
+                  args: msg.args,
+                }, { turn: turnId, subagent: msg.subagentId }));
+                break;
+              }
               flushAccumulatedText();
               hadToolCalls = true;
               const toolArgs = JSON.stringify(msg.args).slice(0, 100);
@@ -676,6 +708,11 @@ export async function runCursor(opts: {
               break;
 
             case 'tool_call_end':
+              // Sidechain tool calls — only send session envelope with subagent
+              if (msg.subagentId) {
+                session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId }, { turn: turnId, subagent: msg.subagentId }));
+                break;
+              }
               const existingHandle = toolCallTimeoutHandles.get(msg.callId);
               if (existingHandle) {
                 clearTimeout(existingHandle);

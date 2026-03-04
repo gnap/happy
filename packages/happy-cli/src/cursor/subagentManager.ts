@@ -153,9 +153,9 @@ export class SubagentManager {
     if (agent.status === 'stopped') return { ok: false, error: `Sub-agent ${id} was stopped.` };
 
     agent.status = 'running';
-    agent.turnCount++;
-    agent.updatedAt = Date.now();
-    agent.lastText = '';
+      agent.turnCount++;
+      agent.updatedAt = Date.now();
+      agent.lastText = '';  // reset for new turn
 
     this.runTurn(agent, message);
     return { ok: true, info: this.toInfo(agent) };
@@ -210,7 +210,7 @@ export class SubagentManager {
           agent.chatId = msg.sessionId as string;
           logger.debug(`[subagentMgr] agent=${agent.id.slice(0, 8)} chatId=${agent.chatId}`);
         }
-        if (msg.type === 'text_delta') agent.lastText = msg.text;
+        if (msg.type === 'text_delta') agent.lastText += msg.text;
         if (msg.type === 'error') {
           agent.error = msg.message;
         }
