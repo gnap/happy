@@ -19,31 +19,39 @@ export const ToolDiffView = React.memo<ToolDiffViewProps>(({
     showPlusMinusSymbols = false 
 }) => {
     const wrapLines = useSetting('wrapLinesInDiffs');
-    
-    const diffView = (
-        <DiffView 
-            oldText={oldText} 
-            newText={newText} 
-            wrapLines={wrapLines}
-            showLineNumbers={showLineNumbers}
-            showPlusMinusSymbols={showPlusMinusSymbols}
-            style={{ flex: 1, ...style }}
-        />
-    );
-    
+
     if (wrapLines) {
-        // When wrapping lines, no horizontal scroll needed
-        return <View style={{ flex: 1 }}>{diffView}</View>;
+        return (
+            <View style={{ flex: 1 }}>
+                <DiffView
+                    oldText={oldText}
+                    newText={newText}
+                    wrapLines={wrapLines}
+                    showLineNumbers={showLineNumbers}
+                    showPlusMinusSymbols={showPlusMinusSymbols}
+                    style={{ flex: 1, ...style }}
+                />
+            </View>
+        );
     }
-    
-    // When not wrapping, use horizontal scroll
+
+    // Non-wrapping: use horizontal scroll. DiffView gets only minWidth:'100%' so it
+    // can grow wider than the viewport for long lines (enabling true horizontal scroll).
+    // Callers must NOT pass width:'100%' via style — that would re-constrain the view
+    // to the viewport and cause line truncation.
     return (
-        <ScrollView 
-            horizontal 
+        <ScrollView
+            horizontal
             showsHorizontalScrollIndicator={true}
-            contentContainerStyle={{ flexGrow: 1 }}
         >
-            {diffView}
+            <DiffView
+                oldText={oldText}
+                newText={newText}
+                wrapLines={wrapLines}
+                showLineNumbers={showLineNumbers}
+                showPlusMinusSymbols={showPlusMinusSymbols}
+                style={{ minWidth: '100%' }}
+            />
         </ScrollView>
     );
 });

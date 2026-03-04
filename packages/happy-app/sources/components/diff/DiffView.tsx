@@ -43,7 +43,6 @@ export const DiffView: React.FC<DiffViewProps> = ({
     const containerStyle: ViewStyle = {
         backgroundColor: theme.colors.surface,
         borderWidth: 0,
-        flex: 1,
         ...style,
     };
 
@@ -124,6 +123,10 @@ export const DiffView: React.FC<DiffViewProps> = ({
         );
     };
 
+    // In non-wrapLines mode each line is wrapped in a row View so Text extends
+    // horizontally without wrapping or truncation, enabling correct horizontal scroll.
+    const lineRowStyle: ViewStyle = { flexDirection: 'row' };
+
     // Render diff content as separate lines to prevent wrapping
     const renderDiffContent = () => {
         const lines: React.ReactNode[] = [];
@@ -131,9 +134,9 @@ export const DiffView: React.FC<DiffViewProps> = ({
         hunks.forEach((hunk, hunkIndex) => {
             // Add hunk header for non-first hunks
             if (hunkIndex > 0) {
-                lines.push(
+                const hunkHeaderText = (
                     <Text 
-                        key={`hunk-header-${hunkIndex}`} 
+                        key={wrapLines ? `hunk-header-${hunkIndex}` : `hunk-header-text-${hunkIndex}`}
                         numberOfLines={wrapLines ? undefined : 1}
                         style={{
                             ...Typography.mono(),
@@ -148,6 +151,11 @@ export const DiffView: React.FC<DiffViewProps> = ({
                         {`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`}
                     </Text>
                 );
+                lines.push(wrapLines ? hunkHeaderText : (
+                    <View key={`hunk-header-${hunkIndex}`} style={lineRowStyle}>
+                        {hunkHeaderText}
+                    </View>
+                ));
             }
 
             hunk.lines.forEach((line, lineIndex) => {
@@ -156,16 +164,15 @@ export const DiffView: React.FC<DiffViewProps> = ({
                 const textColor = isAdded ? colors.addedText : isRemoved ? colors.removedText : colors.contextText;
                 const bgColor = isAdded ? colors.addedBg : isRemoved ? colors.removedBg : colors.contextBg;
                 
-                // Render complete line in a single Text element
-                lines.push(
+                const lineText = (
                     <Text
-                        key={`line-${hunkIndex}-${lineIndex}`}
+                        key={wrapLines ? `line-${hunkIndex}-${lineIndex}` : `line-text-${hunkIndex}-${lineIndex}`}
                         numberOfLines={wrapLines ? undefined : 1}
                         style={{
                             ...Typography.mono(),
                             fontSize: 13,
                             lineHeight: 20,
-                            backgroundColor: bgColor,
+                            backgroundColor: wrapLines ? bgColor : undefined,
                             transform: [{ scaleX: fontScaleX }],
                             paddingLeft: 8,
                             paddingRight: 8,
@@ -189,6 +196,16 @@ export const DiffView: React.FC<DiffViewProps> = ({
                         {renderLineContent(line.content, textColor, line.tokens)}
                     </Text>
                 );
+
+                // In non-wrapLines mode, wrap in a row View so text extends horizontally
+                // without wrapping or truncation (for horizontal scroll). bgColor is applied
+                // to the row View so the background spans the full line width.
+                // In wrapLines mode, render Text directly so it wraps at container width.
+                lines.push(wrapLines ? lineText : (
+                    <View key={`line-${hunkIndex}-${lineIndex}`} style={[lineRowStyle, { backgroundColor: bgColor }]}>
+                        {lineText}
+                    </View>
+                ));
             });
         });
         
@@ -196,7 +213,7 @@ export const DiffView: React.FC<DiffViewProps> = ({
     };
 
     return (
-        <View style={[containerStyle, { overflow: 'hidden' }]}>
+        <View style={containerStyle}>
             {renderDiffContent()}
         </View>
     );

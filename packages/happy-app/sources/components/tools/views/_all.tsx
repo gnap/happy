@@ -16,6 +16,7 @@ import { CodexPatchView } from './CodexPatchView';
 import { CursorBashViewFull } from './CursorBashViewFull';
 import { CursorEditViewFull } from './CursorEditViewFull';
 import { CursorWriteViewFull } from './CursorWriteViewFull';
+import { WriteViewFull } from './WriteViewFull';
 import { CodexDiffView } from './CodexDiffView';
 import { AskUserQuestionView } from './AskUserQuestionView';
 import { GeminiEditView } from './GeminiEditView';
@@ -36,8 +37,10 @@ export type ToolViewComponent = React.ComponentType<ToolViewProps>;
 // Registry of tool-specific view components
 export const toolViewRegistry: Record<string, ToolViewComponent> = {
     Edit: EditView,
+    CursorEdit: EditView,
     Bash: BashView,
     CursorBash: BashView,
+    CursorWrite: WriteView,
     CodexBash: CodexBashView,
     CodexPatch: CodexPatchView,
     CodexDiff: CodexDiffView,
@@ -59,7 +62,7 @@ export const toolFullViewRegistry: Record<string, ToolViewComponent> = {
     CursorEdit: CursorEditViewFull,
     CursorWrite: CursorWriteViewFull,
     Edit: EditViewFull,
-    Write: WriteView,
+    Write: WriteViewFull,
     MultiEdit: MultiEditViewFull,
     CodexDiff: CodexDiffView,
     // Gemini
@@ -87,6 +90,7 @@ export { CodexDiffView } from './CodexDiffView';
 export { BashViewFull } from './BashViewFull';
 export { CursorEditViewFull } from './CursorEditViewFull';
 export { CursorWriteViewFull } from './CursorWriteViewFull';
+export { WriteViewFull } from './WriteViewFull';
 export { EditViewFull } from './EditViewFull';
 export { MultiEditViewFull } from './MultiEditViewFull';
 export { ExitPlanToolView } from './ExitPlanToolView';
