@@ -8,6 +8,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { createHash } from 'node:crypto';
+import { createId } from '@paralleldrive/cuid2';
 import { logger } from '@/ui/logger';
 import type { CursorStreamMessage } from './types';
 
@@ -35,8 +36,11 @@ export type CursorParsedMessage =
   | { type: 'session_init'; sessionId: string; model?: string }
   | { type: 'thinking_delta'; text: string }
   | { type: 'text_delta'; text: string }
-  | { type: 'tool_call_start'; toolName: string; args: Record<string, unknown>; callId: string; description?: string }
-  | { type: 'tool_call_end'; toolName: string; result: unknown; callId: string; success: boolean }
+  | { type: 'tool_call_start'; toolName: string; args: Record<string, unknown>; callId: string; description?: string; subagentId?: string }
+  | { type: 'tool_call_end'; toolName: string; result: unknown; callId: string; success: boolean; subagentId?: string }
+  | { type: 'subagent_start'; subagentId: string }
+  | { type: 'subagent_stop'; subagentId: string }
+  | { type: 'subagent_text'; subagentId: string; text: string; thinking?: boolean }
   | { type: 'task_started' }
   | { type: 'task_complete'; sessionId?: string; usage?: Record<string, unknown>; costUsd?: number; durationMs?: number }
   | { type: 'error'; message: string };
@@ -46,9 +50,70 @@ export type CursorParsedMessage =
  * Per-key FIFO: same tool+args can run multiple times; completed order may differ from started,
  * so we use a queue per (toolName, argsHash) so each completed gets the correct callId.
  */
+/** Parse a single conversationStep from a native Cursor taskToolCall result into messages. */
+function parseConversationStep(step: Record<string, unknown>, subagentId: string): CursorParsedMessage[] {
+  const results: CursorParsedMessage[] = [];
+  const thinking = step.thinkingMessage as { text?: string } | undefined;
+  if (thinking?.text?.trim()) {
+    results.push({ type: 'subagent_text', subagentId, text: thinking.text, thinking: true });
+  }
+  const assistant = step.assistantMessage as { text?: string } | undefined;
+  if (assistant?.text?.trim()) {
+    results.push({ type: 'subagent_text', subagentId, text: assistant.text });
+  }
+  const stc = step.toolCall as Record<string, unknown> | undefined;
+  if (!stc) return results;
+
+  const stepCallId = randomUUID();
+  if (stc.shellToolCall) {
+    const tc = stc.shellToolCall as Record<string, unknown>;
+    const args = tc.args as Record<string, unknown> | undefined ?? {};
+    const command = (args.command as string) || '';
+    const shellDesc = (args.description as string) || undefined;
+    results.push({ type: 'tool_call_start', toolName: 'CursorBash', args: { command, description: shellDesc }, callId: stepCallId, subagentId, description: shellDesc });
+    const r = tc.result as { success?: { stdout?: string; exitCode?: number }; failure?: { stderr?: string; exitCode?: number } } | undefined;
+    results.push({ type: 'tool_call_end', toolName: 'CursorBash', result: { stdout: r?.success?.stdout ?? '', stderr: r?.failure?.stderr ?? '', exitCode: r?.success?.exitCode ?? r?.failure?.exitCode }, callId: stepCallId, success: !!r?.success, subagentId });
+  } else if (stc.readToolCall) {
+    const tc = stc.readToolCall as Record<string, unknown>;
+    const args = tc.args as Record<string, unknown> | undefined ?? {};
+    results.push({ type: 'tool_call_start', toolName: 'CursorRead', args: { path: args.path ?? '' }, callId: stepCallId, subagentId });
+    results.push({ type: 'tool_call_end', toolName: 'CursorRead', result: tc.result, callId: stepCallId, success: true, subagentId });
+  } else if (stc.writeToolCall) {
+    const tc = stc.writeToolCall as Record<string, unknown>;
+    const args = tc.args as Record<string, unknown> | undefined ?? {};
+    const content = (args.content ?? args.streamContent ?? '') as string;
+    results.push({ type: 'tool_call_start', toolName: 'CursorWrite', args: { path: args.path ?? '', content }, callId: stepCallId, subagentId });
+    results.push({ type: 'tool_call_end', toolName: 'CursorWrite', result: tc.result, callId: stepCallId, success: true, subagentId });
+  } else if (stc.editToolCall) {
+    const tc = stc.editToolCall as Record<string, unknown>;
+    const args = tc.args as Record<string, unknown> | undefined ?? {};
+    const editPath = (args.path ?? args.file_path ?? args.filePath ?? '') as string;
+    const oldString = (args.old_string ?? args.oldString ?? args.oldText ?? '') as string;
+    const newString = (args.new_string ?? args.newString ?? args.newText ?? '') as string;
+    results.push({ type: 'tool_call_start', toolName: 'CursorEdit', args: { path: editPath, old_string: oldString, new_string: newString }, callId: stepCallId, subagentId });
+    results.push({ type: 'tool_call_end', toolName: 'CursorEdit', result: tc.result, callId: stepCallId, success: true, subagentId });
+  } else if (stc.mcpToolCall) {
+    const tc = stc.mcpToolCall as Record<string, unknown>;
+    const toolName = (tc.name as string) || 'McpTool';
+    const args = (tc.args as Record<string, unknown>) || {};
+    const mcpDesc = (tc.description as string) || undefined;
+    results.push({ type: 'tool_call_start', toolName, args, callId: stepCallId, subagentId, description: mcpDesc });
+    results.push({ type: 'tool_call_end', toolName, result: tc.result, callId: stepCallId, success: true, subagentId });
+  } else if (stc.taskToolCall) {
+    const tc = stc.taskToolCall as Record<string, unknown>;
+    const args = tc.args as Record<string, unknown> | undefined ?? {};
+    const desc = (args.description as string) || 'Task';
+    results.push({ type: 'tool_call_start', toolName: 'Task', args: { description: desc, prompt: args.prompt ?? '' }, callId: stepCallId, subagentId });
+    results.push({ type: 'tool_call_end', toolName: 'Task', result: null, callId: stepCallId, success: true, subagentId });
+  }
+  return results;
+}
+
 export class CursorMessageParser {
   /** key = toolKey (toolName + args hash), value = queue of callIds for that key */
   private pendingByKey: Map<string, string[]> = new Map();
+  /** key = toolKey for Task, value = queue of cuid2 subagent IDs (paired with callIds) */
+  private taskSubagentIds: Map<string, string[]> = new Map();
 
   private toolKey(toolName: string, args: Record<string, unknown>): string {
     const canonical = JSON.stringify(args, Object.keys(args).sort());
@@ -294,6 +359,45 @@ export class CursorMessageParser {
             });
           }
         }
+
+        if (tc.taskToolCall) {
+          const taskArgs = tc.taskToolCall.args as Record<string, unknown> | undefined ?? {};
+          const agentId = (taskArgs.agentId as string) || 'unknown';
+          const description = (taskArgs.description as string) || '';
+          const prompt = (taskArgs.prompt as string) || '';
+          const key = this.toolKey('Task', { agentId });
+          if (msg.subtype === 'started') {
+            // Use a single cuid2 as BOTH callId and subagentId so the reducer tracer can
+            // link sidechain events (parentUUID=subagentId) to this tool call via
+            // toolCallToMessageId[content.id] = toolCallToMessageId[subagentId].
+            const subagentId = createId();
+            let q = this.taskSubagentIds.get(key);
+            if (!q) { q = []; this.taskSubagentIds.set(key, q); }
+            q.push(subagentId);
+            results.push({ type: 'tool_call_start', toolName: 'Task', args: { description, prompt }, callId: subagentId, description });
+          } else if (msg.subtype === 'completed') {
+            const subagentId = this.taskSubagentIds.get(key)?.shift() ?? createId();
+            const steps = ((tc.taskToolCall.result as Record<string, unknown> | undefined)?.success as Record<string, unknown> | undefined)?.conversationSteps;
+            const stepList = Array.isArray(steps) ? (steps as Record<string, unknown>[]) : [];
+
+            results.push({ type: 'subagent_start', subagentId });
+            for (const step of stepList) {
+              results.push(...parseConversationStep(step, subagentId));
+            }
+            results.push({ type: 'subagent_stop', subagentId });
+
+            // Extract summary from last non-empty assistant message in steps
+            let summary: string | null = null;
+            for (let i = stepList.length - 1; i >= 0; i--) {
+              const text = (stepList[i].assistantMessage as { text?: string } | undefined)?.text?.trim();
+              if (text) { summary = text; break; }
+            }
+            results.push({ type: 'tool_call_end', toolName: 'Task', result: summary, callId: subagentId, success: true });
+          } else if (msg.subtype) {
+            const subagentId2 = this.taskSubagentIds.get(key)?.shift() ?? createId();
+            results.push({ type: 'tool_call_end', toolName: 'Task', result: { cancelled: true, subtype: msg.subtype }, callId: subagentId2, success: false });
+          }
+        }
         break;
       }
 
@@ -325,6 +429,7 @@ export class CursorMessageParser {
    */
   clear(): void {
     this.pendingByKey.clear();
+    this.taskSubagentIds.clear();
   }
 }
 

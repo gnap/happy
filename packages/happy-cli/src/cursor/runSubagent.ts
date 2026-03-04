@@ -142,7 +142,7 @@ export function runSubagent(opts: RunSubagentOptions): Promise<RunSubagentResult
       logger.debug(`[subagent] message: ${typeInfo}${subtypeInfo}`);
       const parsed = parser.parse(rawMsg);
       for (const msg of parsed) {
-        if (msg.type === 'text_delta') lastText = msg.text;
+        if (msg.type === 'text_delta') lastText += msg.text;
         if (msg.type === 'error') {
           hadError = true;
           errorMessage = msg.message;

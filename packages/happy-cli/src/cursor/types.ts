@@ -87,6 +87,24 @@ export interface CursorToolCallMessage {
                 };
             };
         };
+        /** Native cursor-agent task tool (sub-agent) */
+        taskToolCall?: {
+            args?: Record<string, unknown>;
+            result?: {
+                success?: {
+                    conversationSteps?: Array<Record<string, unknown>>;
+                    agentId?: string;
+                    isBackground?: boolean;
+                    durationMs?: number;
+                };
+            };
+        };
+        /** MCP tool call */
+        mcpToolCall?: {
+            name?: string;
+            args?: Record<string, unknown>;
+            result?: unknown;
+        };
     };
 }
 

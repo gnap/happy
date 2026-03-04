@@ -88,7 +88,32 @@ export function mapCursorMessageToSessionEnvelopes(
     };
   }
 
+  if (type === 'subagent_start') {
+    return {
+      currentTurnId: state.currentTurnId,
+      envelopes: [createEnvelope('agent', { t: 'start' }, { ...opts, subagent: message.subagentId })],
+    };
+  }
+
+  if (type === 'subagent_stop') {
+    return {
+      currentTurnId: state.currentTurnId,
+      envelopes: [createEnvelope('agent', { t: 'stop' }, { ...opts, subagent: message.subagentId })],
+    };
+  }
+
+  if (type === 'subagent_text') {
+    const ev = message.thinking
+      ? { t: 'text' as const, text: message.text, thinking: true }
+      : { t: 'text' as const, text: message.text };
+    return {
+      currentTurnId: state.currentTurnId,
+      envelopes: [createEnvelope('agent', ev, { ...opts, subagent: message.subagentId })],
+    };
+  }
+
   if (type === 'tool_call_start') {
+    const subagentOpts = message.subagentId ? { ...opts, subagent: message.subagentId } : opts;
     const command = typeof message.args?.command === 'string' ? message.args.command : null;
     const title = command
       ? `Run \`${command.length > 80 ? command.slice(0, 77) + '...' : command}\``
@@ -102,18 +127,19 @@ export function mapCursorMessageToSessionEnvelopes(
           call: message.callId,
           name: message.toolName,
           title,
-          description: title,
+          description: message.description ?? title,
           args: message.args,
-        }, opts),
+        }, subagentOpts),
       ],
     };
   }
 
   if (type === 'tool_call_end') {
+    const subagentOpts = message.subagentId ? { ...opts, subagent: message.subagentId } : opts;
     return {
       currentTurnId: state.currentTurnId,
       envelopes: [
-        createEnvelope('agent', { t: 'tool-call-end', call: message.callId }, opts),
+        createEnvelope('agent', { t: 'tool-call-end', call: message.callId }, subagentOpts),
       ],
     };
   }
