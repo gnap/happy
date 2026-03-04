@@ -52,3 +52,6 @@ CLAUDE.local.md
 notes/
 # ralphex progress logs
 progress*.txt
+# Cursor local config (port changes on every run)
+.cursor/mcp.json
+.cursor/happy-tarui-linux-cursor-backup/

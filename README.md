@@ -53,7 +53,7 @@ yarn release
 ```
 
 <h3 align="center">
-Step 3: Start using `happy` instead of `claude` or `codex`
+Step 3: Start using `happy` instead of `claude`, `codex`, or `cursor`
 </h3>
 
 ```bash
@@ -68,6 +68,14 @@ happy
 
 happy codex
 
+# Instead of: cursor (Cursor Agent)
+# Use: happy cursor
+
+happy cursor
+
+# Resume the last Cursor session for the same workspace
+happy cursor --resume
+
 ```
 
 <div align="center"><img src="/.github/mascot.png" width="200" title="Happy Coder" alt="Happy Coder"/></div>
@@ -76,10 +84,24 @@ happy codex
 
 On your computer, run `happy` instead of `claude` or `happy codex` instead of `codex` to start your AI through our wrapper. When you want to control your coding agent from your phone, it restarts the session in remote mode. To switch back to your computer, just press any key on your keyboard.
 
+## Happy Cursor
+
+Run [Cursor Agent](https://cursor.com) remotely through Happy — the same mobile control and push notifications you get with Claude Code and Codex, now for Cursor.
+
+```bash
+# Start Cursor Agent (auto-configures Happy MCP in .cursor/mcp.json)
+happy cursor
+
+# Resume the last session for this workspace
+happy cursor --resume
+```
+
+Happy automatically writes `.cursor/mcp.json` so the Cursor agent loads the Happy MCP server without any manual setup. Once running, send prompts from your phone or web browser and watch Cursor work in real time.
+
 ## 🔥 Why Happy Coder?
 
-- 📱 **Mobile access to Claude Code and Codex** - Check what your AI is building while away from your desk
-- 🔔 **Push notifications** - Get alerted when Claude Code and Codex needs permission or encounters errors  
+- 📱 **Mobile access to Claude Code, Codex, and Cursor** - Check what your AI is building while away from your desk
+- 🔔 **Push notifications** - Get alerted when your agent needs permission or encounters errors
 - ⚡ **Switch devices instantly** - Take control from phone or desktop with one keypress
 - 🔐 **End-to-end encrypted** - Your code never leaves your devices unencrypted
 - 🛠️ **Open source** - Audit the code yourself. No telemetry, no tracking
