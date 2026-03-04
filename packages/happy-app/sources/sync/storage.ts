@@ -10,7 +10,7 @@ import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
 import { Profile } from "./profile";
 import { UserProfile, RelationshipUpdatedEvent } from "./friendTypes";
-import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts } from "./persistence";
+import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes } from "./persistence";
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 import type { CustomerInfo } from './revenueCat/types';
 import React from "react";
@@ -252,6 +252,8 @@ export const storage = create<StorageState>()((set, get) => {
     let purchases = loadPurchases();
     let profile = loadProfile();
     let sessionDrafts = loadSessionDrafts();
+    let sessionPermissionModes = loadSessionPermissionModes();
+    let sessionModelModes = loadSessionModelModes();
     return {
         settings,
         settingsVersion: version,
@@ -300,8 +302,10 @@ export const storage = create<StorageState>()((set, get) => {
             return Object.values(state.sessions).filter(s => s.active);
         },
         applySessions: (sessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[]) => set((state) => {
-            // Load drafts if sessions are empty (initial load). Permission/model come from session.metadata (eventual consistency via message meta).
+            // Load drafts and MMKV permission/model only on initial load. Resolution: metadata first, then existing, then MMKV, then server.
             const savedDrafts = Object.keys(state.sessions).length === 0 ? sessionDrafts : {};
+            const savedPermissionModes = Object.keys(state.sessions).length === 0 ? sessionPermissionModes : {};
+            const savedModelModes = Object.keys(state.sessions).length === 0 ? sessionModelModes : {};
 
             // Merge new sessions with existing ones
             const mergedSessions: Record<string, Session> = { ...state.sessions };
@@ -311,21 +315,24 @@ export const storage = create<StorageState>()((set, get) => {
                 // Use centralized resolver for consistent state management
                 const presence = resolveSessionOnlineState(session);
 
-                // Preserve existing draft; permission/model from metadata (CLI) or existing or server
+                // Draft: existing || saved || session. Permission/model: metadata first, then existing, then MMKV, then server.
                 const existingDraft = state.sessions[session.id]?.draft;
                 const savedDraft = savedDrafts[session.id];
                 const existingPermissionMode = state.sessions[session.id]?.permissionMode;
+                const savedPermissionMode = savedPermissionModes[session.id];
                 const defaultPermissionMode: PermissionModeKey = isSandboxEnabled(session.metadata) ? 'bypassPermissions' : 'default';
                 const metadataPermission = session.metadata?.currentOperatingModeCode?.trim();
                 const resolvedPermissionMode: PermissionModeKey =
                     (metadataPermission && metadataPermission !== 'default' ? metadataPermission : undefined) ||
                     (existingPermissionMode && existingPermissionMode !== 'default' ? existingPermissionMode : undefined) ||
+                    (savedPermissionMode && savedPermissionMode !== 'default' ? savedPermissionMode : undefined) ||
                     (session.permissionMode && session.permissionMode !== 'default' ? session.permissionMode : undefined) ||
                     (metadataPermission ? metadataPermission : undefined) ||
                     defaultPermissionMode;
                 const metadataModel = session.metadata?.currentModelCode?.trim();
                 const existingModelMode = state.sessions[session.id]?.modelMode;
-                const resolvedModelMode = (metadataModel && metadataModel !== '' ? metadataModel : undefined) ?? existingModelMode ?? session.modelMode ?? undefined;
+                const savedModelMode = savedModelModes[session.id];
+                const resolvedModelMode = (metadataModel && metadataModel !== '' ? metadataModel : undefined) ?? existingModelMode ?? savedModelMode ?? session.modelMode ?? undefined;
                 // todos: derived by replay (reducer) when messages load; not synced to server. Preserve here so
                 // list fetches do not overwrite; replay will update session.todos when that session's messages load.
                 const existingTodos = state.sessions[session.id]?.todos;
@@ -811,7 +818,6 @@ export const storage = create<StorageState>()((set, get) => {
             const session = state.sessions[sessionId];
             if (!session) return state;
 
-            // Update the session with the new permission mode (persisted to session metadata when user sends a message via CLI)
             const updatedSessions = {
                 ...state.sessions,
                 [sessionId]: {
@@ -819,6 +825,13 @@ export const storage = create<StorageState>()((set, get) => {
                     permissionMode: mode
                 }
             };
+            const allModes: Record<string, string> = {};
+            Object.entries(updatedSessions).forEach(([id, sess]) => {
+                if (sess.permissionMode && sess.permissionMode !== 'default') {
+                    allModes[id] = sess.permissionMode;
+                }
+            });
+            saveSessionPermissionModes(allModes);
 
             return {
                 ...state,
@@ -829,7 +842,6 @@ export const storage = create<StorageState>()((set, get) => {
             const session = state.sessions[sessionId];
             if (!session) return state;
 
-            // Update in-memory only; persisted to session metadata when user sends a message via CLI
             const updatedSessions = {
                 ...state.sessions,
                 [sessionId]: {
@@ -837,6 +849,13 @@ export const storage = create<StorageState>()((set, get) => {
                     modelMode: mode
                 }
             };
+            const allModelModes: Record<string, string> = {};
+            Object.entries(updatedSessions).forEach(([id, sess]) => {
+                if (sess.modelMode != null && sess.modelMode !== '') {
+                    allModelModes[id] = sess.modelMode;
+                }
+            });
+            saveSessionModelModes(allModelModes);
 
             return {
                 ...state,
@@ -943,10 +962,16 @@ export const storage = create<StorageState>()((set, get) => {
             // Remove session git status if it exists
             const { [sessionId]: deletedGitStatus, ...remainingGitStatus } = state.sessionGitStatus;
             
-            // Clear drafts from persistent storage (permission/model are in session metadata only)
+            // Clear drafts and permission/model from MMKV
             const drafts = loadSessionDrafts();
             delete drafts[sessionId];
             saveSessionDrafts(drafts);
+            const modes = loadSessionPermissionModes();
+            delete modes[sessionId];
+            saveSessionPermissionModes(modes);
+            const modelModes = loadSessionModelModes();
+            delete modelModes[sessionId];
+            saveSessionModelModes(modelModes);
 
             // Rebuild sessionListViewData without the deleted session
             const sessionListViewData = buildSessionListViewData(remainingSessions);

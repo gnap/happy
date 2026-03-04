@@ -155,12 +155,13 @@
 | `purchases`              | RevenueCat 购买状态 |
 | `profile`               | 用户 profile |
 | `session-drafts`        | 各会话输入框草稿 `Record<sessionId, string>` |
+| `session-permission-modes` | 各会话 permission mode 偏好（解析时 **metadata 优先**，无 metadata 时用此 fallback） |
+| `session-model-modes`   | 各会话 model 偏好（同上，metadata 优先） |
 | `new-session-draft-v1`   | 新建会话向导的草稿（机器、路径、agent 类型等） |
 | `temp_text_*`           | 临时大文本（用后即删） |
 
-### 5.2 不持久化的内容（仅内存或通过消息最终一致）
+### 5.2 不持久化的内容（仅内存）
 
-- **会话 permission / model**：不写入 MMKV；由 CLI 在用户发带 `meta` 的消息时写入 `session.metadata`，App 拉会话列表时从 `session.metadata` 解析，最终一致。
 - **会话列表**（`sessions`、`sessionListViewData`）：不写入 MMKV，完全依赖启动后 `fetchSessions` + Socket。
 - **会话消息**（`sessionMessages[sessionId]`）：不写入 MMKV，依赖进入会话时 `fetchMessages` + Socket 增量。
 - **Machines**：不写入 MMKV，由 `fetchMachines` + Socket 更新。
