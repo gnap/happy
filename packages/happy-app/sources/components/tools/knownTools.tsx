@@ -87,6 +87,68 @@ export const knownTools = {
             return null;
         }
     },
+    'CursorBash': {
+        title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            if (opts.tool.description) {
+                return opts.tool.description;
+            }
+            return t('tools.names.terminal');
+        },
+        icon: ICON_TERMINAL,
+        minimal: true,
+        hideDefaultError: true,
+        isMutable: true,
+        input: z.object({
+            command: z.string().describe('The command to execute'),
+        }).partial().passthrough(),
+        extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            if (typeof opts.tool.input?.command === 'string') {
+                return opts.tool.input.command;
+            }
+            return null;
+        }
+    },
+    'CursorRead': {
+        title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            if (typeof opts.tool.input?.path === 'string') {
+                return resolvePath(opts.tool.input.path, opts.metadata);
+            }
+            return t('tools.names.readFile');
+        },
+        icon: ICON_READ,
+        minimal: true,
+        input: z.object({
+            path: z.string().describe('The file path to read'),
+        }).partial().passthrough(),
+    },
+    'CursorWrite': {
+        title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            if (typeof opts.tool.input?.path === 'string') {
+                return resolvePath(opts.tool.input.path, opts.metadata);
+            }
+            return t('tools.names.writeFile');
+        },
+        icon: ICON_EDIT,
+        minimal: true,
+        isMutable: true,
+        input: z.object({
+            path: z.string().describe('The file path to write'),
+        }).partial().passthrough(),
+    },
+    'CursorEdit': {
+        title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            if (typeof opts.tool.input?.path === 'string') {
+                return resolvePath(opts.tool.input.path, opts.metadata);
+            }
+            return t('tools.names.editFile');
+        },
+        icon: ICON_EDIT,
+        minimal: true,
+        isMutable: true,
+        input: z.object({
+            path: z.string().describe('The file path to edit'),
+        }).partial().passthrough(),
+    },
     'Glob': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
             if (typeof opts.tool.input.pattern === 'string') {
