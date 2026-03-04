@@ -296,7 +296,8 @@ const codexCursorDataSchema = z.discriminatedUnion('type', [
         type: z.literal('tool-call-result'),
         callId: z.string(),
         output: z.any(),
-        id: z.string()
+        id: z.string(),
+        is_error: z.boolean().optional()
     })
 ]);
 
@@ -357,7 +358,8 @@ const rawAgentRecordSchema = z.discriminatedUnion('type', [z.object({
             type: z.literal('tool-call-result'),
             callId: z.string(),
             output: z.any(),
-            id: z.string()
+            id: z.string(),
+            is_error: z.boolean().optional()
         }),
         // File operations
         z.object({
