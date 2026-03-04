@@ -354,6 +354,7 @@ export const ca: TranslationStructure = {
         created: 'Creat',
         lastUpdated: 'Última actualització',
         sequence: 'Seqüència',
+        sequenceSubtitle: 'Seq intern de missatges de la sessió (monotònic per sessió; igual que Session.seq del servidor)',
         quickActions: 'Accions ràpides',
         viewMachine: 'Veure la màquina',
         viewMachineSubtitle: 'Veure detalls de la màquina i sessions',
@@ -383,6 +384,10 @@ export const ca: TranslationStructure = {
         deleteSessionWarning: 'Aquesta acció no es pot desfer. Tots els missatges i dades associats amb aquesta sessió s\'eliminaran permanentment.',
         failedToDeleteSession: 'Error en eliminar la sessió',
         sessionDeleted: 'Sessió eliminada amb èxit',
+        rebuildMessageCache: 'Reconstruir la memòria cau de missatges',
+        rebuildMessageCacheSubtitle: 'Esborrar els missatges en memòria cau i tornar a carregar del servidor',
+        cachedLastSeq: ({ seq }: { seq: number }) => `Darrer seq en memòria cau: ${seq}`,
+        rebuildMessageCacheConfirm: 'Això esborrarà la memòria cau local de missatges i recarregarà tots els missatges del servidor. Continuar?',
         
     },
 

@@ -354,6 +354,7 @@ export const pt: TranslationStructure = {
         created: 'Criado',
         lastUpdated: 'Última atualização',
         sequence: 'Sequência',
+        sequenceSubtitle: 'Seq interno de mensagens da sessão (monótono por sessão; igual ao Session.seq do servidor)',
         quickActions: 'Ações rápidas',
         viewMachine: 'Ver máquina',
         viewMachineSubtitle: 'Ver detalhes da máquina e sessões',
@@ -383,6 +384,10 @@ export const pt: TranslationStructure = {
         deleteSessionWarning: 'Esta ação não pode ser desfeita. Todas as mensagens e dados associados a esta sessão serão excluídos permanentemente.',
         failedToDeleteSession: 'Falha ao excluir sessão',
         sessionDeleted: 'Sessão excluída com sucesso',
+        rebuildMessageCache: 'Reconstruir cache de mensagens',
+        rebuildMessageCacheSubtitle: 'Limpar mensagens em cache e recarregar do servidor',
+        cachedLastSeq: ({ seq }: { seq: number }) => `Último seq em cache: ${seq}`,
+        rebuildMessageCacheConfirm: 'Isso limpará o cache local de mensagens e recarregará todas as mensagens do servidor. Continuar?',
         
     },
 

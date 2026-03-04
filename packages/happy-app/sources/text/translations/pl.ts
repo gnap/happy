@@ -365,6 +365,7 @@ export const pl: TranslationStructure = {
         created: 'Utworzono',
         lastUpdated: 'Ostatnia aktualizacja',
         sequence: 'Sekwencja',
+        sequenceSubtitle: 'Wewnętrzny seq wiadomości sesji (monotonicznie rosnący per sesja; taki sam jak Session.seq serwera)',
         quickActions: 'Szybkie akcje',
         viewMachine: 'Zobacz maszynę',
         viewMachineSubtitle: 'Zobacz szczegóły maszyny i sesje',
@@ -394,6 +395,10 @@ export const pl: TranslationStructure = {
         deleteSessionWarning: 'Ta operacja jest nieodwracalna. Wszystkie wiadomości i dane powiązane z tą sesją zostaną trwale usunięte.',
         failedToDeleteSession: 'Nie udało się usunąć sesji',
         sessionDeleted: 'Sesja została pomyślnie usunięta',
+        rebuildMessageCache: 'Odbuduj pamięć podręczną wiadomości',
+        rebuildMessageCacheSubtitle: 'Wyczyść buforowane wiadomości i pobierz ponownie z serwera',
+        cachedLastSeq: ({ seq }: { seq: number }) => `Buforowany ostatni seq: ${seq}`,
+        rebuildMessageCacheConfirm: 'Spowoduje to wyczyszczenie lokalnej pamięci podręcznej wiadomości i ponowne załadowanie wszystkich wiadomości z serwera. Kontynuować?',
     },
 
     components: {

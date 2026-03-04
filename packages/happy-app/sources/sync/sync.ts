@@ -245,7 +245,7 @@ class Sync {
         Promise.race([readyPromise, timeoutPromise]).then(() => {
             storage.getState().applyReady();
         }).catch((error) => {
-            log.log('🔄 #init: initial sync error, applying ready so UI can show:', String(error));
+            log.log(`🔄 #init: initial sync error, applying ready so UI can show: ${String(error)}`);
             storage.getState().applyReady();
         });
     }
@@ -1891,7 +1891,7 @@ class Sync {
                     gitStatusSync.invalidate(sessionId);
                 }
             } catch (e) {
-                log.log('🔄 reconnect: error invalidating message syncs:', String(e));
+                log.log(`🔄 reconnect: error invalidating message syncs: ${String(e)}`);
             }
             for (const sync of this.sendSync.values()) {
                 sync.invalidate();

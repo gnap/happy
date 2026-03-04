@@ -327,6 +327,7 @@ export const ru: TranslationStructure = {
         created: 'Создано',
         lastUpdated: 'Последнее обновление',
         sequence: 'Последовательность',
+        sequenceSubtitle: 'Внутренний seq сообщений сессии (монотонно возрастает в рамках сессии; совпадает с Session.seq сервера)',
         quickActions: 'Быстрые действия',
         viewMachine: 'Посмотреть машину',
         viewMachineSubtitle: 'Посмотреть детали машины и сессии',
@@ -356,6 +357,10 @@ export const ru: TranslationStructure = {
         deleteSessionWarning: 'Это действие нельзя отменить. Все сообщения и данные, связанные с этой сессией, будут удалены навсегда.',
         failedToDeleteSession: 'Не удалось удалить сессию',
         sessionDeleted: 'Сессия успешно удалена',
+        rebuildMessageCache: 'Перестроить кэш сообщений',
+        rebuildMessageCacheSubtitle: 'Очистить кэшированные сообщения и загрузить заново с сервера',
+        cachedLastSeq: ({ seq }: { seq: number }) => `Кэшированный последний seq: ${seq}`,
+        rebuildMessageCacheConfirm: 'Это очистит локальный кэш сообщений и перезагрузит все сообщения с сервера. Продолжить?',
     },
 
     components: {
