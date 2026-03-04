@@ -628,18 +628,17 @@ export async function runCursor(opts: {
               codexIdByCallId.set(msg.callId, codexId);
               // Dual-send: output (old App) + session (new App)
               session.sendOutputFormatMessage({ type: 'assistant', uuid: randomUUID(), message: { role: 'assistant', model: 'cursor', content: [{ type: 'tool_use', id: msg.callId, name: codexName, input: codexInput }] } });
-              // Session protocol: timer uses tool-call-start / tool-call-end to stop
-              const cmd = Array.isArray((codexInput as { command?: unknown })?.command)
-                ? (codexInput as { command: string[] }).command.join(' ')
-                : (codexInput as { command?: string })?.command ?? '';
-              const toolTitle = cmd ? `Run \`${cmd.length > 80 ? cmd.slice(0, 77) + '...' : cmd}\`` : `${codexName} call`;
+              // Session protocol: use original Cursor tool names and args so new App matches CursorBash/CursorRead/etc. knownTools entries
+              const cursorCmd = typeof msg.args?.command === 'string' ? msg.args.command : null;
+              const toolTitle = msg.description
+                ?? (cursorCmd ? `Run \`${cursorCmd.length > 80 ? cursorCmd.slice(0, 77) + '...' : cursorCmd}\`` : `${msg.toolName} call`);
               session.sendSessionProtocolMessage(createEnvelope('agent', {
                 t: 'tool-call-start',
                 call: msg.callId,
-                name: codexName,
+                name: msg.toolName,
                 title: toolTitle,
                 description: toolTitle,
-                args: codexInput,
+                args: msg.args,
               }, { turn: turnId }));
               // Codex + cursor tool-call for store App 1.5.0 (schema requires id; reducer uses callId)
               logger.debug(`[cursor] codex/cursor tool-call callId=${msg.callId.slice(0, 8)}... name=${codexName}`);

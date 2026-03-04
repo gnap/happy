@@ -34,7 +34,7 @@ export interface CursorToolCallMessage {
     subtype: 'completed' | 'started' | string;
     tool_call: {
         shellToolCall?: {
-            args?: { command?: string };
+            args?: { command?: string; description?: string };
             result?: {
                 success?: {
                     stdout?: string;
