@@ -14,12 +14,28 @@ interface FilteredTool {
     state: 'running' | 'completed' | 'error';
 }
 
+function extractTaskResult(result: unknown): string | null {
+    if (typeof result === 'string' && result.trim()) return result;
+    if (Array.isArray(result)) {
+        const text = result
+            .filter((b: any) => b?.type === 'text' && typeof b?.text === 'string')
+            .map((b: any) => b.text as string)
+            .join('\n\n');
+        return text.trim() || null;
+    }
+    return null;
+}
+
 export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages, compact }) => {
     const { theme } = useUnistyles();
     const filtered: FilteredTool[] = [];
+
     let lastAgentText: string | null = null;
 
     for (let m of messages) {
+        if (m.kind === 'agent-text' && m.text) {
+            lastAgentText = m.text;
+        }
         if (m.kind === 'tool-call') {
             const knownTool = knownTools[m.tool.name as keyof typeof knownTools] as any;
             
@@ -49,9 +65,14 @@ export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages, c
                 });
             }
         }
-        if (m.kind === 'agent-text' && m.text) {
-            lastAgentText = m.text;
-        }
+    }
+
+    const resultSummary = !compact && tool.state === 'completed'
+        ? (extractTaskResult(tool.result) ?? lastAgentText)
+        : null;
+
+    if (filtered.length === 0 && !resultSummary) {
+        return null;
     }
 
     const styles = StyleSheet.create({
@@ -103,13 +124,9 @@ export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages, c
         },
         summaryContainer: {
             paddingHorizontal: 4,
-            paddingTop: 4,
+            paddingTop: 8,
         },
     });
-
-    if (filtered.length === 0 && !lastAgentText) {
-        return null;
-    }
 
     const visibleTools = filtered.slice(filtered.length - 3);
     const remainingCount = filtered.length - 3;
@@ -145,9 +162,9 @@ export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages, c
                     </Text>
                 </View>
             )}
-            {!compact && lastAgentText != null && (
+            {resultSummary != null && (
                 <View style={styles.summaryContainer}>
-                    <MarkdownView markdown={lastAgentText} />
+                    <MarkdownView markdown={resultSummary} />
                 </View>
             )}
         </View>
