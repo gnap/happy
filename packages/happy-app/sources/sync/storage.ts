@@ -302,10 +302,10 @@ export const storage = create<StorageState>()((set, get) => {
             return Object.values(state.sessions).filter(s => s.active);
         },
         applySessions: (sessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[]) => set((state) => {
-            // Load drafts and MMKV permission/model only on initial load. Resolution: metadata first, then existing, then MMKV, then server.
+            // Drafts: only from MMKV on initial load. Permission/model: read MMKV every time so restart/refresh keeps selection (metadata first, then existing, then MMKV, then server).
             const savedDrafts = Object.keys(state.sessions).length === 0 ? sessionDrafts : {};
-            const savedPermissionModes = Object.keys(state.sessions).length === 0 ? sessionPermissionModes : {};
-            const savedModelModes = Object.keys(state.sessions).length === 0 ? sessionModelModes : {};
+            const savedPermissionModes = loadSessionPermissionModes();
+            const savedModelModes = loadSessionModelModes();
 
             // Merge new sessions with existing ones
             const mergedSessions: Record<string, Session> = { ...state.sessions };
