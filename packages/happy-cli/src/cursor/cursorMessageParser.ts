@@ -132,11 +132,13 @@ export class CursorMessageParser {
             const callId = this.shiftCallId(key);
             const r = tc.shellToolCall.result;
             const success = !!r?.success;
-            const stdout = r?.success?.stdout || r?.failure?.stderr || '';
+            const stdout = r?.success?.stdout ?? '';
+            const stderr = r?.failure?.stderr ?? '';
+            const exitCode = r?.success?.exitCode ?? r?.failure?.exitCode;
             results.push({
               type: 'tool_call_end',
               toolName: 'CursorBash',
-              result: { stdout, exitCode: r?.success?.exitCode ?? r?.failure?.exitCode },
+              result: { stdout, stderr, exitCode },
               callId,
               success,
             });
