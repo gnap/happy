@@ -14,6 +14,8 @@ import { MultiEditViewFull } from './MultiEditViewFull';
 import { CodexBashView } from './CodexBashView';
 import { CodexPatchView } from './CodexPatchView';
 import { CursorBashViewFull } from './CursorBashViewFull';
+import { CursorEditViewFull } from './CursorEditViewFull';
+import { CursorWriteViewFull } from './CursorWriteViewFull';
 import { CodexDiffView } from './CodexDiffView';
 import { AskUserQuestionView } from './AskUserQuestionView';
 import { GeminiEditView } from './GeminiEditView';
@@ -35,6 +37,7 @@ export type ToolViewComponent = React.ComponentType<ToolViewProps>;
 export const toolViewRegistry: Record<string, ToolViewComponent> = {
     Edit: EditView,
     Bash: BashView,
+    CursorBash: BashView,
     CodexBash: CodexBashView,
     CodexPatch: CodexPatchView,
     CodexDiff: CodexDiffView,
@@ -53,8 +56,15 @@ export const toolViewRegistry: Record<string, ToolViewComponent> = {
 export const toolFullViewRegistry: Record<string, ToolViewComponent> = {
     Bash: BashViewFull,
     CursorBash: CursorBashViewFull,
+    CursorEdit: CursorEditViewFull,
+    CursorWrite: CursorWriteViewFull,
     Edit: EditViewFull,
+    Write: WriteView,
     MultiEdit: MultiEditViewFull,
+    CodexDiff: CodexDiffView,
+    // Gemini
+    edit: GeminiEditView,
+    execute: GeminiExecuteView,
     Task: TaskView, // Task output is in children (sidechain agent-text), not tool.result
 };
 
@@ -75,6 +85,8 @@ export { CodexBashView } from './CodexBashView';
 export { CodexPatchView } from './CodexPatchView';
 export { CodexDiffView } from './CodexDiffView';
 export { BashViewFull } from './BashViewFull';
+export { CursorEditViewFull } from './CursorEditViewFull';
+export { CursorWriteViewFull } from './CursorWriteViewFull';
 export { EditViewFull } from './EditViewFull';
 export { MultiEditViewFull } from './MultiEditViewFull';
 export { ExitPlanToolView } from './ExitPlanToolView';

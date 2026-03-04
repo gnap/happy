@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, ScrollView, StyleSheet } from 'react-native';
 import { ToolCall } from '@/sync/typesMessage';
 import { Metadata } from '@/sync/storageTypes';
 import { CommandView } from '@/components/CommandView';
@@ -42,16 +42,26 @@ export const CursorBashViewFull = React.memo<CursorBashViewFullProps>(({ tool })
 
     return (
         <View style={styles.container}>
-            <CommandView
-                command={command}
-                stdout={stdout}
-                stderr={stderr}
-                error={error}
-                fullWidth
-            />
-            {exitCode !== null && exitCode !== 0 && (
-                <Text style={styles.exitCode}>exit {exitCode}</Text>
-            )}
+            <View style={styles.terminalContainer}>
+                <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={true}
+                    contentContainerStyle={styles.scrollContent}
+                >
+                    <View style={styles.commandWrapper}>
+                        <CommandView
+                            command={command}
+                            stdout={stdout}
+                            stderr={stderr}
+                            error={error}
+                            fullWidth
+                        />
+                        {exitCode !== null && exitCode !== 0 && (
+                            <Text style={styles.exitCode}>exit {exitCode}</Text>
+                        )}
+                    </View>
+                </ScrollView>
+            </View>
         </View>
     );
 });
@@ -62,6 +72,16 @@ const styles = StyleSheet.create({
         paddingTop: 32,
         paddingBottom: 64,
         flex: 1,
+    },
+    terminalContainer: {
+        flex: 1,
+    },
+    scrollContent: {
+        flexGrow: 1,
+    },
+    commandWrapper: {
+        flex: 1,
+        minWidth: '100%',
     },
     exitCode: {
         fontFamily: 'monospace',

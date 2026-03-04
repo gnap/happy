@@ -1,0 +1,31 @@
+import * as React from 'react';
+import { View } from 'react-native';
+import { ToolCall } from '@/sync/typesMessage';
+import { Metadata } from '@/sync/storageTypes';
+import { toolFullViewStyles } from '../ToolFullView';
+import { ToolDiffView } from '@/components/tools/ToolDiffView';
+import { trimIdent } from '@/utils/trimIdent';
+
+interface CursorEditViewFullProps {
+    tool: ToolCall;
+    metadata: Metadata | null;
+}
+
+export const CursorEditViewFull = React.memo<CursorEditViewFullProps>(({ tool }) => {
+    const { input } = tool;
+
+    const oldString = trimIdent(typeof input?.old_string === 'string' ? input.old_string : '');
+    const newString = trimIdent(typeof input?.new_string === 'string' ? input.new_string : '');
+
+    return (
+        <View style={toolFullViewStyles.sectionFullWidth}>
+            <ToolDiffView
+                oldText={oldString}
+                newText={newString}
+                style={{ width: '100%' }}
+                showLineNumbers={true}
+                showPlusMinusSymbols={true}
+            />
+        </View>
+    );
+});
