@@ -189,13 +189,14 @@ export class CursorMessageParser {
 
         if (tc.writeToolCall) {
           const filePath = tc.writeToolCall.args?.path || '';
+          const content = tc.writeToolCall.args?.content ?? '';
           const key = this.toolKey('CursorWrite', { path: filePath });
           if (msg.subtype === 'started') {
             const callId = this.pushCallId(key);
             results.push({
               type: 'tool_call_start',
               toolName: 'CursorWrite',
-              args: { path: filePath },
+              args: { path: filePath, content },
               callId,
             });
           } else if (msg.subtype === 'completed') {
@@ -220,14 +221,18 @@ export class CursorMessageParser {
         }
 
         if (tc.editToolCall) {
-          const args = tc.editToolCall.args || {};
-          const key = this.toolKey('CursorEdit', args);
+          const rawArgs = tc.editToolCall.args || {};
+          const editPath = (rawArgs.path ?? rawArgs.file_path ?? rawArgs.filePath ?? '') as string;
+          const oldString = (rawArgs.old_string ?? rawArgs.oldString ?? rawArgs.oldText ?? '') as string;
+          const newString = (rawArgs.new_string ?? rawArgs.newString ?? rawArgs.newText ?? '') as string;
+          const normalizedEditArgs = { path: editPath, old_string: oldString, new_string: newString };
+          const key = this.toolKey('CursorEdit', normalizedEditArgs);
           if (msg.subtype === 'started') {
             const callId = this.pushCallId(key);
             results.push({
               type: 'tool_call_start',
               toolName: 'CursorEdit',
-              args,
+              args: normalizedEditArgs,
               callId,
             });
           } else if (msg.subtype === 'completed') {
