@@ -9,28 +9,36 @@ interface ToolDiffViewProps {
     style?: any;
     showLineNumbers?: boolean;
     showPlusMinusSymbols?: boolean;
+    /** When set (e.g. list view compact), only show this many diff lines; detail view omits for full. */
+    maxLines?: number;
 }
 
-export const ToolDiffView = React.memo<ToolDiffViewProps>(({ 
-    oldText, 
-    newText, 
-    style, 
+export const ToolDiffView = React.memo<ToolDiffViewProps>(({
+    oldText,
+    newText,
+    style,
     showLineNumbers = false,
-    showPlusMinusSymbols = false 
+    showPlusMinusSymbols = false,
+    maxLines,
 }) => {
     const wrapLines = useSetting('wrapLinesInDiffs');
+
+    const diffView = (
+        <DiffView
+            oldText={oldText}
+            newText={newText}
+            wrapLines={wrapLines}
+            showLineNumbers={showLineNumbers}
+            showPlusMinusSymbols={showPlusMinusSymbols}
+            maxLines={maxLines}
+            style={wrapLines ? { flex: 1, ...style } : { minWidth: '100%' }}
+        />
+    );
 
     if (wrapLines) {
         return (
             <View style={{ flex: 1 }}>
-                <DiffView
-                    oldText={oldText}
-                    newText={newText}
-                    wrapLines={wrapLines}
-                    showLineNumbers={showLineNumbers}
-                    showPlusMinusSymbols={showPlusMinusSymbols}
-                    style={{ flex: 1, ...style }}
-                />
+                {diffView}
             </View>
         );
     }
@@ -44,14 +52,7 @@ export const ToolDiffView = React.memo<ToolDiffViewProps>(({
             horizontal
             showsHorizontalScrollIndicator={true}
         >
-            <DiffView
-                oldText={oldText}
-                newText={newText}
-                wrapLines={wrapLines}
-                showLineNumbers={showLineNumbers}
-                showPlusMinusSymbols={showPlusMinusSymbols}
-                style={{ minWidth: '100%' }}
-            />
+            {diffView}
         </ScrollView>
     );
 });

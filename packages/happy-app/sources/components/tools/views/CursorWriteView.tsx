@@ -4,7 +4,9 @@ import { ToolSectionView } from '../../tools/ToolSectionView';
 import { ToolDiffView } from '@/components/tools/ToolDiffView';
 import { useSetting } from '@/sync/storage';
 
-export const CursorWriteView = React.memo<ToolViewProps>(({ tool }) => {
+const LIST_DIFF_MAX_LINES = 4;
+
+export const CursorWriteView = React.memo<ToolViewProps>(({ tool, compact }) => {
     const showLineNumbersInToolViews = useSetting('showLineNumbersInToolViews');
     const { input, result } = tool;
 
@@ -25,6 +27,7 @@ export const CursorWriteView = React.memo<ToolViewProps>(({ tool }) => {
                     newText={contents}
                     showLineNumbers={showLineNumbersInToolViews}
                     showPlusMinusSymbols={showLineNumbersInToolViews}
+                    maxLines={compact ? LIST_DIFF_MAX_LINES : undefined}
                 />
             </ToolSectionView>
         </>

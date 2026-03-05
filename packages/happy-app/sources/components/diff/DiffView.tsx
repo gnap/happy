@@ -16,6 +16,8 @@ interface DiffViewProps {
     newTitle?: string;
     style?: ViewStyle;
     maxHeight?: number;
+    /** When set (e.g. list/card view), only render this many diff lines; detail view shows full. */
+    maxLines?: number;
     wrapLines?: boolean;
     fontScaleX?: number;
 }
@@ -28,6 +30,7 @@ export const DiffView: React.FC<DiffViewProps> = ({
     showPlusMinusSymbols = true,
     wrapLines = false,
     style,
+    maxLines,
     fontScaleX = 1,
 }) => {
     // Always use light theme colors
@@ -130,8 +133,12 @@ export const DiffView: React.FC<DiffViewProps> = ({
     // Render diff content as separate lines to prevent wrapping
     const renderDiffContent = () => {
         const lines: React.ReactNode[] = [];
-        
-        hunks.forEach((hunk, hunkIndex) => {
+        let contentLineCount = 0;
+
+        for (let hunkIndex = 0; hunkIndex < hunks.length; hunkIndex++) {
+            const hunk = hunks[hunkIndex];
+            if (maxLines != null && contentLineCount >= maxLines) break;
+
             // Add hunk header for non-first hunks
             if (hunkIndex > 0) {
                 const hunkHeaderText = (
@@ -158,12 +165,14 @@ export const DiffView: React.FC<DiffViewProps> = ({
                 ));
             }
 
-            hunk.lines.forEach((line, lineIndex) => {
+            for (let lineIndex = 0; lineIndex < hunk.lines.length; lineIndex++) {
+                if (maxLines != null && contentLineCount >= maxLines) break;
+                const line = hunk.lines[lineIndex];
                 const isAdded = line.type === 'add';
                 const isRemoved = line.type === 'remove';
                 const textColor = isAdded ? colors.addedText : isRemoved ? colors.removedText : colors.contextText;
                 const bgColor = isAdded ? colors.addedBg : isRemoved ? colors.removedBg : colors.contextBg;
-                
+
                 const lineText = (
                     <Text
                         key={wrapLines ? `line-${hunkIndex}-${lineIndex}` : `line-text-${hunkIndex}-${lineIndex}`}
@@ -206,9 +215,10 @@ export const DiffView: React.FC<DiffViewProps> = ({
                         {lineText}
                     </View>
                 ));
-            });
-        });
-        
+                contentLineCount++;
+            }
+        }
+
         return lines;
     };
 

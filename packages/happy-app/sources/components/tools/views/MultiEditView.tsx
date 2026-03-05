@@ -7,7 +7,9 @@ import { knownTools } from '../../tools/knownTools';
 import { trimIdent } from '@/utils/trimIdent';
 import { useSetting } from '@/sync/storage';
 
-export const MultiEditView = React.memo<ToolViewProps>(({ tool }) => {
+const LIST_DIFF_MAX_LINES = 4;
+
+export const MultiEditView = React.memo<ToolViewProps>(({ tool, compact }) => {
     const showLineNumbersInToolViews = useSetting('showLineNumbersInToolViews');
     const wrapLinesInDiffs = useSetting('wrapLinesInDiffs');
     
@@ -36,6 +38,7 @@ export const MultiEditView = React.memo<ToolViewProps>(({ tool }) => {
                             wrapLines={wrapLinesInDiffs}
                             showLineNumbers={showLineNumbersInToolViews}
                             showPlusMinusSymbols={showLineNumbersInToolViews}
+                            maxLines={compact ? LIST_DIFF_MAX_LINES : undefined}
                         />
                         {index < edits.length - 1 && <View style={styles.separator} />}
                     </View>

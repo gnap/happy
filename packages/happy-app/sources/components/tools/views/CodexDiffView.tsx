@@ -11,6 +11,7 @@ import { t } from '@/text';
 interface CodexDiffViewProps {
     tool: ToolCall;
     metadata: Metadata | null;
+    compact?: boolean;
 }
 
 /**
@@ -75,7 +76,9 @@ function parseUnifiedDiff(unifiedDiff: string): { oldText: string; newText: stri
     };
 }
 
-export const CodexDiffView = React.memo<CodexDiffViewProps>(({ tool, metadata }) => {
+const LIST_DIFF_MAX_LINES = 4;
+
+export const CodexDiffView = React.memo<CodexDiffViewProps>(({ tool, metadata, compact }) => {
     const { theme } = useUnistyles();
     const showLineNumbersInToolViews = useSetting('showLineNumbersInToolViews');
     const { input } = tool;
@@ -108,6 +111,7 @@ export const CodexDiffView = React.memo<CodexDiffViewProps>(({ tool, metadata })
                     newText={newText} 
                     showLineNumbers={showLineNumbersInToolViews}
                     showPlusMinusSymbols={showLineNumbersInToolViews}
+                    maxLines={compact ? LIST_DIFF_MAX_LINES : undefined}
                 />
             </ToolSectionView>
         </>
