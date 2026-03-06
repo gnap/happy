@@ -155,7 +155,7 @@ function toCodexToolShape(
 export async function runCursor(opts: {
   credentials: Credentials;
   startedBy?: 'daemon' | 'terminal';
-  /** Workspace root for session, .cursor/mcp.json, and cursor-agent cwd. Defaults to process.cwd(). Set via --cwd or HAPPY_CURSOR_WORKSPACE when running from monorepo so MCP is under repo root. */
+  /** Workspace root for session, .cursor/mcp.json, and cursor-agent cwd. Same as other agents: daemon spawns with cwd so process.cwd() is App path; terminal defaults to process.cwd(), optional --cwd to override. */
   workspaceRoot?: string;
   /** Resume last session for same workspace (--resume / -r). Default: false (new session). */
   resumeSession?: boolean;
