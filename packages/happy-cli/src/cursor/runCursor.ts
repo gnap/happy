@@ -492,6 +492,21 @@ export async function runCursor(opts: {
   ensureCursorMcpHappy(workspacePath, happyServer.url);
   logger.debug(`[cursor] Happy MCP: url=${happyServer.url}, workspacePath=${workspacePath}, subagentMcp=${enableSubagentMcp}`);
 
+  // Optional: report Cursor IDE quota to server (monitor-only; path from cursorQuotaPaths, respects CURSOR_STATE_DB_PATH / CURSOR_USER_DATA_DIR)
+  void (async () => {
+    try {
+      const { getCursorQuotaInfo, buildCursorUsageReportPayload, hasCursorStateDb } = await import('./cursorQuotaFetcher');
+      if (!hasCursorStateDb()) return;
+      const result = await getCursorQuotaInfo();
+      if (result?.info && session.isSocketConnected()) {
+        const payload = buildCursorUsageReportPayload(result.info);
+        session.client.sendCursorQuotaReport(payload);
+      }
+    } catch (_) {
+      // Ignore: sqlite3 missing, no Cursor auth, or API failure
+    }
+  })();
+
   //
   // Main loop
   //

@@ -675,6 +675,21 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     /**
+     * Send Cursor IDE quota/usage to the server (monitor-only; key: 'cursor-ide').
+     * Payload must have tokens: { total, ... }, cost: { total, ... } (see cursorQuotaFetcher.buildCursorUsageReportPayload).
+     */
+    sendCursorQuotaReport(payload: { tokens: Record<string, number>; cost: Record<string, number> }) {
+        const usageReport = {
+            key: 'cursor-ide',
+            sessionId: this.sessionId,
+            tokens: payload.tokens,
+            cost: payload.cost,
+        };
+        logger.debug('[SOCKET] Sending Cursor quota report');
+        this.socket.emit('usage-report', usageReport);
+    }
+
+    /**
      * Update session metadata
      * @param handler - Handler function that returns the updated metadata
      * @returns Promise that resolves when the server has acked the update (callers can await for kill path)
