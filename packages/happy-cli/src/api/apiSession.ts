@@ -671,7 +671,11 @@ export class ApiSessionClient extends EventEmitter {
             }
         }
         logger.debugLargeJson('[SOCKET] Sending usage data:', usageReport)
-        this.socket.emit('usage-report', usageReport);
+        this.socket.emit('usage-report', usageReport, (ack: { success?: boolean; error?: string }) => {
+            if (ack && !ack.success) {
+                logger.warn('[SOCKET] usage-report ack error:', ack.error);
+            }
+        });
     }
 
     /**
@@ -686,7 +690,13 @@ export class ApiSessionClient extends EventEmitter {
             cost: payload.cost,
         };
         logger.debug('[SOCKET] Sending Cursor quota report');
-        this.socket.emit('usage-report', usageReport);
+        this.socket.emit('usage-report', usageReport, (ack: { success?: boolean; error?: string }) => {
+            if (ack && ack.success) {
+                logger.debug('[SOCKET] Cursor quota report saved by server');
+            } else if (ack && !ack.success) {
+                logger.warn('[SOCKET] Cursor quota report ack error:', ack.error);
+            }
+        });
     }
 
     /**

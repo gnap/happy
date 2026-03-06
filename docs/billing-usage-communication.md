@@ -223,3 +223,26 @@ CLI 可能跑在本机 macOS/Linux/Windows、SSH 远端、devcontainer、Codespa
 | 实时性         | 轮询或按需请求 usage-summary   | 上报即存；可加 ephemeral 推送到 App（当前未用） | 轮询代理 /usage、定时拉 Fetcher           |
 
 若要「像 Cursor 那样」在 Happy 里展示 Cursor 账户的配额/用量，需要单独做：读 Cursor 的 state.vscdb 取 accessToken，再请求 api2.cursor.sh 的 usage-summary，并定义好 Happy 侧的展示与权限边界；与现有 Happy 计费通讯（CLI → Server → App）是两套独立链路。
+
+---
+
+## 五、如何确认 CLI 上报被服务端正确聚合
+
+### 5.1 Record 与 object 对 schema 有无影响
+
+**结论：无影响。**
+
+- 线上传的是 **JSON**。TypeScript 的 `Record<string, number>` 与 `object` 在运行时都是普通对象，序列化结果一致。
+- 服务端 `usageHandler` 只要求 `tokens` / `cost` 为 `typeof === 'object'` 且含 `total: number`；聚合时用 `Object.entries(data.tokens)` / `Object.entries(data.cost)` 遍历，只要存进 DB 的是「可枚举键 + 数字值」的普通对象即可。
+- Prisma 的 `data: Json` 存的就是你传进去的普通对象；合并冲突时把类型从 `Record` 改成 `object` 只影响类型检查，**不会**改变实际发送/存储的 payload 形状。
+
+### 5.2 如何验证「上报 → 落库 → 聚合」整条链
+
+1. **App 用量页 Debug 面板**  
+   设置 → 用量 → 展开「Show raw JSON」，看当前周期内 `/v1/usage/query` 返回的 `usage` 与 `totals`。若 CLI 已用 Cursor 会话上报过，应能在某时间点的 `tokens` / `cost` 里看到 `plan_requests_used`、`on_demand_cents` 等 key。
+
+2. **CLI 使用 usage-report 的 ack（可选）**  
+   服务端 `usage-report` 的 handler 支持 callback；CLI 若用 `emitWithAck('usage-report', ...)` 或传 callback，可收到 `{ success, reportId, createdAt, updatedAt }` 或 `{ success: false, error }`，便于在本地日志确认「服务端已落库」。
+
+3. **服务端日志**  
+   `usageHandler` 在成功写入后会打 `Usage report saved: key=..., sessionId=..., userId=...`，可配合时间与 key（如 `cursor-ide`）确认该条上报已被处理。
