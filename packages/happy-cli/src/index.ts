@@ -165,8 +165,9 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
       const { runCursor } = await import('@/cursor/runCursor');
 
       // Parse cursor options: --started-by, --cwd, --resume/-r
+      // Workspace: same as claude/codex/gemini — daemon spawns with cwd so process.cwd() is correct; terminal uses process.cwd(), optional --cwd to override
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
-      let workspaceRoot: string | undefined = process.env.HAPPY_CURSOR_WORKSPACE;
+      let workspaceRoot: string | undefined = undefined;
       let resumeSession = false;
       for (let i = 1; i < args.length; i++) {
         if (args[i] === '--started-by') {

@@ -678,7 +678,7 @@ export class ApiSessionClient extends EventEmitter {
      * Send Cursor IDE quota/usage to the server (monitor-only; key: 'cursor-ide').
      * Payload must have tokens: { total, ... }, cost: { total, ... } (see cursorQuotaFetcher.buildCursorUsageReportPayload).
      */
-    sendCursorQuotaReport(payload: { tokens: Record<string, number>; cost: Record<string, number> }) {
+    sendCursorQuotaReport(payload: { tokens: { total: number; [key: string]: number }; cost: { total: number; [key: string]: number } }) {
         const usageReport = {
             key: 'cursor-ide',
             sessionId: this.sessionId,

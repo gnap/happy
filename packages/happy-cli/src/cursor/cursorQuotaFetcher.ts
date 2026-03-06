@@ -9,7 +9,7 @@
  * report Cursor account usage (plan / on-demand).
  */
 
-import { execSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import type { CursorPlatform } from './cursorQuotaPaths';
 import {
@@ -73,10 +73,11 @@ export function readCursorAuthFromStateDb(
   try {
     // sqlite3 -json avoids delimiter issues in values; supported in sqlite3 3.8+
     const sql = "SELECT key, value FROM ItemTable WHERE key LIKE 'cursorAuth/%'";
-    const out = execSync('sqlite3', ['-json', stateDbPath, sql], {
+    const result = spawnSync('sqlite3', ['-json', stateDbPath, sql], {
       encoding: 'utf8',
       maxBuffer: 2 * 1024 * 1024,
-    }).trim();
+    });
+    const out = (result.stdout ?? '').trim();
     if (!out) return null;
 
     const rows = JSON.parse(out) as Array<{ key: string; value: string }>;
@@ -248,25 +249,26 @@ export function hasCursorStateDb(platform?: CursorPlatform): boolean {
 
 /**
  * Build usage-report payload for Happy server (key: 'cursor-ide').
- * Server expects tokens.total and cost.total; Cursor has no token/cost, so we send
- * plan/onDemand counts as tokens and cost.total = 0.
+ * Server expects tokens.total and cost.total. We send plan usage as tokens and
+ * on-demand usage as cost (Cursor API reports on-demand used count; we treat as cost cents for display).
  */
 export function buildCursorUsageReportPayload(info: CursorQuotaInfo): {
-  tokens: Record<string, number>;
-  cost: Record<string, number>;
+  tokens: { total: number; [key: string]: number };
+  cost: { total: number; [key: string]: number };
 } {
   const planUsed = info.planUsage?.used ?? 0;
   const planRemaining = info.planUsage?.remaining ?? 0;
-  const onDemandUsed = info.onDemandUsage?.used ?? 0;
-  const total = planUsed + onDemandUsed;
+  const onDemandUsedCents = info.onDemandUsage?.used ?? 0;
 
   return {
     tokens: {
-      total,
-      plan_used: planUsed,
-      plan_remaining: planRemaining,
-      on_demand_used: onDemandUsed,
+      total: planUsed,
+      plan_requests_used: planUsed,
+      plan_requests_remaining: planRemaining,
     },
-    cost: { total: 0 },
+    cost: {
+      total: onDemandUsedCents,
+      on_demand_cents: onDemandUsedCents,
+    },
   };
 }

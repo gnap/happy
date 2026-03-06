@@ -23,6 +23,9 @@ import { projectPath } from '@/projectPath';
 import { getTmuxUtilities, isTmuxAvailable, parseTmuxSessionIdentifier, formatTmuxSessionIdentifier } from '@/utils/tmux';
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
 
+/** Time to wait for a spawned session to report via /session-started webhook before failing the spawn (Cursor cold start can exceed 30s). */
+const SESSION_WEBHOOK_TIMEOUT_MS = 60_000;
+
 // Prepare initial metadata
 export const initialMachineMetadata: MachineMetadata = {
   host: os.hostname(),
@@ -448,7 +451,7 @@ export async function startDaemon(): Promise<void> {
                   type: 'error',
                   errorMessage: `Session webhook timeout for PID ${tmuxResult.pid} (tmux)`
                 });
-              }, 30_000); // Same timeout as regular sessions (Cursor cold start can exceed 15s)
+              }, SESSION_WEBHOOK_TIMEOUT_MS);
 
               // Register awaiter for tmux session (exact same as regular flow)
               pidToAwaiter.set(tmuxResult.pid!, (completedSession) => {
@@ -566,7 +569,7 @@ export async function startDaemon(): Promise<void> {
                 type: 'error',
                 errorMessage: `Session webhook timeout for PID ${happyProcess.pid}`
               });
-            }, 30_000); // Cursor cold start can exceed 15s; avoid false timeout to App
+            }, SESSION_WEBHOOK_TIMEOUT_MS);
 
             // Register awaiter
             pidToAwaiter.set(happyProcess.pid!, (completedSession) => {
