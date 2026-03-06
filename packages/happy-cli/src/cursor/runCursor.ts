@@ -492,11 +492,16 @@ export async function runCursor(opts: {
   ensureCursorMcpHappy(workspacePath, happyServer.url);
   logger.debug(`[cursor] Happy MCP: url=${happyServer.url}, workspacePath=${workspacePath}, subagentMcp=${enableSubagentMcp}`);
 
-  // Optional: report Cursor IDE quota to server (monitor-only; path from cursorQuotaPaths, respects CURSOR_STATE_DB_PATH / CURSOR_USER_DATA_DIR)
+  // Optional: report Cursor IDE quota to server (monitor-only). Wait for socket so ack is possible.
   void (async () => {
     try {
       const { getCursorQuotaInfo, buildCursorUsageReportPayload, hasCursorStateDb } = await import('./cursorQuotaFetcher');
       if (!hasCursorStateDb()) return;
+      // Wait up to 5s for socket so usage-report ack can be received
+      for (let i = 0; i < 25; i++) {
+        if (session.isSocketConnected()) break;
+        await new Promise((r) => setTimeout(r, 200));
+      }
       const result = await getCursorQuotaInfo();
       if (result?.info && session.isSocketConnected()) {
         const payload = buildCursorUsageReportPayload(result.info);
