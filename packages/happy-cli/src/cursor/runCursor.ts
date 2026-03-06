@@ -500,7 +500,7 @@ export async function runCursor(opts: {
       const result = await getCursorQuotaInfo();
       if (result?.info && session.isSocketConnected()) {
         const payload = buildCursorUsageReportPayload(result.info);
-        session.client.sendCursorQuotaReport(payload);
+        session.sendCursorQuotaReport(payload);
       }
     } catch (_) {
       // Ignore: sqlite3 missing, no Cursor auth, or API failure
