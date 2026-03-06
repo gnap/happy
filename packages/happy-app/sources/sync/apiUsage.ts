@@ -91,6 +91,64 @@ export async function getUsageForPeriod(
     });
 }
 
+/** Source of usage (by report key: claude-session vs cursor-ide). Inferred from token/cost key names. */
+export type UsageSource = 'claude' | 'cursor' | 'other';
+
+/** Display info for a usage key (token or cost key from server). */
+export interface UsageKeyDisplay {
+    labelKey: string;
+    source: UsageSource;
+}
+
+/** Known token/cost keys and their display label key + source for usage breakdown UI. */
+const USAGE_KEY_DISPLAY: Record<string, UsageKeyDisplay> = {
+    // Claude (claude-session)
+    total: { labelKey: 'usage.keyTotal', source: 'other' },
+    input: { labelKey: 'usage.keyClaudeInput', source: 'claude' },
+    output: { labelKey: 'usage.keyClaudeOutput', source: 'claude' },
+    cache_creation: { labelKey: 'usage.keyClaudeCacheCreation', source: 'claude' },
+    cache_read: { labelKey: 'usage.keyClaudeCacheRead', source: 'claude' },
+    // Cursor (cursor-ide)
+    plan_requests_used: { labelKey: 'usage.keyCursorPlanUsed', source: 'cursor' },
+    plan_requests_remaining: { labelKey: 'usage.keyCursorPlanRemaining', source: 'cursor' },
+    plan_used: { labelKey: 'usage.keyCursorPlanUsed', source: 'cursor' },
+    plan_remaining: { labelKey: 'usage.keyCursorPlanRemaining', source: 'cursor' },
+    on_demand_used: { labelKey: 'usage.keyCursorOnDemandUsed', source: 'cursor' },
+    on_demand_cents: { labelKey: 'usage.keyCursorOnDemandCents', source: 'cursor' },
+};
+
+/**
+ * Get display label key and source for a usage breakdown key (token or cost key).
+ * Used by UsagePanel to show "Claude input", "Cursor plan (used)" etc.
+ */
+export function getUsageKeyDisplay(key: string): UsageKeyDisplay {
+    return USAGE_KEY_DISPLAY[key] ?? { labelKey: 'usage.keyUnknown', source: 'other' };
+}
+
+/**
+ * Group token/cost entries by source for display (Claude vs Cursor sections).
+ */
+export function groupUsageBySource(byKey: Record<string, number>): { source: UsageSource; entries: [string, number][] }[] {
+    const bySource: Record<UsageSource, [string, number][]> = {
+        claude: [],
+        cursor: [],
+        other: [],
+    };
+    for (const [k, v] of Object.entries(byKey)) {
+        if (typeof v !== 'number') continue;
+        const { source } = getUsageKeyDisplay(k);
+        bySource[source].push([k, v]);
+    }
+    for (const arr of Object.values(bySource)) {
+        arr.sort(([, a], [, b]) => b - a);
+    }
+    const result: { source: UsageSource; entries: [string, number][] }[] = [];
+    if (bySource.claude.length > 0) result.push({ source: 'claude', entries: bySource.claude });
+    if (bySource.cursor.length > 0) result.push({ source: 'cursor', entries: bySource.cursor });
+    if (bySource.other.length > 0) result.push({ source: 'other', entries: bySource.other });
+    return result;
+}
+
 /**
  * Calculate total tokens and cost from usage data
  */

@@ -902,7 +902,23 @@ export const en = {
         cost: 'Cost',
         usageOverTime: 'Usage over time',
         byModel: 'By Model',
+        bySource: 'By source',
         noData: 'No usage data available',
+        noBreakdown: 'No breakdown for this period.',
+        // Breakdown by source (Claude / Cursor)
+        sectionClaude: 'Claude',
+        sectionCursor: 'Cursor',
+        sectionOther: 'Other',
+        keyTotal: 'Total',
+        keyClaudeInput: 'Claude input',
+        keyClaudeOutput: 'Claude output',
+        keyClaudeCacheCreation: 'Claude cache (write)',
+        keyClaudeCacheRead: 'Claude cache (read)',
+        keyCursorPlanUsed: 'Cursor plan (used)',
+        keyCursorPlanRemaining: 'Cursor plan (remaining)',
+        keyCursorOnDemandUsed: 'Cursor on-demand (used)',
+        keyCursorOnDemandCents: 'Cursor on-demand (cents)',
+        keyUnknown: 'Other',
     },
 
     feed: {

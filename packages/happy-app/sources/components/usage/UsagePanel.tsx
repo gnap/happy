@@ -7,10 +7,10 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { UsageChart } from './UsageChart';
 import { UsageBar } from './UsageBar';
-import { getUsageForPeriod, calculateTotals, UsageDataPoint } from '@/sync/apiUsage';
+import { getUsageForPeriod, calculateTotals, groupUsageBySource, getUsageKeyDisplay, UsageDataPoint } from '@/sync/apiUsage';
 import { Ionicons } from '@expo/vector-icons';
 import { HappyError } from '@/utils/errors';
-import { t } from '@/text';
+import { t, type TranslationKey } from '@/text';
 
 type TimePeriod = 'today' | '7days' | '30days';
 
@@ -110,7 +110,14 @@ const styles = StyleSheet.create((theme) => ({
     },
     metricTextActive: {
         color: '#FFFFFF',
-    }
+    },
+    debugJson: {
+        fontFamily: 'monospace',
+        fontSize: 11,
+        color: theme.colors.textSecondary,
+        padding: 12,
+        maxHeight: 320,
+    },
 }));
 
 export const UsagePanel: React.FC<{ sessionId?: string }> = ({ sessionId }) => {
@@ -127,6 +134,8 @@ export const UsagePanel: React.FC<{ sessionId?: string }> = ({ sessionId }) => {
         tokensByModel: {} as Record<string, number>,
         costByModel: {} as Record<string, number>
     });
+    const [showDebug, setShowDebug] = useState(false);
+    const [rawDebug, setRawDebug] = useState<{ usage: UsageDataPoint[]; totals: typeof totals } | null>(null);
     
     useEffect(() => {
         loadUsageData();
@@ -143,8 +152,11 @@ export const UsagePanel: React.FC<{ sessionId?: string }> = ({ sessionId }) => {
         
         try {
             const response = await getUsageForPeriod(auth.credentials, period, sessionId);
-            setUsageData(response.usage || []);
-            setTotals(calculateTotals(response.usage || []));
+            const usage = response.usage || [];
+            setUsageData(usage);
+            const nextTotals = calculateTotals(usage);
+            setTotals(nextTotals);
+            setRawDebug({ usage, totals: nextTotals });
         } catch (err) {
             console.error('Failed to load usage data:', err);
             if (err instanceof HappyError) {
@@ -193,13 +205,24 @@ export const UsagePanel: React.FC<{ sessionId?: string }> = ({ sessionId }) => {
         );
     }
     
-    // Get top models by usage
-    const topModels = Object.entries(totals.tokensByModel)
-        .sort(([, a], [, b]) => b - a)
-        .slice(0, 5);
-    
-    const maxModelTokens = Math.max(...Object.values(totals.tokensByModel), 1);
-    
+    // Group token and cost breakdown by source (Claude / Cursor) with friendly labels
+    const tokenGroups = groupUsageBySource(totals.tokensByModel);
+    const costGroups = groupUsageBySource(totals.costByModel);
+    const maxTokenInGroups = Math.max(
+        ...tokenGroups.flatMap((g) => g.entries.map(([, v]) => v)),
+        1
+    );
+    const maxCostInGroups = Math.max(
+        ...costGroups.flatMap((g) => g.entries.map(([, v]) => v)),
+        1
+    );
+
+    const sectionTitleBySource: Record<string, string> = {
+        claude: t('usage.sectionClaude'),
+        cursor: t('usage.sectionCursor'),
+        other: t('usage.sectionOther'),
+    };
+
     return (
         <ScrollView style={styles.container}>
             {/* Period Selector */}
@@ -262,22 +285,78 @@ export const UsagePanel: React.FC<{ sessionId?: string }> = ({ sessionId }) => {
                 </View>
             )}
             
-            {/* Usage by Model */}
-            {topModels.length > 0 && (
-                <ItemGroup title={t('usage.byModel')}>
-                    <View style={{ padding: 16 }}>
-                        {topModels.map(([model, tokens]) => (
-                            <UsageBar
-                                key={model}
-                                label={model}
-                                value={tokens}
-                                maxValue={maxModelTokens}
-                                color="#007AFF"
-                            />
-                        ))}
-                    </View>
-                </ItemGroup>
-            )}
+            {/* Usage by source (Claude / Cursor) – tokens – always show so layout change is visible */}
+            <ItemGroup title={t('usage.bySource')}>
+                <View style={{ padding: 16 }}>
+                    {tokenGroups.length > 0 ? (
+                        tokenGroups.map(({ source, entries }) => (
+                            <View key={source} style={{ marginBottom: 16 }}>
+                                <Text style={[styles.sectionTitle, { marginHorizontal: 0, marginBottom: 8 }]}>
+                                    {sectionTitleBySource[source]}
+                                </Text>
+                                {entries.map(([key, value]) => (
+                                    <UsageBar
+                                        key={key}
+                                        label={t(getUsageKeyDisplay(key).labelKey as TranslationKey)}
+                                        value={value}
+                                        maxValue={maxTokenInGroups}
+                                        color={source === 'cursor' ? '#6366F1' : '#007AFF'}
+                                    />
+                                ))}
+                            </View>
+                        ))
+                    ) : (
+                        <Text style={styles.statLabel}>{t('usage.noBreakdown')}</Text>
+                    )}
+                </View>
+            </ItemGroup>
+
+            {/* Cost by source – always show */}
+            <ItemGroup title={t('usage.cost')}>
+                <View style={{ padding: 16 }}>
+                    {costGroups.length > 0 ? (
+                        costGroups.map(({ source, entries }) => (
+                            <View key={`cost-${source}`} style={{ marginBottom: 16 }}>
+                                <Text style={[styles.sectionTitle, { marginHorizontal: 0, marginBottom: 8 }]}>
+                                    {sectionTitleBySource[source]}
+                                </Text>
+                                {entries.map(([key, value]) => (
+                                    <UsageBar
+                                        key={key}
+                                        label={t(getUsageKeyDisplay(key).labelKey as TranslationKey)}
+                                        value={value}
+                                        maxValue={maxCostInGroups}
+                                        color={source === 'cursor' ? '#6366F1' : '#FF9500'}
+                                        showPercentage={maxCostInGroups > 0}
+                                    />
+                                ))}
+                            </View>
+                        ))
+                    ) : (
+                        <Text style={styles.statLabel}>{t('usage.noBreakdown')}</Text>
+                    )}
+                </View>
+            </ItemGroup>
+
+            {/* Debug: raw JSON */}
+            <ItemGroup title="Debug">
+                <Pressable onPress={() => setShowDebug((v) => !v)} style={{ padding: 16 }}>
+                    <Text style={styles.statLabel}>
+                        {showDebug ? 'Hide raw JSON' : 'Show raw JSON'}
+                    </Text>
+                </Pressable>
+                {showDebug && rawDebug !== null && (
+                    <ScrollView
+                        style={styles.debugJson}
+                        nestedScrollEnabled
+                        contentContainerStyle={{ paddingBottom: 16 }}
+                    >
+                        <Text selectable style={styles.debugJson}>
+                            {JSON.stringify(rawDebug, null, 2)}
+                        </Text>
+                    </ScrollView>
+                )}
+            </ItemGroup>
         </ScrollView>
     );
 };
