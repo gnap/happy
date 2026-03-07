@@ -585,8 +585,9 @@ export const storage = create<StorageState>()((set, get) => {
                 // Run reducer with agentState
                 const reducerResult = reducer(existingSession.reducerState, normalizedMessages, agentState);
                 const processedMessages = reducerResult.messages;
-                for (let message of processedMessages) {
-                    changed.add(message.id);
+                // Use reducer's own changed set (only newly created messages, not all messages)
+                for (const id of reducerResult.changed) {
+                    changed.add(id);
                 }
                 if (reducerResult.hasReadyEvent) {
                     hasReadyEvent = true;
