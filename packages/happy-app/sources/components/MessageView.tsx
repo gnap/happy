@@ -86,22 +86,19 @@ function UserTextBlock(props: {
 
   return (
     <View style={styles.userMessageContainer}>
-      {/* Status indicator row (sending spinner or failed retry) */}
-      {(isSending || isFailed) && (
-        <View style={styles.sendStatusRow}>
-          {isSending && (
-            <ActivityIndicator size="small" color="#8E8E93" style={styles.sendingSpinner} />
-          )}
-          {isFailed && (
-            <Pressable onPress={handleRetry} style={styles.retryButton} hitSlop={8}>
-              <Ionicons name="alert-circle" size={16} color="#FF3B30" />
-              <Text style={styles.retryText}>{t('message.sendFailed')}</Text>
-            </Pressable>
-          )}
+      <View style={styles.userMessageRow}>
+        {/* Status indicator to the left of the bubble */}
+        {isSending && (
+          <ActivityIndicator size="small" color="#8E8E93" style={styles.sendingSpinner} />
+        )}
+        {isFailed && (
+          <Pressable onPress={handleRetry} style={styles.retryButton} hitSlop={8}>
+            <Ionicons name="alert-circle" size={18} color="#FF3B30" />
+          </Pressable>
+        )}
+        <View style={[styles.userMessageBubble, isSending && styles.userMessageBubbleSending]}>
+          <MarkdownView markdown={props.message.displayText || props.message.text} onOptionPress={handleOptionPress} />
         </View>
-      )}
-      <View style={[styles.userMessageBubble, isSending && styles.userMessageBubbleSending]}>
-        <MarkdownView markdown={props.message.displayText || props.message.text} onOptionPress={handleOptionPress} />
       </View>
     </View>
   );
@@ -224,40 +221,30 @@ const styles = StyleSheet.create((theme) => ({
   },
   userMessageContainer: {
     maxWidth: '100%',
-    flexDirection: 'column',
     alignItems: 'flex-end',
-    justifyContent: 'flex-end',
     paddingHorizontal: 16,
+    marginBottom: 12,
+  },
+  userMessageRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    maxWidth: '100%',
+    gap: 6,
   },
   userMessageBubble: {
     backgroundColor: theme.colors.userMessageBackground,
     paddingHorizontal: 12,
     paddingVertical: 4,
     borderRadius: 12,
-    marginBottom: 12,
-    maxWidth: '100%',
+    flexShrink: 1,
   },
   userMessageBubbleSending: {
     opacity: 0.55,
   },
-  sendStatusRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-    marginBottom: 4,
-    paddingHorizontal: 4,
-  },
-  sendingSpinner: {
-    marginRight: 2,
-  },
+  sendingSpinner: {},
   retryButton: {
-    flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-  },
-  retryText: {
-    fontSize: 13,
-    color: '#FF3B30',
+    justifyContent: 'center',
   },
   agentMessageContainer: {
     marginHorizontal: 16,

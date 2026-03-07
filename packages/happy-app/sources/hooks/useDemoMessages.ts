@@ -29,6 +29,7 @@ export function useDemoMessages(messages: Message[]) {
                     oldestSeq: 0,
                     hasOlderMessages: false,
                     isLoadingOlder: false,
+                    isFetching: false,
                 }
             }
         }));
