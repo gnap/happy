@@ -251,6 +251,7 @@ export function hasCursorStateDb(platform?: CursorPlatform): boolean {
  * Build usage-report payload for Happy server (key: 'cursor-ide').
  * Server expects tokens.total and cost.total. We send plan usage as tokens and
  * on-demand usage as cost (Cursor API reports on-demand used count; we treat as cost cents for display).
+ * Includes plan_requests_limit and on_demand_limit/remaining so the App can show used/limit as percentage.
  */
 export function buildCursorUsageReportPayload(info: CursorQuotaInfo): {
   tokens: { total: number; [key: string]: number };
@@ -258,17 +259,24 @@ export function buildCursorUsageReportPayload(info: CursorQuotaInfo): {
 } {
   const planUsed = info.planUsage?.used ?? 0;
   const planRemaining = info.planUsage?.remaining ?? 0;
+  const planLimit = info.planUsage?.limit ?? 0;
   const onDemandUsedCents = info.onDemandUsage?.used ?? 0;
+  const onDemandLimit = info.onDemandUsage?.limit;
+  const onDemandRemaining = info.onDemandUsage?.remaining;
 
-  return {
-    tokens: {
-      total: planUsed,
-      plan_requests_used: planUsed,
-      plan_requests_remaining: planRemaining,
-    },
-    cost: {
-      total: onDemandUsedCents,
-      on_demand_cents: onDemandUsedCents,
-    },
+  const tokens: { total: number; [key: string]: number } = {
+    total: planUsed,
+    plan_requests_used: planUsed,
+    plan_requests_remaining: planRemaining,
+    plan_requests_limit: planLimit,
   };
+
+  const cost: { total: number; [key: string]: number } = {
+    total: onDemandUsedCents,
+    on_demand_cents: onDemandUsedCents,
+  };
+  if (onDemandLimit != null) cost.on_demand_limit = onDemandLimit;
+  if (onDemandRemaining != null) cost.on_demand_remaining = onDemandRemaining;
+
+  return { tokens, cost };
 }

@@ -216,6 +216,16 @@ export const UsagePanel: React.FC<{ sessionId?: string }> = ({ sessionId }) => {
         ...costGroups.flatMap((g) => g.entries.map(([, v]) => v)),
         1
     );
+    /** For Cursor plan: use limit as bar denominator when present so "used" shows real %. */
+    const tokenBarMax = (key: string) =>
+        key === 'plan_requests_used' && typeof totals.tokensByModel['plan_requests_limit'] === 'number'
+            ? totals.tokensByModel['plan_requests_limit']
+            : maxTokenInGroups;
+    /** For Cursor on-demand: use limit as bar denominator when present so "used" shows real %. */
+    const costBarMax = (key: string) =>
+        key === 'on_demand_cents' && typeof totals.costByModel['on_demand_limit'] === 'number'
+            ? totals.costByModel['on_demand_limit']
+            : maxCostInGroups;
 
     const sectionTitleBySource: Record<string, string> = {
         claude: t('usage.sectionClaude'),
@@ -299,7 +309,7 @@ export const UsagePanel: React.FC<{ sessionId?: string }> = ({ sessionId }) => {
                                         key={key}
                                         label={t(getUsageKeyDisplay(key).labelKey as TranslationKey)}
                                         value={value}
-                                        maxValue={maxTokenInGroups}
+                                        maxValue={tokenBarMax(key)}
                                         color={source === 'cursor' ? '#6366F1' : '#007AFF'}
                                     />
                                 ))}
@@ -325,9 +335,9 @@ export const UsagePanel: React.FC<{ sessionId?: string }> = ({ sessionId }) => {
                                         key={key}
                                         label={t(getUsageKeyDisplay(key).labelKey as TranslationKey)}
                                         value={value}
-                                        maxValue={maxCostInGroups}
+                                        maxValue={costBarMax(key)}
                                         color={source === 'cursor' ? '#6366F1' : '#FF9500'}
-                                        showPercentage={maxCostInGroups > 0}
+                                        showPercentage={costBarMax(key) > 0}
                                     />
                                 ))}
                             </View>

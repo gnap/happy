@@ -916,8 +916,11 @@ export const en = {
         keyClaudeCacheRead: 'Claude cache (read)',
         keyCursorPlanUsed: 'Cursor plan (used)',
         keyCursorPlanRemaining: 'Cursor plan (remaining)',
+        keyCursorPlanLimit: 'Cursor plan (limit)',
         keyCursorOnDemandUsed: 'Cursor on-demand (used)',
         keyCursorOnDemandCents: 'Cursor on-demand (cents)',
+        keyCursorOnDemandLimit: 'Cursor on-demand (limit)',
+        keyCursorOnDemandRemaining: 'Cursor on-demand (remaining)',
         keyUnknown: 'Other',
     },
 

@@ -111,10 +111,13 @@ const USAGE_KEY_DISPLAY: Record<string, UsageKeyDisplay> = {
     // Cursor (cursor-ide)
     plan_requests_used: { labelKey: 'usage.keyCursorPlanUsed', source: 'cursor' },
     plan_requests_remaining: { labelKey: 'usage.keyCursorPlanRemaining', source: 'cursor' },
+    plan_requests_limit: { labelKey: 'usage.keyCursorPlanLimit', source: 'cursor' },
     plan_used: { labelKey: 'usage.keyCursorPlanUsed', source: 'cursor' },
     plan_remaining: { labelKey: 'usage.keyCursorPlanRemaining', source: 'cursor' },
     on_demand_used: { labelKey: 'usage.keyCursorOnDemandUsed', source: 'cursor' },
     on_demand_cents: { labelKey: 'usage.keyCursorOnDemandCents', source: 'cursor' },
+    on_demand_limit: { labelKey: 'usage.keyCursorOnDemandLimit', source: 'cursor' },
+    on_demand_remaining: { labelKey: 'usage.keyCursorOnDemandRemaining', source: 'cursor' },
 };
 
 /**
