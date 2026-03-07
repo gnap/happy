@@ -103,7 +103,7 @@ export interface ClientToServerEvents {
       total: number
       [key: string]: number
     }
-  }) => void
+  }, callback?: (ack: { success?: boolean; error?: string }) => void) => void
 }
 
 /**
