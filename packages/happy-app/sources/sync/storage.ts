@@ -71,6 +71,8 @@ interface SessionMessages {
     hasOlderMessages: boolean;
     /** True while an older-messages fetch is in flight */
     isLoadingOlder: boolean;
+    /** True while a fetchMessages (incremental/cold-start) call is in flight */
+    isFetching: boolean;
 }
 
 // Machine type is now imported from storageTypes - represents persisted machine data
@@ -120,6 +122,7 @@ interface StorageState {
     applyReady: () => void;
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => { changed: string[], hasReadyEvent: boolean };
     applyMessagesLoaded: (sessionId: string) => void;
+    setFetching: (sessionId: string, fetching: boolean) => void;
     applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState, oldestSeq: number, hasOlderMessages: boolean) => void;
     applyOlderMessages: (sessionId: string, olderMessages: NormalizedMessage[], newOldestSeq: number, hasOlderMessages: boolean) => void;
     setLoadingOlder: (sessionId: string, loading: boolean) => void;
@@ -514,6 +517,7 @@ export const storage = create<StorageState>()((set, get) => {
                         oldestSeq: existingSessionMessages.oldestSeq,
                         hasOlderMessages: existingSessionMessages.hasOlderMessages,
                         isLoadingOlder: existingSessionMessages.isLoadingOlder,
+                        isFetching: existingSessionMessages.isFetching,
                     };
 
                     // IMPORTANT: Copy latestUsage from reducerState to Session for immediate availability
@@ -573,6 +577,7 @@ export const storage = create<StorageState>()((set, get) => {
                     oldestSeq: 0,
                     hasOlderMessages: false,
                     isLoadingOlder: false,
+                    isFetching: false,
                 };
 
                 // Get the session's agentState if available
@@ -695,6 +700,7 @@ export const storage = create<StorageState>()((set, get) => {
                                 oldestSeq: 0,
                                 hasOlderMessages: false,
                                 isLoadingOlder: false,
+                                isFetching: false,
                             } satisfies SessionMessages
                         }
                     };
@@ -705,13 +711,25 @@ export const storage = create<StorageState>()((set, get) => {
                             ...state.sessionMessages,
                             [sessionId]: {
                                 ...existingSession,
-                                isLoaded: true
+                                isLoaded: true,
+                                isFetching: false,
                             } satisfies SessionMessages
                         }
                     };
                 }
 
             return result;
+        }),
+        setFetching: (sessionId: string, fetching: boolean) => set((state) => {
+            const existing = state.sessionMessages[sessionId];
+            if (!existing) return state;
+            return {
+                ...state,
+                sessionMessages: {
+                    ...state.sessionMessages,
+                    [sessionId]: { ...existing, isFetching: fetching },
+                },
+            };
         }),
         applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState, oldestSeq: number, hasOlderMessages: boolean) => set((state) => {
             const messagesMap: Record<string, Message> = {};
@@ -732,6 +750,7 @@ export const storage = create<StorageState>()((set, get) => {
                         oldestSeq,
                         hasOlderMessages,
                         isLoadingOlder: false,
+                        isFetching: false,
                     } satisfies SessionMessages,
                 },
             };
@@ -767,6 +786,7 @@ export const storage = create<StorageState>()((set, get) => {
                         oldestSeq: newOldestSeq,
                         hasOlderMessages,
                         isLoadingOlder: false,
+                        isFetching: false,
                     } satisfies SessionMessages,
                 },
             };
@@ -1260,7 +1280,7 @@ export function useOutboxEntry(localId: string | null | undefined): OutboxEntry 
     return storage((state) => (localId ? state.outbox[localId] ?? null : null));
 }
 
-export function useSessionMessages(sessionId: string): { messages: Message[], isLoaded: boolean, hasOlderMessages: boolean, isLoadingOlder: boolean, oldestSeq: number } {
+export function useSessionMessages(sessionId: string): { messages: Message[], isLoaded: boolean, hasOlderMessages: boolean, isLoadingOlder: boolean, isFetching: boolean, oldestSeq: number } {
     return storage(useShallow((state) => {
         const session = state.sessionMessages[sessionId];
         return {
@@ -1268,6 +1288,7 @@ export function useSessionMessages(sessionId: string): { messages: Message[], is
             isLoaded: session?.isLoaded ?? false,
             hasOlderMessages: session?.hasOlderMessages ?? false,
             isLoadingOlder: session?.isLoadingOlder ?? false,
+            isFetching: session?.isFetching ?? false,
             oldestSeq: session?.oldestSeq ?? 0,
         };
     }));
