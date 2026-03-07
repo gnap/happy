@@ -1,5 +1,5 @@
 import * as React from "react";
-import { View, Text } from "react-native";
+import { View, Text, ActivityIndicator, Pressable } from "react-native";
 import { StyleSheet } from 'react-native-unistyles';
 import { MarkdownView } from "./markdown/MarkdownView";
 import { t } from '@/text';
@@ -10,7 +10,8 @@ import { ToolView } from "./tools/ToolView";
 import { AgentEvent } from "@/sync/typesRaw";
 import { sync } from '@/sync/sync';
 import { Option } from './markdown/MarkdownView';
-import { useSetting } from "@/sync/storage";
+import { useSetting, useOutboxEntry } from "@/sync/storage";
+import { Ionicons } from '@expo/vector-icons';
 
 export const MessageView = (props: {
   message: Message;
@@ -69,17 +70,38 @@ function UserTextBlock(props: {
   message: UserTextMessage;
   sessionId: string;
 }) {
+  const outbox = useOutboxEntry(props.message.localId);
+  const isSending = outbox?.status === 'sending';
+  const isFailed = outbox?.status === 'failed';
+
   const handleOptionPress = React.useCallback((option: Option) => {
     sync.sendMessage(props.sessionId, option.title);
   }, [props.sessionId]);
 
+  const handleRetry = React.useCallback(() => {
+    if (props.message.localId) {
+      sync.retryMessage(props.message.localId);
+    }
+  }, [props.message.localId]);
+
   return (
     <View style={styles.userMessageContainer}>
-      <View style={styles.userMessageBubble}>
+      {/* Status indicator row (sending spinner or failed retry) */}
+      {(isSending || isFailed) && (
+        <View style={styles.sendStatusRow}>
+          {isSending && (
+            <ActivityIndicator size="small" color="#8E8E93" style={styles.sendingSpinner} />
+          )}
+          {isFailed && (
+            <Pressable onPress={handleRetry} style={styles.retryButton} hitSlop={8}>
+              <Ionicons name="alert-circle" size={16} color="#FF3B30" />
+              <Text style={styles.retryText}>{t('message.sendFailed')}</Text>
+            </Pressable>
+          )}
+        </View>
+      )}
+      <View style={[styles.userMessageBubble, isSending && styles.userMessageBubbleSending]}>
         <MarkdownView markdown={props.message.displayText || props.message.text} onOptionPress={handleOptionPress} />
-        {/* {__DEV__ && (
-          <Text style={styles.debugText}>{JSON.stringify(props.message.meta)}</Text>
-        )} */}
       </View>
     </View>
   );
@@ -214,6 +236,28 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: 12,
     marginBottom: 12,
     maxWidth: '100%',
+  },
+  userMessageBubbleSending: {
+    opacity: 0.55,
+  },
+  sendStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    marginBottom: 4,
+    paddingHorizontal: 4,
+  },
+  sendingSpinner: {
+    marginRight: 2,
+  },
+  retryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  retryText: {
+    fontSize: 13,
+    color: '#FF3B30',
   },
   agentMessageContainer: {
     marginHorizontal: 16,

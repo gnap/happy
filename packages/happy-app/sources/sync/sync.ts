@@ -15,6 +15,7 @@ import { registerPushToken } from './apiPush';
 import { Platform, AppState, type AppStateStatus } from 'react-native';
 import { isRunningOnMac } from '@/utils/platform';
 import { NormalizedMessage, normalizeRawMessage, RawRecord } from './typesRaw';
+import type { MessageMeta } from './typesMessageMeta';
 import { applySettings, Settings, settingsDefaults, settingsParse, SUPPORTED_SCHEMA_VERSION } from './settings';
 import { Profile, profileParse } from './profile';
 import { loadPendingSettings, savePendingSettings } from './persistence';
@@ -446,29 +447,17 @@ class Sync {
         }
         this.sendAbortControllers.clear();
 
-        const now = Date.now();
-        const sessionIds: string[] = [];
-        for (const [sessionId, pending] of this.pendingOutbox) {
-            if (pending.length === 0) {
-                continue;
+        const failedLocalIds: string[] = [];
+        for (const [, pending] of this.pendingOutbox) {
+            for (const msg of pending) {
+                failedLocalIds.push(msg.localId);
             }
-            pending.length = 0;
-            this.pendingOutbox.delete(sessionId);
-            sessionIds.push(sessionId);
         }
+        this.pendingOutbox.clear();
 
-        for (const sessionId of sessionIds) {
-            this.enqueueMessages(sessionId, [{
-                id: randomUUID(),
-                localId: null,
-                createdAt: now,
-                role: 'event',
-                isSidechain: false,
-                content: {
-                    type: 'message',
-                    message: reasonText
-                }
-            }]);
+        // Mark outbox entries as failed so UI can show retry
+        if (failedLocalIds.length > 0) {
+            storage.getState().failOutboxEntries(failedLocalIds, reasonText);
         }
     }
 
@@ -505,6 +494,9 @@ class Sync {
 
         // Generate local ID
         const localId = randomUUID();
+
+        // Track in outbox immediately (before encryption, so UI shows "sending" right away)
+        storage.getState().addOutboxEntry({ localId, sessionId, text, displayText, createdAt: Date.now() });
 
         // Determine sentFrom based on platform
         let sentFrom: string;
@@ -543,12 +535,21 @@ class Sync {
         };
         const encryptedRawRecord = await encryption.encryptRawRecord(content);
 
-        // Add to messages - normalize the raw record (Cursor: wire type 'cursor' → thinking; Codex: unchanged)
+        // Optimistically insert the user message immediately so the UI responds without waiting
+        // for the server round-trip. We construct the NormalizedMessage directly instead of going
+        // through normalizeRawMessage because session-protocol mode (dev/preview) returns null
+        // for role:'user' raw records (they're expected to arrive back as session envelopes).
         const createdAt = Date.now();
-        const normalizedMessage = normalizeRawMessage(localId, localId, createdAt, content);
-        if (normalizedMessage) {
-            this.enqueueMessages(sessionId, [normalizedMessage]);
-        }
+        const optimisticMessage: NormalizedMessage = {
+            id: localId,
+            localId,
+            createdAt,
+            role: 'user',
+            content: { type: 'text', text },
+            isSidechain: false,
+            meta: content.meta as MessageMeta | undefined,
+        };
+        this.enqueueMessages(sessionId, [optimisticMessage]);
 
         let pending = this.pendingOutbox.get(sessionId);
         if (!pending) {
@@ -1644,6 +1645,12 @@ class Sync {
 
             const data = await response.json() as V3PostSessionMessagesResponse;
             pending.splice(0, batch.length);
+
+            // Confirmed by server – remove from outbox
+            for (const msg of batch) {
+                storage.getState().removeOutboxEntry(msg.localId);
+            }
+
             if (Array.isArray(data.messages) && data.messages.length > 0) {
                 const currentLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
                 let maxSeq = currentLastSeq;
@@ -1691,6 +1698,18 @@ class Sync {
             this.messageFetchRunning--;
         }
     };
+
+    /**
+     * Retry a previously failed outbox message identified by its localId.
+     */
+    retryMessage = async (localId: string): Promise<void> => {
+        const entry = storage.getState().outbox[localId];
+        if (!entry || entry.status !== 'failed') return;
+
+        // Remove the failed entry and re-send via the normal path
+        storage.getState().removeOutboxEntry(localId);
+        await this.sendMessage(entry.sessionId, entry.text, entry.displayText);
+    }
 
     /**
      * Fetch the latest page of messages for a session (up to 100).

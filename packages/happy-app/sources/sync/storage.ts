@@ -50,6 +50,16 @@ function isSandboxEnabled(metadata: Session['metadata'] | null | undefined): boo
 // Known entitlement IDs
 export type KnownEntitlements = 'pro';
 
+export interface OutboxEntry {
+    localId: string;
+    sessionId: string;
+    text: string;
+    displayText?: string;
+    status: 'sending' | 'failed';
+    failReason?: string;
+    createdAt: number;
+}
+
 interface SessionMessages {
     messages: Message[];
     messagesMap: Record<string, Message>;
@@ -85,6 +95,7 @@ interface StorageState {
     sessionsData: SessionListItem[] | null;  // Legacy - to be removed
     sessionListViewData: SessionListViewItem[] | null;
     sessionMessages: Record<string, SessionMessages>;
+    outbox: Record<string, OutboxEntry>;
     sessionGitStatus: Record<string, GitStatus | null>;
     machines: Record<string, Machine>;
     artifacts: Record<string, DecryptedArtifact>;  // New artifacts storage
@@ -135,6 +146,10 @@ interface StorageState {
     updateArtifact: (artifact: DecryptedArtifact) => void;
     deleteArtifact: (artifactId: string) => void;
     deleteSession: (sessionId: string) => void;
+    // Outbox (send status tracking)
+    addOutboxEntry: (entry: Omit<OutboxEntry, 'status'>) => void;
+    removeOutboxEntry: (localId: string) => void;
+    failOutboxEntries: (localIds: string[], reason: string) => void;
     deleteSessionMessages: (sessionId: string) => void;
     // Project management methods
     getProjects: () => import('./projectManager').Project[];
@@ -283,6 +298,7 @@ export const storage = create<StorageState>()((set, get) => {
         sessionsData: null,  // Legacy - to be removed
         sessionListViewData: null,
         sessionMessages: {},
+        outbox: {},
         sessionGitStatus: {},
         realtimeStatus: 'disconnected',
         realtimeMode: 'idle',
@@ -1085,6 +1101,24 @@ export const storage = create<StorageState>()((set, get) => {
                 sessionListViewData
             };
         }),
+        // Outbox (send status tracking)
+        addOutboxEntry: (entry: Omit<OutboxEntry, 'status'>) => set((state) => ({
+            ...state,
+            outbox: { ...state.outbox, [entry.localId]: { ...entry, status: 'sending' } },
+        })),
+        removeOutboxEntry: (localId: string) => set((state) => {
+            const { [localId]: _, ...rest } = state.outbox;
+            return { ...state, outbox: rest };
+        }),
+        failOutboxEntries: (localIds: string[], reason: string) => set((state) => {
+            const updated = { ...state.outbox };
+            for (const localId of localIds) {
+                if (updated[localId]) {
+                    updated[localId] = { ...updated[localId], status: 'failed', failReason: reason };
+                }
+            }
+            return { ...state, outbox: updated };
+        }),
         // Friend management methods
         applyFriends: (friends: UserProfile[]) => set((state) => {
             const mergedFriends = { ...state.friends };
@@ -1220,6 +1254,10 @@ export function useSession(id: string): Session | null {
 }
 
 const emptyArray: unknown[] = [];
+
+export function useOutboxEntry(localId: string | null | undefined): OutboxEntry | null {
+    return storage((state) => (localId ? state.outbox[localId] ?? null : null));
+}
 
 export function useSessionMessages(sessionId: string): { messages: Message[], isLoaded: boolean, hasOlderMessages: boolean, isLoadingOlder: boolean, oldestSeq: number } {
     return storage(useShallow((state) => {

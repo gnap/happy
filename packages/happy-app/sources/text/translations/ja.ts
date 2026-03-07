@@ -808,6 +808,7 @@ export const ja: TranslationStructure = {
         unknownEvent: '不明なイベント',
         usageLimitUntil: ({ time }: { time: string }) => `${time}まで使用制限中`,
         unknownTime: '不明な時間',
+        sendFailed: 'Failed to send – tap to retry',
     },
 
     codex: {

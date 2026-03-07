@@ -776,6 +776,7 @@ export const ca: TranslationStructure = {
         unknownEvent: 'Esdeveniment desconegut',
         usageLimitUntil: ({ time }: { time: string }) => `Límit d'ús assolit fins a ${time}`,
         unknownTime: 'temps desconegut',
+        sendFailed: 'Failed to send – tap to retry',
     },
 
     codex: {
