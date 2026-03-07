@@ -1826,14 +1826,14 @@ class Sync {
                     storage.getState().setFetching(sessionId, true);
                 }
 
-                // On cold start (no cache / lastSeq=0): fetch latest 100 using session.seq as anchor.
-                // On incremental update (lastSeq>0): fetch only new messages since lastSeq.
-                let afterSeq: number;
-                if (cachedLastSeq > 0) {
-                    afterSeq = cachedLastSeq;
-                } else {
-                    afterSeq = Math.max(0, sessionSeq - 100);
-                }
+                // Always anchor to the latest 100 messages from session.seq.
+                // If cachedLastSeq is recent (gap < 100), afterSeq = cachedLastSeq (incremental).
+                // If cachedLastSeq is stale (gap > 100), afterSeq = sessionSeq - 100 (jump to latest).
+                // This ensures the user always sees the newest messages first, even with a stale cache.
+                const latestAnchor = Math.max(0, sessionSeq - 100);
+                const afterSeq = cachedLastSeq > 0
+                    ? Math.max(cachedLastSeq, latestAnchor)
+                    : latestAnchor;
 
                 log.log(`💬 fetchMessages: requesting after_seq=${afterSeq} for ${sessionId} (cachedLastSeq=${cachedLastSeq})`);
                 const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
@@ -1889,7 +1889,15 @@ class Sync {
                     hasOlderMessages = oldestSeq > 1;
                 }
 
-                log.log(`💬 fetchMessages completed for ${sessionId}: ${normalizedMessages.length} messages, maxSeq=${maxSeq}, oldestSeq=${oldestSeq}, hasOlderMessages=${hasOlderMessages}`);
+                log.log(`💬 fetchMessages completed for ${sessionId}: ${normalizedMessages.length} messages, maxSeq=${maxSeq}, oldestSeq=${oldestSeq}, hasOlderMessages=${hasOlderMessages}, sessionSeq=${sessionSeq}`);
+
+                // If we're still behind session.seq, kick off another fetch immediately.
+                // This handles cases where new messages arrived during this fetch, or where
+                // the batch of 100 didn't reach the latest seq.
+                if (maxSeq < sessionSeq) {
+                    log.log(`💬 fetchMessages: still behind (maxSeq=${maxSeq} < sessionSeq=${sessionSeq}), re-invalidating`);
+                    this.getMessagesSync(sessionId).invalidate();
+                }
 
                 // Only patch store for cold-start path; incremental path already has correct values.
                 if (cachedLastSeq === 0) {
