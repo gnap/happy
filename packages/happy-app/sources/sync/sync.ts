@@ -1856,10 +1856,9 @@ class Sync {
                     if (!decrypted) continue;
                     let normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
                     if (!normalized) continue;
-                    // In session-protocol mode, user messages are re-emitted as session envelopes
-                    // by the CLI without the original localId. Re-attach it so the reducer can
-                    // deduplicate against the already-displayed optimistic message.
-                    if (normalized.role === 'user' && normalized.localId === null) {
+                    // Session envelopes carry their own server-assigned localId (different from
+                    // the original user message localId), so resolve by text for ALL user messages.
+                    if (normalized.role === 'user') {
                         const claimedLocalId = this.resolveLocalIdForIncoming(sessionId, normalized.id, normalized.content.text);
                         if (claimedLocalId) {
                             normalized = { ...normalized, localId: claimedLocalId };
@@ -2131,9 +2130,9 @@ class Sync {
                 if (decrypted) {
                     lastMessage = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
 
-                    // In session-protocol mode, user messages arrive as session envelopes without
-                    // the original localId. Re-attach it to enable deduplication with the optimistic message.
-                    if (lastMessage && lastMessage.role === 'user' && lastMessage.localId === null) {
+                    // Session envelopes carry their own server-assigned localId (different from
+                    // the original user message localId), so resolve by text for ALL user messages.
+                    if (lastMessage && lastMessage.role === 'user') {
                         const claimedLocalId = this.resolveLocalIdForIncoming(sid, lastMessage.id, lastMessage.content.text);
                         if (claimedLocalId) {
                             lastMessage = { ...lastMessage, localId: claimedLocalId };
