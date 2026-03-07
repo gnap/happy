@@ -81,6 +81,9 @@ class Sync {
     // We track sent message texts here so we can re-attach the localId when the echo arrives,
     // enabling deduplication with the already-displayed optimistic message.
     private sentMessageLocalIds = new Map<string, Array<{ localId: string; text: string }>>();
+    // Once a (serverMsgId → localId) pair is claimed by either fetchMessages or handleUpdate,
+    // record it here so the OTHER path can reuse the same localId rather than creating a duplicate.
+    private claimedServerMessageIds = new Map<string, string>(); // serverMsgId → localId
     private sessionMessageQueue = new Map<string, NormalizedMessage[]>();
     private sessionQueueProcessing = new Set<string>();
     private _loggedMissingSessionForSid = new Set<string>();
@@ -838,10 +841,12 @@ class Sync {
             log.log(`📥 fetchSessions completed - processed ${decryptedSessions.length} sessions`);
             this._loggedMissingSessionForSid.clear();
 
-            // When cached lastSeq < session.seq, trigger message fetch so cache catches up
+            // Only eagerly catch up messages for active sessions (agent is running).
+            // Inactive/offline sessions are loaded lazily when the user opens them.
             void (async () => {
                 for (const session of decryptedSessions) {
                     if (session.metadata?.flavor !== 'cursor') continue;
+                    if (!session.active) continue; // skip offline sessions
                     try {
                         const cached = await getCachedLastSeq(session.id);
                         if (cached != null && cached < session.seq) {
@@ -1745,6 +1750,27 @@ class Sync {
     }
 
     /**
+     * Resolve a localId for an incoming server message (serverMsgId) that arrived without one.
+     *
+     * Race-condition-safe: handleUpdate and fetchMessages may both process the same server
+     * message. The first caller claims the localId from sentMessageLocalIds and registers the
+     * mapping in claimedServerMessageIds. The second caller finds it already registered and
+     * reuses it – preventing the reducer from creating a second, duplicate message.
+     */
+    private resolveLocalIdForIncoming(sessionId: string, serverMsgId: string, text: string): string | null {
+        // Already claimed by another code path → reuse the same localId.
+        const existing = this.claimedServerMessageIds.get(serverMsgId);
+        if (existing) return existing;
+
+        const localId = this.claimSentMessageLocalId(sessionId, text);
+        if (localId) {
+            this.claimedServerMessageIds.set(serverMsgId, localId);
+            console.log(`[Sync] resolveLocalId: ${serverMsgId} → ${localId} (text="${text}")`);
+        }
+        return localId;
+    }
+
+    /**
      * Fetch the latest page of messages for a session (up to 100).
      * Uses session.seq to compute the starting point so we only fetch the
      * newest 100 messages on cold start instead of paginating the full history.
@@ -1761,13 +1787,6 @@ class Sync {
                 if (!encryption) {
                     log.log(`💬 fetchMessages: Session encryption not ready for ${sessionId}, will retry`);
                     throw new Error(`Session encryption not ready for ${sessionId}`);
-                }
-
-                // Show loading indicator while fetching (only when already loaded so cold-start
-                // uses the existing full-screen loader rather than the bottom spinner).
-                const alreadyLoaded = storage.getState().sessionMessages[sessionId]?.isLoaded ?? false;
-                if (alreadyLoaded) {
-                    storage.getState().setFetching(sessionId, true);
                 }
 
                 // --- Cache: cold-start hydration (Cursor sessions only) ---
@@ -1791,6 +1810,21 @@ class Sync {
                 }
 
                 const cachedLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
+                const currentSession = storage.getState().sessions[sessionId];
+                const sessionSeq = currentSession?.seq ?? 0;
+
+                // Already up-to-date: skip the API call and loading indicator entirely.
+                if (cachedLastSeq > 0 && cachedLastSeq >= sessionSeq) {
+                    log.log(`💬 fetchMessages: already up-to-date for ${sessionId} (lastSeq=${cachedLastSeq} >= seq=${sessionSeq}), skipping fetch`);
+                    return;
+                }
+
+                // Only show the loading indicator now that we know a network request is needed.
+                // Cold-start uses the full-screen loader (isLoaded=false), not this bottom spinner.
+                const alreadyLoaded = storage.getState().sessionMessages[sessionId]?.isLoaded ?? false;
+                if (alreadyLoaded) {
+                    storage.getState().setFetching(sessionId, true);
+                }
 
                 // On cold start (no cache / lastSeq=0): fetch latest 100 using session.seq as anchor.
                 // On incremental update (lastSeq>0): fetch only new messages since lastSeq.
@@ -1798,8 +1832,6 @@ class Sync {
                 if (cachedLastSeq > 0) {
                     afterSeq = cachedLastSeq;
                 } else {
-                    const currentSession = storage.getState().sessions[sessionId];
-                    const sessionSeq = currentSession?.seq ?? 0;
                     afterSeq = Math.max(0, sessionSeq - 100);
                 }
 
@@ -1828,7 +1860,7 @@ class Sync {
                     // by the CLI without the original localId. Re-attach it so the reducer can
                     // deduplicate against the already-displayed optimistic message.
                     if (normalized.role === 'user' && normalized.localId === null) {
-                        const claimedLocalId = this.claimSentMessageLocalId(sessionId, normalized.content.text);
+                        const claimedLocalId = this.resolveLocalIdForIncoming(sessionId, normalized.id, normalized.content.text);
                         if (claimedLocalId) {
                             normalized = { ...normalized, localId: claimedLocalId };
                         }
@@ -2047,12 +2079,14 @@ class Sync {
                         else inactive.push(s.id);
                     }
                 }
+                // On reconnect, only eagerly refresh active sessions.
+                // Inactive/offline sessions load messages lazily on open.
                 for (const sessionId of active) {
                     this.getMessagesSync(sessionId).invalidate();
                     gitStatusSync.invalidate(sessionId);
                 }
                 for (const sessionId of inactive) {
-                    this.getMessagesSync(sessionId).invalidate();
+                    // Skip message fetch for offline sessions — onSessionVisible handles it.
                     gitStatusSync.invalidate(sessionId);
                 }
             } catch (e) {
@@ -2100,7 +2134,7 @@ class Sync {
                     // In session-protocol mode, user messages arrive as session envelopes without
                     // the original localId. Re-attach it to enable deduplication with the optimistic message.
                     if (lastMessage && lastMessage.role === 'user' && lastMessage.localId === null) {
-                        const claimedLocalId = this.claimSentMessageLocalId(sid, lastMessage.content.text);
+                        const claimedLocalId = this.resolveLocalIdForIncoming(sid, lastMessage.id, lastMessage.content.text);
                         if (claimedLocalId) {
                             lastMessage = { ...lastMessage, localId: claimedLocalId };
                         }
@@ -2223,6 +2257,9 @@ class Sync {
             this.pendingOutbox.delete(sessionId);
             this.sessionLastSeq.delete(sessionId);
             this.sentMessageLocalIds.delete(sessionId);
+            // claimedServerMessageIds is keyed by serverId not sessionId, so we can't easily
+            // bulk-delete by session. It's small and self-limiting (only live claims), so just
+            // leave entries to expire naturally (they'll never match again after session deletion).
             this.sessionMessageLocks.delete(sessionId);
             this.sessionMessageQueue.delete(sessionId);
             this.sessionQueueProcessing.delete(sessionId);

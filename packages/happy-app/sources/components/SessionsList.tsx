@@ -1,9 +1,9 @@
 import React from 'react';
-import { View, Pressable, FlatList, Platform } from 'react-native';
+import { View, Pressable, FlatList, Platform, ActivityIndicator } from 'react-native';
 import { Swipeable } from 'react-native-gesture-handler';
 import { Text } from '@/components/StyledText';
 import { usePathname } from 'expo-router';
-import { SessionListViewItem } from '@/sync/storage';
+import { SessionListViewItem, useSessionIsFetching } from '@/sync/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { getSessionName, useSessionStatus, getSessionSubtitle, getSessionAvatarId } from '@/utils/sessionUtils';
 import { Avatar } from './Avatar';
@@ -192,6 +192,10 @@ const stylesheet = StyleSheet.create((theme) => ({
         textAlign: 'center',
         ...Typography.default('semiBold'),
     },
+    fetchingIndicator: {
+        marginLeft: 6,
+        flexShrink: 0,
+    },
 }));
 
 export function SessionsList() {
@@ -333,6 +337,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
     const styles = stylesheet;
     const sessionStatus = useSessionStatus(session);
     const sessionName = getSessionName(session);
+    const isFetching = useSessionIsFetching(session.id);
     const sessionSubtitle = getSessionSubtitle(session);
     const navigateToSession = useNavigateToSession();
     const isTablet = useIsTablet();
@@ -404,9 +409,12 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
                     <Text style={[
                         styles.sessionTitle,
                         sessionStatus.isConnected ? styles.sessionTitleConnected : styles.sessionTitleDisconnected
-                    ]} numberOfLines={1}> {/* {variant !== 'no-path' ? 1 : 2} - issue is we don't have anything to take this space yet and it looks strange - if summaries were more reliably generated, we can add this. While no summary - add something like "New session" or "Empty session", and extend summary to 2 lines once we have it */}
+                    ]} numberOfLines={1}>
                         {sessionName}
                     </Text>
+                    {isFetching && (
+                        <ActivityIndicator size="small" style={styles.fetchingIndicator} />
+                    )}
                 </View>
 
                 {/* Subtitle line */}

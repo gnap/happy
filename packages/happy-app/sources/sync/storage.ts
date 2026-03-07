@@ -1294,6 +1294,10 @@ export function useSessionMessages(sessionId: string): { messages: Message[], is
     }));
 }
 
+export function useSessionIsFetching(sessionId: string): boolean {
+    return storage(state => state.sessionMessages[sessionId]?.isFetching ?? false);
+}
+
 export function useMessage(sessionId: string, messageId: string): Message | null {
     return storage(useShallow((state) => {
         const session = state.sessionMessages[sessionId];
