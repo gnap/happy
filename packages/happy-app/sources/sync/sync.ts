@@ -1992,11 +1992,9 @@ class Sync {
                         console.log('🔄 Sync: Applying message (fast path):', JSON.stringify(lastMessage));
                         this.enqueueMessages(updateData.body.sid, [lastMessage]);
                         this.sessionLastSeq.set(updateData.body.sid, incomingSeq);
-                        let hasMutableTool = false;
-                        if (lastMessage.role === 'agent' && lastMessage.content[0] && lastMessage.content[0].type === 'tool-result') {
-                            hasMutableTool = storage.getState().isMutableToolCall(updateData.body.sid, lastMessage.content[0].tool_use_id);
-                        }
-                        if (hasMutableTool) {
+                        // Refresh git status only when turn is done (ready), not on every mutable tool result
+                        const isReadyEvent = lastMessage.role === 'event' && (lastMessage.content as { type?: string })?.type === 'ready';
+                        if (isReadyEvent || isTaskComplete) {
                             gitStatusSync.invalidate(updateData.body.sid);
                         }
                     } else {
@@ -2069,10 +2067,8 @@ class Sync {
                     updatedAt: updateData.createdAt
                 }]);
 
-                // Invalidate git status when agent state changes (files may have been modified)
+                // Git status is refreshed on ready/turn-end only (see new-message), not on every agentState push
                 if (updateData.body.agentState) {
-                    gitStatusSync.invalidate(updateData.body.id);
-
                     // Check for new permission requests and notify voice assistant
                     if (agentState?.requests && Object.keys(agentState.requests).length > 0) {
                         const requestIds = Object.keys(agentState.requests);

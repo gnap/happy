@@ -109,30 +109,28 @@ export class GitStatusSync {
                 return;
             }
 
-            // First check if we're in a git repository
+            const cwd = session.metadata.path;
+
             const gitCheckResult = await sessionBash(sessionId, {
                 command: 'git rev-parse --is-inside-work-tree',
-                cwd: session.metadata.path,
+                cwd,
                 timeout: 5000
             });
 
             if (!gitCheckResult.success || gitCheckResult.exitCode !== 0) {
-                // Not a git repository, clear any existing status
                 storage.getState().applyGitStatus(sessionId, null);
-                
-                // Also update the project git status
                 if (session.metadata?.machineId) {
-                    const projectKey = createProjectKey(session.metadata.machineId, session.metadata.path);
-                    projectManager.updateProjectGitStatus(projectKey, null);
+                    projectManager.updateProjectGitStatus(createProjectKey(session.metadata.machineId, cwd), null);
                 }
                 return;
             }
 
-            // Get git status in porcelain v2 format (includes branch info)
-            // --untracked-files=all ensures we get individual files, not directories
+            // Options chosen to reduce git pressure on large repos (no parallel: one git at a time).
+            // status: --untracked-files=normal (avoid listing every untracked file)
+            // diff: --no-renames (skip rename detection), --no-ext-diff (skip external diff drivers)
             const statusResult = await sessionBash(sessionId, {
-                command: 'git status --porcelain=v2 --branch --show-stash --untracked-files=all',
-                cwd: session.metadata.path,
+                command: 'git status --porcelain=v2 --branch --show-stash --untracked-files=normal',
+                cwd,
                 timeout: 10000
             });
 
@@ -141,35 +139,26 @@ export class GitStatusSync {
                 return;
             }
 
-            // Get git diff statistics for unstaged changes
             const diffStatResult = await sessionBash(sessionId, {
-                command: 'git diff --numstat',
-                cwd: session.metadata.path,
+                command: 'git diff --numstat --no-renames --no-ext-diff',
+                cwd,
                 timeout: 10000
             });
 
-            // Get git diff statistics for staged changes
             const stagedDiffStatResult = await sessionBash(sessionId, {
-                command: 'git diff --cached --numstat',
-                cwd: session.metadata.path,
+                command: 'git diff --cached --numstat --no-renames --no-ext-diff',
+                cwd,
                 timeout: 10000
             });
 
-            // Parse the git status output with diff statistics
             const gitStatus = this.parseGitStatusV2(
                 statusResult.stdout,
                 diffStatResult.success ? diffStatResult.stdout : '',
                 stagedDiffStatResult.success ? stagedDiffStatResult.stdout : ''
             );
 
-            // Apply to storage (this also updates the project git status via the modified applyGitStatus)
             storage.getState().applyGitStatus(sessionId, gitStatus);
-            
-            // Additionally, update the project directly for efficiency
-            if (session.metadata?.machineId) {
-                const projectKey = createProjectKey(session.metadata.machineId, session.metadata.path);
-                projectManager.updateProjectGitStatus(projectKey, gitStatus);
-            }
+            projectManager.updateProjectGitStatus(projectKey, gitStatus);
 
         } catch (error) {
             console.error('Error fetching git status for session', sessionId, ':', error);
