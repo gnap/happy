@@ -77,6 +77,10 @@ class Sync {
     private sendAbortControllers = new Map<string, AbortController>();
     private sessionLastSeq = new Map<string, number>();
     private pendingOutbox = new Map<string, OutboxMessage[]>();
+    // In session-protocol mode user messages arrive back as session envelopes without localId.
+    // We track sent message texts here so we can re-attach the localId when the echo arrives,
+    // enabling deduplication with the already-displayed optimistic message.
+    private sentMessageLocalIds = new Map<string, Array<{ localId: string; text: string }>>();
     private sessionMessageQueue = new Map<string, NormalizedMessage[]>();
     private sessionQueueProcessing = new Set<string>();
     private _loggedMissingSessionForSid = new Set<string>();
@@ -498,6 +502,13 @@ class Sync {
         // Track in outbox immediately (before encryption, so UI shows "sending" right away)
         storage.getState().addOutboxEntry({ localId, sessionId, text, displayText, createdAt: Date.now() });
 
+        // Track sent text → localId so we can re-attach localId when the session-envelope echo
+        // arrives without one (session protocol mode: raw role:'user' messages are re-emitted as
+        // session envelopes by the CLI, dropping the original localId).
+        const sentPending = this.sentMessageLocalIds.get(sessionId) ?? [];
+        sentPending.push({ localId, text });
+        this.sentMessageLocalIds.set(sessionId, sentPending);
+
         // Determine sentFrom based on platform
         let sentFrom: string;
         if (Platform.OS === 'web') {
@@ -549,7 +560,10 @@ class Sync {
             isSidechain: false,
             meta: content.meta as MessageMeta | undefined,
         };
-        this.enqueueMessages(sessionId, [optimisticMessage]);
+        // Apply the optimistic message directly (bypass the queue/lock) so it appears in the UI
+        // immediately without waiting for fetchMessages to release its lock.
+        // applyMessages is a synchronous Zustand set, safe to call from any context.
+        this.applyMessages(sessionId, [optimisticMessage]);
 
         let pending = this.pendingOutbox.get(sessionId);
         if (!pending) {
@@ -1712,6 +1726,25 @@ class Sync {
     }
 
     /**
+     * In session-protocol mode, user messages are echoed back as session envelopes without
+     * the original localId. This method checks if an incoming user message (with localId=null)
+     * matches a recently sent message and, if so, claims and returns the original localId.
+     * Returns null if no match found.
+     */
+    private claimSentMessageLocalId(sessionId: string, text: string): string | null {
+        const pending = this.sentMessageLocalIds.get(sessionId);
+        if (!pending || pending.length === 0) return null;
+        const idx = pending.findIndex(e => e.text === text);
+        if (idx === -1) return null;
+        const localId = pending[idx].localId;
+        pending.splice(idx, 1);
+        if (pending.length === 0) {
+            this.sentMessageLocalIds.delete(sessionId);
+        }
+        return localId;
+    }
+
+    /**
      * Fetch the latest page of messages for a session (up to 100).
      * Uses session.seq to compute the starting point so we only fetch the
      * newest 100 messages on cold start instead of paginating the full history.
@@ -1728,6 +1761,13 @@ class Sync {
                 if (!encryption) {
                     log.log(`💬 fetchMessages: Session encryption not ready for ${sessionId}, will retry`);
                     throw new Error(`Session encryption not ready for ${sessionId}`);
+                }
+
+                // Show loading indicator while fetching (only when already loaded so cold-start
+                // uses the existing full-screen loader rather than the bottom spinner).
+                const alreadyLoaded = storage.getState().sessionMessages[sessionId]?.isLoaded ?? false;
+                if (alreadyLoaded) {
+                    storage.getState().setFetching(sessionId, true);
                 }
 
                 // --- Cache: cold-start hydration (Cursor sessions only) ---
@@ -1782,8 +1822,18 @@ class Sync {
                 const normalizedMessages: NormalizedMessage[] = [];
                 for (const decrypted of decryptedMessages) {
                     if (!decrypted) continue;
-                    const normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
-                    if (normalized) normalizedMessages.push(normalized);
+                    let normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
+                    if (!normalized) continue;
+                    // In session-protocol mode, user messages are re-emitted as session envelopes
+                    // by the CLI without the original localId. Re-attach it so the reducer can
+                    // deduplicate against the already-displayed optimistic message.
+                    if (normalized.role === 'user' && normalized.localId === null) {
+                        const claimedLocalId = this.claimSentMessageLocalId(sessionId, normalized.content.text);
+                        if (claimedLocalId) {
+                            normalized = { ...normalized, localId: claimedLocalId };
+                        }
+                    }
+                    normalizedMessages.push(normalized);
                 }
 
                 if (normalizedMessages.length > 0) {
@@ -2047,6 +2097,15 @@ class Sync {
                 if (decrypted) {
                     lastMessage = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
 
+                    // In session-protocol mode, user messages arrive as session envelopes without
+                    // the original localId. Re-attach it to enable deduplication with the optimistic message.
+                    if (lastMessage && lastMessage.role === 'user' && lastMessage.localId === null) {
+                        const claimedLocalId = this.claimSentMessageLocalId(sid, lastMessage.content.text);
+                        if (claimedLocalId) {
+                            lastMessage = { ...lastMessage, localId: claimedLocalId };
+                        }
+                    }
+
                     // Check for task lifecycle events to update thinking state
                     // This ensures UI updates even if volatile activity updates are lost
                     const rawContent = decrypted.content as {
@@ -2100,13 +2159,33 @@ class Sync {
                         this.fetchSessions();
                     }
 
-                    // Fast-path only on consecutive seq values, otherwise fetch from server.
+                    // Fast-path: apply message directly when seq is strictly consecutive.
+                    // Lenient path: when there is a seq gap (e.g. session-protocol mode where
+                    // the raw user message occupies a seq slot but normalizes to null), still
+                    // enqueue the message immediately so it appears in the UI without waiting
+                    // for fetchMessages. fetchMessages is still triggered to fill any real gaps;
+                    // the reducer's messageIds deduplication handles re-delivery of the same msg.
                     const currentLastSeq = this.sessionLastSeq.get(updateData.body.sid);
                     const incomingSeq = updateData.body.message.seq;
-                    if (lastMessage && currentLastSeq !== undefined && incomingSeq === currentLastSeq + 1) {
+                    const isFastPath = lastMessage !== null && currentLastSeq !== undefined && incomingSeq === currentLastSeq + 1;
+                    if (isFastPath && lastMessage) {
                         console.log('🔄 Sync: Applying message (fast path):', JSON.stringify(lastMessage));
                         this.enqueueMessages(updateData.body.sid, [lastMessage]);
                         this.sessionLastSeq.set(updateData.body.sid, incomingSeq);
+                    } else {
+                        // Seq gap → trigger fetch to fill missing messages
+                        this.getMessagesSync(updateData.body.sid).invalidate();
+                        // Also enqueue the current message immediately if non-null so the UI
+                        // updates without waiting for the full fetchMessages round-trip.
+                        // sessionLastSeq is NOT updated here; fetchMessages will set it correctly
+                        // after retrieving the gap, preventing future messages from skipping ahead.
+                        if (lastMessage) {
+                            console.log('🔄 Sync: Applying message (lenient path, seq gap):', JSON.stringify(lastMessage));
+                            this.enqueueMessages(updateData.body.sid, [lastMessage]);
+                        }
+                    }
+                    // Check for mutable tool call (fast and lenient paths)
+                    if (lastMessage) {
                         let hasMutableTool = false;
                         if (lastMessage.role === 'agent' && lastMessage.content[0] && lastMessage.content[0].type === 'tool-result') {
                             hasMutableTool = storage.getState().isMutableToolCall(updateData.body.sid, lastMessage.content[0].tool_use_id);
@@ -2114,8 +2193,6 @@ class Sync {
                         if (hasMutableTool) {
                             gitStatusSync.invalidate(updateData.body.sid);
                         }
-                    } else {
-                        this.getMessagesSync(updateData.body.sid).invalidate();
                     }
                 }
             }
@@ -2145,6 +2222,7 @@ class Sync {
             this.sendSync.delete(sessionId);
             this.pendingOutbox.delete(sessionId);
             this.sessionLastSeq.delete(sessionId);
+            this.sentMessageLocalIds.delete(sessionId);
             this.sessionMessageLocks.delete(sessionId);
             this.sessionMessageQueue.delete(sessionId);
             this.sessionQueueProcessing.delete(sessionId);
