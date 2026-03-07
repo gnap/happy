@@ -7,7 +7,7 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Avatar } from '@/components/Avatar';
-import { useSession, useIsDataReady } from '@/sync/storage';
+import { useSession, useIsDataReady, useSessionMessages } from '@/sync/storage';
 import { sync } from '@/sync/sync';
 import { getSessionName, useSessionStatus, formatOSPlatform, formatPathRelativeToHome, getSessionAvatarId } from '@/utils/sessionUtils';
 import * as Clipboard from 'expo-clipboard';
@@ -59,6 +59,59 @@ function StatusDot({ color, isPulsing, size = 8 }: { color: string; isPulsing?: 
                 marginRight: 4,
             }}
         />
+    );
+}
+
+/**
+ * 极细分段进度条，显示哪些 seq 范围已缓存（绿色）、哪些未加载（灰色）。
+ * 左=最旧(seq 1)，右=最新(session.seq)。
+ */
+function CacheProgressBar({
+    totalSeq,
+    oldestSeq,
+    hasOlderMessages,
+    isLoaded,
+    segments = 20,
+}: {
+    totalSeq: number;
+    oldestSeq: number;
+    hasOlderMessages: boolean;
+    isLoaded: boolean;
+    segments?: number;
+}) {
+    const { theme } = useUnistyles();
+    if (totalSeq <= 0) return null;
+
+    // Compute the first loaded seq.
+    // - Not yet loaded: nothing green.
+    // - Loaded and no older messages exist: seq 1 onwards (fully green).
+    // - Loaded with older messages pending: oldestSeq onwards.
+    const firstLoadedSeq: number | null = isLoaded
+        ? (hasOlderMessages ? (oldestSeq > 0 ? oldestSeq : null) : 1)
+        : null;
+
+    const bars = Array.from({ length: segments }, (_, i) => {
+        const segStart = Math.floor((i / segments) * totalSeq) + 1;
+        const segEnd = Math.floor(((i + 1) / segments) * totalSeq);
+        if (firstLoadedSeq === null) return false;
+        // Segment is loaded if it overlaps [firstLoadedSeq, totalSeq]
+        return segEnd >= firstLoadedSeq && segStart <= totalSeq;
+    });
+
+    return (
+        <View style={{ flexDirection: 'row', height: 2, gap: 1, paddingHorizontal: 16, paddingBottom: 6 }}>
+            {bars.map((loaded, i) => (
+                <View
+                    key={i}
+                    style={{
+                        flex: 1,
+                        height: 2,
+                        borderRadius: 1,
+                        backgroundColor: loaded ? '#34C759' : theme.colors.divider,
+                    }}
+                />
+            ))}
+        </View>
     );
 }
 
@@ -128,6 +181,7 @@ function SessionInfoContent({ session }: { session: Session }) {
     const devModeEnabled = __DEV__;
     const sessionName = getSessionName(session);
     const sessionStatus = useSessionStatus(session);
+    const { oldestSeq, hasOlderMessages, isLoaded: messagesLoaded } = useSessionMessages(session.id);
     
     // Check if CLI version is outdated
     const isCliOutdated = session.metadata?.version && !isVersionSupported(session.metadata.version, MINIMUM_CLI_VERSION);
@@ -334,13 +388,24 @@ function SessionInfoContent({ session }: { session: Session }) {
                         icon={<Ionicons name="time-outline" size={29} color="#007AFF" />}
                         showChevron={false}
                     />
-                    <Item
-                        title={t('sessionInfo.sequence')}
-                        subtitle={t('sessionInfo.sequenceSubtitle')}
-                        detail={cachedLastSeq != null && cachedLastSeq !== session.seq ? `${cachedLastSeq}/${session.seq}` : session.seq.toString()}
-                        icon={<Ionicons name="git-commit-outline" size={29} color="#007AFF" />}
-                        showChevron={false}
-                    />
+                    <View>
+                        <Item
+                            title={t('sessionInfo.sequence')}
+                            subtitle={t('sessionInfo.sequenceSubtitle')}
+                            detail={cachedLastSeq != null && cachedLastSeq !== session.seq ? `${cachedLastSeq}/${session.seq}` : session.seq.toString()}
+                            icon={<Ionicons name="git-commit-outline" size={29} color="#007AFF" />}
+                            showChevron={false}
+                            showDivider={false}
+                        />
+                        {session.metadata?.flavor === 'cursor' && (
+                            <CacheProgressBar
+                                totalSeq={session.seq}
+                                oldestSeq={oldestSeq}
+                                hasOlderMessages={hasOlderMessages}
+                                isLoaded={messagesLoaded}
+                            />
+                        )}
+                    </View>
                 </ItemGroup>
 
                 {/* Quick Actions */}

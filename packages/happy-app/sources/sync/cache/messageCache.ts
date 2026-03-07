@@ -43,6 +43,8 @@ export interface LoadedCache {
     messages: Message[];
     reducerState: ReducerState;
     lastSeq: number;
+    oldestSeq: number;
+    hasOlderMessages: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -104,8 +106,14 @@ export async function loadMessageCache(session: Session): Promise<LoadedCache | 
         const messages = await db.getSessionMessages(session.id);
         const reducerState = deserializeReducerStateOrCreate(cacheRow.reducerStateJson);
 
-        log.log(`📦 messageCache: loaded ${messages.length} messages for ${session.id} (lastSeq=${cacheRow.lastSeq})`);
-        return { messages, reducerState, lastSeq: cacheRow.lastSeq };
+        log.log(`📦 messageCache: loaded ${messages.length} messages for ${session.id} (lastSeq=${cacheRow.lastSeq}, oldestSeq=${cacheRow.oldestSeq}, hasOlderMessages=${cacheRow.hasOlderMessages})`);
+        return {
+            messages,
+            reducerState,
+            lastSeq: cacheRow.lastSeq,
+            oldestSeq: cacheRow.oldestSeq,
+            hasOlderMessages: cacheRow.hasOlderMessages,
+        };
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (msg === 'cache load timeout') {
@@ -170,6 +178,8 @@ export async function saveMessageCache(
     messages: Message[],
     reducerState: ReducerState,
     lastSeq: number,
+    oldestSeq: number = 0,
+    hasOlderMessages: boolean = false,
 ): Promise<void> {
     if (!isCacheEnabled(session)) {
         log.log(`📦 messageCache: skip save for ${session.id} (flavor=${session.metadata?.flavor ?? 'none'}, not cursor)`);
@@ -182,13 +192,15 @@ export async function saveMessageCache(
             {
                 sessionId: session.id,
                 lastSeq,
+                oldestSeq,
+                hasOlderMessages,
                 schemaVersion: SERIALIZER_SCHEMA_VERSION,
                 cachedAt: Date.now(),
                 reducerStateJson: serializeReducerStateToJson(reducerState),
             },
             messages,
         );
-        log.log(`📦 messageCache: saved ${messages.length} messages for ${session.id} (lastSeq=${lastSeq})`);
+        log.log(`📦 messageCache: saved ${messages.length} messages for ${session.id} (lastSeq=${lastSeq}, oldestSeq=${oldestSeq}, hasOlderMessages=${hasOlderMessages})`);
         notifyCachedLastSeq(session.id, lastSeq);
     } catch (err) {
         log.log(`📦 messageCache: save error for ${session.id}: ${err}`);

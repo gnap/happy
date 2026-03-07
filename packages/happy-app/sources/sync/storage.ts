@@ -55,6 +55,12 @@ interface SessionMessages {
     messagesMap: Record<string, Message>;
     reducerState: ReducerState;
     isLoaded: boolean;
+    /** Lowest seq currently loaded; 0 means unknown / full history loaded */
+    oldestSeq: number;
+    /** True if there are messages on the server with seq < oldestSeq */
+    hasOlderMessages: boolean;
+    /** True while an older-messages fetch is in flight */
+    isLoadingOlder: boolean;
 }
 
 // Machine type is now imported from storageTypes - represents persisted machine data
@@ -103,7 +109,9 @@ interface StorageState {
     applyReady: () => void;
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => { changed: string[], hasReadyEvent: boolean };
     applyMessagesLoaded: (sessionId: string) => void;
-    applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState) => void;
+    applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState, oldestSeq: number, hasOlderMessages: boolean) => void;
+    applyOlderMessages: (sessionId: string, olderMessages: NormalizedMessage[], newOldestSeq: number, hasOlderMessages: boolean) => void;
+    setLoadingOlder: (sessionId: string, loading: boolean) => void;
     applySettings: (settings: Settings, version: number) => void;
     applySettingsLocal: (settings: Partial<Settings>) => void;
     applyLocalSettings: (settings: Partial<LocalSettings>) => void;
@@ -485,8 +493,11 @@ export const storage = create<StorageState>()((set, get) => {
                     updatedSessionMessages[session.id] = {
                         messages: messagesArray,
                         messagesMap: mergedMessagesMap,
-                        reducerState: existingSessionMessages.reducerState, // The reducer modifies state in-place, so this has the updates
-                        isLoaded: existingSessionMessages.isLoaded
+                        reducerState: existingSessionMessages.reducerState,
+                        isLoaded: existingSessionMessages.isLoaded,
+                        oldestSeq: existingSessionMessages.oldestSeq,
+                        hasOlderMessages: existingSessionMessages.hasOlderMessages,
+                        isLoadingOlder: existingSessionMessages.isLoadingOlder,
                     };
 
                     // IMPORTANT: Copy latestUsage from reducerState to Session for immediate availability
@@ -542,7 +553,10 @@ export const storage = create<StorageState>()((set, get) => {
                     messages: [],
                     messagesMap: {},
                     reducerState: createReducer(),
-                    isLoaded: false
+                    isLoaded: false,
+                    oldestSeq: 0,
+                    hasOlderMessages: false,
+                    isLoadingOlder: false,
                 };
 
                 // Get the session's agentState if available
@@ -614,72 +628,75 @@ export const storage = create<StorageState>()((set, get) => {
             const existingSession = state.sessionMessages[sessionId];
             let result: StorageState;
 
-            if (!existingSession) {
-                // First time loading - check for AgentState
-                const session = state.sessions[sessionId];
-                const agentState = session?.agentState;
+                if (!existingSession) {
+                    // First time loading - check for AgentState
+                    const session = state.sessions[sessionId];
+                    const agentState = session?.agentState;
 
-                // Create new reducer state
-                const reducerState = createReducer();
+                    // Create new reducer state
+                    const reducerState = createReducer();
 
-                // Process AgentState if it exists
-                let messages: Message[] = [];
-                let messagesMap: Record<string, Message> = {};
+                    // Process AgentState if it exists
+                    let messages: Message[] = [];
+                    let messagesMap: Record<string, Message> = {};
 
-                if (agentState) {
-                    // Process AgentState through reducer to get initial permission messages
-                    const reducerResult = reducer(reducerState, [], agentState);
-                    const processedMessages = reducerResult.messages;
+                    if (agentState) {
+                        // Process AgentState through reducer to get initial permission messages
+                        const reducerResult = reducer(reducerState, [], agentState);
+                        const processedMessages = reducerResult.messages;
 
-                    processedMessages.forEach(message => {
-                        messagesMap[message.id] = message;
-                    });
+                        processedMessages.forEach(message => {
+                            messagesMap[message.id] = message;
+                        });
 
-                    messages = Object.values(messagesMap)
-                        .sort((a, b) => b.createdAt - a.createdAt);
-                }
+                        messages = Object.values(messagesMap)
+                            .sort((a, b) => b.createdAt - a.createdAt);
+                    }
 
-                // Extract latestUsage from reducerState if available and update session
-                let updatedSessions = state.sessions;
-                if (session && reducerState.latestUsage) {
-                    updatedSessions = {
-                        ...state.sessions,
-                        [sessionId]: {
-                            ...session,
-                            latestUsage: { ...reducerState.latestUsage }
+                    // Extract latestUsage from reducerState if available and update session
+                    let updatedSessions = state.sessions;
+                    if (session && reducerState.latestUsage) {
+                        updatedSessions = {
+                            ...state.sessions,
+                            [sessionId]: {
+                                ...session,
+                                latestUsage: { ...reducerState.latestUsage }
+                            }
+                        };
+                    }
+
+                    result = {
+                        ...state,
+                        sessions: updatedSessions,
+                        sessionMessages: {
+                            ...state.sessionMessages,
+                            [sessionId]: {
+                                reducerState,
+                                messages,
+                                messagesMap,
+                                isLoaded: true,
+                                oldestSeq: 0,
+                                hasOlderMessages: false,
+                                isLoadingOlder: false,
+                            } satisfies SessionMessages
+                        }
+                    };
+                } else {
+                    result = {
+                        ...state,
+                        sessionMessages: {
+                            ...state.sessionMessages,
+                            [sessionId]: {
+                                ...existingSession,
+                                isLoaded: true
+                            } satisfies SessionMessages
                         }
                     };
                 }
 
-                result = {
-                    ...state,
-                    sessions: updatedSessions,
-                    sessionMessages: {
-                        ...state.sessionMessages,
-                        [sessionId]: {
-                            reducerState,
-                            messages,
-                            messagesMap,
-                            isLoaded: true
-                        } satisfies SessionMessages
-                    }
-                };
-            } else {
-                result = {
-                    ...state,
-                    sessionMessages: {
-                        ...state.sessionMessages,
-                        [sessionId]: {
-                            ...existingSession,
-                            isLoaded: true
-                        } satisfies SessionMessages
-                    }
-                };
-            }
-
             return result;
         }),
-        applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState) => set((state) => {
+        applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState, oldestSeq: number, hasOlderMessages: boolean) => set((state) => {
             const messagesMap: Record<string, Message> = {};
             for (const msg of messages) {
                 messagesMap[msg.id] = msg;
@@ -695,7 +712,56 @@ export const storage = create<StorageState>()((set, get) => {
                         messagesMap,
                         reducerState,
                         isLoaded: true,
+                        oldestSeq,
+                        hasOlderMessages,
+                        isLoadingOlder: false,
                     } satisfies SessionMessages,
+                },
+            };
+        }),
+        applyOlderMessages: (sessionId: string, olderMessages: NormalizedMessage[], newOldestSeq: number, hasOlderMessages: boolean) => set((state) => {
+            const existing = state.sessionMessages[sessionId];
+            if (!existing) return state;
+
+            // Run a fresh temporary reducer on just the older batch.
+            // The main reducerState is left intact so incremental (new) messages keep working.
+            const tempReducer = createReducer();
+            const session = state.sessions[sessionId];
+            const reducerResult = reducer(tempReducer, olderMessages, session?.agentState ?? undefined);
+
+            const mergedMap = { ...existing.messagesMap };
+            for (const msg of reducerResult.messages) {
+                // Only add if not already present – never overwrite newer rendered versions
+                if (!mergedMap[msg.id]) {
+                    mergedMap[msg.id] = msg;
+                }
+            }
+
+            const sorted = Object.values(mergedMap).sort((a, b) => b.createdAt - a.createdAt);
+
+            return {
+                ...state,
+                sessionMessages: {
+                    ...state.sessionMessages,
+                    [sessionId]: {
+                        ...existing,
+                        messages: sorted,
+                        messagesMap: mergedMap,
+                        oldestSeq: newOldestSeq,
+                        hasOlderMessages,
+                        isLoadingOlder: false,
+                    } satisfies SessionMessages,
+                },
+            };
+        }),
+        setLoadingOlder: (sessionId: string, loading: boolean) => set((state) => {
+            const existing = state.sessionMessages[sessionId];
+            if (!existing) return state;
+            return {
+                ...state,
+                sessionMessages: {
+                    ...state.sessionMessages,
+                    [sessionId]: { ...existing, isLoadingOlder: loading },
                 },
             };
         }),
@@ -1155,12 +1221,15 @@ export function useSession(id: string): Session | null {
 
 const emptyArray: unknown[] = [];
 
-export function useSessionMessages(sessionId: string): { messages: Message[], isLoaded: boolean } {
+export function useSessionMessages(sessionId: string): { messages: Message[], isLoaded: boolean, hasOlderMessages: boolean, isLoadingOlder: boolean, oldestSeq: number } {
     return storage(useShallow((state) => {
         const session = state.sessionMessages[sessionId];
         return {
-            messages: session?.messages ?? emptyArray,
-            isLoaded: session?.isLoaded ?? false
+            messages: session?.messages ?? emptyArray as Message[],
+            isLoaded: session?.isLoaded ?? false,
+            hasOlderMessages: session?.hasOlderMessages ?? false,
+            isLoadingOlder: session?.isLoadingOlder ?? false,
+            oldestSeq: session?.oldestSeq ?? 0,
         };
     }));
 }

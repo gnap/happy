@@ -738,10 +738,36 @@ export function normalizeRawMessage(
     // Zod transform handles normalization during validation
     let parsed = rawRecordSchema.safeParse(raw);
     if (!parsed.success) {
-        console.error('=== VALIDATION ERROR ===');
-        console.error('Zod issues:', JSON.stringify(parsed.error.issues, null, 2));
-        console.error('Raw message:', JSON.stringify(raw, null, 2));
-        console.error('=== END ERROR ===');
+        // 静默：服务端会缓存消息，仅修 CLI 无法保证历史/缓存消息格式一致；此类 tool_result content 为
+        // { stdout, exitCode } 的校验失败未影响日常使用，暂不刷屏日志，日后与后端/协议对齐后再考虑恢复详细日志。
+        const isLegacyToolResultContent = (issues: z.ZodIssue[]): boolean => {
+            const check = (v: unknown): boolean => {
+                if (Array.isArray(v)) return v.some(check);
+                if (v && typeof v === 'object' && 'path' in v && 'expected' in v && 'received' in v) {
+                    const p = (v as { path: unknown }).path;
+                    const exp = (v as { expected: string }).expected;
+                    const rec = (v as { received: string }).received;
+                    if (Array.isArray(p) && exp === 'string' && (rec === 'object' || rec === 'array')) {
+                        const pathStr = String(p.join('.'));
+                        if (pathStr.includes('content') && pathStr.includes('message')) return true;
+                    }
+                }
+                return false;
+            };
+            const walk = (ii: z.ZodIssue[]): boolean =>
+                ii.some((i) => {
+                    if (check(i)) return true;
+                    const ue = (i as { unionErrors?: Array<{ issues: z.ZodIssue[] }> }).unionErrors;
+                    return ue?.some((e) => walk(e.issues)) ?? false;
+                });
+            return walk(issues);
+        };
+        if (!isLegacyToolResultContent(parsed.error.issues)) {
+            console.error('=== VALIDATION ERROR ===');
+            console.error('Zod issues:', JSON.stringify(parsed.error.issues, null, 2));
+            console.error('Raw message:', JSON.stringify(raw, null, 2));
+            console.error('=== END ERROR ===');
+        }
         return null;
     }
     raw = parsed.data;

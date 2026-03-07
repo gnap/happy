@@ -21,6 +21,10 @@ import * as SQLite from 'expo-sqlite';
 export interface CachedSessionRow {
     sessionId: string;
     lastSeq: number;
+    /** Lowest seq currently stored (1 = all messages loaded, >1 = older messages exist) */
+    oldestSeq: number;
+    /** True when the server has messages with seq < oldestSeq */
+    hasOlderMessages: boolean;
     schemaVersion: number;
     cachedAt: number;
     reducerStateJson: string;
@@ -82,7 +86,7 @@ export class MemorySessionCacheDB implements ISessionCacheDB {
 // ---------------------------------------------------------------------------
 
 const IDB_NAME = 'happy_message_cache';
-const IDB_VERSION = 1;
+const IDB_VERSION = 2;
 const STORE_SESSION_CACHE = 'session_cache';
 const STORE_SESSION_MESSAGES = 'session_messages';
 
@@ -132,7 +136,7 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
         return new Promise((resolve, reject) => {
             const req = this.getStore().cache.get(sessionId);
             req.onsuccess = () => {
-                const row = req.result as { sessionId: string; lastSeq: number; schemaVersion: number; cachedAt: number; reducerState: string } | undefined;
+                const row = req.result as { sessionId: string; lastSeq: number; oldestSeq?: number; hasOlderMessages?: boolean; schemaVersion: number; cachedAt: number; reducerState: string } | undefined;
                 if (!row) {
                     resolve(null);
                     return;
@@ -140,6 +144,8 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
                 resolve({
                     sessionId: row.sessionId,
                     lastSeq: row.lastSeq,
+                    oldestSeq: row.oldestSeq ?? 0,
+                    hasOlderMessages: row.hasOlderMessages ?? false,
                     schemaVersion: row.schemaVersion,
                     cachedAt: row.cachedAt,
                     reducerStateJson: row.reducerState,
@@ -180,6 +186,8 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
             cache.put({
                 sessionId: row.sessionId,
                 lastSeq: row.lastSeq,
+                oldestSeq: row.oldestSeq,
+                hasOlderMessages: row.hasOlderMessages,
                 schemaVersion: row.schemaVersion,
                 cachedAt: row.cachedAt,
                 reducerState: row.reducerStateJson,
@@ -221,8 +229,8 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
 // SQLite implementation (expo-sqlite) for iOS / Android
 // ---------------------------------------------------------------------------
 
-const DB_NAME = 'happy_message_cache.db';
-const SCHEMA_VERSION = 1;
+const DB_NAME = 'happy_message_cache_v2.db';
+const SCHEMA_VERSION = 2;
 
 class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
     // We use dynamic require to avoid crashing on platforms without native support
@@ -252,11 +260,13 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
             PRAGMA journal_mode = WAL;
 
             CREATE TABLE IF NOT EXISTS session_cache (
-                session_id      TEXT PRIMARY KEY,
-                last_seq        INTEGER NOT NULL DEFAULT 0,
-                schema_version  INTEGER NOT NULL DEFAULT 1,
-                cached_at       INTEGER NOT NULL DEFAULT 0,
-                reducer_state   TEXT NOT NULL DEFAULT '{}'
+                session_id          TEXT PRIMARY KEY,
+                last_seq            INTEGER NOT NULL DEFAULT 0,
+                oldest_seq          INTEGER NOT NULL DEFAULT 0,
+                has_older_messages  INTEGER NOT NULL DEFAULT 0,
+                schema_version      INTEGER NOT NULL DEFAULT 2,
+                cached_at           INTEGER NOT NULL DEFAULT 0,
+                reducer_state       TEXT NOT NULL DEFAULT '{}'
             );
 
             CREATE TABLE IF NOT EXISTS session_messages (
@@ -283,7 +293,7 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
     async getSessionCache(sessionId: string): Promise<CachedSessionRow | null> {
         await this.ensureReady();
         const row = await this.db.getFirstAsync(
-            'SELECT session_id, last_seq, schema_version, cached_at, reducer_state FROM session_cache WHERE session_id = ?',
+            'SELECT session_id, last_seq, oldest_seq, has_older_messages, schema_version, cached_at, reducer_state FROM session_cache WHERE session_id = ?',
             [sessionId]
         ) as Record<string, unknown> | null;
 
@@ -291,6 +301,8 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
         return {
             sessionId: row['session_id'] as string,
             lastSeq: row['last_seq'] as number,
+            oldestSeq: (row['oldest_seq'] as number) ?? 0,
+            hasOlderMessages: !!row['has_older_messages'],
             schemaVersion: row['schema_version'] as number,
             cachedAt: row['cached_at'] as number,
             reducerStateJson: row['reducer_state'] as string,
@@ -321,9 +333,9 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
         await this.db.withTransactionAsync(async () => {
             await this.db.runAsync(
                 `INSERT OR REPLACE INTO session_cache
-                    (session_id, last_seq, schema_version, cached_at, reducer_state)
-                 VALUES (?, ?, ?, ?, ?)`,
-                [row.sessionId, row.lastSeq, row.schemaVersion, row.cachedAt, row.reducerStateJson]
+                    (session_id, last_seq, oldest_seq, has_older_messages, schema_version, cached_at, reducer_state)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                [row.sessionId, row.lastSeq, row.oldestSeq, row.hasOlderMessages ? 1 : 0, row.schemaVersion, row.cachedAt, row.reducerStateJson]
             );
 
             await this.db.runAsync(

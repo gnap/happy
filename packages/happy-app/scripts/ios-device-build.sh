@@ -20,18 +20,19 @@ if [[ -f "$ROOT_DIR/package.json" ]]; then
   echo ""
 fi
 
-# Prebuild: regenerate native ios/android from app config (optional; set RUN_PREBUILD=1 to enable).
-# Skip by default because prebuild overwrites custom ios files (e.g. Happydev-NoPush.entitlements).
+# Prebuild: regenerate native ios from app config (set RUN_PREBUILD=1 to enable).
+# withPersonalTeamEntitlements plugin strips aps-environment + associated-domains for dev,
+# so prebuild is safe to run; no manual entitlements patching needed.
 if [[ "$RUN_PREBUILD" == "1" ]]; then
-  echo "Running prebuild (expo prebuild)..."
-  (cd "$APP_DIR" && yarn prebuild)
+  echo "Running prebuild (APP_ENV=development expo prebuild)..."
+  (cd "$APP_DIR" && APP_ENV=development npx expo prebuild --platform ios)
   echo ""
 fi
 
 cd "$IOS_DIR"
 
-# Use device name or UDID. Example: ./ios-device-build.sh 00008140-001E55691160801C
-# Optional second arg: "release" or "--release" → build Release and install to device.
+# Use device UDID or name as first arg. Example: ./ios-device-build.sh 00008140-001E55691160801C
+# Optional second arg: "release" or "--release" → build Release instead of Debug.
 DEST="${1:-00008140-001E55691160801C}"
 if [[ "$2" == "release" || "$2" == "--release" ]]; then
   BUILD_CONFIG="Release"
@@ -45,14 +46,9 @@ else
   DEST_SPEC="name=$DEST"
 fi
 
-# Personal team: use a distinct bundle ID (com.slopus.happy.dev is taken by org) and no-push entitlements.
-if [[ "$DEVELOPMENT_TEAM" == "WNNK7EH57R" ]]; then
-  CODE_SIGN_ENTITLEMENTS_ARG="CODE_SIGN_ENTITLEMENTS=Happydev/Happydev-NoPush.entitlements"
-  BUNDLE_ID_ARG="PRODUCT_BUNDLE_IDENTIFIER=com.slopus.happy.dev.personal"
-else
-  CODE_SIGN_ENTITLEMENTS_ARG=""
-  BUNDLE_ID_ARG=""
-fi
+# Personal team: bundle ID com.slopus.happy.dev.personal (org bundle is taken).
+# Entitlements are already stripped by withPersonalTeamEntitlements.js plugin during prebuild.
+BUNDLE_ID_ARG="PRODUCT_BUNDLE_IDENTIFIER=com.slopus.happy.dev.personal"
 
 echo "Building Happydev ($BUILD_CONFIG) for device: $DEST (team: $DEVELOPMENT_TEAM)"
 echo ""
@@ -62,9 +58,9 @@ xcodebuild -workspace Happydev.xcworkspace -scheme Happydev \
   -configuration "$BUILD_CONFIG" \
   -derivedDataPath build \
   -allowProvisioningUpdates \
+  -disableAutomaticPackageResolution \
   DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
   $BUNDLE_ID_ARG \
-  $CODE_SIGN_ENTITLEMENTS_ARG \
   build
 
 APP_PATH="$IOS_DIR/build/Build/Products/${BUILD_CONFIG}-iphoneos/Happydev.app"
@@ -78,5 +74,5 @@ echo "Installing to device..."
 xcrun devicectl device install app --device "$DEST" "$APP_PATH"
 echo "Done. Open the Happy (dev) app on your device."
 if [[ "$BUILD_CONFIG" == "Debug" ]]; then
-  echo "Start Metro (yarn start:metro or start:metro:loop) and enter your Mac IP:8081 if prompted."
+  echo "Start Metro with: yarn start:metro:lan"
 fi

@@ -11,6 +11,8 @@ function makeCacheRow(sessionId: string, lastSeq = 42): CachedSessionRow {
     return {
         sessionId,
         lastSeq,
+        oldestSeq: 0,
+        hasOlderMessages: false,
         schemaVersion: 1,
         cachedAt: Date.now(),
         reducerStateJson: JSON.stringify({ schemaVersion: 1 }),

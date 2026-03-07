@@ -1692,6 +1692,12 @@ class Sync {
         }
     };
 
+    /**
+     * Fetch the latest page of messages for a session (up to 100).
+     * Uses session.seq to compute the starting point so we only fetch the
+     * newest 100 messages on cold start instead of paginating the full history.
+     * Incremental updates (after a cache hit) still fetch from lastSeq forward.
+     */
     private fetchMessages = async (sessionId: string) => {
         log.log(`💬 fetchMessages starting for session ${sessionId} - acquiring lock`);
         const lock = this.getSessionMessageLock(sessionId);
@@ -1706,90 +1712,104 @@ class Sync {
                 }
 
                 // --- Cache: cold-start hydration (Cursor sessions only) ---
-                // Persistence design: we load from persisted lastSeq so we only fetch new messages.
-                // Cursor sessions: lastSeq comes from loadMessageCache (DB). Others: sessionLastSeq
-                // stays 0 until we fetch, so we request from after_seq=0 (full fetch).
                 const session = storage.getState().sessions[sessionId];
                 const existingSessionMessages = storage.getState().sessionMessages[sessionId];
                 if (!existingSessionMessages?.isLoaded) {
                     const cached = await loadMessageCache(session);
                     if (cached) {
-                        storage.getState().applyHydratedCache(sessionId, cached.messages, cached.reducerState);
+                        storage.getState().applyHydratedCache(
+                            sessionId,
+                            cached.messages,
+                            cached.reducerState,
+                            cached.oldestSeq,
+                            cached.hasOlderMessages,
+                        );
                         this.sessionLastSeq.set(sessionId, cached.lastSeq);
-                        log.log(`💬 fetchMessages: hydrated from cache for ${sessionId} (lastSeq=${cached.lastSeq}, ${cached.messages.length} messages)`);
+                        log.log(`💬 fetchMessages: hydrated from cache for ${sessionId} (lastSeq=${cached.lastSeq}, oldestSeq=${cached.oldestSeq}, ${cached.messages.length} messages)`);
                     } else {
                         log.log(`💬 fetchMessages: no cache for ${sessionId} (will fetch from server)`);
                     }
                 }
 
-                let afterSeq = this.sessionLastSeq.get(sessionId) ?? 0;
-                log.log(`💬 fetchMessages: loading from after_seq=${afterSeq} for ${sessionId}`);
-                let hasMore = true;
-                let totalNormalized = 0;
+                const cachedLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
 
-                while (hasMore) {
-                    log.log(`💬 fetchMessages: requesting page after_seq=${afterSeq} for ${sessionId}`);
-                    const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
-                    if (!response.ok) {
-                        throw new Error(`Failed to fetch messages for ${sessionId}: ${response.status}`);
-                    }
-                    const data = await response.json() as V3GetSessionMessagesResponse;
-                    const messages = Array.isArray(data.messages) ? data.messages : [];
-
-                    let maxSeq = afterSeq;
-                    for (const message of messages) {
-                        if (message.seq > maxSeq) {
-                            maxSeq = message.seq;
-                        }
-                    }
-
-                    const decryptedMessages = await encryption.decryptMessages(messages);
-                    const normalizedMessages: NormalizedMessage[] = [];
-                    for (let i = 0; i < decryptedMessages.length; i++) {
-                        const decrypted = decryptedMessages[i];
-                        if (!decrypted) {
-                            continue;
-                        }
-                        const normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
-                        if (normalized) {
-                            normalizedMessages.push(normalized);
-                        }
-                    }
-
-                    if (normalizedMessages.length > 0) {
-                        totalNormalized += normalizedMessages.length;
-                        this.applyMessages(sessionId, normalizedMessages);
-                        // Persist cache after each page so UI (e.g. session info "已缓存最新 seq") can show progress in real time.
-                        const pageSession = storage.getState().sessions[sessionId];
-                        const pageMsgs = storage.getState().sessionMessages[sessionId];
-                        if (pageSession && pageMsgs) {
-                            void saveMessageCache(pageSession, pageMsgs.messages, pageMsgs.reducerState, maxSeq);
-                        }
-                    }
-
-                    this.sessionLastSeq.set(sessionId, maxSeq);
-                    hasMore = !!data.hasMore;
-                    log.log(`💬 fetchMessages: page done for ${sessionId} got ${messages.length} messages, hasMore=${hasMore}, totalNormalized=${totalNormalized}`);
-                    if (hasMore && maxSeq === afterSeq) {
-                        log.log(`💬 fetchMessages: pagination stalled for ${sessionId}, stopping to avoid infinite loop`);
-                        break;
-                    }
-                    afterSeq = maxSeq;
+                // On cold start (no cache / lastSeq=0): fetch latest 100 using session.seq as anchor.
+                // On incremental update (lastSeq>0): fetch only new messages since lastSeq.
+                let afterSeq: number;
+                if (cachedLastSeq > 0) {
+                    afterSeq = cachedLastSeq;
+                } else {
+                    const currentSession = storage.getState().sessions[sessionId];
+                    const sessionSeq = currentSession?.seq ?? 0;
+                    afterSeq = Math.max(0, sessionSeq - 100);
                 }
 
-                log.log(`💬 fetchMessages completed for session ${sessionId} - processed ${totalNormalized} messages`);
+                log.log(`💬 fetchMessages: requesting after_seq=${afterSeq} for ${sessionId} (cachedLastSeq=${cachedLastSeq})`);
+                const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch messages for ${sessionId}: ${response.status}`);
+                }
+                const data = await response.json() as V3GetSessionMessagesResponse;
+                const messages = Array.isArray(data.messages) ? data.messages : [];
 
-                // --- Cache: persist updated state after successful fetch ---
-                // We re-read session here (metadata might have arrived after init)
+                let maxSeq = afterSeq;
+                let minSeqInPage = afterSeq > 0 ? afterSeq + 1 : 1;
+                for (const message of messages) {
+                    if (message.seq > maxSeq) maxSeq = message.seq;
+                    if (message.seq < minSeqInPage) minSeqInPage = message.seq;
+                }
+
+                const decryptedMessages = await encryption.decryptMessages(messages);
+                const normalizedMessages: NormalizedMessage[] = [];
+                for (const decrypted of decryptedMessages) {
+                    if (!decrypted) continue;
+                    const normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
+                    if (normalized) normalizedMessages.push(normalized);
+                }
+
+                if (normalizedMessages.length > 0) {
+                    this.applyMessages(sessionId, normalizedMessages);
+                }
+
+                this.sessionLastSeq.set(sessionId, maxSeq);
+
+                // Determine pagination state.
+                // - Incremental update (cachedLastSeq > 0): new messages arrive at the top;
+                //   the bottom of our loaded window (oldestSeq) does NOT change.
+                //   Preserve whatever applyHydratedCache already set.
+                // - Cold start (cachedLastSeq = 0): compute from this page's min seq.
+                let oldestSeq: number;
+                let hasOlderMessages: boolean;
+                if (cachedLastSeq > 0) {
+                    const existingState = storage.getState().sessionMessages[sessionId];
+                    oldestSeq = existingState?.oldestSeq ?? 0;
+                    hasOlderMessages = existingState?.hasOlderMessages ?? false;
+                } else {
+                    oldestSeq = messages.length > 0 ? minSeqInPage : 1;
+                    hasOlderMessages = oldestSeq > 1;
+                }
+
+                log.log(`💬 fetchMessages completed for ${sessionId}: ${normalizedMessages.length} messages, maxSeq=${maxSeq}, oldestSeq=${oldestSeq}, hasOlderMessages=${hasOlderMessages}`);
+
+                // Only patch store for cold-start path; incremental path already has correct values.
+                if (cachedLastSeq === 0) {
+                    const stateAfter = storage.getState().sessionMessages[sessionId];
+                    if (stateAfter) {
+                        storage.getState().applyOlderMessages(sessionId, [], oldestSeq, hasOlderMessages);
+                    }
+                }
+
+                // --- Cache: persist after successful fetch ---
                 const updatedSession = storage.getState().sessions[sessionId];
                 const sessionMsgs = storage.getState().sessionMessages[sessionId];
                 if (updatedSession && sessionMsgs) {
-                    const finalSeq = this.sessionLastSeq.get(sessionId) ?? 0;
                     void saveMessageCache(
                         updatedSession,
                         sessionMsgs.messages,
                         sessionMsgs.reducerState,
-                        finalSeq,
+                        maxSeq,
+                        oldestSeq,
+                        hasOlderMessages,
                     );
                 }
             } catch (err) {
@@ -1798,10 +1818,86 @@ class Sync {
                 if (err instanceof Error && err.stack) {
                     log.log(`💬 fetchMessages stack: ${err.stack}`);
                 }
-                // Fall through to finally so UI stops spinning
             } finally {
-                // Always mark as loaded so message page shows empty state instead of infinite spinner
                 storage.getState().applyMessagesLoaded(sessionId);
+                this.releaseMessageFetchSlot();
+            }
+        });
+    }
+
+    /**
+     * Fetch the next older page of messages (100 before the currently oldest loaded seq).
+     * Called when the user scrolls to the top of the message list.
+     */
+    fetchOlderMessages = async (sessionId: string): Promise<void> => {
+        const stateNow = storage.getState().sessionMessages[sessionId];
+        if (!stateNow?.hasOlderMessages || stateNow.isLoadingOlder) return;
+
+        storage.getState().setLoadingOlder(sessionId, true);
+
+        const lock = this.getSessionMessageLock(sessionId);
+        await lock.inLock(async () => {
+            await this.acquireMessageFetchSlot();
+            try {
+                const encryption = this.encryption.getSessionEncryption(sessionId);
+                if (!encryption) throw new Error(`Session encryption not ready for ${sessionId}`);
+
+                const currentState = storage.getState().sessionMessages[sessionId];
+                if (!currentState?.hasOlderMessages) return;
+
+                const oldestSeq = currentState.oldestSeq;
+                // Fetch 100 messages ending just before oldestSeq:
+                // after_seq = max(0, oldestSeq - 101) → returns seq in [oldestSeq-100, oldestSeq-1]
+                const afterSeq = Math.max(0, oldestSeq - 101);
+                log.log(`💬 fetchOlderMessages: requesting after_seq=${afterSeq} limit=100 for ${sessionId} (oldestSeq=${oldestSeq})`);
+
+                const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
+                if (!response.ok) throw new Error(`Failed to fetch older messages: ${response.status}`);
+
+                const data = await response.json() as V3GetSessionMessagesResponse;
+                const messages = Array.isArray(data.messages) ? data.messages : [];
+
+                // Keep only messages strictly before the current oldest to avoid overlap
+                const olderApiMessages = messages.filter(m => m.seq < oldestSeq);
+
+                // Compute new oldestSeq from the raw API messages (seq is always present there)
+                let newOldestSeq = oldestSeq;
+                for (const m of olderApiMessages) {
+                    if (m.seq < newOldestSeq) newOldestSeq = m.seq;
+                }
+
+                const decryptedMessages = await encryption.decryptMessages(olderApiMessages);
+                const normalizedMessages: NormalizedMessage[] = [];
+                for (const decrypted of decryptedMessages) {
+                    if (!decrypted) continue;
+                    const normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
+                    if (normalized) normalizedMessages.push(normalized);
+                }
+
+                const newHasOlderMessages = newOldestSeq > 1;
+
+                log.log(`💬 fetchOlderMessages: got ${normalizedMessages.length} older messages for ${sessionId}, newOldestSeq=${newOldestSeq}, hasMore=${newHasOlderMessages}`);
+
+                storage.getState().applyOlderMessages(sessionId, normalizedMessages, newOldestSeq, newHasOlderMessages);
+
+                // Persist updated cache
+                const updatedSession = storage.getState().sessions[sessionId];
+                const sessionMsgs = storage.getState().sessionMessages[sessionId];
+                if (updatedSession && sessionMsgs) {
+                    const lastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
+                    void saveMessageCache(
+                        updatedSession,
+                        sessionMsgs.messages,
+                        sessionMsgs.reducerState,
+                        lastSeq,
+                        newOldestSeq,
+                        newHasOlderMessages,
+                    );
+                }
+            } catch (err) {
+                log.log(`💬 fetchOlderMessages failed for ${sessionId}: ${err}`);
+                storage.getState().setLoadingOlder(sessionId, false);
+            } finally {
                 this.releaseMessageFetchSlot();
             }
         });
