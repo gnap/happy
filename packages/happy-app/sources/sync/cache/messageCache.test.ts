@@ -146,6 +146,8 @@ describe('loadMessageCache', () => {
             {
                 sessionId: session.id,
                 lastSeq: 10,
+                oldestSeq: 0,
+                hasOlderMessages: false,
                 schemaVersion: SERIALIZER_SCHEMA_VERSION + 999,
                 cachedAt: Date.now(),
                 reducerStateJson: JSON.stringify({ schemaVersion: SERIALIZER_SCHEMA_VERSION + 999 }),
@@ -166,6 +168,8 @@ describe('loadMessageCache', () => {
             {
                 sessionId: session.id,
                 lastSeq: 5,
+                oldestSeq: 0,
+                hasOlderMessages: false,
                 schemaVersion: SERIALIZER_SCHEMA_VERSION,
                 cachedAt: Date.now(),
                 reducerStateJson: 'invalid-json!!!',

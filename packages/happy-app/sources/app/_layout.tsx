@@ -36,6 +36,7 @@ import { ModalProvider } from '@/modal';
 import { PostHogProvider } from 'posthog-react-native';
 import { tracking } from '@/track/tracking';
 import { syncRestore } from '@/sync/sync';
+import { log } from '@/log';
 import { useTrackScreens } from '@/track/useTrackScreens';
 import { RealtimeProvider } from '@/realtime/RealtimeProvider';
 import { FaviconPermissionIndicator } from '@/components/web/FaviconPermissionIndicator';
@@ -200,9 +201,11 @@ export default function RootLayout() {
                 await loadFonts();
                 await sodium.ready;
                 const credentials = await TokenStorage.getCredentials();
-                console.log('credentials', credentials);
                 if (credentials) {
+                    log.log('Init: credentials present, restoring sync');
                     await syncRestore(credentials);
+                } else {
+                    log.log('Init: no stored credentials (not logged in)');
                 }
 
                 setInitState({ credentials });

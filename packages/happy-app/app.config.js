@@ -5,7 +5,7 @@ const name = {
     production: "Happy"
 }[variant];
 const bundleId = {
-    development: "com.slopus.happy.dev",
+    development: "com.slopus.happy.dev.personal",
     preview: "com.slopus.happy.preview",
     production: "com.ex3ndr.happy"
 }[variant];
@@ -78,6 +78,7 @@ export default {
         },
         plugins: [
             require("./plugins/withEinkCompatibility.js"),
+            require("./plugins/withPersonalTeamEntitlements.js"),
             [
                 "expo-router",
                 {
