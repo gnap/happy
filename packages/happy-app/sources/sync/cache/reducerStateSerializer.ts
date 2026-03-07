@@ -24,6 +24,7 @@ import type { AgentEvent } from '../typesRaw';
 export interface PersistedReducerMessage {
     id: string;
     realID: string | null;
+    localId?: string | null;
     createdAt: number;
     role: 'user' | 'agent';
     text: string | null;

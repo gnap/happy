@@ -791,6 +791,7 @@ export const en: TranslationStructure = {
         unknownEvent: 'Unknown event',
         usageLimitUntil: ({ time }: { time: string }) => `Usage limit reached until ${time}`,
         unknownTime: 'unknown time',
+        sendFailed: 'Failed to send – tap to retry',
     },
 
     codex: {
