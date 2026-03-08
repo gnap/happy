@@ -289,7 +289,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     );
     const placeholder = messages.length === 0 ? (
         <>
-            {isLoaded ? (
+            {isLoaded && session.seq <= 0 ? (
                 <EmptyMessages session={session} />
             ) : (
                 <ActivityIndicator size="small" color={theme.colors.textSecondary} />
