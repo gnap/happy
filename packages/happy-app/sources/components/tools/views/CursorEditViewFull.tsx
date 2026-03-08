@@ -7,27 +7,20 @@ import { trimIdent } from '@/utils/trimIdent';
 import { useLazyToolInput } from './useLazyToolInput';
 
 export const CursorEditViewFull = React.memo<ToolViewProps>(({ tool, sessionId, messageId }) => {
-    const { result } = tool;
+    // Fetches full args and/or full result via RPC when either tool.lazyContent or
+    // result.success._lazyResult is set; resolves both in the store before re-rendering.
+    const { loading } = useLazyToolInput(tool, sessionId, messageId);
+
+    // Prefer full-file before/after from result (populated after RPC resolves the lazy result).
+    // Fall back to input fields for in-progress tools or when result has no file content.
+    const { input, result } = tool;
     const successResult = result?.success ?? result;
-
-    // When the tool is completed, the result carries full file content — no RPC needed.
-    // Only fetch lazily while the tool is still running (result not yet available).
-    const hasResultContent = typeof successResult?.beforeFullFileContent === 'string';
-    const { loading } = useLazyToolInput(
-        tool,
-        hasResultContent ? undefined : sessionId,
-        messageId,
-    );
-
-    // After a successful fetch, resolveToolCallLazyContent updates tool.input in the store
-    // so the parent re-renders with full content — read directly from tool.input here.
-    const oldString = hasResultContent
-        ? successResult.beforeFullFileContent
-        : trimIdent(typeof tool.input?.old_string === 'string' ? tool.input.old_string : '');
-    const newString = hasResultContent
-        ? successResult.afterFullFileContent
-        : trimIdent(typeof tool.input?.new_string === 'string' ? tool.input.new_string
-            : typeof tool.input?.streamContent === 'string' ? tool.input.streamContent : '');
+    const oldString = typeof successResult?.beforeFullFileContent === 'string'
+        ? trimIdent(successResult.beforeFullFileContent)
+        : trimIdent(input?.old_string || '');
+    const newString = typeof successResult?.afterFullFileContent === 'string'
+        ? trimIdent(successResult.afterFullFileContent)
+        : trimIdent(input?.new_string || input?.streamContent || '');
 
     return (
         <View style={toolFullViewStyles.sectionFullWidth}>

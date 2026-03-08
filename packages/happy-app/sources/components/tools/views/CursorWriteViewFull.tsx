@@ -6,24 +6,18 @@ import { ToolDiffView } from '@/components/tools/ToolDiffView';
 import { useLazyToolInput } from './useLazyToolInput';
 
 export const CursorWriteViewFull = React.memo<ToolViewProps>(({ tool, sessionId, messageId }) => {
-    const { result } = tool;
+    // Fetches full args and/or full result via RPC when either tool.lazyContent or
+    // result.success._lazyResult is set; resolves both in the store before re-rendering.
+    const { loading } = useLazyToolInput(tool, sessionId, messageId);
+
+    // Prefer afterFullFileContent from result (populated after RPC resolves the lazy result).
+    // Fall back to input fields for in-progress tools.
+    const { input, result } = tool;
     const successResult = result?.success ?? result;
-
-    // When the tool is completed, the result carries full file content — no RPC needed.
-    // Only fetch lazily while the tool is still running (result not yet available).
-    const hasResultContent = typeof successResult?.afterFullFileContent === 'string';
-    const { loading } = useLazyToolInput(
-        tool,
-        hasResultContent ? undefined : sessionId,
-        messageId,
-    );
-
-    // After a successful fetch, resolveToolCallLazyContent updates tool.input in the store
-    // so the parent re-renders with full content — read directly from tool.input here.
-    const contents = hasResultContent
+    const contents = typeof successResult?.afterFullFileContent === 'string'
         ? successResult.afterFullFileContent
-        : typeof tool.input?.content === 'string' ? tool.input.content
-        : typeof tool.input?.streamContent === 'string' ? tool.input.streamContent
+        : typeof input?.content === 'string' ? input.content
+        : typeof input?.streamContent === 'string' ? input.streamContent
         : '';
 
     return (

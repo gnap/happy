@@ -1,13 +1,15 @@
 import React, { useMemo } from 'react';
 import { View, Text, ViewStyle } from 'react-native';
-import { calculateUnifiedDiff, DiffToken } from '@/components/diff/calculateDiff';
+import { calculateUnifiedDiff, DiffToken, DiffResult } from '@/components/diff/calculateDiff';
 import { Typography } from '@/constants/Typography';
 import { useUnistyles } from 'react-native-unistyles';
 
 
 interface DiffViewProps {
-    oldText: string;
-    newText: string;
+    oldText?: string;
+    newText?: string;
+    /** Pre-parsed diff result. When provided, oldText/newText are ignored and no diff is computed. */
+    parsedDiff?: DiffResult;
     contextLines?: number;
     showLineNumbers?: boolean;
     showPlusMinusSymbols?: boolean;
@@ -23,8 +25,9 @@ interface DiffViewProps {
 }
 
 export const DiffView: React.FC<DiffViewProps> = ({
-    oldText,
-    newText,
+    oldText = '',
+    newText = '',
+    parsedDiff,
     contextLines = 3,
     showLineNumbers = true,
     showPlusMinusSymbols = true,
@@ -37,10 +40,11 @@ export const DiffView: React.FC<DiffViewProps> = ({
     const { theme } = useUnistyles();
     const colors = theme.colors.diff;
 
-    // Calculate diff with inline highlighting
+    // Use pre-parsed diff when provided (e.g. from Cursor's diffString); otherwise compute.
     const { hunks } = useMemo(() => {
+        if (parsedDiff) return parsedDiff;
         return calculateUnifiedDiff(oldText, newText, contextLines);
-    }, [oldText, newText, contextLines]);
+    }, [parsedDiff, oldText, newText, contextLines]);
 
     // Styles
     const containerStyle: ViewStyle = {
