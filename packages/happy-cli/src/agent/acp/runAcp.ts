@@ -463,18 +463,21 @@ export async function runAcp(opts: {
     throw new Error('No machine ID found in settings');
   }
 
-  await api.getOrCreateMachine({
-    machineId: settings.machineId,
-    metadata: initialMachineMetadata,
-  });
-
   const { state, metadata } = createSessionMetadata({
     flavor: resolveSessionFlavor(opts.agentName),
     machineId: settings.machineId,
     startedBy: opts.startedBy,
     sandbox: settings.sandboxConfig,
   });
-  const response = await api.getOrCreateSession({ tag: sessionTag, metadata, state });
+
+  // When started by the daemon, the machine is already registered — skip the redundant call.
+  // Otherwise, parallelize machine registration and session creation since they are independent.
+  const [, response] = await Promise.all([
+    opts.startedBy === 'daemon'
+      ? Promise.resolve(null)
+      : api.getOrCreateMachine({ machineId: settings.machineId, metadata: initialMachineMetadata }),
+    api.getOrCreateSession({ tag: sessionTag, metadata, state }),
+  ]);
   if (response) {
     logAcp('muted', `Happy Session ID: ${response.id}`);
   }
