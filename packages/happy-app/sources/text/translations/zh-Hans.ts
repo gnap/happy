@@ -917,9 +917,9 @@ export const zhHans: TranslationStructure = {
         keyClaudeCacheCreation: 'Claude 缓存（写入）',
         keyClaudeCacheRead: 'Claude 缓存（读取）',
         keyCursorPlanUsed: 'Cursor 套餐（已用）',
-        keyCursorPlanRemaining: 'Cursor 套餐（剩余）',
+        keyCursorPlanLimit: 'Cursor 套餐（剩余）',
         keyCursorOnDemandUsed: 'Cursor 按量（已用）',
-        keyCursorOnDemandCents: 'Cursor 按量（分）',
+        keyCursorOnDemandLimit: 'Cursor 按量（分）',
         keyUnknown: '其他',
     },
 

@@ -948,9 +948,9 @@ export const ja: TranslationStructure = {
         keyClaudeCacheCreation: 'Claude キャッシュ（書き込み）',
         keyClaudeCacheRead: 'Claude キャッシュ（読み取り）',
         keyCursorPlanUsed: 'Cursor プラン（使用済み）',
-        keyCursorPlanRemaining: 'Cursor プラン（残り）',
+        keyCursorPlanLimit: 'Cursor プラン（残り）',
         keyCursorOnDemandUsed: 'Cursor 従量（使用済み）',
-        keyCursorOnDemandCents: 'Cursor 従量（セント）',
+        keyCursorOnDemandLimit: 'Cursor 従量（セント）',
         keyUnknown: 'その他',
     },
 

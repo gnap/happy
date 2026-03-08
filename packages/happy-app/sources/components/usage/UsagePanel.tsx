@@ -7,7 +7,7 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { UsageChart } from './UsageChart';
 import { UsageBar } from './UsageBar';
-import { getUsageForPeriod, calculateTotals, groupUsageBySource, getUsageKeyDisplay, UsageDataPoint } from '@/sync/apiUsage';
+import { getUsageForPeriod, calculateTotals, groupUsageBySource, getUsageKeyDisplay, UsageDataPoint, USAGE_LIMIT_KEYS } from '@/sync/apiUsage';
 import { Ionicons } from '@expo/vector-icons';
 import { HappyError } from '@/utils/errors';
 import { t, type TranslationKey } from '@/text';
@@ -208,14 +208,18 @@ export const UsagePanel: React.FC<{ sessionId?: string }> = ({ sessionId }) => {
     // Group token and cost breakdown by source (Claude / Cursor) with friendly labels
     const tokenGroups = groupUsageBySource(totals.tokensByModel);
     const costGroups = groupUsageBySource(totals.costByModel);
-    const maxTokenInGroups = Math.max(
-        ...tokenGroups.flatMap((g) => g.entries.map(([, v]) => v)),
-        1
-    );
-    const maxCostInGroups = Math.max(
-        ...costGroups.flatMap((g) => g.entries.map(([, v]) => v)),
-        1
-    );
+
+    /**
+     * Per-group max value for bar scaling.
+     * If the group contains a _limit key (e.g. plan_limit, on_demand_limit_cents),
+     * use its value as the denominator so bars reflect actual plan utilisation.
+     * Otherwise fall back to the max non-limit value in the group.
+     */
+    const groupMaxValue = (entries: [string, number][]): number => {
+        const limitEntry = entries.find(([k]) => USAGE_LIMIT_KEYS.has(k));
+        if (limitEntry) return Math.max(limitEntry[1], 1);
+        return Math.max(...entries.map(([, v]) => v), 1);
+    };
 
     const sectionTitleBySource: Record<string, string> = {
         claude: t('usage.sectionClaude'),
@@ -289,22 +293,27 @@ export const UsagePanel: React.FC<{ sessionId?: string }> = ({ sessionId }) => {
             <ItemGroup title={t('usage.bySource')}>
                 <View style={{ padding: 16 }}>
                     {tokenGroups.length > 0 ? (
-                        tokenGroups.map(({ source, entries }) => (
-                            <View key={source} style={{ marginBottom: 16 }}>
-                                <Text style={[styles.sectionTitle, { marginHorizontal: 0, marginBottom: 8 }]}>
-                                    {sectionTitleBySource[source]}
-                                </Text>
-                                {entries.map(([key, value]) => (
-                                    <UsageBar
-                                        key={key}
-                                        label={t(getUsageKeyDisplay(key).labelKey as TranslationKey)}
-                                        value={value}
-                                        maxValue={maxTokenInGroups}
-                                        color={source === 'cursor' ? '#6366F1' : '#007AFF'}
-                                    />
-                                ))}
-                            </View>
-                        ))
+                        tokenGroups.map(({ source, entries }) => {
+                            const maxVal = groupMaxValue(entries);
+                            const visibleEntries = entries.filter(([k]) => !USAGE_LIMIT_KEYS.has(k));
+                            return (
+                                <View key={source} style={{ marginBottom: 16 }}>
+                                    <Text style={[styles.sectionTitle, { marginHorizontal: 0, marginBottom: 8 }]}>
+                                        {sectionTitleBySource[source]}
+                                    </Text>
+                                    {visibleEntries.map(([key, value]) => (
+                                        <UsageBar
+                                            key={key}
+                                            label={t(getUsageKeyDisplay(key).labelKey as TranslationKey)}
+                                            value={value}
+                                            maxValue={maxVal}
+                                            showPercentage
+                                            color={source === 'cursor' ? '#6366F1' : '#007AFF'}
+                                        />
+                                    ))}
+                                </View>
+                            );
+                        })
                     ) : (
                         <Text style={styles.statLabel}>{t('usage.noBreakdown')}</Text>
                     )}
@@ -315,23 +324,27 @@ export const UsagePanel: React.FC<{ sessionId?: string }> = ({ sessionId }) => {
             <ItemGroup title={t('usage.cost')}>
                 <View style={{ padding: 16 }}>
                     {costGroups.length > 0 ? (
-                        costGroups.map(({ source, entries }) => (
-                            <View key={`cost-${source}`} style={{ marginBottom: 16 }}>
-                                <Text style={[styles.sectionTitle, { marginHorizontal: 0, marginBottom: 8 }]}>
-                                    {sectionTitleBySource[source]}
-                                </Text>
-                                {entries.map(([key, value]) => (
-                                    <UsageBar
-                                        key={key}
-                                        label={t(getUsageKeyDisplay(key).labelKey as TranslationKey)}
-                                        value={value}
-                                        maxValue={maxCostInGroups}
-                                        color={source === 'cursor' ? '#6366F1' : '#FF9500'}
-                                        showPercentage={maxCostInGroups > 0}
-                                    />
-                                ))}
-                            </View>
-                        ))
+                        costGroups.map(({ source, entries }) => {
+                            const maxVal = groupMaxValue(entries);
+                            const visibleEntries = entries.filter(([k]) => !USAGE_LIMIT_KEYS.has(k));
+                            return (
+                                <View key={`cost-${source}`} style={{ marginBottom: 16 }}>
+                                    <Text style={[styles.sectionTitle, { marginHorizontal: 0, marginBottom: 8 }]}>
+                                        {sectionTitleBySource[source]}
+                                    </Text>
+                                    {visibleEntries.map(([key, value]) => (
+                                        <UsageBar
+                                            key={key}
+                                            label={t(getUsageKeyDisplay(key).labelKey as TranslationKey)}
+                                            value={value}
+                                            maxValue={maxVal}
+                                            showPercentage
+                                            color={source === 'cursor' ? '#6366F1' : '#FF9500'}
+                                        />
+                                    ))}
+                                </View>
+                            );
+                        })
                     ) : (
                         <Text style={styles.statLabel}>{t('usage.noBreakdown')}</Text>
                     )}

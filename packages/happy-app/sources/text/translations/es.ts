@@ -916,9 +916,9 @@ export const es: TranslationStructure = {
         keyClaudeCacheCreation: 'Claude caché (escritura)',
         keyClaudeCacheRead: 'Claude caché (lectura)',
         keyCursorPlanUsed: 'Cursor plan (usado)',
-        keyCursorPlanRemaining: 'Cursor plan (restante)',
+        keyCursorPlanLimit: 'Cursor plan (restante)',
         keyCursorOnDemandUsed: 'Cursor bajo demanda (usado)',
-        keyCursorOnDemandCents: 'Cursor bajo demanda (centavos)',
+        keyCursorOnDemandLimit: 'Cursor bajo demanda (centavos)',
         keyUnknown: 'Otros',
     },
 

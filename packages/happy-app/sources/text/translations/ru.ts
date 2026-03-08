@@ -938,9 +938,9 @@ export const ru: TranslationStructure = {
         keyClaudeCacheCreation: 'Claude кэш (запись)',
         keyClaudeCacheRead: 'Claude кэш (чтение)',
         keyCursorPlanUsed: 'Cursor план (использовано)',
-        keyCursorPlanRemaining: 'Cursor план (осталось)',
+        keyCursorPlanLimit: 'Cursor план (осталось)',
         keyCursorOnDemandUsed: 'Cursor по запросу (использовано)',
-        keyCursorOnDemandCents: 'Cursor по запросу (центы)',
+        keyCursorOnDemandLimit: 'Cursor по запросу (центы)',
         keyUnknown: 'Другое',
     },
 

@@ -916,9 +916,9 @@ export const zhHant: TranslationStructure = {
         keyClaudeCacheCreation: 'Claude 快取（寫入）',
         keyClaudeCacheRead: 'Claude 快取（讀取）',
         keyCursorPlanUsed: 'Cursor 方案（已用）',
-        keyCursorPlanRemaining: 'Cursor 方案（剩餘）',
+        keyCursorPlanLimit: 'Cursor 方案（剩餘）',
         keyCursorOnDemandUsed: 'Cursor 按量（已用）',
-        keyCursorOnDemandCents: 'Cursor 按量（分）',
+        keyCursorOnDemandLimit: 'Cursor 按量（分）',
         keyUnknown: '其他',
     },
 

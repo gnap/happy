@@ -915,9 +915,9 @@ export const ca: TranslationStructure = {
         keyClaudeCacheCreation: 'Claude memòria cau (escriptura)',
         keyClaudeCacheRead: 'Claude memòria cau (lectura)',
         keyCursorPlanUsed: 'Cursor pla (usat)',
-        keyCursorPlanRemaining: 'Cursor pla (restant)',
+        keyCursorPlanLimit: 'Cursor pla (restant)',
         keyCursorOnDemandUsed: 'Cursor sota demanda (usat)',
-        keyCursorOnDemandCents: 'Cursor sota demanda (centaus)',
+        keyCursorOnDemandLimit: 'Cursor sota demanda (centaus)',
         keyUnknown: 'Altres',
     },
 
