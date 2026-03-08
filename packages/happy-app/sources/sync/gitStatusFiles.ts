@@ -51,14 +51,13 @@ export async function getGitStatusFiles(sessionId: string): Promise<GitStatusFil
             return null;
         }
 
-        // Get combined diff statistics for both staged and unstaged changes
+        // diff: --no-renames (skip rename detection), --no-ext-diff (skip external diff drivers)
         const diffStatResult = await sessionBash(sessionId, {
-            command: 'git diff --numstat HEAD && echo "---STAGED---" && git diff --cached --numstat',
+            command: 'git diff --numstat --no-renames --no-ext-diff && echo "---STAGED---" && git diff --cached --numstat --no-renames --no-ext-diff',
             cwd: session.metadata.path,
             timeout: 10000
         });
 
-        // Parse the results using v2 parser
         const statusOutput = statusResult.stdout;
         const diffOutput = diffStatResult.success ? diffStatResult.stdout : '';
 
