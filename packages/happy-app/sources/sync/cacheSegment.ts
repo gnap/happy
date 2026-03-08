@@ -69,34 +69,45 @@ export function olderAfterSeq(oldestSeq: number): number {
 /**
  * Compute the cache bitmap from the currently loaded range [oldestSeq, newestSeq].
  *
- * A full segment (segmentEnd ≤ totalSeq) is marked when its entire range lies within
- * [oldestSeq, newestSeq].  The partial rightmost segment (segmentEnd > totalSeq) is
- * marked when newestSeq ≥ totalSeq (i.e. we have reached the end of the session).
+ * Segments are numbered FROM THE NEWEST end of the session so the bitmap always
+ * covers the most recent 3000 messages regardless of session length:
+ *   bit 0 = segment containing totalSeq (newest)
+ *   bit 1 = segment immediately before that
+ *   …
+ *   bit 29 = 30th-newest segment
+ *
+ * A segment is marked when its entire available range lies within [oldestSeq, newestSeq].
+ * The newest segment may be partial (if totalSeq is not a multiple of CACHE_SEGMENT_SIZE);
+ * its effective end is min(segmentEnd, totalSeq).
  */
 export function computeBitmap(oldestSeq: number, newestSeq: number, totalSeq: number): number {
     if (oldestSeq <= 0 || newestSeq <= 0 || totalSeq <= 0) return 0;
 
+    const newestSeg = segmentIndex(totalSeq); // absolute segment index of the newest message
     let bitmap = 0;
-    for (let seg = 0; seg < MAX_TRACKED_SEGMENTS; seg++) {
+
+    for (let i = 0; i < MAX_TRACKED_SEGMENTS; i++) {
+        const seg = newestSeg - i;
+        if (seg < 0) break;
+
         const start = segmentStart(seg);
         const end = segmentEnd(seg);
+        const effectiveEnd = Math.min(end, totalSeq); // cap for partial newest segment
 
-        if (start > newestSeq) break;
-        if (start < oldestSeq) continue;
+        if (start < oldestSeq) break; // all further segments are also before oldestSeq
 
-        if (end <= totalSeq) {
-            if (newestSeq >= end) bitmap |= (1 << seg);
-        } else {
-            // Partial last segment: loaded once we reach the session's last seq.
-            if (newestSeq >= totalSeq) bitmap |= (1 << seg);
+        if (newestSeq >= effectiveEnd) {
+            bitmap |= (1 << i);
         }
     }
     return bitmap;
 }
 
 /**
- * Expand a bitmap into a boolean array of length totalSegments (oldest→newest order).
- * Index 0 = oldest segment (left in the progress bar), last index = newest (right).
+ * Expand a bitmap into a boolean array for rendering (oldest→newest, left→right).
+ *
+ * The bitmap uses bit 0 = newest segment, bit N-1 = oldest tracked segment.
+ * Display reverses this: index 0 = oldest (left), last index = newest (right).
  */
 export function getBitmapSegments(bitmap: number, totalSeq: number): boolean[] {
     if (totalSeq <= 0) return [];
@@ -104,5 +115,9 @@ export function getBitmapSegments(bitmap: number, totalSeq: number): boolean[] {
         Math.ceil(totalSeq / CACHE_SEGMENT_SIZE),
         MAX_TRACKED_SEGMENTS,
     );
-    return Array.from({ length: totalSegments }, (_, i) => !!(bitmap & (1 << i)));
+    // bitmapBit 0 = newest (rightmost in bar), so display index i maps to bit (totalSegments-1-i).
+    return Array.from({ length: totalSegments }, (_, i) => {
+        const bitmapBit = totalSegments - 1 - i;
+        return !!(bitmap & (1 << bitmapBit));
+    });
 }
