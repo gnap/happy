@@ -149,6 +149,11 @@ function toCodexToolShape(
   return { codexName: toolName, codexInput: args };
 }
 
+/** Enable with DEBUG=1 or HAPPY_SESSION_TIMING=1 to log startup phase timings (ms from runCursor entry). */
+function shouldLogStartupTiming(): boolean {
+  return process.env.DEBUG === '1' || process.env.HAPPY_SESSION_TIMING === '1';
+}
+
 /**
  * Main entry point for the cursor command with ink UI.
  */
@@ -159,8 +164,22 @@ export async function runCursor(opts: {
   workspaceRoot?: string;
   /** Resume last session for same workspace (--resume / -r). Default: false (new session). */
   resumeSession?: boolean;
+  /** Set by index.ts: Date.now() at start of CLI async IIFE, so we can report "time to runCursor entry". */
+  cliStartTime?: number;
 }): Promise<void> {
+  const t0 = Date.now();
+  const toRunCursorEntryMs = opts.cliStartTime != null ? t0 - opts.cliStartTime : undefined;
+  const startupSteps: Record<string, number> = {};
+  const step = (name: string) => {
+    startupSteps[name] = Date.now() - t0;
+    if (shouldLogStartupTiming()) logger.debug(`[cursor] Startup ${name}: ${startupSteps[name]}ms`);
+  };
+
   const workspacePath = opts.workspaceRoot != null ? resolve(opts.workspaceRoot) : process.cwd();
+  step('entry');
+  if (shouldLogStartupTiming() && toRunCursorEntryMs != null) {
+    logger.debug(`[cursor] Startup toRunCursorEntry: ${toRunCursorEntryMs}ms (index load + auth + daemon check → runCursor)`);
+  }
 
   // Default: new session. Resume only with --resume/-r.
   const tagPath = join(configuration.happyHomeDir, CURSOR_SESSION_TAG_FILE);
@@ -202,6 +221,7 @@ export async function runCursor(opts: {
   connectionState.setBackend('Cursor');
 
   const api = await ApiClient.create(opts.credentials);
+  step('apiClient');
 
   //
   // Machine
@@ -239,6 +259,7 @@ export async function runCursor(opts: {
   ]);
 
   const sessionId = response?.id ?? `offline-${sessionTag}`;
+  step('sessionApi');
   logger.debug(`[cursor] Session: ${sessionId} (tag: ${sessionTag.slice(0, 8)}..., reused: ${tagReused})`);
   logger.debug(`[cursor] Workspace: ${workspacePath}`);
   if (tagReused) {
@@ -332,6 +353,7 @@ export async function runCursor(opts: {
   });
   session = initialSession;
   session.onUserMessage(handleUserMessage);
+  step('sessionConnect');
   writeSessionPidFile(session.sessionId);
   // Persist initial default mode so app reload can restore it
   syncModeToSessionMetadata('default', undefined);
@@ -494,6 +516,7 @@ export async function runCursor(opts: {
     },
   } : {});
   ensureCursorMcpHappy(workspacePath, happyServer.url);
+  step('mcpServer');
   logger.debug(`[cursor] Happy MCP: url=${happyServer.url}, workspacePath=${workspacePath}, subagentMcp=${enableSubagentMcp}`);
 
   // Optional: report Cursor IDE quota to server (monitor-only). Wait for socket so ack is possible.
@@ -524,6 +547,23 @@ export async function runCursor(opts: {
 
   // Send "It's ready!" once on startup so mobile can open this session (critical when reusing session after restart)
   emitReadyIfIdle();
+  step('ready');
+
+  if (shouldLogStartupTiming() && Object.keys(startupSteps).length > 0) {
+    const order = ['entry', 'apiClient', 'sessionApi', 'sessionConnect', 'mcpServer', 'ready'];
+    let prev = 0;
+    const deltas = order
+      .filter((k) => startupSteps[k] != null)
+      .map((k) => {
+        const v = startupSteps[k]!;
+        const d = v - prev;
+        prev = v;
+        return `${k}=${d}ms`;
+      });
+    const runCursorTotal = startupSteps['ready'] ?? 0;
+    const fullTotal = toRunCursorEntryMs != null ? toRunCursorEntryMs + runCursorTotal : runCursorTotal;
+    logger.debug(`[cursor] Startup timing (phase ms): ${deltas.join(' ')} runCursorTotal=${runCursorTotal}ms${toRunCursorEntryMs != null ? ` toRunCursorEntry=${toRunCursorEntryMs}ms fullTotal=${fullTotal}ms` : ''}`);
+  }
 
   // Log connection state after a short delay (helps debug remote/SSH: socket vs HTTP fallback)
   setTimeout(() => {

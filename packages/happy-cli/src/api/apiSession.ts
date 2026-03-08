@@ -180,6 +180,9 @@ export class ApiSessionClient extends EventEmitter {
     private metadataLock = new AsyncLock();
     private encryptionKey: Uint8Array;
     private encryptionVariant: 'legacy' | 'dataKey';
+    /** Resolves when the WebSocket first connects; used by updateMetadata to wait for initial connection. */
+    private socketConnectedPromise: Promise<void>;
+    private socketConnectedResolve: (() => void) | undefined;
     /** Directory where full tool-call args are persisted across session restarts. */
     private get toolContentDir(): string {
         const base = this.metadata?.path ?? process.cwd();
@@ -311,6 +314,9 @@ export class ApiSessionClient extends EventEmitter {
         this.lastSeq = session.seq ?? 0;
         this.sendSync = new InvalidateSync(() => this.flushOutbox());
         this.receiveSync = new InvalidateSync(() => this.fetchMessages());
+        this.socketConnectedPromise = new Promise<void>((resolve) => {
+            this.socketConnectedResolve = resolve;
+        });
 
         // Initialize RPC handler manager
         this.rpcHandlerManager = new RpcHandlerManager({
@@ -365,6 +371,8 @@ export class ApiSessionClient extends EventEmitter {
 
         this.socket.on('connect', () => {
             logger.debug('Socket connected successfully');
+            this.socketConnectedResolve?.();
+            this.socketConnectedResolve = undefined;
             this.stopFallbackPoll();
             this.rpcHandlerManager.onSocketConnect(this.socket);
             this.receiveSync.invalidate();
@@ -454,6 +462,11 @@ export class ApiSessionClient extends EventEmitter {
         //
 
         this.socket.connect();
+
+        // Trigger an initial HTTP poll so we get any messages already on the server (e.g. user sent
+        // from App before socket connected). Otherwise we only fetch after socket 'connect' or
+        // after connect_error (fallback poll every 8s), so new sessions can appear unresponsive.
+        this.receiveSync.invalidate();
     }
 
     onUserMessage(callback: (data: UserMessage) => void) {
@@ -632,6 +645,8 @@ export class ApiSessionClient extends EventEmitter {
                     if (!isRetryable || attempt === ApiSessionClient.FLUSH_RETRY_MAX) {
                         const data = axios.isAxiosError(error) ? error.response?.data : undefined;
                         logger.debug('[API] flushOutbox failed', { sessionId: this.sessionId, batchLength: chunk.length, flushed, total, status, isTimeout, data, error });
+                        // App won't receive reply until flush succeeds; log at warn so it's visible without DEBUG
+                        logger.warn(`[API] Failed to send ${chunk.length} reply message(s) to server (App will not show them). Check network and server.`, { status, isTimeout, sessionId: this.sessionId });
                         throw error;
                     }
                     logger.debug('[API] flushOutbox retryable error (will retry)', { status, isTimeout, attempt: attempt + 1, maxRetries: ApiSessionClient.FLUSH_RETRY_MAX });
@@ -921,7 +936,12 @@ export class ApiSessionClient extends EventEmitter {
     updateMetadata(handler: (metadata: Metadata) => Metadata): Promise<void> {
         return this.metadataLock.inLock(async () => {
             if (!this.socket.connected) {
-                throw new Error('Session real-time disconnected; title update requires WebSocket (check network / HAPPY_SERVER_URL)');
+                // Wait for initial socket connection (e.g. called at startup before socket connects).
+                // Give up after 15s so a permanently-offline session doesn't block indefinitely.
+                const timeout = new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error('Session real-time disconnected; title update requires WebSocket (check network / HAPPY_SERVER_URL)')), 15_000)
+                );
+                await Promise.race([this.socketConnectedPromise, timeout]);
             }
             await backoff(async () => {
                 let updated = handler(this.metadata!); // Weird state if metadata is null - should never happen but here we are
