@@ -94,14 +94,54 @@ const LAZY_TOOL_CONTENT_ENABLED = process.env.HAPPY_LAZY_TOOL_CONTENT !== '0';
  */
 const LAZY_DIFF_TOOL_NAMES = new Set(['CursorEdit', 'CursorWrite']);
 
-/** Per-tool: which top-level string fields to truncate. */
+/** Per-tool: which top-level string fields to truncate in the tool input. */
 const LAZY_DIFF_TOOL_FIELDS: Record<string, string[]> = {
     CursorEdit: ['old_string', 'new_string', 'streamContent'],
     CursorWrite: ['content', 'streamContent'],
 };
 
-/** Characters per field kept in the compact (wire) copy. */
-const LAZY_CONTENT_THRESHOLD = 100;
+/**
+ * Per-tool: which fields inside result.success (or top-level result) to strip entirely
+ * (set to undefined) on the wire. Full content is persisted and served via RPC.
+ * These are large full-file snapshots only needed by the detail (full) view.
+ */
+const LAZY_RESULT_STRIP_FIELDS_BY_TOOL: Record<string, string[]> = {
+    CursorEdit: ['beforeFullFileContent', 'afterFullFileContent'],
+    CursorWrite: ['afterFullFileContent'],
+};
+
+/**
+ * Per-tool: which fields inside result.success to truncate to a short preview for the
+ * compact (message-list) view. diffString is a pre-computed unified diff; keeping the
+ * first LAZY_DIFF_STRING_MAX_LINES lines gives enough context for the 4-line card.
+ */
+const LAZY_RESULT_PREVIEW_FIELDS_BY_TOOL: Record<string, string[]> = {
+    CursorEdit: ['diffString'],
+    CursorWrite: ['diffString'],
+};
+
+/** Max lines kept in the compact diffString preview. */
+const LAZY_DIFF_STRING_MAX_LINES = 15;
+
+/**
+ * Characters per field kept in the compact (wire) copy for non-diff fields.
+ * ~400 chars covers ~4-8 lines of typical code — enough for the compact 4-line preview.
+ * Full content is served via RPC when the detail view opens.
+ */
+const LAZY_CONTENT_THRESHOLD = 400;
+
+/** Truncate a string at a line boundary, keeping at most maxLines lines. */
+function truncateByLines(s: string, maxLines: number): string {
+    let pos = 0;
+    let lineCount = 0;
+    while (pos < s.length && lineCount < maxLines) {
+        const nl = s.indexOf('\n', pos);
+        if (nl === -1) { pos = s.length; lineCount++; break; }
+        pos = nl + 1;
+        lineCount++;
+    }
+    return s.slice(0, pos);
+}
 
 function truncateDiffArgs(
     name: string,
@@ -167,6 +207,80 @@ export class ApiSessionClient extends EventEmitter {
             return null;
         }
     }
+
+    private persistToolCallResult(callId: string, result: unknown): void {
+        try {
+            mkdirSync(this.toolContentDir, { recursive: true });
+            writeFileSync(
+                join(this.toolContentDir, `${callId}_result.json`),
+                JSON.stringify(result),
+                'utf8',
+            );
+        } catch (err) {
+            logger.debug('[lazy] Failed to persist tool result to disk', { callId, err });
+        }
+    }
+
+    private async loadToolCallResultFromDisk(callId: string): Promise<unknown | null> {
+        try {
+            const raw = await readFile(join(this.toolContentDir, `${callId}_result.json`), 'utf8');
+            return JSON.parse(raw);
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * For CursorEdit / CursorWrite tool results:
+     * - Strip large full-file fields (beforeFullFileContent, afterFullFileContent) entirely
+     *   from the wire payload; they are persisted to disk and served via RPC for the full view.
+     * - Truncate diffString to LAZY_DIFF_STRING_MAX_LINES lines for the compact card preview.
+     *
+     * @returns The encoded output to embed in the wire message.
+     */
+    maybeLazyEncodeResult(toolName: string, callId: string, output: unknown): unknown {
+        if (!LAZY_TOOL_CONTENT_ENABLED) return output;
+        const stripFields = LAZY_RESULT_STRIP_FIELDS_BY_TOOL[toolName];
+        const previewFields = LAZY_RESULT_PREVIEW_FIELDS_BY_TOOL[toolName];
+        if ((!stripFields || stripFields.length === 0) && (!previewFields || previewFields.length === 0)) return output;
+        if (!output || typeof output !== 'object') return output;
+
+        const r = output as Record<string, unknown>;
+        const successKey = 'success' in r ? 'success' : null;
+        const successObj = successKey ? (r[successKey] as Record<string, unknown>) : r;
+        if (!successObj || typeof successObj !== 'object') return output;
+
+        let wasTruncated = false;
+        const compactSuccess: Record<string, unknown> = { ...successObj };
+
+        // Strip full-file fields entirely (available via RPC)
+        for (const field of stripFields ?? []) {
+            if (typeof successObj[field] === 'string' && (successObj[field] as string).length > 0) {
+                delete compactSuccess[field];
+                wasTruncated = true;
+            }
+        }
+
+        // Truncate diffString to first LAZY_DIFF_STRING_MAX_LINES lines
+        for (const field of previewFields ?? []) {
+            if (typeof successObj[field] === 'string') {
+                const original = successObj[field] as string;
+                const truncated = truncateByLines(original, LAZY_DIFF_STRING_MAX_LINES);
+                if (truncated.length < original.length) {
+                    compactSuccess[field] = truncated;
+                    wasTruncated = true;
+                }
+            }
+        }
+
+        if (!wasTruncated) return output;
+
+        compactSuccess._lazyResult = true;
+        this.persistToolCallResult(callId, output);
+        logger.debug('[lazy] Encoded result for', { toolName, callId: callId.slice(0, 8) });
+        return successKey ? { ...r, [successKey]: compactSuccess } : compactSuccess;
+    }
+
     private claudeSessionProtocolState: ClaudeSessionProtocolState = {
         currentTurnId: null,
         uuidToProviderSubagent: new Map<string, string>(),
@@ -209,14 +323,17 @@ export class ApiSessionClient extends EventEmitter {
         registerCommonHandlers(this.rpcHandlerManager, workingDir);
         // RPC so callers (e.g. server or app) can get this session's id (e.g. to map connection → sessionId)
         this.rpcHandlerManager.registerHandler('getSessionId', () => ({ sessionId: this.sessionId }));
-        // Lazy tool content: serve full args from disk
+        // Lazy tool content: serve full args and/or result from disk
         this.rpcHandlerManager.registerHandler<
             { callId: string },
-            { success: boolean; args?: Record<string, unknown>; error?: string }
+            { success: boolean; args?: Record<string, unknown>; result?: unknown; error?: string }
         >('getToolCallFullContent', async (req) => {
-            const fromDisk = await this.loadToolCallContentFromDisk(req.callId);
-            if (fromDisk) {
-                return { success: true, args: fromDisk };
+            const [args, result] = await Promise.all([
+                this.loadToolCallContentFromDisk(req.callId),
+                this.loadToolCallResultFromDisk(req.callId),
+            ]);
+            if (args || result) {
+                return { success: true, ...(args ? { args } : {}), ...(result !== null ? { result } : {}) };
             }
             return { success: false, error: 'Content not found' };
         });
