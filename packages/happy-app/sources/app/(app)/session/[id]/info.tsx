@@ -68,18 +68,23 @@ function CacheProgressBar({
     oldestSeq,
     hasOlderMessages,
     isLoaded,
+    isFetching,
 }: {
     totalSeq: number;
     oldestSeq: number;
     hasOlderMessages: boolean;
     isLoaded: boolean;
+    isFetching: boolean;
 }) {
     const { theme } = useUnistyles();
     if (totalSeq <= 0) return null;
 
+    // Show progress only when:
+    // - messages are loaded (not mid-cold-start)
+    // - not currently fetching (avoids showing 100% while new messages are still arriving)
+    // - oldestSeq is known (=0 means unknown, e.g. after a failed fetch)
     let progress = 0;
-    if (isLoaded && oldestSeq > 0) {
-        // oldestSeq=0 means the actual range is unknown (e.g. fetch failed); treat as empty.
+    if (isLoaded && !isFetching && oldestSeq > 0) {
         progress = hasOlderMessages
             ? (totalSeq - oldestSeq + 1) / totalSeq
             : 1;
@@ -158,7 +163,7 @@ function SessionInfoContent({ session }: { session: Session }) {
     const devModeEnabled = __DEV__;
     const sessionName = getSessionName(session);
     const sessionStatus = useSessionStatus(session);
-    const { oldestSeq, hasOlderMessages, isLoaded: messagesLoaded } = useSessionMessages(session.id);
+    const { oldestSeq, hasOlderMessages, isLoaded: messagesLoaded, isFetching: messagesFetching } = useSessionMessages(session.id);
     
     // Check if CLI version is outdated
     const isCliOutdated = session.metadata?.version && !isVersionSupported(session.metadata.version, MINIMUM_CLI_VERSION);
@@ -380,6 +385,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                                 oldestSeq={oldestSeq}
                                 hasOlderMessages={hasOlderMessages}
                                 isLoaded={messagesLoaded}
+                                isFetching={messagesFetching}
                             />
                         )}
                     </View>
