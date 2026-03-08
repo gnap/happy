@@ -180,6 +180,9 @@ export class ApiSessionClient extends EventEmitter {
     private metadataLock = new AsyncLock();
     private encryptionKey: Uint8Array;
     private encryptionVariant: 'legacy' | 'dataKey';
+    /** Resolves when the WebSocket first connects; used by updateMetadata to wait for initial connection. */
+    private socketConnectedPromise: Promise<void>;
+    private socketConnectedResolve: (() => void) | undefined;
     /** Directory where full tool-call args are persisted across session restarts. */
     private get toolContentDir(): string {
         const base = this.metadata?.path ?? process.cwd();
@@ -311,6 +314,9 @@ export class ApiSessionClient extends EventEmitter {
         this.lastSeq = session.seq ?? 0;
         this.sendSync = new InvalidateSync(() => this.flushOutbox());
         this.receiveSync = new InvalidateSync(() => this.fetchMessages());
+        this.socketConnectedPromise = new Promise<void>((resolve) => {
+            this.socketConnectedResolve = resolve;
+        });
 
         // Initialize RPC handler manager
         this.rpcHandlerManager = new RpcHandlerManager({
@@ -365,6 +371,8 @@ export class ApiSessionClient extends EventEmitter {
 
         this.socket.on('connect', () => {
             logger.debug('Socket connected successfully');
+            this.socketConnectedResolve?.();
+            this.socketConnectedResolve = undefined;
             this.stopFallbackPoll();
             this.rpcHandlerManager.onSocketConnect(this.socket);
             this.receiveSync.invalidate();
@@ -928,7 +936,12 @@ export class ApiSessionClient extends EventEmitter {
     updateMetadata(handler: (metadata: Metadata) => Metadata): Promise<void> {
         return this.metadataLock.inLock(async () => {
             if (!this.socket.connected) {
-                throw new Error('Session real-time disconnected; title update requires WebSocket (check network / HAPPY_SERVER_URL)');
+                // Wait for initial socket connection (e.g. called at startup before socket connects).
+                // Give up after 15s so a permanently-offline session doesn't block indefinitely.
+                const timeout = new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error('Session real-time disconnected; title update requires WebSocket (check network / HAPPY_SERVER_URL)')), 15_000)
+                );
+                await Promise.race([this.socketConnectedPromise, timeout]);
             }
             await backoff(async () => {
                 let updated = handler(this.metadata!); // Weird state if metadata is null - should never happen but here we are
