@@ -2246,7 +2246,7 @@ class Sync {
                             this.enqueueMessages(updateData.body.sid, [lastMessage]);
                         }
                     }
-                    // Refresh git status only on ready event or task completion, not on every tool result
+                    // Refresh git status only when turn is done (ready), not on every mutable tool result
                     if (lastMessage) {
                         const isReadyEvent = lastMessage.role === 'event' && (lastMessage.content as { type?: string })?.type === 'ready';
                         if (isReadyEvent || isTaskComplete) {
