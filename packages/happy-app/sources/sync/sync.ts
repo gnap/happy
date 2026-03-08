@@ -42,7 +42,7 @@ import { FeedItem } from './feedTypes';
 import { UserProfile } from './friendTypes';
 import { resolveMessageModeMeta } from './messageMeta';
 import { loadMessageCache, saveMessageCache, clearMessageCache, clearAllMessageCaches, preloadSessionCacheDB, getCachedLastSeq } from './cache/messageCache';
-import { alignAfterSeq } from './cacheSegment';
+import { olderAfterSeq } from './cacheSegment';
 import { overrideSessionCacheDB, IndexedDBSessionCacheDB } from './cache/sessionCacheDB';
 
 type V3GetSessionMessagesResponse = {
@@ -1974,11 +1974,13 @@ class Sync {
                 if (!currentState?.hasOlderMessages) return;
 
                 const oldestSeq = currentState.oldestSeq;
-                // Align to the segment boundary that contains (oldestSeq - 1) so that:
-                //  1. The new oldestSeq lands on a segment start.
+                // Align to the segment boundary that precedes oldestSeq so that:
+                //  1. The new oldestSeq lands on a segment start after the fetch.
                 //  2. The bitmap can mark the entire newly-loaded segment as cached.
-                // Example: oldestSeq=251 → target=250 → segment 2 starts at 201 → afterSeq=200.
-                const alignedAfterSeq = Math.max(0, alignAfterSeq(Math.max(1, oldestSeq) - 1));
+                // olderAfterSeq targets the segment CONTAINING (oldestSeq-1), not oldestSeq itself,
+                // which avoids re-fetching the current page when oldestSeq is already a segment start.
+                // Example: oldestSeq=401 → target=400 → segment 3 (301-400) → afterSeq=300 → fetch 301-400.
+                const alignedAfterSeq = olderAfterSeq(oldestSeq);
                 log.log(`💬 fetchOlderMessages: requesting after_seq=${alignedAfterSeq} limit=100 for ${sessionId} (oldestSeq=${oldestSeq})`);
 
                 const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${alignedAfterSeq}&limit=100`);
