@@ -754,7 +754,8 @@ export async function runCursor(opts: {
               codexIdByCallId.delete(msg.callId);
               const out = toolResultForOutputFormat(msg.result, !msg.success);
               session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: msg.callId, content: out.content, is_error: out.is_error }] } });
-              const resultPayload = { type: 'tool-call-result' as const, callId: msg.callId, id: msg.callId, output: msg.result, is_error: out.is_error };
+              const lazyResult = session.maybeLazyEncodeResult(msg.toolName, msg.callId, msg.result);
+              const resultPayload = { type: 'tool-call-result' as const, callId: msg.callId, id: msg.callId, output: lazyResult, is_error: out.is_error };
               logger.debug(`[cursor] codex/cursor tool-call-result callId=${msg.callId.slice(0, 8)}... success=${msg.success}`);
               session.sendCodexMessage(resultPayload);
               session.sendCursorMessage(resultPayload);
