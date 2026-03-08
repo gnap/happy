@@ -214,10 +214,6 @@ export async function runCursor(opts: {
     process.exit(1);
   }
   logger.debug(`Using machineId: ${machineId}`);
-  await api.getOrCreateMachine({
-    machineId,
-    metadata: initialMachineMetadata,
-  });
 
   //
   // Create session
@@ -232,7 +228,15 @@ export async function runCursor(opts: {
     path: workspacePath,
     dangerouslySkipPermissions: false,
   });
-  const response = await api.getOrCreateSession({ tag: sessionTag, metadata, state, existingEncryptionKey });
+
+  // When started by the daemon, the machine is already registered — skip the redundant call.
+  // Otherwise, parallelize machine registration and session creation since they are independent.
+  const [, response] = await Promise.all([
+    opts.startedBy === 'daemon'
+      ? Promise.resolve(null)
+      : api.getOrCreateMachine({ machineId, metadata: initialMachineMetadata }),
+    api.getOrCreateSession({ tag: sessionTag, metadata, state, existingEncryptionKey }),
+  ]);
 
   const sessionId = response?.id ?? `offline-${sessionTag}`;
   logger.debug(`[cursor] Session: ${sessionId} (tag: ${sessionTag.slice(0, 8)}..., reused: ${tagReused})`);

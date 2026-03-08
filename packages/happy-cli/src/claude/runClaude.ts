@@ -90,12 +90,6 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     }
     logger.debug(`Using machineId: ${machineId}`);
 
-    // Create machine if it doesn't exist
-    await api.getOrCreateMachine({
-        machineId,
-        metadata: initialMachineMetadata
-    });
-
     let metadata: Metadata = {
         path: workingDirectory,
         host: os.hostname(),
@@ -116,7 +110,15 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         sandbox: sandboxConfig?.enabled ? sandboxConfig : null,
         dangerouslySkipPermissions,
     };
-    const response = await api.getOrCreateSession({ tag: sessionTag, metadata, state });
+
+    // When started by the daemon, the machine is already registered — skip the redundant call.
+    // Otherwise, parallelize machine registration and session creation since they are independent.
+    const [, response] = await Promise.all([
+        options.startedBy === 'daemon'
+            ? Promise.resolve(null)
+            : api.getOrCreateMachine({ machineId, metadata: initialMachineMetadata }),
+        api.getOrCreateSession({ tag: sessionTag, metadata, state }),
+    ]);
 
     // Handle server unreachable case - run Claude locally with hot reconnection
     // Note: connectionState.notifyOffline() was already called by api.ts with error details

@@ -103,10 +103,6 @@ export async function runCodex(opts: {
         process.exit(1);
     }
     logger.debug(`Using machineId: ${machineId}`);
-    await api.getOrCreateMachine({
-        machineId,
-        metadata: initialMachineMetadata
-    });
 
     //
     // Create session
@@ -118,7 +114,15 @@ export async function runCodex(opts: {
         startedBy: opts.startedBy,
         sandbox: sandboxConfig,
     });
-    const response = await api.getOrCreateSession({ tag: sessionTag, metadata, state });
+
+    // When started by the daemon, the machine is already registered — skip the redundant call.
+    // Otherwise, parallelize machine registration and session creation since they are independent.
+    const [, response] = await Promise.all([
+        opts.startedBy === 'daemon'
+            ? Promise.resolve(null)
+            : api.getOrCreateMachine({ machineId, metadata: initialMachineMetadata }),
+        api.getOrCreateSession({ tag: sessionTag, metadata, state }),
+    ]);
 
     // Handle server unreachable case - create offline stub with hot reconnection
     let session: ApiSessionClient;
