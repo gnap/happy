@@ -149,11 +149,16 @@ export async function fetchCursorUsageSummary(accessToken: string): Promise<Curs
     const individual = json.individualUsage as Record<string, unknown> | undefined;
     if (individual?.plan && typeof individual.plan === 'object') {
       const p = individual.plan as Record<string, unknown>;
+      const used = (p.used as number) ?? 0;
+      // Cursor returns breakdown.total = included + bonus, which is the real cap.
+      // p.limit only reflects the included quota and may show 0 remaining even when bonus is available.
+      const breakdown = p.breakdown as Record<string, unknown> | undefined;
+      const totalLimit = typeof breakdown?.total === 'number' ? breakdown.total : ((p.limit as number) ?? 0);
       planUsage = {
         enabled: (p.enabled as boolean) ?? false,
-        used: (p.used as number) ?? 0,
-        limit: (p.limit as number) ?? 0,
-        remaining: (p.remaining as number) ?? 0,
+        used,
+        limit: totalLimit,
+        remaining: Math.max(0, totalLimit - used),
         totalPercentUsed: (p.totalPercentUsed as number) ?? 0,
         autoPercentUsed: (p.autoPercentUsed as number) ?? 0,
         apiPercentUsed: (p.apiPercentUsed as number) ?? 0,
