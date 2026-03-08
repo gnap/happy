@@ -78,8 +78,9 @@ function CacheProgressBar({
     if (totalSeq <= 0) return null;
 
     let progress = 0;
-    if (isLoaded) {
-        progress = hasOlderMessages && oldestSeq > 0
+    if (isLoaded && oldestSeq > 0) {
+        // oldestSeq=0 means the actual range is unknown (e.g. fetch failed); treat as empty.
+        progress = hasOlderMessages
             ? (totalSeq - oldestSeq + 1) / totalSeq
             : 1;
     }
