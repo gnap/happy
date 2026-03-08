@@ -108,19 +108,17 @@ const USAGE_KEY_DISPLAY: Record<string, UsageKeyDisplay> = {
     output: { labelKey: 'usage.keyClaudeOutput', source: 'claude' },
     cache_creation: { labelKey: 'usage.keyClaudeCacheCreation', source: 'claude' },
     cache_read: { labelKey: 'usage.keyClaudeCacheRead', source: 'claude' },
-    // Cursor plan (cursor-ide) — plan_limit is reference value, not rendered as a bar
+    // Cursor (cursor-ide)
+    plan_requests_used: { labelKey: 'usage.keyCursorPlanUsed', source: 'cursor' },
+    plan_requests_remaining: { labelKey: 'usage.keyCursorPlanRemaining', source: 'cursor' },
+    plan_requests_limit: { labelKey: 'usage.keyCursorPlanLimit', source: 'cursor' },
     plan_used: { labelKey: 'usage.keyCursorPlanUsed', source: 'cursor' },
-    plan_limit: { labelKey: 'usage.keyCursorPlanLimit', source: 'cursor' },
-    // Cursor on-demand — on_demand_limit_cents is reference value, not rendered as a bar
-    on_demand_used_cents: { labelKey: 'usage.keyCursorOnDemandUsed', source: 'cursor' },
-    on_demand_limit_cents: { labelKey: 'usage.keyCursorOnDemandLimit', source: 'cursor' },
+    plan_remaining: { labelKey: 'usage.keyCursorPlanRemaining', source: 'cursor' },
+    on_demand_used: { labelKey: 'usage.keyCursorOnDemandUsed', source: 'cursor' },
+    on_demand_cents: { labelKey: 'usage.keyCursorOnDemandCents', source: 'cursor' },
+    on_demand_limit: { labelKey: 'usage.keyCursorOnDemandLimit', source: 'cursor' },
+    on_demand_remaining: { labelKey: 'usage.keyCursorOnDemandRemaining', source: 'cursor' },
 };
-
-/**
- * Keys that are reference/denominator values only — used to compute bar scale but
- * not rendered as their own bar row in the usage breakdown.
- */
-export const USAGE_LIMIT_KEYS = new Set(['plan_limit', 'on_demand_limit_cents']);
 
 /**
  * Get display label key and source for a usage breakdown key (token or cost key).

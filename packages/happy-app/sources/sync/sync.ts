@@ -2102,12 +2102,15 @@ class Sync {
                     }
                 }
                 // On reconnect, only eagerly refresh active sessions.
-                // Inactive/offline sessions load both messages and git status lazily on open.
+                // Inactive/offline sessions load messages lazily on open.
                 for (const sessionId of active) {
                     this.getMessagesSync(sessionId).invalidate();
                     gitStatusSync.invalidate(sessionId);
                 }
-                // inactive: skip entirely — onSessionVisible handles both on open.
+                for (const sessionId of inactive) {
+                    // Skip message fetch for offline sessions — onSessionVisible handles it.
+                    gitStatusSync.invalidate(sessionId);
+                }
             } catch (e) {
                 log.log(`🔄 reconnect: error invalidating message syncs: ${String(e)}`);
             }
@@ -2237,7 +2240,7 @@ class Sync {
                             this.enqueueMessages(updateData.body.sid, [lastMessage]);
                         }
                     }
-                    // Refresh git status only on ready event or task completion, not on every tool result
+                    // Refresh git status only when turn is done (ready), not on every mutable tool result
                     if (lastMessage) {
                         const isReadyEvent = lastMessage.role === 'event' && (lastMessage.content as { type?: string })?.type === 'ready';
                         if (isReadyEvent || isTaskComplete) {
