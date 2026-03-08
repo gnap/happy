@@ -524,12 +524,12 @@ export async function runCursor(opts: {
     try {
       const { getCursorQuotaInfo, buildCursorUsageReportPayload, hasCursorStateDb } = await import('./cursorQuotaFetcher');
       if (!hasCursorStateDb()) return;
-      // Wait up to 5s for socket so usage-report ack can be received
-      for (let i = 0; i < 25; i++) {
-        if (session.isSocketConnected()) break;
-        await new Promise((r) => setTimeout(r, 200));
-      }
-      const result = await getCursorQuotaInfo();
+      // Fetch quota info and wait for socket in parallel; socket may take >5s on first connect
+      const [result] = await Promise.all([
+        getCursorQuotaInfo(),
+        // Wait up to 15s for socket so usage-report ack can be received
+        (async () => { for (let i = 0; i < 75; i++) { if (session.isSocketConnected()) break; await new Promise((r) => setTimeout(r, 200)); } })(),
+      ]);
       if (result?.info && session.isSocketConnected()) {
         const payload = buildCursorUsageReportPayload(result.info);
         session.sendCursorQuotaReport(payload);
