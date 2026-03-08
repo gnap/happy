@@ -42,6 +42,7 @@ import { FeedItem } from './feedTypes';
 import { UserProfile } from './friendTypes';
 import { resolveMessageModeMeta } from './messageMeta';
 import { loadMessageCache, saveMessageCache, clearMessageCache, clearAllMessageCaches, preloadSessionCacheDB, getCachedLastSeq } from './cache/messageCache';
+import { alignAfterSeq } from './cacheSegment';
 import { overrideSessionCacheDB, IndexedDBSessionCacheDB } from './cache/sessionCacheDB';
 
 type V3GetSessionMessagesResponse = {
@@ -1849,7 +1850,8 @@ class Sync {
                 const latestAnchor = Math.max(0, sessionSeq - 100);
                 const afterSeq = cachedLastSeq > 0
                     ? Math.max(cachedLastSeq, latestAnchor)
-                    : latestAnchor;
+                    // Cold start: align left boundary to segment start so bitmap tracking is accurate.
+                    : alignAfterSeq(latestAnchor);
 
                 log.log(`💬 fetchMessages: requesting after_seq=${afterSeq} for ${sessionId} (cachedLastSeq=${cachedLastSeq})`);
                 const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
@@ -1973,12 +1975,14 @@ class Sync {
                 if (!currentState?.hasOlderMessages) return;
 
                 const oldestSeq = currentState.oldestSeq;
-                // Fetch 100 messages ending just before oldestSeq:
-                // after_seq = max(0, oldestSeq - 101) → returns seq in [oldestSeq-100, oldestSeq-1]
-                const afterSeq = Math.max(0, oldestSeq - 101);
-                log.log(`💬 fetchOlderMessages: requesting after_seq=${afterSeq} limit=100 for ${sessionId} (oldestSeq=${oldestSeq})`);
+                // Align to the segment boundary that contains (oldestSeq - 1) so that:
+                //  1. The new oldestSeq lands on a segment start.
+                //  2. The bitmap can mark the entire newly-loaded segment as cached.
+                // Example: oldestSeq=251 → target=250 → segment 2 starts at 201 → afterSeq=200.
+                const alignedAfterSeq = Math.max(0, alignAfterSeq(Math.max(1, oldestSeq) - 1));
+                log.log(`💬 fetchOlderMessages: requesting after_seq=${alignedAfterSeq} limit=100 for ${sessionId} (oldestSeq=${oldestSeq})`);
 
-                const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
+                const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${alignedAfterSeq}&limit=100`);
                 if (!response.ok) throw new Error(`Failed to fetch older messages: ${response.status}`);
 
                 const data = await response.json() as V3GetSessionMessagesResponse;

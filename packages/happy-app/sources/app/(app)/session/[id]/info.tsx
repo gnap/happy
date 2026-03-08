@@ -22,6 +22,7 @@ import { Session } from '@/sync/storageTypes';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { HappyError } from '@/utils/errors';
 import { getCachedLastSeq, subscribeToCachedLastSeq } from '@/sync/cache/messageCache';
+import { getBitmapSegments } from '@/sync/cacheSegment';
 
 // Animated status dot component
 function StatusDot({ color, isPulsing, size = 8 }: { color: string; isPulsing?: boolean; size?: number }) {
@@ -62,27 +63,37 @@ function StatusDot({ color, isPulsing, size = 8 }: { color: string; isPulsing?: 
     );
 }
 
-/** 简单进度条：右=最新(session.seq)，绿色覆盖 [oldestSeq, newestSeq] 范围。 */
+/**
+ * Segmented cache progress bar.
+ * Each segment represents 100 messages; green = fully cached in memory, gray = not yet loaded.
+ * Segments are ordered left (oldest) → right (newest), mirroring the scroll direction.
+ */
 function CacheProgressBar({
     totalSeq,
-    oldestSeq,
-    newestSeq,
+    cachedBitmap,
 }: {
     totalSeq: number;
-    oldestSeq: number;
-    newestSeq: number;
+    cachedBitmap: number;
 }) {
     const { theme } = useUnistyles();
     if (totalSeq <= 0) return null;
 
-    // Both boundaries must be known before we can show anything meaningful.
-    const progress = (oldestSeq > 0 && newestSeq > 0)
-        ? Math.min((newestSeq - oldestSeq + 1) / totalSeq, 1)
-        : 0;
+    const segments = getBitmapSegments(cachedBitmap, totalSeq);
+    if (segments.length === 0) return null;
 
     return (
-        <View style={{ height: 2, marginHorizontal: 16, marginBottom: 6, borderRadius: 1, backgroundColor: theme.colors.divider, overflow: 'hidden', flexDirection: 'row', justifyContent: 'flex-end' }}>
-            <View style={{ width: `${progress * 100}%`, height: '100%', borderRadius: 1, backgroundColor: '#34C759' }} />
+        <View style={{ height: 4, marginHorizontal: 16, marginBottom: 6, flexDirection: 'row', gap: 2 }}>
+            {segments.map((cached, i) => (
+                <View
+                    key={i}
+                    style={{
+                        flex: 1,
+                        height: '100%',
+                        borderRadius: 1,
+                        backgroundColor: cached ? '#34C759' : theme.colors.divider,
+                    }}
+                />
+            ))}
         </View>
     );
 }
@@ -153,7 +164,7 @@ function SessionInfoContent({ session }: { session: Session }) {
     const devModeEnabled = __DEV__;
     const sessionName = getSessionName(session);
     const sessionStatus = useSessionStatus(session);
-    const { oldestSeq, newestSeq } = useSessionMessages(session.id);
+    const { cachedBitmap } = useSessionMessages(session.id);
     
     // Check if CLI version is outdated
     const isCliOutdated = session.metadata?.version && !isVersionSupported(session.metadata.version, MINIMUM_CLI_VERSION);
@@ -372,8 +383,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                         {session.metadata?.flavor === 'cursor' && (
                             <CacheProgressBar
                                 totalSeq={session.seq}
-                                oldestSeq={oldestSeq}
-                                newestSeq={newestSeq}
+                                cachedBitmap={cachedBitmap}
                             />
                         )}
                     </View>

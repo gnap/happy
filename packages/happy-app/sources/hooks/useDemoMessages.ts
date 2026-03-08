@@ -28,6 +28,7 @@ export function useDemoMessages(messages: Message[]) {
                     isLoaded: true,
                     oldestSeq: 0,
                     newestSeq: 0,
+                    cachedBitmap: 0,
                     hasOlderMessages: false,
                     isLoadingOlder: false,
                     isFetching: false,

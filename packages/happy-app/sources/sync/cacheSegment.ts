@@ -1,0 +1,90 @@
+/**
+ * Cache segment utilities for the message bitmap tracker.
+ *
+ * The loaded message range [oldestSeq, newestSeq] is represented as a bitmap
+ * where each bit corresponds to a fixed-size segment of CACHE_SEGMENT_SIZE messages.
+ * Bit i is set when the segment [segmentStart(i), segmentEnd(i)] is fully present in memory.
+ *
+ * Alignment rules:
+ *  - The LEFT boundary (oldestSeq) must be a segment start. Fetch logic enforces this by
+ *    using alignAfterSeq() to round the API afterSeq parameter down to a segment boundary.
+ *  - The RIGHT boundary (newestSeq) may be unaligned; the partial rightmost segment is
+ *    treated as cached once newestSeq reaches totalSeq (all available messages fetched).
+ *
+ * Limit: JS bitwise operators are 32-bit signed integers, so we safely track 30 segments
+ * (bits 0–29), covering sessions up to 3000 messages. Sessions beyond this still work
+ * correctly, but segments ≥ 30 are not represented in the bitmap.
+ */
+
+export const CACHE_SEGMENT_SIZE = 100;
+export const MAX_TRACKED_SEGMENTS = 30;
+
+/** 0-based segment index for a given sequence number (1-based). */
+export function segmentIndex(seq: number): number {
+    return Math.floor((seq - 1) / CACHE_SEGMENT_SIZE);
+}
+
+/** First (inclusive) seq number in segment idx. */
+export function segmentStart(idx: number): number {
+    return idx * CACHE_SEGMENT_SIZE + 1;
+}
+
+/** Last (inclusive) seq number in a full segment idx. */
+export function segmentEnd(idx: number): number {
+    return (idx + 1) * CACHE_SEGMENT_SIZE;
+}
+
+/**
+ * Align an API afterSeq parameter downward so that (afterSeq + 1) falls exactly on a
+ * segment boundary. This ensures the fetch window's left edge is segment-aligned and
+ * the resulting oldestSeq will be a segment start.
+ *
+ * Example: afterSeq=250 → fetchStart=251 → segment 2 starts at 201 → returns 200.
+ */
+export function alignAfterSeq(afterSeq: number): number {
+    if (afterSeq <= 0) return 0;
+    const fetchStart = afterSeq + 1;
+    const seg = segmentIndex(fetchStart);
+    return segmentStart(seg) - 1;
+}
+
+/**
+ * Compute the cache bitmap from the currently loaded range [oldestSeq, newestSeq].
+ *
+ * A full segment (segmentEnd ≤ totalSeq) is marked when its entire range lies within
+ * [oldestSeq, newestSeq].  The partial rightmost segment (segmentEnd > totalSeq) is
+ * marked when newestSeq ≥ totalSeq (i.e. we have reached the end of the session).
+ */
+export function computeBitmap(oldestSeq: number, newestSeq: number, totalSeq: number): number {
+    if (oldestSeq <= 0 || newestSeq <= 0 || totalSeq <= 0) return 0;
+
+    let bitmap = 0;
+    for (let seg = 0; seg < MAX_TRACKED_SEGMENTS; seg++) {
+        const start = segmentStart(seg);
+        const end = segmentEnd(seg);
+
+        if (start > newestSeq) break;
+        if (start < oldestSeq) continue;
+
+        if (end <= totalSeq) {
+            if (newestSeq >= end) bitmap |= (1 << seg);
+        } else {
+            // Partial last segment: loaded once we reach the session's last seq.
+            if (newestSeq >= totalSeq) bitmap |= (1 << seg);
+        }
+    }
+    return bitmap;
+}
+
+/**
+ * Expand a bitmap into a boolean array of length totalSegments (oldest→newest order).
+ * Index 0 = oldest segment (left in the progress bar), last index = newest (right).
+ */
+export function getBitmapSegments(bitmap: number, totalSeq: number): boolean[] {
+    if (totalSeq <= 0) return [];
+    const totalSegments = Math.min(
+        Math.ceil(totalSeq / CACHE_SEGMENT_SIZE),
+        MAX_TRACKED_SEGMENTS,
+    );
+    return Array.from({ length: totalSegments }, (_, i) => !!(bitmap & (1 << i)));
+}
