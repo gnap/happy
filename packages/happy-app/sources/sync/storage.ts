@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { useShallow } from 'zustand/react/shallow'
 import { Session, Machine, GitStatus } from "./storageTypes";
+import { computeBitmap } from "./cacheSegment";
 import { createReducer, reducer, ReducerState } from "./reducer/reducer";
 import { Message } from "./typesMessage";
 import { NormalizedMessage } from "./typesRaw";
@@ -64,6 +65,12 @@ interface SessionMessages {
     messages: Message[];
     /** Highest seq actually loaded into memory; 0 means unknown */
     newestSeq: number;
+    /**
+     * Bitmap tracking which 100-message segments are fully cached in memory.
+     * Bit i is set when [segmentStart(i), segmentEnd(i)] ⊆ [oldestSeq, newestSeq].
+     * Recomputed whenever oldestSeq or newestSeq changes.
+     */
+    cachedBitmap: number;
     messagesMap: Record<string, Message>;
     reducerState: ReducerState;
     isLoaded: boolean;
@@ -596,6 +603,7 @@ export const storage = create<StorageState>()((set, get) => {
                         isLoaded: existingSessionMessages.isLoaded,
                         oldestSeq: existingSessionMessages.oldestSeq,
                         newestSeq: existingSessionMessages.newestSeq,
+                        cachedBitmap: existingSessionMessages.cachedBitmap,
                         hasOlderMessages: existingSessionMessages.hasOlderMessages,
                         isLoadingOlder: existingSessionMessages.isLoadingOlder,
                         isFetching: existingSessionMessages.isFetching,
@@ -657,6 +665,7 @@ export const storage = create<StorageState>()((set, get) => {
                     isLoaded: false,
                     oldestSeq: 0,
                     newestSeq: 0,
+                    cachedBitmap: 0,
                     hasOlderMessages: false,
                     isLoadingOlder: false,
                     isFetching: false,
@@ -781,6 +790,7 @@ export const storage = create<StorageState>()((set, get) => {
                                 isLoaded: true,
                                 oldestSeq: 0,
                                 newestSeq: 0,
+                                cachedBitmap: 0,
                                 hasOlderMessages: false,
                                 isLoadingOlder: false,
                                 isFetching: false,
@@ -820,6 +830,8 @@ export const storage = create<StorageState>()((set, get) => {
                 messagesMap[msg.id] = msg;
             }
             const sorted = [...messages].sort((a, b) => b.createdAt - a.createdAt);
+            const totalSeq = state.sessions[sessionId]?.seq ?? 0;
+            const cachedBitmap = computeBitmap(oldestSeq, lastSeq, totalSeq);
 
             return {
                 ...state,
@@ -832,6 +844,7 @@ export const storage = create<StorageState>()((set, get) => {
                         isLoaded: true,
                         oldestSeq,
                         newestSeq: lastSeq,
+                        cachedBitmap,
                         hasOlderMessages,
                         isLoadingOlder: false,
                         isFetching: false,
@@ -842,11 +855,14 @@ export const storage = create<StorageState>()((set, get) => {
         setNewestSeq: (sessionId: string, newestSeq: number) => set((state) => {
             const existing = state.sessionMessages[sessionId];
             if (!existing) return state;
+            const newNewestSeq = Math.max(existing.newestSeq, newestSeq);
+            const totalSeq = state.sessions[sessionId]?.seq ?? 0;
+            const cachedBitmap = computeBitmap(existing.oldestSeq, newNewestSeq, totalSeq);
             return {
                 ...state,
                 sessionMessages: {
                     ...state.sessionMessages,
-                    [sessionId]: { ...existing, newestSeq: Math.max(existing.newestSeq, newestSeq) },
+                    [sessionId]: { ...existing, newestSeq: newNewestSeq, cachedBitmap },
                 },
             };
         }),
@@ -870,6 +886,9 @@ export const storage = create<StorageState>()((set, get) => {
 
             const sorted = Object.values(mergedMap).sort((a, b) => b.createdAt - a.createdAt);
 
+            const totalSeq = state.sessions[sessionId]?.seq ?? 0;
+            const cachedBitmap = computeBitmap(newOldestSeq, existing.newestSeq, totalSeq);
+
             return {
                 ...state,
                 sessionMessages: {
@@ -879,6 +898,7 @@ export const storage = create<StorageState>()((set, get) => {
                         messages: sorted,
                         messagesMap: mergedMap,
                         oldestSeq: newOldestSeq,
+                        cachedBitmap,
                         hasOlderMessages,
                         isLoadingOlder: false,
                         isFetching: false,
@@ -1375,7 +1395,7 @@ export function useOutboxEntry(localId: string | null | undefined): OutboxEntry 
     return storage((state) => (localId ? state.outbox[localId] ?? null : null));
 }
 
-export function useSessionMessages(sessionId: string): { messages: Message[], isLoaded: boolean, hasOlderMessages: boolean, isLoadingOlder: boolean, isFetching: boolean, oldestSeq: number, newestSeq: number } {
+export function useSessionMessages(sessionId: string): { messages: Message[], isLoaded: boolean, hasOlderMessages: boolean, isLoadingOlder: boolean, isFetching: boolean, oldestSeq: number, newestSeq: number, cachedBitmap: number } {
     return storage(useShallow((state) => {
         const session = state.sessionMessages[sessionId];
         return {
@@ -1386,6 +1406,7 @@ export function useSessionMessages(sessionId: string): { messages: Message[], is
             isFetching: session?.isFetching ?? false,
             oldestSeq: session?.oldestSeq ?? 0,
             newestSeq: session?.newestSeq ?? 0,
+            cachedBitmap: session?.cachedBitmap ?? 0,
         };
     }));
 }
