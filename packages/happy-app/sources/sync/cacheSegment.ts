@@ -49,6 +49,24 @@ export function alignAfterSeq(afterSeq: number): number {
 }
 
 /**
+ * Compute the afterSeq parameter for fetchOlderMessages so the fetch starts at
+ * the segment boundary that precedes oldestSeq.
+ *
+ * The key difference from alignAfterSeq: we want to start at the segment that
+ * CONTAINS (oldestSeq - 1), not the segment that starts at oldestSeq itself.
+ * This avoids re-fetching the same page when oldestSeq is already at a segment start.
+ *
+ * Examples:
+ *   oldestSeq=401 (seg 4 start) → segmentIndex(400)=3 → afterSeq=300 → fetch 301-400 ✓
+ *   oldestSeq=451              → segmentIndex(450)=4 → afterSeq=400 → fetch 401-450 ✓
+ *   oldestSeq=101              → segmentIndex(100)=0 → afterSeq=0   → fetch 1-100   ✓
+ */
+export function olderAfterSeq(oldestSeq: number): number {
+    if (oldestSeq <= 1) return 0;
+    return segmentStart(segmentIndex(oldestSeq - 1)) - 1;
+}
+
+/**
  * Compute the cache bitmap from the currently loaded range [oldestSeq, newestSeq].
  *
  * A full segment (segmentEnd ≤ totalSeq) is marked when its entire range lies within
