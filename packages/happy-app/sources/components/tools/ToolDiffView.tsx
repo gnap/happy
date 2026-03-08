@@ -1,11 +1,14 @@
 import * as React from 'react';
 import { ScrollView, View } from 'react-native';
 import { DiffView } from '@/components/diff/DiffView';
+import { DiffResult } from '@/components/diff/calculateDiff';
 import { useSetting } from '@/sync/storage';
 
 interface ToolDiffViewProps {
-    oldText: string;
-    newText: string;
+    oldText?: string;
+    newText?: string;
+    /** Pre-parsed diff (e.g. from Cursor's diffString). When set, oldText/newText are ignored. */
+    parsedDiff?: DiffResult;
     style?: any;
     showLineNumbers?: boolean;
     showPlusMinusSymbols?: boolean;
@@ -16,6 +19,7 @@ interface ToolDiffViewProps {
 export const ToolDiffView = React.memo<ToolDiffViewProps>(({
     oldText,
     newText,
+    parsedDiff,
     style,
     showLineNumbers = false,
     showPlusMinusSymbols = false,
@@ -27,6 +31,7 @@ export const ToolDiffView = React.memo<ToolDiffViewProps>(({
         <DiffView
             oldText={oldText}
             newText={newText}
+            parsedDiff={parsedDiff}
             wrapLines={wrapLines}
             showLineNumbers={showLineNumbers}
             showPlusMinusSymbols={showPlusMinusSymbols}

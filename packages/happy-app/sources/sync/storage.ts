@@ -136,6 +136,7 @@ interface StorageState {
     isMutableToolCall: (sessionId: string, callId: string) => boolean;
     finalizeRunningTools: (sessionId: string) => void;
     resolveToolCallLazyContent: (sessionId: string, messageId: string, fullInput: Record<string, unknown>) => boolean;
+    resolveToolCallLazyResult: (sessionId: string, messageId: string, fullResult: unknown) => boolean;
     setRealtimeStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => void;
     setRealtimeMode: (mode: 'idle' | 'speaking', immediate?: boolean) => void;
     clearRealtimeModeDebounce: () => void;
@@ -382,6 +383,42 @@ export const storage = create<StorageState>()((set, get) => {
                 if (reducerMsg?.tool) {
                     reducerMsg.tool.input = fullInput;
                     reducerMsg.tool.lazyContent = false;
+                }
+
+                updated = true;
+                return {
+                    ...state,
+                    sessionMessages: {
+                        ...state.sessionMessages,
+                        [sessionId]: {
+                            ...sessionMessages,
+                            messagesMap: { ...sessionMessages.messagesMap, [messageId]: updatedMsg },
+                            messages: sessionMessages.messages.map(m => m.id === messageId ? updatedMsg : m),
+                        },
+                    },
+                };
+            });
+            return updated;
+        },
+        /**
+         * After a successful lazy-content RPC fetch, replace the truncated tool result
+         * with the full result and remove the _lazyResult marker. Returns true when updated.
+         */
+        resolveToolCallLazyResult: (sessionId: string, messageId: string, fullResult: unknown): boolean => {
+            let updated = false;
+            set((state) => {
+                const sessionMessages = state.sessionMessages[sessionId];
+                if (!sessionMessages) return state;
+
+                const msg = sessionMessages.messagesMap[messageId];
+                if (!msg || msg.kind !== 'tool-call') return state;
+
+                const updatedTool = { ...msg.tool, result: fullResult };
+                const updatedMsg = { ...msg, tool: updatedTool };
+
+                const reducerMsg = sessionMessages.reducerState.messages.get(messageId);
+                if (reducerMsg?.tool) {
+                    reducerMsg.tool.result = fullResult;
                 }
 
                 updated = true;

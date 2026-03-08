@@ -1,4 +1,4 @@
-import { diffLines, diffWordsWithSpace, diffChars } from 'diff';
+import { diffLines, diffWordsWithSpace, diffChars, parsePatch } from 'diff';
 
 export interface DiffToken {
     value: string;
@@ -293,4 +293,65 @@ function createHunks(lines: DiffLine[], contextLines: number): DiffHunk[] {
 export function getDiffStats(oldText: string, newText: string): { additions: number; deletions: number } {
     const result = calculateUnifiedDiff(oldText, newText);
     return result.stats;
+}
+
+/**
+ * Parse a unified diff string (as produced by git diff / Cursor agent) into the internal
+ * DiffResult format so it can be passed directly to DiffView without re-computing the diff.
+ *
+ * Line numbers are taken from the @@ hunk headers, preserving the actual file positions.
+ * Inline token highlighting is not computed (tokens remain undefined); the full-file
+ * before/after path in DiffView continues to provide that.
+ */
+export function parseUnifiedDiff(diffString: string): DiffResult {
+    if (!diffString) return { hunks: [], stats: { additions: 0, deletions: 0 } };
+
+    // parsePatch requires --- / +++ file headers. Cursor's diffString may omit them.
+    // Prepend dummy headers so the parser can find the @@ hunks.
+    const normalized = diffString.startsWith('---') ? diffString
+        : `--- a\n+++ b\n${diffString}`;
+
+    let patches: ReturnType<typeof parsePatch>;
+    try {
+        patches = parsePatch(normalized);
+    } catch {
+        return { hunks: [], stats: { additions: 0, deletions: 0 } };
+    }
+    if (!patches || patches.length === 0) return { hunks: [], stats: { additions: 0, deletions: 0 } };
+
+    let additions = 0;
+    let deletions = 0;
+    const hunks: DiffHunk[] = [];
+
+    for (const patch of patches) {
+        for (const h of patch.hunks) {
+            const lines: DiffLine[] = [];
+            let oldN = h.oldStart;
+            let newN = h.newStart;
+
+            for (const rawLine of h.lines) {
+                const prefix = rawLine[0];
+                const content = rawLine.slice(1);
+                if (prefix === '+') {
+                    lines.push({ type: 'add', content, newLineNumber: newN++ });
+                    additions++;
+                } else if (prefix === '-') {
+                    lines.push({ type: 'remove', content, oldLineNumber: oldN++ });
+                    deletions++;
+                } else {
+                    lines.push({ type: 'normal', content, oldLineNumber: oldN++, newLineNumber: newN++ });
+                }
+            }
+
+            hunks.push({
+                oldStart: h.oldStart,
+                oldLines: h.oldLines,
+                newStart: h.newStart,
+                newLines: h.newLines,
+                lines,
+            });
+        }
+    }
+
+    return { hunks, stats: { additions, deletions } };
 }

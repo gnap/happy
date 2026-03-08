@@ -12,23 +12,33 @@ export type LazyToolInputState = {
     retry: () => void;
 };
 
+function hasLazyResult(tool: ToolCall): boolean {
+    if (!tool.result || typeof tool.result !== 'object') return false;
+    const r = tool.result as Record<string, unknown>;
+    if (r._lazyResult === true) return true;
+    const s = r.success;
+    if (s && typeof s === 'object' && (s as Record<string, unknown>)._lazyResult === true) return true;
+    return false;
+}
+
 /**
- * Hook for lazy-loading full tool input content via RPC.
+ * Hook for lazy-loading full tool content (input args and/or result) via RPC.
  *
- * When the CLI is started with HAPPY_LAZY_TOOL_CONTENT=1, large string fields
- * in Cursor tool inputs are truncated before being sent over the wire, and
- * tool.lazyContent is set to true.
+ * When the CLI is started with HAPPY_LAZY_TOOL_CONTENT=1:
+ * - Large input fields (streamContent, old_string, new_string, content) are truncated;
+ *   tool.lazyContent is set to true.
+ * - Large result fields (beforeFullFileContent, afterFullFileContent) are truncated;
+ *   result.success._lazyResult is set to true.
  *
- * This hook fetches the full content from the CLI's on-disk cache via RPC when
- * the detail view opens, then writes the result back into the Zustand store and
- * persists it to SQLite so subsequent opens show the full diff without a network
- * round-trip.
+ * A single RPC call fetches both full args and full result; each is written back into
+ * the Zustand store and persisted to SQLite so subsequent opens skip the round-trip.
  */
 export function useLazyToolInput(tool: ToolCall, sessionId?: string, messageId?: string): LazyToolInputState {
     const lazyEnabled = useLocalSetting('lazyLoadToolContent');
-    const isLazy = tool.lazyContent === true;
+    const isLazyInput = tool.lazyContent === true;
+    const isLazyResult = hasLazyResult(tool);
     const callId = tool.callId;
-    const shouldFetch = isLazy && lazyEnabled && !!sessionId && !!callId;
+    const shouldFetch = (isLazyInput || isLazyResult) && lazyEnabled && !!sessionId && !!callId;
 
     const [loading, setLoading] = useState(shouldFetch);
     const [error, setError] = useState<string | null>(null);
@@ -39,20 +49,25 @@ export function useLazyToolInput(tool: ToolCall, sessionId?: string, messageId?:
         setLoading(true);
         setError(null);
         try {
-            const result = await getToolCallFullContent(sessionId!, callId!);
-            if (result.success && result.args) {
-                // Update the Zustand store + reducer state so the message no longer
-                // carries lazyContent and shows full content everywhere.
+            const rpcResult = await getToolCallFullContent(sessionId!, callId!);
+            if (rpcResult.success && (rpcResult.args || rpcResult.result !== undefined)) {
                 if (messageId) {
-                    const updated = storage.getState().resolveToolCallLazyContent(sessionId!, messageId, result.args);
-                    if (updated) {
-                        // Persist the updated reducer state to SQLite in the background.
+                    let didUpdate = false;
+                    if (rpcResult.args) {
+                        const updated = storage.getState().resolveToolCallLazyContent(sessionId!, messageId, rpcResult.args);
+                        if (updated) didUpdate = true;
+                    }
+                    if (rpcResult.result !== undefined) {
+                        const updated = storage.getState().resolveToolCallLazyResult(sessionId!, messageId, rpcResult.result);
+                        if (updated) didUpdate = true;
+                    }
+                    if (didUpdate) {
                         void sync.saveSessionCache(sessionId!);
                     }
                 }
                 setError(null);
             } else {
-                setError(result.error ?? 'Failed to load full content');
+                setError(rpcResult.error ?? 'Failed to load full content');
             }
         } catch (e) {
             setError(e instanceof Error ? e.message : String(e));
@@ -69,8 +84,7 @@ export function useLazyToolInput(tool: ToolCall, sessionId?: string, messageId?:
     }, [shouldFetch, fetch]);
 
     return {
-        // Once the store is updated (lazyContent cleared), tool.input already has full
-        // content — the hook just reflects the current tool state.
+        // Once the store is updated, tool.input / tool.result already have full content.
         resolvedInput: tool.input as Record<string, unknown>,
         loading,
         error,

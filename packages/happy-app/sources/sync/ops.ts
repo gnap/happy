@@ -499,6 +499,7 @@ interface GetToolCallFullContentRequest {
 interface GetToolCallFullContentResponse {
     success: boolean;
     args?: Record<string, unknown>;
+    result?: unknown;
     error?: string;
 }
 
