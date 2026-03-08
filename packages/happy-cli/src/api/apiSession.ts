@@ -1,5 +1,8 @@
 import { logger } from '@/ui/logger'
 import { EventEmitter } from 'node:events'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { io, Socket } from 'socket.io-client'
 import { AgentState, ClientToServerEvents, Metadata, ServerToClientEvents, Session, Update, UserMessage, UserMessageSchema, Usage } from './types'
 import { decodeBase64, decrypt, encodeBase64, encrypt } from './encryption';
@@ -77,6 +80,51 @@ type V3PostSessionMessagesResponse = {
     }>;
 };
 
+// ---------------------------------------------------------------------------
+// Lazy tool content: truncate large diff fields on the wire, serve full
+// content from memory via RPC (enabled by HAPPY_LAZY_TOOL_CONTENT=1).
+// ---------------------------------------------------------------------------
+
+const LAZY_TOOL_CONTENT_ENABLED = process.env.HAPPY_LAZY_TOOL_CONTENT !== '0';
+
+/**
+ * Only Cursor tools are lazy-encoded. Their inputs carry full file content
+ * (old_string/new_string/streamContent for CursorEdit; content for CursorWrite)
+ * which can be many KBs. Claude's Edit/Write use small code-snippet diffs.
+ */
+const LAZY_DIFF_TOOL_NAMES = new Set(['CursorEdit', 'CursorWrite']);
+
+/** Per-tool: which top-level string fields to truncate. */
+const LAZY_DIFF_TOOL_FIELDS: Record<string, string[]> = {
+    CursorEdit: ['old_string', 'new_string', 'streamContent'],
+    CursorWrite: ['content', 'streamContent'],
+};
+
+/** Characters per field kept in the compact (wire) copy. */
+const LAZY_CONTENT_THRESHOLD = 100;
+
+function truncateDiffArgs(
+    name: string,
+    args: Record<string, unknown>,
+): { truncated: Record<string, unknown>; wasTruncated: boolean } {
+    let wasTruncated = false;
+    const truncated: Record<string, unknown> = { ...args };
+
+    const fields = LAZY_DIFF_TOOL_FIELDS[name] ?? [];
+    for (const field of fields) {
+        if (typeof args[field] === 'string' && (args[field] as string).length > LAZY_CONTENT_THRESHOLD) {
+            truncated[field] = (args[field] as string).slice(0, LAZY_CONTENT_THRESHOLD);
+            wasTruncated = true;
+        }
+    }
+
+    if (wasTruncated) {
+        truncated._lazy = true;
+    }
+
+    return { truncated, wasTruncated };
+}
+
 export class ApiSessionClient extends EventEmitter {
     private readonly token: string;
     readonly sessionId: string;
@@ -92,6 +140,33 @@ export class ApiSessionClient extends EventEmitter {
     private metadataLock = new AsyncLock();
     private encryptionKey: Uint8Array;
     private encryptionVariant: 'legacy' | 'dataKey';
+    /** Directory where full tool-call args are persisted across session restarts. */
+    private get toolContentDir(): string {
+        const base = this.metadata?.path ?? process.cwd();
+        return join(base, '.happy', 'tool-content');
+    }
+
+    private persistToolCallContent(callId: string, args: Record<string, unknown>): void {
+        try {
+            mkdirSync(this.toolContentDir, { recursive: true });
+            writeFileSync(
+                join(this.toolContentDir, `${callId}.json`),
+                JSON.stringify(args),
+                'utf8',
+            );
+        } catch (err) {
+            logger.debug('[lazy] Failed to persist tool content to disk', { callId, err });
+        }
+    }
+
+    private async loadToolCallContentFromDisk(callId: string): Promise<Record<string, unknown> | null> {
+        try {
+            const raw = await readFile(join(this.toolContentDir, `${callId}.json`), 'utf8');
+            return JSON.parse(raw) as Record<string, unknown>;
+        } catch {
+            return null;
+        }
+    }
     private claudeSessionProtocolState: ClaudeSessionProtocolState = {
         currentTurnId: null,
         uuidToProviderSubagent: new Map<string, string>(),
@@ -134,6 +209,17 @@ export class ApiSessionClient extends EventEmitter {
         registerCommonHandlers(this.rpcHandlerManager, workingDir);
         // RPC so callers (e.g. server or app) can get this session's id (e.g. to map connection → sessionId)
         this.rpcHandlerManager.registerHandler('getSessionId', () => ({ sessionId: this.sessionId }));
+        // Lazy tool content: serve full args from disk
+        this.rpcHandlerManager.registerHandler<
+            { callId: string },
+            { success: boolean; args?: Record<string, unknown>; error?: string }
+        >('getToolCallFullContent', async (req) => {
+            const fromDisk = await this.loadToolCallContentFromDisk(req.callId);
+            if (fromDisk) {
+                return { success: true, args: fromDisk };
+            }
+            return { success: false, error: 'Content not found' };
+        });
 
         //
         // Create socket
@@ -453,6 +539,24 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     /**
+     * If HAPPY_LAZY_TOOL_CONTENT is set, intercept tool-call-start envelopes for
+     * diff-type tools, truncate large string fields, and cache the full args.
+     */
+    private maybeLazyEncodeEnvelope(envelope: SessionEnvelope): SessionEnvelope {
+        if (!LAZY_TOOL_CONTENT_ENABLED) return envelope;
+        const ev = envelope.ev as Record<string, unknown>;
+        if (ev.t !== 'tool-call-start') return envelope;
+        const name = ev.name as string;
+        if (!LAZY_DIFF_TOOL_NAMES.has(name)) return envelope;
+        const callId = ev.call as string;
+        const args = ev.args as Record<string, unknown>;
+        const { truncated, wasTruncated } = truncateDiffArgs(name, args);
+        if (!wasTruncated) return envelope;
+        this.persistToolCallContent(callId, args);
+        return { ...envelope, ev: { ...ev, args: truncated } } as SessionEnvelope;
+    }
+
+    /**
      * Send message to session
      * @param body - Message body (can be MessageContent or raw content for agent messages)
      */
@@ -549,17 +653,10 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     sendSessionProtocolMessage(envelope: SessionEnvelope) {
-        if (envelope.role !== 'user') {
-            this.enqueueSessionProtocolEnvelope(envelope);
-            return;
-        }
-
-        if (envelope.ev.t !== 'text') {
-            this.enqueueSessionProtocolEnvelope(envelope);
-            return;
-        }
-
-        this.enqueueSessionProtocolEnvelope(envelope);
+        // Apply lazy encoding at the single exit point so all code paths
+        // (Claude via sendClaudeSessionMessage, Cursor via direct call, etc.) are covered.
+        const finalEnvelope = this.maybeLazyEncodeEnvelope(envelope);
+        this.enqueueSessionProtocolEnvelope(finalEnvelope);
     }
 
     /**

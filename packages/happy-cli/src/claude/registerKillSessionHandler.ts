@@ -18,22 +18,16 @@ export function registerKillSessionHandler(
     rpcHandlerManager.registerHandler<KillSessionRequest, KillSessionResponse>('killSession', async () => {
         logger.debug('Kill session request received');
 
-        // Await full cleanup so we only return success after session-end is sent and process is exiting.
-        // Returning success before completion caused: first archive attempt didn't actually archive,
-        // then socket closed so second attempt got "method not found".
-        try {
-            await killThisHappy();
-            return {
-                success: true,
-                message: 'Killing happy-cli process'
-            };
-        } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            logger.debug('Kill session failed', { error: msg });
-            return {
-                success: false,
-                message: msg
-            };
-        }
+        // Schedule cleanup one tick later so the RPC ack is flushed to the socket
+        // before process.exit is called. Awaiting cleanup directly caused a timeout
+        // because cleanup ends with process.exit(0) before the ack could be sent.
+        // The cleanup function calls flush()+close() before exit, so session-end and
+        // any other queued messages are still delivered correctly.
+        setImmediate(() => void killThisHappy());
+
+        return {
+            success: true,
+            message: 'Killing happy-cli process'
+        };
     });
 }
