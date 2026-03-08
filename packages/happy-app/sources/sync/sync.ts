@@ -2102,15 +2102,12 @@ class Sync {
                     }
                 }
                 // On reconnect, only eagerly refresh active sessions.
-                // Inactive/offline sessions load messages lazily on open.
+                // Inactive/offline sessions load both messages and git status lazily on open.
                 for (const sessionId of active) {
                     this.getMessagesSync(sessionId).invalidate();
                     gitStatusSync.invalidate(sessionId);
                 }
-                for (const sessionId of inactive) {
-                    // Skip message fetch for offline sessions — onSessionVisible handles it.
-                    gitStatusSync.invalidate(sessionId);
-                }
+                // inactive: skip entirely — onSessionVisible handles both on open.
             } catch (e) {
                 log.log(`🔄 reconnect: error invalidating message syncs: ${String(e)}`);
             }
