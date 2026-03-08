@@ -85,7 +85,7 @@ type V3PostSessionMessagesResponse = {
 // content from memory via RPC (enabled by HAPPY_LAZY_TOOL_CONTENT=1).
 // ---------------------------------------------------------------------------
 
-const LAZY_TOOL_CONTENT_ENABLED = !!process.env.HAPPY_LAZY_TOOL_CONTENT;
+const LAZY_TOOL_CONTENT_ENABLED = process.env.HAPPY_LAZY_TOOL_CONTENT !== '0';
 
 /**
  * Only Cursor tools are lazy-encoded. Their inputs carry full file content
