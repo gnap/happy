@@ -27,6 +27,7 @@ export function useDemoMessages(messages: Message[]) {
                     reducerState: createReducer(),
                     isLoaded: true,
                     oldestSeq: 0,
+                    newestSeq: 0,
                     hasOlderMessages: false,
                     isLoadingOlder: false,
                     isFetching: false,

@@ -62,33 +62,23 @@ function StatusDot({ color, isPulsing, size = 8 }: { color: string; isPulsing?: 
     );
 }
 
-/** 简单进度条：显示已缓存的 seq 范围占总 seq 的比例。 */
+/** 简单进度条：右=最新(session.seq)，绿色覆盖 [oldestSeq, newestSeq] 范围。 */
 function CacheProgressBar({
     totalSeq,
     oldestSeq,
-    hasOlderMessages,
-    isLoaded,
-    isFetching,
+    newestSeq,
 }: {
     totalSeq: number;
     oldestSeq: number;
-    hasOlderMessages: boolean;
-    isLoaded: boolean;
-    isFetching: boolean;
+    newestSeq: number;
 }) {
     const { theme } = useUnistyles();
     if (totalSeq <= 0) return null;
 
-    // Show progress only when:
-    // - messages are loaded (not mid-cold-start)
-    // - not currently fetching (avoids showing 100% while new messages are still arriving)
-    // - oldestSeq is known (=0 means unknown, e.g. after a failed fetch)
-    let progress = 0;
-    if (isLoaded && !isFetching && oldestSeq > 0) {
-        progress = hasOlderMessages
-            ? (totalSeq - oldestSeq + 1) / totalSeq
-            : 1;
-    }
+    // Both boundaries must be known before we can show anything meaningful.
+    const progress = (oldestSeq > 0 && newestSeq > 0)
+        ? Math.min((newestSeq - oldestSeq + 1) / totalSeq, 1)
+        : 0;
 
     return (
         <View style={{ height: 2, marginHorizontal: 16, marginBottom: 6, borderRadius: 1, backgroundColor: theme.colors.divider, overflow: 'hidden', flexDirection: 'row', justifyContent: 'flex-end' }}>
@@ -163,7 +153,7 @@ function SessionInfoContent({ session }: { session: Session }) {
     const devModeEnabled = __DEV__;
     const sessionName = getSessionName(session);
     const sessionStatus = useSessionStatus(session);
-    const { oldestSeq, hasOlderMessages, isLoaded: messagesLoaded, isFetching: messagesFetching } = useSessionMessages(session.id);
+    const { oldestSeq, newestSeq } = useSessionMessages(session.id);
     
     // Check if CLI version is outdated
     const isCliOutdated = session.metadata?.version && !isVersionSupported(session.metadata.version, MINIMUM_CLI_VERSION);
@@ -383,9 +373,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                             <CacheProgressBar
                                 totalSeq={session.seq}
                                 oldestSeq={oldestSeq}
-                                hasOlderMessages={hasOlderMessages}
-                                isLoaded={messagesLoaded}
-                                isFetching={messagesFetching}
+                                newestSeq={newestSeq}
                             />
                         )}
                     </View>
