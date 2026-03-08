@@ -1816,6 +1816,7 @@ class Sync {
                             cached.reducerState,
                             cached.oldestSeq,
                             cached.hasOlderMessages,
+                            cached.lastSeq,
                         );
                         this.sessionLastSeq.set(sessionId, cached.lastSeq);
                         log.log(`💬 fetchMessages: hydrated from cache for ${sessionId} (lastSeq=${cached.lastSeq}, oldestSeq=${cached.oldestSeq}, ${cached.messages.length} messages)`);
@@ -1921,6 +1922,9 @@ class Sync {
                         storage.getState().applyOlderMessages(sessionId, [], oldestSeq, hasOlderMessages);
                     }
                 }
+
+                // Update the high-water mark for the progress bar.
+                storage.getState().setNewestSeq(sessionId, maxSeq);
 
                 // --- Cache: persist after successful fetch ---
                 const updatedSession = storage.getState().sessions[sessionId];
