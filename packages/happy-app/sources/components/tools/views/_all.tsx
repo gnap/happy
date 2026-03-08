@@ -29,6 +29,8 @@ export type ToolViewProps = {
     metadata: Metadata | null;
     messages: Message[];
     sessionId?: string;
+    /** Message id of the ToolCallMessage that owns this tool — used for lazy content cache update. */
+    messageId?: string;
     /** When true, used in session card: truncate summary (e.g. numberOfLines). When false/undefined, used in detail: show full content. */
     compact?: boolean;
 }

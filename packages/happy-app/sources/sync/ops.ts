@@ -491,6 +491,41 @@ export async function sessionKill(sessionId: string): Promise<SessionKillRespons
     }
 }
 
+// Types for lazy tool content RPC
+interface GetToolCallFullContentRequest {
+    callId: string;
+}
+
+interface GetToolCallFullContentResponse {
+    success: boolean;
+    args?: Record<string, unknown>;
+    error?: string;
+}
+
+/**
+ * Fetch the full (non-truncated) tool call input from the CLI cache.
+ * Only relevant when the CLI was started with HAPPY_LAZY_TOOL_CONTENT=1
+ * and the tool.input._lazy flag is set.
+ */
+export async function getToolCallFullContent(
+    sessionId: string,
+    callId: string
+): Promise<GetToolCallFullContentResponse> {
+    try {
+        const response = await apiSocket.sessionRPC<GetToolCallFullContentResponse, GetToolCallFullContentRequest>(
+            sessionId,
+            'getToolCallFullContent',
+            { callId }
+        );
+        return response;
+    } catch (error) {
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error'
+        };
+    }
+}
+
 /**
  * Permanently delete a session from the server
  * This will remove the session and all its associated data (messages, usage reports, access keys)

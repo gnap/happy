@@ -739,6 +739,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
 
                         let toolCall: ToolCall = {
                             name: c.name,
+                            callId: c.id,
+                            lazyContent: c.lazyContent,
                             state: 'running' as const,
                             input: permission ? permission.arguments : c.input,  // Use permission args if available
                             createdAt: permission ? permission.createdAt : msg.createdAt,  // Use permission timestamp if available

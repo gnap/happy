@@ -503,6 +503,8 @@ type NormalizedAgentContent =
         description: string | null;
         uuid: string;
         parentUUID: string | null;
+        /** True when the CLI truncated large content fields and full content must be fetched via RPC. */
+        lazyContent?: boolean;
     } | {
         type: 'tool-result'
         tool_use_id: string;
@@ -651,6 +653,13 @@ function normalizeSessionEnvelope(
     }
 
     if (envelope.ev.t === 'tool-call-start') {
+        // If the CLI truncated large content fields (_lazy marker), lift the flag out of
+        // the args object so it lives as proper metadata on the content block.
+        const rawArgs = envelope.ev.args as Record<string, unknown>;
+        const isLazy = rawArgs._lazy === true;
+        const cleanArgs: Record<string, unknown> = isLazy
+            ? Object.fromEntries(Object.entries(rawArgs).filter(([k]) => k !== '_lazy'))
+            : rawArgs;
         return {
             id: messageId,
             localId,
@@ -661,10 +670,11 @@ function normalizeSessionEnvelope(
                 type: 'tool-call',
                 id: envelope.ev.call,
                 name: envelope.ev.name || 'unknown',
-                input: envelope.ev.args,
+                input: cleanArgs,
                 description: envelope.ev.description,
                 uuid: contentUUID,
-                parentUUID
+                parentUUID,
+                ...(isLazy ? { lazyContent: true } : {}),
             }],
             meta
         } satisfies NormalizedMessage;
