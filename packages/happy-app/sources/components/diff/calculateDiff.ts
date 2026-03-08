@@ -315,14 +315,19 @@ export function parseUnifiedDiff(diffString: string): DiffResult {
     let deletions = 0;
     const hunks: DiffHunk[] = [];
 
-    let currentLines: DiffLine[] | null = null;
-    let oldN = 0;
-    let newN = 0;
-    let hunkOldStart = 0;
-    let hunkNewStart = 0;
+    // Cursor's diffString omits @@ hunk headers entirely — it's just raw content lines
+    // with +/-/space prefixes. Initialize a default hunk at line 1 so those lines are
+    // collected even when no @@ header is present. When a @@ header IS found (standard
+    // unified diff), flushHunk() finalises the previous hunk and the correct absolute
+    // line numbers from the header are used going forward.
+    let currentLines: DiffLine[] = [];
+    let oldN = 1;
+    let newN = 1;
+    let hunkOldStart = 1;
+    let hunkNewStart = 1;
 
     const flushHunk = () => {
-        if (currentLines && currentLines.length > 0) {
+        if (currentLines.length > 0) {
             const oldCount = currentLines.filter(l => l.type !== 'add').length;
             const newCount = currentLines.filter(l => l.type !== 'remove').length;
             hunks.push({
@@ -333,7 +338,7 @@ export function parseUnifiedDiff(diffString: string): DiffResult {
                 lines: currentLines,
             });
         }
-        currentLines = null;
+        currentLines = [];
     };
 
     for (const raw of rawLines) {
@@ -344,12 +349,10 @@ export function parseUnifiedDiff(diffString: string): DiffResult {
             hunkNewStart = parseInt(hunkMatch[2], 10);
             oldN = hunkOldStart;
             newN = hunkNewStart;
-            currentLines = [];
             continue;
         }
 
         // Skip file headers (--- / +++ / diff --git / index ...) and "\ No newline" markers
-        if (currentLines === null) continue;
         if (raw.startsWith('--- ') || raw.startsWith('+++ ') || raw.startsWith('diff ') || raw.startsWith('index ') || raw.startsWith('\\ ')) continue;
 
         const prefix = raw[0];
