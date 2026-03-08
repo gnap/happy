@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { createTwoFilesPatch } from 'diff'
 import { io, Socket } from 'socket.io-client'
 import { AgentState, ClientToServerEvents, Metadata, ServerToClientEvents, Session, Update, UserMessage, UserMessageSchema, Usage } from './types'
 import { decodeBase64, decrypt, encodeBase64, encrypt } from './encryption';
@@ -252,6 +253,29 @@ export class ApiSessionClient extends EventEmitter {
 
         let wasTruncated = false;
         const compactSuccess: Record<string, unknown> = { ...successObj };
+
+        // For CursorEdit: re-compute diffString from full file contents before they are stripped,
+        // replacing Cursor's no-hunk-header format with a standard unified diff that includes
+        // @@ -N,N +N,N @@ headers so the App can display absolute line numbers.
+        if (toolName === 'CursorEdit') {
+            const before = typeof successObj['beforeFullFileContent'] === 'string' ? successObj['beforeFullFileContent'] as string : null;
+            const after = typeof successObj['afterFullFileContent'] === 'string' ? successObj['afterFullFileContent'] as string : null;
+            const filePath = typeof successObj['path'] === 'string' ? successObj['path'] as string : 'file';
+            if (before !== null && after !== null) {
+                try {
+                    // Strip Index:/====/---/+++ file headers; keep from first @@ header onwards
+                    // so all 15 compact lines are actual diff content.
+                    const patch = createTwoFilesPatch(filePath, filePath, before, after, '', '', { context: 3 });
+                    const patchLines = patch.split('\n');
+                    const hunkStart = patchLines.findIndex(l => l.startsWith('@@ -'));
+                    const diffBody = hunkStart >= 0 ? patchLines.slice(hunkStart).join('\n') : patch;
+                    compactSuccess['diffString'] = truncateByLines(diffBody, LAZY_DIFF_STRING_MAX_LINES);
+                    wasTruncated = true;
+                } catch (e) {
+                    logger.debug('[lazy] Failed to compute unified diff', { callId, err: e });
+                }
+            }
+        }
 
         // Strip full-file fields entirely (available via RPC)
         for (const field of stripFields ?? []) {
