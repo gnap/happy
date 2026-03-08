@@ -257,29 +257,6 @@ export class ApiSessionClient extends EventEmitter {
         // so that when lazy content is resolved the compact view still gets correct line numbers.
         let recomputedDiffBody: string | null = null;
 
-        // For CursorEdit: re-compute diffString from full file contents before they are stripped,
-        // replacing Cursor's no-hunk-header format with a standard unified diff that includes
-        // @@ -N,N +N,N @@ headers so the App can display absolute line numbers.
-        if (toolName === 'CursorEdit') {
-            const before = typeof successObj['beforeFullFileContent'] === 'string' ? successObj['beforeFullFileContent'] as string : null;
-            const after = typeof successObj['afterFullFileContent'] === 'string' ? successObj['afterFullFileContent'] as string : null;
-            const filePath = typeof successObj['path'] === 'string' ? successObj['path'] as string : 'file';
-            if (before !== null && after !== null) {
-                try {
-                    // Strip Index:/====/---/+++ file headers; keep from first @@ header onwards
-                    // so all 15 compact lines are actual diff content.
-                    const patch = createTwoFilesPatch(filePath, filePath, before, after, '', '', { context: 3 });
-                    const patchLines = patch.split('\n');
-                    const hunkStart = patchLines.findIndex(l => l.startsWith('@@ -'));
-                    recomputedDiffBody = hunkStart >= 0 ? patchLines.slice(hunkStart).join('\n') : patch;
-                    compactSuccess['diffString'] = truncateByLines(recomputedDiffBody, LAZY_DIFF_STRING_MAX_LINES);
-                    wasTruncated = true;
-                } catch (e) {
-                    logger.debug('[lazy] Failed to compute unified diff', { callId, err: e });
-                }
-            }
-        }
-
         // Strip full-file fields entirely (available via RPC)
         for (const field of stripFields ?? []) {
             if (typeof successObj[field] === 'string' && (successObj[field] as string).length > 0) {
@@ -296,6 +273,31 @@ export class ApiSessionClient extends EventEmitter {
                 if (truncated.length < original.length) {
                     compactSuccess[field] = truncated;
                     wasTruncated = true;
+                }
+            }
+        }
+
+        // For CursorEdit: re-compute diffString from full file contents before they are stripped,
+        // replacing Cursor's no-hunk-header format with a standard unified diff that includes
+        // @@ -N,N +N,N @@ headers so the App can display absolute line numbers.
+        // This must run AFTER the previewFields loop above so the recomputed (correct) diffString
+        // overwrites any truncated copy of Cursor's original headerless diffString.
+        if (toolName === 'CursorEdit') {
+            const before = typeof successObj['beforeFullFileContent'] === 'string' ? successObj['beforeFullFileContent'] as string : null;
+            const after = typeof successObj['afterFullFileContent'] === 'string' ? successObj['afterFullFileContent'] as string : null;
+            const filePath = typeof successObj['path'] === 'string' ? successObj['path'] as string : 'file';
+            if (before !== null && after !== null) {
+                try {
+                    // Strip Index:/====/---/+++ file headers; keep from first @@ header onwards
+                    // so all 15 compact lines are actual diff content.
+                    const patch = createTwoFilesPatch(filePath, filePath, before, after, '', '', { context: 3 });
+                    const patchLines = patch.split('\n');
+                    const hunkStart = patchLines.findIndex(l => l.startsWith('@@ -'));
+                    recomputedDiffBody = hunkStart >= 0 ? patchLines.slice(hunkStart).join('\n') : patch;
+                    compactSuccess['diffString'] = truncateByLines(recomputedDiffBody, LAZY_DIFF_STRING_MAX_LINES);
+                    wasTruncated = true;
+                } catch (e) {
+                    logger.debug('[lazy] Failed to compute unified diff', { callId, err: e });
                 }
             }
         }
