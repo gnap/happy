@@ -8,34 +8,17 @@
 
 // Set IPv4 for all HTTPS before any other imports that may hit the server (auth, api, etc.)
 import { configuration } from '@/configuration'
-import axios from 'axios'
 import chalk from 'chalk'
-import { runClaude, StartOptions } from '@/claude/runClaude'
 import { logger } from './ui/logger'
-import { readCredentials, readSettings, readSessionPidMapping } from './persistence'
-import { authAndSetupMachineIfNeeded } from './ui/auth'
 import packageJson from '../package.json'
-import { z } from 'zod'
-import { startDaemon } from './daemon/run'
-import { checkIfDaemonRunningAndCleanupStaleState, isDaemonRunningCurrentlyInstalledHappyVersion, stopDaemon } from './daemon/controlClient'
-import { getLatestDaemonLog } from './ui/logger'
-import { killRunawayHappyProcesses } from './daemon/doctor'
-import { install } from './daemon/install'
-import { uninstall } from './daemon/uninstall'
-import { ApiClient } from './api/api'
-import { runDoctorCommand } from './ui/doctor'
-import { listDaemonSessions, stopDaemonSession } from './daemon/controlClient'
-import { handleAuthCommand } from './commands/auth'
-import { handleConnectCommand } from './commands/connect'
-import { handleSandboxCommand } from './commands/sandbox'
-import { spawnHappyCLI } from './utils/spawnHappyCLI'
-import { claudeCliPath } from './claude/claudeLocal'
 import { execFileSync } from 'node:child_process'
 import { extractNoSandboxFlag } from './utils/sandboxFlags'
+import type { StartOptions } from '@/claude/runClaude'
 
 
 (async () => {
   const args = process.argv.slice(2)
+  const cliStartTime = Date.now()
 
   // If --version is passed - do not log, its likely daemon inquiring about our version
   if (!args.includes('--version')) {
@@ -48,6 +31,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
   if (subcommand === 'doctor') {
     // Check for clean subcommand
     if (args[1] === 'clean') {
+      const { killRunawayHappyProcesses } = await import('./daemon/doctor')
       const result = await killRunawayHappyProcesses()
       console.log(`Cleaned up ${result.killed} runaway processes`)
       if (result.errors.length > 0) {
@@ -55,11 +39,13 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
       }
       process.exit(0)
     }
+    const { runDoctorCommand } = await import('./ui/doctor')
     await runDoctorCommand();
     return;
   } else if (subcommand === 'auth') {
     // Handle auth subcommands
     try {
+      const { handleAuthCommand } = await import('./commands/auth')
       await handleAuthCommand(args.slice(1));
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
@@ -72,6 +58,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
   } else if (subcommand === 'connect') {
     // Handle connect subcommands
     try {
+      const { handleConnectCommand } = await import('./commands/connect')
       await handleConnectCommand(args.slice(1));
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
@@ -83,6 +70,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
     return;
   } else if (subcommand === 'sandbox') {
     try {
+      const { handleSandboxCommand } = await import('./commands/sandbox')
       await handleSandboxCommand(args.slice(1));
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
@@ -99,12 +87,14 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
     const sessionsSub = args[1];
     if (sessionsSub === 'list') {
       const checkId = args[2]; // optional: e.g. 88206
+      const { readCredentials } = await import('./persistence')
       const credentials = await readCredentials();
       if (!credentials) {
         console.error(chalk.red('Not authenticated. Run happy auth first.'));
         process.exit(1);
       }
       try {
+        const axios = (await import('axios')).default
         const { data } = await axios.get<{ sessions: Array<{ id: string; active: boolean; activeAt: number; createdAt: number }> }>(
           `${configuration.serverUrl}/v1/sessions`,
           { headers: { Authorization: `Bearer ${credentials.token}` } }
@@ -124,6 +114,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
           }
         }
       } catch (err: unknown) {
+        const { default: axios } = await import('axios')
         const msg = axios.isAxiosError(err) ? (err.response?.data ?? err.message) : (err instanceof Error ? err.message : String(err));
         console.error(chalk.red('Failed to fetch sessions:'), msg);
         process.exit(1);
@@ -146,9 +137,8 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
         }
       }
       
-      const {
-        credentials
-      } = await authAndSetupMachineIfNeeded();
+      const { authAndSetupMachineIfNeeded } = await import('./ui/auth')
+      const { credentials } = await authAndSetupMachineIfNeeded();
       await runCodex({credentials, startedBy, noSandbox: codexArgs.noSandbox});
       // Do not force exit here; allow instrumentation to show lingering handles
     } catch (error) {
@@ -179,14 +169,15 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
         }
       }
 
-      const {
-        credentials
-      } = await authAndSetupMachineIfNeeded();
+      const { authAndSetupMachineIfNeeded } = await import('./ui/auth')
+      const { credentials } = await authAndSetupMachineIfNeeded();
 
       // Auto-start daemon (same as codex/gemini)
       logger.debug('Ensuring Happy background service is running & matches our version...');
+      const { isDaemonRunningCurrentlyInstalledHappyVersion } = await import('./daemon/controlClient')
       if (!(await isDaemonRunningCurrentlyInstalledHappyVersion())) {
         logger.debug('Starting Happy background service...');
+        const { spawnHappyCLI } = await import('./utils/spawnHappyCLI')
         const daemonProcess = spawnHappyCLI(['daemon', 'start-sync'], {
           detached: true,
           stdio: 'ignore',
@@ -196,7 +187,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
         await new Promise(resolve => setTimeout(resolve, 200));
       }
 
-      await runCursor({ credentials, startedBy, workspaceRoot, resumeSession });
+      await runCursor({ credentials, startedBy, workspaceRoot, resumeSession, cliStartTime });
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
       if (process.env.DEBUG) {
@@ -397,14 +388,15 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
         }
       }
       
-      const {
-        credentials
-      } = await authAndSetupMachineIfNeeded();
+      const { authAndSetupMachineIfNeeded } = await import('./ui/auth')
+      const { credentials } = await authAndSetupMachineIfNeeded();
 
       // Auto-start daemon for gemini (same as claude)
       logger.debug('Ensuring Happy background service is running & matches our version...');
+      const { isDaemonRunningCurrentlyInstalledHappyVersion } = await import('./daemon/controlClient')
       if (!(await isDaemonRunningCurrentlyInstalledHappyVersion())) {
         logger.debug('Starting Happy background service...');
+        const { spawnHappyCLI } = await import('./utils/spawnHappyCLI')
         const daemonProcess = spawnHappyCLI(['daemon', 'start-sync'], {
           detached: true,
           stdio: 'ignore',
@@ -447,11 +439,14 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
       }
 
       const resolved = resolveAcpAgentConfig(acpArgs);
+      const { authAndSetupMachineIfNeeded } = await import('./ui/auth')
       const { credentials } = await authAndSetupMachineIfNeeded();
 
       logger.debug('Ensuring Happy background service is running & matches our version...');
+      const { isDaemonRunningCurrentlyInstalledHappyVersion } = await import('./daemon/controlClient')
       if (!(await isDaemonRunningCurrentlyInstalledHappyVersion())) {
         logger.debug('Starting Happy background service...');
+        const { spawnHappyCLI } = await import('./utils/spawnHappyCLI')
         const daemonProcess = spawnHappyCLI(['daemon', 'start-sync'], {
           detached: true,
           stdio: 'ignore',
@@ -481,6 +476,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
     // Keep for backward compatibility - redirect to auth logout
     console.log(chalk.yellow('Note: "happy logout" is deprecated. Use "happy auth logout" instead.\n'));
     try {
+      const { handleAuthCommand } = await import('./commands/auth')
       await handleAuthCommand(['logout']);
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
@@ -508,6 +504,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
 
     if (daemonSubcommand === 'list') {
       try {
+        const { listDaemonSessions } = await import('./daemon/controlClient')
         const sessions = await listDaemonSessions()
 
         if (sessions.length === 0) {
@@ -517,6 +514,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
           console.log(JSON.stringify(sessions, null, 2))
         }
         // PID -> sessionId from CLI files (~/.happy/session-pids/<pid>) so we can see which process manages which session
+        const { readSessionPidMapping } = await import('./persistence')
         const pidMap = await readSessionPidMapping()
         if (pidMap.size > 0) {
           console.log('Session PID mapping (this machine, from CLI files):')
@@ -548,6 +546,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
 
       try {
         const target: string | number = pid ?? sessionId!;
+        const { stopDaemonSession } = await import('./daemon/controlClient')
         const success = await stopDaemonSession(target);
         console.log(success ? 'Session stopped' : 'Failed to stop session')
       } catch (error) {
@@ -557,6 +556,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
 
     } else if (daemonSubcommand === 'start') {
       // Spawn detached daemon process
+      const { spawnHappyCLI } = await import('./utils/spawnHappyCLI')
       const child = spawnHappyCLI(['daemon', 'start-sync'], {
         detached: true,
         stdio: 'ignore',
@@ -565,6 +565,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
       child.unref();
 
       // Wait for daemon to write state file (up to 5 seconds)
+      const { checkIfDaemonRunningAndCleanupStaleState } = await import('./daemon/controlClient')
       let started = false;
       for (let i = 0; i < 50; i++) {
         if (await checkIfDaemonRunningAndCleanupStaleState()) {
@@ -582,17 +583,21 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
       }
       process.exit(0);
     } else if (daemonSubcommand === 'start-sync') {
+      const { startDaemon } = await import('./daemon/run')
       await startDaemon()
       process.exit(0)
     } else if (daemonSubcommand === 'stop') {
+      const { stopDaemon } = await import('./daemon/controlClient')
       await stopDaemon()
       process.exit(0)
     } else if (daemonSubcommand === 'status') {
       // Show daemon-specific doctor output
+      const { runDoctorCommand } = await import('./ui/doctor')
       await runDoctorCommand('daemon')
       process.exit(0)
     } else if (daemonSubcommand === 'logs') {
       // Simply print the path to the latest daemon log file
+      const { getLatestDaemonLog } = await import('./ui/logger')
       const latest = await getLatestDaemonLog()
       if (!latest) {
         console.log('No daemon logs found')
@@ -602,6 +607,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
       process.exit(0)
     } else if (daemonSubcommand === 'install') {
       try {
+        const { install } = await import('./daemon/install')
         await install()
       } catch (error) {
         console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
@@ -609,6 +615,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
       }
     } else if (daemonSubcommand === 'uninstall') {
       try {
+        const { uninstall } = await import('./daemon/uninstall')
         await uninstall()
       } catch (error) {
         console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
@@ -663,7 +670,8 @@ ${chalk.bold('To clean up runaway processes:')} Use ${chalk.cyan('happy doctor c
         // Also pass through to claude (will show after our version)
         unknownArgs.push(arg)
       } else if (arg === '--happy-starting-mode') {
-        options.startingMode = z.enum(['local', 'remote']).parse(args[++i])
+        const { z } = await import('zod')
+      options.startingMode = z.enum(['local', 'remote']).parse(args[++i])
       } else if (arg === '--yolo') {
         // Shortcut for --dangerously-skip-permissions
         unknownArgs.push('--dangerously-skip-permissions')
@@ -718,6 +726,7 @@ ${chalk.bold('To clean up runaway processes:')} Use ${chalk.cyan('happy doctor c
     }
 
     // Resolve Chrome mode: explicit flag > settings > false
+    const { readSettings } = await import('./persistence')
     const settings = await readSettings()
     const chromeEnabled = chromeOverride ?? settings.chromeMode ?? false
     if (chromeEnabled) {
@@ -773,6 +782,7 @@ ${chalk.bold.cyan('Claude Code Options (from `claude --help`):')}
       // Run claude --help and display its output
       // Use execFileSync directly with claude CLI for runtime-agnostic compatibility
       try {
+        const { claudeCliPath } = await import('./claude/claudeLocal')
         const claudeHelp = execFileSync(claudeCliPath, ['--help'], { encoding: 'utf8' })
         console.log(claudeHelp)
       } catch (e) {
@@ -789,17 +799,18 @@ ${chalk.bold.cyan('Claude Code Options (from `claude --help`):')}
     }
 
     // Normal flow - auth and machine setup
-    const {
-      credentials
-    } = await authAndSetupMachineIfNeeded();
+    const { authAndSetupMachineIfNeeded } = await import('./ui/auth')
+    const { credentials } = await authAndSetupMachineIfNeeded();
 
     // Always auto-start daemon for simplicity
     logger.debug('Ensuring Happy background service is running & matches our version...');
 
+    const { isDaemonRunningCurrentlyInstalledHappyVersion } = await import('./daemon/controlClient')
     if (!(await isDaemonRunningCurrentlyInstalledHappyVersion())) {
       logger.debug('Starting Happy background service...');
 
       // Use the built binary to spawn daemon
+      const { spawnHappyCLI } = await import('./utils/spawnHappyCLI')
       const daemonProcess = spawnHappyCLI(['daemon', 'start-sync'], {
         detached: true,
         stdio: 'ignore',
@@ -813,6 +824,7 @@ ${chalk.bold.cyan('Claude Code Options (from `claude --help`):')}
 
     // Start the CLI
     try {
+      const { runClaude } = await import('@/claude/runClaude')
       await runClaude(credentials, options);
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
@@ -876,6 +888,7 @@ ${chalk.bold('Examples:')}
   }
 
   // Load credentials
+  const { readCredentials } = await import('./persistence')
   let credentials = await readCredentials()
   if (!credentials) {
     console.error(chalk.red('Error: Not authenticated. Please run "happy auth login" first.'))
@@ -886,6 +899,7 @@ ${chalk.bold('Examples:')}
 
   try {
     // Create API client and send push notification
+    const { ApiClient } = await import('./api/api')
     const api = await ApiClient.create(credentials);
 
     // Use custom title or default to "Happy"
