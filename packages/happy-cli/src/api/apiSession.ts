@@ -454,6 +454,11 @@ export class ApiSessionClient extends EventEmitter {
         //
 
         this.socket.connect();
+
+        // Trigger an initial HTTP poll so we get any messages already on the server (e.g. user sent
+        // from App before socket connected). Otherwise we only fetch after socket 'connect' or
+        // after connect_error (fallback poll every 8s), so new sessions can appear unresponsive.
+        this.receiveSync.invalidate();
     }
 
     onUserMessage(callback: (data: UserMessage) => void) {
@@ -632,6 +637,8 @@ export class ApiSessionClient extends EventEmitter {
                     if (!isRetryable || attempt === ApiSessionClient.FLUSH_RETRY_MAX) {
                         const data = axios.isAxiosError(error) ? error.response?.data : undefined;
                         logger.debug('[API] flushOutbox failed', { sessionId: this.sessionId, batchLength: chunk.length, flushed, total, status, isTimeout, data, error });
+                        // App won't receive reply until flush succeeds; log at warn so it's visible without DEBUG
+                        logger.warn(`[API] Failed to send ${chunk.length} reply message(s) to server (App will not show them). Check network and server.`, { status, isTimeout, sessionId: this.sessionId });
                         throw error;
                     }
                     logger.debug('[API] flushOutbox retryable error (will retry)', { status, isTimeout, attempt: attempt + 1, maxRetries: ApiSessionClient.FLUSH_RETRY_MAX });
