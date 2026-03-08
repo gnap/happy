@@ -1850,8 +1850,7 @@ class Sync {
                 const latestAnchor = Math.max(0, sessionSeq - 100);
                 const afterSeq = cachedLastSeq > 0
                     ? Math.max(cachedLastSeq, latestAnchor)
-                    // Cold start: align left boundary to segment start so bitmap tracking is accurate.
-                    : alignAfterSeq(latestAnchor);
+                    : latestAnchor;
 
                 log.log(`💬 fetchMessages: requesting after_seq=${afterSeq} for ${sessionId} (cachedLastSeq=${cachedLastSeq})`);
                 const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
