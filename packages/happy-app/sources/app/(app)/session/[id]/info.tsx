@@ -62,55 +62,31 @@ function StatusDot({ color, isPulsing, size = 8 }: { color: string; isPulsing?: 
     );
 }
 
-/**
- * 极细分段进度条，显示哪些 seq 范围已缓存（绿色）、哪些未加载（灰色）。
- * 左=最旧(seq 1)，右=最新(session.seq)。
- */
+/** 简单进度条：显示已缓存的 seq 范围占总 seq 的比例。 */
 function CacheProgressBar({
     totalSeq,
     oldestSeq,
     hasOlderMessages,
     isLoaded,
-    segments = 20,
 }: {
     totalSeq: number;
     oldestSeq: number;
     hasOlderMessages: boolean;
     isLoaded: boolean;
-    segments?: number;
 }) {
     const { theme } = useUnistyles();
     if (totalSeq <= 0) return null;
 
-    // Compute the first loaded seq.
-    // - Not yet loaded: nothing green.
-    // - Loaded and no older messages exist: seq 1 onwards (fully green).
-    // - Loaded with older messages pending: oldestSeq onwards.
-    const firstLoadedSeq: number | null = isLoaded
-        ? (hasOlderMessages ? (oldestSeq > 0 ? oldestSeq : null) : 1)
-        : null;
-
-    const bars = Array.from({ length: segments }, (_, i) => {
-        const segStart = Math.floor((i / segments) * totalSeq) + 1;
-        const segEnd = Math.floor(((i + 1) / segments) * totalSeq);
-        if (firstLoadedSeq === null) return false;
-        // Segment is loaded if it overlaps [firstLoadedSeq, totalSeq]
-        return segEnd >= firstLoadedSeq && segStart <= totalSeq;
-    });
+    let progress = 0;
+    if (isLoaded) {
+        progress = hasOlderMessages && oldestSeq > 0
+            ? (totalSeq - oldestSeq + 1) / totalSeq
+            : 1;
+    }
 
     return (
-        <View style={{ flexDirection: 'row', height: 2, gap: 1, paddingHorizontal: 16, paddingBottom: 6 }}>
-            {bars.map((loaded, i) => (
-                <View
-                    key={i}
-                    style={{
-                        flex: 1,
-                        height: 2,
-                        borderRadius: 1,
-                        backgroundColor: loaded ? '#34C759' : theme.colors.divider,
-                    }}
-                />
-            ))}
+        <View style={{ height: 2, marginHorizontal: 16, marginBottom: 6, borderRadius: 1, backgroundColor: theme.colors.divider, overflow: 'hidden', flexDirection: 'row', justifyContent: 'flex-end' }}>
+            <View style={{ width: `${progress * 100}%`, height: '100%', borderRadius: 1, backgroundColor: '#34C759' }} />
         </View>
     );
 }
