@@ -253,6 +253,9 @@ export class ApiSessionClient extends EventEmitter {
 
         let wasTruncated = false;
         const compactSuccess: Record<string, unknown> = { ...successObj };
+        // Full diffString with proper @@ headers to persist alongside the full result,
+        // so that when lazy content is resolved the compact view still gets correct line numbers.
+        let recomputedDiffBody: string | null = null;
 
         // For CursorEdit: re-compute diffString from full file contents before they are stripped,
         // replacing Cursor's no-hunk-header format with a standard unified diff that includes
@@ -268,8 +271,8 @@ export class ApiSessionClient extends EventEmitter {
                     const patch = createTwoFilesPatch(filePath, filePath, before, after, '', '', { context: 3 });
                     const patchLines = patch.split('\n');
                     const hunkStart = patchLines.findIndex(l => l.startsWith('@@ -'));
-                    const diffBody = hunkStart >= 0 ? patchLines.slice(hunkStart).join('\n') : patch;
-                    compactSuccess['diffString'] = truncateByLines(diffBody, LAZY_DIFF_STRING_MAX_LINES);
+                    recomputedDiffBody = hunkStart >= 0 ? patchLines.slice(hunkStart).join('\n') : patch;
+                    compactSuccess['diffString'] = truncateByLines(recomputedDiffBody, LAZY_DIFF_STRING_MAX_LINES);
                     wasTruncated = true;
                 } catch (e) {
                     logger.debug('[lazy] Failed to compute unified diff', { callId, err: e });
@@ -300,7 +303,14 @@ export class ApiSessionClient extends EventEmitter {
         if (!wasTruncated) return output;
 
         compactSuccess._lazyResult = true;
-        this.persistToolCallResult(callId, output);
+        // Persist with the recomputed diffString (full, not truncated) so that when the lazy
+        // result is resolved back into the store, the compact view still has correct @@ headers
+        // and absolute line numbers instead of falling back to Cursor's headerless format.
+        const persistSuccess = recomputedDiffBody !== null
+            ? { ...successObj, diffString: recomputedDiffBody }
+            : successObj;
+        const persistOutput = successKey ? { ...r, [successKey]: persistSuccess } : persistSuccess;
+        this.persistToolCallResult(callId, persistOutput);
         logger.debug('[lazy] Encoded result for', { toolName, callId: callId.slice(0, 8) });
         return successKey ? { ...r, [successKey]: compactSuccess } : compactSuccess;
     }
