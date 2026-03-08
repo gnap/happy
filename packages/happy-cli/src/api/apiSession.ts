@@ -101,7 +101,7 @@ const LAZY_DIFF_TOOL_FIELDS: Record<string, string[]> = {
 };
 
 /** Characters per field kept in the compact (wire) copy. */
-const LAZY_CONTENT_THRESHOLD = 2000;
+const LAZY_CONTENT_THRESHOLD = 100;
 
 function truncateDiffArgs(
     name: string,
