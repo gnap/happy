@@ -135,6 +135,7 @@ interface StorageState {
     applyNativeUpdateStatus: (status: { available: boolean; updateUrl?: string } | null) => void;
     isMutableToolCall: (sessionId: string, callId: string) => boolean;
     finalizeRunningTools: (sessionId: string) => void;
+    resolveToolCallLazyContent: (sessionId: string, messageId: string, fullInput: Record<string, unknown>) => boolean;
     setRealtimeStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => void;
     setRealtimeMode: (mode: 'idle' | 'speaking', immediate?: boolean) => void;
     clearRealtimeModeDebounce: () => void;
@@ -359,6 +360,45 @@ export const storage = create<StorageState>()((set, get) => {
                 },
             };
         }),
+        /**
+         * After a successful lazy-content RPC fetch, replace the truncated tool input
+         * with the full args and clear the lazyContent flag in both the message map
+         * and the reducer state. Returns true when the message was found and updated.
+         */
+        resolveToolCallLazyContent: (sessionId: string, messageId: string, fullInput: Record<string, unknown>): boolean => {
+            let updated = false;
+            set((state) => {
+                const sessionMessages = state.sessionMessages[sessionId];
+                if (!sessionMessages) return state;
+
+                const msg = sessionMessages.messagesMap[messageId];
+                if (!msg || msg.kind !== 'tool-call') return state;
+
+                const updatedTool = { ...msg.tool, input: fullInput, lazyContent: false };
+                const updatedMsg = { ...msg, tool: updatedTool };
+
+                // Mirror into reducerState so the next cache save persists the full content
+                const reducerMsg = sessionMessages.reducerState.messages.get(messageId);
+                if (reducerMsg?.tool) {
+                    reducerMsg.tool.input = fullInput;
+                    reducerMsg.tool.lazyContent = false;
+                }
+
+                updated = true;
+                return {
+                    ...state,
+                    sessionMessages: {
+                        ...state.sessionMessages,
+                        [sessionId]: {
+                            ...sessionMessages,
+                            messagesMap: { ...sessionMessages.messagesMap, [messageId]: updatedMsg },
+                            messages: sessionMessages.messages.map(m => m.id === messageId ? updatedMsg : m),
+                        },
+                    },
+                };
+            });
+            return updated;
+        },
         getActiveSessions: () => {
             const state = get();
             return Object.values(state.sessions).filter(s => s.active);

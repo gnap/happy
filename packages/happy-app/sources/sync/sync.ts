@@ -273,6 +273,21 @@ class Sync {
     }
 
     /**
+     * Persist the current in-memory state for a session to SQLite.
+     * Called after resolving lazy tool content so the full content is saved to cache.
+     */
+    saveSessionCache = async (sessionId: string): Promise<void> => {
+        const state = storage.getState();
+        const session = state.sessions[sessionId];
+        const sessionMsgs = state.sessionMessages[sessionId];
+        if (!session || !sessionMsgs) return;
+        const lastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
+        const oldestSeq = sessionMsgs.oldestSeq;
+        const hasOlderMessages = sessionMsgs.hasOlderMessages ?? false;
+        await saveMessageCache(session, sessionMsgs.messages, sessionMsgs.reducerState, lastSeq, oldestSeq, hasOlderMessages);
+    }
+
+    /**
      * Clear the local message cache for a session and trigger a full refetch.
      * Only meaningful for Cursor sessions; safe to call on any session.
      */

@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { View, Text, StyleSheet, ScrollView } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, ActivityIndicator } from 'react-native';
 import { ToolViewProps } from './_all';
 import { knownTools } from '@/components/tools/knownTools';
 import { toolFullViewStyles } from '../ToolFullView';
@@ -7,20 +7,21 @@ import { DiffView } from '@/components/diff/DiffView';
 import { trimIdent } from '@/utils/trimIdent';
 import { t } from '@/text';
 import { useSetting } from '@/sync/storage';
+import { useLazyToolInput } from './useLazyToolInput';
 
-export const MultiEditViewFull = React.memo<ToolViewProps>(({ tool, metadata }) => {
-    const { input } = tool;
+export const MultiEditViewFull = React.memo<ToolViewProps>(({ tool, metadata, sessionId }) => {
     const wrapLinesInDiffs = useSetting('wrapLinesInDiffs');
+    const { resolvedInput, loading } = useLazyToolInput(tool, sessionId);
 
     // Parse the input
     let edits: Array<{ old_string: string; new_string: string; replace_all?: boolean }> = [];
     
-    const parsed = knownTools.MultiEdit.input.safeParse(input);
+    const parsed = knownTools.MultiEdit.input.safeParse(resolvedInput);
     if (parsed.success && parsed.data.edits) {
         edits = parsed.data.edits;
     }
 
-    if (edits.length === 0) {
+    if (edits.length === 0 && !loading) {
         return null;
     }
 
@@ -57,19 +58,19 @@ export const MultiEditViewFull = React.memo<ToolViewProps>(({ tool, metadata }) 
     );
 
     if (wrapLinesInDiffs) {
-        // When wrapping lines, no horizontal scroll needed
         return (
             <View style={toolFullViewStyles.sectionFullWidth}>
+                {loading && <ActivityIndicator size="small" style={{ marginBottom: 8 }} />}
                 {content}
             </View>
         );
     }
 
-    // When not wrapping, use horizontal scroll
     return (
         <View style={toolFullViewStyles.sectionFullWidth}>
-            <ScrollView 
-                horizontal 
+            {loading && <ActivityIndicator size="small" style={{ marginBottom: 8 }} />}
+            <ScrollView
+                horizontal
                 showsHorizontalScrollIndicator={true}
                 showsVerticalScrollIndicator={true}
                 nestedScrollEnabled={true}
