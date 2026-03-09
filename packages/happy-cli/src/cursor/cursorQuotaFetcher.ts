@@ -264,8 +264,8 @@ export function hasCursorStateDb(platform?: CursorPlatform): boolean {
  * Build usage-report payload for Happy server (key: 'cursor-ide').
  *
  * Plan usage (tokens):
- *   - plan_limit: real quota = breakdown.total (included + bonus), fallback to plan.limit
- *   - plan_used:  actual requests used = round(plan_limit × totalPercentUsed / 100)
+ *   - plan_limit: plan.limit (base plan, in cents)
+ *   - plan_used:  plan.used (in cents, as reported by Cursor API)
  *
  * OnDemand usage (cost, in US cents):
  *   - on_demand_used_cents: amount spent this billing cycle
@@ -275,20 +275,16 @@ export function buildCursorUsageReportPayload(info: CursorQuotaInfo): {
   tokens: { total: number; [key: string]: number };
   cost: { total: number; [key: string]: number };
 } {
-  const plan = info.planUsage;
-  const planLimit = plan?.breakdown?.total ?? plan?.limit ?? 0;
-  const planUsed = plan ? Math.round(planLimit * plan.totalPercentUsed / 100) : 0;
-
-  const onDemandUsed = info.onDemandUsage?.used ?? 0;
-  const onDemandLimit = info.onDemandUsage?.limit ?? null;
+  const planUsed = info.planUsage?.used ?? 0;
+  const planLimit = info.planUsage?.limit ?? 0;
+  const onDemandUsedCents = info.onDemandUsage?.used ?? 0;
+  const onDemandLimit = info.onDemandUsage?.limit;
 
   const cost: { total: number; [key: string]: number } = {
-    total: onDemandUsed,
-    on_demand_used_cents: onDemandUsed,
+    total: onDemandUsedCents,
+    on_demand_used_cents: onDemandUsedCents,
   };
-  if (onDemandLimit !== null) {
-    cost.on_demand_limit_cents = onDemandLimit;
-  }
+  if (onDemandLimit != null) cost.on_demand_limit_cents = onDemandLimit;
 
   return {
     tokens: {
