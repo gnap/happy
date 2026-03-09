@@ -7,7 +7,7 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { UsageChart } from './UsageChart';
 import { UsageBar } from './UsageBar';
-import { getUsageForPeriod, calculateTotals, groupUsageBySource, getUsageKeyDisplay, UsageDataPoint } from '@/sync/apiUsage';
+import { getUsageForPeriod, calculateTotals, groupUsageBySource, getUsageKeyDisplay, UsageDataPoint, SNAPSHOT_KEYS } from '@/sync/apiUsage';
 import { Ionicons } from '@expo/vector-icons';
 import { HappyError } from '@/utils/errors';
 import { t, type TranslationKey } from '@/text';
@@ -208,24 +208,88 @@ export const UsagePanel: React.FC<{ sessionId?: string }> = ({ sessionId }) => {
     // Group token and cost breakdown by source (Claude / Cursor) with friendly labels
     const tokenGroups = groupUsageBySource(totals.tokensByModel);
     const costGroups = groupUsageBySource(totals.costByModel);
+    // Support both legacy key names (installed binary) and new key names (wip source).
+    const onDemandUsed: number | null =
+        totals.costByModel['on_demand_used_cents'] ??
+        totals.costByModel['on_demand_cents'] ??
+        null;
+    const onDemandLimit: number | null =
+        totals.costByModel['on_demand_limit_cents'] ??
+        totals.costByModel['on_demand_limit'] ??
+        null;
+    // Plan is stored under tokens (cents), pulled out separately for cost display.
+    const planUsedCents: number | null =
+        totals.tokensByModel['plan_requests_used'] ??
+        totals.tokensByModel['plan_used'] ??
+        null;
+    const planLimitCents: number | null =
+        totals.tokensByModel['plan_requests_limit'] ??
+        totals.tokensByModel['plan_limit'] ??
+        null;
+
+    // Keys hidden from the token breakdown: plan (cents, shown in cost section + summary)
+    // and limit/remaining keys (implicit from the bar's maxValue).
+    const HIDDEN_BREAKDOWN_KEYS = new Set([
+        // plan – moved to cost section
+        'plan_used', 'plan_requests_used',
+        'plan_limit', 'plan_requests_limit',
+        'plan_requests_remaining',
+        // on-demand limits/remaining
+        'on_demand_limit', 'on_demand_remaining',
+        'on_demand_limit_cents',
+    ]);
+
+    // Max is calculated per unit type: exclude SNAPSHOT_KEYS so Cursor request counts
+    // don't pollute the Claude token scale (and vice-versa for costs).
     const maxTokenInGroups = Math.max(
-        ...tokenGroups.flatMap((g) => g.entries.map(([, v]) => v)),
+        ...tokenGroups.flatMap((g) => g.entries.filter(([k]) => !SNAPSHOT_KEYS.has(k)).map(([, v]) => v)),
         1
     );
     const maxCostInGroups = Math.max(
-        ...costGroups.flatMap((g) => g.entries.map(([, v]) => v)),
+        ...costGroups.flatMap((g) => g.entries.filter(([k]) => !SNAPSHOT_KEYS.has(k)).map(([, v]) => v)),
         1
     );
-    /** For Cursor plan: use limit as bar denominator when present so "used" shows real %. */
+    const planLimit =
+        totals.tokensByModel['plan_requests_limit'] ??
+        totals.tokensByModel['plan_limit'] ??
+        null;
+    const onDemandCostLimit =
+        totals.costByModel['on_demand_limit_cents'] ??
+        totals.costByModel['on_demand_limit'] ??
+        null;
+
+    /** Cursor plan requests: use plan limit so the bar shows "X of Y requests used". */
     const tokenBarMax = (key: string) =>
-        key === 'plan_requests_used' && typeof totals.tokensByModel['plan_requests_limit'] === 'number'
-            ? totals.tokensByModel['plan_requests_limit']
+        (key === 'plan_requests_used' || key === 'plan_used') && planLimit !== null
+            ? planLimit
             : maxTokenInGroups;
-    /** For Cursor on-demand: use limit as bar denominator when present so "used" shows real %. */
+    /** Cursor on-demand cents: use cent limit so the bar shows real spend %. */
     const costBarMax = (key: string) =>
-        key === 'on_demand_cents' && typeof totals.costByModel['on_demand_limit'] === 'number'
-            ? totals.costByModel['on_demand_limit']
+        (key === 'on_demand_cents' || key === 'on_demand_used_cents') && onDemandCostLimit !== null
+            ? onDemandCostLimit
             : maxCostInGroups;
+
+    const isCursorPlanUsedKey = (key: string) => key === 'plan_requests_used' || key === 'plan_used';
+    const isCursorOnDemandCentsKey = (key: string) => key === 'on_demand_cents' || key === 'on_demand_used_cents';
+
+    /** Value label for a token bar entry. Plan values are in cents, same as on-demand. */
+    const formatTokenValue = (key: string) => (value: number, percentage: number): string => {
+        if (isCursorPlanUsedKey(key)) {
+            const pct = planLimit !== null && planLimit > 0 ? ` (${percentage.toFixed(0)}%)` : '';
+            return `$${(value / 100).toFixed(2)}${pct}`;
+        }
+        if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+        if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+        return value.toLocaleString();
+    };
+    /** Value label for a cost bar entry. Cursor on-demand values are in cents → convert to $. */
+    const formatCostBarValue = (key: string) => (value: number, percentage: number): string => {
+        if (isCursorOnDemandCentsKey(key)) {
+            const pct = onDemandCostLimit !== null && onDemandCostLimit > 0 ? ` (${percentage.toFixed(0)}%)` : '';
+            return `$${(value / 100).toFixed(2)}${pct}`;
+        }
+        return `$${value.toFixed(4)}`;
+    };
 
     const sectionTitleBySource: Record<string, string> = {
         claude: t('usage.sectionClaude'),
@@ -260,6 +324,24 @@ export const UsagePanel: React.FC<{ sessionId?: string }> = ({ sessionId }) => {
                     <Text style={styles.statLabel}>{t('usage.totalCost')}</Text>
                     <Text style={styles.statValue}>{formatCost(totals.totalCost)}</Text>
                 </View>
+                {planUsedCents !== null && (
+                    <View style={styles.statRow}>
+                        <Text style={styles.statLabel}>{t('usage.keyCursorPlanUsed')}</Text>
+                        <Text style={[styles.statValue, { color: '#6366F1' }]}>
+                            {`$${(planUsedCents / 100).toFixed(2)}`}
+                            {planLimitCents !== null ? ` / $${(planLimitCents / 100).toFixed(2)}` : ''}
+                        </Text>
+                    </View>
+                )}
+                {onDemandUsed !== null && (
+                    <View style={styles.statRow}>
+                        <Text style={styles.statLabel}>{t('usage.keyCursorOnDemandCents')}</Text>
+                        <Text style={[styles.statValue, { color: '#6366F1' }]}>
+                            {`$${(onDemandUsed / 100).toFixed(2)}`}
+                            {onDemandLimit !== null ? ` / $${(onDemandLimit / 100).toFixed(2)}` : ''}
+                        </Text>
+                    </View>
+                )}
             </View>
             
             {/* Usage Chart */}
@@ -295,54 +377,90 @@ export const UsagePanel: React.FC<{ sessionId?: string }> = ({ sessionId }) => {
                 </View>
             )}
             
-            {/* Usage by source (Claude / Cursor) – tokens – always show so layout change is visible */}
+            {/* Usage by source (Claude tokens / Cursor requests) */}
             <ItemGroup title={t('usage.bySource')}>
                 <View style={{ padding: 16 }}>
                     {tokenGroups.length > 0 ? (
-                        tokenGroups.map(({ source, entries }) => (
-                            <View key={source} style={{ marginBottom: 16 }}>
-                                <Text style={[styles.sectionTitle, { marginHorizontal: 0, marginBottom: 8 }]}>
-                                    {sectionTitleBySource[source]}
-                                </Text>
-                                {entries.map(([key, value]) => (
-                                    <UsageBar
-                                        key={key}
-                                        label={t(getUsageKeyDisplay(key).labelKey as TranslationKey)}
-                                        value={value}
-                                        maxValue={tokenBarMax(key)}
-                                        color={source === 'cursor' ? '#6366F1' : '#007AFF'}
-                                    />
-                                ))}
-                            </View>
-                        ))
+                        tokenGroups.map(({ source, entries }) => {
+                            const visible = entries.filter(([k]) => !HIDDEN_BREAKDOWN_KEYS.has(k));
+                            if (visible.length === 0) return null;
+                            return (
+                                <View key={source} style={{ marginBottom: 16 }}>
+                                    <Text style={[styles.sectionTitle, { marginHorizontal: 0, marginBottom: 8 }]}>
+                                        {sectionTitleBySource[source]}
+                                    </Text>
+                                    {visible.map(([key, value]) => (
+                                        <UsageBar
+                                            key={key}
+                                            label={t(getUsageKeyDisplay(key).labelKey as TranslationKey)}
+                                            value={value}
+                                            maxValue={tokenBarMax(key)}
+                                            color={source === 'cursor' ? '#6366F1' : '#007AFF'}
+                                            formatValue={formatTokenValue(key)}
+                                        />
+                                    ))}
+                                </View>
+                            );
+                        })
                     ) : (
                         <Text style={styles.statLabel}>{t('usage.noBreakdown')}</Text>
                     )}
                 </View>
             </ItemGroup>
 
-            {/* Cost by source – always show */}
+            {/* Cost by source (Claude $ / Cursor plan ¢ / Cursor on-demand ¢) */}
             <ItemGroup title={t('usage.cost')}>
                 <View style={{ padding: 16 }}>
-                    {costGroups.length > 0 ? (
-                        costGroups.map(({ source, entries }) => (
+                    {/* Cursor plan bar (data lives in tokensByModel but unit is cents) */}
+                    {planUsedCents !== null && (
+                        <View style={{ marginBottom: 16 }}>
+                            <Text style={[styles.sectionTitle, { marginHorizontal: 0, marginBottom: 8 }]}>
+                                {sectionTitleBySource['cursor']}
+                            </Text>
+                            <UsageBar
+                                label={t('usage.keyCursorPlanUsed')}
+                                value={planUsedCents}
+                                maxValue={planLimitCents ?? planUsedCents}
+                                color='#6366F1'
+                                formatValue={formatCostBarValue('on_demand_used_cents')}
+                            />
+                            {onDemandUsed !== null && (
+                                <UsageBar
+                                    label={t('usage.keyCursorOnDemandCents')}
+                                    value={onDemandUsed}
+                                    maxValue={onDemandLimit ?? onDemandUsed}
+                                    color='#6366F1'
+                                    formatValue={formatCostBarValue('on_demand_used_cents')}
+                                />
+                            )}
+                        </View>
+                    )}
+                    {costGroups.map(({ source, entries }) => {
+                        // Cursor on-demand already rendered above alongside plan
+                        if (source === 'cursor') return null;
+                        const visible = entries.filter(([k]) => !HIDDEN_BREAKDOWN_KEYS.has(k));
+                        if (visible.length === 0) return null;
+                        return (
                             <View key={`cost-${source}`} style={{ marginBottom: 16 }}>
                                 <Text style={[styles.sectionTitle, { marginHorizontal: 0, marginBottom: 8 }]}>
                                     {sectionTitleBySource[source]}
                                 </Text>
-                                {entries.map(([key, value]) => (
+                                {visible.map(([key, value]) => (
                                     <UsageBar
                                         key={key}
                                         label={t(getUsageKeyDisplay(key).labelKey as TranslationKey)}
                                         value={value}
                                         maxValue={costBarMax(key)}
-                                        color={source === 'cursor' ? '#6366F1' : '#FF9500'}
-                                        showPercentage={costBarMax(key) > 0}
+                                        color='#FF9500'
+                                        formatValue={formatCostBarValue(key)}
                                     />
                                 ))}
                             </View>
-                        ))
-                    ) : (
+                        );
+                    })}
+                    {planUsedCents === null && costGroups.every(({ entries }) =>
+                        entries.filter(([k]) => !HIDDEN_BREAKDOWN_KEYS.has(k)).length === 0
+                    ) && (
                         <Text style={styles.statLabel}>{t('usage.noBreakdown')}</Text>
                     )}
                 </View>

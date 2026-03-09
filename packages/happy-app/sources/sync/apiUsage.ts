@@ -100,6 +100,33 @@ export interface UsageKeyDisplay {
     source: UsageSource;
 }
 
+/**
+ * Cursor quota fields are snapshots of current billing-cycle state, not incremental counters.
+ * Summing them across multiple data points (e.g. multiple session starts per day) gives
+ * inflated values. Use max instead so the displayed value approximates the latest reading.
+ */
+export const SNAPSHOT_KEYS = new Set([
+    // new CLI key names (wip source)
+    'plan_requests_used',
+    'plan_requests_remaining',
+    'plan_requests_limit',
+    'on_demand_cents',
+    'on_demand_limit',
+    'on_demand_remaining',
+    // legacy CLI key names (installed binary)
+    'plan_used',
+    'plan_limit',
+    'on_demand_used_cents',
+    'on_demand_limit_cents',
+]);
+
+/**
+ * Precomputed aggregate keys sent alongside their components (e.g. tokens.total =
+ * input + output + cache_creation + cache_read). Including them in totals would
+ * double-count, so they are excluded from both accumulation and breakdown display.
+ */
+const COMPUTED_KEYS = new Set(['total']);
+
 /** Known token/cost keys and their display label key + source for usage breakdown UI. */
 const USAGE_KEY_DISPLAY: Record<string, UsageKeyDisplay> = {
     // Claude (claude-session)
@@ -108,16 +135,20 @@ const USAGE_KEY_DISPLAY: Record<string, UsageKeyDisplay> = {
     output: { labelKey: 'usage.keyClaudeOutput', source: 'claude' },
     cache_creation: { labelKey: 'usage.keyClaudeCacheCreation', source: 'claude' },
     cache_read: { labelKey: 'usage.keyClaudeCacheRead', source: 'claude' },
-    // Cursor (cursor-ide)
+    // Cursor plan – new key names
     plan_requests_used: { labelKey: 'usage.keyCursorPlanUsed', source: 'cursor' },
     plan_requests_remaining: { labelKey: 'usage.keyCursorPlanRemaining', source: 'cursor' },
     plan_requests_limit: { labelKey: 'usage.keyCursorPlanLimit', source: 'cursor' },
+    // Cursor plan – legacy key names
     plan_used: { labelKey: 'usage.keyCursorPlanUsed', source: 'cursor' },
-    plan_remaining: { labelKey: 'usage.keyCursorPlanRemaining', source: 'cursor' },
-    on_demand_used: { labelKey: 'usage.keyCursorOnDemandUsed', source: 'cursor' },
+    plan_limit: { labelKey: 'usage.keyCursorPlanLimit', source: 'cursor' },
+    // Cursor on-demand – new key names
     on_demand_cents: { labelKey: 'usage.keyCursorOnDemandCents', source: 'cursor' },
     on_demand_limit: { labelKey: 'usage.keyCursorOnDemandLimit', source: 'cursor' },
     on_demand_remaining: { labelKey: 'usage.keyCursorOnDemandRemaining', source: 'cursor' },
+    // Cursor on-demand – legacy key names (key name already encodes unit)
+    on_demand_used_cents: { labelKey: 'usage.keyCursorOnDemandCents', source: 'cursor' },
+    on_demand_limit_cents: { labelKey: 'usage.keyCursorOnDemandLimit', source: 'cursor' },
 };
 
 /**
@@ -169,19 +200,29 @@ export function calculateTotals(usage: UsageDataPoint[]): {
     };
     
     for (const dataPoint of usage) {
-        // Sum tokens
-        for (const [model, tokens] of Object.entries(dataPoint.tokens)) {
+        for (const [key, tokens] of Object.entries(dataPoint.tokens)) {
             if (typeof tokens === 'number') {
-                result.totalTokens += tokens;
-                result.tokensByModel[model] = (result.tokensByModel[model] || 0) + tokens;
+                if (COMPUTED_KEYS.has(key)) {
+                    // skip – covered by individual component keys
+                } else if (SNAPSHOT_KEYS.has(key)) {
+                    result.tokensByModel[key] = Math.max(result.tokensByModel[key] ?? 0, tokens);
+                } else {
+                    result.totalTokens += tokens;
+                    result.tokensByModel[key] = (result.tokensByModel[key] || 0) + tokens;
+                }
             }
         }
-        
-        // Sum costs
-        for (const [model, cost] of Object.entries(dataPoint.cost)) {
+
+        for (const [key, cost] of Object.entries(dataPoint.cost)) {
             if (typeof cost === 'number') {
-                result.totalCost += cost;
-                result.costByModel[model] = (result.costByModel[model] || 0) + cost;
+                if (COMPUTED_KEYS.has(key)) {
+                    // skip – covered by individual component keys
+                } else if (SNAPSHOT_KEYS.has(key)) {
+                    result.costByModel[key] = Math.max(result.costByModel[key] ?? 0, cost);
+                } else {
+                    result.totalCost += cost;
+                    result.costByModel[key] = (result.costByModel[key] || 0) + cost;
+                }
             }
         }
     }

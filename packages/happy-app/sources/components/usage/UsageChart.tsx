@@ -2,7 +2,7 @@ import React from 'react';
 import { View, ScrollView, Pressable } from 'react-native';
 import { Text } from '@/components/StyledText';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { UsageDataPoint } from '@/sync/apiUsage';
+import { UsageDataPoint, SNAPSHOT_KEYS } from '@/sync/apiUsage';
 
 interface UsageChartProps {
     data: UsageDataPoint[];
@@ -75,11 +75,11 @@ export const UsageChart: React.FC<UsageChartProps> = ({
     
     // Calculate max value for scaling
     const getValueForDataPoint = (point: UsageDataPoint): number => {
-        if (metric === 'tokens') {
-            return Object.values(point.tokens).reduce((sum, val) => sum + (val || 0), 0);
-        } else {
-            return Object.values(point.cost).reduce((sum, val) => sum + (val || 0), 0);
-        }
+        const entries = metric === 'tokens' ? point.tokens : point.cost;
+        return Object.entries(entries).reduce((sum, [key, val]) => {
+            if (key === 'total' || SNAPSHOT_KEYS.has(key)) return sum;
+            return sum + (val || 0);
+        }, 0);
     };
     
     const maxValue = Math.max(...data.map(getValueForDataPoint), 1);
