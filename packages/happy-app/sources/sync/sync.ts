@@ -109,6 +109,7 @@ class Sync {
     private activityAccumulator: ActivityUpdateAccumulator;
     private pendingSettings: Partial<Settings> = loadPendingSettings();
     private appState: AppStateStatus = AppState.currentState;
+    private appStateSubscription: ReturnType<typeof AppState.addEventListener> | null = null;
     private backgroundSendTimeout: ReturnType<typeof setTimeout> | null = null;
     private backgroundSendNotificationId: string | null = null;
     private backgroundSendStartedAt: number | null = null;
@@ -145,8 +146,12 @@ class Sync {
         this.pushTokenSync = new InvalidateSync(registerPushToken);
         this.activityAccumulator = new ActivityUpdateAccumulator(this.flushActivityUpdates.bind(this), 2000);
 
+        // Remove any previously registered listener (e.g. after Metro hot reload)
+        // before adding a new one, so listeners don't accumulate.
+        this.appStateSubscription?.remove();
+
         // Listen for app state changes to refresh purchases
-        AppState.addEventListener('change', (nextAppState) => {
+        this.appStateSubscription = AppState.addEventListener('change', (nextAppState) => {
             this.appState = nextAppState;
             if (nextAppState === 'active') {
                 const shouldFailAfterResume = this.backgroundSendStartedAt !== null
@@ -159,6 +164,9 @@ class Sync {
                     this.failPendingOutboxMessages('Message failed to send in background after 30s. Please retry.');
                 }
                 log.log('📱 App became active');
+                // Reconnect or probe the socket before invalidating syncs so
+                // the data fetches have a live connection to use.
+                apiSocket.resumeReconnection();
                 this.purchasesSync.invalidate();
                 this.profileSync.invalidate();
                 this.machinesSync.invalidate();
@@ -172,6 +180,9 @@ class Sync {
                 this.feedSync.invalidate();
             } else {
                 log.log(`📱 App state changed to: ${nextAppState}`);
+                // Stop reconnection timers while suspended to avoid waking the
+                // JS thread unnecessarily. A live connected socket is preserved.
+                apiSocket.pauseReconnection();
                 this.maybeStartBackgroundSendWatchdog();
             }
         });
