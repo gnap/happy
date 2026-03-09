@@ -10,6 +10,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { homedir } from 'node:os';
 import { EventEmitter } from 'node:events';
 import { logger } from '@/ui/logger';
 import type { CursorStreamMessage } from './types';
@@ -118,11 +119,13 @@ export class CursorProcess extends EventEmitter {
     const spawnCmd = isLinux ? 'stdbuf' : 'script';
     const spawnArgs = isLinux ? ['-o0', 'script', ...scriptArgs] : scriptArgs;
 
+    // Run with CWD = user home so shell/relative paths are from home; --workspace already points at session directory.
+    const processCwd = homedir();
     return new Promise<void>((resolve, reject) => {
       let subprocessError: Error | null = null;
       const child = spawn(spawnCmd, spawnArgs, {
         stdio: ['ignore', 'pipe', 'pipe'],
-        cwd: this.options.cwd,
+        cwd: processCwd,
         env: {
           ...process.env,
           ...this.options.env,
