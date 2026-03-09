@@ -245,6 +245,76 @@ class ApiSocket {
     }
 
     //
+    // Background / Foreground Lifecycle
+    //
+
+    /**
+     * Called when the app goes to background.
+     * If not currently connected, tears down the socket entirely so socket.io's
+     * reconnection timers don't fire while the JS thread is suspended by iOS.
+     * A live connected socket is left intact so the OS can keep it open.
+     */
+    pauseReconnection() {
+        if (this.currentStatus !== 'connected') {
+            this.disconnect();
+        }
+    }
+
+    /**
+     * Called when the app comes back to foreground.
+     * - If connected: sends an application-level ping to verify the connection
+     *   is still alive (silent TCP drops during iOS suspend are common). Forces
+     *   a reconnect if no pong arrives within 5 seconds.
+     * - If not connected (and not already in progress): creates a fresh socket
+     *   immediately, resetting socket.io's exponential backoff from scratch.
+     * - If connecting: leaves the in-progress attempt alone.
+     */
+    resumeReconnection() {
+        if (this.currentStatus === 'connected' && this.socket?.connected) {
+            this.probeConnection();
+        } else if (this.currentStatus !== 'connecting') {
+            // Ensure clean state, then connect immediately (new socket = backoff reset).
+            if (this.socket) {
+                this.socket.removeAllListeners();
+                this.socket.disconnect();
+                this.socket = null;
+            }
+            this.reconnectionDisabled = false;
+            this.connect();
+        }
+        // 'connecting': in-progress attempt, leave it alone.
+    }
+
+    /**
+     * Emits an application-level ping and waits for the server ACK.
+     * If no response within timeoutMs the connection is treated as stale and
+     * a fresh reconnect is forced.
+     */
+    private probeConnection(timeoutMs = 5000) {
+        if (!this.socket) return;
+        let settled = false;
+
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            this.disconnect();
+            this.connect();
+        }, timeoutMs);
+
+        try {
+            this.socket.emit('ping', () => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+            });
+        } catch {
+            clearTimeout(timer);
+            this.disconnect();
+            this.connect();
+        }
+    }
+
+    //
     // Private Methods
     //
 
