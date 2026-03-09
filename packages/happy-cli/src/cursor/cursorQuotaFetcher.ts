@@ -149,16 +149,11 @@ export async function fetchCursorUsageSummary(accessToken: string): Promise<Curs
     const individual = json.individualUsage as Record<string, unknown> | undefined;
     if (individual?.plan && typeof individual.plan === 'object') {
       const p = individual.plan as Record<string, unknown>;
-      const used = (p.used as number) ?? 0;
-      // Cursor returns breakdown.total = included + bonus, which is the real cap.
-      // p.limit only reflects the included quota and may show 0 remaining even when bonus is available.
-      const breakdown = p.breakdown as Record<string, unknown> | undefined;
-      const totalLimit = typeof breakdown?.total === 'number' ? breakdown.total : ((p.limit as number) ?? 0);
       planUsage = {
         enabled: (p.enabled as boolean) ?? false,
-        used,
-        limit: totalLimit,
-        remaining: Math.max(0, totalLimit - used),
+        used: (p.used as number) ?? 0,
+        limit: (p.limit as number) ?? 0,
+        remaining: (p.remaining as number) ?? 0,
         totalPercentUsed: (p.totalPercentUsed as number) ?? 0,
         autoPercentUsed: (p.autoPercentUsed as number) ?? 0,
         apiPercentUsed: (p.apiPercentUsed as number) ?? 0,
@@ -263,25 +258,21 @@ export function buildCursorUsageReportPayload(info: CursorQuotaInfo): {
   cost: { total: number; [key: string]: number };
 } {
   const planUsed = info.planUsage?.used ?? 0;
-  const planRemaining = info.planUsage?.remaining ?? 0;
   const planLimit = info.planUsage?.limit ?? 0;
   const onDemandUsedCents = info.onDemandUsage?.used ?? 0;
   const onDemandLimit = info.onDemandUsage?.limit;
-  const onDemandRemaining = info.onDemandUsage?.remaining;
 
   const tokens: { total: number; [key: string]: number } = {
     total: planUsed,
-    plan_requests_used: planUsed,
-    plan_requests_remaining: planRemaining,
-    plan_requests_limit: planLimit,
+    plan_used: planUsed,
+    plan_limit: planLimit,
   };
 
   const cost: { total: number; [key: string]: number } = {
     total: onDemandUsedCents,
-    on_demand_cents: onDemandUsedCents,
+    on_demand_used_cents: onDemandUsedCents,
   };
-  if (onDemandLimit != null) cost.on_demand_limit = onDemandLimit;
-  if (onDemandRemaining != null) cost.on_demand_remaining = onDemandRemaining;
+  if (onDemandLimit != null) cost.on_demand_limit_cents = onDemandLimit;
 
   return { tokens, cost };
 }
