@@ -57,3 +57,4 @@ progress*.txt
 .cursor/mcp.json
 # Happy local cache
 .happy/
+.memory/

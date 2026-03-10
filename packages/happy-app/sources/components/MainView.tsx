@@ -3,7 +3,7 @@ import { View, ActivityIndicator, Text, Pressable } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useFriendRequests, useSocketStatus, useRealtimeStatus } from '@/sync/storage';
 import { useVisibleSessionListViewData } from '@/hooks/useVisibleSessionListViewData';
-import { useIsTablet } from '@/utils/responsive';
+import { useIsTablet, useHasSidebar } from '@/utils/responsive';
 import { useRouter } from 'expo-router';
 import { EmptySessionsTablet } from './EmptySessionsTablet';
 import { SessionsList } from './SessionsList';
@@ -233,6 +233,7 @@ export const MainView = React.memo(({ variant }: MainViewProps) => {
     const { theme } = useUnistyles();
     const sessionListViewData = useVisibleSessionListViewData();
     const isTablet = useIsTablet();
+    const hasSidebar = useHasSidebar();
     const router = useRouter();
     const friendRequests = useFriendRequests();
     const realtimeStatus = useRealtimeStatus();
@@ -295,8 +296,8 @@ export const MainView = React.memo(({ variant }: MainViewProps) => {
     }
 
     // Phone variant
-    // Tablet in phone mode - special case (when showing index view on tablets, show empty view)
-    if (isTablet) {
+    // Tablet/desktop in phone mode - special case (when showing index view, show empty view)
+    if (hasSidebar) {
         // Just show an empty view on tablets for the index view
         // The sessions list is shown in the sidebar, so the main area should be blank
         return <View style={styles.emptyStateContentContainer} />;

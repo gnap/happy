@@ -209,12 +209,16 @@ export function SessionsList() {
     const router = useRouter();
     const selectable = isTablet;
     const experiments = useSetting('experiments');
-    const dataWithSelected = selectable ? React.useMemo(() => {
-        return data?.map(item => ({
+    // Always call useMemo unconditionally to satisfy Rules of Hooks.
+    // When selectable is false the memo result is discarded in favour of raw data.
+    const dataWithSelectedMemo = React.useMemo(() => {
+        if (!selectable || !data) return null;
+        return data.map(item => ({
             ...item,
             selected: pathname.startsWith(`/session/${item.type === 'session' ? item.session.id : ''}`)
         }));
-    }, [data, pathname]) : data;
+    }, [selectable, data, pathname]);
+    const dataWithSelected = selectable ? dataWithSelectedMemo : data;
 
     // Request review
     React.useEffect(() => {

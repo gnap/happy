@@ -1,7 +1,7 @@
 import 'react-native-quick-base64';
 import '../theme.css';
 
-// Polyfill for WebKit2GTK (Linux/Tauri): screen.orientation is undefined
+// Polyfill for WebKit2GTK (Linux/Tauri): screen.orientation is not implemented.
 if (typeof screen !== 'undefined' && !screen.orientation) {
   Object.defineProperty(screen, 'orientation', {
     value: {
@@ -18,6 +18,7 @@ if (typeof screen !== 'undefined' && !screen.orientation) {
     configurable: true,
   });
 }
+
 import * as React from 'react';
 import * as SplashScreen from 'expo-splash-screen';
 import * as Fonts from 'expo-font';
@@ -30,6 +31,7 @@ import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { initialWindowMetrics, SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SidebarNavigator } from '@/components/SidebarNavigator';
+import { SidebarProvider } from '@/components/SidebarContext';
 import sodium from '@/encryption/libsodium.lib';
 import { View, Platform } from 'react-native';
 import { ModalProvider } from '@/modal';
@@ -248,11 +250,13 @@ export default function RootLayout() {
                             <StatusBarProvider />
                             <ModalProvider>
                                 <CommandPaletteProvider>
-                                    <RealtimeProvider>
-                                        <HorizontalSafeAreaWrapper>
-                                            <SidebarNavigator />
-                                        </HorizontalSafeAreaWrapper>
-                                    </RealtimeProvider>
+                                    <SidebarProvider>
+                                        <RealtimeProvider>
+                                            <HorizontalSafeAreaWrapper>
+                                                <SidebarNavigator />
+                                            </HorizontalSafeAreaWrapper>
+                                        </RealtimeProvider>
+                                    </SidebarProvider>
                                 </CommandPaletteProvider>
                             </ModalProvider>
                         </ThemeProvider>

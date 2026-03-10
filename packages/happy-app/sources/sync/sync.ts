@@ -14,7 +14,7 @@ import * as Notifications from 'expo-notifications';
 import * as Network from 'expo-network';
 import { registerPushToken } from './apiPush';
 import { Platform, AppState, type AppStateStatus } from 'react-native';
-import { isRunningOnMac } from '@/utils/platform';
+import { isRunningOnMac, isRunningInTauri } from '@/utils/platform';
 import { NormalizedMessage, normalizeRawMessage, RawRecord } from './typesRaw';
 import type { MessageMeta } from './typesMessageMeta';
 import { applySettings, Settings, settingsDefaults, settingsParse, SUPPORTED_SCHEMA_VERSION } from './settings';
@@ -173,17 +173,7 @@ class Sync {
                 // Reconnect or probe the socket before invalidating syncs so
                 // the data fetches have a live connection to use.
                 apiSocket.resumeReconnection();
-                this.purchasesSync.invalidate();
-                this.profileSync.invalidate();
-                this.machinesSync.invalidate();
-                this.pushTokenSync.invalidate();
-                this.sessionsSync.invalidate();
-                this.nativeUpdateSync.invalidate();
-                log.log('📱 App became active: Invalidating artifacts sync');
-                this.artifactsSync.invalidate();
-                this.friendsSync.invalidate();
-                this.friendRequestsSync.invalidate();
-                this.feedSync.invalidate();
+                this.#invalidateAllSyncs();
             } else {
                 log.log(`📱 App state changed to: ${nextAppState}`);
                 // Stop reconnection timers while suspended to avoid waking the
@@ -220,6 +210,62 @@ class Sync {
                     // connected. The underlying TCP connection may have been silently
                     // dropped; probe immediately to confirm liveness.
                     log.log(`🌐 Network interface changed (${prevType} → ${type}), probing connection`);
+                    apiSocket.resumeReconnection();
+                }
+            });
+        }
+
+        // On web/Tauri, AppState never fires — bridge window visibility and OS
+        // focus events to the same pause/resume logic used on iOS.
+        if (Platform.OS === 'web') {
+            this.#setupDesktopLifecycle();
+        }
+    }
+
+    /** Invalidate all data syncs (called on app resume / window becoming visible). */
+    #invalidateAllSyncs() {
+        this.purchasesSync.invalidate();
+        this.profileSync.invalidate();
+        this.machinesSync.invalidate();
+        this.pushTokenSync.invalidate();
+        this.sessionsSync.invalidate();
+        this.nativeUpdateSync.invalidate();
+        log.log('🖥️ Invalidating artifacts sync');
+        this.artifactsSync.invalidate();
+        this.friendsSync.invalidate();
+        this.friendRequestsSync.invalidate();
+        this.feedSync.invalidate();
+    }
+
+    /**
+     * Desktop (Tauri / browser) lifecycle management.
+     *
+     * visibilitychange is the primary signal:
+     *   hidden  → pauseReconnection  (window minimised or tab hidden)
+     *   visible → resumeReconnection + full sync invalidation
+     *
+     * Tauri WINDOW_FOCUS fires when the OS window regains focus without a
+     * visibility change (window was visible but behind another app). We only
+     * probe the socket here — no full invalidation needed.
+     */
+    async #setupDesktopLifecycle() {
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                log.log('🖥️ Window hidden — pausing reconnection');
+                apiSocket.pauseReconnection();
+            } else {
+                log.log('🖥️ Window visible — resuming and invalidating syncs');
+                apiSocket.resumeReconnection();
+                this.#invalidateAllSyncs();
+            }
+        });
+
+        if (isRunningInTauri()) {
+            const { getCurrentWindow } = await import('@tauri-apps/api/window');
+            const { TauriEvent } = await import('@tauri-apps/api/event');
+            getCurrentWindow().listen(TauriEvent.WINDOW_FOCUS, () => {
+                if (!document.hidden) {
+                    log.log('🖥️ Window focused (Tauri) — probing connection');
                     apiSocket.resumeReconnection();
                 }
             });

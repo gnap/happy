@@ -63,6 +63,14 @@ export function useIsTablet(): boolean {
     return deviceType === 'tablet';
 }
 
+// Hook to detect if the sidebar layout should be used.
+// Desktop (web/Tauri) always uses the sidebar regardless of window size,
+// since window resizing does not change the "device type" meaningfully.
+export function useHasSidebar(): boolean {
+    const isTablet = useIsTablet();
+    return isTablet || Platform.OS === 'web';
+}
+
 // Hook to detect landscape orientation
 export function useIsLandscape(): boolean {
     const { width, height } = useWindowDimensions();

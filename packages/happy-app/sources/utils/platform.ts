@@ -17,3 +17,7 @@ export function isRunningOnMac(): boolean {
     return Platform.isPad && Platform.Version && typeof Platform.Version === 'string' && 
            Platform.Version.includes('Mac');
 }
+
+export function isRunningInTauri(): boolean {
+    return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+}

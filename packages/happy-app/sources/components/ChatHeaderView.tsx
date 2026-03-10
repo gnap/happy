@@ -5,9 +5,10 @@ import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { Avatar } from '@/components/Avatar';
 import { Typography } from '@/constants/Typography';
-import { useHeaderHeight } from '@/utils/responsive';
+import { useHeaderHeight, useHasSidebar } from '@/utils/responsive';
 import { layout } from '@/components/layout';
 import { useUnistyles } from 'react-native-unistyles';
+import { useSidebar } from './SidebarContext';
 
 interface ChatHeaderViewProps {
     title: string;
@@ -34,6 +35,8 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
     const navigation = useNavigation();
     const insets = useSafeAreaInsets();
     const headerHeight = useHeaderHeight();
+    const hasSidebar = useHasSidebar();
+    const sidebar = useSidebar();
 
     const handleBackPress = () => {
         if (onBackPress) {
@@ -43,17 +46,31 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
         }
     };
 
+    const handleSidebarToggle = React.useCallback(() => {
+        sidebar?.toggleSidebar();
+    }, [sidebar]);
+
     return (
         <View style={[styles.container, { paddingTop: insets.top, backgroundColor: theme.colors.header.background }]}>
             <View style={styles.contentWrapper}>
                 <View style={[styles.content, { height: headerHeight }]}>
-                <Pressable onPress={handleBackPress} style={styles.backButton} hitSlop={15}>
-                    <Ionicons
-                        name={Platform.OS === 'ios' ? 'chevron-back' : 'arrow-back'}
-                        size={Platform.select({ ios: 28, default: 24 })}
-                        color={theme.colors.header.tint}
-                    />
-                </Pressable>
+                {hasSidebar && sidebar ? (
+                    <Pressable onPress={handleSidebarToggle} style={styles.backButton} hitSlop={15}>
+                        <Ionicons
+                            name={sidebar.isCollapsed ? 'menu-outline' : 'arrow-back-circle-outline'}
+                            size={24}
+                            color={theme.colors.header.tint}
+                        />
+                    </Pressable>
+                ) : (
+                    <Pressable onPress={handleBackPress} style={styles.backButton} hitSlop={15}>
+                        <Ionicons
+                            name={Platform.OS === 'ios' ? 'chevron-back' : 'arrow-back'}
+                            size={Platform.select({ ios: 28, default: 24 })}
+                            color={theme.colors.header.tint}
+                        />
+                    </Pressable>
+                )}
                 
                 <View style={styles.titleContainer}>
                     <Text
