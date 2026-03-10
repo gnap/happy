@@ -11,6 +11,7 @@ import { InvalidateSync } from '@/utils/sync';
 import { ActivityUpdateAccumulator } from './reducer/activityUpdateAccumulator';
 import { randomUUID } from 'expo-crypto';
 import * as Notifications from 'expo-notifications';
+import * as Network from 'expo-network';
 import { registerPushToken } from './apiPush';
 import { Platform, AppState, type AppStateStatus } from 'react-native';
 import { isRunningOnMac } from '@/utils/platform';
@@ -110,6 +111,9 @@ class Sync {
     private pendingSettings: Partial<Settings> = loadPendingSettings();
     private appState: AppStateStatus = AppState.currentState;
     private appStateSubscription: ReturnType<typeof AppState.addEventListener> | null = null;
+    private networkStateSubscription: ReturnType<typeof Network.addNetworkStateListener> | null = null;
+    /** Last known network connectivity; null until first change event fires. */
+    private lastNetworkConnected: boolean | null = null;
     private backgroundSendTimeout: ReturnType<typeof setTimeout> | null = null;
     private backgroundSendNotificationId: string | null = null;
     private backgroundSendStartedAt: number | null = null;
@@ -186,6 +190,30 @@ class Sync {
                 this.maybeStartBackgroundSendWatchdog();
             }
         });
+
+        // Network reachability monitoring (iOS/Android only; expo-network behaves
+        // differently on web and the socket handles reconnection there anyway).
+        this.networkStateSubscription?.remove();
+        if (Platform.OS !== 'web') {
+            this.networkStateSubscription = Network.addNetworkStateListener(({ isConnected }) => {
+                const connected = isConnected ?? false;
+                const prev = this.lastNetworkConnected;
+                this.lastNetworkConnected = connected;
+
+                if (prev === null) {
+                    // First event is the current state, not a transition — skip.
+                    return;
+                }
+
+                if (connected && !prev) {
+                    log.log('🌐 Network became reachable, triggering reconnect');
+                    apiSocket.resumeReconnection();
+                } else if (!connected && prev) {
+                    log.log('🌐 Network lost, pausing reconnection');
+                    apiSocket.pauseReconnection();
+                }
+            });
+        }
     }
 
     async create(credentials: AuthCredentials, encryption: Encryption) {
