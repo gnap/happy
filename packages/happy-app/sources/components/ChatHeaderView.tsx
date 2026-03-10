@@ -9,6 +9,8 @@ import { useHeaderHeight, useHasSidebar } from '@/utils/responsive';
 import { layout } from '@/components/layout';
 import { useUnistyles } from 'react-native-unistyles';
 import { useSidebar } from './SidebarContext';
+import { isRunningInTauri } from '@/utils/platform';
+import { DESKTOP_SIDEBAR_WIDTH } from './SidebarNavigator';
 
 interface ChatHeaderViewProps {
     title: string;
@@ -46,12 +48,65 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
         }
     };
 
+    // Sidebar toggle with Tauri window resize sequenced correctly:
+    //   Expand → resize window first (grows left), then show sidebar (no content shrink flash)
+    //   Collapse → hide sidebar first, then resize window (no content grow flash... minimal)
+    const handleSidebarToggle = React.useCallback(() => {
+        if (!sidebar) return;
+        const willCollapse = !sidebar.isCollapsed;
+
+        if (!isRunningInTauri()) {
+            sidebar.toggleSidebar();
+            return;
+        }
+
+        (async () => {
+            try {
+                const [{ getCurrentWindow }, { PhysicalSize, PhysicalPosition }] = await Promise.all([
+                    import('@tauri-apps/api/window'),
+                    import('@tauri-apps/api/dpi'),
+                ]);
+                const win = getCurrentWindow();
+
+                if (willCollapse) {
+                    // Hide sidebar first so content area is consistent before window shrinks.
+                    sidebar.setIsCollapsed(true);
+                    const [physSize, physPos, scale] = await Promise.all([
+                        win.outerSize(), win.outerPosition(), win.scaleFactor(),
+                    ]);
+                    const physDelta = Math.round(DESKTOP_SIDEBAR_WIDTH * scale);
+                    await Promise.all([
+                        win.setSize(new PhysicalSize(physSize.width - physDelta, physSize.height)),
+                        win.setPosition(new PhysicalPosition(physPos.x + physDelta, physPos.y)),
+                    ]);
+                } else {
+                    // Grow window first so the sidebar has room when it mounts.
+                    const [physSize, physPos, scale] = await Promise.all([
+                        win.outerSize(), win.outerPosition(), win.scaleFactor(),
+                    ]);
+                    const physDelta = Math.round(DESKTOP_SIDEBAR_WIDTH * scale);
+                    const newX = Math.max(0, physPos.x - physDelta);
+                    const actualDelta = physPos.x - newX;
+                    await Promise.all([
+                        win.setSize(new PhysicalSize(physSize.width + actualDelta, physSize.height)),
+                        win.setPosition(new PhysicalPosition(newX, physPos.y)),
+                    ]);
+                    // Show sidebar after window is already the right size.
+                    sidebar.setIsCollapsed(false);
+                }
+            } catch (e) {
+                console.error('[ChatHeaderView] sidebar resize failed:', e);
+                sidebar.toggleSidebar();
+            }
+        })();
+    }, [sidebar]);
+
     return (
         <View style={[styles.container, { paddingTop: insets.top, backgroundColor: theme.colors.header.background }]}>
             <View style={styles.contentWrapper}>
                 <View style={[styles.content, { height: headerHeight }]}>
                 {hasSidebar && sidebar ? (
-                    <Pressable onPress={sidebar.toggleSidebar} style={styles.backButton} hitSlop={15}>
+                    <Pressable onPress={handleSidebarToggle} style={styles.backButton} hitSlop={15}>
                         <Ionicons
                             name={sidebar.isCollapsed ? 'menu-outline' : 'arrow-back-circle-outline'}
                             size={24}

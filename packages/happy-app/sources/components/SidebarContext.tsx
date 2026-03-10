@@ -2,6 +2,7 @@ import * as React from 'react';
 
 interface SidebarContextValue {
     isCollapsed: boolean;
+    setIsCollapsed: (value: boolean) => void;
     toggleSidebar: () => void;
 }
 
@@ -11,7 +12,7 @@ export const SidebarProvider = ({ children }: { children: React.ReactNode }) => 
     const [isCollapsed, setIsCollapsed] = React.useState(false);
     const toggleSidebar = React.useCallback(() => setIsCollapsed(v => !v), []);
     return (
-        <SidebarContext.Provider value={{ isCollapsed, toggleSidebar }}>
+        <SidebarContext.Provider value={{ isCollapsed, setIsCollapsed, toggleSidebar }}>
             {children}
         </SidebarContext.Provider>
     );
