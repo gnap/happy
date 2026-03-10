@@ -53,7 +53,7 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
                 {hasSidebar && sidebar ? (
                     <Pressable onPress={sidebar.toggleSidebar} style={styles.backButton} hitSlop={15}>
                         <Ionicons
-                            name={sidebar.isCollapsed ? 'menu-outline' : 'chevron-back-outline'}
+                            name={sidebar.isCollapsed ? 'menu-outline' : 'arrow-back-circle-outline'}
                             size={24}
                             color={theme.colors.header.tint}
                         />
