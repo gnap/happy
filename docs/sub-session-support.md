@@ -84,3 +84,80 @@ Reducer：
 | 按子会话单独拉消息 | ❌ 不适用；消息按 session 拉，子会话只是主 session 消息树的一部分 |
 
 结论：**现有基础框架已经支持我们需要的「子会话」语义**（Task + sidechain + children），无需引入会话级的父子或新表，只要继续用 session 协议里的 `subagent` + tracer 的 `toolCallToMessageId` + reducer 的 sidechain 即可。
+
+---
+
+## 5. Session Metadata 支持
+
+Session 有完整的 `metadata` 字段，DB 里加密存储，带 `metadataVersion` 乐观并发控制。
+
+### 主要字段（`storageTypes.ts` / `packages/happy-cli/src/api/types.ts`）
+
+| 字段 | 说明 |
+|---|---|
+| `path` / `host` / `os` | 工作目录、主机名、操作系统 |
+| `name` | 会话自定义名称 |
+| `models` / `currentModelCode` | 可用模型列表 + 当前选中 |
+| `operatingModes` / `currentOperatingModeCode` | 操作模式（plan/act 等） |
+| `thoughtLevels` / `currentThoughtLevelCode` | 思考深度档位 |
+| `summary { text, updatedAt }` | AI 生成的会话摘要 |
+| `machineId` | 关联 Machine ID |
+| `lifecycleState` / `lifecycleStateSince` | 生命周期（running / archiveRequested / archived） |
+| `archivedBy` / `archiveReason` | 归档来源与原因 |
+| `flavor` | 会话变体标识 |
+| `sandbox` | Sandbox 配置 |
+| `tools` / `slashCommands` | CLI 可用工具列表 |
+| `hostPid` / `startedBy` | 进程 PID、启动来源（daemon / terminal） |
+
+---
+
+## 6. 用 Tag 代替 SessionId 交互
+
+`POST /v1/sessions` 是 **upsert** 语义：`tag + userId` → 已有则返回，否则新建。
+
+```typescript
+// packages/happy-cli/src/api/api.ts
+api.getOrCreateSession({ tag: 'my-project', metadata, state })
+// → 服务端: findFirst({ accountId: userId, tag }) 或 create
+```
+
+- **固定 tag**：每次启动连到同一个 session（Cursor backend 的持久化原理）
+- **`randomUUID()` tag**：每次启动新建 session（Codex / Gemini / ACP / Claude 的默认行为）
+- App 侧不暴露 tag，通过 `session.id` 导航；tag 对 App 透明
+
+---
+
+## 7. Envelope 子会话封装细节（`happy-wire/src/sessionProtocol.ts`）
+
+### Envelope 结构
+
+```typescript
+{
+  id: cuid2,           // 消息唯一 ID
+  time: number,        // 时间戳
+  role: 'user' | 'agent',
+  turn?: string,       // 所属 turn ID
+  subagent?: cuid2,    // ← 子会话标识符（有则为 sidechain）
+  ev: SessionEvent     // text / tool-call-start / tool-call-end / turn-start / turn-end / start / stop / ...
+}
+```
+
+### 约束（wire 层校验）
+- `start` / `stop` 事件必须是 `role: 'agent'`
+- `subagent` 必须是合法 cuid2
+
+### 子会话 envelope 序列
+
+```
+{ role:'agent', subagent:'<sid>', ev:{ t:'start', title:'子任务名' } }    ← 子会话开始（App 不渲染）
+{ role:'agent', subagent:'<sid>', ev:{ t:'turn-start' } }
+{ role:'agent', subagent:'<sid>', ev:{ t:'text', text:'...' } }
+{ role:'agent', subagent:'<sid>', ev:{ t:'tool-call-start', ... } }
+{ role:'agent', subagent:'<sid>', ev:{ t:'tool-call-end', ... } }
+{ role:'agent', subagent:'<sid>', ev:{ t:'turn-end', status:'completed' } }
+{ role:'agent', subagent:'<sid>', ev:{ t:'stop' } }                       ← 子会话结束（App 不渲染）
+```
+
+### 用 Session 级子会话复用现有机制的路径
+
+若想实现独立 sessionId 的子会话，可以在子 session 的发送端将 envelope 转发到父 session 的消息流并加 `subagent` tag —— App 侧零改动即可渲染子会话树。当前 `runSubagent.ts` 正是此思路：子 agent 进程复用父 session 的 `ApiSessionClient` 发送带 `subagent` 的 envelope，只是子 agent 不是独立 session 实体。
