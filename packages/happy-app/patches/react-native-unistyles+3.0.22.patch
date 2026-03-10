@@ -1,0 +1,46 @@
+diff --git a/node_modules/react-native-unistyles/lib/commonjs/web/runtime.js b/node_modules/react-native-unistyles/lib/commonjs/web/runtime.js
+index 0fb5a10..a77ea3f 100644
+--- a/node_modules/react-native-unistyles/lib/commonjs/web/runtime.js
++++ b/node_modules/react-native-unistyles/lib/commonjs/web/runtime.js
+@@ -67,7 +67,11 @@ class UnistylesRuntime {
+     if ((0, _utils.isServer)()) {
+       return _types.Orientation.Portrait;
+     }
+-    return screen.orientation.type.includes('portrait') ? _types.Orientation.Portrait : _types.Orientation.Landscape;
++    const orientationType = screen.orientation?.type;
++    if (!orientationType) {
++      return window.matchMedia('(orientation: portrait)').matches ? _types.Orientation.Portrait : _types.Orientation.Landscape;
++    }
++    return orientationType.includes('portrait') ? _types.Orientation.Portrait : _types.Orientation.Landscape;
+   }
+   get isLandscape() {
+     return this.orientation === _types.Orientation.Landscape;
+diff --git a/node_modules/react-native-unistyles/lib/module/web/runtime.js b/node_modules/react-native-unistyles/lib/module/web/runtime.js
+index f313e5e..2661ced 100644
+--- a/node_modules/react-native-unistyles/lib/module/web/runtime.js
++++ b/node_modules/react-native-unistyles/lib/module/web/runtime.js
+@@ -63,7 +63,11 @@ export class UnistylesRuntime {
+     if (isServer()) {
+       return Orientation.Portrait;
+     }
+-    return screen.orientation.type.includes('portrait') ? Orientation.Portrait : Orientation.Landscape;
++    const orientationType = screen.orientation?.type;
++    if (!orientationType) {
++      return window.matchMedia('(orientation: portrait)').matches ? Orientation.Portrait : Orientation.Landscape;
++    }
++    return orientationType.includes('portrait') ? Orientation.Portrait : Orientation.Landscape;
+   }
+   get isLandscape() {
+     return this.orientation === Orientation.Landscape;
+diff --git a/node_modules/react-native-unistyles/lib/module/web/utils/.index.js.swn b/node_modules/react-native-unistyles/lib/module/web/utils/.index.js.swn
+new file mode 100644
+index 0000000..2842e57
+Binary files /dev/null and b/node_modules/react-native-unistyles/lib/module/web/utils/.index.js.swn differ
+diff --git a/node_modules/react-native-unistyles/lib/module/web/utils/.index.js.swo b/node_modules/react-native-unistyles/lib/module/web/utils/.index.js.swo
+new file mode 100644
+index 0000000..8abdc4b
+Binary files /dev/null and b/node_modules/react-native-unistyles/lib/module/web/utils/.index.js.swo differ
+diff --git a/node_modules/react-native-unistyles/lib/module/web/utils/.index.js.swp b/node_modules/react-native-unistyles/lib/module/web/utils/.index.js.swp
+new file mode 100644
+index 0000000..1bf742c
+Binary files /dev/null and b/node_modules/react-native-unistyles/lib/module/web/utils/.index.js.swp differ

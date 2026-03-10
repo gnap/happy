@@ -1,6 +1,6 @@
 import { useSocketStatus, useFriendRequests, useSettings, useSessions } from '@/sync/storage';
 import * as React from 'react';
-import { Text, View, Pressable, useWindowDimensions } from 'react-native';
+import { Text, View, Pressable, Platform, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useHeaderHeight } from '@/utils/responsive';
@@ -299,7 +299,7 @@ export const SidebarView = React.memo(() => {
                 )}
                 <MainView variant="sidebar" />
             </View>
-            {!hasSessions && <FABWide onPress={handleNewSession} />}
+            {!hasSessions && Platform.OS !== 'web' && <FABWide onPress={handleNewSession} />}
         </>
     )
 });

@@ -67,6 +67,11 @@ config.server.rewriteRequestUrl = (url) => {
   return typeof expoRewrite === "function" ? expoRewrite(decoded) : decoded;
 };
 
+// Exclude Rust/Tauri build artifacts from module resolution.
+// For dev mode, use CARGO_TARGET_DIR=/tmp/... to keep Rust build output
+// outside the project tree entirely, preventing FallbackWatcher crashes.
+config.resolver.blockList = [/src-tauri[/\\]target[/\\].*/];
+
 // Add support for .wasm files (required by Skia for all platforms)
 // Source: https://shopify.github.io/react-native-skia/docs/getting-started/installation/
 config.resolver.assetExts.push('wasm');

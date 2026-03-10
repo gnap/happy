@@ -12,13 +12,11 @@ export const DESKTOP_SIDEBAR_WIDTH = 280;
 
 // ─── Desktop layout (web / Tauri) ────────────────────────────────────────────
 //
-// Layout: [sidebar (fixed width) | content (flex:1)]
-//
-// Window resize is handled by ChatHeaderView's toggle button so the sequencing
-// (resize-then-setState for expand, setState-then-resize for collapse) can be
-// controlled precisely. This component just reflects the current isCollapsed
-// state and does NOT subscribe to useWindowDimensions to avoid spurious
-// re-renders triggered by the window resize itself.
+// Standard side-by-side layout: [sidebar | content].
+// On Wayland, window position cannot be controlled by the app, so we don't
+// attempt to resize or reposition the window. The sidebar simply shows/hides
+// and the content area takes the remaining space — the same behaviour as most
+// desktop apps (VS Code, Slack, etc.).
 //
 const DesktopLayout = React.memo(() => {
     const auth = useAuth();
