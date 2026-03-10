@@ -592,7 +592,7 @@ class Sync {
         this.backgroundSendStartedAt = null;
     }
 
-    async sendMessage(sessionId: string, text: string, displayText?: string) {
+    async sendMessage(sessionId: string, text: string, displayText?: string, existingLocalId?: string) {
 
         // Get encryption
         const encryption = this.encryption.getSessionEncryption(sessionId);
@@ -610,10 +610,11 @@ class Sync {
 
         const { permissionMode, model } = resolveMessageModeMeta(session);
 
-        // Generate local ID
-        const localId = randomUUID();
+        // Reuse existing localId on retry so the same bubble is reused; generate fresh one otherwise.
+        const localId = existingLocalId ?? randomUUID();
 
-        // Track in outbox immediately (before encryption, so UI shows "sending" right away)
+        // Track in outbox immediately (before encryption, so UI shows "sending" right away).
+        // addOutboxEntry is keyed by localId, so this resets a 'failed' entry back to 'sending'.
         storage.getState().addOutboxEntry({ localId, sessionId, text, displayText, createdAt: Date.now() });
 
         // Track sent text → localId so we can re-attach localId when the session-envelope echo
@@ -677,7 +678,10 @@ class Sync {
         // Apply the optimistic message directly (bypass the queue/lock) so it appears in the UI
         // immediately without waiting for fetchMessages to release its lock.
         // applyMessages is a synchronous Zustand set, safe to call from any context.
-        this.applyMessages(sessionId, [optimisticMessage]);
+        // Skip on retry (existingLocalId set): the bubble is already in the list.
+        if (!existingLocalId) {
+            this.applyMessages(sessionId, [optimisticMessage]);
+        }
 
         let pending = this.pendingOutbox.get(sessionId);
         if (!pending) {
@@ -1831,14 +1835,15 @@ class Sync {
 
     /**
      * Retry a previously failed outbox message identified by its localId.
+     * Reuses the same localId so the existing bubble is reused (no duplicate).
      */
     retryMessage = async (localId: string): Promise<void> => {
         const entry = storage.getState().outbox[localId];
         if (!entry || entry.status !== 'failed') return;
 
-        // Remove the failed entry and re-send via the normal path
-        storage.getState().removeOutboxEntry(localId);
-        await this.sendMessage(entry.sessionId, entry.text, entry.displayText);
+        // Pass existingLocalId so sendMessage resets the outbox entry to 'sending'
+        // and skips creating a second optimistic bubble.
+        await this.sendMessage(entry.sessionId, entry.text, entry.displayText, localId);
     }
 
     /**
@@ -1933,8 +1938,11 @@ class Sync {
 
                 // Only show the loading indicator now that we know a network request is needed.
                 // Cold-start uses the full-screen loader (isLoaded=false), not this bottom spinner.
+                // Skip the spinner when the seq increment is caused by our own outgoing message
+                // (already shown optimistically) — avoids a spurious flash while the send is in flight.
                 const alreadyLoaded = storage.getState().sessionMessages[sessionId]?.isLoaded ?? false;
-                if (alreadyLoaded) {
+                const hasPendingOutbox = (this.pendingOutbox.get(sessionId)?.length ?? 0) > 0;
+                if (alreadyLoaded && !hasPendingOutbox) {
                     storage.getState().setFetching(sessionId, true);
                 }
 
