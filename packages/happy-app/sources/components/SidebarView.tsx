@@ -1,4 +1,4 @@
-import { useSocketStatus, useFriendRequests, useSettings } from '@/sync/storage';
+import { useSocketStatus, useFriendRequests, useSettings, useSessions } from '@/sync/storage';
 import * as React from 'react';
 import { Text, View, Pressable, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -140,6 +140,8 @@ export const SidebarView = React.memo(() => {
     const friendRequests = useFriendRequests();
     const inboxHasContent = useInboxHasContent();
     const settings = useSettings();
+    const sessions = useSessions();
+    const hasSessions = sessions != null && sessions.length > 0;
 
     // Compute connection status once per render (theme-reactive, no stale memoization)
     const connectionStatus = (() => {
@@ -297,7 +299,7 @@ export const SidebarView = React.memo(() => {
                 )}
                 <MainView variant="sidebar" />
             </View>
-            <FABWide onPress={handleNewSession} />
+            {!hasSessions && <FABWide onPress={handleNewSession} />}
         </>
     )
 });

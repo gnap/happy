@@ -30,6 +30,7 @@ import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { initialWindowMetrics, SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SidebarNavigator } from '@/components/SidebarNavigator';
+import { SidebarProvider } from '@/components/SidebarContext';
 import sodium from '@/encryption/libsodium.lib';
 import { View, Platform } from 'react-native';
 import { ModalProvider } from '@/modal';
@@ -248,11 +249,13 @@ export default function RootLayout() {
                             <StatusBarProvider />
                             <ModalProvider>
                                 <CommandPaletteProvider>
-                                    <RealtimeProvider>
-                                        <HorizontalSafeAreaWrapper>
-                                            <SidebarNavigator />
-                                        </HorizontalSafeAreaWrapper>
-                                    </RealtimeProvider>
+                                    <SidebarProvider>
+                                        <RealtimeProvider>
+                                            <HorizontalSafeAreaWrapper>
+                                                <SidebarNavigator />
+                                            </HorizontalSafeAreaWrapper>
+                                        </RealtimeProvider>
+                                    </SidebarProvider>
                                 </CommandPaletteProvider>
                             </ModalProvider>
                         </ThemeProvider>

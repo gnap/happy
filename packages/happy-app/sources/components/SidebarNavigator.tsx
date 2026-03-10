@@ -1,15 +1,18 @@
 import { useAuth } from '@/auth/AuthContext';
 import * as React from 'react';
 import { Drawer } from 'expo-router/drawer';
-import { useIsTablet } from '@/utils/responsive';
+import { useHasSidebar } from '@/utils/responsive';
 import { SidebarView } from './SidebarView';
 import { Slot } from 'expo-router';
 import { useWindowDimensions } from 'react-native';
+import { useSidebar } from './SidebarContext';
 
-export const SidebarNavigator = React.memo(() => {
+const SidebarNavigatorInner = React.memo(() => {
     const auth = useAuth();
-    const isTablet = useIsTablet();
-    const showPermanentDrawer = auth.isAuthenticated && isTablet;
+    const hasSidebar = useHasSidebar();
+    const sidebar = useSidebar();
+    const isCollapsed = sidebar?.isCollapsed ?? false;
+    const showPermanentDrawer = auth.isAuthenticated && hasSidebar && !isCollapsed;
     const { width: windowWidth } = useWindowDimensions();
 
     // Calculate drawer width only when needed
@@ -17,6 +20,7 @@ export const SidebarNavigator = React.memo(() => {
         if (!showPermanentDrawer) return 280; // Default width for hidden drawer
         return Math.min(Math.max(Math.floor(windowWidth * 0.3), 250), 360);
     }, [windowWidth, showPermanentDrawer]);
+
 
     const drawerNavigationOptions = React.useMemo(() => {
         if (!showPermanentDrawer) {
@@ -64,3 +68,5 @@ export const SidebarNavigator = React.memo(() => {
         />
     )
 });
+
+export const SidebarNavigator = SidebarNavigatorInner;
