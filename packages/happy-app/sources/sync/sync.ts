@@ -11,6 +11,7 @@ import { InvalidateSync } from '@/utils/sync';
 import { ActivityUpdateAccumulator } from './reducer/activityUpdateAccumulator';
 import { randomUUID } from 'expo-crypto';
 import * as Notifications from 'expo-notifications';
+import * as Network from 'expo-network';
 import { registerPushToken } from './apiPush';
 import { Platform, AppState, type AppStateStatus } from 'react-native';
 import { isRunningOnMac, isRunningInTauri } from '@/utils/platform';
