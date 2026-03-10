@@ -114,6 +114,8 @@ class Sync {
     private networkStateSubscription: ReturnType<typeof Network.addNetworkStateListener> | null = null;
     /** Last known network connectivity; null until first change event fires. */
     private lastNetworkConnected: boolean | null = null;
+    /** Last known network type; used to detect interface switches (e.g. WiFi → Cellular). */
+    private lastNetworkType: Network.NetworkStateType | null = null;
     private backgroundSendTimeout: ReturnType<typeof setTimeout> | null = null;
     private backgroundSendNotificationId: string | null = null;
     private backgroundSendStartedAt: number | null = null;
@@ -195,22 +197,30 @@ class Sync {
         // differently on web and the socket handles reconnection there anyway).
         this.networkStateSubscription?.remove();
         if (Platform.OS !== 'web') {
-            this.networkStateSubscription = Network.addNetworkStateListener(({ isConnected }) => {
+            this.networkStateSubscription = Network.addNetworkStateListener(({ isConnected, type }) => {
                 const connected = isConnected ?? false;
-                const prev = this.lastNetworkConnected;
+                const prevConnected = this.lastNetworkConnected;
+                const prevType = this.lastNetworkType;
                 this.lastNetworkConnected = connected;
+                this.lastNetworkType = type ?? null;
 
-                if (prev === null) {
+                if (prevConnected === null) {
                     // First event is the current state, not a transition — skip.
                     return;
                 }
 
-                if (connected && !prev) {
+                if (connected && !prevConnected) {
                     log.log('🌐 Network became reachable, triggering reconnect');
                     apiSocket.resumeReconnection();
-                } else if (!connected && prev) {
+                } else if (!connected && prevConnected) {
                     log.log('🌐 Network lost, pausing reconnection');
                     apiSocket.pauseReconnection();
+                } else if (connected && type !== prevType) {
+                    // Network interface switched (e.g. WiFi → Cellular) while staying
+                    // connected. The underlying TCP connection may have been silently
+                    // dropped; probe immediately to confirm liveness.
+                    log.log(`🌐 Network interface changed (${prevType} → ${type}), probing connection`);
+                    apiSocket.resumeReconnection();
                 }
             });
         }
