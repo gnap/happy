@@ -39,35 +39,39 @@ const DesktopLayout = React.memo(() => {
         if (!isRunningInTauri()) return;
 
         (async () => {
-            const [{ getCurrentWindow }, { PhysicalSize, PhysicalPosition }] = await Promise.all([
-                import('@tauri-apps/api/window'),
-                import('@tauri-apps/api/dpi'),
-            ]);
-
-            const win = getCurrentWindow();
-            const [physSize, physPos, scale] = await Promise.all([
-                win.outerSize(),
-                win.outerPosition(),
-                win.scaleFactor(),
-            ]);
-
-            // Convert the logical sidebar width to physical pixels for the OS.
-            const physDelta = Math.round(DESKTOP_SIDEBAR_WIDTH * scale);
-
-            if (isCollapsed) {
-                // Sidebar just hidden → shrink window from the left, right edge fixed.
-                await Promise.all([
-                    win.setSize(new PhysicalSize(physSize.width - physDelta, physSize.height)),
-                    win.setPosition(new PhysicalPosition(physPos.x + physDelta, physPos.y)),
+            try {
+                const [{ getCurrentWindow }, { PhysicalSize, PhysicalPosition }] = await Promise.all([
+                    import('@tauri-apps/api/window'),
+                    import('@tauri-apps/api/dpi'),
                 ]);
-            } else {
-                // Sidebar just shown → grow window to the left, right edge fixed.
-                const newX = Math.max(0, physPos.x - physDelta);
-                const actualDelta = physPos.x - newX;
-                await Promise.all([
-                    win.setSize(new PhysicalSize(physSize.width + actualDelta, physSize.height)),
-                    win.setPosition(new PhysicalPosition(newX, physPos.y)),
+
+                const win = getCurrentWindow();
+                const [physSize, physPos, scale] = await Promise.all([
+                    win.outerSize(),
+                    win.outerPosition(),
+                    win.scaleFactor(),
                 ]);
+
+                // Convert the logical sidebar width to physical pixels for the OS.
+                const physDelta = Math.round(DESKTOP_SIDEBAR_WIDTH * scale);
+
+                if (isCollapsed) {
+                    // Sidebar just hidden → shrink window from the left, right edge fixed.
+                    await Promise.all([
+                        win.setSize(new PhysicalSize(physSize.width - physDelta, physSize.height)),
+                        win.setPosition(new PhysicalPosition(physPos.x + physDelta, physPos.y)),
+                    ]);
+                } else {
+                    // Sidebar just shown → grow window to the left, right edge fixed.
+                    const newX = Math.max(0, physPos.x - physDelta);
+                    const actualDelta = physPos.x - newX;
+                    await Promise.all([
+                        win.setSize(new PhysicalSize(physSize.width + actualDelta, physSize.height)),
+                        win.setPosition(new PhysicalPosition(newX, physPos.y)),
+                    ]);
+                }
+            } catch (e) {
+                console.error('[SidebarNavigator] window resize failed:', e);
             }
         })();
     }, [isCollapsed]);
