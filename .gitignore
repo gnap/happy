@@ -62,6 +62,6 @@ progress*.txt
 
 # Local agent runtime data
 .happy/
-
 # OpenCode trace output (script is committed, output is not)
 docs/competition/opencode/traces/
+.memory/
