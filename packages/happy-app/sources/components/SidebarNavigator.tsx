@@ -9,10 +9,10 @@ import { useSidebar } from './SidebarContext';
 
 // ─── Desktop layout (web / Tauri) ────────────────────────────────────────────
 //
-// The sidebar occupies a fixed-width column that is ALWAYS reserved in the
-// flex row, so toggling its visibility never changes the content area's width.
-// When collapsed the sidebar content slides off-screen via translateX while
-// the reserved column remains, giving the "session size unchanged" effect.
+// Sidebar width animates via CSS transition so the content area expands /
+// contracts smoothly without a jarring layout jump. The inner fixed-width
+// wrapper keeps SidebarView from distorting during the width animation while
+// overflow:hidden clips it cleanly.
 //
 const DesktopLayout = React.memo(() => {
     const auth = useAuth();
@@ -27,18 +27,17 @@ const DesktopLayout = React.memo(() => {
 
     return (
         <View style={{ flex: 1, flexDirection: 'row' }}>
-            {/* Reserved sidebar column — width never changes */}
-            <View style={{ width: drawerWidth, overflow: 'hidden' }}>
-                {/* Sidebar slides in/out without affecting sibling layout */}
-                <View style={{
-                    position: 'absolute',
-                    left: 0, right: 0, top: 0, bottom: 0,
-                    transform: [{ translateX: isCollapsed ? -drawerWidth : 0 }],
-                }}>
+            {/* Animated sidebar column — width transitions, content expands to fill */}
+            <View style={[
+                { width: isCollapsed ? 0 : drawerWidth, overflow: 'hidden' },
+                { transition: 'width 250ms ease-in-out' } as any,
+            ]}>
+                {/* Fixed-width inner prevents SidebarView from distorting during animation */}
+                <View style={{ width: drawerWidth, flex: 1 }}>
                     <SidebarView />
                 </View>
             </View>
-            {/* Content — always the same width */}
+            {/* Content — flex:1, smoothly expands as sidebar shrinks */}
             <View style={{ flex: 1 }}>
                 <Slot />
             </View>
