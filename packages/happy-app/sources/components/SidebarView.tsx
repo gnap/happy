@@ -1,12 +1,11 @@
-import { useSocketStatus, useFriendRequests, useSettings, useSessions } from '@/sync/storage';
+import { useSocketStatus, useFriendRequests, useSettings } from '@/sync/storage';
 import * as React from 'react';
-import { Text, View, Pressable, Platform, useWindowDimensions } from 'react-native';
+import { Text, View, Pressable, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useHeaderHeight } from '@/utils/responsive';
 import { Typography } from '@/constants/Typography';
 import { StatusDot } from './StatusDot';
-import { FABWide } from './FABWide';
 import { VoiceAssistantStatusBar } from './VoiceAssistantStatusBar';
 import { useRealtimeStatus } from '@/sync/storage';
 import { MainView } from './MainView';
@@ -140,9 +139,6 @@ export const SidebarView = React.memo(() => {
     const friendRequests = useFriendRequests();
     const inboxHasContent = useInboxHasContent();
     const settings = useSettings();
-    const sessions = useSessions();
-    const hasSessions = sessions != null && sessions.length > 0;
-
     // Compute connection status once per render (theme-reactive, no stale memoization)
     const connectionStatus = (() => {
         const { status } = socketStatus;
@@ -299,7 +295,6 @@ export const SidebarView = React.memo(() => {
                 )}
                 <MainView variant="sidebar" />
             </View>
-            {!hasSessions && Platform.OS !== 'web' && <FABWide onPress={handleNewSession} />}
         </>
     )
 });
