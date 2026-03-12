@@ -746,12 +746,18 @@ export async function startDaemon(): Promise<void> {
     const restartSession = async (sessionId: string): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
       logger.debug(`[DAEMON RUN] Restart session: ${sessionId}`);
 
-      // Find the tracked session to get its spawn params
+      // Find in currently tracked sessions first, then fall back to recently-exited ring buffer
       let found: TrackedSession | undefined;
       for (const session of pidToTrackedSession.values()) {
         if (session.happySessionId === sessionId) {
           found = session;
           break;
+        }
+      }
+      if (!found) {
+        found = recentlyExited.slice().reverse().find((s: TrackedSession) => s.happySessionId === sessionId);
+        if (found) {
+          logger.debug(`[DAEMON RUN] Restart: session ${sessionId} found in recentlyExited (exitReason: ${found.exitReason ?? 'unknown'})`);
         }
       }
 
@@ -767,7 +773,7 @@ export async function startDaemon(): Promise<void> {
 
       const { directory, agent, sessionTag } = found;
 
-      // Kill existing process
+      // Kill existing process if still running
       stopSession(sessionId);
 
       // Wait briefly for process to die

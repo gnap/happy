@@ -444,47 +444,70 @@ export async function runCursor(opts: {
     }
   }
 
-  const handleKillSession = async () => {
-    logger.debug('[Cursor] Kill session requested');
+  /**
+   * Terminate the session.
+   *
+   * pause=true  (SIGTERM / SIGHUP / normal completion):
+   *   Set lifecycleState='paused' so the App shows the session as resumable.
+   *   Do NOT call sendSessionDeath() — the server will mark it inactive when the
+   *   WebSocket disconnects, preserving the session record for restart-session.
+   *
+   * pause=false (App RPC kill / explicit user termination):
+   *   Archive the session permanently (current behavior).
+   */
+  const handleKillSession = async (pause = false) => {
+    logger.debug(`[Cursor] Kill session requested (pause=${pause})`);
     removeSessionPidFile();
     await handleAbort();
 
-    const killReason = exitSignalName ? `signal: ${exitSignalName}` : 'killed by app (RPC)';
+    const exitReason = exitSignalName ? `signal: ${exitSignalName}` : (pause ? 'paused' : 'killed by app (RPC)');
     try {
       if (session) {
-        await session.updateMetadata((currentMetadata) => ({
-          ...currentMetadata,
-          lifecycleState: 'archived',
-          lifecycleStateSince: Date.now(),
-          archivedBy: 'cli',
-          archiveReason: 'User terminated',
-        }));
-        session.sendSessionDeath();
+        if (pause) {
+          // Pause: mark as paused so App knows it can be resumed, do NOT archive
+          await session.updateMetadata((currentMetadata) => ({
+            ...currentMetadata,
+            lifecycleState: 'paused',
+            lifecycleStateSince: Date.now(),
+          }));
+          // Let the WebSocket disconnect naturally — no sendSessionDeath()
+        } else {
+          // Kill: archive permanently
+          await session.updateMetadata((currentMetadata) => ({
+            ...currentMetadata,
+            lifecycleState: 'archived',
+            lifecycleStateSince: Date.now(),
+            archivedBy: 'cli',
+            archiveReason: 'User terminated',
+          }));
+          session.sendSessionDeath();
+        }
         await session.flush();
         await session.close();
       }
       stopCaffeinate();
       happyServer.stop();
-      await notifyDaemonSessionEnding(session.sessionId, process.pid, killReason, 0);
+      await notifyDaemonSessionEnding(session.sessionId, process.pid, exitReason, 0);
       process.exit(0);
     } catch (error) {
       logger.debug('[Cursor] Error during session termination:', error);
-      await notifyDaemonSessionEnding(session.sessionId, process.pid, `${killReason} (cleanup error: ${error instanceof Error ? error.message : String(error)})`, 1);
+      await notifyDaemonSessionEnding(session.sessionId, process.pid, `${exitReason} (cleanup error: ${error instanceof Error ? error.message : String(error)})`, 1);
       process.exit(1);
     }
   };
 
   session.rpcHandlerManager.registerHandler('abort', handleAbort);
-  registerKillSessionHandler(session.rpcHandlerManager, handleKillSession);
+  // App RPC kill: permanent archive (pause=false)
+  registerKillSessionHandler(session.rpcHandlerManager, () => handleKillSession(false));
 
-  // Exit handlers: always run cleanup so server gets session-end (反注册)
+  // Signal handlers: pause so session can be resumed (pause=true)
   let exitHandled = false;
   let exitSignalName: string | null = null;
   const onExitSignal = (sig: string) => {
     exitSignalName = sig;
     if (exitHandled) return;
     exitHandled = true;
-    void handleKillSession();
+    void handleKillSession(true);
   };
   process.on('SIGTERM', () => onExitSignal('SIGTERM'));
   process.on('SIGINT', () => onExitSignal('SIGINT'));
@@ -940,12 +963,19 @@ export async function runCursor(opts: {
 
     // Report exit reason to daemon before closing (best-effort, don't block cleanup)
     if (!exitHandled) {
-      // Normal completion — the message loop exited naturally
+      // Normal completion — the message loop exited naturally; pause so it can be resumed
       notifyDaemonSessionEnding(session.sessionId, process.pid, 'completed normally (exit 0)', 0).catch(() => {});
     }
 
     try {
-      session.sendSessionDeath();
+      // Pause path (normal / signal exits are handled via handleKillSession(pause=true) above,
+      // but for safety also skip sendSessionDeath() here — just flush & close the socket cleanly.
+      // The server will mark the session inactive on websocket disconnect.
+      await session.updateMetadata((currentMetadata) => ({
+        ...currentMetadata,
+        lifecycleState: 'paused',
+        lifecycleStateSince: Date.now(),
+      }));
       await session.flush();
       await session.close();
     } catch (e) {

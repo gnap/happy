@@ -373,24 +373,31 @@ export async function runGemini(opts: {
     }
   }
 
-  const handleKillSession = async () => {
-    logger.debug('[Gemini] Kill session requested - terminating process');
+  const handleKillSession = async (pause = false) => {
+    logger.debug(`[Gemini] Kill session requested (pause=${pause})`);
     removeSessionPidFile();
     await handleAbort();
     logger.debug('[Gemini] Abort completed, proceeding with termination');
 
-    const killReason = exitSignalName ? `signal: ${exitSignalName}` : 'killed by app (RPC)';
+    const exitReason = exitSignalName ? `signal: ${exitSignalName}` : (pause ? 'paused' : 'killed by app (RPC)');
     try {
       if (session) {
-        await session.updateMetadata((currentMetadata) => ({
-          ...currentMetadata,
-          lifecycleState: 'archived',
-          lifecycleStateSince: Date.now(),
-          archivedBy: 'cli',
-          archiveReason: 'User terminated'
-        }));
-
-        session.sendSessionDeath();
+        if (pause) {
+          await session.updateMetadata((currentMetadata) => ({
+            ...currentMetadata,
+            lifecycleState: 'paused',
+            lifecycleStateSince: Date.now(),
+          }));
+        } else {
+          await session.updateMetadata((currentMetadata) => ({
+            ...currentMetadata,
+            lifecycleState: 'archived',
+            lifecycleStateSince: Date.now(),
+            archivedBy: 'cli',
+            archiveReason: 'User terminated'
+          }));
+          session.sendSessionDeath();
+        }
         await session.flush();
         await session.close();
       }
@@ -403,26 +410,27 @@ export async function runGemini(opts: {
       }
 
       logger.debug('[Gemini] Session termination complete, exiting');
-      await notifyDaemonSessionEnding(session.sessionId, process.pid, killReason, 0);
+      await notifyDaemonSessionEnding(session.sessionId, process.pid, exitReason, 0);
       process.exit(0);
     } catch (error) {
       logger.debug('[Gemini] Error during session termination:', error);
-      await notifyDaemonSessionEnding(session.sessionId, process.pid, `${killReason} (cleanup error: ${error instanceof Error ? error.message : String(error)})`, 1);
+      await notifyDaemonSessionEnding(session.sessionId, process.pid, `${exitReason} (cleanup error: ${error instanceof Error ? error.message : String(error)})`, 1);
       process.exit(1);
     }
   };
 
   session.rpcHandlerManager.registerHandler('abort', handleAbort);
-  registerKillSessionHandler(session.rpcHandlerManager, handleKillSession);
+  // App RPC kill: permanent archive (pause=false)
+  registerKillSessionHandler(session.rpcHandlerManager, () => handleKillSession(false));
 
-  // Exit handlers: always run cleanup so server gets session-end (反注册)
+  // Signal handlers: pause so session can be resumed (pause=true)
   let exitHandled = false;
   let exitSignalName: string | null = null;
   const onExitSignal = (sig: string) => {
     exitSignalName = sig;
     if (exitHandled) return;
     exitHandled = true;
-    void handleKillSession();
+    void handleKillSession(true);
   };
   process.on('SIGTERM', () => onExitSignal('SIGTERM'));
   process.on('SIGINT', () => onExitSignal('SIGINT'));
@@ -1322,7 +1330,12 @@ export async function runGemini(opts: {
     }
 
     try {
-      session.sendSessionDeath();
+      // Pause: set paused state and close cleanly (no sendSessionDeath)
+      await session.updateMetadata((currentMetadata) => ({
+        ...currentMetadata,
+        lifecycleState: 'paused',
+        lifecycleStateSince: Date.now(),
+      }));
       await session.flush();
       await session.close();
     } catch (e) {
