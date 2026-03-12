@@ -67,7 +67,7 @@ function toolResultForOutputFormat(result: unknown, isError: boolean): { content
   return { content: JSON.stringify(result ?? ''), is_error: isError };
 }
 import { createId } from '@paralleldrive/cuid2';
-import { CursorProcess } from './cursorProcess';
+import { CursorProcess, fetchCursorModels } from './cursorProcess';
 import { CursorMessageParser, type CursorParsedMessage } from './cursorMessageParser';
 import type { CursorStreamMessage, CursorMode } from './types';
 
@@ -370,6 +370,20 @@ export async function runCursor(opts: {
   writeSessionPidFile(session.sessionId);
   // Persist initial default mode so app reload can restore it
   syncModeToSessionMetadata('default', undefined);
+
+  // Query cursor-agent for available models and report to session metadata (best-effort, non-blocking)
+  fetchCursorModels().then((result) => {
+    if (!result || result.models.length === 0) {
+      logger.debug('[cursor] fetchCursorModels: no models returned, skipping metadata update');
+      return;
+    }
+    logger.debug(`[cursor] fetchCursorModels: ${result.models.length} models, current=${result.currentModelId}`);
+    session.updateMetadata((m) => ({
+      ...m,
+      models: result.models,
+      currentModelCode: m.currentModelCode ?? result.currentModelId,
+    })).catch((err) => logger.debug('[cursor] Failed to update models in session metadata', err));
+  }).catch((err) => logger.debug('[cursor] fetchCursorModels threw:', err));
 
   // Report to daemon (once at start; also retry periodically so daemon sees us if it wasn't running at start).
   // 30s interval keeps liveness TTL (90s = 3× interval) well-fed even under transient network hiccups.

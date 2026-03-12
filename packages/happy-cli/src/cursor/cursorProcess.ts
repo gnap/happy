@@ -9,7 +9,7 @@
  * - Subsequent: cursor-agent --print --output-format stream-json --force --resume <chatId> "prompt"
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import { homedir } from 'node:os';
 import { EventEmitter } from 'node:events';
 import { logger } from '@/ui/logger';
@@ -254,6 +254,72 @@ export class CursorProcess extends EventEmitter {
       }
     }
   }
+}
+
+export interface CursorModelInfo {
+  code: string;
+  value: string;
+}
+
+export interface CursorModelsResult {
+  models: CursorModelInfo[];
+  /** The currently selected model ID ('current' marker), falls back to 'default' marker, then 'auto' */
+  currentModelId: string;
+}
+
+/**
+ * Query available models from cursor-agent by running `cursor-agent models`.
+ * Parses the plain-text output (no JSON mode available).
+ * Returns null on failure (e.g. cursor-agent not installed, network error).
+ */
+export function fetchCursorModels(timeoutMs = 10_000): Promise<CursorModelsResult | null> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      logger.debug('[cursor] fetchCursorModels: timed out');
+      resolve(null);
+    }, timeoutMs);
+
+    execFile(CURSOR_AGENT_BIN, ['models'], { timeout: timeoutMs }, (err, stdout) => {
+      clearTimeout(timer);
+      if (err) {
+        logger.debug(`[cursor] fetchCursorModels error: ${err.message}`);
+        resolve(null);
+        return;
+      }
+      resolve(parseCursorModelsOutput(stdout));
+    });
+  });
+}
+
+/**
+ * Parse plain-text output of `cursor-agent models`.
+ * Lines format: `<id> - <name>` optionally followed by `  (default)` or `  (current)`.
+ */
+export function parseCursorModelsOutput(output: string): CursorModelsResult {
+  const models: CursorModelInfo[] = [];
+  let currentModelId: string | null = null;
+  let defaultModelId: string | null = null;
+
+  // Strip ANSI escape codes
+  const clean = output.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+
+  for (const rawLine of clean.split('\n')) {
+    const line = rawLine.trim();
+    const match = line.match(/^([a-zA-Z0-9][a-zA-Z0-9._-]*)\s+-\s+(.+?)(\s+\((default|current)\))?$/);
+    if (!match) continue;
+
+    const [, code, rawName, , marker] = match;
+    const value = rawName.trim();
+    models.push({ code, value });
+
+    if (marker === 'current') currentModelId = code;
+    if (marker === 'default') defaultModelId = code;
+  }
+
+  return {
+    models,
+    currentModelId: currentModelId ?? defaultModelId ?? 'auto',
+  };
 }
 
 /**
