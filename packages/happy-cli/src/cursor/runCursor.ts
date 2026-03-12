@@ -34,7 +34,7 @@ import { projectPath } from '@/projectPath';
 import { startHappyServer } from '@/claude/utils/startHappyServer';
 import { MessageBuffer } from '@/ui/ink/messageBuffer';
 import { CodexDisplay } from '@/ui/ink/CodexDisplay';
-import { notifyDaemonSessionStarted } from '@/daemon/controlClient';
+import { notifyDaemonSessionStarted, notifyDaemonSessionEnding } from '@/daemon/controlClient';
 import { registerKillSessionHandler } from '@/claude/registerKillSessionHandler';
 import { stopCaffeinate } from '@/utils/caffeinate';
 import { connectionState } from '@/utils/serverConnectionErrors';
@@ -449,6 +449,7 @@ export async function runCursor(opts: {
     removeSessionPidFile();
     await handleAbort();
 
+    const killReason = exitSignalName ? `signal: ${exitSignalName}` : 'killed by app (RPC)';
     try {
       if (session) {
         await session.updateMetadata((currentMetadata) => ({
@@ -464,9 +465,11 @@ export async function runCursor(opts: {
       }
       stopCaffeinate();
       happyServer.stop();
+      await notifyDaemonSessionEnding(session.sessionId, process.pid, killReason, 0);
       process.exit(0);
     } catch (error) {
       logger.debug('[Cursor] Error during session termination:', error);
+      await notifyDaemonSessionEnding(session.sessionId, process.pid, `${killReason} (cleanup error: ${error instanceof Error ? error.message : String(error)})`, 1);
       process.exit(1);
     }
   };
@@ -476,14 +479,16 @@ export async function runCursor(opts: {
 
   // Exit handlers: always run cleanup so server gets session-end (反注册)
   let exitHandled = false;
-  const onExitSignal = () => {
+  let exitSignalName: string | null = null;
+  const onExitSignal = (sig: string) => {
+    exitSignalName = sig;
     if (exitHandled) return;
     exitHandled = true;
     void handleKillSession();
   };
-  process.on('SIGTERM', onExitSignal);
-  process.on('SIGINT', onExitSignal);
-  process.on('SIGHUP', onExitSignal);
+  process.on('SIGTERM', () => onExitSignal('SIGTERM'));
+  process.on('SIGINT', () => onExitSignal('SIGINT'));
+  process.on('SIGHUP', () => onExitSignal('SIGHUP'));
 
   //
   // Initialize Ink UI (reuse CodexDisplay since layout is similar)
@@ -931,6 +936,12 @@ export async function runCursor(opts: {
 
     if (reconnectionHandle) {
       reconnectionHandle.cancel();
+    }
+
+    // Report exit reason to daemon before closing (best-effort, don't block cleanup)
+    if (!exitHandled) {
+      // Normal completion — the message loop exited naturally
+      notifyDaemonSessionEnding(session.sessionId, process.pid, 'completed normally (exit 0)', 0).catch(() => {});
     }
 
     try {

@@ -24,7 +24,7 @@ import { CodexDisplay } from "@/ui/ink/CodexDisplay";
 import { trimIdent } from "@/utils/trimIdent";
 import type { CodexSessionConfig } from './types';
 import { CHANGE_TITLE_INSTRUCTION } from '@/gemini/constants';
-import { notifyDaemonSessionStarted } from "@/daemon/controlClient";
+import { notifyDaemonSessionStarted, notifyDaemonSessionEnding } from "@/daemon/controlClient";
 import { registerKillSessionHandler } from "@/claude/registerKillSessionHandler";
 import { delay } from "@/utils/time";
 import { stopCaffeinate } from "@/utils/caffeinate";
@@ -286,6 +286,7 @@ export async function runCodex(opts: {
         await handleAbort();
         logger.debug('[Codex] Abort completed, proceeding with termination');
 
+        const killReason = exitSignalName ? `signal: ${exitSignalName}` : 'killed by app (RPC)';
         try {
             // Update lifecycle state to archived before closing
             if (session) {
@@ -317,9 +318,11 @@ export async function runCodex(opts: {
             happyServer.stop();
 
             logger.debug('[Codex] Session termination complete, exiting');
+            await notifyDaemonSessionEnding(session.sessionId, process.pid, killReason, 0);
             process.exit(0);
         } catch (error) {
             logger.debug('[Codex] Error during session termination:', error);
+            await notifyDaemonSessionEnding(session.sessionId, process.pid, `${killReason} (cleanup error: ${error instanceof Error ? error.message : String(error)})`, 1);
             process.exit(1);
         }
     };
@@ -331,14 +334,16 @@ export async function runCodex(opts: {
 
     // Exit handlers: always run cleanup so server gets session-end (反注册)
     let exitHandled = false;
-    const onExitSignal = () => {
+    let exitSignalName: string | null = null;
+    const onExitSignal = (sig: string) => {
+        exitSignalName = sig;
         if (exitHandled) return;
         exitHandled = true;
         void handleKillSession();
     };
-    process.on('SIGTERM', onExitSignal);
-    process.on('SIGINT', onExitSignal);
-    process.on('SIGHUP', onExitSignal);
+    process.on('SIGTERM', () => onExitSignal('SIGTERM'));
+    process.on('SIGINT', () => onExitSignal('SIGINT'));
+    process.on('SIGHUP', () => onExitSignal('SIGHUP'));
 
     //
     // Initialize Ink UI

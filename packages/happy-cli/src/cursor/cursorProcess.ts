@@ -245,17 +245,44 @@ export class CursorProcess extends EventEmitter {
       const msg = JSON.parse(trimmed) as CursorStreamMessage;
       this.emit('message', msg);
     } catch {
-      // Not JSON - could be shell error (e.g. command not found)
+      // Not JSON - could be shell error or cursor-agent user-visible error
       logger.debug(`[cursor] Non-JSON stdout line: ${trimmed.slice(0, 150)}`);
-      if (/command not found|cursor-agent.*not found|not found/i.test(trimmed)) {
-        const err = new Error(
-          'cursor-agent not found. Install Cursor CLI on this machine (see https://docs.cursor.com) or set CURSOR_AGENT_PATH to the binary path.'
-        );
-        logger.debug(`[cursor] ${err.message}`);
-        this.emit('subprocessError', err);
+      const userError = detectCursorAgentError(trimmed);
+      if (userError) {
+        logger.debug(`[cursor] ${userError.message}`);
+        this.emit('subprocessError', userError);
       }
     }
   }
+}
+
+/**
+ * Detect user-visible errors from cursor-agent Non-JSON stdout output.
+ * cursor-agent outputs these as plain text (sometimes with a short prefix like "k: " or "b: "
+ * that are ANSI escape remnants). Returns an Error if the line is a known error pattern.
+ */
+function detectCursorAgentError(line: string): Error | null {
+  // Strip leading single-char prefix artifacts (e.g. "k: ", "b: ")
+  const text = line.replace(/^[a-z]: /, '').trim();
+
+  if (/command not found|cursor-agent.*not found/i.test(text)) {
+    return new Error(
+      'cursor-agent not found. Install Cursor CLI on this machine (see https://docs.cursor.com) or set CURSOR_AGENT_PATH to the binary path.'
+    );
+  }
+  if (/Provider Error|trouble connecting to the model provider/i.test(text)) {
+    return new Error(`Model provider error: ${text}`);
+  }
+  if (/unpaid invoice/i.test(text)) {
+    return new Error(`Cursor billing error: ${text}`);
+  }
+  if (/rate limit|too many requests/i.test(text)) {
+    return new Error(`Rate limit error: ${text}`);
+  }
+  if (/unauthorized|invalid.*api.*key|authentication.*failed/i.test(text)) {
+    return new Error(`Authentication error: ${text}`);
+  }
+  return null;
 }
 
 /**

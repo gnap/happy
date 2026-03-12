@@ -69,6 +69,29 @@ export async function notifyDaemonSessionStarted(
   });
 }
 
+/**
+ * Notify the daemon that this session process is about to exit.
+ * Call this before process.exit() so the daemon can record the reason
+ * without waiting for the periodic PID check (which would only log "evicted").
+ *
+ * @param sessionId - The happy server session ID
+ * @param pid       - process.pid of the session process
+ * @param reason    - Human-readable exit reason (e.g. 'completed normally', 'killed by app', 'signal: SIGTERM')
+ * @param exitCode  - Optional process exit code (0 = success, non-zero = error)
+ */
+export async function notifyDaemonSessionEnding(
+  sessionId: string,
+  pid: number,
+  reason: string,
+  exitCode?: number,
+): Promise<void> {
+  try {
+    await daemonPost('/session-ending', { sessionId, pid, reason, exitCode });
+  } catch {
+    // Best-effort; do not block the exit path
+  }
+}
+
 export async function listDaemonSessions(): Promise<any[]> {
   const result = await daemonPost('/list');
   return result.children || [];
@@ -89,6 +112,11 @@ export async function stopDaemonSession(sessionIdOrPid: string | number): Promis
 export async function spawnDaemonSession(directory: string, sessionId?: string): Promise<any> {
   const result = await daemonPost('/spawn-session', { directory, sessionId });
   return result;
+}
+
+export async function listDaemonSessionHistory(): Promise<any[]> {
+  const result = await daemonPost('/list-history');
+  return result.recentlyExited || [];
 }
 
 export async function restartDaemonSession(sessionId: string): Promise<{ success: boolean; newSessionId?: string; error?: string }> {

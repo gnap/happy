@@ -173,8 +173,50 @@ export async function startDaemon(): Promise<void> {
     // Session spawning awaiter system
     const pidToAwaiter = new Map<number, (session: TrackedSession) => void>();
 
+    // Ring buffer of recently exited sessions for post-mortem queries (capped at 50)
+    const MAX_RECENTLY_EXITED = 50;
+    const recentlyExited: TrackedSession[] = [];
+    const pushRecentlyExited = (session: TrackedSession) => {
+      recentlyExited.push({ ...session, childProcess: undefined });
+      if (recentlyExited.length > MAX_RECENTLY_EXITED) {
+        recentlyExited.shift();
+      }
+    };
+
     // Helper functions
     const getCurrentChildren = () => Array.from(pidToTrackedSession.values());
+    const getRecentlyExited = () => [...recentlyExited];
+
+    /** Derive human-readable exit reason from code/signal when no webhook reason was given. */
+    const resolveExitReason = (code: number | null, signal: string | null | undefined): string => {
+      if (signal) {
+        if (signal === 'SIGKILL') return 'killed (SIGKILL — OOM or force kill)';
+        if (signal === 'SIGTERM') return 'terminated (SIGTERM)';
+        if (signal === 'SIGINT') return 'interrupted (SIGINT)';
+        return `signal: ${signal}`;
+      }
+      if (code === 0) return 'completed normally (exit 0)';
+      if (code !== null && code !== undefined) return `exited with error (code ${code})`;
+      return 'unknown';
+    };
+
+    /** Called by /session-ending webhook: session process pre-announces its exit reason. */
+    const onSessionEnding = (sessionId: string, pid: number, reason: string, exitCode?: number) => {
+      const session = pidToTrackedSession.get(pid);
+      if (session) {
+        session.exitReason = reason;
+        if (exitCode !== undefined) session.exitCode = exitCode;
+        logger.debug(`[DAEMON RUN] Session ending (self-reported): ${sessionId} PID ${pid} reason="${reason}"`);
+      } else {
+        // Process already evicted — still record for history if it matches a recently-exited entry
+        const recent = recentlyExited.slice().reverse().find((s: TrackedSession) => s.pid === pid && s.happySessionId === sessionId);
+        if (recent) {
+          recent.exitReason = reason;
+          if (exitCode !== undefined) recent.exitCode = exitCode;
+          logger.debug(`[DAEMON RUN] Session ending (self-reported, already evicted): ${sessionId} PID ${pid} reason="${reason}"`);
+        }
+      }
+    };
 
     // Handle webhook from happy session reporting itself
     const onHappySessionWebhook = (sessionId: string, sessionMetadata: Metadata) => {
@@ -564,14 +606,19 @@ export async function startDaemon(): Promise<void> {
           happyProcess.on('exit', (code, signal) => {
             logger.debug(`[DAEMON RUN] Child PID ${happyProcess.pid} exited with code ${code}, signal ${signal}`);
             if (happyProcess.pid) {
-              onChildExited(happyProcess.pid);
+              onChildExited(happyProcess.pid, code, signal);
             }
           });
 
           happyProcess.on('error', (error) => {
             logger.debug(`[DAEMON RUN] Child process error:`, error);
             if (happyProcess.pid) {
-              onChildExited(happyProcess.pid);
+              const session = pidToTrackedSession.get(happyProcess.pid);
+              if (session && !session.exitReason) {
+                session.exitReason = `spawn error: ${error.message}`;
+                session.exitTime = Date.now();
+              }
+              onChildExited(happyProcess.pid, 1, null);
             }
           });
 
@@ -675,8 +722,23 @@ export async function startDaemon(): Promise<void> {
     };
 
     // Handle child process exit
-    const onChildExited = (pid: number) => {
-      logger.debug(`[DAEMON RUN] Removing exited process PID ${pid} from tracking`);
+    const onChildExited = (pid: number, code?: number | null, signal?: string | null) => {
+      const session = pidToTrackedSession.get(pid);
+      if (session) {
+        // Only fill code/signal if the process hasn't already self-reported via /session-ending
+        if (session.exitCode === undefined && session.exitSignal === undefined) {
+          session.exitCode = code ?? null;
+          session.exitSignal = signal ?? null;
+        }
+        if (!session.exitReason) {
+          session.exitReason = resolveExitReason(code ?? null, signal);
+        }
+        session.exitTime = session.exitTime ?? Date.now();
+        logger.debug(`[DAEMON RUN] Removing exited process PID ${pid} from tracking (reason: ${session.exitReason})`);
+        pushRecentlyExited(session);
+      } else {
+        logger.debug(`[DAEMON RUN] Removing exited process PID ${pid} from tracking`);
+      }
       pidToTrackedSession.delete(pid);
     };
 
@@ -730,12 +792,14 @@ export async function startDaemon(): Promise<void> {
     // Start control server
     const { port: controlPort, stop: stopControlServer } = await startDaemonControlServer({
       getChildren: getCurrentChildren,
+      getRecentlyExited,
       stopSession,
       stopSessionByPid,
       spawnSession,
       restartSession,
       requestShutdown: () => requestShutdown('happy-cli'),
-      onHappySessionWebhook
+      onHappySessionWebhook,
+      onSessionEnding,
     });
 
     // Periodic liveness check: verify sessions are still running by checking their PID.
@@ -749,7 +813,12 @@ export async function startDaemon(): Promise<void> {
       for (const [pid, session] of pidToTrackedSession.entries()) {
         const pidAlive = (() => { try { process.kill(pid, 0); return true; } catch { return false; } })();
         if (!pidAlive) {
-          logger.debug(`[DAEMON RUN] Evicting dead session ${session.happySessionId} (PID ${pid} not found)`);
+          if (!session.exitReason) {
+            session.exitReason = 'evicted (pid missing — no exit event received)';
+            session.exitTime = session.exitTime ?? Date.now();
+          }
+          logger.debug(`[DAEMON RUN] Evicting dead session ${session.happySessionId} (PID ${pid} not found, reason: ${session.exitReason})`);
+          pushRecentlyExited(session);
           pidToTrackedSession.delete(pid);
           continue;
         }

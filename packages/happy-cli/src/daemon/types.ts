@@ -27,4 +27,19 @@ export interface TrackedSession {
   agent?: 'claude' | 'codex' | 'cursor' | 'gemini';
   /** Timestamp of last heartbeat received from this session (Date.now()) */
   lastHeartbeat?: number;
+
+  // --- Exit tracking ---
+  /** Process exit code (0 = normal, non-zero = error, null = killed by signal) */
+  exitCode?: number | null;
+  /** Signal that terminated the process (e.g. 'SIGTERM', 'SIGKILL') */
+  exitSignal?: string | null;
+  /** Timestamp when exit was detected (Date.now()) */
+  exitTime?: number;
+  /**
+   * Human-readable exit reason. Sources (in priority order):
+   *   1. Session process called /session-ending webhook before dying
+   *   2. Daemon captured exit code/signal from child process exit event
+   *   3. Daemon PID check found process gone ('evicted (pid missing)')
+   */
+  exitReason?: string;
 }

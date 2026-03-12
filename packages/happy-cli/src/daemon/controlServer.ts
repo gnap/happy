@@ -13,20 +13,24 @@ import { SpawnSessionOptions, SpawnSessionResult } from '@/modules/common/regist
 
 export function startDaemonControlServer({
   getChildren,
+  getRecentlyExited,
   stopSession,
   stopSessionByPid,
   spawnSession,
   restartSession,
   requestShutdown,
-  onHappySessionWebhook
+  onHappySessionWebhook,
+  onSessionEnding,
 }: {
   getChildren: () => TrackedSession[];
+  getRecentlyExited: () => TrackedSession[];
   stopSession: (sessionId: string) => boolean;
   stopSessionByPid: (pid: number) => boolean;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
   restartSession: (sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
   requestShutdown: () => void;
   onHappySessionWebhook: (sessionId: string, metadata: Metadata) => void;
+  onSessionEnding: (sessionId: string, pid: number, reason: string, exitCode?: number) => void;
 }): Promise<{ port: number; stop: () => Promise<void> }> {
   return new Promise((resolve) => {
     const app = fastify({
@@ -202,6 +206,64 @@ export function startDaemonControlServer({
       logger.debug(`[CONTROL SERVER] Restart session request: ${sessionId}`);
       const result = await restartSession(sessionId);
       return result;
+    });
+
+    // Session pre-announces its exit reason before dying
+    typed.post('/session-ending', {
+      schema: {
+        body: z.object({
+          sessionId: z.string(),
+          pid: z.number().int().positive(),
+          reason: z.string(),
+          exitCode: z.number().int().optional(),
+        }),
+        response: {
+          200: z.object({ status: z.literal('ok') })
+        }
+      }
+    }, async (request) => {
+      const { sessionId, pid, reason, exitCode } = request.body;
+      logger.debug(`[CONTROL SERVER] Session ending: ${sessionId} PID ${pid} reason="${reason}"`);
+      onSessionEnding(sessionId, pid, reason, exitCode);
+      return { status: 'ok' as const };
+    });
+
+    // List recently exited sessions for post-mortem analysis
+    typed.post('/list-history', {
+      schema: {
+        response: {
+          200: z.object({
+            recentlyExited: z.array(z.object({
+              startedBy: z.string(),
+              happySessionId: z.string().optional(),
+              pid: z.number(),
+              directory: z.string().optional(),
+              agent: z.string().optional(),
+              exitCode: z.number().nullable().optional(),
+              exitSignal: z.string().nullable().optional(),
+              exitTime: z.number().optional(),
+              exitReason: z.string().optional(),
+              lastHeartbeat: z.number().optional(),
+            }))
+          })
+        }
+      }
+    }, async () => {
+      const exited = getRecentlyExited();
+      return {
+        recentlyExited: exited.map(s => ({
+          startedBy: s.startedBy,
+          happySessionId: s.happySessionId,
+          pid: s.pid,
+          directory: s.directory,
+          agent: s.agent,
+          exitCode: s.exitCode,
+          exitSignal: s.exitSignal,
+          exitTime: s.exitTime,
+          exitReason: s.exitReason,
+          lastHeartbeat: s.lastHeartbeat,
+        }))
+      };
     });
 
     // Stop daemon
