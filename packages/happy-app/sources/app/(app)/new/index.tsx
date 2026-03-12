@@ -2,7 +2,7 @@ import React from 'react';
 import { View, Text, Platform, Pressable, useWindowDimensions, ScrollView, TextInput } from 'react-native';
 import Constants from 'expo-constants';
 import { Typography } from '@/constants/Typography';
-import { useAllMachines, storage, useSetting, useSettingMutable, useSessions } from '@/sync/storage';
+import { useAllMachines, storage, useSetting, useSettingMutable, useSessions, useLocalSetting } from '@/sync/storage';
 import { Ionicons, Octicons } from '@expo/vector-icons';
 import { ItemGroup } from '@/components/ItemGroup';
 import { Item } from '@/components/Item';
@@ -291,7 +291,10 @@ function NewSessionWizard() {
     // Variant B (true): Enhanced profile-first wizard with sections
     const useEnhancedSessionWizard = useSetting('useEnhancedSessionWizard');
     const lastUsedPermissionMode = useSetting('lastUsedPermissionMode');
-    const lastUsedModelMode = useSetting('lastUsedModelMode');
+    // Local device setting takes precedence; falls back to server value on cold start (when local is null).
+    const lastUsedModelModeLocal = useLocalSetting('lastUsedModelMode');
+    const lastUsedModelModeServer = useSetting('lastUsedModelMode');
+    const lastUsedModelMode = lastUsedModelModeLocal ?? lastUsedModelModeServer;
     const experimentsEnabled = useSetting('experiments');
     const [profiles, setProfiles] = useSettingMutable('profiles');
     const lastUsedProfile = useSetting('lastUsedProfile');
@@ -400,7 +403,7 @@ function NewSessionWizard() {
 
     const handleModelModeChange = React.useCallback((mode: ModelMode) => {
         setModelMode(mode);
-        sync.applySettings({ lastUsedModelMode: mode.key });
+        storage.getState().applyLocalSettings({ lastUsedModelMode: mode.key });
     }, []);
 
     //
@@ -1023,8 +1026,8 @@ function NewSessionWizard() {
                 lastUsedAgent: agentType,
                 lastUsedProfile: selectedProfileId,
                 lastUsedPermissionMode: permissionMode.key,
-                lastUsedModelMode: modelMode?.key ?? null,
             });
+            storage.getState().applyLocalSettings({ lastUsedModelMode: modelMode?.key ?? null });
 
             // Get environment variables from selected profile
             let environmentVariables = undefined;

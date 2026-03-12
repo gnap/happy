@@ -281,7 +281,7 @@ export const SettingsSchema = z.object({
     })).describe('Last 10 machine-path combinations, ordered by most recent first'),
     lastUsedAgent: z.string().nullable().describe('Last selected agent type for new sessions'),
     lastUsedPermissionMode: z.string().nullable().describe('Last selected permission mode for new sessions'),
-    lastUsedModelMode: z.string().nullable().describe('Last selected model mode for new sessions'),
+    lastUsedModelMode: z.string().nullable().describe('Last selected model mode for new sessions (server value; used as cold-start fallback when no local override is set)'),
     // Profile management settings
     profiles: z.array(AIBackendProfileSchema).describe('User-defined profiles for AI backend and environment variables'),
     lastUsedProfile: z.string().nullable().describe('Last selected profile for new sessions'),

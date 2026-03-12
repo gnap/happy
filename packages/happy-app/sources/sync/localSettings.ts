@@ -15,6 +15,8 @@ export const LocalSettingsSchema = z.object({
     acknowledgedCliVersions: z.record(z.string(), z.string()).describe('Acknowledged CLI versions per machine'),
     // Performance: fetch full diff content on demand via RPC instead of always streaming it
     lazyLoadToolContent: z.boolean().describe('Fetch full diff content on demand in detail view (requires CLI support)'),
+    // Model preference is device-local: server sync must not overwrite the user's per-device choice
+    lastUsedModelMode: z.string().nullable().describe('Last selected model mode for new sessions (device-local, not synced)'),
 });
 
 //
@@ -38,6 +40,7 @@ export const localSettingsDefaults: LocalSettings = {
     markdownCopyV2: false,
     acknowledgedCliVersions: {},
     lazyLoadToolContent: true,
+    lastUsedModelMode: null,
 };
 Object.freeze(localSettingsDefaults);
 
