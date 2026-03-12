@@ -8,7 +8,7 @@ import { SessionTypeSelector } from '@/components/SessionTypeSelector';
 import type { PermissionModeKey, ModelModeKey } from '@/components/PermissionModeSelector';
 import { ItemGroup } from '@/components/ItemGroup';
 import { Item } from '@/components/Item';
-import { useAllMachines, useSessions, useSetting, storage } from '@/sync/storage';
+import { useAllMachines, useSessions, useSetting, useLocalSetting, storage } from '@/sync/storage';
 import { useRouter } from 'expo-router';
 import { AIBackendProfile, validateProfileForAgent, getProfileEnvironmentVariables } from '@/sync/settings';
 import { Modal } from '@/modal';
@@ -535,7 +535,9 @@ export function NewSessionWizard({ onComplete, onCancel, initialPrompt = '' }: N
     const recentMachinePaths = useSetting('recentMachinePaths');
     const lastUsedAgent = useSetting('lastUsedAgent');
     const lastUsedPermissionMode = useSetting('lastUsedPermissionMode');
-    const lastUsedModelMode = useSetting('lastUsedModelMode');
+    const lastUsedModelModeLocal = useLocalSetting('lastUsedModelMode');
+    const lastUsedModelModeServer = useSetting('lastUsedModelMode');
+    const lastUsedModelMode = lastUsedModelModeLocal ?? lastUsedModelModeServer;
     const profiles = useSetting('profiles');
     const lastUsedProfile = useSetting('lastUsedProfile');
 

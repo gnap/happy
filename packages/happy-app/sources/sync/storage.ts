@@ -481,7 +481,10 @@ export const storage = create<StorageState>()((set, get) => {
                 const metadataModel = session.metadata?.currentModelCode?.trim();
                 const existingModelMode = state.sessions[session.id]?.modelMode;
                 const savedModelMode = savedModelModes[session.id];
-                const resolvedModelMode = (metadataModel && metadataModel !== '' ? metadataModel : undefined) ?? existingModelMode ?? savedModelMode ?? session.modelMode ?? undefined;
+                // User's explicit local choice (existingModelMode / savedModelMode) takes priority over
+                // server-pushed metadata so a model change in the UI is not immediately overwritten.
+                // metadataModel (what the agent is currently running) is used only as a fallback.
+                const resolvedModelMode = existingModelMode ?? savedModelMode ?? (metadataModel && metadataModel !== '' ? metadataModel : undefined) ?? session.modelMode ?? undefined;
                 // todos: derived by replay (reducer) when messages load; not synced to server. Preserve here so
                 // list fetches do not overwrite; replay will update session.todos when that session's messages load.
                 const existingTodos = state.sessions[session.id]?.todos;
