@@ -500,11 +500,13 @@ export async function runAcp(opts: {
   session = initialSession;
 
   if (response) {
-    try {
-      await notifyDaemonSessionStarted(response.id, metadata);
-    } catch (error) {
-      logger.debug('[acp] Failed to report session to daemon:', error);
-    }
+    const reportToDaemon = () => {
+      notifyDaemonSessionStarted(response.id, metadata).catch((err) =>
+        logger.debug('[acp] Failed to report session to daemon:', err)
+      );
+    };
+    reportToDaemon();
+    setInterval(reportToDaemon, 60_000);
   }
 
   permissionHandler = new GenericAcpPermissionHandler(session, opts.agentName);

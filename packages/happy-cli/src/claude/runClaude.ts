@@ -167,18 +167,14 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
 
     logger.debug(`Session created: ${response.id}`);
 
-    // Always report to daemon if it exists
-    try {
-        logger.debug(`[START] Reporting session ${response.id} to daemon`);
-        const result = await notifyDaemonSessionStarted(response.id, metadata);
-        if (result.error) {
-            logger.debug(`[START] Failed to report to daemon (may not be running):`, result.error);
-        } else {
-            logger.debug(`[START] Reported session ${response.id} to daemon`);
-        }
-    } catch (error) {
-        logger.debug('[START] Failed to report to daemon (may not be running):', error);
-    }
+    // Report to daemon on startup and every 60s so daemon re-discovers sessions after restart
+    const reportToDaemon = () => {
+        notifyDaemonSessionStarted(response.id, metadata).then((result) => {
+            if (result?.error) logger.debug(`[START] Daemon report failed:`, result.error);
+        }).catch((err) => logger.debug('[START] Daemon report error:', err));
+    };
+    reportToDaemon();
+    setInterval(reportToDaemon, 60_000);
 
     // Extract SDK metadata in background and update session when ready
     extractSDKMetadataAsync(async (sdkMetadata) => {
