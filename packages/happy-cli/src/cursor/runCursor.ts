@@ -181,12 +181,18 @@ export async function runCursor(opts: {
     logger.debug(`[cursor] Startup toRunCursorEntry: ${toRunCursorEntryMs}ms (index load + auth + daemon check → runCursor)`);
   }
 
-  // Default: new session. Resume only with --resume/-r.
+  // Default: new session. Resume only with --resume/-r or HAPPY_CURSOR_SESSION_TAG (daemon restart).
   const tagPath = join(configuration.happyHomeDir, CURSOR_SESSION_TAG_FILE);
   const workspacePathFile = join(configuration.happyHomeDir, CURSOR_SESSION_WORKSPACE_FILE);
   let sessionTag: string;
   let tagReused = false;
-  if (opts.resumeSession) {
+  const envSessionTag = process.env.HAPPY_CURSOR_SESSION_TAG?.trim() || null;
+  if (envSessionTag) {
+    // Daemon restart: reconnect to exact session by tag
+    sessionTag = envSessionTag;
+    tagReused = true;
+    logger.debug(`[cursor] Using session tag from env (daemon restart): ${sessionTag.slice(0, 8)}...`);
+  } else if (opts.resumeSession) {
     let savedTag: string | null = null;
     let savedWorkspace: string | null = null;
     try {
@@ -206,13 +212,16 @@ export async function runCursor(opts: {
     sessionTag = randomUUID();
   }
 
-  // Load existing encryption key when reusing session to avoid key mismatch
+  // Load existing encryption key when reusing session to avoid key mismatch.
+  // Per-session key file (by tag) takes priority over global file to avoid cross-session key confusion.
   const keyPath = join(configuration.happyHomeDir, CURSOR_SESSION_KEY_FILE);
+  const perSessionKeyPath = join(configuration.happyHomeDir, `cursor-session-key-${sessionTag}`);
   let existingEncryptionKey: Uint8Array | undefined;
   if (tagReused) {
     try {
-      if (existsSync(keyPath)) {
-        existingEncryptionKey = new Uint8Array(Buffer.from(readFileSync(keyPath, 'utf8').trim(), 'base64'));
+      const keyFilePath = existsSync(perSessionKeyPath) ? perSessionKeyPath : keyPath;
+      if (existsSync(keyFilePath)) {
+        existingEncryptionKey = new Uint8Array(Buffer.from(readFileSync(keyFilePath, 'utf8').trim(), 'base64'));
       }
     } catch { /* ignore */ }
   }
@@ -270,12 +279,16 @@ export async function runCursor(opts: {
     console.log('[cursor] In the App: pull-to-refresh the session list, or tap the "It\'s ready!" push to open this session.');
   }
 
-  // Persist session tag, workspace, and encryption key so next restart reuses correctly
+  // Persist session tag, workspace, and encryption key so next restart reuses correctly.
+  // Also write per-session key file (by tag) so daemon restart can find the right key even when
+  // another session has overwritten the global cursor-session-key file in the meantime.
   try {
     writeFileSync(tagPath, sessionTag, 'utf8');
     writeFileSync(workspacePathFile, workspacePath, 'utf8');
     if (response) {
-      writeFileSync(keyPath, Buffer.from(response.encryptionKey).toString('base64'), 'utf8');
+      const keyBase64 = Buffer.from(response.encryptionKey).toString('base64');
+      writeFileSync(keyPath, keyBase64, 'utf8');
+      writeFileSync(perSessionKeyPath, keyBase64, 'utf8');
     }
   } catch (e) {
     logger.debug('[cursor] Could not write session tag/workspace/key file:', e);
@@ -358,11 +371,12 @@ export async function runCursor(opts: {
   // Persist initial default mode so app reload can restore it
   syncModeToSessionMetadata('default', undefined);
 
-  // Report to daemon (once at start; also retry periodically so daemon sees us if it wasn't running at start)
-  const DAEMON_REPORT_INTERVAL_MS = 60_000;
+  // Report to daemon (once at start; also retry periodically so daemon sees us if it wasn't running at start).
+  // 30s interval keeps liveness TTL (90s = 3× interval) well-fed even under transient network hiccups.
+  const DAEMON_REPORT_INTERVAL_MS = 30_000;
   const reportToDaemon = () => {
     if (!response) return;
-    notifyDaemonSessionStarted(session.sessionId, { ...metadata, hostPid: process.pid }).then((result) => {
+    notifyDaemonSessionStarted(session.sessionId, { ...metadata, hostPid: process.pid, sessionTag }).then((result) => {
       if (result?.error) logger.debug(`[START] Daemon report failed:`, result.error);
     }).catch((err) => logger.debug('[START] Daemon report error:', err));
   };
@@ -407,7 +421,11 @@ export async function runCursor(opts: {
 
   let abortController = new AbortController();
   let shouldExit = false;
-  let cursorChatId: string | null = null;
+  // Restore cursor chat ID from server-side agentState so restarts resume the same chat
+  let cursorChatId: string | null = response?.agentState?.cursorChatId ?? null;
+  if (cursorChatId) {
+    logger.debug(`[cursor] Restored cursor chat ID from agentState: ${cursorChatId}`);
+  }
 
   async function handleAbort() {
     logger.debug('[Cursor] Abort requested');
@@ -670,9 +688,10 @@ export async function runCursor(opts: {
         function handleParsedMessage(msg: CursorParsedMessage) {
           switch (msg.type) {
             case 'session_init':
-              if (msg.sessionId) {
+              if (msg.sessionId && msg.sessionId !== cursorChatId) {
                 cursorChatId = msg.sessionId;
                 logger.debug(`[cursor] Chat ID: ${cursorChatId}`);
+                session.updateAgentState((s) => ({ ...s, cursorChatId }));
               }
               break;
 

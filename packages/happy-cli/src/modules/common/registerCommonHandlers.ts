@@ -134,6 +134,9 @@ export interface SpawnSessionOptions {
         TMUX_TMPDIR?: string;               // Temporary directory for tmux server socket files
         // Note: TMUX_TMPDIR is used by tmux to store socket files when default /tmp is not suitable
         // Common use case: When /tmp has limited space or different permissions
+
+        // Session restart: reconnect to an existing server session by tag
+        HAPPY_CURSOR_SESSION_TAG?: string;
     };
 }
 

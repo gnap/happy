@@ -91,6 +91,11 @@ export async function spawnDaemonSession(directory: string, sessionId?: string):
   return result;
 }
 
+export async function restartDaemonSession(sessionId: string): Promise<{ success: boolean; newSessionId?: string; error?: string }> {
+  const result = await daemonPost('/restart-session', { sessionId });
+  return result;
+}
+
 export async function stopDaemonHttp(): Promise<void> {
   await daemonPost('/stop');
 }

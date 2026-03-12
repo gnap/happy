@@ -676,8 +676,9 @@ export class ApiSessionClient extends EventEmitter {
                 } catch (error: unknown) {
                     const status = axios.isAxiosError(error) ? error.response?.status : undefined;
                     const isTimeout = axios.isAxiosError(error) && error.code === 'ECONNABORTED';
+                    const isNetworkReset = axios.isAxiosError(error) && error.code === 'ECONNRESET';
                     const isRetryableStatus = status !== undefined && ApiSessionClient.FLUSH_RETRY_STATUSES.includes(status);
-                    const isRetryable = isRetryableStatus || (isTimeout && attempt < ApiSessionClient.FLUSH_RETRY_MAX);
+                    const isRetryable = isRetryableStatus || (isTimeout && attempt < ApiSessionClient.FLUSH_RETRY_MAX) || isNetworkReset;
                     if (!isRetryable || attempt === ApiSessionClient.FLUSH_RETRY_MAX) {
                         const data = axios.isAxiosError(error) ? error.response?.data : undefined;
                         logger.debug('[API] flushOutbox failed', { sessionId: this.sessionId, batchLength: chunk.length, flushed, total, status, isTimeout, data, error });

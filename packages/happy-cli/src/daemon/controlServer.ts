@@ -16,6 +16,7 @@ export function startDaemonControlServer({
   stopSession,
   stopSessionByPid,
   spawnSession,
+  restartSession,
   requestShutdown,
   onHappySessionWebhook
 }: {
@@ -23,6 +24,7 @@ export function startDaemonControlServer({
   stopSession: (sessionId: string) => boolean;
   stopSessionByPid: (pid: number) => boolean;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
+  restartSession: (sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
   requestShutdown: () => void;
   onHappySessionWebhook: (sessionId: string, metadata: Metadata) => void;
 }): Promise<{ port: number; stop: () => Promise<void> }> {
@@ -66,7 +68,11 @@ export function startDaemonControlServer({
             children: z.array(z.object({
               startedBy: z.string(),
               happySessionId: z.string(),
-              pid: z.number()
+              pid: z.number(),
+              directory: z.string().optional(),
+              agent: z.string().optional(),
+              lastHeartbeat: z.number().optional(),
+              isAlive: z.boolean(),
             }))
           })
         }
@@ -80,7 +86,11 @@ export function startDaemonControlServer({
           .map(child => ({
             startedBy: child.startedBy,
             happySessionId: child.happySessionId!,
-            pid: child.pid
+            pid: child.pid,
+            directory: child.directory,
+            agent: child.agent,
+            lastHeartbeat: child.lastHeartbeat,
+            isAlive: (() => { try { process.kill(child.pid, 0); return true; } catch { return false; } })(),
           }))
       }
     });
@@ -171,6 +181,27 @@ export function startDaemonControlServer({
             error: result.errorMessage
           };
       }
+    });
+
+    // Restart a session: kill existing process and respawn reconnecting to same server session
+    typed.post('/restart-session', {
+      schema: {
+        body: z.object({
+          sessionId: z.string()
+        }),
+        response: {
+          200: z.object({
+            success: z.boolean(),
+            newSessionId: z.string().optional(),
+            error: z.string().optional()
+          })
+        }
+      }
+    }, async (request) => {
+      const { sessionId } = request.body;
+      logger.debug(`[CONTROL SERVER] Restart session request: ${sessionId}`);
+      const result = await restartSession(sessionId);
+      return result;
     });
 
     // Stop daemon

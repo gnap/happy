@@ -510,16 +510,14 @@ import type { StartOptions } from '@/claude/runClaude'
         if (sessions.length === 0) {
           console.log('No active sessions this daemon is aware of (they might have been started by a previous version of the daemon)')
         } else {
+          const now = Date.now()
           console.log('Active sessions (from daemon):')
-          console.log(JSON.stringify(sessions, null, 2))
-        }
-        // PID -> sessionId from CLI files (~/.happy/session-pids/<pid>) so we can see which process manages which session
-        const { readSessionPidMapping } = await import('./persistence')
-        const pidMap = await readSessionPidMapping()
-        if (pidMap.size > 0) {
-          console.log('Session PID mapping (this machine, from CLI files):')
-          const arr = Array.from(pidMap.entries()).map(([pid, sessionId]) => ({ pid, sessionId }))
-          console.log(JSON.stringify(arr, null, 2))
+          for (const s of sessions) {
+            const age = s.lastHeartbeat ? Math.round((now - s.lastHeartbeat) / 1000) : null
+            const aliveStr = s.isAlive ? '✓ alive' : '✗ stale'
+            const heartbeatStr = age != null ? `last heartbeat ${age}s ago` : 'no heartbeat yet'
+            console.log(`  ${aliveStr}  ${s.happySessionId}  PID ${s.pid}  ${s.agent ?? '?'}  ${s.directory ?? '?'}  (${heartbeatStr})`)
+          }
         }
       } catch (error) {
         console.log('No daemon running')
@@ -549,6 +547,30 @@ import type { StartOptions } from '@/claude/runClaude'
         const { stopDaemonSession } = await import('./daemon/controlClient')
         const success = await stopDaemonSession(target);
         console.log(success ? 'Session stopped' : 'Failed to stop session')
+      } catch (error) {
+        console.log('No daemon running')
+      }
+      return
+
+    } else if (daemonSubcommand === 'restart-session') {
+      const sessionId = args[2];
+      if (!sessionId) {
+        console.error('Usage: happy daemon restart-session <sessionId>')
+        process.exit(1)
+      }
+
+      try {
+        const { restartDaemonSession } = await import('./daemon/controlClient')
+        const result = await restartDaemonSession(sessionId);
+        if (result.success) {
+          console.log(`Session restarted successfully`)
+          if (result.newSessionId) {
+            console.log(`New session ID: ${result.newSessionId}`)
+          }
+        } else {
+          console.error(`Failed to restart session: ${result.error ?? 'unknown error'}`)
+          process.exit(1)
+        }
       } catch (error) {
         console.log('No daemon running')
       }
@@ -630,6 +652,7 @@ ${chalk.bold('Usage:')}
   happy daemon stop               Stop the daemon (sessions stay alive)
   happy daemon status             Show daemon status
   happy daemon list               List active sessions
+  happy daemon restart-session    Restart a hung/dead session (resumes same chat)
 
   If you want to kill all happy related processes run 
   ${chalk.cyan('happy doctor clean')}

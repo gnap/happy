@@ -196,6 +196,10 @@ export async function startDaemon(): Promise<void> {
         // Update daemon-spawned session with reported data
         existingSession.happySessionId = sessionId;
         existingSession.happySessionMetadataFromLocalWebhook = sessionMetadata;
+        if (sessionMetadata.sessionTag) {
+          existingSession.sessionTag = sessionMetadata.sessionTag;
+        }
+        existingSession.lastHeartbeat = Date.now();
         logger.debug(`[DAEMON RUN] Updated daemon-spawned session ${sessionId} with metadata`);
 
         // Resolve any awaiter for this PID
@@ -206,15 +210,25 @@ export async function startDaemon(): Promise<void> {
           logger.debug(`[DAEMON RUN] Resolved session awaiter for PID ${pid}`);
         }
       } else if (!existingSession) {
-        // New session started externally
+        // New session started externally (or re-registration after daemon restart)
         const trackedSession: TrackedSession = {
-          startedBy: 'happy directly - likely by user from terminal',
+          startedBy: sessionMetadata.startedBy === 'daemon' ? 'daemon' : 'happy directly - likely by user from terminal',
           happySessionId: sessionId,
           happySessionMetadataFromLocalWebhook: sessionMetadata,
-          pid
+          pid,
+          directory: sessionMetadata.path,
+          sessionTag: sessionMetadata.sessionTag,
+          agent: (sessionMetadata.flavor as TrackedSession['agent']) ?? 'cursor',
+          lastHeartbeat: Date.now(),
         };
         pidToTrackedSession.set(pid, trackedSession);
-        logger.debug(`[DAEMON RUN] Registered externally-started session ${sessionId}`);
+        logger.debug(`[DAEMON RUN] Registered session ${sessionId} (started by: ${trackedSession.startedBy})`);
+      } else {
+        // Existing external session: refresh heartbeat and fill in any missing fields
+        existingSession.lastHeartbeat = Date.now();
+        if (!existingSession.directory && sessionMetadata.path) existingSession.directory = sessionMetadata.path;
+        if (!existingSession.sessionTag && sessionMetadata.sessionTag) existingSession.sessionTag = sessionMetadata.sessionTag;
+        if (!existingSession.agent && sessionMetadata.flavor) existingSession.agent = sessionMetadata.flavor as TrackedSession['agent'];
       }
     };
 
@@ -431,6 +445,8 @@ export async function startDaemon(): Promise<void> {
               pid: tmuxResult.pid, // Real PID from tmux -P flag
               tmuxSessionId: tmuxResult.sessionId,
               directoryCreated,
+              directory,
+              agent: options.agent ?? 'cursor',
               message: directoryCreated
                 ? `The path '${directory}' did not exist. We created a new folder and spawned a new session in tmux session '${tmuxSessionName}'. Use 'tmux attach -t ${tmuxSessionName}' to view the session.`
                 : `Spawned new session in tmux session '${tmuxSessionName}'. Use 'tmux attach -t ${tmuxSessionName}' to view the session.`
@@ -538,6 +554,8 @@ export async function startDaemon(): Promise<void> {
             pid: happyProcess.pid,
             childProcess: happyProcess,
             directoryCreated,
+            directory,
+            agent: options.agent ?? 'cursor',
             message: directoryCreated ? `The path '${directory}' did not exist. We created a new folder and spawned a new session there.` : undefined
           };
 
@@ -662,15 +680,86 @@ export async function startDaemon(): Promise<void> {
       pidToTrackedSession.delete(pid);
     };
 
+    // Restart a session: kill existing process and spawn a new one reconnecting to the same server session
+    const restartSession = async (sessionId: string): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
+      logger.debug(`[DAEMON RUN] Restart session: ${sessionId}`);
+
+      // Find the tracked session to get its spawn params
+      let found: TrackedSession | undefined;
+      for (const session of pidToTrackedSession.values()) {
+        if (session.happySessionId === sessionId) {
+          found = session;
+          break;
+        }
+      }
+
+      if (!found) {
+        logger.debug(`[DAEMON RUN] Restart: session ${sessionId} not found`);
+        return { success: false, error: 'Session not found' };
+      }
+
+      if (!found.directory) {
+        logger.debug(`[DAEMON RUN] Restart: session ${sessionId} has no directory`);
+        return { success: false, error: 'Session directory unknown (session may predate restart support)' };
+      }
+
+      const { directory, agent, sessionTag } = found;
+
+      // Kill existing process
+      stopSession(sessionId);
+
+      // Wait briefly for process to die
+      await new Promise((r) => setTimeout(r, 500));
+
+      // Spawn new process, reconnecting to the same server session via HAPPY_CURSOR_SESSION_TAG
+      const result = await spawnSession({
+        directory,
+        agent,
+        environmentVariables: sessionTag ? { HAPPY_CURSOR_SESSION_TAG: sessionTag } : undefined,
+      });
+
+      if (result.type === 'success') {
+        logger.debug(`[DAEMON RUN] Restarted session ${sessionId} -> new session ${result.sessionId}`);
+        return { success: true, newSessionId: result.sessionId };
+      } else {
+        logger.debug(`[DAEMON RUN] Restart spawn failed:`, result);
+        return { success: false, error: result.type === 'error' ? result.errorMessage : 'Spawn failed' };
+      }
+    };
+
     // Start control server
     const { port: controlPort, stop: stopControlServer } = await startDaemonControlServer({
       getChildren: getCurrentChildren,
       stopSession,
       stopSessionByPid,
       spawnSession,
+      restartSession,
       requestShutdown: () => requestShutdown('happy-cli'),
       onHappySessionWebhook
     });
+
+    // Periodic liveness check: verify sessions are still running by checking their PID.
+    // - PID alive   → keep session, just note if heartbeat is stale
+    // - PID gone    → evict (process is dead regardless of heartbeat state)
+    // Sessions with a childProcess also get cleaned up via the 'exit' event,
+    // but the PID check here catches any that slip through (e.g. SIGKILL).
+    const SESSION_HEARTBEAT_STALE_MS = 90_000; // 3× heartbeat interval
+    const ttlCleanupInterval = setInterval(() => {
+      const now = Date.now();
+      for (const [pid, session] of pidToTrackedSession.entries()) {
+        const pidAlive = (() => { try { process.kill(pid, 0); return true; } catch { return false; } })();
+        if (!pidAlive) {
+          logger.debug(`[DAEMON RUN] Evicting dead session ${session.happySessionId} (PID ${pid} not found)`);
+          pidToTrackedSession.delete(pid);
+          continue;
+        }
+        // PID alive: just log if heartbeat is stale (for visibility), do not evict
+        if (session.lastHeartbeat && now - session.lastHeartbeat > SESSION_HEARTBEAT_STALE_MS) {
+          logger.debug(`[DAEMON RUN] Session ${session.happySessionId} (PID ${pid}) is alive but heartbeat is stale (${Math.round((now - session.lastHeartbeat) / 1000)}s ago)`);
+        }
+      }
+    }, 30_000);
+    ttlCleanupInterval.unref(); // don't prevent daemon from exiting
 
     // Write initial daemon state (no lock needed for state file)
     const fileState: DaemonLocallyPersistedState = {
