@@ -72,6 +72,22 @@ config.server.rewriteRequestUrl = (url) => {
 // outside the project tree entirely, preventing FallbackWatcher crashes.
 config.resolver.blockList = [/src-tauri[/\\]target[/\\].*/];
 
+// Redirect native-only modules to web mocks when bundling for web
+const path = require('path');
+const WEB_MODULE_MOCKS = {
+  'expo-network': path.resolve(__dirname, 'sources/mocks/expo-network.web.ts'),
+};
+const originalResolveRequest = config.resolver.resolveRequest;
+config.resolver.resolveRequest = (context, moduleName, platform) => {
+  if (platform === 'web' && WEB_MODULE_MOCKS[moduleName]) {
+    return { filePath: WEB_MODULE_MOCKS[moduleName], type: 'sourceFile' };
+  }
+  if (originalResolveRequest) {
+    return originalResolveRequest(context, moduleName, platform);
+  }
+  return context.resolveRequest(context, moduleName, platform);
+};
+
 // Add support for .wasm files (required by Skia for all platforms)
 // Source: https://shopify.github.io/react-native-skia/docs/getting-started/installation/
 config.resolver.assetExts.push('wasm');
