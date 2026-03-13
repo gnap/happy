@@ -457,6 +457,8 @@ export interface RunAcpOptions {
   verbose?: boolean;
   /** When set, use this backend instead of spawning AcpBackend from command/args. */
   backend?: import('@/agent/core').AgentBackend;
+  /** Custom transport handler; used when backend is not provided. Defaults to DefaultTransport. */
+  transportHandler?: import('@/agent/transport').TransportHandler;
 }
 
 export async function runAcp(opts: RunAcpOptions): Promise<void> {
@@ -532,20 +534,33 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     },
   };
 
-  const backend = opts.backend ?? new AcpBackend({
+  let defaultTransport = opts.transportHandler;
+  if (!defaultTransport) {
+    if (opts.agentName === 'cursor') {
+      const { cursorTransport } = await import('@/agent/transport');
+      defaultTransport = cursorTransport;
+    } else {
+      defaultTransport = new DefaultTransport(opts.agentName);
+    }
+  }
+
+  const backendFactory = () => new AcpBackend({
     agentName: opts.agentName,
     cwd: process.cwd(),
     command: opts.command!,
     args: opts.args ?? [],
     mcpServers,
     permissionHandler,
-    transportHandler: new DefaultTransport(opts.agentName),
+    transportHandler: defaultTransport,
     verbose,
   });
+
+  let backend = opts.backend ?? backendFactory();
 
   let thinking = false;
   let acpSessionId: string | null = null;
   let shouldExit = false;
+  let backendStopped = false;
   let abortController = new AbortController();
   let pendingTurn: PendingTurn | null = null;
 
@@ -576,9 +591,15 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     const reason = detail
       ? `${opts.agentName} backend ${status}: ${detail}`
       : `${opts.agentName} backend ${status}`;
-    logger.debug(`[${opts.agentName}] ${reason}; stopping ACP runner`);
-    shouldExit = true;
-    messageQueue.close();
+    if (status === 'stopped') {
+      // stopped = current operation cancelled; backend will be restarted for next message
+      logger.debug(`[${opts.agentName}] ${reason}; will restart backend for next message`);
+      backendStopped = true;
+    } else {
+      logger.debug(`[${opts.agentName}] ${reason}; stopping ACP runner`);
+      shouldExit = true;
+      messageQueue.close();
+    }
     clearPendingTurn(new Error(reason));
   };
 
@@ -898,20 +919,7 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     acpSessionId = started.sessionId;
 
     if (opts.agentName === 'cursor') {
-      session.updateMetadata((m) => ({
-        ...m,
-        operatingModes: [
-          { code: 'default', value: 'Default', description: null },
-          { code: 'read-only', value: 'Read only', description: null },
-          { code: 'safe-yolo', value: 'Safe YOLO', description: null },
-          { code: 'yolo', value: 'YOLO', description: null },
-        ],
-        models: [
-          { code: 'auto', value: 'Auto', description: null },
-          { code: 'sonnet-4.5', value: 'Sonnet 4.5', description: null },
-          { code: 'opus-4.6-thinking', value: 'Opus 4.6 Thinking', description: null },
-        ],
-      }));
+      // Modes come from session/new response (agent/plan/ask); no need to hardcode here.
       session.sendSessionEvent({ type: 'ready' });
       try {
         api.push().sendToAllDevices("It's ready!", "Cursor is waiting for your command", { sessionId: session.sessionId });
@@ -969,6 +977,23 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
           logAcp('muted', `Outgoing prompt completion from ${opts.agentName}`);
         }
       } catch (error) {
+        if (backendStopped && !opts.backend) {
+          // agent stopped due to cancellation; dispose old backend and restart for next message
+          backendStopped = false;
+          sendEnvelopes(sessionManager.endTurn('failed'));
+          await session.flush().catch(() => {});
+          try {
+            backend.offMessage?.(onBackendMessage);
+            await backend.dispose();
+          } catch { /* ignore dispose errors */ }
+          backend = backendFactory();
+          backend.onMessage(onBackendMessage);
+          const restarted = await backend.startSession();
+          acpSessionId = restarted.sessionId;
+          session.sendSessionEvent({ type: 'ready' });
+          logAcp('muted', `Backend restarted after cancellation (new session: ${acpSessionId})`);
+          continue;
+        }
         sendEnvelopes(sessionManager.endTurn('failed'));
         await session.flush();
         session.sendSessionEvent({ type: 'ready' });

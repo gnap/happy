@@ -7,6 +7,7 @@
  */
 
 export { GeminiTransport, geminiTransport } from './GeminiTransport';
+export { CursorTransport, cursorTransport } from './CursorTransport';
 
 // Future handlers:
 // export { CodexTransport, codexTransport } from './CodexTransport';
