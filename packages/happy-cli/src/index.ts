@@ -577,7 +577,17 @@ import type { StartOptions } from '@/claude/runClaude'
       return
 
     } else if (daemonSubcommand === 'start') {
-      // Spawn detached daemon process
+      // On Linux, prefer systemd user service if installed
+      if (process.platform === 'linux') {
+        const { isServiceInstalled, startService } = await import('./daemon/linux/systemd')
+        if (isServiceInstalled()) {
+          startService()
+          console.log('Daemon started successfully')
+          process.exit(0)
+        }
+      }
+
+      // Fallback: spawn detached daemon process
       const { spawnHappyCLI } = await import('./utils/spawnHappyCLI')
       const child = spawnHappyCLI(['daemon', 'start-sync'], {
         detached: true,
@@ -609,8 +619,16 @@ import type { StartOptions } from '@/claude/runClaude'
       await startDaemon()
       process.exit(0)
     } else if (daemonSubcommand === 'stop') {
+      // Always stop via HTTP first (works regardless of how the daemon was started)
       const { stopDaemon } = await import('./daemon/controlClient')
       await stopDaemon()
+      // On Linux, also stop the systemd service if installed
+      if (process.platform === 'linux') {
+        const { isServiceInstalled, stopService } = await import('./daemon/linux/systemd')
+        if (isServiceInstalled()) {
+          try { stopService() } catch {}
+        }
+      }
       process.exit(0)
     } else if (daemonSubcommand === 'status') {
       // Show daemon-specific doctor output

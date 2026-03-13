@@ -142,6 +142,24 @@ export async function runDoctorCommand(filter?: 'all' | 'daemon'): Promise<void>
 
     // Daemon status - shown for both 'all' and 'daemon' filters
     console.log(chalk.bold('\n🤖 Daemon Status'));
+
+    // Linux: show systemd service status
+    if (process.platform === 'linux') {
+        try {
+            const { isSystemdAvailable, isServiceInstalled, getServiceActiveState, SERVICE_NAME } = await import('@/daemon/linux/systemd')
+            if (isSystemdAvailable()) {
+                if (isServiceInstalled()) {
+                    const state = getServiceActiveState()
+                    const stateLabel = state === 'active' ? chalk.green(`✓ active`) :
+                        state === 'failed' ? chalk.red(`❌ failed`) :
+                        chalk.yellow(`⚠ ${state}`)
+                    console.log(`  systemd service: ${stateLabel} (${chalk.gray(`systemctl --user status ${SERVICE_NAME}`)})`)
+                } else {
+                    console.log(`  systemd service: ${chalk.gray('not installed')} (run ${chalk.cyan('happy daemon install')} to fix terminal-exit restarts)`)
+                }
+            }
+        } catch { /* ignore */ }
+    }
     try {
         const isRunning = await checkIfDaemonRunningAndCleanupStaleState();
         const state = await readDaemonState();

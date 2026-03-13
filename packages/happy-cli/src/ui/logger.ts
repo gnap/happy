@@ -6,9 +6,9 @@
  */
 
 import chalk from 'chalk'
-import { appendFileSync } from 'fs'
+import { createWriteStream, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
+import type { WriteStream } from 'node:fs'
 import { configuration } from '@/configuration'
-import { existsSync, readdirSync, statSync } from 'node:fs'
 import { join, basename } from 'node:path'
 // Note: readDaemonState is imported lazily inside listDaemonLogFiles() to avoid
 // circular dependency: logger.ts ↔ persistence.ts
@@ -47,6 +47,7 @@ function getSessionLogPath(): string {
 
 class Logger {
   private dangerouslyUnencryptedServerLoggingUrl: string | undefined
+  private writeStream: WriteStream | null = null
 
   constructor(
     public readonly logFilePath = getSessionLogPath()
@@ -57,6 +58,21 @@ class Logger {
       this.dangerouslyUnencryptedServerLoggingUrl = process.env.HAPPY_SERVER_URL
       console.log(chalk.yellow('[REMOTE LOGGING] Sending logs to server for AI debugging'))
     }
+  }
+
+  private getWriteStream(): WriteStream {
+    if (!this.writeStream) {
+      try {
+        mkdirSync(join(this.logFilePath, '..'), { recursive: true })
+      } catch {
+        // ignore
+      }
+      this.writeStream = createWriteStream(this.logFilePath, { flags: 'a' })
+      this.writeStream.on('error', () => {
+        this.writeStream = null
+      })
+    }
+    return this.writeStream
   }
 
   // Use local timezone for simplicity of locating the logs,
@@ -207,26 +223,17 @@ class Logger {
     
     // Send to remote server if configured
     if (this.dangerouslyUnencryptedServerLoggingUrl) {
-      // Determine log level from prefix
       let level = 'info'
       if (prefix.includes(this.localTimezoneTimestamp())) {
         level = 'debug'
       }
-      // Fire and forget, with explicit .catch to prevent unhandled rejection
-      this.sendToRemoteServer(level, message, ...args).catch(() => {
-        // Silently ignore remote logging errors to prevent loops
-      })
+      this.sendToRemoteServer(level, message, ...args).catch(() => {})
     }
     
-    // Handle async file path
     try {
-      appendFileSync(this.logFilePath, logLine)
-    } catch (appendError) {
-      if (process.env.DEBUG) {
-        console.error('[DEV MODE ONLY THROWING] Failed to append to log file:', appendError)
-        throw appendError
-      }
-      // In production, fail silently to avoid disturbing Claude session
+      this.getWriteStream().write(logLine)
+    } catch {
+      // Silently fail to avoid disturbing Claude session
     }
   }
 }
