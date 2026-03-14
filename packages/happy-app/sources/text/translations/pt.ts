@@ -417,6 +417,7 @@ export const pt: TranslationStructure = {
             claude: 'Claude',
             codex: 'Codex',
             cursor: 'Cursor',
+            cursorAcp: 'Cursor ACP',
             gemini: 'Gemini',
         },
         model: {

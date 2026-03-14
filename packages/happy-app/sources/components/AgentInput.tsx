@@ -66,7 +66,7 @@ interface AgentInputProps {
     };
     alwaysShowContextSize?: boolean;
     onFileViewerPress?: () => void;
-    agentType?: 'claude' | 'codex' | 'cursor' | 'gemini';
+    agentType?: 'claude' | 'codex' | 'cursor' | 'cursor-acp' | 'gemini';
     onAgentClick?: () => void;
     machineName?: string | null;
     onMachineClick?: () => void;
@@ -305,7 +305,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
 
     // Use metadata.flavor for existing sessions, agentType prop for new sessions
     const isCodex = props.metadata?.flavor === 'codex' || props.agentType === 'codex';
-    const isCursor = props.metadata?.flavor === 'cursor' || props.agentType === 'cursor';
+    const isCursor = props.metadata?.flavor === 'cursor' || props.agentType === 'cursor' || props.agentType === 'cursor-acp';
     const isGemini = props.metadata?.flavor === 'gemini' || props.agentType === 'gemini';
     const displayPermissionMode = React.useMemo(() => (
         props.permissionMode ? hackMode(props.permissionMode) : null
@@ -1079,7 +1079,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                             fontWeight: '600',
                                             ...Typography.default('semiBold'),
                                         }}>
-                                            {props.agentType === 'claude' ? t('agentInput.agent.claude') : props.agentType === 'codex' ? t('agentInput.agent.codex') : props.agentType === 'cursor' ? t('agentInput.agent.cursor') : t('agentInput.agent.gemini')}
+                                            {props.agentType === 'claude' ? t('agentInput.agent.claude') : props.agentType === 'codex' ? t('agentInput.agent.codex') : props.agentType === 'cursor-acp' ? t('agentInput.agent.cursorAcp') : props.agentType === 'cursor' ? t('agentInput.agent.cursor') : t('agentInput.agent.gemini')}
                                         </Text>
                                     </Pressable>
                                 )}

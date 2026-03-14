@@ -65,7 +65,7 @@ const useProfileMap = (profiles: AIBackendProfile[]) => {
 
 // Environment variable transformation helper
 // Returns ALL profile environment variables - daemon will use them as-is
-const transformProfileToEnvironmentVars = (profile: AIBackendProfile, agentType: 'claude' | 'codex' | 'cursor' | 'gemini' = 'claude') => {
+const transformProfileToEnvironmentVars = (profile: AIBackendProfile, agentType: 'claude' | 'codex' | 'cursor' | 'cursor-acp' | 'gemini' = 'claude') => {
     // getProfileEnvironmentVariables already returns ALL env vars from profile
     // including custom environmentVariables array and provider-specific configs
     return getProfileEnvironmentVariables(profile);
@@ -319,16 +319,16 @@ function NewSessionWizard() {
         }
         return 'anthropic'; // Default to Anthropic
     });
-    const [agentType, setAgentType] = React.useState<'claude' | 'codex' | 'cursor' | 'gemini'>(() => {
+    const [agentType, setAgentType] = React.useState<'claude' | 'codex' | 'cursor' | 'cursor-acp' | 'gemini'>(() => {
         // Check if agent type was provided in temp data
         if (tempSessionData?.agentType) {
             // Only allow gemini if experiments are enabled
             if (tempSessionData.agentType === 'gemini' && !experimentsEnabled) {
                 return 'claude';
             }
-            return tempSessionData.agentType as 'claude' | 'codex' | 'cursor' | 'gemini';
+            return tempSessionData.agentType as 'claude' | 'codex' | 'cursor' | 'cursor-acp' | 'gemini';
         }
-        if (lastUsedAgent === 'claude' || lastUsedAgent === 'codex' || lastUsedAgent === 'cursor') {
+        if (lastUsedAgent === 'claude' || lastUsedAgent === 'codex' || lastUsedAgent === 'cursor' || lastUsedAgent === 'cursor-acp') {
             return lastUsedAgent;
         }
         // Only allow gemini if experiments are enabled
@@ -338,14 +338,15 @@ function NewSessionWizard() {
         return 'claude';
     });
 
-    // Agent cycling handler (for cycling through claude -> codex -> cursor -> gemini)
+    // Agent cycling handler (for cycling through claude -> codex -> cursor -> cursor-acp -> gemini)
     // Note: Does NOT persist immediately - persistence is handled by useEffect below
     const handleAgentClick = React.useCallback(() => {
         setAgentType(prev => {
-            // Cycle: claude -> codex -> cursor -> gemini (if experiments) -> claude
+            // Cycle: claude -> codex -> cursor -> cursor-acp -> gemini (if experiments) -> claude
             if (prev === 'claude') return 'codex';
             if (prev === 'codex') return 'cursor';
-            if (prev === 'cursor') return experimentsEnabled ? 'gemini' : 'claude';
+            if (prev === 'cursor') return 'cursor-acp';
+            if (prev === 'cursor-acp') return experimentsEnabled ? 'gemini' : 'claude';
             return 'claude';
         });
     }, [experimentsEnabled]);
@@ -469,9 +470,11 @@ function NewSessionWizard() {
         if (lastCorrectedTimestampRef.current === cliAvailability.timestamp) return;
         lastCorrectedTimestampRef.current = cliAvailability.timestamp;
 
-        const agentAvailable = cliAvailability[agentType];
+        // cursor-acp shares the cursor-agent binary so reuse the cursor availability status
+        const agentAvailabilityKey = agentType === 'cursor-acp' ? 'cursor' : agentType;
+        const agentAvailable = cliAvailability[agentAvailabilityKey as keyof typeof cliAvailability];
         if (agentAvailable === false) {
-            const availableAgent: 'claude' | 'codex' | 'cursor' | 'gemini' =
+            const availableAgent: 'claude' | 'codex' | 'cursor' | 'cursor-acp' | 'gemini' =
                 cliAvailability.claude === true ? 'claude' :
                 cliAvailability.codex === true ? 'codex' :
                 cliAvailability.cursor === true ? 'cursor' :
@@ -496,7 +499,7 @@ function NewSessionWizard() {
     const { variables: daemonEnv } = useEnvironmentVariables(selectedMachineId, envVarRefs);
 
     // Temporary banner dismissal (X button) - resets when component unmounts or machine changes
-    const [hiddenBanners, setHiddenBanners] = React.useState<{ claude: boolean; codex: boolean; cursor: boolean; gemini: boolean }>({ claude: false, codex: false, cursor: false, gemini: false });
+    const [hiddenBanners, setHiddenBanners] = React.useState<{ claude: boolean; codex: boolean; cursor: boolean; gemini: boolean }>({ claude: false, codex: false, cursor: false, gemini: false }); // cursor-acp shares 'cursor' banner
 
     // Helper to check if CLI warning has been dismissed (checks both global and per-machine)
     const isWarningDismissed = React.useCallback((cli: 'claude' | 'codex' | 'cursor' | 'gemini'): boolean => {
@@ -561,8 +564,10 @@ function NewSessionWizard() {
             .filter(([, supported]) => supported)
             .map(([agent]) => agent);
         const requiredCLI = supportedCLIs.length === 1 ? supportedCLIs[0] as 'claude' | 'codex' | 'cursor' | 'gemini' : null;
+        // cursor-acp shares cursor-agent binary
+        const requiredCLIKey = (requiredCLI === 'cursor-acp' as any) ? 'cursor' : requiredCLI;
 
-        if (requiredCLI && cliAvailability[requiredCLI] === false) {
+        if (requiredCLIKey && cliAvailability[requiredCLIKey as keyof typeof cliAvailability] === false) {
             return {
                 available: false,
                 reason: `cli-not-detected:${requiredCLI}`,
@@ -1381,7 +1386,7 @@ function NewSessionWizard() {
                                 </View>
                             )}
 
-                            {selectedMachineId && cliAvailability.cursor === false && !isWarningDismissed('cursor') && !hiddenBanners.cursor && (
+                            {selectedMachineId && cliAvailability.cursor === false && (agentType === 'cursor' || agentType === 'cursor-acp') && !isWarningDismissed('cursor') && !hiddenBanners.cursor && (
                                 <View style={{
                                     backgroundColor: theme.colors.box.warning.background,
                                     borderRadius: 10,

@@ -137,8 +137,10 @@ export const AIBackendProfileSchema = z.object({
 export type AIBackendProfile = z.infer<typeof AIBackendProfileSchema>;
 
 // Helper functions for profile validation and compatibility
-export function validateProfileForAgent(profile: AIBackendProfile, agent: 'claude' | 'codex' | 'cursor' | 'gemini'): boolean {
-    return profile.compatibility[agent];
+export function validateProfileForAgent(profile: AIBackendProfile, agent: 'claude' | 'codex' | 'cursor' | 'cursor-acp' | 'gemini'): boolean {
+    // cursor-acp uses the same cursor-agent binary so reuse cursor compatibility
+    const compatKey = agent === 'cursor-acp' ? 'cursor' : agent;
+    return profile.compatibility[compatKey];
 }
 
 /**
