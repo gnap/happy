@@ -173,6 +173,13 @@ const PENDING_TODO_FLUSH_TTL_MS = 3000;
 export class AcpCursorBackend extends AcpBackend {
   /** Buffer for first tool_call notification (empty rawInput). */
   private pendingCursorTools = new Map<string, PendingCursorTool>();
+  /**
+   * Execute tool calls buffered while waiting for the command title from requestPermission.
+   * Local bin cursor-agent (2026.03+) sends a single tool_call with rawInput={} and never sends
+   * a second notification with rawInput.command. The command only arrives in requestPermission's
+   * toolCall.title. We defer the tool-call flush until then.
+   */
+  private pendingCommandEnrich = new Map<string, PendingCursorTool & { inProgressParams: SessionNotification }>();
   /** Extra data for a tool call delivered out-of-band via _cursor/* extension methods. */
   private cursorExtData = new Map<string, CursorExtData>();
   /**
@@ -317,6 +324,17 @@ export class AcpCursorBackend extends AcpBackend {
       }
       if (status === 'completed') {
         const toolCallId = typeof update.toolCallId === 'string' ? update.toolCallId : '';
+
+        // Flush any deferred execute tool call (local bin, allowlisted command — no permission fired).
+        const enrichPending = toolCallId ? this.pendingCommandEnrich.get(toolCallId) : undefined;
+        if (enrichPending) {
+          this.pendingCommandEnrich.delete(toolCallId);
+          // Emit tool-call first, then the deferred in_progress, so AcpBackend's startToolCall
+          // sees the tool already active and won't emit a duplicate tool-call.
+          this.flushCommandEnrich(enrichPending);
+          super.handleSessionUpdate(enrichPending.inProgressParams);
+        }
+
         // Check if this is a TodoWrite tool (tracked via toolCallIdToKindMap or name map).
         const toolName = toolCallId ? this.createHandlerContext().toolCallIdToNameMap.get(toolCallId) : undefined;
         if (toolName === 'TodoWrite') {
@@ -396,10 +414,19 @@ export class AcpCursorBackend extends AcpBackend {
 
     const pending = this.pendingCursorTools.get(toolCallId);
     if (pending) {
-      // Never received a second tool_call with real args; flush now with whatever we have.
       this.pendingCursorTools.delete(toolCallId);
+
+      if (pending.kind === 'execute' && !hasRealInput(pending.rawInput)) {
+        // Local bin cursor-agent: no second tool_call with rawInput.command will arrive.
+        // Defer both the tool-call flush AND the in_progress pass-through until requestPermission
+        // fires with toolCall.title containing the command. We must not call super here because
+        // AcpBackend.handleToolCallUpdate would emit tool-call("unknown") before we have the command.
+        this.pendingCommandEnrich.set(toolCallId, { ...pending, inProgressParams: params });
+        return;
+      }
+
+      // Never received a second tool_call with real args; flush now with whatever we have.
       const fakeParams = this.transformToolCallParams(
-        // Build a minimal tool_call notification from the buffered data
         { ...params, update: { ...pending, sessionUpdate: 'tool_call', status: 'pending' } } as unknown as SessionNotification,
         { ...pending, sessionUpdate: 'tool_call', status: 'pending' },
         pending.kind,
@@ -410,6 +437,43 @@ export class AcpCursorBackend extends AcpBackend {
     }
 
     super.handleSessionUpdate(params);
+  }
+
+  /**
+   * Called by AcpBackend when a requestPermission RPC arrives.
+   * For execute tool calls deferred in pendingCommandEnrich, extracts the command
+   * from the permission's toolCall.title and flushes the tool-call with the real command.
+   */
+  protected override onPermissionRequest(toolCallId: string, commandTitle: string): void {
+    const pending = this.pendingCommandEnrich.get(toolCallId);
+    if (!pending) return;
+    this.pendingCommandEnrich.delete(toolCallId);
+
+    // Strip surrounding backticks from title (e.g. "`ls /tmp`" → "ls /tmp")
+    const command = commandTitle.replace(/^`|`$/g, '').trim();
+    const enrichedRawInput = command ? { command } : pending.rawInput;
+    const enrichedTitle = commandTitle || pending.title;
+
+    // Emit tool-call with the real command first, then pass the deferred in_progress so that
+    // AcpBackend sees activeToolCalls already populated and won't emit a second tool-call.
+    this.flushCommandEnrich({ ...pending, rawInput: enrichedRawInput, title: enrichedTitle });
+    super.handleSessionUpdate(pending.inProgressParams);
+  }
+
+  private flushCommandEnrich(
+    pending: PendingCursorTool & { inProgressParams: SessionNotification },
+  ): void {
+    const { inProgressParams, kind, title, rawInput } = pending;
+    // Build a synthetic tool_call notification so AcpBackend emits the tool-call event.
+    const fakeUpdate = { ...pending, sessionUpdate: 'tool_call' as const, status: 'pending' as const };
+    const fakeParams = this.transformToolCallParams(
+      { ...inProgressParams, update: fakeUpdate } as unknown as SessionNotification,
+      fakeUpdate,
+      kind,
+      title,
+      rawInput,
+    );
+    super.handleSessionUpdate(fakeParams);
   }
 
   /**
@@ -424,7 +488,7 @@ export class AcpCursorBackend extends AcpBackend {
   }
 
   /** Build a transformed SessionNotification with mapped appName/description/args. */
-  private transformToolCallParams(
+  protected transformToolCallParams(
     params: SessionNotification,
     update: SessionUpdate,
     kind: string,

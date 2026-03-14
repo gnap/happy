@@ -612,6 +612,13 @@ export class AcpBackend implements AgentBackend {
             paramsKeys: Object.keys(params),
           }, null, 2));
           
+          // Notify subclass before emitting (e.g. AcpCursorBackend uses this to enrich
+          // execute tool-call descriptions when local bin cursor-agent omits rawInput.command).
+          // Use toolCall.toolCallId (the real ACP tool call ID) not the permissionId UUID.
+          const acpToolCallId = (toolCall as any)?.toolCallId ?? toolCallId;
+          const commandTitle = (toolCall as any)?.title ?? '';
+          this.onPermissionRequest(acpToolCallId, commandTitle);
+
           // Emit permission request event for UI/mobile handling
           this.emit({
             type: 'permission-request',
@@ -661,6 +668,10 @@ export class AcpBackend implements AgentBackend {
                 } else if (options.length > 0) {
                   // Fallback to first option if no specific match
                   optionId = options[0].optionId || 'proceed_once';
+                } else {
+                  // No options provided (e.g. cursor sub-agent permissions) — default to proceed_once.
+                  // Without this fallback the optionId stays 'cancel' and cursor-agent treats it as denied.
+                  optionId = 'proceed_once';
                 }
                 
                 // Emit tool-result with permissionId so UI can close the timer
@@ -872,6 +883,14 @@ export class AcpBackend implements AgentBackend {
       throw error;
     }
   }
+
+  /**
+   * Called when a requestPermission RPC arrives, before emitting the permission-request event.
+   * Subclasses can override to enrich pending tool-call descriptions using the command title
+   * (e.g. AcpCursorBackend fills in rawInput.command for local bin cursor-agent).
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  protected onPermissionRequest(_toolCallId: string, _commandTitle: string): void {}
 
   /**
    * Handle extension methods sent by the agent (e.g. cursor-specific _cursor/* methods).

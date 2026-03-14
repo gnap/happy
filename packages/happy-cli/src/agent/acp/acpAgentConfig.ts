@@ -9,9 +9,14 @@ export type AcpAgentConfig = {
 function resolveCursorAgentPath(): string {
   const envPath = process.env.CURSOR_AGENT_PATH;
   if (envPath) return envPath;
-  // Prefer the Homebrew-installed version (2026.02.x) which exposes tool rawInput args in ACP.
-  // The ~/.local version (2026.03.x+) regressed to sending empty rawInput for all tool calls.
-  const preferred = ['/opt/homebrew/bin/cursor-agent', '/usr/local/bin/cursor-agent'];
+  // Prefer the ~/.local version (2026.03.x+) which fixes sub-agent Task LLM calls hanging forever.
+  // The Homebrew version (2026.02.x) has richer rawInput for tool calls but sub-agent tasks never
+  // complete (LLM API calls hang indefinitely). Local bin Task description falls back to title.
+  const preferred = [
+    '/Users/gnap/.local/bin/cursor-agent',
+    '/opt/homebrew/bin/cursor-agent',
+    '/usr/local/bin/cursor-agent',
+  ];
   const found = preferred.find(p => existsSync(p));
   if (found) return found;
   try {

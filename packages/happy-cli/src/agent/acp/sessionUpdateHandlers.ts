@@ -283,11 +283,21 @@ export function startToolCall(
   if (!ctx.toolCallTimeouts.has(toolCallId)) {
     const timeout = setTimeout(() => {
       const duration = formatDuration(ctx.toolCallStartTimes.get(toolCallId));
+      const resolvedKind = ctx.toolCallIdToKindMap.get(toolCallId) || toolKindStr || 'unknown';
       logger.debug(`[AcpBackend] ⏱️ Tool call TIMEOUT (from ${source}): ${toolCallId} (${toolKind}) after ${(timeoutMs / 1000).toFixed(0)}s - Duration: ${duration}, removing from active set`);
 
       ctx.activeToolCalls.delete(toolCallId);
       ctx.toolCallStartTimes.delete(toolCallId);
       ctx.toolCallTimeouts.delete(toolCallId);
+      ctx.toolCallIdToKindMap.delete(toolCallId);
+
+      // Emit a synthetic tool-result so the App knows this tool call ended.
+      ctx.emit({
+        type: 'tool-result',
+        toolName: resolvedKind,
+        result: { error: `Tool call timed out after ${(timeoutMs / 1000).toFixed(0)}s`, status: 'timeout' },
+        callId: toolCallId,
+      });
 
       if (ctx.activeToolCalls.size === 0) {
         logger.debug('[AcpBackend] No more active tool calls after timeout, emitting idle status');
