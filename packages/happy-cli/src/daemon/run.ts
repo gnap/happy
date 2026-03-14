@@ -778,6 +778,7 @@ export async function startDaemon(): Promise<void> {
           logger.debug(`[DAEMON RUN] Session PID ${pid} exited (reason: ${session.exitReason}), moving to stoppedSessions`);
           if (session.happySessionId) {
             stoppedSessions.set(session.happySessionId, { ...session, childProcess: undefined });
+            persistNow();
           }
         }
       } else {
@@ -788,19 +789,21 @@ export async function startDaemon(): Promise<void> {
 
     /** Remove a stopped session from the visible list (explicit user action). */
     const archiveSession = (sessionId: string): boolean => {
-      if (stoppedSessions.delete(sessionId)) {
+      let removed = stoppedSessions.delete(sessionId);
+      if (removed) {
         logger.debug(`[DAEMON RUN] Archived session ${sessionId}`);
-        return true;
       }
       // Also handle the edge case where it's still in active tracking (e.g. archive while running)
       for (const [pid, session] of pidToTrackedSession.entries()) {
         if (session.happySessionId === sessionId) {
           pidToTrackedSession.delete(pid);
           logger.debug(`[DAEMON RUN] Archived active session ${sessionId} (PID ${pid})`);
-          return true;
+          removed = true;
+          break;
         }
       }
-      return false;
+      if (removed) persistNow();
+      return removed;
     };
 
     // Restart a session: kill existing process and spawn a new one reconnecting to the same server session
@@ -911,6 +914,53 @@ export async function startDaemon(): Promise<void> {
     if (prevState?.lastSessionTagByDirectory) Object.assign(lastSessionTagByDirectory, prevState.lastSessionTagByDirectory);
     if (prevState?.lastDirectoryBySessionId) Object.assign(lastDirectoryBySessionId, prevState.lastDirectoryBySessionId);
     if (prevState?.lastAgentBySessionId) Object.assign(lastAgentBySessionId, prevState.lastAgentBySessionId);
+    // Restore stopped sessions from previous daemon run (so restart/auto-respawn still works)
+    if (prevState?.stoppedSessions) {
+      const MAX_STOPPED_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+      const now = Date.now();
+      for (const s of prevState.stoppedSessions) {
+        if (s.exitTime && now - s.exitTime > MAX_STOPPED_AGE_MS) continue;
+        stoppedSessions.set(s.happySessionId, {
+          startedBy: 'daemon',
+          happySessionId: s.happySessionId,
+          pid: s.pid,
+          directory: s.directory,
+          sessionTag: s.sessionTag,
+          agent: s.agent as any,
+          exitReason: s.exitReason,
+          exitTime: s.exitTime,
+          lastHeartbeat: s.lastHeartbeat,
+        });
+      }
+      logger.debug(`[DAEMON RUN] Restored ${stoppedSessions.size} stopped session(s) from persisted state`);
+    }
+    const serializeStoppedSessions = () =>
+      Array.from(stoppedSessions.values()).map(s => ({
+        happySessionId: s.happySessionId!,
+        pid: s.pid,
+        directory: s.directory,
+        sessionTag: s.sessionTag,
+        agent: s.agent,
+        exitReason: s.exitReason,
+        exitTime: s.exitTime,
+        lastHeartbeat: s.lastHeartbeat,
+      }));
+
+    /** Write the full daemon state snapshot to disk immediately. */
+    const persistNow = () => {
+      writeDaemonState({
+        pid: process.pid,
+        httpPort: controlPort,
+        startTime: fileState.startTime,
+        startedWithCliVersion: packageJson.version,
+        lastHeartbeat: fileState.lastHeartbeat,
+        daemonLogPath: fileState.daemonLogPath,
+        lastSessionTagByDirectory: { ...lastSessionTagByDirectory },
+        lastDirectoryBySessionId: { ...lastDirectoryBySessionId },
+        lastAgentBySessionId: { ...lastAgentBySessionId },
+        stoppedSessions: serializeStoppedSessions(),
+      });
+    };
     const fileState: DaemonLocallyPersistedState = {
       pid: process.pid,
       httpPort: controlPort,
@@ -919,7 +969,8 @@ export async function startDaemon(): Promise<void> {
       daemonLogPath: logger.logFilePath,
       lastSessionTagByDirectory: { ...lastSessionTagByDirectory },
       lastDirectoryBySessionId: { ...lastDirectoryBySessionId },
-      lastAgentBySessionId: { ...lastAgentBySessionId }
+      lastAgentBySessionId: { ...lastAgentBySessionId },
+      stoppedSessions: serializeStoppedSessions(),
     };
     writeDaemonState(fileState);
     logger.debug('[DAEMON RUN] Daemon state written');
@@ -1040,7 +1091,8 @@ export async function startDaemon(): Promise<void> {
           daemonLogPath: fileState.daemonLogPath,
           lastSessionTagByDirectory: { ...lastSessionTagByDirectory },
           lastDirectoryBySessionId: { ...lastDirectoryBySessionId },
-          lastAgentBySessionId: { ...lastAgentBySessionId }
+          lastAgentBySessionId: { ...lastAgentBySessionId },
+          stoppedSessions: serializeStoppedSessions(),
         };
         writeDaemonState(updatedState);
         if (process.env.DEBUG) {

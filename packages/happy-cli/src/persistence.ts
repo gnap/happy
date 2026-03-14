@@ -283,6 +283,20 @@ export interface DaemonLocallyPersistedState {
   lastDirectoryBySessionId?: Record<string, string>;
   /** Server session ID -> agent type. Enables correct agent selection when auto-respawning. */
   lastAgentBySessionId?: Record<string, string>;
+  /**
+   * Stopped sessions that have not been archived. Persisted so they survive daemon restart
+   * and can still be restarted or trigger auto-respawn on new messages.
+   */
+  stoppedSessions?: Array<{
+    happySessionId: string;
+    pid: number;
+    directory?: string;
+    sessionTag?: string;
+    agent?: string;
+    exitReason?: string;
+    exitTime?: number;
+    lastHeartbeat?: number;
+  }>;
 }
 
 export async function readSettings(): Promise<Settings> {
