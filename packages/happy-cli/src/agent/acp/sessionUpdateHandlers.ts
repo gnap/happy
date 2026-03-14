@@ -504,15 +504,6 @@ export function handleToolCall(
 
   logger.debug(`[AcpBackend] Received tool_call: toolCallId=${toolCallId}, status=${status}, kind=${update.kind}`);
 
-  // cursor-agent ACP sends two tool_call notifications per tool:
-  //   1st: rawInput={} (empty pre-announcement) — skip
-  //   2nd: rawInput={command:"..."} (actual args) — start
-  // When rawInput is present but empty, skip and wait for the second notification.
-  if (update.rawInput !== undefined && Object.keys(update.rawInput).length === 0) {
-    logger.debug(`[AcpBackend] Skipping tool_call with empty rawInput (cursor pre-announcement), toolCallId=${toolCallId}`);
-    return { handled: true };
-  }
-
   // tool_call can come without explicit status, assume 'in_progress' if missing
   const isInProgress = !status || status === 'in_progress' || status === 'pending';
 

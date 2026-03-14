@@ -41,7 +41,8 @@ vi.mock('axios', () => ({
 vi.mock('@/configuration', () => ({
     configuration: {
         serverUrl: 'https://server.test'
-    }
+    },
+    serverHttpsAgent: {},
 }));
 
 vi.mock('@/ui/logger', () => ({

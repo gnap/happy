@@ -514,7 +514,7 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
   }
 
   permissionHandler = new GenericAcpPermissionHandler(session, opts.agentName);
-  const sessionManager = new AcpSessionManager();
+  const sessionManager = new AcpSessionManager(opts.agentName);
   const messageQueue = new MessageQueue2<AcpSwitchMode>((mode) => hashObject(mode));
   let currentPermissionMode: string | undefined;
   let currentModel: string | null | undefined;
@@ -892,6 +892,15 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     session.keepAlive(thinking, 'remote');
   }, 2000);
 
+  // Flush accumulated text chunks every 80ms so App receives batched envelopes
+  // instead of one per token (avoids each token rendering as a separate bubble).
+  const textFlushInterval = setInterval(() => {
+    const envelopes = sessionManager.flushText();
+    if (envelopes.length > 0) {
+      sendEnvelopes(envelopes);
+    }
+  }, 80);
+
   async function handleAbort() {
     try {
       if (acpSessionId) {
@@ -1004,6 +1013,7 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     }
   } finally {
     clearInterval(keepAliveInterval);
+    clearInterval(textFlushInterval);
     reconnectionHandle?.cancel();
     clearPendingTurn(new Error('ACP runner shutting down'));
 

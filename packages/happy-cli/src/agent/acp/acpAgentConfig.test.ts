@@ -2,11 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { KNOWN_ACP_AGENTS, resolveAcpAgentConfig } from './acpAgentConfig';
 
 describe('KNOWN_ACP_AGENTS', () => {
-  it('defines built-in Gemini and OpenCode command mappings', () => {
-    expect(KNOWN_ACP_AGENTS).toEqual({
-      gemini: { command: 'gemini', args: ['--experimental-acp'] },
-      opencode: { command: 'opencode', args: ['acp'] },
-    });
+  it('defines built-in Gemini, OpenCode and Cursor command mappings', () => {
+    expect(KNOWN_ACP_AGENTS.gemini).toEqual({ command: 'gemini', args: ['--experimental-acp'] });
+    expect(KNOWN_ACP_AGENTS.opencode).toEqual({ command: 'opencode', args: ['acp'] });
+    expect(KNOWN_ACP_AGENTS.cursor.args).toEqual(['acp']);
+    expect(typeof KNOWN_ACP_AGENTS.cursor.command).toBe('string');
+    expect(Object.keys(KNOWN_ACP_AGENTS).sort()).toEqual(['cursor', 'gemini', 'opencode']);
   });
 });
 
