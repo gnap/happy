@@ -322,14 +322,6 @@ export async function runCursor(opts: {
       permissionMode: messagePermissionMode || 'default',
       model: messageModel,
     };
-    // Persist permission/model and dangerouslySkipPermissions to session metadata so App can read them on next fetch (align with Claude: force = skip permissions)
-    const metaChanged = message.meta?.permissionMode !== undefined || (message.meta && Object.prototype.hasOwnProperty.call(message.meta, 'model'));
-    if (metaChanged) {
-      const effectivePermission = messagePermissionMode || 'default';
-      const effectiveModel = messageModel ?? 'default';
-      const dangerouslySkipPermissions = effectivePermission === 'force';
-      session.updateMetadata((m) => ({ ...m, currentOperatingModeCode: effectivePermission, currentModelCode: effectiveModel, dangerouslySkipPermissions })).catch((err) => logger.debug('[Cursor] Failed to persist permission/model to session metadata', err));
-    }
     logger.debug(`[cursor] User message queued (length: ${message.content.text.length})`);
     messageQueue.push(message.content.text, mode);
   };
@@ -588,7 +580,7 @@ export async function runCursor(opts: {
 
       const { message: userMessage, mode } = batch;
       messageBuffer.addMessage(userMessage, 'user');
-      logger.debug(`[cursor] Processing message (length: ${userMessage.length}); spawning cursor-agent`);
+      logger.debug(`[cursor] Received message (length: ${userMessage.length}), sending turn-start and spawning cursor-agent`);
 
       // Cursor has no change_title MCP tool, so don't append that instruction (unlike Codex/Gemini)
       const prompt = userMessage;
@@ -609,21 +601,32 @@ export async function runCursor(opts: {
       let turnEndStatus: 'completed' | 'failed' | 'cancelled' = 'completed';
 
       const flushAccumulatedText = () => {
-        if (accumulatedResponse.trim()) {
-          const text = accumulatedResponse;
+        const trimmed = accumulatedResponse.trim();
+        if (trimmed) {
           accumulatedResponse = '';
-          // Dual-send: output (old App) + session (new App)
-          session.sendOutputFormatMessage({ type: 'assistant', uuid: randomUUID(), message: { role: 'assistant', model: 'cursor', content: [{ type: 'text', text }] } });
-          session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text }, { turn: turnId }));
+          logger.debug(`[cursor] Sending reply to app (length: ${trimmed.length})`);
+          session.sendCodexMessage({
+            type: 'message',
+            message: trimmed,
+          });
+          // Session protocol: send full reply so App has it even if no text_delta was streamed (e.g. reply only in result message)
+          session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: trimmed }, { turn: turnId }));
         }
       };
 
+      let flushInterval: ReturnType<typeof setInterval> | null = null;
       try {
         thinking = true;
         session.keepAlive(thinking, 'remote');
 
-        // Send turn-start in wrapped shape (type: 'session', data) so store App lifecycle check sees contentType === 'session'
-        session.sendSessionLifecycleEnvelope(createEnvelope('agent', { t: 'turn-start' }, { turn: turnId }));
+        // Send task_started (codex) and turn-start (session protocol) so mobile starts timer / thinking state
+        session.sendCodexMessage( {
+          type: 'task_started',
+          id: randomUUID(),
+        });
+        session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'turn-start' }, { turn: turnId }));
+        logger.debug(`[cursor] Sent task_started + turn-start (turnId: ${turnId.slice(0, 8)}...)`);
+        await session.flush();
         messageBuffer.addMessage('Thinking...', 'system');
 
         // Spawn cursor-agent process (second+ turn uses --resume so cursor-agent continues same chat)
@@ -655,6 +658,12 @@ export async function runCursor(opts: {
           ? 600000 // default 10 min
           : Math.max(0, parseInt(perToolTimeoutMsRaw, 10));
 
+        // Flush outbox periodically during the turn so App gets turn-start/thinking/text in real time
+        const flushIntervalMs = 2000;
+        flushInterval = setInterval(() => {
+          session.flush().catch((err) => logger.debug('[cursor] Periodic flush error', err));
+        }, flushIntervalMs);
+
         // Handle stream-json messages
         cursorProc.on('message', (rawMsg: CursorStreamMessage) => {
           const typeInfo = 'type' in rawMsg ? `${rawMsg.type}` : 'unknown';
@@ -680,11 +689,19 @@ export async function runCursor(opts: {
               accumulatedResponse += msg.text;
               messageBuffer.removeLastMessage('system');
               messageBuffer.addMessage(msg.text, 'assistant');
+              // Stream reply to App via session protocol so reply appears (periodic flush sends it)
+              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: msg.text }, { turn: turnId }));
               break;
 
             case 'thinking_delta':
               // Show thinking in CLI only; do not stream thinking content to app (align with Codex: state via task_started/task_complete only).
               messageBuffer.updateLastMessage(`[Thinking] ${msg.text.slice(0, 100)}...`, 'system');
+              session.sendCodexMessage( {
+                type: 'thinking',
+                text: msg.text,
+              });
+              // Session protocol: so App shows thinking state / incremental thinking
+              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: msg.text, thinking: true }, { turn: turnId }));
               break;
 
             case 'subagent_start':
@@ -861,7 +878,12 @@ export async function runCursor(opts: {
           session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: errorMsg }, { turn: turnId }));
         }
       } finally {
+        if (flushInterval !== null) {
+          clearInterval(flushInterval);
+          flushInterval = null;
+        }
         flushAccumulatedText();
+        await session.flush();
         for (const h of toolCallTimeoutHandles.values()) clearTimeout(h);
         toolCallTimeoutHandles.clear();
 

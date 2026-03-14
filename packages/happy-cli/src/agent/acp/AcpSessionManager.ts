@@ -1,6 +1,7 @@
 import { createId } from '@paralleldrive/cuid2';
 import { createEnvelope, type CreateEnvelopeOptions, type SessionEnvelope } from '@slopus/happy-wire';
 import type { AgentMessage } from '@/agent/core';
+import { logger } from '@/ui/logger';
 
 function turnOptions(turnId: string | null, time: number): CreateEnvelopeOptions {
   return turnId ? { turn: turnId, time } : { time };
@@ -14,23 +15,15 @@ function buildToolDescription(toolName: string): string {
   return `Running ${toolName}`;
 }
 
-function parseThinkingPayload(payload: unknown): { text: string; streaming: boolean } {
-  if (typeof payload === 'string') {
-    return { text: payload, streaming: false };
-  }
-  if (!payload || typeof payload !== 'object') {
-    return { text: '', streaming: false };
-  }
-  const text = typeof (payload as { text?: unknown }).text === 'string'
-    ? (payload as { text: string }).text
-    : '';
-  const streaming = (payload as { streaming?: unknown }).streaming === true;
-  return { text, streaming };
-}
 
 export class AcpSessionManager {
+  private readonly agentName: string;
   private currentTurnId: string | null = null;
   private readonly acpCallToSessionCall = new Map<string, string>();
+
+  constructor(agentName: string) {
+    this.agentName = agentName;
+  }
 
   /** Monotonic clock: max(lastTime + 1, Date.now()) */
   private lastTime = 0;
@@ -73,6 +66,18 @@ export class AcpSessionManager {
     return [createEnvelope('agent', { t: 'text', text }, turnOptions(this.currentTurnId, this.nextTime()))];
   }
 
+  /**
+   * Flush accumulated output text as a single envelope.
+   * Called periodically by the runner (e.g. every 80ms) so the app receives
+   * batched chunks instead of one envelope per token.
+   */
+  flushText(): SessionEnvelope[] {
+    if (this.pendingType !== 'output') {
+      return [];
+    }
+    return this.flush();
+  }
+
   startTurn(): SessionEnvelope[] {
     if (this.currentTurnId) {
       return [];
@@ -102,23 +107,21 @@ export class AcpSessionManager {
 
   mapMessage(msg: AgentMessage): SessionEnvelope[] {
     if (msg.type === 'event' && msg.name === 'thinking') {
-      const { text, streaming } = parseThinkingPayload(msg.payload);
-      if (!text) {
+      if (this.agentName === 'cursor') {
         return [];
       }
-
-      if (streaming) {
-        // Streaming thinking: accumulate, flush if switching from a different type
-        const flushed = this.pendingType !== 'thinking' ? this.flush() : [];
-        this.pendingType = 'thinking';
-        this.pendingText += text;
-        return flushed;
-      }
-
-      // Non-streaming thinking: flush pending, emit immediately
+      const payload = msg.payload as { text?: string; streaming?: boolean } | string | null;
+      const text = typeof payload === 'string' ? payload : (payload as { text?: string })?.text ?? '';
+      const streaming = typeof payload === 'object' && payload !== null && (payload as { streaming?: boolean }).streaming === true;
       const trimmed = text.replace(/^\n+|\n+$/g, '');
       if (!trimmed) {
-        return this.flush();
+        return streaming ? [] : this.flush();
+      }
+      if (streaming) {
+        const flushed = this.pendingType !== 'thinking' ? this.flush() : [];
+        this.pendingType = 'thinking';
+        this.pendingText += trimmed;
+        return flushed;
       }
       return [
         ...this.flush(),
@@ -135,9 +138,10 @@ export class AcpSessionManager {
       if (!text) {
         return [];
       }
-      // Accumulate output, flush if switching from a different type
+      // Flush pending if switching from a different type (e.g. thinking → output)
       const flushed = this.pendingType !== 'output' ? this.flush() : [];
       this.pendingType = 'output';
+      // Accumulate instead of emitting per-token; caller flushes periodically via flushText()
       this.pendingText += text;
       return flushed;
     }
@@ -161,9 +165,12 @@ export class AcpSessionManager {
     if (msg.type === 'tool-result') {
       const flushed = this.flush();
       const call = this.ensureSessionCallId(msg.callId);
+      const result = msg.result && typeof msg.result === 'object' && !Array.isArray(msg.result)
+        ? (msg.result as Record<string, unknown>)
+        : undefined;
       return [
         ...flushed,
-        createEnvelope('agent', { t: 'tool-call-end', call }, turnOptions(this.currentTurnId, this.nextTime())),
+        createEnvelope('agent', { t: 'tool-call-end', call, ...(result ? { result } : {}) }, turnOptions(this.currentTurnId, this.nextTime())),
       ];
     }
 

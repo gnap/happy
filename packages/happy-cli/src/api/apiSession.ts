@@ -440,7 +440,7 @@ export class ApiSessionClient extends EventEmitter {
                 if (data.body.t === 'new-message') {
                     const messageSeq = data.body.message?.seq;
                     const isEncrypted = data.body.message?.content?.t === 'encrypted';
-                    const acceptSeq = typeof messageSeq === 'number' && (this.lastSeq === 0 || messageSeq === this.lastSeq + 1);
+                    const acceptSeq = typeof messageSeq === 'number' && this.lastSeq > 0 && messageSeq === this.lastSeq + 1;
                     if (isEncrypted && acceptSeq) {
                         const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.message.content.c));
                         logger.debugLargeJson('[SOCKET] [UPDATE] Received update:', body);

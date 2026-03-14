@@ -9,7 +9,7 @@ function mapMany(mapper: AcpSessionManager, messages: AgentMessage[]) {
 
 describe('AcpSessionManager turn lifecycle', () => {
   it('emits turn-start from startTurn()', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     const envelopes = mapper.startTurn();
 
     expect(envelopes).toHaveLength(1);
@@ -19,7 +19,7 @@ describe('AcpSessionManager turn lifecycle', () => {
   });
 
   it('emits completed turn-end from endTurn()', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     const started = mapper.startTurn();
     const ended = mapper.endTurn('completed');
 
@@ -30,7 +30,7 @@ describe('AcpSessionManager turn lifecycle', () => {
   });
 
   it('emits failed turn-end from endTurn()', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     const started = mapper.startTurn();
     const ended = mapper.endTurn('failed');
 
@@ -40,7 +40,7 @@ describe('AcpSessionManager turn lifecycle', () => {
   });
 
   it('emits cancelled turn-end from endTurn()', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     const started = mapper.startTurn();
     const ended = mapper.endTurn('cancelled');
 
@@ -50,7 +50,7 @@ describe('AcpSessionManager turn lifecycle', () => {
   });
 
   it('is idempotent for repeated startTurn()', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     const first = mapper.startTurn();
     const second = mapper.startTurn();
 
@@ -59,13 +59,13 @@ describe('AcpSessionManager turn lifecycle', () => {
   });
 
   it('does not emit turn-end without active turn', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     const envelopes = mapper.endTurn('completed');
     expect(envelopes).toHaveLength(0);
   });
 
   it('is idempotent for repeated endTurn()', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     mapper.startTurn();
     const first = mapper.endTurn('completed');
     const second = mapper.endTurn('completed');
@@ -76,7 +76,7 @@ describe('AcpSessionManager turn lifecycle', () => {
   });
 
   it('supports multiple complete turn cycles with distinct turn ids', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     const start1 = mapper.startTurn();
     mapper.endTurn('completed');
     const start2 = mapper.startTurn();
@@ -88,7 +88,7 @@ describe('AcpSessionManager turn lifecycle', () => {
   });
 
   it('ignores status messages in mapMessage', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     expect(mapper.mapMessage({ type: 'status', status: 'running' })).toHaveLength(0);
     expect(mapper.mapMessage({ type: 'status', status: 'idle' })).toHaveLength(0);
     expect(mapper.mapMessage({ type: 'status', status: 'error' })).toHaveLength(0);
@@ -97,7 +97,7 @@ describe('AcpSessionManager turn lifecycle', () => {
   });
 
   it('flushes pending text on endTurn()', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     mapper.startTurn();
     mapper.mapMessage({ type: 'model-output', textDelta: 'What command would you like me' });
 
@@ -108,7 +108,7 @@ describe('AcpSessionManager turn lifecycle', () => {
   });
 
   it('flushes pending text on endTurn() even without active turn', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     mapper.startTurn();
     mapper.endTurn('completed');
 
@@ -123,24 +123,28 @@ describe('AcpSessionManager turn lifecycle', () => {
 });
 
 describe('AcpSessionManager text mapping', () => {
-  it('accumulates model-output and flushes on endTurn()', () => {
-    const mapper = new AcpSessionManager();
+  it('accumulates model-output chunks and flushText() emits them batched', () => {
+    const mapper = new AcpSessionManager("test");
     const start = mapper.startTurn()[0];
 
-    // Accumulates - not flushed yet
+    // Chunks accumulate; mapMessage returns []
     expect(mapper.mapMessage({ type: 'model-output', textDelta: 'hel' })).toHaveLength(0);
     expect(mapper.mapMessage({ type: 'model-output', textDelta: 'lo' })).toHaveLength(0);
 
-    // Flushed combined output on turn-end
+    // flushText() emits accumulated text as a single envelope
+    const flushed = mapper.flushText();
+    expect(flushed).toHaveLength(1);
+    expect(flushed[0].ev).toEqual({ t: 'text', text: 'hello' });
+    expect(flushed[0].turn).toBe(start.turn);
+
+    // endTurn with no pending text emits turn-end only
     const envelopes = mapper.endTurn('completed');
-    expect(envelopes).toHaveLength(2);
-    expect(envelopes[0].ev).toEqual({ t: 'text', text: 'hello' });
-    expect(envelopes[0].turn).toBe(start.turn);
-    expect(envelopes[1].ev).toEqual({ t: 'turn-end', status: 'completed' });
+    expect(envelopes).toHaveLength(1);
+    expect(envelopes[0].ev).toEqual({ t: 'turn-end', status: 'completed' });
   });
 
   it('flushes accumulated output when thinking starts', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     mapper.startTurn();
 
     mapper.mapMessage({ type: 'model-output', textDelta: 'hello' });
@@ -151,7 +155,7 @@ describe('AcpSessionManager text mapping', () => {
   });
 
   it('skips empty model-output text', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     expect(mapper.mapMessage({ type: 'model-output', textDelta: '' })).toHaveLength(0);
     expect(mapper.mapMessage({ type: 'model-output' })).toHaveLength(0);
   });
@@ -159,7 +163,7 @@ describe('AcpSessionManager text mapping', () => {
 
 describe('AcpSessionManager tool mapping', () => {
   it('maps tool-call to tool-call-start with generated call id', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     const start = mapper.startTurn()[0];
 
     const envelopes = mapper.mapMessage({
@@ -182,7 +186,7 @@ describe('AcpSessionManager tool mapping', () => {
   });
 
   it('maps tool-result to paired tool-call-end', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     mapper.startTurn();
     const start = mapper.mapMessage({
       type: 'tool-call',
@@ -205,7 +209,7 @@ describe('AcpSessionManager tool mapping', () => {
   });
 
   it('creates distinct call ids for multiple tool calls', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     mapper.startTurn();
 
     const first = mapper.mapMessage({
@@ -229,7 +233,7 @@ describe('AcpSessionManager tool mapping', () => {
   });
 
   it('emits tool-call-end with generated call id for unknown tool result', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     mapper.startTurn();
     const envelope = mapper.mapMessage({
       type: 'tool-result',
@@ -247,7 +251,7 @@ describe('AcpSessionManager tool mapping', () => {
 
 describe('AcpSessionManager thinking mapping', () => {
   it('accumulates streaming thinking and flushes on type change', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     mapper.startTurn();
 
     // Streaming thinking accumulates
@@ -261,7 +265,7 @@ describe('AcpSessionManager thinking mapping', () => {
   });
 
   it('emits non-streaming thinking immediately', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     mapper.startTurn();
 
     const envelopes = mapper.mapMessage({ type: 'event', name: 'thinking', payload: { text: 'full thought' } });
@@ -270,7 +274,7 @@ describe('AcpSessionManager thinking mapping', () => {
   });
 
   it('flushes streaming thinking on endTurn()', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     const start = mapper.startTurn()[0];
 
     mapper.mapMessage({ type: 'event', name: 'thinking', payload: { text: 'A', streaming: true } });
@@ -284,7 +288,7 @@ describe('AcpSessionManager thinking mapping', () => {
   });
 
   it('alternates between thinking and output correctly', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     mapper.startTurn();
 
     // Streaming thinking
@@ -309,7 +313,7 @@ describe('AcpSessionManager thinking mapping', () => {
   });
 
   it('skips thinking messages with empty text', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     expect(mapper.mapMessage({ type: 'event', name: 'thinking', payload: { text: '' } })).toHaveLength(0);
     expect(mapper.mapMessage({ type: 'event', name: 'thinking', payload: {} })).toHaveLength(0);
   });
@@ -317,7 +321,7 @@ describe('AcpSessionManager thinking mapping', () => {
 
 describe('AcpSessionManager ignored messages', () => {
   it('ignores non-session-protocol ACP messages', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     const messages: AgentMessage[] = [
       { type: 'permission-request', id: 'p1', reason: 'ReadFile', payload: {} },
       { type: 'permission-response', id: 'p1', approved: true },
@@ -333,7 +337,7 @@ describe('AcpSessionManager ignored messages', () => {
 
 describe('AcpSessionManager id consistency', () => {
   it('keeps ids consistent across a full turn sequence', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     // startTurn, then output "hello" accumulates, tool-call flushes it,
     // tool-result, then output "done" accumulates, endTurn flushes it + turn-end
     const envelopes = [
@@ -366,7 +370,7 @@ describe('AcpSessionManager id consistency', () => {
   });
 
   it('assigns strictly increasing timestamps to all envelopes', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     const envelopes = [
       ...mapper.startTurn(),
       ...mapper.mapMessage({ type: 'event', name: 'thinking', payload: { text: 'hmm', streaming: true } }),
@@ -383,7 +387,7 @@ describe('AcpSessionManager id consistency', () => {
   });
 
   it('uses different turn ids between separate turns', () => {
-    const mapper = new AcpSessionManager();
+    const mapper = new AcpSessionManager("test");
     const firstStart = mapper.startTurn()[0];
     mapper.endTurn('completed');
     const secondStart = mapper.startTurn()[0];

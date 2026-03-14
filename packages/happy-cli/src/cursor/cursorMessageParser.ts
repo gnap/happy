@@ -165,13 +165,15 @@ export class CursorMessageParser {
 
       case 'assistant': {
         const content = msg.message?.content;
-        if (Array.isArray(content)) {
-          for (const block of content) {
-            if (block.type === 'text' && block.text) {
-              results.push({ type: 'text_delta', text: block.text });
-            }
-            // Do NOT emit tool_call_start for tool_use here - we only emit from tool_call started/completed
-            // so that each start has exactly one end and the mobile timer stops correctly.
+        const blocks = Array.isArray(content) ? content : content && typeof content === 'object' ? [content] : [];
+        for (const block of blocks) {
+          if (!block || typeof block !== 'object') continue;
+          const b = block as Record<string, unknown>;
+          let text = typeof b.text === 'string' ? b.text : '';
+          if (!text && typeof b.content === 'string') text = b.content;
+          if (!text && typeof b.message === 'string') text = b.message;
+          if (text) {
+            results.push({ type: 'text_delta', text });
           }
         }
         break;
@@ -402,23 +404,56 @@ export class CursorMessageParser {
       }
 
       case 'result': {
+        const raw = msg as unknown as Record<string, unknown>;
+        let resultText: string | undefined;
+        if (typeof raw.result === 'string' && raw.result.length > 0) {
+          resultText = raw.result;
+        } else if (raw.result && typeof raw.result === 'object') {
+          const o = raw.result as Record<string, unknown>;
+          if (typeof o.result === 'string' && o.result) resultText = o.result;
+          else if (typeof o.output === 'string' && o.output) resultText = o.output;
+          else if (typeof o.text === 'string' && o.text) resultText = o.text;
+          else if (typeof o.message === 'string' && o.message) resultText = o.message;
+          else if (typeof o.content === 'string' && o.content) resultText = o.content;
+        }
+        if (typeof raw.output === 'string' && raw.output) resultText = resultText ?? raw.output;
+        if (typeof raw.message === 'string' && raw.message) resultText = resultText ?? raw.message;
+        if (resultText && !raw.is_error) {
+          results.push({ type: 'text_delta', text: resultText });
+        }
         results.push({
           type: 'task_complete',
-          sessionId: msg.session_id,
-          usage: msg.usage as Record<string, unknown> | undefined,
-          costUsd: msg.total_cost_usd,
-          durationMs: msg.duration_ms,
+          sessionId: raw.session_id as string | undefined,
+          usage: raw.usage as Record<string, unknown> | undefined,
+          costUsd: raw.total_cost_usd as number | undefined,
+          durationMs: raw.duration_ms as number | undefined,
         });
 
-        if (msg.is_error && msg.result) {
-          results.push({ type: 'error', message: msg.result });
+        if (raw.is_error && raw.result) {
+          results.push({ type: 'error', message: typeof raw.result === 'string' ? raw.result : JSON.stringify(raw.result) });
         }
         break;
       }
 
-      default:
-        logger.debug(`[cursor] Unknown message type: ${(msg as any).type}`);
+      default: {
+        const anyMsg = msg as Record<string, unknown>;
+        const type = anyMsg.type as string;
+        // Fallback: treat message with result-like body as final reply (e.g. alternate stream shape)
+        const resultText = typeof anyMsg.result === 'string' ? anyMsg.result : undefined;
+        if (resultText && !anyMsg.is_error) {
+          results.push({ type: 'text_delta', text: resultText });
+          results.push({
+            type: 'task_complete',
+            sessionId: anyMsg.session_id as string | undefined,
+            usage: anyMsg.usage as Record<string, unknown> | undefined,
+            costUsd: anyMsg.total_cost_usd as number | undefined,
+            durationMs: anyMsg.duration_ms as number | undefined,
+          });
+          break;
+        }
+        logger.debug(`[cursor] Unknown message type: ${type}`);
         break;
+      }
     }
 
     return results;

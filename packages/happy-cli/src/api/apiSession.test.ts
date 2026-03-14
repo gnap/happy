@@ -42,7 +42,7 @@ vi.mock('@/configuration', () => ({
     configuration: {
         serverUrl: 'https://server.test'
     },
-    serverHttpsAgent: undefined
+    serverHttpsAgent: {},
 }));
 
 vi.mock('@/ui/logger', () => ({

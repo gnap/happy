@@ -42,6 +42,22 @@ export interface SessionUpdate {
   };
   plan?: unknown;
   thinking?: unknown;
+  /**
+   * cursor-agent ACP: tool input args (instead of content).
+   * First tool_call notification sends empty {}, second sends actual args.
+   * Only start tool call when rawInput is non-empty.
+   */
+  rawInput?: Record<string, unknown>;
+  /**
+   * cursor-agent ACP: tool result on completion (instead of content).
+   * Shape: { exitCode?: number; stdout?: string; stderr?: string }
+   */
+  rawOutput?: Record<string, unknown>;
+  /**
+   * cursor-agent ACP: human-readable tool title (e.g. "`echo hello`").
+   * Use as display name instead of the generic kind ("execute", "read", etc.).
+   */
+  title?: string;
   [key: string]: unknown;
 }
 
@@ -293,23 +309,31 @@ export function startToolCall(
   // Emit running status
   ctx.emit({ type: 'status', status: 'running' });
 
-  // Parse args and emit tool-call event
-  const args = parseArgsFromContent(update.content);
+  // Parse args: prefer rawInput (cursor ACP) over content (Gemini/others)
+  const rawInputArgs = update.rawInput && Object.keys(update.rawInput).length > 0
+    ? update.rawInput
+    : null;
+  const contentArgs = parseArgsFromContent(update.content);
+  const args = rawInputArgs ?? contentArgs;
 
   // Extract locations if present
   if (update.locations && Array.isArray(update.locations)) {
-    args.locations = update.locations;
+    (args as Record<string, unknown>).locations = update.locations;
   }
 
   // Log investigation tool objective
-  if (isInvestigation && args.objective) {
-    logger.debug(`[AcpBackend] 🔍 Investigation tool objective: ${String(args.objective).substring(0, 100)}...`);
+  if (isInvestigation && (args as Record<string, unknown>).objective) {
+    logger.debug(`[AcpBackend] 🔍 Investigation tool objective: ${String((args as Record<string, unknown>).objective).substring(0, 100)}...`);
   }
+
+  // Use title as display name (cursor ACP sends human-readable title, kind is just "execute"/"read"/etc.)
+  const titleName = typeof update.title === 'string' ? update.title : undefined;
+  const displayName = titleName || toolKindStr || 'unknown';
 
   ctx.emit({
     type: 'tool-call',
-    toolName: toolKindStr || 'unknown',
-    args,
+    toolName: displayName,
+    args: args as Record<string, unknown>,
     callId: toolCallId,
   });
 }
@@ -457,9 +481,12 @@ export function handleToolCallUpdate(
       logger.debug(`[AcpBackend] Tool call ${toolCallId} already tracked, status: ${status}`);
     }
   } else if (status === 'completed') {
-    completeToolCall(toolCallId, toolKind, update.content, ctx);
+    // cursor-agent ACP sends result in rawOutput; fall back to content for other agents
+    const result = update.rawOutput !== undefined ? update.rawOutput : update.content;
+    completeToolCall(toolCallId, toolKind, result, ctx);
   } else if (status === 'failed' || status === 'cancelled') {
-    failToolCall(toolCallId, status, toolKind, update.content, ctx);
+    const result = update.rawOutput !== undefined ? update.rawOutput : update.content;
+    failToolCall(toolCallId, status, toolKind, result, ctx);
   }
 
   return { handled: true, toolCallCountSincePrompt };
