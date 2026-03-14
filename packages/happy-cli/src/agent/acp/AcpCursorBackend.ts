@@ -8,8 +8,16 @@
  *     - First notification: rawInput = {}, title = "Terminal"  (buffered, not emitted)
  *     - Second notification: rawInput = {command: "ls"}, real title  (flushed + mapped)
  *
- *  2. Tool kind → App tool name mapping:
- *     execute → CursorBash  |  read → CursorRead  |  edit → CursorEdit  |  search → Grep
+ *  2. Tool kind + title → App tool name mapping:
+ *     execute              → CursorBash
+ *     read                 → CursorRead
+ *     edit                 → CursorEdit
+ *     search + pattern     → Grep
+ *     search + pattern=*   → Glob  (globToolCall sends glob pattern)
+ *     search + searchTerm  → WebSearch
+ *     other + "Task: …"   → Task
+ *     other + "Update TODOs: …" → TodoWrite
+ *     other + "Web Fetch: …"   → WebFetch
  *
  *  3. Transforms rawInput to match the App renderer's expected arg shape.
  */
@@ -17,6 +25,7 @@
 import type { SessionNotification } from '@agentclientprotocol/sdk';
 import { AcpBackend, type AcpBackendOptions } from './AcpBackend';
 import type { SessionUpdate } from './sessionUpdateHandlers';
+import { logger } from '@/ui/logger';
 
 /** Buffered first tool_call notification waiting for real args. */
 interface PendingCursorTool {
@@ -63,15 +72,79 @@ function mapCursorKind(
     };
   }
   if (kind === 'search') {
+    // globToolCall → Glob (has `pattern` but no `searchTerm`)
+    // grepToolCall / semSearchToolCall → Grep (has `pattern`)
+    // webSearchToolCall → WebSearch (has `searchTerm`)
+    // lsToolCall → CursorRead-like (has `path`)
+    const searchTerm = typeof rawInput['searchTerm'] === 'string' ? rawInput['searchTerm'] : '';
+    if (searchTerm) {
+      return {
+        appName: 'WebSearch',
+        description: searchTerm,
+        args: { query: searchTerm },
+      };
+    }
     const pattern = typeof rawInput['pattern'] === 'string' ? rawInput['pattern'] : '';
     const path = typeof rawInput['path'] === 'string' ? rawInput['path'] : '';
+    // lsToolCall only has `path`, no `pattern` → treat as directory listing
+    if (!pattern && path) {
+      return {
+        appName: 'CursorRead',
+        description: path,
+        args: { path },
+      };
+    }
+    // Check if this looks like a glob (pattern has glob chars or title contains "glob")
+    const isGlob = pattern.includes('*') || pattern.includes('?') ||
+      (typeof title === 'string' && title.toLowerCase().includes('glob'));
+    if (isGlob) {
+      return {
+        appName: 'Glob',
+        description: pattern || title || 'Search Files',
+        args: { pattern, path },
+      };
+    }
     return {
       appName: 'Grep',
       description: pattern || title || 'Search',
       args: { pattern, path },
     };
   }
-  // Unknown kind: pass through using the title or kind as display name
+  if (kind === 'other') {
+    const t = title ?? '';
+    // taskToolCall: title = "Task: {description}"
+    if (t.startsWith('Task: ') || rawInput['_toolName'] === 'task') {
+      const description = typeof rawInput['description'] === 'string'
+        ? rawInput['description']
+        : t.replace(/^Task:\s*/, '') || 'Subagent task';
+      const prompt = typeof rawInput['prompt'] === 'string' ? rawInput['prompt'] : description;
+      const subagentType = typeof rawInput['subagentType'] === 'string' ? rawInput['subagentType'] : undefined;
+      return {
+        appName: 'Task',
+        description,
+        args: { description, prompt, ...(subagentType ? { subagent_type: subagentType } : {}) },
+      };
+    }
+    // updateTodosToolCall: title = "Update TODOs: …"
+    if (t.startsWith('Update TODOs') || rawInput['_toolName'] === 'updateTodos') {
+      const todos = Array.isArray(rawInput['todos']) ? rawInput['todos'] : [];
+      return {
+        appName: 'TodoWrite',
+        description: t || 'Update TODOs',
+        args: { todos },
+      };
+    }
+    // webFetchToolCall: title = "Web Fetch: {url}"
+    if (t.startsWith('Web Fetch: ') || typeof rawInput['url'] === 'string') {
+      const url = typeof rawInput['url'] === 'string' ? rawInput['url'] : t.replace(/^Web Fetch:\s*/, '');
+      return {
+        appName: 'WebFetch',
+        description: url || title || 'Fetch URL',
+        args: { url },
+      };
+    }
+  }
+  // Fallback: pass through with title as display name
   return {
     appName: title || kind,
     description: title || kind,
@@ -86,12 +159,100 @@ function hasRealInput(rawInput: Record<string, unknown>): boolean {
   );
 }
 
+/** Enrichment data delivered via cursor extension RPC calls (e.g. _cursor/update_todos). */
+interface CursorExtData {
+  todos?: unknown[];
+}
+
 export class AcpCursorBackend extends AcpBackend {
   /** Buffer for first tool_call notification (empty rawInput). */
   private pendingCursorTools = new Map<string, PendingCursorTool>();
+  /** Extra data for a tool call delivered out-of-band via _cursor/* extension methods. */
+  private cursorExtData = new Map<string, CursorExtData>();
+  /**
+   * Buffered `tool_call_update(completed)` for TodoWrite calls.
+   * cursor-agent sends _cursor/update_todos AFTER completed, so we hold
+   * the completed notification until the todos arrive, then flush both.
+   */
+  private pendingTodoCompleted = new Map<string, SessionNotification>();
+  /** Latest known full todo list — used to merge partial updates (merge: true). */
+  private latestTodos: Array<Record<string, unknown>> = [];
 
   constructor(options: AcpBackendOptions) {
     super(options);
+  }
+
+  /**
+   * Handle cursor-specific extension RPC methods.
+   *
+   * _cursor/update_todos arrives with { toolCallId, todos, merge }.
+   * Two cases:
+   *  A) tool_call arrived first → toolCallId is in pendingCursorTools → flush immediately with todos.
+   *  B) _cursor/update_todos arrives first → store in cursorExtData, tool_call handler picks it up later.
+   */
+  protected override handleExtMethod(method: string, params: unknown): unknown {
+    if (method === '_cursor/update_todos') {
+      const p = params as { toolCallId?: string; todos?: unknown[]; merge?: boolean };
+      logger.info(`[AcpCursorBackend] _cursor/update_todos: ${JSON.stringify(p).slice(0, 300)}`);
+      if (p?.toolCallId && Array.isArray(p.todos)) {
+        const toolCallId = p.toolCallId;
+        // Merge partial updates into the known todo list.
+        const incomingTodos = p.todos as Array<Record<string, unknown>>;
+        let resolvedTodos: Array<Record<string, unknown>>;
+        if (p.merge && this.latestTodos.length > 0) {
+          const merged = new Map(this.latestTodos.map(t => [t['id'], t]));
+          for (const todo of incomingTodos) {
+            merged.set(todo['id'], todo);
+          }
+          resolvedTodos = Array.from(merged.values());
+        } else {
+          resolvedTodos = incomingTodos;
+        }
+        this.latestTodos = resolvedTodos;
+        const pending = this.pendingCursorTools.get(toolCallId);
+        if (pending) {
+          // Case A: tool_call already buffered — inject todos and flush now.
+          this.pendingCursorTools.delete(toolCallId);
+          const enrichedInput = { ...pending.rawInput, todos: resolvedTodos };
+          // We need the original params to reconstruct a SessionNotification.
+          // Re-use the stored pending data to build a synthetic notification.
+          const fakeUpdate: SessionUpdate = {
+            ...pending,
+            sessionUpdate: 'tool_call',
+            status: 'pending',
+            rawInput: enrichedInput,
+          };
+          const fakeParams = {
+            update: fakeUpdate,
+          } as unknown as SessionNotification;
+          super.handleSessionUpdate(
+            this.transformToolCallParams(fakeParams, fakeUpdate, pending.kind, pending.title, enrichedInput),
+          );
+        } else {
+          // Check if completed notification is already buffered (most common case).
+          const pendingCompleted = this.pendingTodoCompleted.get(toolCallId);
+          if (pendingCompleted) {
+            this.pendingTodoCompleted.delete(toolCallId);
+            const completedUpdate = (pendingCompleted as { update?: SessionUpdate }).update;
+            if (completedUpdate) {
+              const enrichedUpdate: SessionUpdate = {
+                ...completedUpdate,
+                rawOutput: { ...(completedUpdate.rawOutput ?? {}), newTodos: resolvedTodos },
+              };
+              super.handleSessionUpdate(
+                { ...pendingCompleted, update: enrichedUpdate } as unknown as SessionNotification,
+              );
+            }
+          } else {
+            // Case B: tool_call hasn't been flushed yet — store for later.
+            const existing = this.cursorExtData.get(toolCallId) ?? {};
+            this.cursorExtData.set(toolCallId, { ...existing, todos: resolvedTodos });
+          }
+        }
+      }
+      return {};
+    }
+    return super.handleExtMethod(method, params);
   }
 
   protected override handleSessionUpdate(params: SessionNotification): void {
@@ -119,6 +280,27 @@ export class AcpCursorBackend extends AcpBackend {
         this.handleCursorToolCallUpdateInProgress(params, update);
         return;
       }
+      if (status === 'completed') {
+        const toolCallId = typeof update.toolCallId === 'string' ? update.toolCallId : '';
+        // Check if this is a TodoWrite tool (tracked via toolCallIdToKindMap or name map).
+        const toolName = toolCallId ? this.createHandlerContext().toolCallIdToNameMap.get(toolCallId) : undefined;
+        if (toolName === 'TodoWrite') {
+          const ext = this.cursorExtData.get(toolCallId);
+          if (ext?.todos) {
+            // Todos already arrived — inject and emit immediately.
+            this.cursorExtData.delete(toolCallId);
+            const enrichedUpdate: SessionUpdate = {
+              ...update,
+              rawOutput: { ...(update.rawOutput ?? {}), newTodos: ext.todos },
+            };
+            super.handleSessionUpdate({ ...params, update: enrichedUpdate } as unknown as typeof params);
+          } else {
+            // Todos not yet arrived — buffer completed notification, flush when _cursor/update_todos comes.
+            this.pendingTodoCompleted.set(toolCallId, params);
+          }
+          return;
+        }
+      }
     }
 
     super.handleSessionUpdate(params);
@@ -135,9 +317,23 @@ export class AcpCursorBackend extends AcpBackend {
     const rawInput = update.rawInput ?? {};
     const title = typeof update.title === 'string' ? update.title : undefined;
 
-    if (!hasRealInput(rawInput)) {
-      // First notification: buffer it, don't pass to base yet.
-      this.pendingCursorTools.set(toolCallId, { kind, rawInput, title, toolCallId });
+    // TodoWrite: always buffer — we need todos from _cursor/update_todos which may arrive later.
+    const isTodoWrite =
+      rawInput['_toolName'] === 'updateTodos' ||
+      (typeof title === 'string' && title.startsWith('Update TODOs'));
+
+    if (!hasRealInput(rawInput) || isTodoWrite) {
+      // Check if ext data (todos) already arrived before this tool_call notification.
+      const ext = this.cursorExtData.get(toolCallId);
+      if (isTodoWrite && ext?.todos) {
+        // Ext data already available — enrich and emit immediately.
+        this.cursorExtData.delete(toolCallId);
+        const enriched = { ...rawInput, todos: ext.todos };
+        super.handleSessionUpdate(this.transformToolCallParams(params, update, kind, title, enriched));
+      } else {
+        // Buffer and wait (for ext data or in_progress fallback).
+        this.pendingCursorTools.set(toolCallId, { kind, rawInput, title, toolCallId });
+      }
       return;
     }
 
@@ -174,6 +370,17 @@ export class AcpCursorBackend extends AcpBackend {
     super.handleSessionUpdate(params);
   }
 
+  /**
+   * Merge any out-of-band data received via cursor extension RPCs (_cursor/update_todos etc.)
+   * into the rawInput before mapping. Also clears the stored ext data.
+   */
+  private enrichRawInput(toolCallId: string, rawInput: Record<string, unknown>): Record<string, unknown> {
+    const ext = this.cursorExtData.get(toolCallId);
+    if (!ext) return rawInput;
+    this.cursorExtData.delete(toolCallId);
+    return { ...rawInput, ...ext };
+  }
+
   /** Build a transformed SessionNotification with mapped appName/description/args. */
   private transformToolCallParams(
     params: SessionNotification,
@@ -182,7 +389,9 @@ export class AcpCursorBackend extends AcpBackend {
     title: string | undefined,
     rawInput: Record<string, unknown>,
   ): SessionNotification {
-    const { appName, description, args } = mapCursorKind(kind, title, rawInput);
+    const toolCallId = typeof update.toolCallId === 'string' ? update.toolCallId : '';
+    const enriched = toolCallId ? this.enrichRawInput(toolCallId, rawInput) : rawInput;
+    const { appName, description, args } = mapCursorKind(kind, title, enriched);
     return {
       ...params,
       update: {
@@ -200,6 +409,8 @@ export class AcpCursorBackend extends AcpBackend {
 
   override async dispose(): Promise<void> {
     this.pendingCursorTools.clear();
+    this.cursorExtData.clear();
+    this.pendingTodoCompleted.clear();
     await super.dispose();
   }
 }

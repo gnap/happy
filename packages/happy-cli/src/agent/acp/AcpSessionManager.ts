@@ -31,6 +31,13 @@ function formatToolResult(toolName: string, result: unknown): Record<string, unk
     const totalMatches = r['totalMatches'];
     return totalMatches !== undefined ? { totalMatches } : undefined;
   }
+  if (toolName === 'TodoWrite') {
+    // Pass newTodos through so TodoView can render them from tool.result.newTodos
+    if (Array.isArray(r['newTodos'])) {
+      return { newTodos: r['newTodos'] };
+    }
+    return undefined;
+  }
   return r;
 }
 

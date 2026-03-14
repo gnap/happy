@@ -706,6 +706,10 @@ export class AcpBackend implements AgentBackend {
           const defaultOptionId = proceedOnceOption?.optionId || (options.length > 0 && options[0].optionId ? options[0].optionId : 'proceed_once');
           return { outcome: { outcome: 'selected', optionId: defaultOptionId } };
         },
+        extMethod: async (method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> => {
+          const result = this.handleExtMethod(method, params);
+          return (result instanceof Promise ? await result : result) as Record<string, unknown>;
+        },
       };
 
       // Create ClientSideConnection
@@ -867,6 +871,15 @@ export class AcpBackend implements AgentBackend {
       }
       throw error;
     }
+  }
+
+  /**
+   * Handle extension methods sent by the agent (e.g. cursor-specific _cursor/* methods).
+   * Subclasses can override this to intercept extension calls before they throw "Method not found".
+   * Returns a resolved value or throws to indicate the method is not handled.
+   */
+  protected handleExtMethod(method: string, _params: unknown): unknown {
+    throw new Error(`Method not found: ${method}`);
   }
 
   /**
