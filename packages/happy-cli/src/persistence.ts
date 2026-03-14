@@ -6,10 +6,10 @@
 
 import { FileHandle } from 'node:fs/promises'
 import { readFile, writeFile, mkdir, open, unlink, rename, stat } from 'node:fs/promises'
-import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs'
-import { constants } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, writeFileSync, readFileSync, unlinkSync, mkdirSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
+import { join } from 'node:path'
+import { constants } from 'node:fs'
 import { configuration } from '@/configuration'
 import * as z from 'zod';
 import { encodeBase64 } from '@/api/encryption';
@@ -60,7 +60,6 @@ const EnvironmentVariableSchema = z.object({
 const ProfileCompatibilitySchema = z.object({
   claude: z.boolean().default(true),
   codex: z.boolean().default(true),
-  cursor: z.boolean().default(true),
   gemini: z.boolean().default(true),
 });
 
@@ -111,7 +110,7 @@ export const AIBackendProfileSchema = z.object({
     defaultModelMode: z.string().optional(),
 
     // Compatibility metadata
-    compatibility: ProfileCompatibilitySchema.default({ claude: true, codex: true, cursor: true, gemini: true }),
+    compatibility: ProfileCompatibilitySchema.default({ claude: true, codex: true, gemini: true }),
 
     // Built-in profile indicator
     isBuiltIn: z.boolean().default(false),
@@ -125,7 +124,9 @@ export const AIBackendProfileSchema = z.object({
 export type AIBackendProfile = z.infer<typeof AIBackendProfileSchema>;
 
 // Helper functions matching the happy app exactly
-export function validateProfileForAgent(profile: AIBackendProfile, agent: 'claude' | 'codex' | 'cursor' | 'gemini'): boolean {
+export function validateProfileForAgent(profile: AIBackendProfile, agent: 'claude' | 'codex' | 'gemini' | 'cursor' | 'cursor-acp'): boolean {
+  // cursor / cursor-acp: profile compat doesn't filter cursor sessions — always allow
+  if (agent === 'cursor' || agent === 'cursor-acp') return true;
   return profile.compatibility[agent];
 }
 
@@ -551,75 +552,6 @@ export async function clearDaemonState(): Promise<void> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Session PID mapping: CLI writes sessionId to ~/.happy/session-pids/<pid>
-// so we can tell which process manages which session (e.g. daemon list, debugging).
-// ---------------------------------------------------------------------------
-
-const SESSION_PIDS_DIR = 'session-pids';
-
-function getSessionPidsDir(): string {
-  return join(configuration.happyHomeDir, SESSION_PIDS_DIR);
-}
-
-/**
- * Write this process's PID -> sessionId so daemon list / tools can show which process owns which session.
- * Call once when session is created (and optionally after reporting to daemon).
- */
-export function writeSessionPidFile(sessionId: string): void {
-  try {
-    const dir = getSessionPidsDir();
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
-    const path = join(dir, String(process.pid));
-    writeFileSync(path, sessionId, 'utf8');
-  } catch (e) {
-    logger.debug('[persistence] writeSessionPidFile failed:', e);
-  }
-}
-
-/**
- * Remove this process's PID file. Call on session exit (cleanup, SIGTERM path, normal exit).
- */
-export function removeSessionPidFile(): void {
-  try {
-    const path = join(getSessionPidsDir(), String(process.pid));
-    if (existsSync(path)) {
-      unlinkSync(path);
-    }
-  } catch {
-    // ignore
-  }
-}
-
-/**
- * Read all pid -> sessionId mappings from session-pids dir. Only includes PIDs that are still alive.
- */
-export async function readSessionPidMapping(): Promise<Map<number, string>> {
-  const out = new Map<number, string>();
-  const dir = getSessionPidsDir();
-  if (!existsSync(dir)) return out;
-  try {
-    const names = await readdir(dir);
-    for (const name of names) {
-      const pid = parseInt(name, 10);
-      if (String(pid) !== name || pid <= 0) continue;
-      try {
-        process.kill(pid, 0); // check process exists
-      } catch {
-        continue; // process dead, skip (stale file)
-      }
-      const path = join(dir, name);
-      const sessionId = readFileSync(path, 'utf8').trim();
-      if (sessionId) out.set(pid, sessionId);
-    }
-  } catch {
-    // ignore
-  }
-  return out;
-}
-
 /**
  * Acquire an exclusive lock file for the daemon.
  * The lock file proves the daemon is running and prevents multiple instances.
@@ -802,4 +734,57 @@ export async function getEnvironmentVariable(profileId: string, key: string): Pr
   }
 
   return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Session PID mapping: CLI writes sessionId to ~/.happy/session-pids/<pid>
+// so daemon list can show which process manages which session.
+// ---------------------------------------------------------------------------
+
+const SESSION_PIDS_DIR = 'session-pids';
+
+function getSessionPidsDir(): string {
+  return join(configuration.happyHomeDir, SESSION_PIDS_DIR);
+}
+
+export function writeSessionPidFile(sessionId: string): void {
+  try {
+    const dir = getSessionPidsDir();
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
+    const path = join(dir, String(process.pid));
+    writeFileSync(path, sessionId, 'utf8');
+  } catch (e) {
+    logger.debug('[persistence] writeSessionPidFile failed:', e);
+  }
+}
+
+export function removeSessionPidFile(): void {
+  try {
+    const path = join(getSessionPidsDir(), String(process.pid));
+    if (existsSync(path)) {
+      unlinkSync(path);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+export async function readSessionPidMapping(): Promise<Map<number, string>> {
+  const out = new Map<number, string>();
+  const dir = getSessionPidsDir();
+  if (!existsSync(dir)) return out;
+  try {
+    const names = await readdir(dir);
+    for (const name of names) {
+      const pid = parseInt(name, 10);
+      if (String(pid) !== name || pid <= 0) continue;
+      try { process.kill(pid, 0); } catch { continue; }
+      const path = join(dir, name);
+      const sessionId = readFileSync(path, 'utf8').trim();
+      if (sessionId) out.set(pid, sessionId);
+    }
+  } catch { /* ignore */ }
+  return out;
 }

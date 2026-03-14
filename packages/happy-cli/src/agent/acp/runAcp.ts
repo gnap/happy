@@ -2,8 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { ApiClient } from '@/api/api';
 import type { ApiSessionClient } from '@/api/apiSession';
+import type { UserMessage } from '@/api/types';
 import type { AgentMessage } from '@/agent/core';
 import { AcpBackend, type AcpPermissionHandler } from './AcpBackend';
+import { AcpCursorBackend } from './AcpCursorBackend';
 import { DefaultTransport } from '@/agent/transport';
 import { AcpSessionManager } from './AcpSessionManager';
 import type { SessionEnvelope } from '@slopus/happy-wire';
@@ -29,7 +31,8 @@ import {
 } from './sessionConfigMetadata';
 import type { SessionConfigOption, SessionModeState, SessionModelState } from '@agentclientprotocol/sdk';
 
-const TURN_TIMEOUT_MS = 5 * 60 * 1000;
+/** Turn timeout must exceed the per-tool-call timeout (CursorTransport uses 10 min). */
+const TURN_TIMEOUT_MS = 30 * 60 * 1000;
 const ACP_EVENT_PREVIEW_CHARS = 240;
 const ACP_RAW_PREVIEW_CHARS = 2000;
 const ACP_COLOR_RESET = '\u001b[0m';
@@ -435,24 +438,33 @@ type PendingTurn = {
   timeout: NodeJS.Timeout;
 };
 
-function resolveSessionFlavor(agentName: string): 'gemini' | 'opencode' | 'acp' {
+function resolveSessionFlavor(agentName: string): 'gemini' | 'opencode' | 'cursor' | 'acp' {
   if (agentName === 'gemini') {
     return 'gemini';
   }
   if (agentName === 'opencode') {
     return 'opencode';
   }
+  if (agentName === 'cursor') {
+    return 'cursor';
+  }
   return 'acp';
 }
 
-export async function runAcp(opts: {
+export interface RunAcpOptions {
   credentials: Credentials;
   agentName: string;
-  command: string;
-  args: string[];
+  command?: string;
+  args?: string[];
   startedBy?: 'daemon' | 'terminal';
   verbose?: boolean;
-}): Promise<void> {
+  /** When set, use this backend instead of spawning AcpBackend from command/args. */
+  backend?: import('@/agent/core').AgentBackend;
+  /** Custom transport handler; used when backend is not provided. Defaults to DefaultTransport. */
+  transportHandler?: import('@/agent/transport').TransportHandler;
+}
+
+export async function runAcp(opts: RunAcpOptions): Promise<void> {
   const verbose = opts.verbose === true;
   const sessionTag = randomUUID();
   connectionState.setBackend(opts.agentName);
@@ -484,6 +496,8 @@ export async function runAcp(opts: {
 
   let session: ApiSessionClient;
   let permissionHandler: GenericAcpPermissionHandler;
+  // Forward reference so onSessionSwap can re-register the callback on the new session.
+  let userMessageHandler: ((message: UserMessage) => void) | null = null;
   const { session: initialSession, reconnectionHandle } = setupOfflineReconnection({
     api,
     sessionTag,
@@ -494,6 +508,9 @@ export async function runAcp(opts: {
       session = newSession;
       if (permissionHandler) {
         permissionHandler.updateSession(newSession);
+      }
+      if (userMessageHandler) {
+        newSession.onUserMessage(userMessageHandler);
       }
     },
   });
@@ -530,20 +547,36 @@ export async function runAcp(opts: {
     },
   };
 
-  const backend = new AcpBackend({
+  let defaultTransport = opts.transportHandler;
+  if (!defaultTransport) {
+    if (opts.agentName === 'cursor') {
+      const { cursorTransport } = await import('@/agent/transport');
+      defaultTransport = cursorTransport;
+    } else {
+      defaultTransport = new DefaultTransport(opts.agentName);
+    }
+  }
+
+  const backendOptions = {
     agentName: opts.agentName,
     cwd: process.cwd(),
-    command: opts.command,
-    args: opts.args,
+    command: opts.command!,
+    args: opts.args ?? [],
     mcpServers,
     permissionHandler,
-    transportHandler: new DefaultTransport(opts.agentName),
+    transportHandler: defaultTransport,
     verbose,
-  });
+  };
+  const backendFactory = () => opts.agentName === 'cursor'
+    ? new AcpCursorBackend(backendOptions)
+    : new AcpBackend(backendOptions);
+
+  let backend = opts.backend ?? backendFactory();
 
   let thinking = false;
   let acpSessionId: string | null = null;
   let shouldExit = false;
+  let backendStopped = false;
   let abortController = new AbortController();
   let pendingTurn: PendingTurn | null = null;
 
@@ -558,6 +591,7 @@ export async function runAcp(opts: {
       current.reject(error);
       return;
     }
+    logger.debug(`[${opts.agentName}] Turn ended, resolving waitForTurnEnd`);
     current.resolve();
   };
 
@@ -569,13 +603,34 @@ export async function runAcp(opts: {
     pendingTurn = { resolve, reject, timeout };
   });
 
+  /**
+   * Extend the turn deadline by TURN_TIMEOUT_MS from now.
+   * Called on any meaningful activity (tool call, model output) so a long-running
+   * sub-task that keeps producing output never hits the static deadline.
+   */
+  const extendTurnTimeout = () => {
+    if (!pendingTurn) return;
+    clearTimeout(pendingTurn.timeout);
+    const current = pendingTurn;
+    current.timeout = setTimeout(() => {
+      pendingTurn = null;
+      current.reject(new Error(`Timed out waiting for ${opts.agentName} to finish the turn`));
+    }, TURN_TIMEOUT_MS);
+  };
+
   const stopRunnerFromBackendStatus = (status: 'error' | 'stopped', detail?: string) => {
     const reason = detail
       ? `${opts.agentName} backend ${status}: ${detail}`
       : `${opts.agentName} backend ${status}`;
-    logger.debug(`[${opts.agentName}] ${reason}; stopping ACP runner`);
-    shouldExit = true;
-    messageQueue.close();
+    if (status === 'stopped') {
+      // stopped = current operation cancelled; backend will be restarted for next message
+      logger.debug(`[${opts.agentName}] ${reason}; will restart backend for next message`);
+      backendStopped = true;
+    } else {
+      logger.debug(`[${opts.agentName}] ${reason}; stopping ACP runner`);
+      shouldExit = true;
+      messageQueue.close();
+    }
     clearPendingTurn(new Error(reason));
   };
 
@@ -589,6 +644,9 @@ export async function runAcp(opts: {
       if (verbose) {
         logAcp('muted', `Incoming raw envelope for ${opts.agentName}: ${formatUnknownForConsole(envelope, ACP_RAW_PREVIEW_CHARS)}`);
       }
+    }
+    if (envelopes.length > 0) {
+      session.flush().catch((err) => logger.debug(`[${opts.agentName}] flush after sendEnvelopes failed`, err));
     }
   };
 
@@ -606,7 +664,10 @@ export async function runAcp(opts: {
       if (resolved === modeSelector.currentCode) {
         return;
       }
-      const switched = await backend.setSessionConfigOption(modeSelector.configId, resolved);
+      const switched =
+        'setSessionConfigOption' in backend && typeof (backend as { setSessionConfigOption?: (id: string, value: string) => Promise<boolean> }).setSessionConfigOption === 'function'
+          ? await (backend as { setSessionConfigOption: (id: string, value: string) => Promise<boolean> }).setSessionConfigOption(modeSelector.configId, resolved)
+          : false;
       if (switched) {
         modeSelector.currentCode = resolved;
         return;
@@ -626,7 +687,10 @@ export async function runAcp(opts: {
       return;
     }
 
-    const switched = await backend.setSessionMode(resolvedLegacyMode);
+    const switched =
+      'setSessionMode' in backend && typeof (backend as { setSessionMode?: (mode: string) => Promise<boolean> }).setSessionMode === 'function'
+        ? await (backend as { setSessionMode: (mode: string) => Promise<boolean> }).setSessionMode(resolvedLegacyMode)
+        : false;
     if (switched) {
       legacyModes = {
         ...legacyModes,
@@ -649,7 +713,10 @@ export async function runAcp(opts: {
       if (resolved === modelSelector.currentCode) {
         return;
       }
-      const switched = await backend.setSessionConfigOption(modelSelector.configId, resolved);
+      const switched =
+        'setSessionConfigOption' in backend && typeof (backend as { setSessionConfigOption?: (id: string, value: string) => Promise<boolean> }).setSessionConfigOption === 'function'
+          ? await (backend as { setSessionConfigOption: (id: string, value: string) => Promise<boolean> }).setSessionConfigOption(modelSelector.configId, resolved)
+          : false;
       if (switched) {
         modelSelector.currentCode = resolved;
         return;
@@ -669,7 +736,10 @@ export async function runAcp(opts: {
       return;
     }
 
-    const switched = await backend.setSessionModel(resolvedLegacyModel);
+    const switched =
+      'setSessionModel' in backend && typeof (backend as { setSessionModel?: (model: string) => Promise<boolean> }).setSessionModel === 'function'
+        ? await (backend as { setSessionModel: (model: string) => Promise<boolean> }).setSessionModel(resolvedLegacyModel)
+        : false;
     if (switched) {
       legacyModels = {
         ...legacyModels,
@@ -797,6 +867,12 @@ export async function runAcp(opts: {
       }
     }
 
+    if (msg.type === 'tool-call' || msg.type === 'model-output') {
+      // Any activity from the agent extends the turn deadline so long-running
+      // sub-tasks (e.g. Task sub-agents) don't hit the static TURN_TIMEOUT_MS.
+      extendTurnTimeout();
+    }
+
     if (msg.type === 'status') {
       const suffix = msg.detail ? `: ${msg.detail}` : '';
       const statusLine = `Status: ${msg.status}${suffix}`;
@@ -824,11 +900,14 @@ export async function runAcp(opts: {
 
   backend.onMessage(onBackendMessage);
 
-  session.onUserMessage((message) => {
+  userMessageHandler = (message) => {
     if (!message.content.text) {
+      const keys = message?.content && typeof message.content === 'object' ? Object.keys(message.content).join(',') : 'n/a';
+      logger.debug(`[${opts.agentName}] onUserMessage skipped: no text (keys: ${keys})`);
       return;
     }
 
+    logger.debug(`[${opts.agentName}] User message received from app, pushing to queue (len=${message.content.text.length})`);
     if (typeof message.meta?.permissionMode === 'string') {
       currentPermissionMode = message.meta.permissionMode;
       logger.debug(`[${opts.agentName}] Requested ACP permission mode: ${currentPermissionMode}`);
@@ -843,13 +922,23 @@ export async function runAcp(opts: {
       permissionMode: currentPermissionMode,
       model: currentModel,
     });
-  });
+  };
+  session.onUserMessage(userMessageHandler);
   session.keepAlive(thinking, 'remote');
   writeSessionPidFile(session.sessionId);
 
   const keepAliveInterval = setInterval(() => {
     session.keepAlive(thinking, 'remote');
   }, 2000);
+
+  // Flush accumulated text chunks every 80ms so App receives batched envelopes
+  // instead of one per token (avoids each token rendering as a separate bubble).
+  const textFlushInterval = setInterval(() => {
+    const envelopes = sessionManager.flushText();
+    if (envelopes.length > 0) {
+      sendEnvelopes(envelopes);
+    }
+  }, 80);
 
   async function handleAbort() {
     try {
@@ -886,6 +975,17 @@ export async function runAcp(opts: {
   try {
     const started = await backend.startSession();
     acpSessionId = started.sessionId;
+
+    if (opts.agentName === 'cursor') {
+      // Modes come from session/new response (agent/plan/ask); no need to hardcode here.
+      session.sendSessionEvent({ type: 'ready' });
+      try {
+        api.push().sendToAllDevices("It's ready!", "Cursor is waiting for your command", { sessionId: session.sessionId });
+      } catch (pushError) {
+        logger.debug('[cursor] Failed to send ready push', pushError);
+      }
+    }
+
     if (verbose) {
       if (!sawSlashCommands) {
         logAcp('muted', `Outgoing slash commands from ${opts.agentName}: not reported yet`);
@@ -916,6 +1016,7 @@ export async function runAcp(opts: {
       }
 
       logAcp('incoming', `Incoming prompt: ${formatUnknownForConsole(batch.message, ACP_EVENT_PREVIEW_CHARS)}`);
+      logger.debug(`[${opts.agentName}] Sending turn-start and starting backend`);
       sendEnvelopes(sessionManager.startTurn());
       const turnEnded = waitForTurnEnd();
       try {
@@ -927,13 +1028,35 @@ export async function runAcp(opts: {
         }
         await backend.sendPrompt(acpSessionId, batch.message);
         await turnEnded;
+        if (backend instanceof AcpCursorBackend) {
+          backend.flushPendingOnTurnEnd();
+        }
         sendEnvelopes(sessionManager.endTurn('completed'));
+        await session.flush();
         session.sendSessionEvent({ type: 'ready' });
         if (verbose) {
           logAcp('muted', `Outgoing prompt completion from ${opts.agentName}`);
         }
       } catch (error) {
+        if (backendStopped && !opts.backend) {
+          // agent stopped due to cancellation; dispose old backend and restart for next message
+          backendStopped = false;
+          sendEnvelopes(sessionManager.endTurn('failed'));
+          await session.flush().catch(() => {});
+          try {
+            backend.offMessage?.(onBackendMessage);
+            await backend.dispose();
+          } catch { /* ignore dispose errors */ }
+          backend = backendFactory();
+          backend.onMessage(onBackendMessage);
+          const restarted = await backend.startSession();
+          acpSessionId = restarted.sessionId;
+          session.sendSessionEvent({ type: 'ready' });
+          logAcp('muted', `Backend restarted after cancellation (new session: ${acpSessionId})`);
+          continue;
+        }
         sendEnvelopes(sessionManager.endTurn('failed'));
+        await session.flush();
         session.sendSessionEvent({ type: 'ready' });
         logAcp('error', `Prompt error from ${opts.agentName}: ${error instanceof Error ? error.message : String(error)}`);
         clearPendingTurn(error instanceof Error ? error : new Error(String(error)));
@@ -943,6 +1066,7 @@ export async function runAcp(opts: {
   } finally {
     removeSessionPidFile();
     clearInterval(keepAliveInterval);
+    clearInterval(textFlushInterval);
     reconnectionHandle?.cancel();
     clearPendingTurn(new Error('ACP runner shutting down'));
 

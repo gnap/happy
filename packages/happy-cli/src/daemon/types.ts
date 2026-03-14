@@ -24,7 +24,7 @@ export interface TrackedSession {
   /** Happy server session tag (UUID) for reconnecting to the same server session */
   sessionTag?: string;
   /** Agent type used when spawning */
-  agent?: 'claude' | 'codex' | 'cursor' | 'gemini';
+  agent?: 'claude' | 'codex' | 'cursor' | 'cursor-acp' | 'gemini';
   /** Timestamp of last heartbeat received from this session (Date.now()) */
   lastHeartbeat?: number;
 

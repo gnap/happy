@@ -5,7 +5,8 @@
         "cli": "yarn workspace happy-coder cli",
         "release": "node ./scripts/release.cjs",
         "web": "yarn workspace happy-app web",
-        "postinstall": "patch-package && node ./scripts/postinstall.cjs"
+        "postinstall": "patch-package && node ./scripts/postinstall.cjs",
+        "install-pre-commit": "sh ./scripts/install-pre-commit.sh"
     },
     "workspaces": {
         "packages": [

@@ -39,7 +39,7 @@ export const initialMachineMetadata: MachineMetadata = {
 // Get environment variables for a profile, filtered for agent compatibility
 async function getProfileEnvironmentVariablesForAgent(
   profileId: string,
-  agentType: 'claude' | 'codex' | 'cursor' | 'gemini'
+  agentType: 'claude' | 'codex' | 'gemini' | 'cursor' | 'cursor-acp'
 ): Promise<Record<string, string>> {
   try {
     const settings = await readSettings();
@@ -445,8 +445,13 @@ export async function startDaemon(): Promise<void> {
 
           // Construct command for the CLI
           const cliPath = join(projectPath(), 'dist', 'index.mjs');
-          // Determine agent command - support claude, codex, cursor, and gemini (must match switch below)
-          const agent = options.agent === 'gemini' ? 'gemini' : (options.agent === 'codex' ? 'codex' : (options.agent === 'cursor' ? 'cursor' : 'claude'));
+          // Determine agent command - support claude, codex, gemini, cursor, cursor-acp
+          let agent: string;
+          if (options.agent === 'gemini') agent = 'gemini';
+          else if (options.agent === 'codex') agent = 'codex';
+          else if (options.agent === 'cursor') agent = 'cursor';
+          else if (options.agent === 'cursor-acp') agent = 'acp cursor';
+          else agent = 'claude';
           const fullCommand = `node --no-warnings --no-deprecation ${cliPath} ${agent} --happy-starting-mode remote --started-by daemon`;
 
           // Spawn in tmux with environment variables
@@ -454,7 +459,7 @@ export async function startDaemon(): Promise<void> {
           // 1. tmux sessions need daemon's expanded auth variables (e.g., ANTHROPIC_AUTH_TOKEN)
           // 2. Regular spawn uses env: { ...process.env, ...extraEnv }
           // 3. tmux needs explicit environment via -e flags to ensure all variables are available
-          const windowName = `happy-${Date.now()}-${agent}`;
+          const windowName = `happy-${Date.now()}-${agent.replace(/\s+/g, '-')}`;
           const tmuxEnv: Record<string, string> = {};
 
           // Add all daemon environment variables (filtering out undefined)
@@ -531,21 +536,24 @@ export async function startDaemon(): Promise<void> {
         if (!useTmux) {
           logger.debug(`[DAEMON RUN] Using regular process spawning`);
 
-          // Construct arguments for the CLI - support claude, codex, cursor, and gemini
-          let agentCommand: string;
+          // Construct arguments for the CLI - support claude, codex, gemini, cursor, cursor-acp
+          let agentArgs: string[];
           switch (options.agent) {
             case 'claude':
             case undefined:
-              agentCommand = 'claude';
+              agentArgs = ['claude'];
               break;
             case 'codex':
-              agentCommand = 'codex';
+              agentArgs = ['codex'];
               break;
             case 'cursor':
-              agentCommand = 'cursor';
+              agentArgs = ['cursor'];
               break;
             case 'gemini':
-              agentCommand = 'gemini';
+              agentArgs = ['gemini'];
+              break;
+            case 'cursor-acp':
+              agentArgs = ['acp', 'cursor'];
               break;
             default:
               return {
@@ -554,7 +562,7 @@ export async function startDaemon(): Promise<void> {
               };
           }
           const args = [
-            agentCommand,
+            ...agentArgs,
             '--happy-starting-mode', 'remote',
             '--started-by', 'daemon'
           ];

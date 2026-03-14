@@ -1,0 +1,18 @@
+#!/bin/sh
+# 提交前在本地构建 happy-coder，确保没有错误再提交
+# 安装: ./scripts/install-pre-commit.sh 或 cp scripts/pre-commit.hook .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+
+set -e
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+# 若有 happy-cli 相关文件被暂存，则先构建
+if git diff --cached --name-only | grep -q '^packages/happy-cli/'; then
+  echo "Building happy-coder (packages/happy-cli) before commit..."
+  if ! yarn workspace happy-coder build 2>&1; then
+    echo "ERROR: happy-coder build failed. Fix errors before committing."
+    exit 1
+  fi
+  echo "Build OK."
+fi
+exit 0

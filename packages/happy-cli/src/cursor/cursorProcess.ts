@@ -1,24 +1,47 @@
 /**
- * CursorProcess - Spawns cursor-agent with a PTY wrapper
+ * CursorProcess - Spawns cursor-agent with PTY wrapper
  *
- * cursor-agent requires a TTY to produce output. We use the `script` command
- * to create a pseudo-TTY (tested on macOS; Linux has `script` but args may differ).
+ * By default we use the `script` command (macOS/Linux) to give cursor-agent a PTY so it
+ * streams output line-by-line. We spawn script (a system binary), not cursor-agent directly,
+ * so this works even when the process has a minimal PATH. Set CURSOR_AGENT_NO_PTY=1 to
+ * spawn cursor-agent with a plain pipe (no PTY) for debugging.
  *
  * Each user message spawns a new cursor-agent process:
  * - First message: cursor-agent --print --output-format stream-json --force "prompt"
  * - Subsequent: cursor-agent --print --output-format stream-json --force --resume <chatId> "prompt"
  */
 
-import { spawn, execFile, type ChildProcess } from 'node:child_process';
-import { homedir } from 'node:os';
+import { execSync, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { logger } from '@/ui/logger';
 import type { CursorStreamMessage } from './types';
 
-const CURSOR_AGENT_BIN = process.env.CURSOR_AGENT_PATH || 'cursor-agent';
+const CURSOR_AGENT_NAME = 'cursor-agent';
 
-/** Execution mode aligned with cursor-agent: --mode plan | ask, or default (no flag) */
 export type CursorExecutionMode = 'default' | 'plan' | 'ask';
+
+/** Resolve cursor-agent to an absolute path for use inside script's bash (so it works with minimal PATH). */
+function resolveCursorAgentPath(): string {
+  const envPath = process.env.CURSOR_AGENT_PATH;
+  if (envPath && envPath.length > 0) {
+    return envPath;
+  }
+  try {
+    const fromWhich = execSync(`which ${CURSOR_AGENT_NAME}`, {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin' },
+    }).trim();
+    if (fromWhich) return fromWhich;
+  } catch {
+    /* which failed */
+  }
+  const fallbacks = ['/opt/homebrew/bin/cursor-agent', '/usr/local/bin/cursor-agent'];
+  for (const p of fallbacks) {
+    if (existsSync(p)) return p;
+  }
+  return CURSOR_AGENT_NAME;
+}
 
 export interface CursorProcessOptions {
   /** Working directory */
@@ -27,11 +50,11 @@ export interface CursorProcessOptions {
   env?: Record<string, string>;
   /** Resume a previous chat session */
   resumeChatId?: string;
-  /** Model to use (e.g., 'auto', 'opus-4.6-thinking', 'gpt-5.3-codex-high') */
+  /** Model to use (e.g., 'auto', 'sonnet-4.5', 'opus-4.6-thinking') */
   model?: string;
-  /** Execution mode: plan (--mode plan), ask (--mode ask), or default (no --mode) */
+  /** Execution mode: plan, ask, or default */
   executionMode?: CursorExecutionMode;
-  /** If true, pass -f/--force to cursor-agent (force allow commands) */
+  /** If true, pass --force to cursor-agent */
   force?: boolean;
   /**
    * Process-level safety timeout in ms. Only kills the process if it runs longer than this.
@@ -41,8 +64,6 @@ export interface CursorProcessOptions {
   timeoutMs?: number;
   /** Abort signal */
   signal?: AbortSignal;
-  /** If true, pass --approve-mcps so cursor-agent loads MCPs from .cursor/mcp.json without prompting */
-  approveMcps?: boolean;
 }
 
 export interface CursorProcessEvents {
@@ -72,17 +93,9 @@ export class CursorProcess extends EventEmitter {
     const cursorArgs = [
       '--print',
       '--output-format', 'stream-json',
-      '--trust',  // Non-interactive: avoid "Workspace Trust Required" prompt (user already chose this dir in Happy)
+      '--stream-partial-output', // stream assistant/result deltas instead of only at end
+      '--force',
     ];
-
-    if (this.options.executionMode === 'plan') {
-      cursorArgs.push('--mode', 'plan');
-    } else if (this.options.executionMode === 'ask') {
-      cursorArgs.push('--mode', 'ask');
-    }
-    if (this.options.force) {
-      cursorArgs.push('--force');
-    }
 
     if (this.options.model) {
       cursorArgs.push('--model', this.options.model);
@@ -91,67 +104,69 @@ export class CursorProcess extends EventEmitter {
     if (this.options.resumeChatId) {
       cursorArgs.push('--resume', this.options.resumeChatId);
     }
-    if (this.options.approveMcps) {
-      cursorArgs.push('--approve-mcps');
-      logger.debug('[cursor] MCP: --approve-mcps enabled so Happy (change_title, etc.) loads from .cursor/mcp.json');
-    }
-    // Ensure cursor-agent reads .cursor/mcp.json from our workspace (where we wrote Happy MCP URL)
-    cursorArgs.push('--workspace', this.options.cwd);
 
     cursorArgs.push(prompt);
 
-    // Build the full command string for script wrapper
-    const escapedArgs = cursorArgs.map(a => `"${a.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`);
-    const fullCommand = `${CURSOR_AGENT_BIN} ${escapedArgs.join(' ')}`;
+    const cursorAgentPath = resolveCursorAgentPath();
+    const escapedArgs = cursorArgs.map((a) => `"${a.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`);
+    const fullCommand = `${cursorAgentPath} ${escapedArgs.join(' ')}`;
 
     logger.debug(`[cursor] Spawning: ${fullCommand.slice(0, 200)}...`);
 
-    // Use script + bash for PTY. Use login shell (-l) so .profile/.bash_profile
-    // is sourced and PATH includes ~/.local/bin (where cursor-agent is often installed).
-    // macOS script: script -q /dev/null command [args]
-    // Linux script: script -q /dev/null -c command
-    // On Linux when stdout is a pipe, script buffers output; wrap with stdbuf -o0 so we get stream-json lines promptly.
+    const noPty = process.env.CURSOR_AGENT_NO_PTY === '1';
     const isLinux = process.platform === 'linux';
-    const scriptArgs = isLinux
-      ? ['-q', '/dev/null', '-c', `${'/bin/bash'} -l -c ${JSON.stringify(fullCommand)}`]
-      : ['-q', '/dev/null', '/bin/bash', '-l', '-c', fullCommand];
+    const env = {
+      ...process.env,
+      ...this.options.env,
+      TERM: 'xterm-256color',
+      PYTHONUNBUFFERED: '1',
+      LC_ALL: 'en_US.UTF-8',
+      LANG: 'en_US.UTF-8',
+    };
 
-    const spawnCmd = isLinux ? 'stdbuf' : 'script';
-    const spawnArgs = isLinux ? ['-o0', 'script', ...scriptArgs] : scriptArgs;
+    const spawnOptions: SpawnOptions = {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: this.options.cwd,
+      env: env as Record<string, string>,
+    };
 
-    // Run with CWD = user home so shell/relative paths are from home; --workspace already points at session directory.
-    const processCwd = homedir();
     return new Promise<void>((resolve, reject) => {
       let subprocessError: Error | null = null;
-      const child = spawn(spawnCmd, spawnArgs, {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        cwd: processCwd,
-        env: {
-          ...process.env,
-          ...this.options.env,
-          TERM: 'xterm-256color',
-        },
-      });
-      this.child = child;
+      const onExit = (code: number | null) => {
+        this.cleanup();
+        if (this.buffer.trim()) {
+          const lines = this.buffer.split('\n').map((l) => l.trim()).filter(Boolean);
+          logger.debug(`[cursor] Process close: processing ${lines.length} buffered line(s), total ${this.buffer.length} chars`);
+          for (const line of lines) {
+            this.parseLine(line);
+          }
+          this.buffer = '';
+        }
+        logger.debug(`[cursor] Process exited with code: ${code}`);
+        this.emit('exit', code);
+        if (subprocessError) {
+          reject(subprocessError);
+        } else {
+          resolve();
+        }
+      };
 
-      // Handle abort signal
+      const onAbort = (): void => {
+        this.kill();
+        reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+      };
       if (this.options.signal) {
-        const onAbort = () => {
-          this.kill();
-          reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
-        };
         if (this.options.signal.aborted) {
-          child.kill('SIGTERM');
           reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
           return;
         }
         this.options.signal.addEventListener('abort', onAbort, { once: true });
-        child.on('close', () => {
-          this.options.signal!.removeEventListener('abort', onAbort);
-        });
       }
 
-      // Safety-only process timeout (default 1h); per-tool timeout in runCursor stops UI timer without killing process
+      this.once('subprocessError', (err: Error) => {
+        subprocessError = err;
+      });
+
       const timeoutMs = this.options.timeoutMs ?? 3600000;
       if (timeoutMs > 0) {
         this.timeoutHandle = setTimeout(() => {
@@ -160,38 +175,39 @@ export class CursorProcess extends EventEmitter {
         }, timeoutMs);
       }
 
+      let child: ChildProcess;
+      if (noPty) {
+        child = spawn(cursorAgentPath, cursorArgs, spawnOptions);
+        logger.debug('[cursor] Spawning cursor-agent directly (no PTY)');
+      } else {
+        // PTY via script (same as pre-ACP): spawn script so cursor-agent runs inside a PTY; script is a system binary so spawn always works
+        const scriptArgs = isLinux
+          ? ['-q', '/dev/null', '-c', `/bin/bash -l -c ${JSON.stringify(fullCommand)}`]
+          : ['-q', '/dev/null', '/bin/bash', '-l', '-c', fullCommand];
+        const spawnCmd = isLinux ? 'stdbuf' : 'script';
+        const spawnArgs = isLinux ? ['-o0', 'script', ...scriptArgs] : scriptArgs;
+        child = spawn(spawnCmd, spawnArgs, spawnOptions);
+        logger.debug('[cursor] Spawning cursor-agent with script (PTY)');
+      }
+
+      this.child = child;
       child.stdout?.on('data', (data: Buffer) => {
         this.processChunk(data.toString());
       });
-
       child.stderr?.on('data', (data: Buffer) => {
         const text = data.toString();
-        // Filter out script command noise
-        if (!text.includes('tcgetattr') && !text.includes('ioctl')) {
+        if (process.env.CURSOR_AGENT_VERBOSE === '1') {
+          logger.debug(`[cursor-agent stderr] ${text.trim()}`);
+        } else if (!text.includes('tcgetattr') && !text.includes('ioctl')) {
           logger.debug(`[cursor] stderr: ${text.trim()}`);
         }
       });
-
-      this.once('subprocessError', (err: Error) => {
-        subprocessError = err;
-      });
-
       child.on('close', (code) => {
-        this.cleanup();
-        // Process remaining buffer
-        if (this.buffer.trim()) {
-          this.parseLine(this.buffer);
-          this.buffer = '';
+        if (this.options.signal) {
+          this.options.signal.removeEventListener('abort', onAbort);
         }
-        logger.debug(`[cursor] cursor-agent process exited with code: ${code}`);
-        this.emit('exit', code);
-        if (subprocessError) {
-          reject(subprocessError);
-        } else {
-          resolve();
-        }
+        onExit(code);
       });
-
       child.on('error', (err) => {
         this.cleanup();
         this.emit('error', err);
@@ -210,7 +226,11 @@ export class CursorProcess extends EventEmitter {
     try {
       this.child.kill('SIGTERM');
       setTimeout(() => {
-        try { this.child?.kill('SIGKILL'); } catch { /* ignore */ }
+        try {
+          this.child?.kill('SIGKILL');
+        } catch {
+          /* ignore */
+        }
       }, 3000);
     } catch {
       /* ignore */
@@ -245,110 +265,24 @@ export class CursorProcess extends EventEmitter {
       const msg = JSON.parse(trimmed) as CursorStreamMessage;
       this.emit('message', msg);
     } catch {
-      // Not JSON - could be shell error or cursor-agent user-visible error
-      logger.debug(`[cursor] Non-JSON stdout line: ${trimmed.slice(0, 150)}`);
-      const userError = detectCursorAgentError(trimmed);
-      if (userError) {
-        logger.debug(`[cursor] ${userError.message}`);
-        this.emit('subprocessError', userError);
+      const jsonStart = trimmed.indexOf('{');
+      if (jsonStart >= 0) {
+        try {
+          const msg = JSON.parse(trimmed.slice(jsonStart)) as CursorStreamMessage;
+          this.emit('message', msg);
+          return;
+        } catch {
+          /* fall through to log */
+        }
+      }
+      logger.debug(`[cursor] Non-JSON line (first 200): ${trimmed.slice(0, 200)}`);
+      if (/command not found|cursor-agent.*not found|not found/i.test(trimmed)) {
+        this.emit('subprocessError', new Error(
+          'cursor-agent not found. Install Cursor CLI on this machine (see https://docs.cursor.com) or set CURSOR_AGENT_PATH to the binary path.'
+        ));
       }
     }
   }
-}
-
-export interface CursorModelInfo {
-  code: string;
-  value: string;
-}
-
-export interface CursorModelsResult {
-  models: CursorModelInfo[];
-  /** The currently selected model ID ('current' marker), falls back to 'default' marker, then 'auto' */
-  currentModelId: string;
-}
-
-/**
- * Query available models from cursor-agent by running `cursor-agent models`.
- * Parses the plain-text output (no JSON mode available).
- * Returns null on failure (e.g. cursor-agent not installed, network error).
- */
-export function fetchCursorModels(timeoutMs = 10_000): Promise<CursorModelsResult | null> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      logger.debug('[cursor] fetchCursorModels: timed out');
-      resolve(null);
-    }, timeoutMs);
-
-    execFile(CURSOR_AGENT_BIN, ['models'], { timeout: timeoutMs }, (err, stdout) => {
-      clearTimeout(timer);
-      if (err) {
-        logger.debug(`[cursor] fetchCursorModels error: ${err.message}`);
-        resolve(null);
-        return;
-      }
-      resolve(parseCursorModelsOutput(stdout));
-    });
-  });
-}
-
-/**
- * Parse plain-text output of `cursor-agent models`.
- * Lines format: `<id> - <name>` optionally followed by `  (default)` or `  (current)`.
- */
-export function parseCursorModelsOutput(output: string): CursorModelsResult {
-  const models: CursorModelInfo[] = [];
-  let currentModelId: string | null = null;
-  let defaultModelId: string | null = null;
-
-  // Strip ANSI escape codes
-  const clean = output.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
-
-  for (const rawLine of clean.split('\n')) {
-    const line = rawLine.trim();
-    const match = line.match(/^([a-zA-Z0-9][a-zA-Z0-9._-]*)\s+-\s+(.+?)(\s+\((default|current)\))?$/);
-    if (!match) continue;
-
-    const [, code, rawName, , marker] = match;
-    const value = rawName.trim();
-    models.push({ code, value });
-
-    if (marker === 'current') currentModelId = code;
-    if (marker === 'default') defaultModelId = code;
-  }
-
-  return {
-    models,
-    currentModelId: currentModelId ?? defaultModelId ?? 'auto',
-  };
-}
-
-/**
- * Detect user-visible errors from cursor-agent Non-JSON stdout output.
- * cursor-agent outputs these as plain text (sometimes with a short prefix like "k: " or "b: "
- * that are ANSI escape remnants). Returns an Error if the line is a known error pattern.
- */
-function detectCursorAgentError(line: string): Error | null {
-  // Strip leading single-char prefix artifacts (e.g. "k: ", "b: ")
-  const text = line.replace(/^[a-z]: /, '').trim();
-
-  if (/command not found|cursor-agent.*not found/i.test(text)) {
-    return new Error(
-      'cursor-agent not found. Install Cursor CLI on this machine (see https://docs.cursor.com) or set CURSOR_AGENT_PATH to the binary path.'
-    );
-  }
-  if (/Provider Error|trouble connecting to the model provider/i.test(text)) {
-    return new Error(`Model provider error: ${text}`);
-  }
-  if (/unpaid invoice/i.test(text)) {
-    return new Error(`Cursor billing error: ${text}`);
-  }
-  if (/rate limit|too many requests/i.test(text)) {
-    return new Error(`Rate limit error: ${text}`);
-  }
-  if (/unauthorized|invalid.*api.*key|authentication.*failed/i.test(text)) {
-    return new Error(`Authentication error: ${text}`);
-  }
-  return null;
 }
 
 /**

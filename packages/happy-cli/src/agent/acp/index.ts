@@ -11,6 +11,8 @@
 
 // Core ACP backend
 export { AcpBackend, type AcpBackendOptions, type AcpPermissionHandler } from './AcpBackend';
+// cursor-agent specialization
+export { AcpCursorBackend } from './AcpCursorBackend';
 
 // Session update handlers (for testing and extension)
 export {

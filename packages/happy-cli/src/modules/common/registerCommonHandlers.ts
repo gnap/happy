@@ -120,7 +120,7 @@ export interface SpawnSessionOptions {
     directory: string;
     sessionId?: string;
     approvedNewDirectoryCreation?: boolean;
-    agent?: 'claude' | 'codex' | 'cursor' | 'gemini';
+    agent?: 'claude' | 'codex' | 'gemini' | 'cursor' | 'cursor-acp';
     token?: string;
     environmentVariables?: {
         // Anthropic Claude API configuration
@@ -135,8 +135,8 @@ export interface SpawnSessionOptions {
         // Note: TMUX_TMPDIR is used by tmux to store socket files when default /tmp is not suitable
         // Common use case: When /tmp has limited space or different permissions
 
-        // Session restart: reconnect to an existing server session by tag
-        HAPPY_CURSOR_SESSION_TAG?: string;
+        // Cursor/ACP session reconnect tag
+        HAPPY_CURSOR_SESSION_TAG?: string;  // Server session tag for reconnecting cursor-acp sessions
     };
 }
 
