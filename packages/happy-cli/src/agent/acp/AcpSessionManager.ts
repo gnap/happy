@@ -76,7 +76,10 @@ export class AcpSessionManager {
     if (!this.pendingText || !this.pendingType) {
       return [];
     }
-    const text = this.pendingText.replace(/^\n+|\n+$/g, '');
+    // Preserve the raw text (including any trailing newlines) so the App can
+    // reconstruct paragraph breaks that straddle a flush-window boundary.
+    // Only skip a chunk that is entirely empty (no characters at all).
+    const text = this.pendingText;
     const type = this.pendingType;
     this.pendingText = '';
     this.pendingType = null;
