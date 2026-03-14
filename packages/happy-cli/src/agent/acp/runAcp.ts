@@ -31,7 +31,8 @@ import {
 } from './sessionConfigMetadata';
 import type { SessionConfigOption, SessionModeState, SessionModelState } from '@agentclientprotocol/sdk';
 
-const TURN_TIMEOUT_MS = 5 * 60 * 1000;
+/** Turn timeout must exceed the per-tool-call timeout (CursorTransport uses 10 min). */
+const TURN_TIMEOUT_MS = 30 * 60 * 1000;
 const ACP_EVENT_PREVIEW_CHARS = 240;
 const ACP_RAW_PREVIEW_CHARS = 2000;
 const ACP_COLOR_RESET = '\u001b[0m';
@@ -597,6 +598,21 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     pendingTurn = { resolve, reject, timeout };
   });
 
+  /**
+   * Extend the turn deadline by TURN_TIMEOUT_MS from now.
+   * Called on any meaningful activity (tool call, model output) so a long-running
+   * sub-task that keeps producing output never hits the static deadline.
+   */
+  const extendTurnTimeout = () => {
+    if (!pendingTurn) return;
+    clearTimeout(pendingTurn.timeout);
+    const current = pendingTurn;
+    current.timeout = setTimeout(() => {
+      pendingTurn = null;
+      current.reject(new Error(`Timed out waiting for ${opts.agentName} to finish the turn`));
+    }, TURN_TIMEOUT_MS);
+  };
+
   const stopRunnerFromBackendStatus = (status: 'error' | 'stopped', detail?: string) => {
     const reason = detail
       ? `${opts.agentName} backend ${status}: ${detail}`
@@ -846,6 +862,12 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
       }
     }
 
+    if (msg.type === 'tool-call' || msg.type === 'model-output') {
+      // Any activity from the agent extends the turn deadline so long-running
+      // sub-tasks (e.g. Task sub-agents) don't hit the static TURN_TIMEOUT_MS.
+      extendTurnTimeout();
+    }
+
     if (msg.type === 'status') {
       const suffix = msg.detail ? `: ${msg.detail}` : '';
       const statusLine = `Status: ${msg.status}${suffix}`;
@@ -990,6 +1012,9 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
         }
         await backend.sendPrompt(acpSessionId, batch.message);
         await turnEnded;
+        if (backend instanceof AcpCursorBackend) {
+          backend.flushPendingOnTurnEnd();
+        }
         sendEnvelopes(sessionManager.endTurn('completed'));
         await session.flush();
         session.sendSessionEvent({ type: 'ready' });

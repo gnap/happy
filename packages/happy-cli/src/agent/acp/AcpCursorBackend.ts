@@ -164,6 +164,12 @@ interface CursorExtData {
   todos?: unknown[];
 }
 
+/**
+ * How long (ms) to wait for _cursor/update_todos after a TodoWrite completed
+ * notification before flushing the completion without todos as a fallback.
+ */
+const PENDING_TODO_FLUSH_TTL_MS = 3000;
+
 export class AcpCursorBackend extends AcpBackend {
   /** Buffer for first tool_call notification (empty rawInput). */
   private pendingCursorTools = new Map<string, PendingCursorTool>();
@@ -173,13 +179,41 @@ export class AcpCursorBackend extends AcpBackend {
    * Buffered `tool_call_update(completed)` for TodoWrite calls.
    * cursor-agent sends _cursor/update_todos AFTER completed, so we hold
    * the completed notification until the todos arrive, then flush both.
+   * Each entry also carries a TTL timer so we never block indefinitely.
    */
-  private pendingTodoCompleted = new Map<string, SessionNotification>();
+  private pendingTodoCompleted = new Map<string, { params: SessionNotification; timer: NodeJS.Timeout }>();
   /** Latest known full todo list — used to merge partial updates (merge: true). */
   private latestTodos: Array<Record<string, unknown>> = [];
 
   constructor(options: AcpBackendOptions) {
     super(options);
+  }
+
+  /**
+   * Flush any buffered state left over from a completed turn.
+   * Call this after the turn resolves to ensure no stale notifications linger.
+   */
+  flushPendingOnTurnEnd(): void {
+    // Emit any still-buffered TodoWrite completions without todos.
+    for (const [, { params, timer }] of this.pendingTodoCompleted) {
+      clearTimeout(timer);
+      super.handleSessionUpdate(params);
+    }
+    this.pendingTodoCompleted.clear();
+
+    // Flush any still-buffered tool_call notifications (e.g. last tool with no in_progress).
+    for (const [, pending] of this.pendingCursorTools) {
+      const fakeUpdate: SessionUpdate = { ...pending, sessionUpdate: 'tool_call', status: 'pending' };
+      const fakeParams = { update: fakeUpdate } as unknown as SessionNotification;
+      super.handleSessionUpdate(
+        this.transformToolCallParams(fakeParams, fakeUpdate, pending.kind, pending.title, pending.rawInput),
+      );
+    }
+    this.pendingCursorTools.clear();
+    this.cursorExtData.clear();
+
+    // Reset todo state for the next turn.
+    this.latestTodos = [];
   }
 
   /**
@@ -232,15 +266,16 @@ export class AcpCursorBackend extends AcpBackend {
           // Check if completed notification is already buffered (most common case).
           const pendingCompleted = this.pendingTodoCompleted.get(toolCallId);
           if (pendingCompleted) {
+            clearTimeout(pendingCompleted.timer);
             this.pendingTodoCompleted.delete(toolCallId);
-            const completedUpdate = (pendingCompleted as { update?: SessionUpdate }).update;
+            const completedUpdate = (pendingCompleted.params as { update?: SessionUpdate }).update;
             if (completedUpdate) {
               const enrichedUpdate: SessionUpdate = {
                 ...completedUpdate,
                 rawOutput: { ...(completedUpdate.rawOutput ?? {}), newTodos: resolvedTodos },
               };
               super.handleSessionUpdate(
-                { ...pendingCompleted, update: enrichedUpdate } as unknown as SessionNotification,
+                { ...pendingCompleted.params, update: enrichedUpdate } as unknown as SessionNotification,
               );
             }
           } else {
@@ -296,7 +331,14 @@ export class AcpCursorBackend extends AcpBackend {
             super.handleSessionUpdate({ ...params, update: enrichedUpdate } as unknown as typeof params);
           } else {
             // Todos not yet arrived — buffer completed notification, flush when _cursor/update_todos comes.
-            this.pendingTodoCompleted.set(toolCallId, params);
+            // TTL: if todos never arrive, emit the completion as-is after PENDING_TODO_FLUSH_TTL_MS.
+            const timer = setTimeout(() => {
+              if (this.pendingTodoCompleted.delete(toolCallId)) {
+                logger.info(`[AcpCursorBackend] TodoWrite TTL flush (no _cursor/update_todos) for ${toolCallId}`);
+                super.handleSessionUpdate(params);
+              }
+            }, PENDING_TODO_FLUSH_TTL_MS);
+            this.pendingTodoCompleted.set(toolCallId, { params, timer });
           }
           return;
         }
@@ -410,7 +452,11 @@ export class AcpCursorBackend extends AcpBackend {
   override async dispose(): Promise<void> {
     this.pendingCursorTools.clear();
     this.cursorExtData.clear();
+    for (const { timer } of this.pendingTodoCompleted.values()) {
+      clearTimeout(timer);
+    }
     this.pendingTodoCompleted.clear();
+    this.latestTodos = [];
     await super.dispose();
   }
 }

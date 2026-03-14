@@ -238,7 +238,9 @@ export function startOfflineReconnection<TSession>(
 /** All network error codes that trigger offline mode */
 export const NETWORK_ERROR_CODES = [
     'ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT',
-    'ECONNRESET', 'EHOSTUNREACH', 'ENETUNREACH'
+    'ECONNRESET', 'EHOSTUNREACH', 'ENETUNREACH',
+    // Axios request timeout (timeout: N exceeded) and cancellation
+    'ECONNABORTED', 'ERR_CANCELED',
 ] as const;
 
 /** Check if error code indicates server unreachable */
