@@ -94,7 +94,27 @@ happy gemini project get          # Show current Google Cloud Project ID
 happy acp gemini                     # Run built-in Gemini ACP command
 happy acp opencode                   # Run built-in OpenCode ACP command
 happy acp opencode --verbose         # Include raw backend/envelope logs
+happy acp cursor                     # Run Cursor Agent via ACP
 happy acp -- custom-agent --flag     # Run any ACP-compatible command directly
+```
+
+#### Cursor Agent
+
+`happy acp cursor` launches [Cursor](https://www.cursor.com/)'s built-in agent (`cursor-agent acp`) over the ACP protocol, enabling mobile remote control of Cursor sessions.
+
+**Requirements:** `cursor-agent` must be installed and available in your PATH (bundled with Cursor).
+
+**Path resolution order:**
+1. `CURSOR_AGENT_PATH` environment variable (if set)
+2. `/opt/homebrew/bin/cursor-agent` (Homebrew install — recommended)
+3. `/usr/local/bin/cursor-agent`
+4. `cursor-agent` from PATH
+
+> **Note:** The Homebrew-installed version is preferred. Newer versions (installed to `~/.local`) have a known regression where tool call arguments are empty.
+
+```bash
+happy acp cursor                              # Start a Cursor Agent session
+CURSOR_AGENT_PATH=/path/to/cursor-agent happy acp cursor  # Use a specific binary
 ```
 
 ### Sandbox Subcommands

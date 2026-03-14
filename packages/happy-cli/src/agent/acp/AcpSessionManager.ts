@@ -178,7 +178,7 @@ export class AcpSessionManager {
           t: 'tool-call-start',
           call,
           name,
-          title: description,
+          title: name,
           description,
           args: msg.args,
         }, turnOptions(this.currentTurnId, this.nextTime())),
