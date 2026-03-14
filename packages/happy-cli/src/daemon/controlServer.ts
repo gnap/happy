@@ -18,6 +18,7 @@ export function startDaemonControlServer({
   stopSessionByPid,
   spawnSession,
   restartSession,
+  archiveSession,
   requestShutdown,
   onHappySessionWebhook,
   onSessionEnding,
@@ -28,6 +29,7 @@ export function startDaemonControlServer({
   stopSessionByPid: (pid: number) => boolean;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
   restartSession: (sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
+  archiveSession: (sessionId: string) => boolean;
   requestShutdown: () => void;
   onHappySessionWebhook: (sessionId: string, metadata: Metadata) => void;
   onSessionEnding: (sessionId: string, pid: number, reason: string, exitCode?: number) => void;
@@ -64,7 +66,7 @@ export function startDaemonControlServer({
       return { status: 'ok' as const };
     });
 
-    // List all tracked sessions
+    // List all tracked sessions (active + stopped-but-not-archived)
     typed.post('/list', {
       schema: {
         response: {
@@ -78,6 +80,8 @@ export function startDaemonControlServer({
               agent: z.string().optional(),
               lastHeartbeat: z.number().optional(),
               isAlive: z.boolean(),
+              exitReason: z.string().optional(),
+              exitTime: z.number().optional(),
             }))
           })
         }
@@ -85,20 +89,27 @@ export function startDaemonControlServer({
     }, async () => {
       const children = getChildren();
       logger.debug(`[CONTROL SERVER] Listing ${children.length} sessions`);
-      return { 
+      return {
         children: children
           .filter(child => child.happySessionId !== undefined)
-          .map(child => ({
-            startedBy: child.startedBy,
-            happySessionId: child.happySessionId!,
-            pid: child.pid,
-            directory: child.directory,
-            sessionTag: child.sessionTag,
-            agent: child.agent,
-            lastHeartbeat: child.lastHeartbeat,
-            isAlive: (() => { try { process.kill(child.pid, 0); return true; } catch { return false; } })(),
-          }))
-      }
+          .map(child => {
+            const isAlive = child.exitTime
+              ? false
+              : (() => { try { process.kill(child.pid, 0); return true; } catch { return false; } })();
+            return {
+              startedBy: child.startedBy,
+              happySessionId: child.happySessionId!,
+              pid: child.pid,
+              directory: child.directory,
+              sessionTag: child.sessionTag,
+              agent: child.agent,
+              lastHeartbeat: child.lastHeartbeat,
+              isAlive,
+              exitReason: child.exitReason,
+              exitTime: child.exitTime,
+            };
+          })
+      };
     });
 
     // Stop specific session (by sessionId from mapping, or by pid without mapping)
@@ -210,6 +221,21 @@ export function startDaemonControlServer({
       logger.debug(`[CONTROL SERVER] Restart session request: ${sessionId}`);
       const result = await restartSession(sessionId);
       return result;
+    });
+
+    // Archive (permanently remove from list) a stopped session
+    typed.post('/archive-session', {
+      schema: {
+        body: z.object({ sessionId: z.string() }),
+        response: {
+          200: z.object({ success: z.boolean() })
+        }
+      }
+    }, async (request) => {
+      const { sessionId } = request.body;
+      logger.debug(`[CONTROL SERVER] Archive session request: ${sessionId}`);
+      const success = archiveSession(sessionId);
+      return { success };
     });
 
     // Session pre-announces its exit reason before dying

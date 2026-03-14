@@ -183,8 +183,17 @@ export async function startDaemon(): Promise<void> {
       }
     };
 
+    /**
+     * Sessions that have exited but have not been archived by the user.
+     * Keyed by happySessionId. Shown in 'daemon list' alongside active sessions.
+     */
+    const stoppedSessions = new Map<string, TrackedSession>();
+
     // Helper functions
-    const getCurrentChildren = () => Array.from(pidToTrackedSession.values());
+    const getCurrentChildren = (): TrackedSession[] => [
+      ...Array.from(pidToTrackedSession.values()),
+      ...Array.from(stoppedSessions.values()),
+    ];
     const getRecentlyExited = () => [...recentlyExited];
 
     /** Persist session tag by directory so restart can reuse same server session after process/daemon restart. */
@@ -750,7 +759,6 @@ export async function startDaemon(): Promise<void> {
     const onChildExited = (pid: number, code?: number | null, signal?: string | null) => {
       const session = pidToTrackedSession.get(pid);
       if (session) {
-        // Only fill code/signal if the process hasn't already self-reported via /session-ending
         if (session.exitCode === undefined && session.exitSignal === undefined) {
           session.exitCode = code ?? null;
           session.exitSignal = signal ?? null;
@@ -759,26 +767,48 @@ export async function startDaemon(): Promise<void> {
           session.exitReason = resolveExitReason(code ?? null, signal);
         }
         session.exitTime = session.exitTime ?? Date.now();
-        logger.debug(`[DAEMON RUN] Removing exited process PID ${pid} from tracking (reason: ${session.exitReason})`);
+        logger.debug(`[DAEMON RUN] Session PID ${pid} exited (reason: ${session.exitReason}), moving to stoppedSessions`);
         persistSessionTagBeforeRemove(session);
         pushRecentlyExited(session);
+        // Keep in stoppedSessions so it remains visible in 'daemon list' until archived
+        if (session.happySessionId) {
+          stoppedSessions.set(session.happySessionId, { ...session, childProcess: undefined });
+        }
       } else {
         logger.debug(`[DAEMON RUN] Removing exited process PID ${pid} from tracking`);
       }
       pidToTrackedSession.delete(pid);
     };
 
+    /** Remove a stopped session from the visible list (explicit user action). */
+    const archiveSession = (sessionId: string): boolean => {
+      if (stoppedSessions.delete(sessionId)) {
+        logger.debug(`[DAEMON RUN] Archived session ${sessionId}`);
+        return true;
+      }
+      // Also handle the edge case where it's still in active tracking (e.g. archive while running)
+      for (const [pid, session] of pidToTrackedSession.entries()) {
+        if (session.happySessionId === sessionId) {
+          pidToTrackedSession.delete(pid);
+          logger.debug(`[DAEMON RUN] Archived active session ${sessionId} (PID ${pid})`);
+          return true;
+        }
+      }
+      return false;
+    };
+
     // Restart a session: kill existing process and spawn a new one reconnecting to the same server session
     const restartSession = async (sessionId: string): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
       logger.debug(`[DAEMON RUN] Restart session: ${sessionId}`);
 
-      // Find in currently tracked sessions first, then fall back to recently-exited ring buffer
+      // Find in active sessions first, then stoppedSessions, then recently-exited ring buffer
       let found: TrackedSession | undefined;
       for (const session of pidToTrackedSession.values()) {
-        if (session.happySessionId === sessionId) {
-          found = session;
-          break;
-        }
+        if (session.happySessionId === sessionId) { found = session; break; }
+      }
+      if (!found) {
+        found = stoppedSessions.get(sessionId);
+        if (found) logger.debug(`[DAEMON RUN] Restart: session ${sessionId} found in stoppedSessions`);
       }
       if (!found) {
         found = recentlyExited.slice().reverse().find((s: TrackedSession) => s.happySessionId === sessionId);
@@ -814,6 +844,8 @@ export async function startDaemon(): Promise<void> {
       });
 
       if (result.type === 'success') {
+        // Remove old stopped entry — new session is live under a new ID
+        stoppedSessions.delete(sessionId);
         logger.debug(`[DAEMON RUN] Restarted session ${sessionId} -> new session ${result.sessionId}`);
         return { success: true, newSessionId: result.sessionId };
       } else {
@@ -830,6 +862,7 @@ export async function startDaemon(): Promise<void> {
       stopSessionByPid,
       spawnSession,
       restartSession,
+      archiveSession,
       requestShutdown: () => requestShutdown('happy-cli'),
       onHappySessionWebhook,
       onSessionEnding,
@@ -853,6 +886,9 @@ export async function startDaemon(): Promise<void> {
           logger.debug(`[DAEMON RUN] Evicting dead session ${session.happySessionId} (PID ${pid} not found, reason: ${session.exitReason})`);
           persistSessionTagBeforeRemove(session);
           pushRecentlyExited(session);
+          if (session.happySessionId) {
+            stoppedSessions.set(session.happySessionId, { ...session, childProcess: undefined });
+          }
           pidToTrackedSession.delete(pid);
           continue;
         }
@@ -934,12 +970,16 @@ export async function startDaemon(): Promise<void> {
       // Prune stale sessions
       for (const [pid, session] of pidToTrackedSession.entries()) {
         try {
-          // Check if process is still alive (signal 0 doesn't kill, just checks)
           process.kill(pid, 0);
-        } catch (error) {
-          // Process is dead, remove from tracking
-          logger.debug(`[DAEMON RUN] Removing stale session with PID ${pid} (process no longer exists)`);
+        } catch {
+          logger.debug(`[DAEMON RUN] Moving stale session PID ${pid} to stoppedSessions`);
+          if (!session.exitReason) session.exitReason = 'evicted (pid missing — detected in heartbeat)';
+          session.exitTime = session.exitTime ?? Date.now();
           persistSessionTagBeforeRemove(session);
+          pushRecentlyExited(session);
+          if (session.happySessionId) {
+            stoppedSessions.set(session.happySessionId, { ...session, childProcess: undefined });
+          }
           pidToTrackedSession.delete(pid);
         }
       }

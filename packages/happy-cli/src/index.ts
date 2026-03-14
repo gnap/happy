@@ -513,13 +513,13 @@ import type { StartOptions } from '@/claude/runClaude'
         if (sessions.length === 0) {
           console.log(restartableOnly
             ? 'No sessions safe to restart (none have path). Run "happy daemon list" to see all.'
-            : 'No active sessions this daemon is aware of (they might have been started by a previous version of the daemon)')
+            : 'No sessions this daemon is aware of.')
         } else {
           const now = Date.now()
-          console.log(restartableOnly ? 'Sessions safe to restart (have path):' : 'Active sessions (from daemon):')
+          console.log(restartableOnly ? 'Sessions safe to restart (have path):' : `Sessions (from daemon):`)
           for (const s of sessions) {
             const age = s.lastHeartbeat ? Math.round((now - s.lastHeartbeat) / 1000) : null
-            const aliveStr = s.isAlive ? '✓ alive' : '✗ stale'
+            const aliveStr = s.isAlive ? '✓ alive' : '✗ stopped'
             const heartbeatStr = age != null ? `last heartbeat ${age}s ago` : 'no heartbeat yet'
             const sessionTagPreview = typeof s.sessionTag === 'string' && s.sessionTag.length > 0
               ? s.sessionTag.slice(0, 8)
@@ -530,6 +530,9 @@ import type { StartOptions } from '@/claude/runClaude'
               console.log(`    path: ${path}`)
             } else {
               console.log(`  ${aliveStr}  ${s.happySessionId}  PID ${s.pid}  ${s.agent ?? '?'}  ${path}  tag ${sessionTagPreview}  (${heartbeatStr})`)
+              if (!s.isAlive && s.exitReason) {
+                console.log(`    exit: ${s.exitReason}`)
+              }
             }
           }
         }
@@ -607,6 +610,21 @@ import type { StartOptions } from '@/claude/runClaude'
         process.exit(1);
       } catch (error) {
         console.log('No daemon running');
+      }
+      return
+
+    } else if (daemonSubcommand === 'archive-session') {
+      const sessionId = args[2];
+      if (!sessionId) {
+        console.error('Usage: happy daemon archive-session <sessionId>')
+        process.exit(1)
+      }
+      try {
+        const { archiveDaemonSession } = await import('./daemon/controlClient');
+        const success = await archiveDaemonSession(sessionId);
+        console.log(success ? `Session ${sessionId} archived.` : `Session ${sessionId} not found in stopped list.`)
+      } catch (error) {
+        console.log('No daemon running')
       }
       return
 
@@ -703,8 +721,9 @@ ${chalk.bold('Usage:')}
   happy daemon start              Start the daemon (detached)
   happy daemon stop               Stop the daemon (sessions stay alive)
   happy daemon status             Show daemon status
-  happy daemon list               List active sessions
+  happy daemon list               List sessions (alive + stopped, until archived)
   happy daemon restart-session    Restart a hung/dead session (resumes same chat)
+  happy daemon archive-session    Remove a stopped session from the list
 
   If you want to kill all happy related processes run 
   ${chalk.cyan('happy doctor clean')}

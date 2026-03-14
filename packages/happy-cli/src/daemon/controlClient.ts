@@ -119,6 +119,11 @@ export async function restartDaemonSession(sessionId: string): Promise<{ success
   return result;
 }
 
+export async function archiveDaemonSession(sessionId: string): Promise<boolean> {
+  const result = await daemonPost('/archive-session', { sessionId });
+  return result.success || false;
+}
+
 /**
  * Spawn a new session in the given directory (e.g. to reconnect from server session list).
  * Optional agent and environmentVariables (e.g. HAPPY_CURSOR_SESSION_TAG for same server session).
