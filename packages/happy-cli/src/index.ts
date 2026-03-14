@@ -87,34 +87,33 @@ import type { StartOptions } from '@/claude/runClaude'
     const sessionsSub = args[1];
     if (sessionsSub === 'list') {
       const checkId = args[2]; // optional: e.g. 88206
-      const { readCredentials } = await import('./persistence')
+      const { readCredentials } = await import('./persistence');
       const credentials = await readCredentials();
       if (!credentials) {
         console.error(chalk.red('Not authenticated. Run happy auth first.'));
         process.exit(1);
       }
       try {
-        const axios = (await import('axios')).default
-        const { data } = await axios.get<{ sessions: Array<{ id: string; active: boolean; activeAt: number; createdAt: number }> }>(
-          `${configuration.serverUrl}/v1/sessions`,
-          { headers: { Authorization: `Bearer ${credentials.token}` } }
-        );
-        const sessions = data.sessions ?? [];
+        const { listServerSessions } = await import('./api/listServerSessions');
+        const sessions = await listServerSessions(credentials);
         if (checkId !== undefined) {
           const found = sessions.find((s) => String(s.id) === String(checkId));
           if (found) {
-            console.log(`Session ${checkId} exists. active=${found.active} activeAt=${found.activeAt} createdAt=${found.createdAt}`);
+            console.log(`Session ${checkId} exists. active=${found.active} activeAt=${found.activeAt} createdAt=${found.createdAt} path=${found.path ?? '?'} tag=${found.tag ? found.tag.slice(0, 8) + '...' : '?'}`);
           } else {
             console.log(`Session ${checkId} not found in server list (${sessions.length} sessions).`);
           }
         } else {
-          console.log(`Sessions (${sessions.length}):`);
+          console.log(`Sessions from server (${sessions.length}):`);
           for (const s of sessions) {
-            console.log(`  ${s.id}  active=${s.active}  createdAt=${s.createdAt}`);
+            const pathStr = s.path ?? '?';
+            const tagStr = s.tag ? s.tag.slice(0, 8) + '...' : '?';
+            const restartable = s.path && s.tag ? '  [restartable]' : '';
+            console.log(`  ${s.id}  active=${s.active}  path=${pathStr}  tag=${tagStr}${restartable}`);
           }
         }
       } catch (err: unknown) {
-        const { default: axios } = await import('axios')
+        const { default: axios } = await import('axios');
         const msg = axios.isAxiosError(err) ? (err.response?.data ?? err.message) : (err instanceof Error ? err.message : String(err));
         console.error(chalk.red('Failed to fetch sessions:'), msg);
         process.exit(1);
@@ -505,18 +504,33 @@ import type { StartOptions } from '@/claude/runClaude'
     if (daemonSubcommand === 'list') {
       try {
         const { listDaemonSessions } = await import('./daemon/controlClient')
-        const sessions = await listDaemonSessions()
+        let sessions = await listDaemonSessions()
+        const restartableOnly = args[2] === '--restartable'
+        if (restartableOnly) {
+          sessions = sessions.filter((s: { directory?: string }) => !!s.directory)
+        }
 
         if (sessions.length === 0) {
-          console.log('No active sessions this daemon is aware of (they might have been started by a previous version of the daemon)')
+          console.log(restartableOnly
+            ? 'No sessions safe to restart (none have path). Run "happy daemon list" to see all.'
+            : 'No active sessions this daemon is aware of (they might have been started by a previous version of the daemon)')
         } else {
           const now = Date.now()
-          console.log('Active sessions (from daemon):')
+          console.log(restartableOnly ? 'Sessions safe to restart (have path):' : 'Active sessions (from daemon):')
           for (const s of sessions) {
             const age = s.lastHeartbeat ? Math.round((now - s.lastHeartbeat) / 1000) : null
             const aliveStr = s.isAlive ? '✓ alive' : '✗ stale'
             const heartbeatStr = age != null ? `last heartbeat ${age}s ago` : 'no heartbeat yet'
-            console.log(`  ${aliveStr}  ${s.happySessionId}  PID ${s.pid}  ${s.agent ?? '?'}  ${s.directory ?? '?'}  (${heartbeatStr})`)
+            const sessionTagPreview = typeof s.sessionTag === 'string' && s.sessionTag.length > 0
+              ? s.sessionTag.slice(0, 8)
+              : '?'
+            const path = s.directory ?? '?'
+            if (restartableOnly) {
+              console.log(`  ${aliveStr}  ${s.happySessionId}  PID ${s.pid}  tag ${sessionTagPreview}  (${heartbeatStr})`)
+              console.log(`    path: ${path}`)
+            } else {
+              console.log(`  ${aliveStr}  ${s.happySessionId}  PID ${s.pid}  ${s.agent ?? '?'}  ${path}  tag ${sessionTagPreview}  (${heartbeatStr})`)
+            }
           }
         }
       } catch (error) {
@@ -560,19 +574,39 @@ import type { StartOptions } from '@/claude/runClaude'
       }
 
       try {
-        const { restartDaemonSession } = await import('./daemon/controlClient')
-        const result = await restartDaemonSession(sessionId);
+        const { restartDaemonSession, spawnDaemonSession } = await import('./daemon/controlClient');
+        let result = await restartDaemonSession(sessionId);
         if (result.success) {
-          console.log(`Session restarted successfully`)
-          if (result.newSessionId) {
-            console.log(`New session ID: ${result.newSessionId}`)
-          }
-        } else {
-          console.error(`Failed to restart session: ${result.error ?? 'unknown error'}`)
-          process.exit(1)
+          console.log(`Session restarted successfully`);
+          if (result.newSessionId) console.log(`New session ID: ${result.newSessionId}`);
+          return;
         }
+        const notFound = (result.error ?? '').toLowerCase().includes('not found') || (result.error ?? '').includes('Session directory unknown');
+        if (notFound) {
+          const { readCredentials } = await import('./persistence');
+          const credentials = await readCredentials();
+          if (credentials) {
+            const { listServerSessions } = await import('./api/listServerSessions');
+            const serverSessions = await listServerSessions(credentials);
+            const one = serverSessions.find((s) => s.id === sessionId);
+            if (one?.path) {
+              const spawnResult = await spawnDaemonSession({
+                directory: one.path,
+                agent: (one.flavor === 'cursor' ? 'cursor' : one.flavor === 'claude' ? 'claude' : one.flavor === 'gemini' ? 'gemini' : 'cursor') as 'cursor' | 'claude' | 'gemini' | 'codex',
+                environmentVariables: one.tag ? { HAPPY_CURSOR_SESSION_TAG: one.tag } : undefined
+              });
+              if (spawnResult.success) {
+                console.log(`Session restarted from server list (spawned in ${one.path})`);
+                if (spawnResult.sessionId) console.log(`New session ID: ${spawnResult.sessionId}`);
+                return;
+              }
+            }
+          }
+        }
+        console.error(`Failed to restart session: ${result.error ?? 'unknown error'}`);
+        process.exit(1);
       } catch (error) {
-        console.log('No daemon running')
+        console.log('No daemon running');
       }
       return
 

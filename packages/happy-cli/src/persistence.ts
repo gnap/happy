@@ -277,6 +277,12 @@ export interface DaemonLocallyPersistedState {
   startedWithCliVersion: string;
   lastHeartbeat?: string;
   daemonLogPath?: string;
+  /** Directory -> last known session tag (Cursor). Persisted so restart can reuse same server session after process/daemon restart. */
+  lastSessionTagByDirectory?: Record<string, string>;
+  /** Server session ID -> directory. Enables heartbeat polling to find the directory for a session that has new messages. */
+  lastDirectoryBySessionId?: Record<string, string>;
+  /** Server session ID -> agent type. Enables correct agent selection when auto-respawning. */
+  lastAgentBySessionId?: Record<string, string>;
 }
 
 export async function readSettings(): Promise<Settings> {

@@ -74,6 +74,7 @@ export function startDaemonControlServer({
               happySessionId: z.string(),
               pid: z.number(),
               directory: z.string().optional(),
+              sessionTag: z.string().optional(),
               agent: z.string().optional(),
               lastHeartbeat: z.number().optional(),
               isAlive: z.boolean(),
@@ -92,6 +93,7 @@ export function startDaemonControlServer({
             happySessionId: child.happySessionId!,
             pid: child.pid,
             directory: child.directory,
+            sessionTag: child.sessionTag,
             agent: child.agent,
             lastHeartbeat: child.lastHeartbeat,
             isAlive: (() => { try { process.kill(child.pid, 0); return true; } catch { return false; } })(),
@@ -122,12 +124,14 @@ export function startDaemonControlServer({
       return { success };
     });
 
-    // Spawn new session
+    // Spawn new session (optional agent + environmentVariables for restart-from-server with tag)
     typed.post('/spawn-session', {
       schema: {
         body: z.object({
           directory: z.string(),
-          sessionId: z.string().optional()
+          sessionId: z.string().optional(),
+          agent: z.enum(['claude', 'codex', 'cursor', 'gemini']).optional(),
+          environmentVariables: z.record(z.string()).optional()
         }),
         response: {
           200: z.object({
@@ -148,10 +152,10 @@ export function startDaemonControlServer({
         }
       }
     }, async (request, reply) => {
-      const { directory, sessionId } = request.body;
+      const { directory, sessionId, agent, environmentVariables } = request.body;
 
-      logger.debug(`[CONTROL SERVER] Spawn session request: dir=${directory}, sessionId=${sessionId || 'new'}`);
-      const result = await spawnSession({ directory, sessionId });
+      logger.debug(`[CONTROL SERVER] Spawn session request: dir=${directory}, sessionId=${sessionId || 'new'}, agent=${agent ?? 'default'}`);
+      const result = await spawnSession({ directory, sessionId, agent, environmentVariables });
 
       switch (result.type) {
         case 'success':

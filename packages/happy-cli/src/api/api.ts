@@ -324,6 +324,37 @@ export class ApiClient {
    * Get vendor API token from the server
    * Returns the token if it exists, null otherwise
    */
+  /**
+   * Fetch sessions updated since a given timestamp.
+   * Used by daemon heartbeat to detect new messages on stopped sessions.
+   * Returns minimal fields needed for auto-respawn decision.
+   */
+  async listChangedSessions(changedSince: number): Promise<Array<{ id: string; seq: number; active: boolean }>> {
+    try {
+      const response = await axios.get(
+        `${configuration.serverUrl}/v2/sessions`,
+        {
+          params: { changedSince, limit: 200 },
+          headers: { Authorization: `Bearer ${this.credential.token}` },
+          httpsAgent: serverHttpsAgent,
+          timeout: 10000,
+        }
+      );
+      return (response.data.sessions ?? []).map((s: Record<string, unknown>) => ({
+        id: String(s.id ?? ''),
+        seq: Number(s.seq ?? 0),
+        active: Boolean(s.active),
+      }));
+    } catch (err) {
+      logger.debug('[API] listChangedSessions error:', err);
+      return [];
+    }
+  }
+
+  /**
+   * Get vendor API token from the server
+   * Returns the token if it exists, null otherwise
+   */
   async getVendorToken(vendor: 'openai' | 'anthropic' | 'gemini'): Promise<any | null> {
     try {
       const response = await axios.get(
