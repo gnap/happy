@@ -868,6 +868,12 @@ export class AcpBackend implements AgentBackend {
         });
       }
 
+      // Prevent unhandled-rejection crash: if the process exits after startup
+      // (e.g. during abort/cancel), signalStartupFailure() will reject this promise
+      // but nothing is awaiting it anymore.  Attach a no-op .catch so Node.js
+      // doesn't treat it as an unhandled rejection and crash the CLI.
+      startupFailurePromise.catch(() => {});
+
       return { sessionId };
 
     } catch (error) {
