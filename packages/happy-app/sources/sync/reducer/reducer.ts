@@ -150,6 +150,8 @@ export type ReducerState = {
     messageIds: Map<string, string>; // originalId -> internalId
     /** Last message id that was a thinking message; used to merge streaming thinking chunks into one bubble */
     lastThinkingMessageId: string | null;
+    /** Last message id that was a regular agent text message; used to merge consecutive text chunks into one bubble */
+    lastAgentTextMessageId: string | null;
     messages: Map<string, ReducerMessage>;
     sidechains: Map<string, ReducerMessage[]>;
     tracerState: TracerState; // Tracer state for sidechain processing
@@ -181,6 +183,7 @@ export function createReducer(): ReducerState {
         localIds: new Map(),
         messageIds: new Map(),
         lastThinkingMessageId: null,
+        lastAgentTextMessageId: null,
         sidechains: new Map(),
         tracerState: createTracer()
     }
@@ -629,6 +632,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             }
             state.messageIds.set(msg.id, mid);
             state.lastThinkingMessageId = null; // user message ends any streaming thinking
+            state.lastAgentTextMessageId = null; // user message ends any streaming text
 
             changed.add(mid);
         } else if (msg.role === 'agent') {
@@ -643,14 +647,19 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             }
 
             // Process text and thinking content (tool calls handled in Phase 2)
-            const THINKING_MERGE_WINDOW_MS = 60000; // merge thinking chunks within 60s (same turn)
+            const MERGE_WINDOW_MS = 60000; // merge streaming chunks within 60s (same turn)
             for (let c of msg.content) {
+                if (c.type === 'tool-call') {
+                    // A tool call interrupts text streaming — next text should be a new bubble
+                    state.lastAgentTextMessageId = null;
+                    continue;
+                }
                 if (c.type === 'text' || c.type === 'thinking') {
                     const isThinking = c.type === 'thinking';
                     if (isThinking && state.lastThinkingMessageId !== null) {
                         // Merge streaming thinking into the same message (avoid one bubble per token)
                         const existing = state.messages.get(state.lastThinkingMessageId);
-                        const withinWindow = existing?.createdAt != null && (msg.createdAt - existing.createdAt) <= THINKING_MERGE_WINDOW_MS;
+                        const withinWindow = existing?.createdAt != null && (msg.createdAt - existing.createdAt) <= MERGE_WINDOW_MS;
                         if (existing?.isThinking && existing.text !== null && withinWindow) {
                             const prev = existing.text.endsWith('*') ? existing.text.slice(0, -1) : existing.text;
                             existing.text = prev + c.thinking + '*';
@@ -662,6 +671,24 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     }
                     if (!isThinking) {
                         state.lastThinkingMessageId = null;
+                        // Merge consecutive regular text chunks into the same bubble
+                        if (state.lastAgentTextMessageId !== null) {
+                            const existing = state.messages.get(state.lastAgentTextMessageId);
+                            const withinWindow = existing?.createdAt != null && (msg.createdAt - existing.createdAt) <= MERGE_WINDOW_MS;
+                            if (existing && !existing.isThinking && existing.text !== null && withinWindow) {
+                                // Direct concatenation: the CLI preserves trailing newlines in each
+                                // flush chunk, so the original line-break structure is maintained
+                                // without adding spurious newlines between chunks.
+                                existing.text = existing.text + c.text;
+                                state.messageIds.set(msg.id, state.lastAgentTextMessageId);
+                                changed.add(state.lastAgentTextMessageId);
+                                continue;
+                            }
+                        }
+                        state.lastAgentTextMessageId = null;
+                    } else {
+                        // Thinking chunk resets regular text merge
+                        state.lastAgentTextMessageId = null;
                     }
                     let mid = allocateId();
                     state.messages.set(mid, {
@@ -677,6 +704,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     });
                     if (isThinking) {
                         state.lastThinkingMessageId = mid;
+                    } else {
+                        state.lastAgentTextMessageId = mid;
                     }
                     state.messageIds.set(msg.id, mid);
                     changed.add(mid);

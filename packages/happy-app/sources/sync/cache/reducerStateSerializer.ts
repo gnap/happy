@@ -146,6 +146,7 @@ export function deserializeReducerState(persisted: PersistedReducerState): Reduc
         localIds: new Map(persisted.localIds),
         messageIds: new Map(persisted.messageIds),
         lastThinkingMessageId: persisted.lastThinkingMessageId,
+        lastAgentTextMessageId: null, // always reset on restore — streaming state is transient
         messages: new Map(persisted.messages),
         sidechains: new Map(persisted.sidechains),
         tracerState: deserializeTracerState(persisted.tracerState),
