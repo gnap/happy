@@ -7,80 +7,11 @@ function turnOptions(turnId: string | null, time: number): CreateEnvelopeOptions
   return turnId ? { turn: turnId, time } : { time };
 }
 
-/**
- * Map cursor-agent ACP tool kinds to App-known tool names with appropriate args.
- * Maps to Cursor-specific tool names (CursorBash/CursorRead/CursorEdit/Grep).
- *
- * cursor-agent sends real args in rawInput:
- *   execute (shellToolCall)  → { command: string }
- *   read    (readToolCall)   → { path: string }
- *   search  (grepToolCall)   → { pattern: string, path?: string }
- *   search  (lsToolCall)     → { path: string }
- *   edit    (editToolCall)   → { path: string }
- */
-function mapCursorTool(
-  kind: string | undefined,
-  displayTitle: string,
-  rawArgs: Record<string, unknown>,
-): {
-  name: string;
-  title: string;
-  description: string;
-  args: Record<string, unknown>;
-} {
-  if (kind === 'execute') {
-    const cmd = typeof rawArgs['command'] === 'string' ? rawArgs['command'] : '';
-    const titleStr = cmd || displayTitle;
-    return {
-      name: 'CursorBash',
-      title: titleStr,
-      description: titleStr,
-      args: { command: cmd },
-    };
-  }
-  if (kind === 'read') {
-    const filePath = typeof rawArgs['path'] === 'string' ? rawArgs['path'] : '';
-    // displayTitle from cursor-agent includes line range, e.g. "Read src/foo.ts (1 - 100)"
-    return {
-      name: 'CursorRead',
-      title: displayTitle,
-      description: displayTitle,
-      args: { path: filePath },
-    };
-  }
-  if (kind === 'edit') {
-    const filePath = typeof rawArgs['path'] === 'string' ? rawArgs['path'] : '';
-    // displayTitle from cursor-agent: "Edit `src/foo.ts`"
-    return {
-      name: 'CursorEdit',
-      title: displayTitle,
-      description: displayTitle,
-      args: { path: filePath },
-    };
-  }
-  if (kind === 'search') {
-    const pattern = typeof rawArgs['pattern'] === 'string' ? rawArgs['pattern'] : '';
-    const path = typeof rawArgs['path'] === 'string' ? rawArgs['path'] : '';
-    return {
-      name: 'Grep',
-      title: displayTitle,
-      description: displayTitle,
-      args: { pattern, path },
-    };
-  }
-  return {
-    name: displayTitle,
-    title: displayTitle,
-    description: `Running ${displayTitle}`,
-    args: rawArgs,
-  };
-}
-
 function formatToolResult(toolName: string, result: unknown): Record<string, unknown> | string | undefined {
   if (result === null || result === undefined) return undefined;
   if (typeof result !== 'object' || Array.isArray(result)) return undefined;
   const r = result as Record<string, unknown>;
-  if (toolName === 'execute') {
+  if (toolName === 'execute' || toolName === 'CursorBash') {
     const stdout = typeof r['stdout'] === 'string' ? r['stdout'].trim() : '';
     const stderr = typeof r['stderr'] === 'string' ? r['stderr'].trim() : '';
     const exitCode = r['exitCode'];
@@ -88,11 +19,15 @@ function formatToolResult(toolName: string, result: unknown): Record<string, unk
     if (exitCode !== 0) return `exit ${exitCode}`;
     return stdout || undefined;
   }
-  if (toolName === 'read') {
+  if (toolName === 'read' || toolName === 'CursorRead') {
     const content = typeof r['content'] === 'string' ? r['content'].trim() : '';
     return content || undefined;
   }
-  if (toolName === 'search') {
+  if (toolName === 'CursorEdit') {
+    // Edit results are typically empty on success
+    return undefined;
+  }
+  if (toolName === 'search' || toolName === 'Grep') {
     const totalMatches = r['totalMatches'];
     return totalMatches !== undefined ? { totalMatches } : undefined;
   }
@@ -102,13 +37,10 @@ function formatToolResult(toolName: string, result: unknown): Record<string, unk
 
 
 export class AcpSessionManager {
-  private readonly agentName: string;
   private currentTurnId: string | null = null;
   private readonly acpCallToSessionCall = new Map<string, string>();
 
-  constructor(agentName: string) {
-    this.agentName = agentName;
-  }
+  constructor() {}
 
   /** Monotonic clock: max(lastTime + 1, Date.now()) */
   private lastTime = 0;
@@ -192,9 +124,6 @@ export class AcpSessionManager {
 
   mapMessage(msg: AgentMessage): SessionEnvelope[] {
     if (msg.type === 'event' && msg.name === 'thinking') {
-      if (this.agentName === 'cursor') {
-        return [];
-      }
       const payload = msg.payload as { text?: string; streaming?: boolean } | string | null;
       const text = typeof payload === 'string' ? payload : (payload as { text?: string })?.text ?? '';
       const streaming = typeof payload === 'object' && payload !== null && (payload as { streaming?: boolean }).streaming === true;
@@ -234,18 +163,17 @@ export class AcpSessionManager {
     if (msg.type === 'tool-call') {
       const flushed = this.flush();
       const call = this.ensureSessionCallId(msg.callId);
-      const { name, title, description, args } = this.agentName === 'cursor'
-        ? mapCursorTool(msg.kind, msg.toolName, msg.args)
-        : { name: msg.toolName, title: msg.toolName, description: `Running ${msg.toolName}`, args: msg.args };
+      const name = msg.toolName;
+      const description = msg.description ?? `Running ${name}`;
       return [
         ...flushed,
         createEnvelope('agent', {
           t: 'tool-call-start',
           call,
           name,
-          title,
+          title: description,
           description,
-          args,
+          args: msg.args,
         }, turnOptions(this.currentTurnId, this.nextTime())),
       ];
     }

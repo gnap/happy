@@ -5,6 +5,7 @@ import type { ApiSessionClient } from '@/api/apiSession';
 import type { UserMessage } from '@/api/types';
 import type { AgentMessage } from '@/agent/core';
 import { AcpBackend, type AcpPermissionHandler } from './AcpBackend';
+import { AcpCursorBackend } from './AcpCursorBackend';
 import { DefaultTransport } from '@/agent/transport';
 import { AcpSessionManager } from './AcpSessionManager';
 import type { SessionEnvelope } from '@slopus/happy-wire';
@@ -520,7 +521,7 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
   }
 
   permissionHandler = new GenericAcpPermissionHandler(session, opts.agentName);
-  const sessionManager = new AcpSessionManager(opts.agentName);
+  const sessionManager = new AcpSessionManager();
   const messageQueue = new MessageQueue2<AcpSwitchMode>((mode) => hashObject(mode));
   let currentPermissionMode: string | undefined;
   let currentModel: string | null | undefined;
@@ -550,7 +551,7 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     }
   }
 
-  const backendFactory = () => new AcpBackend({
+  const backendOptions = {
     agentName: opts.agentName,
     cwd: process.cwd(),
     command: opts.command!,
@@ -559,7 +560,10 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     permissionHandler,
     transportHandler: defaultTransport,
     verbose,
-  });
+  };
+  const backendFactory = () => opts.agentName === 'cursor'
+    ? new AcpCursorBackend(backendOptions)
+    : new AcpBackend(backendOptions);
 
   let backend = opts.backend ?? backendFactory();
 

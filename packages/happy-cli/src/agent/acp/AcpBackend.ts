@@ -337,9 +337,6 @@ export class AcpBackend implements AgentBackend {
   /** Map from tool call ID to raw kind (e.g. "execute", "read") for result formatting */
   private toolCallIdToKindMap = new Map<string, string>();
 
-  /** Deferred tool-call emits waiting for real args from toolCallStarted */
-  private pendingToolCallEmits = new Map<string, { displayName: string; kindStr: string | undefined; args: Record<string, unknown> }>();
-
   /** Track if we just sent a prompt with change_title instruction */
   private recentPromptHadChangeTitle = false;
 
@@ -875,7 +872,7 @@ export class AcpBackend implements AgentBackend {
   /**
    * Create handler context for session update processing
    */
-  private createHandlerContext(): HandlerContext {
+  protected createHandlerContext(): HandlerContext {
     return {
       transport: this.transport,
       activeToolCalls: this.activeToolCalls,
@@ -883,7 +880,6 @@ export class AcpBackend implements AgentBackend {
       toolCallTimeouts: this.toolCallTimeouts,
       toolCallIdToNameMap: this.toolCallIdToNameMap,
       toolCallIdToKindMap: this.toolCallIdToKindMap,
-      pendingToolCallEmits: this.pendingToolCallEmits,
       idleTimeout: this.idleTimeout,
       toolCallCountSincePrompt: this.toolCallCountSincePrompt,
       emit: (msg) => this.emit(msg),
@@ -934,7 +930,7 @@ export class AcpBackend implements AgentBackend {
     }
   }
 
-  private handleSessionUpdate(params: SessionNotification): void {
+  protected handleSessionUpdate(params: SessionNotification): void {
     const notification = params as ExtendedSessionNotification;
     const update = notification.update;
 
@@ -1340,7 +1336,6 @@ export class AcpBackend implements AgentBackend {
     this.toolCallTimeouts.clear();
     this.toolCallStartTimes.clear();
     this.toolCallIdToKindMap.clear();
-    this.pendingToolCallEmits.clear();
     this.pendingPermissions.clear();
   }
 }
