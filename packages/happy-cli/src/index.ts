@@ -393,6 +393,10 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
           startedBy = args[++i] as 'daemon' | 'terminal';
           continue;
         }
+        if (!customCommandMode && args[i] === '--happy-starting-mode') {
+          i++; // consume value, not passed to cursor-agent
+          continue;
+        }
         if (!customCommandMode && args[i] === '--verbose') {
           verbose = true;
           continue;
