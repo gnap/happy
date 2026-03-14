@@ -75,6 +75,14 @@ export interface HandlerContext {
   toolCallTimeouts: Map<string, NodeJS.Timeout>;
   /** Map of tool call ID to tool name */
   toolCallIdToNameMap: Map<string, string>;
+  /** Map of tool call ID to raw kind (e.g. "execute", "read", "search") */
+  toolCallIdToKindMap: Map<string, string>;
+  /**
+   * Deferred tool-call emits: when the first tool_call notification has empty args,
+   * we defer the emit here and flush it when the second notification (toolCallStarted)
+   * arrives with real args, or when in_progress update fires as fallback.
+   */
+  pendingToolCallEmits: Map<string, { displayName: string; kindStr: string | undefined; args: Record<string, unknown> }>;
   /** Current idle timeout handle */
   idleTimeout: NodeJS.Timeout | null;
   /** Tool call counter since last prompt */
@@ -256,7 +264,8 @@ export function startToolCall(
   toolKind: string | unknown,
   update: SessionUpdate,
   ctx: HandlerContext,
-  source: 'tool_call' | 'tool_call_update'
+  source: 'tool_call' | 'tool_call_update',
+  deferEmit: boolean = false
 ): void {
   const startTime = Date.now();
   const toolKindStr = typeof toolKind === 'string' ? toolKind : undefined;
@@ -268,6 +277,10 @@ export function startToolCall(
 
   // Store mapping for permission requests
   ctx.toolCallIdToNameMap.set(toolCallId, realToolName);
+  // Store raw kind for result formatting at completion time
+  if (toolKindStr) {
+    ctx.toolCallIdToKindMap.set(toolCallId, toolKindStr);
+  }
 
   ctx.activeToolCalls.add(toolCallId);
   ctx.toolCallStartTimes.set(toolCallId, startTime);
@@ -330,12 +343,22 @@ export function startToolCall(
   const titleName = typeof update.title === 'string' ? update.title : undefined;
   const displayName = titleName || toolKindStr || 'unknown';
 
-  ctx.emit({
-    type: 'tool-call',
-    toolName: displayName,
-    args: args as Record<string, unknown>,
-    callId: toolCallId,
-  });
+  if (deferEmit) {
+    ctx.pendingToolCallEmits.set(toolCallId, {
+      displayName,
+      kindStr: toolKindStr,
+      args: args as Record<string, unknown>,
+    });
+    logger.debug(`[AcpBackend] ⏳ Deferred tool-call emit for ${toolCallId} (no real args yet)`);
+  } else {
+    ctx.emit({
+      type: 'tool-call',
+      toolName: displayName,
+      kind: toolKindStr,
+      args: args as Record<string, unknown>,
+      callId: toolCallId,
+    });
+  }
 }
 
 /**
@@ -353,6 +376,8 @@ export function completeToolCall(
 
   ctx.activeToolCalls.delete(toolCallId);
   ctx.toolCallStartTimes.delete(toolCallId);
+  const resolvedKind = ctx.toolCallIdToKindMap.get(toolCallId) || toolKindStr;
+  ctx.toolCallIdToKindMap.delete(toolCallId);
 
   const timeout = ctx.toolCallTimeouts.get(toolCallId);
   if (timeout) {
@@ -360,11 +385,11 @@ export function completeToolCall(
     ctx.toolCallTimeouts.delete(toolCallId);
   }
 
-  logger.debug(`[AcpBackend] ✅ Tool call COMPLETED: ${toolCallId} (${toolKindStr}) - Duration: ${duration}. Active tool calls: ${ctx.activeToolCalls.size}`);
+  logger.debug(`[AcpBackend] ✅ Tool call COMPLETED: ${toolCallId} (${resolvedKind}) - Duration: ${duration}. Active tool calls: ${ctx.activeToolCalls.size}`);
 
   ctx.emit({
     type: 'tool-result',
-    toolName: toolKindStr,
+    toolName: resolvedKind,
     result: content,
     callId: toolCallId,
   });
@@ -416,6 +441,7 @@ export function failToolCall(
   // Cleanup
   ctx.activeToolCalls.delete(toolCallId);
   ctx.toolCallStartTimes.delete(toolCallId);
+  ctx.toolCallIdToKindMap.delete(toolCallId);
 
   const timeout = ctx.toolCallTimeouts.get(toolCallId);
   if (timeout) {
@@ -465,12 +491,14 @@ export function handleToolCallUpdate(
   const status = update.status;
   const toolCallId = update.toolCallId;
 
+
   if (!toolCallId) {
     logger.debug('[AcpBackend] Tool call update without toolCallId:', update);
     return { handled: false };
   }
 
-  const toolKind = update.kind || 'unknown';
+  // Prefer cached kind from initial tool_call notification (update has no kind in tool_call_update)
+  const toolKind = ctx.toolCallIdToKindMap.get(toolCallId) || update.kind || 'unknown';
   let toolCallCountSincePrompt = ctx.toolCallCountSincePrompt;
 
   if (status === 'in_progress' || status === 'pending') {
@@ -478,7 +506,21 @@ export function handleToolCallUpdate(
       toolCallCountSincePrompt++;
       startToolCall(toolCallId, toolKind, update, ctx, 'tool_call_update');
     } else {
-      logger.debug(`[AcpBackend] Tool call ${toolCallId} already tracked, status: ${status}`);
+      // Fallback: if a deferred tool-call emit is still pending, flush it now
+      const pending = ctx.pendingToolCallEmits.get(toolCallId);
+      if (pending) {
+        ctx.pendingToolCallEmits.delete(toolCallId);
+        logger.debug(`[AcpBackend] 🚀 Flushing deferred tool-call emit on in_progress for ${toolCallId}`);
+        ctx.emit({
+          type: 'tool-call',
+          toolName: pending.displayName,
+          kind: pending.kindStr,
+          args: pending.args,
+          callId: toolCallId,
+        });
+      } else {
+        logger.debug(`[AcpBackend] Tool call ${toolCallId} already tracked, status: ${status}`);
+      }
     }
   } else if (status === 'completed') {
     // cursor-agent ACP sends result in rawOutput; fall back to content for other agents
@@ -512,12 +554,43 @@ export function handleToolCall(
     return { handled: false };
   }
 
+  // Helper: flush a deferred tool-call emit with the given args and title
+  const flushPending = (realArgs: Record<string, unknown>, titleOverride?: string) => {
+    const pending = ctx.pendingToolCallEmits.get(toolCallId);
+    if (!pending) return;
+    ctx.pendingToolCallEmits.delete(toolCallId);
+    const displayName = titleOverride || pending.displayName;
+    logger.debug(`[AcpBackend] 🚀 Flushing deferred tool-call emit for ${toolCallId} (${displayName})`);
+    ctx.emit({
+      type: 'tool-call',
+      toolName: displayName,
+      kind: pending.kindStr,
+      args: realArgs,
+      callId: toolCallId,
+    });
+  };
+
   if (ctx.activeToolCalls.has(toolCallId)) {
-    logger.debug(`[AcpBackend] Tool call ${toolCallId} already in active set, skipping`);
+    // cursor-agent: toolCallCreated fires first (empty rawInput, deferred), then toolCallStarted
+    // (real rawInput). Flush the deferred emit now with the real args.
+    const rawInput = update.rawInput;
+    const hasRealInput = rawInput && Object.keys(rawInput).length > 0 &&
+      Object.values(rawInput).some(v => v !== null && v !== undefined && v !== '');
+    if (hasRealInput) {
+      const titleName = typeof update.title === 'string' ? update.title : undefined;
+      flushPending(rawInput as Record<string, unknown>, titleName);
+    } else {
+      logger.debug(`[AcpBackend] Tool call ${toolCallId} already in active set, skipping`);
+    }
     return { handled: true };
   }
 
-  startToolCall(toolCallId, update.kind, update, ctx, 'tool_call');
+  // First time: defer emit if args are empty (cursor sends toolCallCreated with empty rawInput first)
+  const rawInput = update.rawInput;
+  const hasRealInput = rawInput && Object.keys(rawInput).length > 0 &&
+    Object.values(rawInput).some(v => v !== null && v !== undefined && v !== '');
+  const defer = !hasRealInput;
+  startToolCall(toolCallId, update.kind, update, ctx, 'tool_call', defer);
   return { handled: true };
 }
 

@@ -7,8 +7,73 @@ function turnOptions(turnId: string | null, time: number): CreateEnvelopeOptions
   return turnId ? { turn: turnId, time } : { time };
 }
 
-function buildToolTitle(toolName: string): string {
-  return toolName;
+/**
+ * Map cursor-agent ACP tool kinds to App-known tool names with appropriate args.
+ * Maps to Cursor-specific tool names (CursorBash/CursorRead/CursorEdit/Grep).
+ *
+ * cursor-agent sends real args in rawInput:
+ *   execute (shellToolCall)  → { command: string }
+ *   read    (readToolCall)   → { path: string }
+ *   search  (grepToolCall)   → { pattern: string, path?: string }
+ *   search  (lsToolCall)     → { path: string }
+ *   edit    (editToolCall)   → { path: string }
+ */
+function mapCursorTool(
+  kind: string | undefined,
+  displayTitle: string,
+  rawArgs: Record<string, unknown>,
+): {
+  name: string;
+  title: string;
+  description: string;
+  args: Record<string, unknown>;
+} {
+  if (kind === 'execute') {
+    const cmd = typeof rawArgs['command'] === 'string' ? rawArgs['command'] : '';
+    const titleStr = cmd || displayTitle;
+    return {
+      name: 'CursorBash',
+      title: titleStr,
+      description: titleStr,
+      args: { command: cmd },
+    };
+  }
+  if (kind === 'read') {
+    const filePath = typeof rawArgs['path'] === 'string' ? rawArgs['path'] : '';
+    // displayTitle from cursor-agent includes line range, e.g. "Read src/foo.ts (1 - 100)"
+    return {
+      name: 'CursorRead',
+      title: displayTitle,
+      description: displayTitle,
+      args: { path: filePath },
+    };
+  }
+  if (kind === 'edit') {
+    const filePath = typeof rawArgs['path'] === 'string' ? rawArgs['path'] : '';
+    // displayTitle from cursor-agent: "Edit `src/foo.ts`"
+    return {
+      name: 'CursorEdit',
+      title: displayTitle,
+      description: displayTitle,
+      args: { path: filePath },
+    };
+  }
+  if (kind === 'search') {
+    const pattern = typeof rawArgs['pattern'] === 'string' ? rawArgs['pattern'] : '';
+    const path = typeof rawArgs['path'] === 'string' ? rawArgs['path'] : '';
+    return {
+      name: 'Grep',
+      title: displayTitle,
+      description: displayTitle,
+      args: { pattern, path },
+    };
+  }
+  return {
+    name: displayTitle,
+    title: displayTitle,
+    description: `Running ${displayTitle}`,
+    args: rawArgs,
+  };
 }
 
 function formatToolResult(toolName: string, result: unknown): Record<string, unknown> | string | undefined {
@@ -34,9 +99,6 @@ function formatToolResult(toolName: string, result: unknown): Record<string, unk
   return r;
 }
 
-function buildToolDescription(toolName: string): string {
-  return `Running ${toolName}`;
-}
 
 
 export class AcpSessionManager {
@@ -172,15 +234,18 @@ export class AcpSessionManager {
     if (msg.type === 'tool-call') {
       const flushed = this.flush();
       const call = this.ensureSessionCallId(msg.callId);
+      const { name, title, description, args } = this.agentName === 'cursor'
+        ? mapCursorTool(msg.kind, msg.toolName, msg.args)
+        : { name: msg.toolName, title: msg.toolName, description: `Running ${msg.toolName}`, args: msg.args };
       return [
         ...flushed,
         createEnvelope('agent', {
           t: 'tool-call-start',
           call,
-          name: msg.toolName,
-          title: buildToolTitle(msg.toolName),
-          description: buildToolDescription(msg.toolName),
-          args: msg.args,
+          name,
+          title,
+          description,
+          args,
         }, turnOptions(this.currentTurnId, this.nextTime())),
       ];
     }

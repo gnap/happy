@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { ApiClient } from '@/api/api';
 import type { ApiSessionClient } from '@/api/apiSession';
+import type { UserMessage } from '@/api/types';
 import type { AgentMessage } from '@/agent/core';
 import { AcpBackend, type AcpPermissionHandler } from './AcpBackend';
 import { DefaultTransport } from '@/agent/transport';
@@ -490,6 +491,8 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
 
   let session: ApiSessionClient;
   let permissionHandler: GenericAcpPermissionHandler;
+  // Forward reference so onSessionSwap can re-register the callback on the new session.
+  let userMessageHandler: ((message: UserMessage) => void) | null = null;
   const { session: initialSession, reconnectionHandle } = setupOfflineReconnection({
     api,
     sessionTag,
@@ -500,6 +503,9 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
       session = newSession;
       if (permissionHandler) {
         permissionHandler.updateSession(newSession);
+      }
+      if (userMessageHandler) {
+        newSession.onUserMessage(userMessageHandler);
       }
     },
   });
@@ -863,7 +869,7 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
 
   backend.onMessage(onBackendMessage);
 
-  session.onUserMessage((message) => {
+  userMessageHandler = (message) => {
     if (!message.content.text) {
       const keys = message?.content && typeof message.content === 'object' ? Object.keys(message.content).join(',') : 'n/a';
       logger.debug(`[${opts.agentName}] onUserMessage skipped: no text (keys: ${keys})`);
@@ -885,7 +891,8 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
       permissionMode: currentPermissionMode,
       model: currentModel,
     });
-  });
+  };
+  session.onUserMessage(userMessageHandler);
   session.keepAlive(thinking, 'remote');
 
   const keepAliveInterval = setInterval(() => {

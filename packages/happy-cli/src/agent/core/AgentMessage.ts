@@ -50,6 +50,8 @@ export interface StatusMessage {
 export interface ToolCallMessage {
   type: 'tool-call';
   toolName: string;
+  /** Raw tool kind from the agent (e.g. "execute", "read", "search") */
+  kind?: string;
   args: Record<string, unknown>;
   callId: ToolCallId;
 }
