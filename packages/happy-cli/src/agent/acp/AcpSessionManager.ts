@@ -11,6 +11,29 @@ function buildToolTitle(toolName: string): string {
   return toolName;
 }
 
+function formatToolResult(toolName: string, result: unknown): Record<string, unknown> | string | undefined {
+  if (result === null || result === undefined) return undefined;
+  if (typeof result !== 'object' || Array.isArray(result)) return undefined;
+  const r = result as Record<string, unknown>;
+  if (toolName === 'execute') {
+    const stdout = typeof r['stdout'] === 'string' ? r['stdout'].trim() : '';
+    const stderr = typeof r['stderr'] === 'string' ? r['stderr'].trim() : '';
+    const exitCode = r['exitCode'];
+    if (exitCode !== 0 && stderr) return `exit ${exitCode}\n${stderr}`;
+    if (exitCode !== 0) return `exit ${exitCode}`;
+    return stdout || undefined;
+  }
+  if (toolName === 'read') {
+    const content = typeof r['content'] === 'string' ? r['content'].trim() : '';
+    return content || undefined;
+  }
+  if (toolName === 'search') {
+    const totalMatches = r['totalMatches'];
+    return totalMatches !== undefined ? { totalMatches } : undefined;
+  }
+  return r;
+}
+
 function buildToolDescription(toolName: string): string {
   return `Running ${toolName}`;
 }
@@ -165,12 +188,10 @@ export class AcpSessionManager {
     if (msg.type === 'tool-result') {
       const flushed = this.flush();
       const call = this.ensureSessionCallId(msg.callId);
-      const result = msg.result && typeof msg.result === 'object' && !Array.isArray(msg.result)
-        ? (msg.result as Record<string, unknown>)
-        : undefined;
+      const result = formatToolResult(msg.toolName, msg.result);
       return [
         ...flushed,
-        createEnvelope('agent', { t: 'tool-call-end', call, ...(result ? { result } : {}) }, turnOptions(this.currentTurnId, this.nextTime())),
+        createEnvelope('agent', { t: 'tool-call-end', call, ...(result !== undefined ? { result } : {}) }, turnOptions(this.currentTurnId, this.nextTime())),
       ];
     }
 
