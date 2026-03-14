@@ -42,4 +42,9 @@ export interface TrackedSession {
    *   3. Daemon PID check found process gone ('evicted (pid missing)')
    */
   exitReason?: string;
+  /**
+   * Set to true when session-ending is called with archive=true (app-initiated kill).
+   * When true, the session is NOT moved to stoppedSessions on exit — it disappears from the list.
+   */
+  pendingArchive?: boolean;
 }

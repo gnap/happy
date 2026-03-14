@@ -228,19 +228,20 @@ export async function startDaemon(): Promise<void> {
     };
 
     /** Called by /session-ending webhook: session process pre-announces its exit reason. */
-    const onSessionEnding = (sessionId: string, pid: number, reason: string, exitCode?: number) => {
+    const onSessionEnding = (sessionId: string, pid: number, reason: string, exitCode?: number, archive?: boolean) => {
       const session = pidToTrackedSession.get(pid);
       if (session) {
         session.exitReason = reason;
         if (exitCode !== undefined) session.exitCode = exitCode;
-        logger.debug(`[DAEMON RUN] Session ending (self-reported): ${sessionId} PID ${pid} reason="${reason}"`);
+        if (archive) session.pendingArchive = true;
+        logger.debug(`[DAEMON RUN] Session ending (self-reported): ${sessionId} PID ${pid} reason="${reason}" archive=${archive ?? false}`);
       } else {
         // Process already evicted — still record for history if it matches a recently-exited entry
         const recent = recentlyExited.slice().reverse().find((s: TrackedSession) => s.pid === pid && s.happySessionId === sessionId);
         if (recent) {
           recent.exitReason = reason;
           if (exitCode !== undefined) recent.exitCode = exitCode;
-          logger.debug(`[DAEMON RUN] Session ending (self-reported, already evicted): ${sessionId} PID ${pid} reason="${reason}"`);
+          logger.debug(`[DAEMON RUN] Session ending (self-reported, already evicted): ${sessionId} PID ${pid} reason="${reason}"`);;
         }
       }
     };
@@ -767,12 +768,17 @@ export async function startDaemon(): Promise<void> {
           session.exitReason = resolveExitReason(code ?? null, signal);
         }
         session.exitTime = session.exitTime ?? Date.now();
-        logger.debug(`[DAEMON RUN] Session PID ${pid} exited (reason: ${session.exitReason}), moving to stoppedSessions`);
         persistSessionTagBeforeRemove(session);
         pushRecentlyExited(session);
-        // Keep in stoppedSessions so it remains visible in 'daemon list' until archived
-        if (session.happySessionId) {
-          stoppedSessions.set(session.happySessionId, { ...session, childProcess: undefined });
+        if (session.pendingArchive) {
+          // App-initiated archive (killSession RPC): do not keep in list
+          logger.debug(`[DAEMON RUN] Session PID ${pid} archived by app, removing from list`);
+        } else {
+          // Process exited on its own (pause / signal / crash): keep visible until user archives
+          logger.debug(`[DAEMON RUN] Session PID ${pid} exited (reason: ${session.exitReason}), moving to stoppedSessions`);
+          if (session.happySessionId) {
+            stoppedSessions.set(session.happySessionId, { ...session, childProcess: undefined });
+          }
         }
       } else {
         logger.debug(`[DAEMON RUN] Removing exited process PID ${pid} from tracking`);

@@ -84,9 +84,10 @@ export async function notifyDaemonSessionEnding(
   pid: number,
   reason: string,
   exitCode?: number,
+  archive?: boolean,
 ): Promise<void> {
   try {
-    await daemonPost('/session-ending', { sessionId, pid, reason, exitCode });
+    await daemonPost('/session-ending', { sessionId, pid, reason, exitCode, archive });
   } catch {
     // Best-effort; do not block the exit path
   }

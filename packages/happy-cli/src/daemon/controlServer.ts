@@ -32,7 +32,7 @@ export function startDaemonControlServer({
   archiveSession: (sessionId: string) => boolean;
   requestShutdown: () => void;
   onHappySessionWebhook: (sessionId: string, metadata: Metadata) => void;
-  onSessionEnding: (sessionId: string, pid: number, reason: string, exitCode?: number) => void;
+  onSessionEnding: (sessionId: string, pid: number, reason: string, exitCode?: number, archive?: boolean) => void;
 }): Promise<{ port: number; stop: () => Promise<void> }> {
   return new Promise((resolve) => {
     const app = fastify({
@@ -246,15 +246,16 @@ export function startDaemonControlServer({
           pid: z.number().int().positive(),
           reason: z.string(),
           exitCode: z.number().int().optional(),
+          archive: z.boolean().optional(),
         }),
         response: {
           200: z.object({ status: z.literal('ok') })
         }
       }
     }, async (request) => {
-      const { sessionId, pid, reason, exitCode } = request.body;
-      logger.debug(`[CONTROL SERVER] Session ending: ${sessionId} PID ${pid} reason="${reason}"`);
-      onSessionEnding(sessionId, pid, reason, exitCode);
+      const { sessionId, pid, reason, exitCode, archive } = request.body;
+      logger.debug(`[CONTROL SERVER] Session ending: ${sessionId} PID ${pid} reason="${reason}" archive=${archive ?? false}`);
+      onSessionEnding(sessionId, pid, reason, exitCode, archive);
       return { status: 'ok' as const };
     });
 
