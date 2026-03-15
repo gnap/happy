@@ -272,10 +272,12 @@ function migrateSettings(raw: any, fromVersion: number): any {
  * This is written to disk by the daemon to track its local process state
  */
 export interface DaemonLocallyPersistedState {
-  pid: number;
-  httpPort: number;
-  startTime: string;
-  startedWithCliVersion: string;
+  /** Absent in tombstone state (daemon stopped but session data preserved) */
+  pid?: number;
+  /** Absent in tombstone state */
+  httpPort?: number;
+  startTime?: string;
+  startedWithCliVersion?: string;
   lastHeartbeat?: string;
   daemonLogPath?: string;
   /** Directory -> last known session tag (Cursor). Persisted so restart can reuse same server session after process/daemon restart. */
@@ -556,38 +558,33 @@ export function writeDaemonState(state: DaemonLocallyPersistedState): void {
 }
 
 /**
- * Write stopped sessions to a separate file that survives daemon restarts.
- * Called by the daemon before shutdown so stopped sessions persist across clean restarts.
- */
-export function writeStoppedSessions(sessions: DaemonLocallyPersistedState['stoppedSessions']): void {
-  try {
-    writeFileSync(configuration.stoppedSessionsFile, JSON.stringify(sessions ?? [], null, 2), 'utf-8');
-  } catch {
-    // Best-effort
-  }
-}
-
-/**
- * Read stopped sessions persisted across daemon restarts.
- */
-export function readStoppedSessions(): DaemonLocallyPersistedState['stoppedSessions'] {
-  try {
-    if (!existsSync(configuration.stoppedSessionsFile)) return undefined;
-    return JSON.parse(readFileSync(configuration.stoppedSessionsFile, 'utf-8'));
-  } catch {
-    return undefined;
-  }
-}
-
-/**
  * Clean up daemon state file and lock file.
- * Does NOT remove stopped-sessions.json — that file survives restarts.
+ * Instead of deleting daemon.state.json entirely, writes a tombstone that preserves
+ * stopped sessions and session maps so they survive clean daemon restarts.
+ * The absence of pid/httpPort signals that no daemon is currently running.
  */
 export async function clearDaemonState(): Promise<void> {
-  if (existsSync(configuration.daemonStateFile)) {
+  // Preserve stopped sessions and directory maps across restart
+  const existing = await readDaemonState();
+  const hasDataToPreserve =
+    (existing?.stoppedSessions?.length ?? 0) > 0 ||
+    Object.keys(existing?.lastDirectoryBySessionId ?? {}).length > 0 ||
+    Object.keys(existing?.lastSessionTagByDirectory ?? {}).length > 0 ||
+    Object.keys(existing?.lastAgentBySessionId ?? {}).length > 0;
+
+  if (hasDataToPreserve) {
+    // Write tombstone: no pid/httpPort (signals daemon is stopped), but keep session data
+    writeFileSync(configuration.daemonStateFile, JSON.stringify({
+      stoppedSessions: existing!.stoppedSessions,
+      lastDirectoryBySessionId: existing!.lastDirectoryBySessionId,
+      lastSessionTagByDirectory: existing!.lastSessionTagByDirectory,
+      lastAgentBySessionId: existing!.lastAgentBySessionId,
+    }, null, 2), 'utf-8');
+  } else if (existsSync(configuration.daemonStateFile)) {
     await unlink(configuration.daemonStateFile);
   }
-  // Also clean up lock file if it exists (for stale cleanup)
+
+  // Clean up lock file
   if (existsSync(configuration.daemonLockFile)) {
     try {
       await unlink(configuration.daemonLockFile);

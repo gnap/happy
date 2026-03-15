@@ -166,8 +166,8 @@ export async function runDoctorCommand(filter?: 'all' | 'daemon'): Promise<void>
 
         if (isRunning && state) {
             console.log(chalk.green('✓ Daemon is running'));
-            console.log(`  PID: ${state.pid}`);
-            console.log(`  Started: ${new Date(state.startTime).toLocaleString()}`);
+            console.log(`  PID: ${state.pid ?? '?'}`);
+            console.log(`  Started: ${state.startTime ? new Date(state.startTime).toLocaleString() : '?'}`);
             console.log(`  CLI Version: ${state.startedWithCliVersion}`);
             if (state.httpPort) {
                 console.log(`  HTTP Port: ${state.httpPort}`);

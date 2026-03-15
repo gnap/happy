@@ -96,7 +96,7 @@ describe.skipIf(!await isServerHealthy())('Daemon Integration Tests', { timeout:
     if (!daemonState) {
       throw new Error('Daemon failed to start within timeout');
     }
-    daemonPid = daemonState.pid;
+    daemonPid = daemonState.pid!;
 
     console.log(`[TEST] Daemon started for test: PID=${daemonPid}`);
     console.log(`[TEST] Daemon log file: ${daemonState?.daemonLogPath}`);

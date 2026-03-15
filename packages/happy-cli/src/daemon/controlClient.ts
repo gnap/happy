@@ -22,7 +22,7 @@ async function daemonPost(path: string, body?: any): Promise<{ error?: string } 
   }
 
   try {
-    process.kill(state.pid, 0);
+    process.kill(state.pid!, 0);
   } catch (error) {
     const errorMessage = 'Daemon is not running, file is stale';
     logger.debug(`[CONTROL CLIENT] ${errorMessage}`);
@@ -33,7 +33,7 @@ async function daemonPost(path: string, body?: any): Promise<{ error?: string } 
 
   try {
     const timeout = process.env.HAPPY_DAEMON_HTTP_TIMEOUT ? parseInt(process.env.HAPPY_DAEMON_HTTP_TIMEOUT) : 10_000;
-    const response = await fetch(`http://127.0.0.1:${state.httpPort}${path}`, {
+    const response = await fetch(`http://127.0.0.1:${state.httpPort!}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body || {}),
@@ -178,16 +178,18 @@ export async function stopDaemonHttp(): Promise<void> {
  */
 export async function checkIfDaemonRunningAndCleanupStaleState(): Promise<boolean> {
   const state = await readDaemonState();
-  if (!state) {
-    return false;
-  }
+  if (!state) return false;
 
-  // Check if the daemon is running
+  // Tombstone state: daemon cleanly stopped but session data was preserved — not running
+  if (!state.pid || !state.httpPort) return false;
+
+  // Check if the daemon process is still alive
   try {
     process.kill(state.pid, 0);
     return true;
   } catch {
-    logger.debug('[DAEMON RUN] Daemon PID not running, cleaning up state');
+    // Stale state (process died unexpectedly): clear the live fields but keep session data
+    logger.debug('[DAEMON RUN] Daemon PID not running, cleaning up stale state');
     await cleanupDaemonState();
     return false;
   }
@@ -259,6 +261,11 @@ export async function stopDaemon() {
     const state = await readDaemonState();
     if (!state) {
       logger.debug('No daemon state found');
+      return;
+    }
+
+    if (!state.pid || !state.httpPort) {
+      logger.debug('No daemon running (tombstone state)');
       return;
     }
 
