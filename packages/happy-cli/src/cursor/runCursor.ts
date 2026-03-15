@@ -19,7 +19,7 @@ import { configuration } from '@/configuration';
 
 import { ApiClient } from '@/api/api';
 import { logger } from '@/ui/logger';
-import { Credentials, readSettings } from '@/persistence';
+import { Credentials, readSettings, writeSessionPidFile, removeSessionPidFile } from '@/persistence';
 import { createSessionMetadata } from '@/utils/createSessionMetadata';
 import { initialMachineMetadata } from '@/daemon/run';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
@@ -28,7 +28,7 @@ import { projectPath } from '@/projectPath';
 import { startHappyServer } from '@/claude/utils/startHappyServer';
 import { MessageBuffer } from '@/ui/ink/messageBuffer';
 import { CodexDisplay } from '@/ui/ink/CodexDisplay';
-import { notifyDaemonSessionStarted } from '@/daemon/controlClient';
+import { notifyDaemonSessionStarted, notifyDaemonSessionEnding } from '@/daemon/controlClient';
 import { registerKillSessionHandler } from '@/claude/registerKillSessionHandler';
 import { stopCaffeinate } from '@/utils/caffeinate';
 import { connectionState } from '@/utils/serverConnectionErrors';
@@ -238,6 +238,7 @@ export async function runCursor(opts: {
   });
   session = initialSession;
   session.onUserMessage(handleUserMessage);
+  writeSessionPidFile(session.sessionId);
 
   // Report to daemon
   if (response) {
@@ -309,34 +310,71 @@ export async function runCursor(opts: {
     }
   }
 
-  const handleKillSession = async () => {
-    logger.debug('[Cursor] Kill session requested');
+  /**
+   * Terminate the session.
+   *
+   * pause=true  (SIGTERM / SIGHUP / normal completion):
+   *   Set lifecycleState='paused' so the App shows the session as resumable.
+   *   Do NOT call sendSessionDeath() — the server will mark it inactive when the
+   *   WebSocket disconnects, preserving the session record for restart-session.
+   *
+   * pause=false (App RPC kill / explicit user termination):
+   *   Archive the session permanently (current behavior).
+   */
+  const handleKillSession = async (pause = false) => {
+    logger.debug(`[Cursor] Kill session requested (pause=${pause})`);
+    removeSessionPidFile();
     await handleAbort();
 
+    const exitReason = exitSignalName ? `signal: ${exitSignalName}` : (pause ? 'paused' : 'killed by app (RPC)');
     try {
       if (session) {
-        session.updateMetadata((currentMetadata) => ({
-          ...currentMetadata,
-          lifecycleState: 'archived',
-          lifecycleStateSince: Date.now(),
-          archivedBy: 'cli',
-          archiveReason: 'User terminated',
-        }));
-        session.sendSessionDeath();
+        if (pause) {
+          await session.updateMetadata((currentMetadata) => ({
+            ...currentMetadata,
+            lifecycleState: 'paused',
+            lifecycleStateSince: Date.now(),
+          }));
+        } else {
+          await session.updateMetadata((currentMetadata) => ({
+            ...currentMetadata,
+            lifecycleState: 'archived',
+            lifecycleStateSince: Date.now(),
+            archivedBy: 'cli',
+            archiveReason: 'User terminated',
+          }));
+          session.sendSessionDeath();
+        }
         await session.flush();
         await session.close();
       }
       stopCaffeinate();
       happyServer.stop();
+      await notifyDaemonSessionEnding(session.sessionId, process.pid, exitReason, 0, !pause);
       process.exit(0);
     } catch (error) {
       logger.debug('[Cursor] Error during session termination:', error);
+      await notifyDaemonSessionEnding(session.sessionId, process.pid, `${exitReason} (cleanup error: ${error instanceof Error ? error.message : String(error)})`, 1, !pause);
       process.exit(1);
     }
   };
 
   session.rpcHandlerManager.registerHandler('abort', handleAbort);
-  registerKillSessionHandler(session.rpcHandlerManager, handleKillSession);
+  // App RPC kill: permanent archive (pause=false)
+  registerKillSessionHandler(session.rpcHandlerManager, () => handleKillSession(false));
+
+  // Signal handlers: pause so session can be resumed (pause=true)
+  let exitHandled = false;
+  let exitSignalName: string | null = null;
+  const onExitSignal = (sig: string) => {
+    exitSignalName = sig;
+    if (exitHandled) return;
+    exitHandled = true;
+    void handleKillSession(true);
+  };
+  process.on('SIGTERM', () => onExitSignal('SIGTERM'));
+  process.on('SIGINT', () => onExitSignal('SIGINT'));
+  process.on('SIGHUP', () => onExitSignal('SIGHUP'));
 
   //
   // Initialize Ink UI (reuse CodexDisplay since layout is similar)

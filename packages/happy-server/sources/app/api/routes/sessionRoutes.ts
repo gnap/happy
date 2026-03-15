@@ -22,6 +22,7 @@ export function sessionRoutes(app: Fastify) {
             take: 150,
             select: {
                 id: true,
+                tag: true,
                 seq: true,
                 createdAt: true,
                 updatedAt: true,
@@ -32,28 +33,15 @@ export function sessionRoutes(app: Fastify) {
                 dataEncryptionKey: true,
                 active: true,
                 lastActiveAt: true,
-                // messages: {
-                //     orderBy: { seq: 'desc' },
-                //     take: 1,
-                //     select: {
-                //         id: true,
-                //         seq: true,
-                //         content: true,
-                //         localId: true,
-                //         createdAt: true
-                //     }
-                // }
             }
         });
 
         return reply.send({
             sessions: sessions.map((v) => {
-                // const lastMessage = v.messages[0];
                 const sessionUpdatedAt = v.updatedAt.getTime();
-                // const lastMessageCreatedAt = lastMessage ? lastMessage.createdAt.getTime() : 0;
-
                 return {
                     id: v.id,
+                    tag: v.tag,
                     seq: v.seq,
                     createdAt: v.createdAt.getTime(),
                     updatedAt: sessionUpdatedAt,

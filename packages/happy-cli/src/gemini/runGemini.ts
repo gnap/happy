@@ -410,11 +410,11 @@ export async function runGemini(opts: {
       }
 
       logger.debug('[Gemini] Session termination complete, exiting');
-      await notifyDaemonSessionEnding(session.sessionId, process.pid, exitReason, 0);
+      await notifyDaemonSessionEnding(session.sessionId, process.pid, exitReason, 0, !pause);
       process.exit(0);
     } catch (error) {
       logger.debug('[Gemini] Error during session termination:', error);
-      await notifyDaemonSessionEnding(session.sessionId, process.pid, `${exitReason} (cleanup error: ${error instanceof Error ? error.message : String(error)})`, 1);
+      await notifyDaemonSessionEnding(session.sessionId, process.pid, `${exitReason} (cleanup error: ${error instanceof Error ? error.message : String(error)})`, 1, !pause);
       process.exit(1);
     }
   };

@@ -18,6 +18,7 @@ export function startDaemonControlServer({
   stopSessionByPid,
   spawnSession,
   restartSession,
+  archiveSession,
   requestShutdown,
   onHappySessionWebhook,
   onSessionEnding,
@@ -28,9 +29,10 @@ export function startDaemonControlServer({
   stopSessionByPid: (pid: number) => boolean;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
   restartSession: (sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
+  archiveSession: (sessionId: string) => boolean;
   requestShutdown: () => void;
   onHappySessionWebhook: (sessionId: string, metadata: Metadata) => void;
-  onSessionEnding: (sessionId: string, pid: number, reason: string, exitCode?: number) => void;
+  onSessionEnding: (sessionId: string, pid: number, reason: string, exitCode?: number, archive?: boolean) => void;
 }): Promise<{ port: number; stop: () => Promise<void> }> {
   return new Promise((resolve) => {
     const app = fastify({
@@ -64,7 +66,7 @@ export function startDaemonControlServer({
       return { status: 'ok' as const };
     });
 
-    // List all tracked sessions
+    // List all tracked sessions (active + stopped-but-not-archived)
     typed.post('/list', {
       schema: {
         response: {
@@ -74,9 +76,12 @@ export function startDaemonControlServer({
               happySessionId: z.string(),
               pid: z.number(),
               directory: z.string().optional(),
+              sessionTag: z.string().optional(),
               agent: z.string().optional(),
               lastHeartbeat: z.number().optional(),
               isAlive: z.boolean(),
+              exitReason: z.string().optional(),
+              exitTime: z.number().optional(),
             }))
           })
         }
@@ -84,19 +89,27 @@ export function startDaemonControlServer({
     }, async () => {
       const children = getChildren();
       logger.debug(`[CONTROL SERVER] Listing ${children.length} sessions`);
-      return { 
+      return {
         children: children
           .filter(child => child.happySessionId !== undefined)
-          .map(child => ({
-            startedBy: child.startedBy,
-            happySessionId: child.happySessionId!,
-            pid: child.pid,
-            directory: child.directory,
-            agent: child.agent,
-            lastHeartbeat: child.lastHeartbeat,
-            isAlive: (() => { try { process.kill(child.pid, 0); return true; } catch { return false; } })(),
-          }))
-      }
+          .map(child => {
+            const isAlive = child.exitTime
+              ? false
+              : (() => { try { process.kill(child.pid, 0); return true; } catch { return false; } })();
+            return {
+              startedBy: child.startedBy,
+              happySessionId: child.happySessionId!,
+              pid: child.pid,
+              directory: child.directory,
+              sessionTag: child.sessionTag,
+              agent: child.agent,
+              lastHeartbeat: child.lastHeartbeat,
+              isAlive,
+              exitReason: child.exitReason,
+              exitTime: child.exitTime,
+            };
+          })
+      };
     });
 
     // Stop specific session (by sessionId from mapping, or by pid without mapping)
@@ -122,12 +135,14 @@ export function startDaemonControlServer({
       return { success };
     });
 
-    // Spawn new session
+    // Spawn new session (optional agent + environmentVariables for restart-from-server with tag)
     typed.post('/spawn-session', {
       schema: {
         body: z.object({
           directory: z.string(),
-          sessionId: z.string().optional()
+          sessionId: z.string().optional(),
+          agent: z.enum(['claude', 'codex', 'cursor', 'gemini']).optional(),
+          environmentVariables: z.record(z.string()).optional()
         }),
         response: {
           200: z.object({
@@ -148,10 +163,10 @@ export function startDaemonControlServer({
         }
       }
     }, async (request, reply) => {
-      const { directory, sessionId } = request.body;
+      const { directory, sessionId, agent, environmentVariables } = request.body;
 
-      logger.debug(`[CONTROL SERVER] Spawn session request: dir=${directory}, sessionId=${sessionId || 'new'}`);
-      const result = await spawnSession({ directory, sessionId });
+      logger.debug(`[CONTROL SERVER] Spawn session request: dir=${directory}, sessionId=${sessionId || 'new'}, agent=${agent ?? 'default'}`);
+      const result = await spawnSession({ directory, sessionId, agent, environmentVariables });
 
       switch (result.type) {
         case 'success':
@@ -208,6 +223,21 @@ export function startDaemonControlServer({
       return result;
     });
 
+    // Archive (permanently remove from list) a stopped session
+    typed.post('/archive-session', {
+      schema: {
+        body: z.object({ sessionId: z.string() }),
+        response: {
+          200: z.object({ success: z.boolean() })
+        }
+      }
+    }, async (request) => {
+      const { sessionId } = request.body;
+      logger.debug(`[CONTROL SERVER] Archive session request: ${sessionId}`);
+      const success = archiveSession(sessionId);
+      return { success };
+    });
+
     // Session pre-announces its exit reason before dying
     typed.post('/session-ending', {
       schema: {
@@ -216,15 +246,16 @@ export function startDaemonControlServer({
           pid: z.number().int().positive(),
           reason: z.string(),
           exitCode: z.number().int().optional(),
+          archive: z.boolean().optional(),
         }),
         response: {
           200: z.object({ status: z.literal('ok') })
         }
       }
     }, async (request) => {
-      const { sessionId, pid, reason, exitCode } = request.body;
-      logger.debug(`[CONTROL SERVER] Session ending: ${sessionId} PID ${pid} reason="${reason}"`);
-      onSessionEnding(sessionId, pid, reason, exitCode);
+      const { sessionId, pid, reason, exitCode, archive } = request.body;
+      logger.debug(`[CONTROL SERVER] Session ending: ${sessionId} PID ${pid} reason="${reason}" archive=${archive ?? false}`);
+      onSessionEnding(sessionId, pid, reason, exitCode, archive);
       return { status: 'ok' as const };
     });
 

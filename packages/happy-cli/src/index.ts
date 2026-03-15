@@ -24,7 +24,7 @@ import { install } from './daemon/install'
 import { uninstall } from './daemon/uninstall'
 import { ApiClient } from './api/api'
 import { runDoctorCommand } from './ui/doctor'
-import { listDaemonSessions, stopDaemonSession } from './daemon/controlClient'
+import { stopDaemonSession } from './daemon/controlClient'
 import { handleAuthCommand } from './commands/auth'
 import { handleConnectCommand } from './commands/connect'
 import { handleSandboxCommand } from './commands/sandbox'
@@ -95,6 +95,45 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
   } else if (subcommand === 'bye') {
     console.log('Bye!');
     process.exit(0);
+  } else if (subcommand === 'sessions') {
+    const sessionsSub = args[1];
+    if (sessionsSub === 'list') {
+      const checkId = args[2]; // optional: e.g. 88206
+      const { readCredentials } = await import('./persistence');
+      const credentials = await readCredentials();
+      if (!credentials) {
+        console.error(chalk.red('Not authenticated. Run happy auth first.'));
+        process.exit(1);
+      }
+      try {
+        const { listServerSessions } = await import('./api/listServerSessions');
+        const sessions = await listServerSessions(credentials);
+        if (checkId !== undefined) {
+          const found = sessions.find((s) => String(s.id) === String(checkId));
+          if (found) {
+            console.log(`Session ${checkId} exists. active=${found.active} activeAt=${found.activeAt} createdAt=${found.createdAt} path=${found.path ?? '?'} tag=${found.tag ? found.tag.slice(0, 8) + '...' : '?'}`);
+          } else {
+            console.log(`Session ${checkId} not found in server list (${sessions.length} sessions).`);
+          }
+        } else {
+          console.log(`Sessions from server (${sessions.length}):`);
+          for (const s of sessions) {
+            const pathStr = s.path ?? '?';
+            const tagStr = s.tag ? s.tag.slice(0, 8) + '...' : '?';
+            const restartable = s.path && s.tag ? '  [restartable]' : '';
+            console.log(`  ${s.id}  active=${s.active}  path=${pathStr}  tag=${tagStr}${restartable}`);
+          }
+        }
+      } catch (err: unknown) {
+        const { default: axios } = await import('axios');
+        const msg = axios.isAxiosError(err) ? (err.response?.data ?? err.message) : (err instanceof Error ? err.message : String(err));
+        console.error(chalk.red('Failed to fetch sessions:'), msg);
+        process.exit(1);
+      }
+      return;
+    }
+    console.error(chalk.red('Usage: happy sessions list [sessionId]'));
+    process.exit(1);
   } else if (subcommand === 'codex') {
     // Handle codex command
     try {
@@ -469,13 +508,38 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
 
     if (daemonSubcommand === 'list') {
       try {
-        const sessions = await listDaemonSessions()
+        const { listDaemonSessions } = await import('./daemon/controlClient')
+        let sessions = await listDaemonSessions()
+        const restartableOnly = args[2] === '--restartable'
+        if (restartableOnly) {
+          sessions = sessions.filter((s: { directory?: string }) => !!s.directory)
+        }
 
         if (sessions.length === 0) {
-          console.log('No active sessions this daemon is aware of (they might have been started by a previous version of the daemon)')
+          console.log(restartableOnly
+            ? 'No sessions safe to restart (none have path). Run "happy daemon list" to see all.'
+            : 'No sessions this daemon is aware of.')
         } else {
-          console.log('Active sessions:')
-          console.log(JSON.stringify(sessions, null, 2))
+          const now = Date.now()
+          console.log(restartableOnly ? 'Sessions safe to restart (have path):' : `Sessions (from daemon):`)
+          for (const s of sessions) {
+            const age = s.lastHeartbeat ? Math.round((now - s.lastHeartbeat) / 1000) : null
+            const aliveStr = s.isAlive ? '✓ alive' : '✗ stopped'
+            const heartbeatStr = age != null ? `last heartbeat ${age}s ago` : 'no heartbeat yet'
+            const sessionTagPreview = typeof s.sessionTag === 'string' && s.sessionTag.length > 0
+              ? s.sessionTag.slice(0, 8)
+              : '?'
+            const path = s.directory ?? '?'
+            if (restartableOnly) {
+              console.log(`  ${aliveStr}  ${s.happySessionId}  PID ${s.pid}  tag ${sessionTagPreview}  (${heartbeatStr})`)
+              console.log(`    path: ${path}`)
+            } else {
+              console.log(`  ${aliveStr}  ${s.happySessionId}  PID ${s.pid}  ${s.agent ?? '?'}  ${path}  tag ${sessionTagPreview}  (${heartbeatStr})`)
+              if (!s.isAlive && s.exitReason) {
+                console.log(`    exit: ${s.exitReason}`)
+              }
+            }
+          }
         }
       } catch (error) {
         console.log('No daemon running')
@@ -492,6 +556,65 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
       try {
         const success = await stopDaemonSession(sessionId)
         console.log(success ? 'Session stopped' : 'Failed to stop session')
+      } catch (error) {
+        console.log('No daemon running')
+      }
+      return
+
+    } else if (daemonSubcommand === 'restart-session') {
+      const sessionId = args[2];
+      if (!sessionId) {
+        console.error('Usage: happy daemon restart-session <sessionId>')
+        process.exit(1)
+      }
+
+      try {
+        const { restartDaemonSession, spawnDaemonSession } = await import('./daemon/controlClient');
+        let result = await restartDaemonSession(sessionId);
+        if (result.success) {
+          console.log(`Session restarted successfully`);
+          if (result.newSessionId) console.log(`New session ID: ${result.newSessionId}`);
+          return;
+        }
+        const notFound = (result.error ?? '').toLowerCase().includes('not found') || (result.error ?? '').includes('Session directory unknown');
+        if (notFound) {
+          const { readCredentials } = await import('./persistence');
+          const credentials = await readCredentials();
+          if (credentials) {
+            const { listServerSessions } = await import('./api/listServerSessions');
+            const serverSessions = await listServerSessions(credentials);
+            const one = serverSessions.find((s) => s.id === sessionId);
+            if (one?.path) {
+              const spawnResult = await spawnDaemonSession({
+                directory: one.path,
+                agent: (one.flavor === 'cursor' ? 'cursor' : one.flavor === 'claude' ? 'claude' : one.flavor === 'gemini' ? 'gemini' : 'cursor') as 'cursor' | 'claude' | 'gemini' | 'codex',
+                environmentVariables: one.tag ? { HAPPY_CURSOR_SESSION_TAG: one.tag } : undefined
+              });
+              if (spawnResult.success) {
+                console.log(`Session restarted from server list (spawned in ${one.path})`);
+                if (spawnResult.sessionId) console.log(`New session ID: ${spawnResult.sessionId}`);
+                return;
+              }
+            }
+          }
+        }
+        console.error(`Failed to restart session: ${result.error ?? 'unknown error'}`);
+        process.exit(1);
+      } catch (error) {
+        console.log('No daemon running');
+      }
+      return
+
+    } else if (daemonSubcommand === 'archive-session') {
+      const sessionId = args[2];
+      if (!sessionId) {
+        console.error('Usage: happy daemon archive-session <sessionId>')
+        process.exit(1)
+      }
+      try {
+        const { archiveDaemonSession } = await import('./daemon/controlClient');
+        const success = await archiveDaemonSession(sessionId);
+        console.log(success ? `Session ${sessionId} archived.` : `Session ${sessionId} not found in stopped list.`)
       } catch (error) {
         console.log('No daemon running')
       }
@@ -564,7 +687,9 @@ ${chalk.bold('Usage:')}
   happy daemon start              Start the daemon (detached)
   happy daemon stop               Stop the daemon (sessions stay alive)
   happy daemon status             Show daemon status
-  happy daemon list               List active sessions
+  happy daemon list               List sessions (alive + stopped, until archived)
+  happy daemon restart-session    Restart a hung/dead session (resumes same chat)
+  happy daemon archive-session    Remove a stopped session from the list
 
   If you want to kill all happy related processes run 
   ${chalk.cyan('happy doctor clean')}

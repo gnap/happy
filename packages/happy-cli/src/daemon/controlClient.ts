@@ -84,9 +84,10 @@ export async function notifyDaemonSessionEnding(
   pid: number,
   reason: string,
   exitCode?: number,
+  archive?: boolean,
 ): Promise<void> {
   try {
-    await daemonPost('/session-ending', { sessionId, pid, reason, exitCode });
+    await daemonPost('/session-ending', { sessionId, pid, reason, exitCode, archive });
   } catch {
     // Best-effort; do not block the exit path
   }
@@ -109,11 +110,6 @@ export async function stopDaemonSession(sessionIdOrPid: string | number): Promis
   return result.success || false;
 }
 
-export async function spawnDaemonSession(directory: string, sessionId?: string): Promise<any> {
-  const result = await daemonPost('/spawn-session', { directory, sessionId });
-  return result;
-}
-
 export async function listDaemonSessionHistory(): Promise<any[]> {
   const result = await daemonPost('/list-history');
   return result.recentlyExited || [];
@@ -122,6 +118,31 @@ export async function listDaemonSessionHistory(): Promise<any[]> {
 export async function restartDaemonSession(sessionId: string): Promise<{ success: boolean; newSessionId?: string; error?: string }> {
   const result = await daemonPost('/restart-session', { sessionId });
   return result;
+}
+
+export async function archiveDaemonSession(sessionId: string): Promise<boolean> {
+  const result = await daemonPost('/archive-session', { sessionId });
+  return result.success || false;
+}
+
+/**
+ * Spawn a new session in the given directory (e.g. to reconnect from server session list).
+ * Optional agent and environmentVariables (e.g. HAPPY_CURSOR_SESSION_TAG for same server session).
+ */
+export async function spawnDaemonSession(opts: {
+  directory: string;
+  agent?: 'claude' | 'codex' | 'cursor' | 'gemini';
+  environmentVariables?: Record<string, string>;
+}): Promise<{ success: boolean; sessionId?: string; error?: string }> {
+  const result = await daemonPost('/spawn-session', {
+    directory: opts.directory,
+    agent: opts.agent,
+    environmentVariables: opts.environmentVariables
+  });
+  if (result.error) return { success: false, error: result.error };
+  if (result.success && result.sessionId) return { success: true, sessionId: result.sessionId };
+  if (result.success) return { success: true };
+  return { success: false, error: (result as any).error ?? 'Spawn failed' };
 }
 
 export async function stopDaemonHttp(): Promise<void> {
