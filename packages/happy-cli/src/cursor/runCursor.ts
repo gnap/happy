@@ -579,8 +579,6 @@ export async function runCursor(opts: {
                 type: 'thinking',
                 text: msg.text,
               });
-              // Session protocol: so App shows thinking state / incremental thinking
-              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: msg.text, thinking: true }, { turn: turnId }));
               break;
 
             case 'tool_call_start':
@@ -612,7 +610,7 @@ export async function runCursor(opts: {
                 call: msg.callId,
                 name: codexName,
                 title: toolTitle,
-                description: toolTitle,
+                description: msg.description ?? toolTitle,
                 args: codexInput,
               }, { turn: turnId }));
               // Per-tool timeout: stop App timer and show "running in background"; process keeps running, conversation continues
