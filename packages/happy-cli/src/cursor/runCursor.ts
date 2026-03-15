@@ -11,7 +11,7 @@
 
 import { render } from 'ink';
 import React from 'react';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import os from 'node:os';
 import { join, resolve } from 'node:path';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -146,6 +146,16 @@ export async function runCursor(opts: {
     } catch { /* ignore */ }
   }
 
+  // For new sessions (tagReused=false), generate a stable key upfront so all POST
+  // attempts — including offline reconnect retries — use the same AES key.
+  // Without this, each retry generates a fresh random key: if the first timed-out
+  // request reached the server, the server creates the session with key_1, but the
+  // App caches key_1 while the reconnect writes key_2 to disk, causing a permanent
+  // decrypt mismatch after "pause on exit" keeps the App's cached key stale.
+  if (!existingEncryptionKey) {
+    existingEncryptionKey = new Uint8Array(randomBytes(32));
+  }
+
   // Set backend for offline warnings
   connectionState.setBackend('Cursor');
 
@@ -186,13 +196,18 @@ export async function runCursor(opts: {
     logger.debug('[cursor] Reusing session – open this same conversation in the app (or tap "It\'s ready!" push) so CLI and phone stay in sync.');
   }
 
-  // Persist session tag, workspace, and encryption key so next restart reuses correctly
+  // Persist session tag, workspace, and encryption key so next restart reuses correctly.
+  // The key is written unconditionally (using the pre-generated stable key) so that
+  // even if the first getOrCreateSession request times out client-side but succeeds
+  // server-side, the same key is available for subsequent reconnect retries and restarts.
   try {
     writeFileSync(tagPath, sessionTag, 'utf8');
     writeFileSync(workspacePathFile, workspacePath, 'utf8');
-    if (response) {
-      writeFileSync(keyPath, Buffer.from(response.encryptionKey).toString('base64'), 'utf8');
-    }
+    writeFileSync(
+      keyPath,
+      Buffer.from(response?.encryptionKey ?? existingEncryptionKey!).toString('base64'),
+      'utf8',
+    );
   } catch (e) {
     logger.debug('[cursor] Could not write session tag/workspace/key file:', e);
   }
@@ -234,6 +249,14 @@ export async function runCursor(opts: {
     onSessionSwap: (newSession) => {
       session = newSession;
       newSession.onUserMessage(handleUserMessage);
+      // Persist the encryption key after successful offline→online reconnection.
+      // The pre-generated key was already written above when response was available;
+      // writing it again here ensures it's on disk even when the first request timed out.
+      try {
+        writeFileSync(keyPath, Buffer.from(newSession.sessionEncryptionKey).toString('base64'), 'utf8');
+      } catch (e) {
+        logger.debug('[cursor] Could not write session key file after reconnect:', e);
+      }
     },
   });
   session = initialSession;

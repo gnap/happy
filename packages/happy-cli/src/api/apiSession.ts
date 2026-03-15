@@ -181,6 +181,8 @@ export class ApiSessionClient extends EventEmitter {
     private metadataLock = new AsyncLock();
     private encryptionKey: Uint8Array;
     private encryptionVariant: 'legacy' | 'dataKey';
+    /** The AES session key; exposed so callers can persist it after offline reconnection. */
+    get sessionEncryptionKey(): Uint8Array { return this.encryptionKey; }
     /** Resolves when the WebSocket first connects; used by updateMetadata to wait for initial connection. */
     private socketConnectedPromise: Promise<void>;
     private socketConnectedResolve: (() => void) | undefined;
@@ -452,6 +454,15 @@ export class ApiSessionClient extends EventEmitter {
                     if (isEncrypted && acceptSeq) {
                         const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.message.content.c));
                         logger.debugLargeJson('[SOCKET] [UPDATE] Received update:', body);
+                        if (body == null || typeof body !== 'object') {
+                            logger.debug('[API] new-message decrypted to null or non-object (encryption key mismatch or bad payload), will fetch via HTTP', {
+                                sessionId: this.sessionId,
+                                messageSeq,
+                                bodyType: body === null ? 'null' : typeof body,
+                            });
+                            this.receiveSync.invalidate();
+                            return;
+                        }
                         this.routeIncomingMessage(body);
                         this.lastSeq = messageSeq;
                         return;
@@ -603,6 +614,14 @@ export class ApiSessionClient extends EventEmitter {
 
                 try {
                     const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(message.content.c));
+                    if (body == null || typeof body !== 'object') {
+                        logger.debug('[API] Fetched message decrypted to null or non-object (encryption key mismatch or bad payload)', {
+                            sessionId: this.sessionId,
+                            seq: message.seq,
+                            bodyType: body === null ? 'null' : typeof body,
+                        });
+                        continue;
+                    }
                     this.routeIncomingMessage(body);
                 } catch (error) {
                     logger.debug('[API] Failed to decrypt fetched message', {
