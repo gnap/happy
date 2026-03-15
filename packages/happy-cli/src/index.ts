@@ -162,9 +162,9 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
     }
     return;
   } else if (subcommand === 'cursor') {
+    // Handle cursor command
     try {
-      const { runAcp } = await import('@/agent/acp/runAcp');
-      const { CursorBackend } = await import('@/cursor/CursorBackend');
+      const { runCursor } = await import('@/cursor/runCursor');
 
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
       for (let i = 1; i < args.length; i++) {
@@ -187,12 +187,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
         await new Promise(resolve => setTimeout(resolve, 200));
       }
 
-      await runAcp({
-        credentials,
-        agentName: 'cursor',
-        startedBy,
-        backend: new CursorBackend({ cwd: process.cwd() }),
-      });
+      await runCursor({ credentials, startedBy });
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error');
       if (process.env.DEBUG) {
