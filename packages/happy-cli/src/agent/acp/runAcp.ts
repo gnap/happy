@@ -516,6 +516,7 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
   });
   session = initialSession;
 
+  let reportToDaemonInterval: ReturnType<typeof setInterval> | null = null;
   if (response) {
     const reportToDaemon = () => {
       notifyDaemonSessionStarted(response.id, metadata).catch((err) =>
@@ -523,7 +524,7 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
       );
     };
     reportToDaemon();
-    setInterval(reportToDaemon, 60_000);
+    reportToDaemonInterval = setInterval(reportToDaemon, 60_000);
   }
 
   permissionHandler = new GenericAcpPermissionHandler(session, opts.agentName);
@@ -1065,6 +1066,9 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     }
   } finally {
     removeSessionPidFile();
+    if (reportToDaemonInterval !== null) {
+      clearInterval(reportToDaemonInterval);
+    }
     clearInterval(keepAliveInterval);
     clearInterval(textFlushInterval);
     reconnectionHandle?.cancel();
