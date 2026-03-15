@@ -556,7 +556,32 @@ export function writeDaemonState(state: DaemonLocallyPersistedState): void {
 }
 
 /**
- * Clean up daemon state file and lock file
+ * Write stopped sessions to a separate file that survives daemon restarts.
+ * Called by the daemon before shutdown so stopped sessions persist across clean restarts.
+ */
+export function writeStoppedSessions(sessions: DaemonLocallyPersistedState['stoppedSessions']): void {
+  try {
+    writeFileSync(configuration.stoppedSessionsFile, JSON.stringify(sessions ?? [], null, 2), 'utf-8');
+  } catch {
+    // Best-effort
+  }
+}
+
+/**
+ * Read stopped sessions persisted across daemon restarts.
+ */
+export function readStoppedSessions(): DaemonLocallyPersistedState['stoppedSessions'] {
+  try {
+    if (!existsSync(configuration.stoppedSessionsFile)) return undefined;
+    return JSON.parse(readFileSync(configuration.stoppedSessionsFile, 'utf-8'));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Clean up daemon state file and lock file.
+ * Does NOT remove stopped-sessions.json — that file survives restarts.
  */
 export async function clearDaemonState(): Promise<void> {
   if (existsSync(configuration.daemonStateFile)) {

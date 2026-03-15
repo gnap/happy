@@ -13,7 +13,7 @@ import { startCaffeinate, stopCaffeinate } from '@/utils/caffeinate';
 import packageJson from '../../package.json';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { spawnHappyCLI } from '@/utils/spawnHappyCLI';
-import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquireDaemonLock, releaseDaemonLock, readSettings, getActiveProfile, getEnvironmentVariables, validateProfileForAgent, getProfileEnvironmentVariables } from '@/persistence';
+import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquireDaemonLock, releaseDaemonLock, readSettings, getActiveProfile, getEnvironmentVariables, validateProfileForAgent, getProfileEnvironmentVariables, writeStoppedSessions, readStoppedSessions } from '@/persistence';
 
 import { cleanupDaemonState, isDaemonRunningCurrentlyInstalledHappyVersion, stopDaemon } from './controlClient';
 import { startDaemonControlServer } from './controlServer';
@@ -922,11 +922,13 @@ export async function startDaemon(): Promise<void> {
     if (prevState?.lastSessionTagByDirectory) Object.assign(lastSessionTagByDirectory, prevState.lastSessionTagByDirectory);
     if (prevState?.lastDirectoryBySessionId) Object.assign(lastDirectoryBySessionId, prevState.lastDirectoryBySessionId);
     if (prevState?.lastAgentBySessionId) Object.assign(lastAgentBySessionId, prevState.lastAgentBySessionId);
-    // Restore stopped sessions from previous daemon run (so restart/auto-respawn still works)
-    if (prevState?.stoppedSessions) {
+    // Restore stopped sessions — prefer dedicated stopped-sessions.json (survives clean shutdown)
+    // fall back to daemon.state.json (survives crash/kill)
+    const persistedStopped = readStoppedSessions() ?? prevState?.stoppedSessions;
+    if (persistedStopped) {
       const MAX_STOPPED_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
       const now = Date.now();
-      for (const s of prevState.stoppedSessions) {
+      for (const s of persistedStopped) {
         if (s.exitTime && now - s.exitTime > MAX_STOPPED_AGE_MS) continue;
         stoppedSessions.set(s.happySessionId, {
           startedBy: 'daemon',
@@ -1177,6 +1179,8 @@ export async function startDaemon(): Promise<void> {
     // Setup signal handlers
     const cleanupAndShutdown = async (source: 'happy-app' | 'happy-cli' | 'os-signal' | 'exception', errorMessage?: string) => {
       logger.debug(`[DAEMON RUN] Starting proper cleanup (source: ${source}, errorMessage: ${errorMessage})...`);
+      // Persist stopped sessions before state file is deleted
+      writeStoppedSessions(serializeStoppedSessions());
 
       // Clear health check interval
       if (restartOnStaleVersionAndHeartbeat) {
