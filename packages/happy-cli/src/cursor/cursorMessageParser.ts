@@ -6,8 +6,8 @@
  * and forward to the Happy server/mobile app.
  */
 
-import { randomUUID } from 'node:crypto';
-import { createHash } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import { appendFileSync } from 'node:fs';
 import { createId } from '@paralleldrive/cuid2';
 import { logger } from '@/ui/logger';
 import type { CursorStreamMessage } from './types';
@@ -164,6 +164,17 @@ export class CursorMessageParser {
       }
 
       case 'assistant': {
+        // cursor-agent (--stream-partial-output) sends individual streaming deltas WITH timestamp_ms,
+        // followed by a final consolidated 'assistant' message WITHOUT timestamp_ms that contains
+        // the complete response text. We must skip the final message to avoid duplicating already-
+        // streamed content. Only process messages that have timestamp_ms (streaming deltas).
+        const rawMsg = msg as unknown as Record<string, unknown>;
+        if (!rawMsg.timestamp_ms) {
+          if (process.env.CURSOR_AGENT_RAW_LOG === '1') {
+            try { appendFileSync(process.env.CURSOR_AGENT_RAW_LOG_FILE ?? '/tmp/cursor-agent-raw.log', `[assistant SKIPPED final-consolidated] no timestamp_ms\n`); } catch { /* ignore */ }
+          }
+          break;
+        }
         const content = msg.message?.content;
         const blocks = Array.isArray(content) ? content : content && typeof content === 'object' ? [content] : [];
         for (const block of blocks) {
@@ -173,6 +184,9 @@ export class CursorMessageParser {
           if (!text && typeof b.content === 'string') text = b.content;
           if (!text && typeof b.message === 'string') text = b.message;
           if (text) {
+            if (process.env.CURSOR_AGENT_RAW_LOG === '1') {
+              try { appendFileSync(process.env.CURSOR_AGENT_RAW_LOG_FILE ?? '/tmp/cursor-agent-raw.log', `[assistant delta] len=${text.length} text=${JSON.stringify(text.slice(0, 200))}\n`); } catch { /* ignore */ }
+            }
             results.push({ type: 'text_delta', text });
           }
         }
