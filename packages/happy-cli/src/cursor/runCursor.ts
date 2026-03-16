@@ -29,7 +29,7 @@ import { hashObject } from '@/utils/deterministicJson';
 import { projectPath } from '@/projectPath';
 import { startHappyServer } from '@/claude/utils/startHappyServer';
 import { MessageBuffer } from '@/ui/ink/messageBuffer';
-import { CodexDisplay } from '@/ui/ink/CodexDisplay';
+import { CursorDisplay } from '@/ui/ink/CursorDisplay';
 import { notifyDaemonSessionStarted, notifyDaemonSessionEnding } from '@/daemon/controlClient';
 import { registerKillSessionHandler } from '@/claude/registerKillSessionHandler';
 import { stopCaffeinate } from '@/utils/caffeinate';
@@ -524,7 +524,7 @@ export async function runCursor(opts: {
   process.on('SIGHUP', () => onExitSignal('SIGHUP'));
 
   //
-  // Initialize Ink UI (reuse CodexDisplay since layout is similar)
+  // Initialize Ink UI
   //
 
   const messageBuffer = new MessageBuffer();
@@ -533,9 +533,8 @@ export async function runCursor(opts: {
 
   if (hasTTY) {
     console.clear();
-    inkInstance = render(React.createElement(CodexDisplay, {
+    inkInstance = render(React.createElement(CursorDisplay, {
       messageBuffer,
-      agentLabel: 'Cursor',
       logPath: process.env.DEBUG ? logger.getLogPath() : undefined,
       onExit: async () => {
         logger.debug('[cursor]: Exiting agent via Ctrl-C');
