@@ -17,17 +17,35 @@ const usageDataSchema = z.object({
 
 export type UsageData = z.infer<typeof usageDataSchema>;
 
+let _sessionProtocolSendEnabledLogged = false;
+
 function isSessionProtocolSendEnabled(): boolean {
     const raw = (
         process.env.EXPO_PUBLIC_ENABLE_SESSION_PROTOCOL_SEND
         ?? process.env.ENABLE_SESSION_PROTOCOL_SEND
         ?? ''
     ).toLowerCase();
-    if (raw === '1' || raw === 'true' || raw === 'yes') return true;
+    const fromEnv = raw === '1' || raw === 'true' || raw === 'yes';
+    if (fromEnv) {
+        if (!_sessionProtocolSendEnabledLogged) {
+            _sessionProtocolSendEnabledLogged = true;
+            console.log('[session protocol] enableSessionProtocolSend=true (env)');
+        }
+        return true;
+    }
     try {
         const Constants = require('expo-constants').default;
-        return Constants.expoConfig?.extra?.enableSessionProtocolSend === true;
-    } catch {
+        const fromExtra = Constants.expoConfig?.extra?.enableSessionProtocolSend === true;
+        if (!_sessionProtocolSendEnabledLogged) {
+            _sessionProtocolSendEnabledLogged = true;
+            console.log('[session protocol] enableSessionProtocolSend=', fromExtra, '(expoConfig.extra)');
+        }
+        return fromExtra;
+    } catch (e) {
+        if (!_sessionProtocolSendEnabledLogged) {
+            _sessionProtocolSendEnabledLogged = true;
+            console.warn('[session protocol] enableSessionProtocolSend=false (expo-constants failed)');
+        }
         return false;
     }
 }
@@ -798,17 +816,20 @@ export function normalizeRawMessage(
         };
     }
     if (raw.role === 'session') {
-        return normalizeSessionEnvelope(
+        const out = normalizeSessionEnvelope(
             raw.content.data,
             localId,
             createdAt,
             raw.meta,
         );
+        if (__DEV__ && out && out.role === 'agent' && out.content[0]?.type === 'text') console.log('[session protocol] rendered session text id=', out.id, 'len=', (out.content[0] as { text?: string }).text?.length);
+        return out;
     }
     if (raw.role === 'agent') {
         if (raw.content.type === 'output') {
             // When session protocol is enabled we already show content from session envelopes; skip output to avoid duplicate bubbles
             if (isSessionProtocolSendEnabled()) {
+                if (__DEV__) console.log('[session protocol] filtered output id=', id);
                 return null;
             }
 
@@ -958,7 +979,10 @@ export function normalizeRawMessage(
             // New App: when session protocol is enabled, skip codex/cursor text only (avoid duplicate bubbles); still accept tool-call/tool-call-result so tool cards get output
             if (isSessionProtocolSendEnabled()) {
                 const t = raw.content.data.type;
-                if (t === 'message' || t === 'reasoning' || t === 'thinking') return null;
+                if (t === 'message' || t === 'reasoning' || t === 'thinking') {
+                    if (__DEV__) console.log('[session protocol] filtered codex/cursor id=', id, 'dataType=', t);
+                    return null;
+                }
             }
             if (raw.content.data.type === 'message') {
                 // Cast codex messages to agent text messages
@@ -1055,10 +1079,23 @@ export function normalizeRawMessage(
             }
         }
         if (raw.content.type === 'session') {
-            return normalizeSessionEnvelope(raw.content.data, localId, createdAt, raw.meta);
+            // When session protocol is enabled, only render from role === 'session' to avoid duplicate
+            // (same envelope can be stored as both role session and role agent+type session)
+            if (isSessionProtocolSendEnabled()) {
+                if (__DEV__) console.log('[session protocol] filtered agent+session id=', id);
+                return null;
+            }
+            const out = normalizeSessionEnvelope(raw.content.data, localId, createdAt, raw.meta);
+            if (__DEV__ && out && out.role === 'agent' && out.content[0]?.type === 'text') console.log('[session protocol] rendered agent+session text id=', out.id);
+            return out;
         }
         // ACP (Agent Communication Protocol) - unified format for all agent providers
         if (raw.content.type === 'acp') {
+            // When session protocol is enabled, skip ACP text (message/reasoning) to avoid duplicate bubbles; keep tool-call/tool-result
+            if (isSessionProtocolSendEnabled()) {
+                const t = raw.content.data.type;
+                if (t === 'message' || t === 'reasoning') return null;
+            }
             if (raw.content.data.type === 'message') {
                 return {
                     id,

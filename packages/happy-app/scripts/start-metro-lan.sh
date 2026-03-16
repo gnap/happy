@@ -14,4 +14,6 @@ echo "Metro bundler will use LAN IP: $LAN_IP"
 echo "Devices should connect to: http://${LAN_IP}:8081"
 export REACT_NATIVE_PACKAGER_HOSTNAME="$LAN_IP"
 export APP_ENV=development
+# Ensure session-protocol-only filtering in app (avoids duplicate bubbles when expoConfig.extra is missing in dev)
+export EXPO_PUBLIC_ENABLE_SESSION_PROTOCOL_SEND=1
 exec npx expo start --port 8081 --lan
