@@ -27,6 +27,8 @@ export interface TrackedSession {
   agent?: 'claude' | 'codex' | 'cursor' | 'cursor-acp' | 'gemini';
   /** Timestamp of last heartbeat received from this session (Date.now()) */
   lastHeartbeat?: number;
+  /** Timestamp when the session process was spawned (Date.now()) */
+  spawnTime?: number;
 
   // --- Exit tracking ---
   /** Process exit code (0 = normal, non-zero = error, null = killed by signal) */

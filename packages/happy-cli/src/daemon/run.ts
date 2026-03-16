@@ -652,13 +652,17 @@ export async function startDaemon(): Promise<void> {
             directoryCreated,
             directory,
             agent: options.agent ?? 'cursor',
+            spawnTime: Date.now(),
             message: directoryCreated ? `The path '${directory}' did not exist. We created a new folder and spawned a new session there.` : undefined
           };
 
           pidToTrackedSession.set(happyProcess.pid, trackedSession);
 
           happyProcess.on('exit', (code, signal) => {
-            logger.debug(`[DAEMON RUN] Child PID ${happyProcess.pid} exited with code ${code}, signal ${signal}`);
+            const s = pidToTrackedSession.get(happyProcess.pid!);
+            const sessionId = s?.happySessionId ?? 'unknown';
+            const duration = s?.spawnTime ? Math.round((Date.now() - s.spawnTime) / 1000) : null;
+            logger.debug(`[DAEMON RUN] Child PID ${happyProcess.pid} (session ${sessionId}) exited: code=${code} signal=${signal}${duration !== null ? ` after ${duration}s` : ''}`);
             if (happyProcess.pid) {
               onChildExited(happyProcess.pid, code, signal);
             }
@@ -794,10 +798,10 @@ export async function startDaemon(): Promise<void> {
         pushRecentlyExited(session);
         if (session.pendingArchive) {
           // App-initiated archive (killSession RPC): do not keep in list
-          logger.debug(`[DAEMON RUN] Session PID ${pid} archived by app, removing from list`);
+          logger.debug(`[DAEMON RUN] Session ${session.happySessionId} (PID ${pid}) archived by app, removing from list`);
         } else {
           // Process exited on its own (pause / signal / crash): keep visible until user archives
-          logger.debug(`[DAEMON RUN] Session PID ${pid} exited (reason: ${session.exitReason}), moving to stoppedSessions`);
+          logger.debug(`[DAEMON RUN] Session ${session.happySessionId} (PID ${pid}) exited (reason: ${session.exitReason}), moving to stoppedSessions`);
           if (session.happySessionId) {
             stoppedSessions.set(session.happySessionId, { ...session, childProcess: undefined });
             persistNow();
@@ -919,6 +923,7 @@ export async function startDaemon(): Promise<void> {
           pushRecentlyExited(session);
           if (session.happySessionId) {
             stoppedSessions.set(session.happySessionId, { ...session, childProcess: undefined });
+            persistNow();
           }
           pidToTrackedSession.delete(pid);
           continue;
