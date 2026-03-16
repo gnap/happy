@@ -405,22 +405,9 @@ export class CursorMessageParser {
 
       case 'result': {
         const raw = msg as unknown as Record<string, unknown>;
-        let resultText: string | undefined;
-        if (typeof raw.result === 'string' && raw.result.length > 0) {
-          resultText = raw.result;
-        } else if (raw.result && typeof raw.result === 'object') {
-          const o = raw.result as Record<string, unknown>;
-          if (typeof o.result === 'string' && o.result) resultText = o.result;
-          else if (typeof o.output === 'string' && o.output) resultText = o.output;
-          else if (typeof o.text === 'string' && o.text) resultText = o.text;
-          else if (typeof o.message === 'string' && o.message) resultText = o.message;
-          else if (typeof o.content === 'string' && o.content) resultText = o.content;
-        }
-        if (typeof raw.output === 'string' && raw.output) resultText = resultText ?? raw.output;
-        if (typeof raw.message === 'string' && raw.message) resultText = resultText ?? raw.message;
-        if (resultText && !raw.is_error) {
-          results.push({ type: 'text_delta', text: resultText });
-        }
+        // Do NOT emit text_delta here: we always use --stream-partial-output so all text
+        // was already delivered via streaming 'assistant' messages and accumulated in runCursor.
+        // Emitting text_delta from result would cause the complete text to be sent a second time.
         results.push({
           type: 'task_complete',
           sessionId: raw.session_id as string | undefined,

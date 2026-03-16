@@ -1,6 +1,6 @@
 import { logger } from '@/ui/logger'
 import { EventEmitter } from 'node:events'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createTwoFilesPatch } from 'diff'
@@ -715,11 +715,11 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
-    private enqueueMessage(content: unknown, invalidate: boolean = true) {
+    private enqueueMessage(content: unknown, invalidate: boolean = true, localId?: string) {
         const encrypted = encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, content));
         this.pendingOutbox.push({
             content: encrypted,
-            localId: randomUUID()
+            localId: localId ?? randomUUID()
         });
         if (invalidate) {
             this.sendSync.invalidate();
@@ -836,14 +836,27 @@ export class ApiSessionClient extends EventEmitter {
                 sentFrom: 'cli'
             }
         };
-
-        this.enqueueMessage(content, invalidate);
+        // Use envelope.id as localId so server dedupes by localId; same envelope sent multiple times becomes one row.
+        this.enqueueMessage(content, invalidate, envelope.id);
     }
+
+    /** Count of envelopes sent this process (for trace log); resets only by process restart. */
+    private _envelopeSendCount = 0;
 
     sendSessionProtocolMessage(envelope: SessionEnvelope) {
         // Apply lazy encoding at the single exit point so all code paths
         // (Claude via sendClaudeSessionMessage, Cursor via direct call, etc.) are covered.
         const finalEnvelope = this.maybeLazyEncodeEnvelope(envelope);
+        if (process.env.HAPPY_CURSOR_TRACE_ENVELOPES === '1') {
+            this._envelopeSendCount += 1;
+            const ev = finalEnvelope.ev as { t?: string; text?: string; call?: string };
+            const textLen = ev.t === 'text' && typeof ev.text === 'string' ? ev.text.length : 0;
+            const line = `[envelope #${this._envelopeSendCount}] id=${finalEnvelope.id} role=${finalEnvelope.role} ev.t=${ev.t}${textLen ? ` textLen=${textLen}` : ''}${ev.call ? ` call=${String(ev.call).slice(0, 8)}` : ''}`;
+            console.error(line);
+            try {
+                appendFileSync(process.env.HAPPY_CURSOR_TRACE_LOG ?? '/tmp/cursor-envelope-trace.log', `${line}\n`);
+            } catch { /* ignore */ }
+        }
         this.enqueueSessionProtocolEnvelope(finalEnvelope);
     }
 
@@ -854,12 +867,21 @@ export class ApiSessionClient extends EventEmitter {
      * messages keep the normal envelope shape.
      */
     sendSessionLifecycleEnvelope(envelope: SessionEnvelope) {
+        if (process.env.HAPPY_CURSOR_TRACE_ENVELOPES === '1') {
+            this._envelopeSendCount += 1;
+            const ev = envelope.ev as { t?: string; status?: string };
+            const line = `[envelope #${this._envelopeSendCount} lifecycle] id=${envelope.id} ev.t=${ev.t} status=${ev.status ?? ''}`;
+            console.error(line);
+            try {
+                appendFileSync(process.env.HAPPY_CURSOR_TRACE_LOG ?? '/tmp/cursor-envelope-trace.log', `${line}\n`);
+            } catch { /* ignore */ }
+        }
         const content = {
             role: 'session',
             content: { type: 'session', data: envelope },
             meta: { sentFrom: 'cli' },
         };
-        this.enqueueMessage(content);
+        this.enqueueMessage(content, true, envelope.id);
     }
 
     /**
