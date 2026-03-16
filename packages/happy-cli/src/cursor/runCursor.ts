@@ -924,8 +924,10 @@ export async function runCursor(opts: {
         const hadPendingToolCalls = codexIdByCallId.size > 0;
         codexIdByCallId.clear();
 
+        // If the turn didn't complete normally (no result message received), it's either
+        // cancelled (user abort) or failed (cursor-agent killed/crashed), never 'completed'.
         const status: 'completed' | 'failed' | 'cancelled' =
-          turnCompletedNormally ? 'completed' : (hadPendingToolCalls ? 'failed' : turnEndStatus);
+          turnCompletedNormally ? 'completed' : (turnEndStatus === 'cancelled' ? 'cancelled' : 'failed');
         // Single turn-end signal: session lifecycle only. Sending codex + cursor task_complete as well caused turn summary to appear three times in the App.
         session.sendSessionLifecycleEnvelope(createEnvelope('agent', { t: 'turn-end', status }, { turn: turnId }));
 
