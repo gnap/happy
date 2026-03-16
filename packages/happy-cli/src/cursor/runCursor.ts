@@ -535,6 +535,7 @@ export async function runCursor(opts: {
     console.clear();
     inkInstance = render(React.createElement(CodexDisplay, {
       messageBuffer,
+      agentLabel: 'Cursor',
       logPath: process.env.DEBUG ? logger.getLogPath() : undefined,
       onExit: async () => {
         logger.debug('[cursor]: Exiting agent via Ctrl-C');
