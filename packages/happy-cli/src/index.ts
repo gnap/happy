@@ -36,6 +36,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
 
 (async () => {
   const args = process.argv.slice(2)
+  const cliStartTime = Date.now()
 
   // If --version is passed - do not log, its likely daemon inquiring about our version
   if (!args.includes('--version')) {
@@ -162,14 +163,21 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
     }
     return;
   } else if (subcommand === 'cursor') {
-    // Handle cursor command
+    // Handle cursor command (happy cursor path; ACP path is "happy acp cursor")
     try {
       const { runCursor } = await import('@/cursor/runCursor');
 
+      // Parse cursor options: --started-by, --cwd, --resume/-r
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
+      let workspaceRoot: string | undefined = undefined;
+      let resumeSession = false;
       for (let i = 1; i < args.length; i++) {
         if (args[i] === '--started-by') {
           startedBy = args[++i] as 'daemon' | 'terminal';
+        } else if (args[i] === '--cwd' && args[i + 1]) {
+          workspaceRoot = args[++i];
+        } else if (args[i] === '--resume' || args[i] === '-r') {
+          resumeSession = true;
         }
       }
 
@@ -187,7 +195,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
         await new Promise(resolve => setTimeout(resolve, 200));
       }
 
-      await runCursor({ credentials, startedBy });
+      await runCursor({ credentials, startedBy, workspaceRoot, resumeSession, cliStartTime });
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error');
       if (process.env.DEBUG) {

@@ -11,7 +11,7 @@
  * - Subsequent: cursor-agent --print --output-format stream-json --force --resume <chatId> "prompt"
  */
 
-import { execSync, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { execFile, execSync, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { logger } from '@/ui/logger';
@@ -64,6 +64,8 @@ export interface CursorProcessOptions {
   timeoutMs?: number;
   /** Abort signal */
   signal?: AbortSignal;
+  /** If true, pass --approve-mcps and --workspace so cursor-agent loads MCPs from .cursor/mcp.json */
+  approveMcps?: boolean;
 }
 
 export interface CursorProcessEvents {
@@ -94,8 +96,18 @@ export class CursorProcess extends EventEmitter {
       '--print',
       '--output-format', 'stream-json',
       '--stream-partial-output', // stream assistant/result deltas instead of only at end
-      '--force',
+      '--trust', // Non-interactive: avoid "Workspace Trust Required" prompt
     ];
+
+    if (this.options.executionMode === 'plan') {
+      cursorArgs.push('--mode', 'plan');
+    } else if (this.options.executionMode === 'ask') {
+      cursorArgs.push('--mode', 'ask');
+    }
+    // Default force to true when unspecified so ACP path (CursorBackend) keeps --force
+    if (this.options.force !== false) {
+      cursorArgs.push('--force');
+    }
 
     if (this.options.model) {
       cursorArgs.push('--model', this.options.model);
@@ -103,6 +115,11 @@ export class CursorProcess extends EventEmitter {
 
     if (this.options.resumeChatId) {
       cursorArgs.push('--resume', this.options.resumeChatId);
+    }
+    if (this.options.approveMcps) {
+      cursorArgs.push('--approve-mcps');
+      cursorArgs.push('--workspace', this.options.cwd);
+      logger.debug('[cursor] MCP: --approve-mcps enabled so Happy loads from .cursor/mcp.json');
     }
 
     cursorArgs.push(prompt);
@@ -296,4 +313,69 @@ function isShellNoise(line: string): boolean {
     || /^Type help /.test(line)
     || /^\w+@\w+/.test(line)
     || /^\(process \d+\)/.test(line);
+}
+
+export interface CursorModelInfo {
+  code: string;
+  value: string;
+}
+
+export interface CursorModelsResult {
+  models: CursorModelInfo[];
+  /** The currently selected model ID ('current' marker), falls back to 'default' marker, then 'auto' */
+  currentModelId: string;
+}
+
+/**
+ * Query available models from cursor-agent by running `cursor-agent models`.
+ * Returns null on failure (e.g. cursor-agent not installed, network error).
+ */
+export function fetchCursorModels(timeoutMs = 10_000): Promise<CursorModelsResult | null> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      logger.debug('[cursor] fetchCursorModels: timed out');
+      resolve(null);
+    }, timeoutMs);
+
+    const bin = resolveCursorAgentPath();
+    execFile(bin, ['models'], { timeout: timeoutMs }, (err, stdout) => {
+      clearTimeout(timer);
+      if (err) {
+        logger.debug(`[cursor] fetchCursorModels error: ${err.message}`);
+        resolve(null);
+        return;
+      }
+      resolve(parseCursorModelsOutput(String(stdout ?? '')));
+    });
+  });
+}
+
+/**
+ * Parse plain-text output of `cursor-agent models`.
+ * Lines format: `<id> - <name>` optionally followed by `  (default)` or `  (current)`.
+ */
+export function parseCursorModelsOutput(output: string): CursorModelsResult {
+  const models: CursorModelInfo[] = [];
+  let currentModelId: string | null = null;
+  let defaultModelId: string | null = null;
+
+  const clean = output.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+
+  for (const rawLine of clean.split('\n')) {
+    const line = rawLine.trim();
+    const match = line.match(/^([a-zA-Z0-9][a-zA-Z0-9._-]*)\s+-\s+(.+?)(\s+\((default|current)\))?$/);
+    if (!match) continue;
+
+    const [, code, rawName, , marker] = match;
+    const value = (rawName as string).trim();
+    models.push({ code, value });
+
+    if (marker === 'current') currentModelId = code as string;
+    if (marker === 'default') defaultModelId = code as string;
+  }
+
+  return {
+    models,
+    currentModelId: currentModelId ?? defaultModelId ?? 'auto',
+  };
 }
