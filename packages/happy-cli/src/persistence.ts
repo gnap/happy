@@ -282,6 +282,8 @@ export interface DaemonLocallyPersistedState {
   daemonLogPath?: string;
   /** Directory -> last known session tag (Cursor). Persisted so restart can reuse same server session after process/daemon restart. */
   lastSessionTagByDirectory?: Record<string, string>;
+  /** Server session ID -> session tag (Cursor). More precise than directory-keyed map when multiple sessions share a directory. */
+  lastSessionTagBySessionId?: Record<string, string>;
   /** Server session ID -> directory. Enables heartbeat polling to find the directory for a session that has new messages. */
   lastDirectoryBySessionId?: Record<string, string>;
   /** Server session ID -> agent type. Enables correct agent selection when auto-respawning. */

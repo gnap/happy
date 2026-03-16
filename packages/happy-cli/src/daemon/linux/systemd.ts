@@ -87,6 +87,7 @@ export function generateServiceContent(): string {
     envLines,
     'Restart=on-failure',
     'RestartSec=5s',
+    'KillMode=process',
     '',
     '[Install]',
     'WantedBy=default.target',

@@ -198,6 +198,8 @@ export async function startDaemon(): Promise<void> {
 
     /** Persist session tag by directory so restart can reuse same server session after process/daemon restart. */
     let lastSessionTagByDirectory: Record<string, string> = {};
+    /** Persist server session ID -> session tag for reliable resume regardless of how many sessions share a directory. */
+    let lastSessionTagBySessionId: Record<string, string> = {};
     /** Persist server session ID -> directory so heartbeat polling can find the directory for sessions with new messages. */
     let lastDirectoryBySessionId: Record<string, string> = {};
     /** Persist server session ID -> agent type for correct agent selection on auto-respawn. */
@@ -302,6 +304,7 @@ export async function startDaemon(): Promise<void> {
       }
       const s = pidToTrackedSession.get(pid);
       if (s?.directory && s.sessionTag) lastSessionTagByDirectory[s.directory] = s.sessionTag;
+      if (s?.happySessionId && s.sessionTag) lastSessionTagBySessionId[s.happySessionId] = s.sessionTag;
       if (s?.happySessionId && s.directory) lastDirectoryBySessionId[s.happySessionId] = s.directory;
       if (s?.happySessionId && s.agent) lastAgentBySessionId[s.happySessionId] = s.agent;
     };
@@ -599,8 +602,19 @@ export async function startDaemon(): Promise<void> {
             '--started-by', 'daemon'
           ];
 
-          // TODO: In future, sessionId could be used with --resume to continue existing sessions
-          // For now, we ignore it - each spawn creates a new session
+          // When a sessionId is provided (e.g. restart from App or spawn-session API), look up
+          // the session tag so cursor reconnects to the same server session.
+          // Prefer sessionId-keyed map (exact match) over directory-keyed map (may be stale if multiple sessions share a directory).
+          // Skip if caller already provided HAPPY_CURSOR_SESSION_TAG explicitly.
+          if (sessionId && !extraEnv.HAPPY_CURSOR_SESSION_TAG) {
+            const sessionTagForResume = lastSessionTagBySessionId[sessionId] ?? lastSessionTagByDirectory[directory];
+            if (sessionTagForResume) {
+              extraEnv.HAPPY_CURSOR_SESSION_TAG = sessionTagForResume;
+              logger.debug(`[DAEMON RUN] Injecting HAPPY_CURSOR_SESSION_TAG=${sessionTagForResume.slice(0, 8)}... for session resume`);
+            }
+          } else if (extraEnv.HAPPY_CURSOR_SESSION_TAG) {
+            logger.debug(`[DAEMON RUN] Using caller-provided HAPPY_CURSOR_SESSION_TAG=${extraEnv.HAPPY_CURSOR_SESSION_TAG.slice(0, 8)}...`);
+          }
           const happyProcess = spawnHappyCLI(args, {
             cwd: directory,
             detached: true,  // Sessions stay alive when daemon stops
@@ -845,7 +859,7 @@ export async function startDaemon(): Promise<void> {
       }
 
       const { directory, agent } = found;
-      const sessionTag = found.sessionTag ?? lastSessionTagByDirectory[directory];
+      const sessionTag = found.sessionTag ?? lastSessionTagBySessionId[sessionId] ?? lastSessionTagByDirectory[directory];
 
       // Kill existing process if still running
       stopSession(sessionId);
@@ -920,6 +934,7 @@ export async function startDaemon(): Promise<void> {
     // Write initial daemon state (no lock needed for state file). Load persisted maps so we don't drop them on restart.
     const prevState = await readDaemonState();
     if (prevState?.lastSessionTagByDirectory) Object.assign(lastSessionTagByDirectory, prevState.lastSessionTagByDirectory);
+    if (prevState?.lastSessionTagBySessionId) Object.assign(lastSessionTagBySessionId, prevState.lastSessionTagBySessionId);
     if (prevState?.lastDirectoryBySessionId) Object.assign(lastDirectoryBySessionId, prevState.lastDirectoryBySessionId);
     if (prevState?.lastAgentBySessionId) Object.assign(lastAgentBySessionId, prevState.lastAgentBySessionId);
     // Restore stopped sessions from previous daemon state (tombstone survives clean shutdown)
@@ -965,6 +980,7 @@ export async function startDaemon(): Promise<void> {
         lastHeartbeat: fileState.lastHeartbeat,
         daemonLogPath: fileState.daemonLogPath,
         lastSessionTagByDirectory: { ...lastSessionTagByDirectory },
+        lastSessionTagBySessionId: { ...lastSessionTagBySessionId },
         lastDirectoryBySessionId: { ...lastDirectoryBySessionId },
         lastAgentBySessionId: { ...lastAgentBySessionId },
         stoppedSessions: serializeStoppedSessions(),
@@ -977,6 +993,7 @@ export async function startDaemon(): Promise<void> {
       startedWithCliVersion: packageJson.version,
       daemonLogPath: logger.logFilePath,
       lastSessionTagByDirectory: { ...lastSessionTagByDirectory },
+      lastSessionTagBySessionId: { ...lastSessionTagBySessionId },
       lastDirectoryBySessionId: { ...lastDirectoryBySessionId },
       lastAgentBySessionId: { ...lastAgentBySessionId },
       stoppedSessions: serializeStoppedSessions(),
@@ -1099,6 +1116,7 @@ export async function startDaemon(): Promise<void> {
           lastHeartbeat: new Date().toLocaleString(),
           daemonLogPath: fileState.daemonLogPath,
           lastSessionTagByDirectory: { ...lastSessionTagByDirectory },
+          lastSessionTagBySessionId: { ...lastSessionTagBySessionId },
           lastDirectoryBySessionId: { ...lastDirectoryBySessionId },
           lastAgentBySessionId: { ...lastAgentBySessionId },
           stoppedSessions: serializeStoppedSessions(),
