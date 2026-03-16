@@ -393,6 +393,10 @@ export async function runCursor(opts: {
   reportToDaemon();
   const daemonReportInterval = setInterval(reportToDaemon, DAEMON_REPORT_INTERVAL_MS);
 
+  // Sync current PID to server metadata so App always sees the latest PID after respawn.
+  session.updateMetadata((m) => ({ ...m, hostPid: process.pid }))
+    .catch((err) => logger.debug('[cursor] Failed to update hostPid in session metadata', err));
+
   //
   // Keep-alive
   //
