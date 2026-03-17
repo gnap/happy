@@ -191,7 +191,9 @@ export class AcpSessionManager {
     if (msg.type === 'tool-result') {
       const flushed = this.flush();
       const call = this.ensureSessionCallId(msg.callId);
-      const result = formatToolResult(msg.toolName, msg.result);
+      const raw = formatToolResult(msg.toolName, msg.result);
+      const result: Record<string, unknown> | undefined =
+        raw === undefined ? undefined : typeof raw === 'string' ? { content: raw } : raw;
       return [
         ...flushed,
         createEnvelope('agent', { t: 'tool-call-end', call, ...(result !== undefined ? { result } : {}) }, turnOptions(this.currentTurnId, this.nextTime())),
