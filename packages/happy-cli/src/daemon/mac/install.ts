@@ -12,23 +12,47 @@
  * This code is kept for potential future use if we decide to offer system-level installation as an option.
  */
 
-import { writeFileSync, chmodSync, existsSync } from 'fs';
+import { writeFileSync, chmodSync, existsSync, mkdirSync } from 'fs';
+import { dirname } from 'path';
 import { execSync } from 'child_process';
 import { logger } from '@/ui/logger';
 import { trimIdent } from '@/utils/trimIdent';
 import os from 'os';
 
 const PLIST_LABEL = 'com.happy-cli.daemon';
-const PLIST_FILE = `/Library/LaunchDaemons/${PLIST_LABEL}.plist`;
 
-// NOTE: Local installation like --local does not make too much sense I feel like
+/** User-level: ~/Library/LaunchAgents (no sudo). System-level: /Library/LaunchDaemons (sudo). */
+function getPlistPath(): string {
+    const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+    if (isRoot) {
+        return `/Library/LaunchDaemons/${PLIST_LABEL}.plist`;
+    }
+    return `${os.homedir()}/Library/LaunchAgents/${PLIST_LABEL}.plist`;
+}
+
+/** launchctl domain: system for LaunchDaemons, gui/$uid for LaunchAgents. */
+function getLaunchctlDomain(): string {
+    const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+    if (isRoot) {
+        return 'system';
+    }
+    const uid = process.getuid?.() ?? 0;
+    return `gui/${uid}`;
+}
 
 export async function install(): Promise<void> {
     try {
+        const PLIST_FILE = getPlistPath();
+        const domain = getLaunchctlDomain();
+
         // Check if already installed
         if (existsSync(PLIST_FILE)) {
             logger.info('Daemon plist already exists. Uninstalling first...');
-            execSync(`launchctl unload ${PLIST_FILE}`, { stdio: 'inherit' });
+            try {
+                execSync(`launchctl bootout ${domain} ${PLIST_FILE}`, { stdio: 'inherit' });
+            } catch {
+                // May not be loaded (e.g. after reboot), continue
+            }
         }
 
         // Get the path to the happy CLI executable
@@ -48,13 +72,16 @@ export async function install(): Promise<void> {
                 <array>
                     <string>${happyPath}</string>
                     <string>${scriptPath}</string>
-                    <string>happy-daemon</string>
+                    <string>daemon</string>
+                    <string>start-sync</string>
                 </array>
                 
                 <key>EnvironmentVariables</key>
                 <dict>
                     <key>HAPPY_DAEMON_MODE</key>
                     <string>true</string>
+                    <key>PATH</key>
+                    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
                 </dict>
                 
                 <key>RunAtLoad</key>
@@ -75,14 +102,18 @@ export async function install(): Promise<void> {
             </plist>
         `);
 
-        // Write plist file
+        // Write plist file (ensure directory exists for user install)
+        const dir = dirname(PLIST_FILE);
+        if (!existsSync(dir)) {
+            mkdirSync(dir, { recursive: true });
+        }
         writeFileSync(PLIST_FILE, plistContent);
         chmodSync(PLIST_FILE, 0o644);
 
         logger.info(`Created daemon plist at ${PLIST_FILE}`);
 
         // Load the daemon
-        execSync(`launchctl load ${PLIST_FILE}`, { stdio: 'inherit' });
+        execSync(`launchctl bootstrap ${domain} ${PLIST_FILE}`, { stdio: 'inherit' });
 
         logger.info('Daemon installed and started successfully');
         logger.info('Check logs at ~/.happy/daemon.log');

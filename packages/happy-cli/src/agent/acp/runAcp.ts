@@ -2,8 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { ApiClient } from '@/api/api';
 import type { ApiSessionClient } from '@/api/apiSession';
+import type { UserMessage } from '@/api/types';
 import type { AgentMessage } from '@/agent/core';
 import { AcpBackend, type AcpPermissionHandler } from './AcpBackend';
+import { AcpCursorBackend } from './AcpCursorBackend';
 import { DefaultTransport } from '@/agent/transport';
 import { AcpSessionManager } from './AcpSessionManager';
 import type { SessionEnvelope } from '@slopus/happy-wire';
@@ -29,7 +31,8 @@ import {
 } from './sessionConfigMetadata';
 import type { SessionConfigOption, SessionModeState, SessionModelState } from '@agentclientprotocol/sdk';
 
-const TURN_TIMEOUT_MS = 5 * 60 * 1000;
+/** Turn timeout must exceed the per-tool-call timeout (CursorTransport uses 10 min). */
+const TURN_TIMEOUT_MS = 30 * 60 * 1000;
 const ACP_EVENT_PREVIEW_CHARS = 240;
 const ACP_RAW_PREVIEW_CHARS = 2000;
 const ACP_COLOR_RESET = '\u001b[0m';
@@ -493,6 +496,8 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
 
   let session: ApiSessionClient;
   let permissionHandler: GenericAcpPermissionHandler;
+  // Forward reference so onSessionSwap can re-register the callback on the new session.
+  let userMessageHandler: ((message: UserMessage) => void) | null = null;
   const { session: initialSession, reconnectionHandle } = setupOfflineReconnection({
     api,
     sessionTag,
@@ -504,20 +509,26 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
       if (permissionHandler) {
         permissionHandler.updateSession(newSession);
       }
+      if (userMessageHandler) {
+        newSession.onUserMessage(userMessageHandler);
+      }
     },
   });
   session = initialSession;
 
+  let reportToDaemonInterval: ReturnType<typeof setInterval> | null = null;
   if (response) {
-    try {
-      await notifyDaemonSessionStarted(response.id, metadata);
-    } catch (error) {
-      logger.debug('[acp] Failed to report session to daemon:', error);
-    }
+    const reportToDaemon = () => {
+      notifyDaemonSessionStarted(response.id, metadata).catch((err) =>
+        logger.debug('[acp] Failed to report session to daemon:', err)
+      );
+    };
+    reportToDaemon();
+    reportToDaemonInterval = setInterval(reportToDaemon, 60_000);
   }
 
   permissionHandler = new GenericAcpPermissionHandler(session, opts.agentName);
-  const sessionManager = new AcpSessionManager(opts.agentName);
+  const sessionManager = new AcpSessionManager();
   const messageQueue = new MessageQueue2<AcpSwitchMode>((mode) => hashObject(mode));
   let currentPermissionMode: string | undefined;
   let currentModel: string | null | undefined;
@@ -547,7 +558,7 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     }
   }
 
-  const backendFactory = () => new AcpBackend({
+  const backendOptions = {
     agentName: opts.agentName,
     cwd: process.cwd(),
     command: opts.command!,
@@ -556,7 +567,10 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     permissionHandler,
     transportHandler: defaultTransport,
     verbose,
-  });
+  };
+  const backendFactory = () => opts.agentName === 'cursor'
+    ? new AcpCursorBackend(backendOptions)
+    : new AcpBackend(backendOptions);
 
   let backend = opts.backend ?? backendFactory();
 
@@ -589,6 +603,21 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     }, TURN_TIMEOUT_MS);
     pendingTurn = { resolve, reject, timeout };
   });
+
+  /**
+   * Extend the turn deadline by TURN_TIMEOUT_MS from now.
+   * Called on any meaningful activity (tool call, model output) so a long-running
+   * sub-task that keeps producing output never hits the static deadline.
+   */
+  const extendTurnTimeout = () => {
+    if (!pendingTurn) return;
+    clearTimeout(pendingTurn.timeout);
+    const current = pendingTurn;
+    current.timeout = setTimeout(() => {
+      pendingTurn = null;
+      current.reject(new Error(`Timed out waiting for ${opts.agentName} to finish the turn`));
+    }, TURN_TIMEOUT_MS);
+  };
 
   const stopRunnerFromBackendStatus = (status: 'error' | 'stopped', detail?: string) => {
     const reason = detail
@@ -839,6 +868,12 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
       }
     }
 
+    if (msg.type === 'tool-call' || msg.type === 'model-output') {
+      // Any activity from the agent extends the turn deadline so long-running
+      // sub-tasks (e.g. Task sub-agents) don't hit the static TURN_TIMEOUT_MS.
+      extendTurnTimeout();
+    }
+
     if (msg.type === 'status') {
       const suffix = msg.detail ? `: ${msg.detail}` : '';
       const statusLine = `Status: ${msg.status}${suffix}`;
@@ -866,7 +901,7 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
 
   backend.onMessage(onBackendMessage);
 
-  session.onUserMessage((message) => {
+  userMessageHandler = (message) => {
     if (!message.content.text) {
       const keys = message?.content && typeof message.content === 'object' ? Object.keys(message.content).join(',') : 'n/a';
       logger.debug(`[${opts.agentName}] onUserMessage skipped: no text (keys: ${keys})`);
@@ -888,7 +923,8 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
       permissionMode: currentPermissionMode,
       model: currentModel,
     });
-  });
+  };
+  session.onUserMessage(userMessageHandler);
   session.keepAlive(thinking, 'remote');
   writeSessionPidFile(session.sessionId);
 
@@ -993,6 +1029,9 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
         }
         await backend.sendPrompt(acpSessionId, batch.message);
         await turnEnded;
+        if (backend instanceof AcpCursorBackend) {
+          backend.flushPendingOnTurnEnd();
+        }
         sendEnvelopes(sessionManager.endTurn('completed'));
         await session.flush();
         session.sendSessionEvent({ type: 'ready' });
@@ -1027,6 +1066,9 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     }
   } finally {
     removeSessionPidFile();
+    if (reportToDaemonInterval !== null) {
+      clearInterval(reportToDaemonInterval);
+    }
     clearInterval(keepAliveInterval);
     clearInterval(textFlushInterval);
     reconnectionHandle?.cancel();

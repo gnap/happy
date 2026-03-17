@@ -1,6 +1,6 @@
 import { logger } from '@/ui/logger'
 import { EventEmitter } from 'node:events'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createTwoFilesPatch } from 'diff'
@@ -181,6 +181,11 @@ export class ApiSessionClient extends EventEmitter {
     private metadataLock = new AsyncLock();
     private encryptionKey: Uint8Array;
     private encryptionVariant: 'legacy' | 'dataKey';
+    /** The AES session key; exposed so callers can persist it after offline reconnection. */
+    get sessionEncryptionKey(): Uint8Array { return this.encryptionKey; }
+    /** Resolves when the WebSocket first connects; used by updateMetadata to wait for initial connection. */
+    private socketConnectedPromise: Promise<void>;
+    private socketConnectedResolve: (() => void) | undefined;
     /** Directory where full tool-call args are persisted across session restarts. */
     private get toolContentDir(): string {
         const base = this.metadata?.path ?? process.cwd();
@@ -347,6 +352,9 @@ export class ApiSessionClient extends EventEmitter {
         this.lastSeq = session.seq ?? 0;
         this.sendSync = new InvalidateSync(() => this.flushOutbox());
         this.receiveSync = new InvalidateSync(() => this.fetchMessages());
+        this.socketConnectedPromise = new Promise<void>((resolve) => {
+            this.socketConnectedResolve = resolve;
+        });
 
         // Initialize RPC handler manager
         this.rpcHandlerManager = new RpcHandlerManager({
@@ -444,6 +452,15 @@ export class ApiSessionClient extends EventEmitter {
                     if (isEncrypted && acceptSeq) {
                         const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.message.content.c));
                         logger.debugLargeJson('[SOCKET] [UPDATE] Received update:', body);
+                        if (body == null || typeof body !== 'object') {
+                            logger.debug('[API] new-message decrypted to null or non-object (encryption key mismatch or bad payload), will fetch via HTTP', {
+                                sessionId: this.sessionId,
+                                messageSeq,
+                                bodyType: body === null ? 'null' : typeof body,
+                            });
+                            this.receiveSync.invalidate();
+                            return;
+                        }
                         this.routeIncomingMessage(body);
                         this.lastSeq = messageSeq;
                         return;
@@ -590,6 +607,14 @@ export class ApiSessionClient extends EventEmitter {
 
                 try {
                     const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(message.content.c));
+                    if (body == null || typeof body !== 'object') {
+                        logger.debug('[API] Fetched message decrypted to null or non-object (encryption key mismatch or bad payload)', {
+                            sessionId: this.sessionId,
+                            seq: message.seq,
+                            bodyType: body === null ? 'null' : typeof body,
+                        });
+                        continue;
+                    }
                     this.routeIncomingMessage(body);
                 } catch (error) {
                     logger.debug('[API] Failed to decrypt fetched message', {
@@ -663,8 +688,9 @@ export class ApiSessionClient extends EventEmitter {
                 } catch (error: unknown) {
                     const status = axios.isAxiosError(error) ? error.response?.status : undefined;
                     const isTimeout = axios.isAxiosError(error) && error.code === 'ECONNABORTED';
+                    const isNetworkReset = axios.isAxiosError(error) && error.code === 'ECONNRESET';
                     const isRetryableStatus = status !== undefined && ApiSessionClient.FLUSH_RETRY_STATUSES.includes(status);
-                    const isRetryable = isRetryableStatus || (isTimeout && attempt < ApiSessionClient.FLUSH_RETRY_MAX);
+                    const isRetryable = isRetryableStatus || (isTimeout && attempt < ApiSessionClient.FLUSH_RETRY_MAX) || isNetworkReset;
                     if (!isRetryable || attempt === ApiSessionClient.FLUSH_RETRY_MAX) {
                         const data = axios.isAxiosError(error) ? error.response?.data : undefined;
                         logger.debug('[API] flushOutbox failed', { sessionId: this.sessionId, batchLength: chunk.length, flushed, total, status, isTimeout, data, error });
@@ -680,11 +706,11 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
-    private enqueueMessage(content: unknown, invalidate: boolean = true) {
+    private enqueueMessage(content: unknown, invalidate: boolean = true, localId?: string) {
         const encrypted = encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, content));
         this.pendingOutbox.push({
             content: encrypted,
-            localId: randomUUID()
+            localId: localId ?? randomUUID()
         });
         if (invalidate) {
             this.sendSync.invalidate();
@@ -801,14 +827,27 @@ export class ApiSessionClient extends EventEmitter {
                 sentFrom: 'cli'
             }
         };
-
-        this.enqueueMessage(content, invalidate);
+        // Use envelope.id as localId so server dedupes by localId; same envelope sent multiple times becomes one row.
+        this.enqueueMessage(content, invalidate, envelope.id);
     }
+
+    /** Count of envelopes sent this process (for trace log); resets only by process restart. */
+    private _envelopeSendCount = 0;
 
     sendSessionProtocolMessage(envelope: SessionEnvelope) {
         // Apply lazy encoding at the single exit point so all code paths
         // (Claude via sendClaudeSessionMessage, Cursor via direct call, etc.) are covered.
         const finalEnvelope = this.maybeLazyEncodeEnvelope(envelope);
+        if (process.env.HAPPY_CURSOR_TRACE_ENVELOPES === '1') {
+            this._envelopeSendCount += 1;
+            const ev = finalEnvelope.ev as { t?: string; text?: string; call?: string };
+            const textLen = ev.t === 'text' && typeof ev.text === 'string' ? ev.text.length : 0;
+            const line = `[envelope #${this._envelopeSendCount}] id=${finalEnvelope.id} role=${finalEnvelope.role} ev.t=${ev.t}${textLen ? ` textLen=${textLen}` : ''}${ev.call ? ` call=${String(ev.call).slice(0, 8)}` : ''}`;
+            console.error(line);
+            try {
+                appendFileSync(process.env.HAPPY_CURSOR_TRACE_LOG ?? '/tmp/cursor-envelope-trace.log', `${line}\n`);
+            } catch { /* ignore */ }
+        }
         this.enqueueSessionProtocolEnvelope(finalEnvelope);
     }
 
@@ -819,12 +858,21 @@ export class ApiSessionClient extends EventEmitter {
      * messages keep the normal envelope shape.
      */
     sendSessionLifecycleEnvelope(envelope: SessionEnvelope) {
+        if (process.env.HAPPY_CURSOR_TRACE_ENVELOPES === '1') {
+            this._envelopeSendCount += 1;
+            const ev = envelope.ev as { t?: string; status?: string };
+            const line = `[envelope #${this._envelopeSendCount} lifecycle] id=${envelope.id} ev.t=${ev.t} status=${ev.status ?? ''}`;
+            console.error(line);
+            try {
+                appendFileSync(process.env.HAPPY_CURSOR_TRACE_LOG ?? '/tmp/cursor-envelope-trace.log', `${line}\n`);
+            } catch { /* ignore */ }
+        }
         const content = {
             role: 'session',
             content: { type: 'session', data: envelope },
             meta: { sentFrom: 'cli' },
         };
-        this.enqueueMessage(content);
+        this.enqueueMessage(content, true, envelope.id);
     }
 
     /**

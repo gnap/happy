@@ -27,8 +27,8 @@ export const sessionToolCallStartEventSchema = z.object({
 export const sessionToolCallEndEventSchema = z.object({
   t: z.literal('tool-call-end'),
   call: z.string(),
-  /** Optional tool execution result; shown in tool card by the App. */
-  result: z.record(z.string(), z.unknown()).optional(),
+  /** Optional tool execution result; shown in tool card by the App. String or object. */
+  result: z.union([z.string(), z.record(z.string(), z.unknown())]).optional(),
 });
 
 export const sessionFileEventSchema = z.object({

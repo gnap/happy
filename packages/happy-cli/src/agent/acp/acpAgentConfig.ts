@@ -9,12 +9,21 @@ export type AcpAgentConfig = {
 function resolveCursorAgentPath(): string {
   const envPath = process.env.CURSOR_AGENT_PATH;
   if (envPath) return envPath;
+  // Prefer the ~/.local version (2026.03.x+) which fixes sub-agent Task LLM calls hanging forever.
+  // The Homebrew version (2026.02.x) has richer rawInput for tool calls but sub-agent tasks never
+  // complete (LLM API calls hang indefinitely). Local bin Task description falls back to title.
+  const preferred = [
+    '/Users/gnap/.local/bin/cursor-agent',
+    '/opt/homebrew/bin/cursor-agent',
+    '/usr/local/bin/cursor-agent',
+  ];
+  const found = preferred.find(p => existsSync(p));
+  if (found) return found;
   try {
     const fromWhich = execSync('which cursor-agent', { encoding: 'utf8' }).trim();
     if (fromWhich) return fromWhich;
   } catch { /* not in PATH */ }
-  const fallbacks = ['/opt/homebrew/bin/cursor-agent', '/usr/local/bin/cursor-agent'];
-  return fallbacks.find(p => existsSync(p)) ?? 'cursor-agent';
+  return 'cursor-agent';
 }
 
 export const KNOWN_ACP_AGENTS: Record<string, AcpAgentConfig> = {

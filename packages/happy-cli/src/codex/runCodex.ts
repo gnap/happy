@@ -24,7 +24,7 @@ import { CodexDisplay } from "@/ui/ink/CodexDisplay";
 import { trimIdent } from "@/utils/trimIdent";
 import type { CodexSessionConfig } from './types';
 import { CHANGE_TITLE_INSTRUCTION } from '@/gemini/constants';
-import { notifyDaemonSessionStarted } from "@/daemon/controlClient";
+import { notifyDaemonSessionStarted, notifyDaemonSessionEnding } from "@/daemon/controlClient";
 import { registerKillSessionHandler } from "@/claude/registerKillSessionHandler";
 import { delay } from "@/utils/time";
 import { stopCaffeinate } from "@/utils/caffeinate";
@@ -280,65 +280,70 @@ export async function runCodex(opts: {
      * Abort stops the current inference but keeps the session alive.
      * Kill terminates the entire process.
      */
-    const handleKillSession = async () => {
-        logger.debug('[Codex] Kill session requested - terminating process');
+    const handleKillSession = async (pause = false) => {
+        logger.debug(`[Codex] Kill session requested (pause=${pause})`);
         removeSessionPidFile();
         await handleAbort();
         logger.debug('[Codex] Abort completed, proceeding with termination');
 
+        const exitReason = exitSignalName ? `signal: ${exitSignalName}` : (pause ? 'paused' : 'killed by app (RPC)');
         try {
-            // Update lifecycle state to archived before closing
             if (session) {
-                await session.updateMetadata((currentMetadata) => ({
-                    ...currentMetadata,
-                    lifecycleState: 'archived',
-                    lifecycleStateSince: Date.now(),
-                    archivedBy: 'cli',
-                    archiveReason: 'User terminated'
-                }));
-
-                // Send session death message
-                session.sendSessionDeath();
+                if (pause) {
+                    await session.updateMetadata((currentMetadata) => ({
+                        ...currentMetadata,
+                        lifecycleState: 'paused',
+                        lifecycleStateSince: Date.now(),
+                    }));
+                } else {
+                    await session.updateMetadata((currentMetadata) => ({
+                        ...currentMetadata,
+                        lifecycleState: 'archived',
+                        lifecycleStateSince: Date.now(),
+                        archivedBy: 'cli',
+                        archiveReason: 'User terminated'
+                    }));
+                    session.sendSessionDeath();
+                }
                 await session.flush();
                 await session.close();
             }
 
-            // Force close Codex transport (best-effort) so we don't leave stray processes
             try {
                 await client.forceCloseSession();
             } catch (e) {
                 logger.debug('[Codex] Error while force closing Codex session during termination', e);
             }
 
-            // Stop caffeinate
             stopCaffeinate();
-
-            // Stop Happy MCP server
             happyServer.stop();
 
             logger.debug('[Codex] Session termination complete, exiting');
+            await notifyDaemonSessionEnding(session.sessionId, process.pid, exitReason, 0, !pause);
             process.exit(0);
         } catch (error) {
             logger.debug('[Codex] Error during session termination:', error);
+            await notifyDaemonSessionEnding(session.sessionId, process.pid, `${exitReason} (cleanup error: ${error instanceof Error ? error.message : String(error)})`, 1, !pause);
             process.exit(1);
         }
     };
 
-    // Register abort handler
     session.rpcHandlerManager.registerHandler('abort', handleAbort);
+    // App RPC kill: permanent archive (pause=false)
+    registerKillSessionHandler(session.rpcHandlerManager, () => handleKillSession(false));
 
-    registerKillSessionHandler(session.rpcHandlerManager, handleKillSession);
-
-    // Exit handlers: always run cleanup so server gets session-end (反注册)
+    // Signal handlers: pause so session can be resumed (pause=true)
     let exitHandled = false;
-    const onExitSignal = () => {
+    let exitSignalName: string | null = null;
+    const onExitSignal = (sig: string) => {
+        exitSignalName = sig;
         if (exitHandled) return;
         exitHandled = true;
-        void handleKillSession();
+        void handleKillSession(true);
     };
-    process.on('SIGTERM', onExitSignal);
-    process.on('SIGINT', onExitSignal);
-    process.on('SIGHUP', onExitSignal);
+    process.on('SIGTERM', () => onExitSignal('SIGTERM'));
+    process.on('SIGINT', () => onExitSignal('SIGINT'));
+    process.on('SIGHUP', () => onExitSignal('SIGHUP'));
 
     //
     // Initialize Ink UI
@@ -727,8 +732,12 @@ export async function runCodex(opts: {
         }
 
         try {
-            logger.debug('[codex]: sendSessionDeath');
-            session.sendSessionDeath();
+            // Pause: set paused state and close cleanly (no sendSessionDeath)
+            await session.updateMetadata((currentMetadata) => ({
+                ...currentMetadata,
+                lifecycleState: 'paused',
+                lifecycleStateSince: Date.now(),
+            }));
             logger.debug('[codex]: flush begin');
             await session.flush();
             logger.debug('[codex]: flush done');

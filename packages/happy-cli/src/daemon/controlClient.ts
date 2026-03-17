@@ -22,7 +22,7 @@ async function daemonPost(path: string, body?: any): Promise<{ error?: string } 
   }
 
   try {
-    process.kill(state.pid, 0);
+    process.kill(state.pid!, 0);
   } catch (error) {
     const errorMessage = 'Daemon is not running, file is stale';
     logger.debug(`[CONTROL CLIENT] ${errorMessage}`);
@@ -32,8 +32,8 @@ async function daemonPost(path: string, body?: any): Promise<{ error?: string } 
   }
 
   try {
-    const timeout = process.env.HAPPY_DAEMON_HTTP_TIMEOUT ? parseInt(process.env.HAPPY_DAEMON_HTTP_TIMEOUT) : 10_000;
-    const response = await fetch(`http://127.0.0.1:${state.httpPort}${path}`, {
+    const timeout = process.env.HAPPY_DAEMON_HTTP_TIMEOUT ? parseInt(process.env.HAPPY_DAEMON_HTTP_TIMEOUT) : 30_000;
+    const response = await fetch(`http://127.0.0.1:${state.httpPort!}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body || {}),
@@ -69,6 +69,30 @@ export async function notifyDaemonSessionStarted(
   });
 }
 
+/**
+ * Notify the daemon that this session process is about to exit.
+ * Call this before process.exit() so the daemon can record the reason
+ * without waiting for the periodic PID check (which would only log "evicted").
+ *
+ * @param sessionId - The happy server session ID
+ * @param pid       - process.pid of the session process
+ * @param reason    - Human-readable exit reason (e.g. 'completed normally', 'killed by app', 'signal: SIGTERM')
+ * @param exitCode  - Optional process exit code (0 = success, non-zero = error)
+ */
+export async function notifyDaemonSessionEnding(
+  sessionId: string,
+  pid: number,
+  reason: string,
+  exitCode?: number,
+  archive?: boolean,
+): Promise<void> {
+  try {
+    await daemonPost('/session-ending', { sessionId, pid, reason, exitCode, archive });
+  } catch {
+    // Best-effort; do not block the exit path
+  }
+}
+
 export async function listDaemonSessions(): Promise<any[]> {
   const result = await daemonPost('/list');
   return result.children || [];
@@ -86,9 +110,39 @@ export async function stopDaemonSession(sessionIdOrPid: string | number): Promis
   return result.success || false;
 }
 
-export async function spawnDaemonSession(directory: string, sessionId?: string): Promise<any> {
-  const result = await daemonPost('/spawn-session', { directory, sessionId });
+export async function listDaemonSessionHistory(): Promise<any[]> {
+  const result = await daemonPost('/list-history');
+  return result.recentlyExited || [];
+}
+
+export async function restartDaemonSession(sessionId: string): Promise<{ success: boolean; newSessionId?: string; error?: string }> {
+  const result = await daemonPost('/restart-session', { sessionId });
   return result;
+}
+
+export async function archiveDaemonSession(sessionId: string): Promise<boolean> {
+  const result = await daemonPost('/archive-session', { sessionId });
+  return result.success || false;
+}
+
+/**
+ * Spawn a new session in the given directory (e.g. to reconnect from server session list).
+ * Optional agent and environmentVariables (e.g. HAPPY_CURSOR_SESSION_TAG for same server session).
+ */
+export async function spawnDaemonSession(opts: {
+  directory: string;
+  agent?: 'claude' | 'codex' | 'cursor' | 'gemini';
+  environmentVariables?: Record<string, string>;
+}): Promise<{ success: boolean; sessionId?: string; error?: string }> {
+  const result = await daemonPost('/spawn-session', {
+    directory: opts.directory,
+    agent: opts.agent,
+    environmentVariables: opts.environmentVariables
+  });
+  if (result.error) return { success: false, error: result.error };
+  if (result.success && result.sessionId) return { success: true, sessionId: result.sessionId };
+  if (result.success) return { success: true };
+  return { success: false, error: (result as any).error ?? 'Spawn failed' };
 }
 
 export async function stopDaemonHttp(): Promise<void> {
@@ -124,16 +178,18 @@ export async function stopDaemonHttp(): Promise<void> {
  */
 export async function checkIfDaemonRunningAndCleanupStaleState(): Promise<boolean> {
   const state = await readDaemonState();
-  if (!state) {
-    return false;
-  }
+  if (!state) return false;
 
-  // Check if the daemon is running
+  // Tombstone state: daemon cleanly stopped but session data was preserved — not running
+  if (!state.pid || !state.httpPort) return false;
+
+  // Check if the daemon process is still alive
   try {
     process.kill(state.pid, 0);
     return true;
   } catch {
-    logger.debug('[DAEMON RUN] Daemon PID not running, cleaning up state');
+    // Stale state (process died unexpectedly): clear the live fields but keep session data
+    logger.debug('[DAEMON RUN] Daemon PID not running, cleaning up stale state');
     await cleanupDaemonState();
     return false;
   }
@@ -205,6 +261,11 @@ export async function stopDaemon() {
     const state = await readDaemonState();
     if (!state) {
       logger.debug('No daemon state found');
+      return;
+    }
+
+    if (!state.pid || !state.httpPort) {
+      logger.debug('No daemon running (tombstone state)');
       return;
     }
 

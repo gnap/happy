@@ -96,7 +96,7 @@ describe.skipIf(!await isServerHealthy())('Daemon Integration Tests', { timeout:
     if (!daemonState) {
       throw new Error('Daemon failed to start within timeout');
     }
-    daemonPid = daemonState.pid;
+    daemonPid = daemonState.pid!;
 
     console.log(`[TEST] Daemon started for test: PID=${daemonPid}`);
     console.log(`[TEST] Daemon log file: ${daemonState?.daemonLogPath}`);
@@ -138,7 +138,7 @@ describe.skipIf(!await isServerHealthy())('Daemon Integration Tests', { timeout:
   });
 
   it('should spawn & stop a session via HTTP (not testing RPC route, but similar enough)', async () => {
-    const response = await spawnDaemonSession('/tmp', 'spawned-test-456');
+    const response = await spawnDaemonSession({ directory: '/tmp' });
 
     expect(response).toHaveProperty('success', true);
     expect(response).toHaveProperty('sessionId');
@@ -161,12 +161,12 @@ describe.skipIf(!await isServerHealthy())('Daemon Integration Tests', { timeout:
     const promises = [];
     const sessionCount = 20;
     for (let i = 0; i < sessionCount; i++) {
-      promises.push(spawnDaemonSession('/tmp'));
+      promises.push(spawnDaemonSession({ directory: '/tmp' }));
     }
 
     // Wait for all sessions to be spawned
     const results = await Promise.all(promises);
-    const sessionIds = results.map(r => r.sessionId);
+    const sessionIds = results.map(r => r.sessionId).filter((id): id is string => id !== undefined);
 
     const sessions = await listDaemonSessions();
     expect(sessions).toHaveLength(sessionCount);
@@ -204,7 +204,7 @@ describe.skipIf(!await isServerHealthy())('Daemon Integration Tests', { timeout:
     await new Promise(resolve => setTimeout(resolve, 5_000));
 
     // Spawn a daemon session
-    const spawnResponse = await spawnDaemonSession('/tmp', 'daemon-session-bbb');
+    const spawnResponse = await spawnDaemonSession({ directory: '/tmp' });
 
     // List all sessions
     const sessions = await listDaemonSessions();
@@ -238,7 +238,7 @@ describe.skipIf(!await isServerHealthy())('Daemon Integration Tests', { timeout:
 
   it('should update session metadata when webhook is called', async () => {
     // Spawn a session
-    const spawnResponse = await spawnDaemonSession('/tmp');
+    const spawnResponse = await spawnDaemonSession({ directory: '/tmp' });
 
     // Verify webhook was processed (session ID updated)
     const sessions = await listDaemonSessions();
@@ -246,7 +246,7 @@ describe.skipIf(!await isServerHealthy())('Daemon Integration Tests', { timeout:
     expect(session).toBeDefined();
 
     // Clean up
-    await stopDaemonSession(spawnResponse.sessionId);
+    await stopDaemonSession(spawnResponse.sessionId!);
   });
 
   it('should not allow starting a second daemon', async () => {
@@ -280,7 +280,7 @@ describe.skipIf(!await isServerHealthy())('Daemon Integration Tests', { timeout:
     const promises = [];
     for (let i = 0; i < 3; i++) {
       promises.push(
-        spawnDaemonSession('/tmp')
+        spawnDaemonSession({ directory: '/tmp' })
       );
     }
 

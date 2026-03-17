@@ -6,8 +6,8 @@
  * and forward to the Happy server/mobile app.
  */
 
-import { randomUUID } from 'node:crypto';
-import { createHash } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import { appendFileSync } from 'node:fs';
 import { createId } from '@paralleldrive/cuid2';
 import { logger } from '@/ui/logger';
 import type { CursorStreamMessage } from './types';
@@ -164,6 +164,18 @@ export class CursorMessageParser {
       }
 
       case 'assistant': {
+        // cursor-agent (--stream-partial-output) sends:
+        //   1. Streaming deltas WITH timestamp_ms and WITHOUT model_call_id  → process
+        //   2. Intermediate consolidated messages WITH timestamp_ms AND model_call_id → skip (same text as delta, duplicates)
+        //   3. Final consolidated message WITHOUT timestamp_ms                → skip (same text as all deltas combined)
+        const rawMsg = msg as unknown as Record<string, unknown>;
+        if (!rawMsg.timestamp_ms || rawMsg.model_call_id) {
+          if (process.env.CURSOR_AGENT_RAW_LOG === '1') {
+            const reason = !rawMsg.timestamp_ms ? 'no timestamp_ms' : 'has model_call_id';
+            try { appendFileSync(process.env.CURSOR_AGENT_RAW_LOG_FILE ?? '/tmp/cursor-agent-raw.log', `[assistant SKIPPED] ${reason}\n`); } catch { /* ignore */ }
+          }
+          break;
+        }
         const content = msg.message?.content;
         const blocks = Array.isArray(content) ? content : content && typeof content === 'object' ? [content] : [];
         for (const block of blocks) {
@@ -173,6 +185,9 @@ export class CursorMessageParser {
           if (!text && typeof b.content === 'string') text = b.content;
           if (!text && typeof b.message === 'string') text = b.message;
           if (text) {
+            if (process.env.CURSOR_AGENT_RAW_LOG === '1') {
+              try { appendFileSync(process.env.CURSOR_AGENT_RAW_LOG_FILE ?? '/tmp/cursor-agent-raw.log', `[assistant delta] len=${text.length} text=${JSON.stringify(text.slice(0, 200))}\n`); } catch { /* ignore */ }
+            }
             results.push({ type: 'text_delta', text });
           }
         }
@@ -405,22 +420,9 @@ export class CursorMessageParser {
 
       case 'result': {
         const raw = msg as unknown as Record<string, unknown>;
-        let resultText: string | undefined;
-        if (typeof raw.result === 'string' && raw.result.length > 0) {
-          resultText = raw.result;
-        } else if (raw.result && typeof raw.result === 'object') {
-          const o = raw.result as Record<string, unknown>;
-          if (typeof o.result === 'string' && o.result) resultText = o.result;
-          else if (typeof o.output === 'string' && o.output) resultText = o.output;
-          else if (typeof o.text === 'string' && o.text) resultText = o.text;
-          else if (typeof o.message === 'string' && o.message) resultText = o.message;
-          else if (typeof o.content === 'string' && o.content) resultText = o.content;
-        }
-        if (typeof raw.output === 'string' && raw.output) resultText = resultText ?? raw.output;
-        if (typeof raw.message === 'string' && raw.message) resultText = resultText ?? raw.message;
-        if (resultText && !raw.is_error) {
-          results.push({ type: 'text_delta', text: resultText });
-        }
+        // Do NOT emit text_delta here: we always use --stream-partial-output so all text
+        // was already delivered via streaming 'assistant' messages and accumulated in runCursor.
+        // Emitting text_delta from result would cause the complete text to be sent a second time.
         results.push({
           type: 'task_complete',
           sessionId: raw.session_id as string | undefined,

@@ -11,13 +11,15 @@
  * - Subsequent: cursor-agent --print --output-format stream-json --force --resume <chatId> "prompt"
  */
 
-import { execSync, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { execFile, execSync, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { logger } from '@/ui/logger';
 import type { CursorStreamMessage } from './types';
 
 const CURSOR_AGENT_NAME = 'cursor-agent';
+
+export type CursorExecutionMode = 'default' | 'plan' | 'ask';
 
 /** Resolve cursor-agent to an absolute path for use inside script's bash (so it works with minimal PATH). */
 function resolveCursorAgentPath(): string {
@@ -41,9 +43,6 @@ function resolveCursorAgentPath(): string {
   return CURSOR_AGENT_NAME;
 }
 
-/** Execution mode aligned with cursor-agent: --mode plan | ask, or default (no flag) */
-export type CursorExecutionMode = 'default' | 'plan' | 'ask';
-
 export interface CursorProcessOptions {
   /** Working directory */
   cwd: string;
@@ -51,11 +50,11 @@ export interface CursorProcessOptions {
   env?: Record<string, string>;
   /** Resume a previous chat session */
   resumeChatId?: string;
-  /** Model to use (e.g., 'auto', 'opus-4.6-thinking', 'gpt-5.3-codex-high') */
+  /** Model to use (e.g., 'auto', 'sonnet-4.5', 'opus-4.6-thinking') */
   model?: string;
-  /** Execution mode: plan (--mode plan), ask (--mode ask), or default (no --mode) */
+  /** Execution mode: plan, ask, or default */
   executionMode?: CursorExecutionMode;
-  /** If true, pass -f/--force to cursor-agent (force allow commands) */
+  /** If true, pass --force to cursor-agent */
   force?: boolean;
   /**
    * Process-level safety timeout in ms. Only kills the process if it runs longer than this.
@@ -65,7 +64,7 @@ export interface CursorProcessOptions {
   timeoutMs?: number;
   /** Abort signal */
   signal?: AbortSignal;
-  /** If true, pass --approve-mcps so cursor-agent loads MCPs from .cursor/mcp.json without prompting */
+  /** If true, pass --approve-mcps and --workspace so cursor-agent loads MCPs from .cursor/mcp.json */
   approveMcps?: boolean;
 }
 
@@ -98,6 +97,7 @@ export class CursorProcess extends EventEmitter {
       '--output-format', 'stream-json',
       '--stream-partial-output', // stream assistant/result deltas instead of only at end
       '--force',
+      '--trust', // Non-interactive: avoid "Workspace Trust Required" prompt
     ];
 
     if (this.options.executionMode === 'plan') {
@@ -105,7 +105,8 @@ export class CursorProcess extends EventEmitter {
     } else if (this.options.executionMode === 'ask') {
       cursorArgs.push('--mode', 'ask');
     }
-    if (this.options.force) {
+    // Default force to true when unspecified so ACP path (CursorBackend) keeps --force
+    if (this.options.force !== false) {
       cursorArgs.push('--force');
     }
 
@@ -118,10 +119,9 @@ export class CursorProcess extends EventEmitter {
     }
     if (this.options.approveMcps) {
       cursorArgs.push('--approve-mcps');
-      logger.debug('[cursor] MCP: --approve-mcps enabled so Happy (change_title, etc.) loads from .cursor/mcp.json');
+      cursorArgs.push('--workspace', this.options.cwd);
+      logger.debug('[cursor] MCP: --approve-mcps enabled so Happy loads from .cursor/mcp.json');
     }
-    // Ensure cursor-agent reads .cursor/mcp.json from our workspace (where we wrote Happy MCP URL)
-    cursorArgs.push('--workspace', this.options.cwd);
 
     cursorArgs.push(prompt);
 
@@ -160,7 +160,7 @@ export class CursorProcess extends EventEmitter {
           }
           this.buffer = '';
         }
-        logger.debug(`[cursor] cursor-agent process exited with code: ${code}`);
+        logger.debug(`[cursor] Process exited with code: ${code}`);
         this.emit('exit', code);
         if (subprocessError) {
           reject(subprocessError);
@@ -295,11 +295,9 @@ export class CursorProcess extends EventEmitter {
       }
       logger.debug(`[cursor] Non-JSON line (first 200): ${trimmed.slice(0, 200)}`);
       if (/command not found|cursor-agent.*not found|not found/i.test(trimmed)) {
-        const err = new Error(
+        this.emit('subprocessError', new Error(
           'cursor-agent not found. Install Cursor CLI on this machine (see https://docs.cursor.com) or set CURSOR_AGENT_PATH to the binary path.'
-        );
-        logger.debug(`[cursor] ${err.message}`);
-        this.emit('subprocessError', err);
+        ));
       }
     }
   }
@@ -316,4 +314,69 @@ function isShellNoise(line: string): boolean {
     || /^Type help /.test(line)
     || /^\w+@\w+/.test(line)
     || /^\(process \d+\)/.test(line);
+}
+
+export interface CursorModelInfo {
+  code: string;
+  value: string;
+}
+
+export interface CursorModelsResult {
+  models: CursorModelInfo[];
+  /** The currently selected model ID ('current' marker), falls back to 'default' marker, then 'auto' */
+  currentModelId: string;
+}
+
+/**
+ * Query available models from cursor-agent by running `cursor-agent models`.
+ * Returns null on failure (e.g. cursor-agent not installed, network error).
+ */
+export function fetchCursorModels(timeoutMs = 10_000): Promise<CursorModelsResult | null> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      logger.debug('[cursor] fetchCursorModels: timed out');
+      resolve(null);
+    }, timeoutMs);
+
+    const bin = resolveCursorAgentPath();
+    execFile(bin, ['models'], { timeout: timeoutMs }, (err, stdout) => {
+      clearTimeout(timer);
+      if (err) {
+        logger.debug(`[cursor] fetchCursorModels error: ${err.message}`);
+        resolve(null);
+        return;
+      }
+      resolve(parseCursorModelsOutput(String(stdout ?? '')));
+    });
+  });
+}
+
+/**
+ * Parse plain-text output of `cursor-agent models`.
+ * Lines format: `<id> - <name>` optionally followed by `  (default)` or `  (current)`.
+ */
+export function parseCursorModelsOutput(output: string): CursorModelsResult {
+  const models: CursorModelInfo[] = [];
+  let currentModelId: string | null = null;
+  let defaultModelId: string | null = null;
+
+  const clean = output.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+
+  for (const rawLine of clean.split('\n')) {
+    const line = rawLine.trim();
+    const match = line.match(/^([a-zA-Z0-9][a-zA-Z0-9._-]*)\s+-\s+(.+?)(\s+\((default|current)\))?$/);
+    if (!match) continue;
+
+    const [, code, rawName, , marker] = match;
+    const value = (rawName as string).trim();
+    models.push({ code, value });
+
+    if (marker === 'current') currentModelId = code as string;
+    if (marker === 'default') defaultModelId = code as string;
+  }
+
+  return {
+    models,
+    currentModelId: currentModelId ?? defaultModelId ?? 'auto',
+  };
 }

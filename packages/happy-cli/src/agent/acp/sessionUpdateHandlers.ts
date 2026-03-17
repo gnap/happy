@@ -42,22 +42,14 @@ export interface SessionUpdate {
   };
   plan?: unknown;
   thinking?: unknown;
-  /**
-   * cursor-agent ACP: tool input args (instead of content).
-   * First tool_call notification sends empty {}, second sends actual args.
-   * Only start tool call when rawInput is non-empty.
-   */
+  /** cursor-agent ACP: tool input args (instead of content). */
   rawInput?: Record<string, unknown>;
-  /**
-   * cursor-agent ACP: tool result on completion (instead of content).
-   * Shape: { exitCode?: number; stdout?: string; stderr?: string }
-   */
+  /** cursor-agent ACP: tool result on completion. */
   rawOutput?: Record<string, unknown>;
-  /**
-   * cursor-agent ACP: human-readable tool title (e.g. "`echo hello`").
-   * Use as display name instead of the generic kind ("execute", "read", etc.).
-   */
+  /** Human-readable tool title or App tool name (e.g. "CursorBash"). */
   title?: string;
+  /** Human-readable description for display (e.g. the command string "ls /tmp"). */
+  description?: string;
   [key: string]: unknown;
 }
 
@@ -75,6 +67,8 @@ export interface HandlerContext {
   toolCallTimeouts: Map<string, NodeJS.Timeout>;
   /** Map of tool call ID to tool name */
   toolCallIdToNameMap: Map<string, string>;
+  /** Map of tool call ID to raw kind (e.g. "execute", "read", "search") */
+  toolCallIdToKindMap: Map<string, string>;
   /** Current idle timeout handle */
   idleTimeout: NodeJS.Timeout | null;
   /** Tool call counter since last prompt */
@@ -268,6 +262,10 @@ export function startToolCall(
 
   // Store mapping for permission requests
   ctx.toolCallIdToNameMap.set(toolCallId, realToolName);
+  // Store raw kind for result formatting at completion time
+  if (toolKindStr) {
+    ctx.toolCallIdToKindMap.set(toolCallId, toolKindStr);
+  }
 
   ctx.activeToolCalls.add(toolCallId);
   ctx.toolCallStartTimes.set(toolCallId, startTime);
@@ -285,11 +283,21 @@ export function startToolCall(
   if (!ctx.toolCallTimeouts.has(toolCallId)) {
     const timeout = setTimeout(() => {
       const duration = formatDuration(ctx.toolCallStartTimes.get(toolCallId));
+      const resolvedKind = ctx.toolCallIdToKindMap.get(toolCallId) || toolKindStr || 'unknown';
       logger.debug(`[AcpBackend] ⏱️ Tool call TIMEOUT (from ${source}): ${toolCallId} (${toolKind}) after ${(timeoutMs / 1000).toFixed(0)}s - Duration: ${duration}, removing from active set`);
 
       ctx.activeToolCalls.delete(toolCallId);
       ctx.toolCallStartTimes.delete(toolCallId);
       ctx.toolCallTimeouts.delete(toolCallId);
+      ctx.toolCallIdToKindMap.delete(toolCallId);
+
+      // Emit a synthetic tool-result so the App knows this tool call ended.
+      ctx.emit({
+        type: 'tool-result',
+        toolName: resolvedKind,
+        result: { error: `Tool call timed out after ${(timeoutMs / 1000).toFixed(0)}s`, status: 'timeout' },
+        callId: toolCallId,
+      });
 
       if (ctx.activeToolCalls.size === 0) {
         logger.debug('[AcpBackend] No more active tool calls after timeout, emitting idle status');
@@ -326,13 +334,16 @@ export function startToolCall(
     logger.debug(`[AcpBackend] 🔍 Investigation tool objective: ${String((args as Record<string, unknown>).objective).substring(0, 100)}...`);
   }
 
-  // Use title as display name (cursor ACP sends human-readable title, kind is just "execute"/"read"/etc.)
+  // Use title as display name; fall back to kind string
   const titleName = typeof update.title === 'string' ? update.title : undefined;
   const displayName = titleName || toolKindStr || 'unknown';
+  const descriptionStr = typeof update.description === 'string' ? update.description : undefined;
 
   ctx.emit({
     type: 'tool-call',
     toolName: displayName,
+    kind: toolKindStr,
+    description: descriptionStr,
     args: args as Record<string, unknown>,
     callId: toolCallId,
   });
@@ -353,6 +364,8 @@ export function completeToolCall(
 
   ctx.activeToolCalls.delete(toolCallId);
   ctx.toolCallStartTimes.delete(toolCallId);
+  const resolvedKind = ctx.toolCallIdToKindMap.get(toolCallId) || toolKindStr;
+  ctx.toolCallIdToKindMap.delete(toolCallId);
 
   const timeout = ctx.toolCallTimeouts.get(toolCallId);
   if (timeout) {
@@ -360,11 +373,11 @@ export function completeToolCall(
     ctx.toolCallTimeouts.delete(toolCallId);
   }
 
-  logger.debug(`[AcpBackend] ✅ Tool call COMPLETED: ${toolCallId} (${toolKindStr}) - Duration: ${duration}. Active tool calls: ${ctx.activeToolCalls.size}`);
+  logger.debug(`[AcpBackend] ✅ Tool call COMPLETED: ${toolCallId} (${resolvedKind}) - Duration: ${duration}. Active tool calls: ${ctx.activeToolCalls.size}`);
 
   ctx.emit({
     type: 'tool-result',
-    toolName: toolKindStr,
+    toolName: resolvedKind,
     result: content,
     callId: toolCallId,
   });
@@ -416,6 +429,7 @@ export function failToolCall(
   // Cleanup
   ctx.activeToolCalls.delete(toolCallId);
   ctx.toolCallStartTimes.delete(toolCallId);
+  ctx.toolCallIdToKindMap.delete(toolCallId);
 
   const timeout = ctx.toolCallTimeouts.get(toolCallId);
   if (timeout) {
@@ -465,12 +479,14 @@ export function handleToolCallUpdate(
   const status = update.status;
   const toolCallId = update.toolCallId;
 
+
   if (!toolCallId) {
     logger.debug('[AcpBackend] Tool call update without toolCallId:', update);
     return { handled: false };
   }
 
-  const toolKind = update.kind || 'unknown';
+  // Prefer cached kind from initial tool_call notification (update has no kind in tool_call_update)
+  const toolKind = ctx.toolCallIdToKindMap.get(toolCallId) || update.kind || 'unknown';
   let toolCallCountSincePrompt = ctx.toolCallCountSincePrompt;
 
   if (status === 'in_progress' || status === 'pending') {

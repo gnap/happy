@@ -334,6 +334,9 @@ export class AcpBackend implements AgentBackend {
   /** Map from real tool call ID to tool name for auto-approval */
   private toolCallIdToNameMap = new Map<string, string>();
 
+  /** Map from tool call ID to raw kind (e.g. "execute", "read") for result formatting */
+  private toolCallIdToKindMap = new Map<string, string>();
+
   /** Track if we just sent a prompt with change_title instruction */
   private recentPromptHadChangeTitle = false;
 
@@ -609,6 +612,13 @@ export class AcpBackend implements AgentBackend {
             paramsKeys: Object.keys(params),
           }, null, 2));
           
+          // Notify subclass before emitting (e.g. AcpCursorBackend uses this to enrich
+          // execute tool-call descriptions when local bin cursor-agent omits rawInput.command).
+          // Use toolCall.toolCallId (the real ACP tool call ID) not the permissionId UUID.
+          const acpToolCallId = (toolCall as any)?.toolCallId ?? toolCallId;
+          const commandTitle = (toolCall as any)?.title ?? '';
+          this.onPermissionRequest(acpToolCallId, commandTitle);
+
           // Emit permission request event for UI/mobile handling
           this.emit({
             type: 'permission-request',
@@ -658,6 +668,10 @@ export class AcpBackend implements AgentBackend {
                 } else if (options.length > 0) {
                   // Fallback to first option if no specific match
                   optionId = options[0].optionId || 'proceed_once';
+                } else {
+                  // No options provided (e.g. cursor sub-agent permissions) — default to proceed_once.
+                  // Without this fallback the optionId stays 'cancel' and cursor-agent treats it as denied.
+                  optionId = 'proceed_once';
                 }
                 
                 // Emit tool-result with permissionId so UI can close the timer
@@ -702,6 +716,10 @@ export class AcpBackend implements AgentBackend {
           );
           const defaultOptionId = proceedOnceOption?.optionId || (options.length > 0 && options[0].optionId ? options[0].optionId : 'proceed_once');
           return { outcome: { outcome: 'selected', optionId: defaultOptionId } };
+        },
+        extMethod: async (method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> => {
+          const result = this.handleExtMethod(method, params);
+          return (result instanceof Promise ? await result : result) as Record<string, unknown>;
         },
       };
 
@@ -850,6 +868,12 @@ export class AcpBackend implements AgentBackend {
         });
       }
 
+      // Prevent unhandled-rejection crash: if the process exits after startup
+      // (e.g. during abort/cancel), signalStartupFailure() will reject this promise
+      // but nothing is awaiting it anymore.  Attach a no-op .catch so Node.js
+      // doesn't treat it as an unhandled rejection and crash the CLI.
+      startupFailurePromise.catch(() => {});
+
       return { sessionId };
 
     } catch (error) {
@@ -867,15 +891,33 @@ export class AcpBackend implements AgentBackend {
   }
 
   /**
+   * Called when a requestPermission RPC arrives, before emitting the permission-request event.
+   * Subclasses can override to enrich pending tool-call descriptions using the command title
+   * (e.g. AcpCursorBackend fills in rawInput.command for local bin cursor-agent).
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  protected onPermissionRequest(_toolCallId: string, _commandTitle: string): void {}
+
+  /**
+   * Handle extension methods sent by the agent (e.g. cursor-specific _cursor/* methods).
+   * Subclasses can override this to intercept extension calls before they throw "Method not found".
+   * Returns a resolved value or throws to indicate the method is not handled.
+   */
+  protected handleExtMethod(method: string, _params: unknown): unknown {
+    throw new Error(`Method not found: ${method}`);
+  }
+
+  /**
    * Create handler context for session update processing
    */
-  private createHandlerContext(): HandlerContext {
+  protected createHandlerContext(): HandlerContext {
     return {
       transport: this.transport,
       activeToolCalls: this.activeToolCalls,
       toolCallStartTimes: this.toolCallStartTimes,
       toolCallTimeouts: this.toolCallTimeouts,
       toolCallIdToNameMap: this.toolCallIdToNameMap,
+      toolCallIdToKindMap: this.toolCallIdToKindMap,
       idleTimeout: this.idleTimeout,
       toolCallCountSincePrompt: this.toolCallCountSincePrompt,
       emit: (msg) => this.emit(msg),
@@ -926,7 +968,7 @@ export class AcpBackend implements AgentBackend {
     }
   }
 
-  private handleSessionUpdate(params: SessionNotification): void {
+  protected handleSessionUpdate(params: SessionNotification): void {
     const notification = params as ExtendedSessionNotification;
     const update = notification.update;
 
@@ -1331,6 +1373,7 @@ export class AcpBackend implements AgentBackend {
     }
     this.toolCallTimeouts.clear();
     this.toolCallStartTimes.clear();
+    this.toolCallIdToKindMap.clear();
     this.pendingPermissions.clear();
   }
 }

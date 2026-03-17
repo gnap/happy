@@ -748,10 +748,15 @@ describe('ApiSessionClient v3 messages API migration', () => {
         expect(mockAxiosGet.mock.calls[0][1].params.after_seq).toBe(1);
     });
 
-    it('accepts first message on fast path when lastSeq is 0 and message seq is 1 (no fetch)', async () => {
+    it('invalidates receive sync on first message when lastSeq is 0', async () => {
         const client = new ApiSessionClient('fake-token', session);
-        const onUserMessage = vi.fn();
-        client.onUserMessage(onUserMessage);
+
+        mockAxiosGet.mockResolvedValueOnce({
+            data: {
+                messages: [],
+                hasMore: false
+            }
+        });
 
         emitSocketEvent('update', createNewMessageUpdate(1, encryptContent(session, {
             role: 'user',
@@ -759,14 +764,9 @@ describe('ApiSessionClient v3 messages API migration', () => {
         })));
 
         await waitForCheck(() => {
-            expect(onUserMessage).toHaveBeenCalledTimes(1);
-            expect(onUserMessage).toHaveBeenCalledWith(expect.objectContaining({
-                role: 'user',
-                content: { type: 'text', text: 'first' }
-            }));
+            expect(mockAxiosGet).toHaveBeenCalledTimes(1);
         });
-        expect((client as any).lastSeq).toBe(1);
-        expect(mockAxiosGet).not.toHaveBeenCalled();
+        expect(mockAxiosGet.mock.calls[0][1].params.after_seq).toBe(0);
     });
 
     it('invalidates receive sync for duplicate and stale seq values', async () => {

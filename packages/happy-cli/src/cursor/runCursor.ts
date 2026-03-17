@@ -8,11 +8,7 @@
  * - PTY-wrapped cursor-agent process per turn
  * - Stream-json output parsed into session protocol envelopes
  *
- * Dual send for old vs new App:
- * - Old App uses output format: sendOutputFormatMessage (assistant/user with content, tool_result in content).
- * - New App uses session protocol: sendSessionProtocolMessage (t: 'text' | 'tool-call' | 'tool-call-end' etc).
- * - For tool results: old App gets full tool_result in output; new App gets only tool-call-result + tool-call-end
- *   (result is shown in tool card), no session t:'text' for tool result — avoids duplicate in new App.
+ * Happy cursor path: only send session protocol (envelope). No output-format dual-send.
  */
 
 import { render } from 'ink';
@@ -33,8 +29,8 @@ import { hashObject } from '@/utils/deterministicJson';
 import { projectPath } from '@/projectPath';
 import { startHappyServer } from '@/claude/utils/startHappyServer';
 import { MessageBuffer } from '@/ui/ink/messageBuffer';
-import { CodexDisplay } from '@/ui/ink/CodexDisplay';
-import { notifyDaemonSessionStarted } from '@/daemon/controlClient';
+import { CursorDisplay } from '@/ui/ink/CursorDisplay';
+import { notifyDaemonSessionStarted, notifyDaemonSessionEnding } from '@/daemon/controlClient';
 import { registerKillSessionHandler } from '@/claude/registerKillSessionHandler';
 import { stopCaffeinate } from '@/utils/caffeinate';
 import { connectionState } from '@/utils/serverConnectionErrors';
@@ -67,7 +63,7 @@ function toolResultForOutputFormat(result: unknown, isError: boolean): { content
   return { content: JSON.stringify(result ?? ''), is_error: isError };
 }
 import { createId } from '@paralleldrive/cuid2';
-import { CursorProcess } from './cursorProcess';
+import { CursorProcess, fetchCursorModels } from './cursorProcess';
 import { CursorMessageParser, type CursorParsedMessage } from './cursorMessageParser';
 import type { CursorStreamMessage, CursorMode } from './types';
 
@@ -181,12 +177,18 @@ export async function runCursor(opts: {
     logger.debug(`[cursor] Startup toRunCursorEntry: ${toRunCursorEntryMs}ms (index load + auth + daemon check → runCursor)`);
   }
 
-  // Default: new session. Resume only with --resume/-r.
+  // Default: new session. Resume only with --resume/-r or HAPPY_CURSOR_SESSION_TAG (daemon restart).
   const tagPath = join(configuration.happyHomeDir, CURSOR_SESSION_TAG_FILE);
   const workspacePathFile = join(configuration.happyHomeDir, CURSOR_SESSION_WORKSPACE_FILE);
   let sessionTag: string;
   let tagReused = false;
-  if (opts.resumeSession) {
+  const envSessionTag = process.env.HAPPY_CURSOR_SESSION_TAG?.trim() || null;
+  if (envSessionTag) {
+    // Daemon restart: reconnect to exact session by tag
+    sessionTag = envSessionTag;
+    tagReused = true;
+    logger.debug(`[cursor] Using session tag from env (daemon restart): ${sessionTag.slice(0, 8)}...`);
+  } else if (opts.resumeSession) {
     let savedTag: string | null = null;
     let savedWorkspace: string | null = null;
     try {
@@ -206,13 +208,16 @@ export async function runCursor(opts: {
     sessionTag = randomUUID();
   }
 
-  // Load existing encryption key when reusing session to avoid key mismatch
+  // Load existing encryption key when reusing session to avoid key mismatch.
+  // Per-session key file (by tag) takes priority over global file to avoid cross-session key confusion.
   const keyPath = join(configuration.happyHomeDir, CURSOR_SESSION_KEY_FILE);
+  const perSessionKeyPath = join(configuration.happyHomeDir, `cursor-session-key-${sessionTag}`);
   let existingEncryptionKey: Uint8Array | undefined;
   if (tagReused) {
     try {
-      if (existsSync(keyPath)) {
-        existingEncryptionKey = new Uint8Array(Buffer.from(readFileSync(keyPath, 'utf8').trim(), 'base64'));
+      const keyFilePath = existsSync(perSessionKeyPath) ? perSessionKeyPath : keyPath;
+      if (existsSync(keyFilePath)) {
+        existingEncryptionKey = new Uint8Array(Buffer.from(readFileSync(keyFilePath, 'utf8').trim(), 'base64'));
       }
     } catch { /* ignore */ }
   }
@@ -270,12 +275,16 @@ export async function runCursor(opts: {
     console.log('[cursor] In the App: pull-to-refresh the session list, or tap the "It\'s ready!" push to open this session.');
   }
 
-  // Persist session tag, workspace, and encryption key so next restart reuses correctly
+  // Persist session tag, workspace, and encryption key so next restart reuses correctly.
+  // Also write per-session key file (by tag) so daemon restart can find the right key even when
+  // another session has overwritten the global cursor-session-key file in the meantime.
   try {
     writeFileSync(tagPath, sessionTag, 'utf8');
     writeFileSync(workspacePathFile, workspacePath, 'utf8');
     if (response) {
-      writeFileSync(keyPath, Buffer.from(response.encryptionKey).toString('base64'), 'utf8');
+      const keyBase64 = Buffer.from(response.encryptionKey).toString('base64');
+      writeFileSync(keyPath, keyBase64, 'utf8');
+      writeFileSync(perSessionKeyPath, keyBase64, 'utf8');
     }
   } catch (e) {
     logger.debug('[cursor] Could not write session tag/workspace/key file:', e);
@@ -322,6 +331,14 @@ export async function runCursor(opts: {
       permissionMode: messagePermissionMode || 'default',
       model: messageModel,
     };
+    // Persist permission/model and dangerouslySkipPermissions to session metadata so App can read them on next fetch (align with Claude: force = skip permissions)
+    const metaChanged = message.meta?.permissionMode !== undefined || (message.meta && Object.prototype.hasOwnProperty.call(message.meta, 'model'));
+    if (metaChanged) {
+      const effectivePermission = messagePermissionMode || 'default';
+      const effectiveModel = messageModel ?? 'default';
+      const dangerouslySkipPermissions = effectivePermission === 'force';
+      session.updateMetadata((m) => ({ ...m, currentOperatingModeCode: effectivePermission, currentModelCode: effectiveModel, dangerouslySkipPermissions })).catch((err) => logger.debug('[Cursor] Failed to persist permission/model to session metadata', err));
+    }
     logger.debug(`[cursor] User message queued (length: ${message.content.text.length})`);
     messageQueue.push(message.content.text, mode);
   };
@@ -350,16 +367,35 @@ export async function runCursor(opts: {
   // Persist initial default mode so app reload can restore it
   syncModeToSessionMetadata('default', undefined);
 
-  // Report to daemon (once at start; also retry periodically so daemon sees us if it wasn't running at start)
-  const DAEMON_REPORT_INTERVAL_MS = 60_000;
+  // Query cursor-agent for available models and report to session metadata (best-effort, non-blocking)
+  fetchCursorModels().then((result) => {
+    if (!result || result.models.length === 0) {
+      logger.debug('[cursor] fetchCursorModels: no models returned, skipping metadata update');
+      return;
+    }
+    logger.debug(`[cursor] fetchCursorModels: ${result.models.length} models, current=${result.currentModelId}`);
+    session.updateMetadata((m) => ({
+      ...m,
+      models: result.models,
+      currentModelCode: m.currentModelCode ?? result.currentModelId,
+    })).catch((err) => logger.debug('[cursor] Failed to update models in session metadata', err));
+  }).catch((err) => logger.debug('[cursor] fetchCursorModels threw:', err));
+
+  // Report to daemon (once at start; also retry periodically so daemon sees us if it wasn't running at start).
+  // 30s interval keeps liveness TTL (90s = 3× interval) well-fed even under transient network hiccups.
+  const DAEMON_REPORT_INTERVAL_MS = 30_000;
   const reportToDaemon = () => {
     if (!response) return;
-    notifyDaemonSessionStarted(session.sessionId, { ...metadata, hostPid: process.pid }).then((result) => {
+    notifyDaemonSessionStarted(session.sessionId, { ...metadata, hostPid: process.pid, sessionTag }).then((result) => {
       if (result?.error) logger.debug(`[START] Daemon report failed:`, result.error);
     }).catch((err) => logger.debug('[START] Daemon report error:', err));
   };
   reportToDaemon();
   const daemonReportInterval = setInterval(reportToDaemon, DAEMON_REPORT_INTERVAL_MS);
+
+  // Sync current PID to server metadata so App always sees the latest PID after respawn.
+  session.updateMetadata((m) => ({ ...m, hostPid: process.pid }))
+    .catch((err) => logger.debug('[cursor] Failed to update hostPid in session metadata', err));
 
   //
   // Keep-alive
@@ -399,7 +435,11 @@ export async function runCursor(opts: {
 
   let abortController = new AbortController();
   let shouldExit = false;
-  let cursorChatId: string | null = null;
+  // Restore cursor chat ID from server-side agentState so restarts resume the same chat
+  let cursorChatId: string | null = response?.agentState?.cursorChatId ?? null;
+  if (cursorChatId) {
+    logger.debug(`[cursor] Restored cursor chat ID from agentState: ${cursorChatId}`);
+  }
 
   async function handleAbort() {
     logger.debug('[Cursor] Abort requested');
@@ -418,49 +458,77 @@ export async function runCursor(opts: {
     }
   }
 
-  const handleKillSession = async () => {
-    logger.debug('[Cursor] Kill session requested');
+  /**
+   * Terminate the session.
+   *
+   * pause=true  (SIGTERM / SIGHUP / normal completion):
+   *   Set lifecycleState='paused' so the App shows the session as resumable.
+   *   Do NOT call sendSessionDeath() — the server will mark it inactive when the
+   *   WebSocket disconnects, preserving the session record for restart-session.
+   *
+   * pause=false (App RPC kill / explicit user termination):
+   *   Archive the session permanently (current behavior).
+   */
+  const handleKillSession = async (pause = false) => {
+    logger.debug(`[Cursor] Kill session requested (pause=${pause})`);
     removeSessionPidFile();
     await handleAbort();
 
+    const exitReason = exitSignalName ? `signal: ${exitSignalName}` : (pause ? 'paused' : 'killed by app (RPC)');
     try {
       if (session) {
-        await session.updateMetadata((currentMetadata) => ({
-          ...currentMetadata,
-          lifecycleState: 'archived',
-          lifecycleStateSince: Date.now(),
-          archivedBy: 'cli',
-          archiveReason: 'User terminated',
-        }));
-        session.sendSessionDeath();
+        if (pause) {
+          // Pause: mark as paused so App knows it can be resumed, do NOT archive
+          await session.updateMetadata((currentMetadata) => ({
+            ...currentMetadata,
+            lifecycleState: 'paused',
+            lifecycleStateSince: Date.now(),
+          }));
+          // Let the WebSocket disconnect naturally — no sendSessionDeath()
+        } else {
+          // Kill: archive permanently
+          await session.updateMetadata((currentMetadata) => ({
+            ...currentMetadata,
+            lifecycleState: 'archived',
+            lifecycleStateSince: Date.now(),
+            archivedBy: 'cli',
+            archiveReason: 'User terminated',
+          }));
+          session.sendSessionDeath();
+        }
         await session.flush();
         await session.close();
       }
       stopCaffeinate();
       happyServer.stop();
+      await notifyDaemonSessionEnding(session.sessionId, process.pid, exitReason, 0);
       process.exit(0);
     } catch (error) {
       logger.debug('[Cursor] Error during session termination:', error);
+      await notifyDaemonSessionEnding(session.sessionId, process.pid, `${exitReason} (cleanup error: ${error instanceof Error ? error.message : String(error)})`, 1);
       process.exit(1);
     }
   };
 
   session.rpcHandlerManager.registerHandler('abort', handleAbort);
-  registerKillSessionHandler(session.rpcHandlerManager, handleKillSession);
+  // App RPC kill: permanent archive (pause=false)
+  registerKillSessionHandler(session.rpcHandlerManager, () => handleKillSession(false));
 
-  // Exit handlers: always run cleanup so server gets session-end (反注册)
+  // Signal handlers: pause so session can be resumed (pause=true)
   let exitHandled = false;
-  const onExitSignal = () => {
+  let exitSignalName: string | null = null;
+  const onExitSignal = (sig: string) => {
+    exitSignalName = sig;
     if (exitHandled) return;
     exitHandled = true;
-    void handleKillSession();
+    void handleKillSession(true);
   };
-  process.on('SIGTERM', onExitSignal);
-  process.on('SIGINT', onExitSignal);
-  process.on('SIGHUP', onExitSignal);
+  process.on('SIGTERM', () => onExitSignal('SIGTERM'));
+  process.on('SIGINT', () => onExitSignal('SIGINT'));
+  process.on('SIGHUP', () => onExitSignal('SIGHUP'));
 
   //
-  // Initialize Ink UI (reuse CodexDisplay since layout is similar)
+  // Initialize Ink UI
   //
 
   const messageBuffer = new MessageBuffer();
@@ -469,7 +537,7 @@ export async function runCursor(opts: {
 
   if (hasTTY) {
     console.clear();
-    inkInstance = render(React.createElement(CodexDisplay, {
+    inkInstance = render(React.createElement(CursorDisplay, {
       messageBuffer,
       logPath: process.env.DEBUG ? logger.getLogPath() : undefined,
       onExit: async () => {
@@ -614,7 +682,23 @@ export async function runCursor(opts: {
         }
       };
 
-      let flushInterval: ReturnType<typeof setInterval> | null = null;
+      // Deadline-based flush: ensures accumulated text is sent even if no \n\n or tool call arrives.
+      const TEXT_FLUSH_DEADLINE_MS = 3000;
+      let textFlushTimer: ReturnType<typeof setTimeout> | null = null;
+      const scheduleTextFlush = () => {
+        if (textFlushTimer !== null) return;
+        textFlushTimer = setTimeout(() => {
+          textFlushTimer = null;
+          flushAccumulatedText();
+        }, TEXT_FLUSH_DEADLINE_MS);
+      };
+      const cancelTextFlushTimer = () => {
+        if (textFlushTimer !== null) {
+          clearTimeout(textFlushTimer);
+          textFlushTimer = null;
+        }
+      };
+
       try {
         thinking = true;
         session.keepAlive(thinking, 'remote');
@@ -658,12 +742,6 @@ export async function runCursor(opts: {
           ? 600000 // default 10 min
           : Math.max(0, parseInt(perToolTimeoutMsRaw, 10));
 
-        // Flush outbox periodically during the turn so App gets turn-start/thinking/text in real time
-        const flushIntervalMs = 2000;
-        flushInterval = setInterval(() => {
-          session.flush().catch((err) => logger.debug('[cursor] Periodic flush error', err));
-        }, flushIntervalMs);
-
         // Handle stream-json messages
         cursorProc.on('message', (rawMsg: CursorStreamMessage) => {
           const typeInfo = 'type' in rawMsg ? `${rawMsg.type}` : 'unknown';
@@ -679,9 +757,10 @@ export async function runCursor(opts: {
         function handleParsedMessage(msg: CursorParsedMessage) {
           switch (msg.type) {
             case 'session_init':
-              if (msg.sessionId) {
+              if (msg.sessionId && msg.sessionId !== cursorChatId) {
                 cursorChatId = msg.sessionId;
                 logger.debug(`[cursor] Chat ID: ${cursorChatId}`);
+                session.updateAgentState((s) => ({ ...s, cursorChatId }));
               }
               break;
 
@@ -689,8 +768,12 @@ export async function runCursor(opts: {
               accumulatedResponse += msg.text;
               messageBuffer.removeLastMessage('system');
               messageBuffer.addMessage(msg.text, 'assistant');
-              // Stream reply to App via session protocol so reply appears (periodic flush sends it)
-              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: msg.text }, { turn: turnId }));
+              if (accumulatedResponse.includes('\n\n')) {
+                cancelTextFlushTimer();
+                flushAccumulatedText();
+              } else {
+                scheduleTextFlush();
+              }
               break;
 
             case 'thinking_delta':
@@ -735,6 +818,7 @@ export async function runCursor(opts: {
                 }, { turn: turnId, subagent: msg.subagentId }));
                 break;
               }
+              cancelTextFlushTimer();
               flushAccumulatedText();
               hadToolCalls = true;
               const toolArgs = JSON.stringify(msg.args).slice(0, 100);
@@ -743,12 +827,8 @@ export async function runCursor(opts: {
                 : toolArgs;
               logger.debug(`[cursor] Shell/tool started: ${msg.toolName} ${cmdPreview} (callId: ${msg.callId.slice(0, 8)}..., pending: ${codexIdByCallId.size + 1})`);
               messageBuffer.addMessage(`Executing: ${msg.toolName} ${toolArgs}`, 'tool');
-              const { codexName, codexInput } = toCodexToolShape(msg.toolName, msg.args);
-              const codexId = randomUUID();
-              codexIdByCallId.set(msg.callId, codexId);
-              // Dual-send: output (old App) + session (new App)
-              session.sendOutputFormatMessage({ type: 'assistant', uuid: randomUUID(), message: { role: 'assistant', model: 'cursor', content: [{ type: 'tool_use', id: msg.callId, name: codexName, input: codexInput }] } });
-              // Session protocol: use original Cursor tool names and args so new App matches CursorBash/CursorRead/etc. knownTools entries
+              codexIdByCallId.set(msg.callId, msg.callId);
+              // Session protocol only; avoid sending codex/cursor tool-call so App does not show three summary cards (session + codex + cursor).
               const cursorCmd = typeof msg.args?.command === 'string' ? msg.args.command : null;
               const toolTitle = msg.description
                 ?? (cursorCmd ? `Run \`${cursorCmd.length > 80 ? cursorCmd.slice(0, 77) + '...' : cursorCmd}\`` : `${msg.toolName} call`);
@@ -760,28 +840,15 @@ export async function runCursor(opts: {
                 description: toolTitle,
                 args: msg.args,
               }, { turn: turnId }));
-              // Codex + cursor tool-call for store App 1.5.0 (schema requires id; reducer uses callId)
-              logger.debug(`[cursor] codex/cursor tool-call callId=${msg.callId.slice(0, 8)}... name=${codexName}`);
-              const toolCallPayload = { type: 'tool-call' as const, callId: msg.callId, id: msg.callId, name: codexName, input: codexInput };
-              session.sendCodexMessage(toolCallPayload);
-              session.sendCursorMessage(toolCallPayload);
-              session.flush().catch(() => {});
+              logger.debug(`[cursor] tool-call callId=${msg.callId.slice(0, 8)}... name=${msg.toolName}`);
               // Per-tool timeout (Codex-style: 0 = disabled). When > 0: stop App timer and show "running in background"; process keeps running.
               if (perToolTimeoutMs > 0) {
                 const handle = setTimeout(() => {
                   toolCallTimeoutHandles.delete(msg.callId);
-                  const bgCodexId = codexIdByCallId.get(msg.callId);
                   const bgResult = { runningInBackground: true, message: 'Tool still running; timer stopped. Response will continue when it completes.' };
                   logger.debug(`[cursor] Per-tool timeout for ${msg.callId.slice(0, 8)}... – sending tool_call_end (running in background)`);
                   messageBuffer.addMessage('Still running (timer stopped)', 'result');
-                  if (bgCodexId) {
-                    const out = toolResultForOutputFormat(bgResult, false);
-                    session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: msg.callId, content: out.content, is_error: out.is_error }] } });
-                  }
-                  const timeoutResultPayload = { type: 'tool-call-result' as const, callId: msg.callId, id: msg.callId, output: bgResult, is_error: false };
-                  logger.debug(`[cursor] codex/cursor tool-call-result callId=${msg.callId.slice(0, 8)}... (timeout)`);
-                  session.sendCodexMessage(timeoutResultPayload);
-                  session.sendCursorMessage(timeoutResultPayload);
+                  logger.debug(`[cursor] tool-call-result (timeout) callId=${msg.callId.slice(0, 8)}...`);
                   session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId }, { turn: turnId }));
                 }, perToolTimeoutMs);
                 toolCallTimeoutHandles.set(msg.callId, handle);
@@ -807,18 +874,10 @@ export async function runCursor(opts: {
                 msg.success ? `Result: ${resultText}` : `Error: ${resultText}`,
                 'result',
               );
-              const sameId = codexIdByCallId.get(msg.callId) ?? randomUUID();
               codexIdByCallId.delete(msg.callId);
-              const out = toolResultForOutputFormat(msg.result, !msg.success);
-              session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: msg.callId, content: out.content, is_error: out.is_error }] } });
-              const lazyResult = session.maybeLazyEncodeResult(msg.toolName, msg.callId, msg.result);
-              const resultPayload = { type: 'tool-call-result' as const, callId: msg.callId, id: msg.callId, output: lazyResult, is_error: out.is_error };
-              logger.debug(`[cursor] codex/cursor tool-call-result callId=${msg.callId.slice(0, 8)}... success=${msg.success}`);
-              session.sendCodexMessage(resultPayload);
-              session.sendCursorMessage(resultPayload);
-              // New App: session only gets tool-call-end; result is in tool card (no t:'text' for tool result)
-              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId }, { turn: turnId }));
-              session.flush().catch(() => {});
+              const lazyResult = session.maybeLazyEncodeResult(msg.toolName, msg.callId, msg.result) as Record<string, unknown>;
+              logger.debug(`[cursor] tool-call-result callId=${msg.callId.slice(0, 8)}... success=${msg.success}`);
+              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId, result: lazyResult }, { turn: turnId }));
               break;
 
             case 'task_complete':
@@ -834,16 +893,9 @@ export async function runCursor(opts: {
               // Close any tool calls that never got tool_call_end (e.g. long-running shell still running when turn ended)
               // so the App stops their timers as soon as we know the turn is complete
               const turnEndedResult = { turnEnded: true, message: 'Turn completed; tool did not report end' };
-              for (const [callId, codexId] of codexIdByCallId) {
+              for (const [callId] of codexIdByCallId) {
                 logger.debug(`[cursor] Closing pending tool call ${callId} (turn completed without tool end)`);
                 messageBuffer.addMessage('Ended (turn completed)', 'result');
-                const out = toolResultForOutputFormat(turnEndedResult, false);
-                session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: callId, content: out.content, is_error: out.is_error }] } });
-                const turnEndPayload = { type: 'tool-call-result' as const, callId, id: callId, output: turnEndedResult, is_error: false };
-                logger.debug(`[cursor] codex/cursor tool-call-result callId=${callId.slice(0, 8)}... (turn ended)`);
-                session.sendCodexMessage(turnEndPayload);
-                session.sendCursorMessage(turnEndPayload);
-                // New App: session only tool-call-end; no t:'text' for tool result
                 session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: callId }, { turn: turnId }));
               }
               codexIdByCallId.clear();
@@ -852,7 +904,6 @@ export async function runCursor(opts: {
             case 'error':
               messageBuffer.addMessage(`Error: ${msg.message}`, 'status');
               const errorText = `Error: ${msg.message}`;
-              session.sendOutputFormatMessage({ type: 'assistant', uuid: randomUUID(), message: { role: 'assistant', model: 'cursor', content: [{ type: 'text', text: errorText }] } });
               session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: errorText }, { turn: turnId }));
               break;
           }
@@ -868,48 +919,34 @@ export async function runCursor(opts: {
         turnEndStatus = isAbortError ? 'cancelled' : 'failed';
         if (isAbortError) {
           messageBuffer.addMessage('Aborted by user', 'status');
-          session.sendOutputFormatMessage({ type: 'assistant', uuid: randomUUID(), message: { role: 'assistant', model: 'cursor', content: [{ type: 'text', text: 'Aborted by user' }] } });
           session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: 'Aborted by user' }, { turn: turnId }));
         } else {
           const errorMsg = error instanceof Error ? error.message : 'Process error';
           logger.debug('[cursor] Error:', error);
           messageBuffer.addMessage(errorMsg, 'status');
-          session.sendOutputFormatMessage({ type: 'assistant', uuid: randomUUID(), message: { role: 'assistant', model: 'cursor', content: [{ type: 'text', text: errorMsg }] } });
           session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: errorMsg }, { turn: turnId }));
         }
       } finally {
-        if (flushInterval !== null) {
-          clearInterval(flushInterval);
-          flushInterval = null;
-        }
+        cancelTextFlushTimer();
         flushAccumulatedText();
-        await session.flush();
         for (const h of toolCallTimeoutHandles.values()) clearTimeout(h);
         toolCallTimeoutHandles.clear();
 
         // Close any tool calls that never got tool_call_end (cursor-agent aborted, crashed, or timed out)
         const abortedResult = { aborted: true, message: 'Tool call ended without result (agent aborted or exited)' };
-        for (const [callId, codexId] of codexIdByCallId) {
+        for (const [callId] of codexIdByCallId) {
           logger.debug(`[cursor] Closing pending tool call ${callId} (no end from cursor-agent)`);
           messageBuffer.addMessage('Ended without result (aborted or exited)', 'result');
-          const out = toolResultForOutputFormat(abortedResult, false);
-          session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: callId, content: out.content, is_error: out.is_error }] } });
-          const abortedPayload = { type: 'tool-call-result' as const, callId, id: callId, output: abortedResult, is_error: false };
-          logger.debug(`[cursor] codex/cursor tool-call-result callId=${callId.slice(0, 8)}... (aborted)`);
-          session.sendCodexMessage(abortedPayload);
-          session.sendCursorMessage(abortedPayload);
-          // New App: session only tool-call-end; no t:'text' for tool result
           session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: callId }, { turn: turnId }));
         }
         const hadPendingToolCalls = codexIdByCallId.size > 0;
         codexIdByCallId.clear();
 
+        // If the turn didn't complete normally (no result message received), it's either
+        // cancelled (user abort) or failed (cursor-agent killed/crashed), never 'completed'.
         const status: 'completed' | 'failed' | 'cancelled' =
-          turnCompletedNormally ? 'completed' : (hadPendingToolCalls ? 'failed' : turnEndStatus);
-        // Codex + cursor task_complete for App builds that check them; id = task/turn id
-        session.sendCodexMessage({ type: 'task_complete', id: turnId });
-        session.sendCursorMessage({ type: 'task_complete', id: turnId });
-        // Wrapped session turn-end so store App lifecycle (content.type === 'session', data.ev.t) stops timer
+          turnCompletedNormally ? 'completed' : (turnEndStatus === 'cancelled' ? 'cancelled' : 'failed');
+        // Single turn-end signal: session lifecycle only. Sending codex + cursor task_complete as well caused turn summary to appear three times in the App.
         session.sendSessionLifecycleEnvelope(createEnvelope('agent', { t: 'turn-end', status }, { turn: turnId }));
 
         // 1.5.0 App only stops timer via ephemeral activity (keepAlive), not message content; send before flush so it’s not delayed
@@ -936,8 +973,21 @@ export async function runCursor(opts: {
       reconnectionHandle.cancel();
     }
 
+    // Report exit reason to daemon before closing (best-effort, don't block cleanup)
+    if (!exitHandled) {
+      // Normal completion — the message loop exited naturally; pause so it can be resumed
+      notifyDaemonSessionEnding(session.sessionId, process.pid, 'completed normally (exit 0)', 0).catch(() => {});
+    }
+
     try {
-      session.sendSessionDeath();
+      // Pause path (normal / signal exits are handled via handleKillSession(pause=true) above,
+      // but for safety also skip sendSessionDeath() here — just flush & close the socket cleanly.
+      // The server will mark the session inactive on websocket disconnect.
+      await session.updateMetadata((currentMetadata) => ({
+        ...currentMetadata,
+        lifecycleState: 'paused',
+        lifecycleStateSince: Date.now(),
+      }));
       await session.flush();
       await session.close();
     } catch (e) {

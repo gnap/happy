@@ -6,9 +6,10 @@ interface CodexDisplayProps {
     messageBuffer: MessageBuffer
     logPath?: string
     onExit?: () => void
+    agentLabel?: string
 }
 
-export const CodexDisplay: React.FC<CodexDisplayProps> = ({ messageBuffer, logPath, onExit }) => {
+export const CodexDisplay: React.FC<CodexDisplayProps> = ({ messageBuffer, logPath, onExit, agentLabel = 'Codex' }) => {
     const [messages, setMessages] = useState<BufferedMessage[]>([])
     const [confirmationMode, setConfirmationMode] = useState<boolean>(false)
     const [actionInProgress, setActionInProgress] = useState<boolean>(false)
@@ -114,7 +115,7 @@ export const CodexDisplay: React.FC<CodexDisplayProps> = ({ messageBuffer, logPa
                 overflow="hidden"
             >
                 <Box flexDirection="column" marginBottom={1}>
-                    <Text color="gray" bold>🤖 Codex Agent Messages</Text>
+                    <Text color="gray" bold>🤖 {agentLabel} Agent Messages</Text>
                     <Text color="gray" dimColor>{'─'.repeat(Math.min(terminalWidth - 4, 60))}</Text>
                 </Box>
                 
@@ -160,7 +161,7 @@ export const CodexDisplay: React.FC<CodexDisplayProps> = ({ messageBuffer, logPa
                     ) : (
                         <>
                             <Text color="green" bold>
-                                🤖 Codex Agent Running • Ctrl-C to exit
+                                🤖 {agentLabel} Agent Running • Ctrl-C to exit
                             </Text>
                         </>
                     )}

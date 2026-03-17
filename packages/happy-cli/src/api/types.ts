@@ -257,6 +257,8 @@ export type Metadata = {
   happyToolsDir: string,
   startedFromDaemon?: boolean,
   hostPid?: number,
+  /** Happy server session tag (UUID) reported by the session on startup, used by daemon for restart */
+  sessionTag?: string,
   startedBy?: 'daemon' | 'terminal',
   // Lifecycle state management
   lifecycleState?: 'running' | 'archiveRequested' | 'archived' | string,
@@ -270,6 +272,8 @@ export type Metadata = {
 
 export type AgentState = {
   controlledByUser?: boolean | null | undefined
+  /** Cursor chat ID for resuming cursor-agent conversation across restarts */
+  cursorChatId?: string | null
   requests?: {
     [id: string]: {
       tool: string,

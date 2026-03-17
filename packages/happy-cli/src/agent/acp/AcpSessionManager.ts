@@ -7,23 +7,47 @@ function turnOptions(turnId: string | null, time: number): CreateEnvelopeOptions
   return turnId ? { turn: turnId, time } : { time };
 }
 
-function buildToolTitle(toolName: string): string {
-  return toolName;
+function formatToolResult(toolName: string, result: unknown): Record<string, unknown> | string | undefined {
+  if (result === null || result === undefined) return undefined;
+  if (typeof result !== 'object' || Array.isArray(result)) return undefined;
+  const r = result as Record<string, unknown>;
+  if (toolName === 'execute' || toolName === 'CursorBash') {
+    const stdout = typeof r['stdout'] === 'string' ? r['stdout'].trim() : '';
+    const stderr = typeof r['stderr'] === 'string' ? r['stderr'].trim() : '';
+    const exitCode = r['exitCode'];
+    if (exitCode !== 0 && stderr) return `exit ${exitCode}\n${stderr}`;
+    if (exitCode !== 0) return `exit ${exitCode}`;
+    return stdout || undefined;
+  }
+  if (toolName === 'read' || toolName === 'CursorRead') {
+    const content = typeof r['content'] === 'string' ? r['content'].trim() : '';
+    return content || undefined;
+  }
+  if (toolName === 'CursorEdit') {
+    // Edit results are typically empty on success
+    return undefined;
+  }
+  if (toolName === 'search' || toolName === 'Grep') {
+    const totalMatches = r['totalMatches'];
+    return totalMatches !== undefined ? { totalMatches } : undefined;
+  }
+  if (toolName === 'TodoWrite') {
+    // Pass newTodos through so TodoView can render them from tool.result.newTodos
+    if (Array.isArray(r['newTodos'])) {
+      return { newTodos: r['newTodos'] };
+    }
+    return undefined;
+  }
+  return r;
 }
 
-function buildToolDescription(toolName: string): string {
-  return `Running ${toolName}`;
-}
 
 
 export class AcpSessionManager {
-  private readonly agentName: string;
   private currentTurnId: string | null = null;
   private readonly acpCallToSessionCall = new Map<string, string>();
 
-  constructor(agentName: string) {
-    this.agentName = agentName;
-  }
+  constructor() {}
 
   /** Monotonic clock: max(lastTime + 1, Date.now()) */
   private lastTime = 0;
@@ -52,7 +76,10 @@ export class AcpSessionManager {
     if (!this.pendingText || !this.pendingType) {
       return [];
     }
-    const text = this.pendingText.replace(/^\n+|\n+$/g, '');
+    // Preserve the raw text (including any trailing newlines) so the App can
+    // reconstruct paragraph breaks that straddle a flush-window boundary.
+    // Only skip a chunk that is entirely empty (no characters at all).
+    const text = this.pendingText;
     const type = this.pendingType;
     this.pendingText = '';
     this.pendingType = null;
@@ -107,9 +134,6 @@ export class AcpSessionManager {
 
   mapMessage(msg: AgentMessage): SessionEnvelope[] {
     if (msg.type === 'event' && msg.name === 'thinking') {
-      if (this.agentName === 'cursor') {
-        return [];
-      }
       const payload = msg.payload as { text?: string; streaming?: boolean } | string | null;
       const text = typeof payload === 'string' ? payload : (payload as { text?: string })?.text ?? '';
       const streaming = typeof payload === 'object' && payload !== null && (payload as { streaming?: boolean }).streaming === true;
@@ -149,14 +173,16 @@ export class AcpSessionManager {
     if (msg.type === 'tool-call') {
       const flushed = this.flush();
       const call = this.ensureSessionCallId(msg.callId);
+      const name = msg.toolName;
+      const description = msg.description ?? `Running ${name}`;
       return [
         ...flushed,
         createEnvelope('agent', {
           t: 'tool-call-start',
           call,
-          name: msg.toolName,
-          title: buildToolTitle(msg.toolName),
-          description: buildToolDescription(msg.toolName),
+          name,
+          title: name,
+          description,
           args: msg.args,
         }, turnOptions(this.currentTurnId, this.nextTime())),
       ];
@@ -165,12 +191,10 @@ export class AcpSessionManager {
     if (msg.type === 'tool-result') {
       const flushed = this.flush();
       const call = this.ensureSessionCallId(msg.callId);
-      const result = msg.result && typeof msg.result === 'object' && !Array.isArray(msg.result)
-        ? (msg.result as Record<string, unknown>)
-        : undefined;
+      const result = formatToolResult(msg.toolName, msg.result);
       return [
         ...flushed,
-        createEnvelope('agent', { t: 'tool-call-end', call, ...(result ? { result } : {}) }, turnOptions(this.currentTurnId, this.nextTime())),
+        createEnvelope('agent', { t: 'tool-call-end', call, ...(result !== undefined ? { result } : {}) }, turnOptions(this.currentTurnId, this.nextTime())),
       ];
     }
 
