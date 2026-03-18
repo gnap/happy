@@ -305,7 +305,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
 
     // Use metadata.flavor for existing sessions, agentType prop for new sessions
     const isCodex = props.metadata?.flavor === 'codex' || props.agentType === 'codex';
-    const isCursor = props.metadata?.flavor === 'cursor' || props.agentType === 'cursor' || props.agentType === 'cursor-acp';
+    const isCursor = props.metadata?.flavor === 'cursor' || props.metadata?.flavor === 'acp-cursor' || props.agentType === 'cursor' || props.agentType === 'cursor-acp';
     const isGemini = props.metadata?.flavor === 'gemini' || props.agentType === 'gemini';
     const displayPermissionMode = React.useMemo(() => (
         props.permissionMode ? hackMode(props.permissionMode) : null

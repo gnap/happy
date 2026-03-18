@@ -128,7 +128,7 @@ export function getHardcodedPermissionModes(flavor: AgentFlavor, translate: Tran
     if (flavor === 'codex') {
         return getCodexPermissionModes(translate);
     }
-    if (flavor === 'cursor' || flavor === 'cursor-acp') {
+    if (flavor === 'cursor' || flavor === 'cursor-acp' || flavor === 'acp-cursor') {
         return getCursorPermissionModes(translate);
     }
     if (flavor === 'gemini') {
@@ -141,7 +141,7 @@ export function getHardcodedModelModes(flavor: AgentFlavor, translate: Translate
     if (flavor === 'codex') {
         return getCodexModelModes(translate);
     }
-    if (flavor === 'cursor' || flavor === 'cursor-acp') {
+    if (flavor === 'cursor' || flavor === 'cursor-acp' || flavor === 'acp-cursor') {
         return getCursorModelModes(translate);
     }
     if (flavor === 'gemini') {
@@ -167,7 +167,7 @@ export function getAvailablePermissionModes(
     metadata: Metadata | null | undefined,
     translate: Translate,
 ): PermissionMode[] {
-    if (flavor === 'claude' || flavor === 'codex' || flavor === 'cursor' || flavor === 'cursor-acp') {
+    if (flavor === 'claude' || flavor === 'codex' || flavor === 'cursor' || flavor === 'cursor-acp' || flavor === 'acp-cursor') {
         return hackModes(getHardcodedPermissionModes(flavor, translate));
     }
 
@@ -203,7 +203,7 @@ export function getDefaultModelKey(flavor: AgentFlavor): string {
     if (flavor === 'codex') {
         return 'gpt-5-codex-high';
     }
-    if (flavor === 'cursor' || flavor === 'cursor-acp') {
+    if (flavor === 'cursor' || flavor === 'cursor-acp' || flavor === 'acp-cursor') {
         return 'auto';
     }
     if (flavor === 'gemini') {

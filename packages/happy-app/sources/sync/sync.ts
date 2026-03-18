@@ -960,7 +960,7 @@ class Sync {
             // Inactive/offline sessions are loaded lazily when the user opens them.
             void (async () => {
                 for (const session of decryptedSessions) {
-                    if (session.metadata?.flavor !== 'cursor') continue;
+                    if (session.metadata?.flavor !== 'cursor' && session.metadata?.flavor !== 'acp-cursor') continue;
                     if (!session.active) continue; // skip offline sessions
                     try {
                         const cached = await getCachedLastSeq(session.id);

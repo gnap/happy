@@ -241,7 +241,7 @@ function SessionInfoContent({ session }: { session: Session }) {
 
     const [cachedLastSeq, setCachedLastSeq] = useState<number | null>(null);
     useEffect(() => {
-        if (session?.metadata?.flavor !== 'cursor') {
+        if (session?.metadata?.flavor !== 'cursor' && session?.metadata?.flavor !== 'acp-cursor') {
             setCachedLastSeq(null);
             return;
         }
@@ -380,7 +380,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                             showChevron={false}
                             showDivider={false}
                         />
-                        {session.metadata?.flavor === 'cursor' && (
+                        {(session.metadata?.flavor === 'cursor' || session.metadata?.flavor === 'acp-cursor') && (
                             <CacheProgressBar
                                 totalSeq={session.seq}
                                 cachedBitmap={cachedBitmap}
@@ -415,7 +415,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                             onPress={handleDeleteSession}
                         />
                     )}
-                    {session.metadata?.flavor === 'cursor' && (
+                    {(session.metadata?.flavor === 'cursor' || session.metadata?.flavor === 'acp-cursor') && (
                         <Item
                             title={t('sessionInfo.rebuildMessageCache')}
                             subtitle={t('sessionInfo.rebuildMessageCacheSubtitle')}
@@ -462,7 +462,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                             subtitle={(() => {
                                 const flavor = (session.metadata.flavor || 'claude').toLowerCase();
                                 if (flavor === 'claude') return t('sessionInfo.aiProviderName.claude');
-                                if (flavor === 'cursor') return t('sessionInfo.aiProviderName.cursor');
+                                if (flavor === 'cursor' || flavor === 'acp-cursor') return t('sessionInfo.aiProviderName.cursor');
                                 if (flavor === 'gemini') return t('sessionInfo.aiProviderName.gemini');
                                 if (flavor === 'codex' || flavor === 'gpt' || flavor === 'openai') return t('sessionInfo.aiProviderName.codex');
                                 return session.metadata.flavor ?? 'Claude';

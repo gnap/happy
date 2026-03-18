@@ -32,7 +32,8 @@ import { log } from '@/log';
  * Currently restricted to sessions with flavor === 'cursor'.
  */
 export function isCacheEnabled(session: Session | null | undefined): boolean {
-    return session?.metadata?.flavor === 'cursor';
+    const flavor = session?.metadata?.flavor;
+    return flavor === 'cursor' || flavor === 'acp-cursor';
 }
 
 // ---------------------------------------------------------------------------
