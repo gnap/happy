@@ -43,7 +43,7 @@ import type { PermissionMode } from '@/api/types';
  * because the mobile app has dedicated handling for codex messages.
  */
 
-import { createEnvelope } from '@slopus/happy-wire';
+import { createEnvelope, type SessionEvent } from '@slopus/happy-wire';
 
 /**
  * Convert tool result to App output-format shape: content must be string (or array of { type, text }).
@@ -648,7 +648,7 @@ export async function runCursor(opts: {
 
       const { message: userMessage, mode } = batch;
       messageBuffer.addMessage(userMessage, 'user');
-      logger.debug(`[cursor] Received message (length: ${userMessage.length}), sending turn-start and spawning cursor-agent`);
+      logger.debug(`[cursor] Processing message (length: ${userMessage.length}); spawning cursor-agent`);
 
       // Cursor has no change_title MCP tool, so don't append that instruction (unlike Codex/Gemini)
       const prompt = userMessage;
@@ -669,16 +669,10 @@ export async function runCursor(opts: {
       let turnEndStatus: 'completed' | 'failed' | 'cancelled' = 'completed';
 
       const flushAccumulatedText = () => {
-        const trimmed = accumulatedResponse.trim();
-        if (trimmed) {
+        if (accumulatedResponse.trim()) {
+          const text = accumulatedResponse;
           accumulatedResponse = '';
-          logger.debug(`[cursor] Sending reply to app (length: ${trimmed.length})`);
-          session.sendCodexMessage({
-            type: 'message',
-            message: trimmed,
-          });
-          // Session protocol: send full reply so App has it even if no text_delta was streamed (e.g. reply only in result message)
-          session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: trimmed }, { turn: turnId }));
+          session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text }, { turn: turnId }));
         }
       };
 
@@ -703,14 +697,8 @@ export async function runCursor(opts: {
         thinking = true;
         session.keepAlive(thinking, 'remote');
 
-        // Send task_started (codex) and turn-start (session protocol) so mobile starts timer / thinking state
-        session.sendCodexMessage( {
-          type: 'task_started',
-          id: randomUUID(),
-        });
-        session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'turn-start' }, { turn: turnId }));
-        logger.debug(`[cursor] Sent task_started + turn-start (turnId: ${turnId.slice(0, 8)}...)`);
-        await session.flush();
+        // Send turn-start in wrapped shape (type: 'session', data) so store App lifecycle check sees contentType === 'session'
+        session.sendSessionLifecycleEnvelope(createEnvelope('agent', { t: 'turn-start' }, { turn: turnId }));
         messageBuffer.addMessage('Thinking...', 'system');
 
         // Spawn cursor-agent process (second+ turn uses --resume so cursor-agent continues same chat)
@@ -779,12 +767,6 @@ export async function runCursor(opts: {
             case 'thinking_delta':
               // Show thinking in CLI only; do not stream thinking content to app (align with Codex: state via task_started/task_complete only).
               messageBuffer.updateLastMessage(`[Thinking] ${msg.text.slice(0, 100)}...`, 'system');
-              session.sendCodexMessage( {
-                type: 'thinking',
-                text: msg.text,
-              });
-              // Session protocol: so App shows thinking state / incremental thinking
-              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: msg.text, thinking: true }, { turn: turnId }));
               break;
 
             case 'subagent_start':
@@ -875,9 +857,9 @@ export async function runCursor(opts: {
                 'result',
               );
               codexIdByCallId.delete(msg.callId);
-              const lazyResult = session.maybeLazyEncodeResult(msg.toolName, msg.callId, msg.result) as Record<string, unknown>;
+              const lazyResult = session.maybeLazyEncodeResult(msg.toolName, msg.callId, msg.result) as string | Record<string, unknown>;
               logger.debug(`[cursor] tool-call-result callId=${msg.callId.slice(0, 8)}... success=${msg.success}`);
-              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId, result: lazyResult }, { turn: turnId }));
+              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId, result: lazyResult } as SessionEvent, { turn: turnId }));
               break;
 
             case 'task_complete':

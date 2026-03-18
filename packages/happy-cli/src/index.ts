@@ -165,8 +165,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
   } else if (subcommand === 'cursor') {
     // Handle cursor command (happy cursor path; ACP path is "happy acp cursor")
     try {
-      const { runAcp } = await import('@/agent/acp/runAcp');
-      const { CursorBackend } = await import('@/cursor/CursorBackend');
+      const { runCursor } = await import('@/cursor/runCursor');
 
       // Parse cursor options: --started-by, --cwd, --resume/-r
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
@@ -196,12 +195,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
         await new Promise(resolve => setTimeout(resolve, 200));
       }
 
-      await runAcp({
-        credentials,
-        agentName: 'cursor',
-        startedBy,
-        backend: new CursorBackend({ cwd: process.cwd() }),
-      });
+      await runCursor({ credentials, startedBy, workspaceRoot, resumeSession, cliStartTime });
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error');
       if (process.env.DEBUG) {

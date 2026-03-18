@@ -96,7 +96,6 @@ export class CursorProcess extends EventEmitter {
       '--print',
       '--output-format', 'stream-json',
       '--stream-partial-output', // stream assistant/result deltas instead of only at end
-      '--force',
       '--trust', // Non-interactive: avoid "Workspace Trust Required" prompt
     ];
 

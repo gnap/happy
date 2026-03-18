@@ -409,6 +409,8 @@ export class ApiSessionClient extends EventEmitter {
 
         this.socket.on('connect', () => {
             logger.debug('Socket connected successfully');
+            this.socketConnectedResolve?.();
+            this.socketConnectedResolve = undefined;
             this.stopFallbackPoll();
             this.rpcHandlerManager.onSocketConnect(this.socket);
             this.receiveSync.invalidate();
@@ -507,6 +509,11 @@ export class ApiSessionClient extends EventEmitter {
         //
 
         this.socket.connect();
+
+        // Trigger an initial HTTP poll so we get any messages already on the server (e.g. user sent
+        // from App before socket connected). Otherwise we only fetch after socket 'connect' or
+        // after connect_error (fallback poll every 8s), so new sessions can appear unresponsive.
+        this.receiveSync.invalidate();
     }
 
     onUserMessage(callback: (data: UserMessage) => void) {
@@ -1008,7 +1015,12 @@ export class ApiSessionClient extends EventEmitter {
     updateMetadata(handler: (metadata: Metadata) => Metadata): Promise<void> {
         return this.metadataLock.inLock(async () => {
             if (!this.socket.connected) {
-                throw new Error('Session real-time disconnected; title update requires WebSocket (check network / HAPPY_SERVER_URL)');
+                // Wait for initial socket connection (e.g. called at startup before socket connects).
+                // Give up after 15s so a permanently-offline session doesn't block indefinitely.
+                const timeout = new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error('Session real-time disconnected; title update requires WebSocket (check network / HAPPY_SERVER_URL)')), 15_000)
+                );
+                await Promise.race([this.socketConnectedPromise, timeout]);
             }
             await backoff(async () => {
                 let updated = handler(this.metadata!); // Weird state if metadata is null - should never happen but here we are

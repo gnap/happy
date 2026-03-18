@@ -32,9 +32,11 @@ export interface CursorAuthData {
 
 export interface CursorPlanUsage {
   enabled: boolean;
+  /** Base plan limit (may be exhausted while bonus remains — use breakdown.total for real quota). */
   used: number;
   limit: number;
   remaining: number;
+  /** Real total quota = included + bonus. Use this as the denominator for usage percentage. */
   breakdown?: { included: number; bonus: number; total: number };
   totalPercentUsed: number;
   autoPercentUsed: number;
@@ -278,17 +280,18 @@ export function buildCursorUsageReportPayload(info: CursorQuotaInfo): {
   const onDemandUsedCents = info.onDemandUsage?.used ?? 0;
   const onDemandLimit = info.onDemandUsage?.limit;
 
-  const tokens: { total: number; [key: string]: number } = {
-    total: planUsed,
-    plan_used: planUsed,
-    plan_limit: planLimit,
-  };
-
   const cost: { total: number; [key: string]: number } = {
     total: onDemandUsedCents,
     on_demand_used_cents: onDemandUsedCents,
   };
   if (onDemandLimit != null) cost.on_demand_limit_cents = onDemandLimit;
 
-  return { tokens, cost };
+  return {
+    tokens: {
+      total: planUsed,
+      plan_used: planUsed,
+      plan_limit: planLimit,
+    },
+    cost,
+  };
 }

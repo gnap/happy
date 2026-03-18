@@ -1,5 +1,5 @@
 import { createId } from '@paralleldrive/cuid2';
-import { createEnvelope, type CreateEnvelopeOptions, type SessionEnvelope } from '@slopus/happy-wire';
+import { createEnvelope, type CreateEnvelopeOptions, type SessionEnvelope, type SessionEvent } from '@slopus/happy-wire';
 import type { AgentMessage } from '@/agent/core';
 import { logger } from '@/ui/logger';
 
@@ -191,12 +191,10 @@ export class AcpSessionManager {
     if (msg.type === 'tool-result') {
       const flushed = this.flush();
       const call = this.ensureSessionCallId(msg.callId);
-      const raw = formatToolResult(msg.toolName, msg.result);
-      const result: Record<string, unknown> | undefined =
-        raw === undefined ? undefined : typeof raw === 'string' ? { content: raw } : raw;
+      const result = formatToolResult(msg.toolName, msg.result);
       return [
         ...flushed,
-        createEnvelope('agent', { t: 'tool-call-end', call, ...(result !== undefined ? { result } : {}) }, turnOptions(this.currentTurnId, this.nextTime())),
+        createEnvelope('agent', { t: 'tool-call-end', call, ...(result !== undefined ? { result } : {}) } as SessionEvent, turnOptions(this.currentTurnId, this.nextTime())),
       ];
     }
 
