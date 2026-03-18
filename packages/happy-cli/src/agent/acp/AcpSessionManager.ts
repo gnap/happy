@@ -24,8 +24,9 @@ function formatToolResult(toolName: string, result: unknown): Record<string, unk
     return content || undefined;
   }
   if (toolName === 'CursorEdit') {
-    // Edit results are typically empty on success
-    return undefined;
+    // Result has been normalized by sessionUpdateHandlers and encoded by maybeLazyEncodeResult.
+    // Pass through so CursorEditView can render the diffString.
+    return r;
   }
   if (toolName === 'search' || toolName === 'Grep') {
     const totalMatches = r['totalMatches'];

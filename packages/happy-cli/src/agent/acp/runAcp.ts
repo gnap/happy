@@ -1018,7 +1018,13 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
       logAcp(frontendMessage.kind, frontendMessage.text);
     }
 
-    sendEnvelopes(sessionManager.mapMessage(msg));
+    // Apply lazy encoding for CursorEdit/CursorWrite in the ACP path (same as direct cursor path).
+    let mappableMsg = msg;
+    if (msg.type === 'tool-result' && (msg.toolName === 'CursorEdit' || msg.toolName === 'CursorWrite')) {
+      const encoded = session.maybeLazyEncodeResult(msg.toolName, msg.callId, msg.result);
+      mappableMsg = { ...msg, result: encoded };
+    }
+    sendEnvelopes(sessionManager.mapMessage(mappableMsg));
   };
 
   backend.onMessage(onBackendMessage);
