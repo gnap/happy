@@ -450,7 +450,7 @@ type PendingTurn = {
   timeout: NodeJS.Timeout;
 };
 
-function resolveSessionFlavor(agentName: string): 'gemini' | 'opencode' | 'cursor' | 'acp' {
+function resolveSessionFlavor(agentName: string): 'gemini' | 'opencode' | 'acp-cursor' | 'acp' {
   if (agentName === 'gemini') {
     return 'gemini';
   }
@@ -458,7 +458,7 @@ function resolveSessionFlavor(agentName: string): 'gemini' | 'opencode' | 'curso
     return 'opencode';
   }
   if (agentName === 'cursor') {
-    return 'cursor';
+    return 'acp-cursor';
   }
   return 'acp';
 }

@@ -124,9 +124,9 @@ export const AIBackendProfileSchema = z.object({
 export type AIBackendProfile = z.infer<typeof AIBackendProfileSchema>;
 
 // Helper functions matching the happy app exactly
-export function validateProfileForAgent(profile: AIBackendProfile, agent: 'claude' | 'codex' | 'gemini' | 'cursor' | 'cursor-acp'): boolean {
-  // cursor / cursor-acp: profile compat doesn't filter cursor sessions — always allow
-  if (agent === 'cursor' || agent === 'cursor-acp') return true;
+export function validateProfileForAgent(profile: AIBackendProfile, agent: 'claude' | 'codex' | 'gemini' | 'cursor' | 'cursor-acp' | 'acp-cursor'): boolean {
+  // cursor / cursor-acp / acp-cursor: profile compat doesn't filter cursor sessions — always allow
+  if (agent === 'cursor' || agent === 'cursor-acp' || agent === 'acp-cursor') return true;
   return profile.compatibility[agent];
 }
 
