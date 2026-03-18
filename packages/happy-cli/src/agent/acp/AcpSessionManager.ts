@@ -174,7 +174,12 @@ export class AcpSessionManager {
     if (msg.type === 'tool-call') {
       const flushed = this.flush();
       const call = this.ensureSessionCallId(msg.callId);
-      const name = msg.toolName;
+      // Use the machine-readable kind ("CursorBash", "CursorEdit", …) as the
+      // canonical name so the App can look up the correct knownTools entry.
+      // Fall back to toolName only when kind is absent (non-cursor ACP agents).
+      const name = msg.kind ?? msg.toolName;
+      // Use the human-readable toolName (e.g. "Run `ls -la`") as the display title.
+      const title = msg.toolName;
       const description = msg.description ?? `Running ${name}`;
       return [
         ...flushed,
@@ -182,7 +187,7 @@ export class AcpSessionManager {
           t: 'tool-call-start',
           call,
           name,
-          title: name,
+          title,
           description,
           args: msg.args,
         }, turnOptions(this.currentTurnId, this.nextTime())),

@@ -49,9 +49,14 @@ function mapCursorKind(
 ): CursorToolMapping {
   if (kind === 'execute') {
     const cmd = typeof rawInput['command'] === 'string' ? rawInput['command'] : '';
+    // cursor-agent sends a semantic description in rawInput.description
+    // (e.g. "List directory contents", "Print hello world") — prefer it over
+    // the raw command so the App title is human-readable, matching the
+    // information richness of the runCursor stream-json path.
+    const semanticDesc = typeof rawInput['description'] === 'string' ? rawInput['description'] : null;
     return {
       appName: 'CursorBash',
-      description: cmd || title || 'Terminal',
+      description: semanticDesc || cmd || title || 'Terminal',
       args: { command: cmd },
     };
   }
@@ -59,7 +64,7 @@ function mapCursorKind(
     const filePath = typeof rawInput['path'] === 'string' ? rawInput['path'] : '';
     return {
       appName: 'CursorRead',
-      description: filePath || title || 'Read File',
+      description: title || filePath || 'Read File',
       args: { path: filePath },
     };
   }
@@ -67,7 +72,7 @@ function mapCursorKind(
     const filePath = typeof rawInput['path'] === 'string' ? rawInput['path'] : '';
     return {
       appName: 'CursorEdit',
-      description: filePath || title || 'Edit File',
+      description: title || filePath || 'Edit File',
       args: { path: filePath },
     };
   }
