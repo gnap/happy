@@ -39,7 +39,7 @@ export const initialMachineMetadata: MachineMetadata = {
 // Get environment variables for a profile, filtered for agent compatibility
 async function getProfileEnvironmentVariablesForAgent(
   profileId: string,
-  agentType: 'claude' | 'codex' | 'gemini' | 'cursor' | 'cursor-acp'
+  agentType: 'claude' | 'codex' | 'gemini' | 'cursor' | 'cursor-acp' | 'acp-cursor'
 ): Promise<Record<string, string>> {
   try {
     const settings = await readSettings();
@@ -481,12 +481,12 @@ export async function startDaemon(): Promise<void> {
 
           // Construct command for the CLI
           const cliPath = join(projectPath(), 'dist', 'index.mjs');
-          // Determine agent command - support claude, codex, gemini, cursor, cursor-acp
+          // Determine agent command - support claude, codex, gemini, cursor, cursor-acp, acp-cursor
           let agent: string;
           if (options.agent === 'gemini') agent = 'gemini';
           else if (options.agent === 'codex') agent = 'codex';
           else if (options.agent === 'cursor') agent = 'cursor';
-          else if (options.agent === 'cursor-acp') agent = 'acp cursor';
+          else if (options.agent === 'cursor-acp' || options.agent === 'acp-cursor') agent = 'acp cursor';
           else agent = 'claude';
           const fullCommand = `node --no-warnings --no-deprecation ${cliPath} ${agent} --happy-starting-mode remote --started-by daemon`;
 
@@ -572,7 +572,7 @@ export async function startDaemon(): Promise<void> {
         if (!useTmux) {
           logger.debug(`[DAEMON RUN] Using regular process spawning`);
 
-          // Construct arguments for the CLI - support claude, codex, gemini, cursor, cursor-acp
+          // Construct arguments for the CLI - support claude, codex, gemini, cursor, cursor-acp, acp-cursor
           let agentArgs: string[];
           switch (options.agent) {
             case 'claude':
@@ -589,6 +589,7 @@ export async function startDaemon(): Promise<void> {
               agentArgs = ['gemini'];
               break;
             case 'cursor-acp':
+            case 'acp-cursor':
               agentArgs = ['acp', 'cursor'];
               break;
             default:
@@ -1176,7 +1177,7 @@ export async function startDaemon(): Promise<void> {
           }
 
           const tag = lastSessionTagBySessionId[id] ?? lastSessionTagByDirectory[directory];
-          const agent = (lastAgentBySessionId[id] as 'cursor' | 'claude' | 'codex' | 'gemini') ?? 'cursor';
+          const agent = (lastAgentBySessionId[id] as 'cursor' | 'claude' | 'codex' | 'gemini' | 'acp-cursor') ?? 'cursor';
           logger.debug(`[DAEMON RUN] Auto-respawning session ${id} (${agent}) in ${directory} (seq ${prevSeq} → ${seq}, tag=${tag?.slice(0, 8) ?? '?'})`);
 
           lastSpawnAttemptBySessionId[id] = now;
