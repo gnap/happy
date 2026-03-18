@@ -1027,12 +1027,20 @@ function NewSessionWizard() {
             });
 
             // Get environment variables from selected profile
-            let environmentVariables = undefined;
+            let environmentVariables: Record<string, string> | undefined = undefined;
             if (selectedProfileId) {
                 const selectedProfile = profileMap.get(selectedProfileId);
                 if (selectedProfile) {
                     environmentVariables = transformProfileToEnvironmentVars(selectedProfile, agentType);
                 }
+            }
+            // Pass initial permission/model to CLI so ACP cursor starts with user-selected mode (not default)
+            if (agentType === 'cursor-acp') {
+                environmentVariables = {
+                    ...environmentVariables,
+                    HAPPY_CURSOR_INITIAL_PERMISSION_MODE: permissionMode.key,
+                    ...(modelMode?.key ? { HAPPY_CURSOR_INITIAL_MODEL: modelMode.key } : {}),
+                };
             }
 
             // Fire spawn in background; navigate back to list immediately so user is not blocked

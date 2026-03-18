@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { ApiClient } from '@/api/api';
 import type { ApiSessionClient } from '@/api/apiSession';
-import type { UserMessage } from '@/api/types';
+import type { UserMessage, Metadata } from '@/api/types';
 import type { AgentMessage } from '@/agent/core';
 import { AcpBackend, type AcpPermissionHandler } from './AcpBackend';
 import { AcpCursorBackend } from './AcpCursorBackend';
@@ -475,12 +475,21 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     throw new Error('No machine ID found in settings');
   }
 
-  const { state, metadata } = createSessionMetadata({
+  const { state, metadata: baseMetadata } = createSessionMetadata({
     flavor: resolveSessionFlavor(opts.agentName),
     machineId: settings.machineId,
     startedBy: opts.startedBy,
     sandbox: settings.sandboxConfig,
   });
+
+  // Initial permission/model from App (daemon passes via env when spawning cursor-acp)
+  const initialPermissionMode = opts.agentName === 'cursor' ? process.env.HAPPY_CURSOR_INITIAL_PERMISSION_MODE?.trim() || undefined : undefined;
+  const initialModel = opts.agentName === 'cursor' ? (process.env.HAPPY_CURSOR_INITIAL_MODEL?.trim() || undefined) : undefined;
+  const metadata: Metadata = {
+    ...baseMetadata,
+    ...(initialPermissionMode ? { currentOperatingModeCode: initialPermissionMode } : {}),
+    ...(initialModel ? { currentModelCode: initialModel } : {}),
+  };
 
   // When started by the daemon, the machine is already registered — skip the redundant call.
   // Otherwise, parallelize machine registration and session creation since they are independent.
@@ -530,12 +539,14 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
   permissionHandler = new GenericAcpPermissionHandler(session, opts.agentName);
   const sessionManager = new AcpSessionManager();
   const messageQueue = new MessageQueue2<AcpSwitchMode>((mode) => hashObject(mode));
-  let currentPermissionMode: string | undefined;
-  let currentModel: string | null | undefined;
+  let currentPermissionMode: string | undefined = initialPermissionMode;
+  let currentModel: string | null | undefined = initialModel ?? undefined;
   let modeSelector: AcpConfigSelector | null = null;
   let modelSelector: AcpConfigSelector | null = null;
   let legacyModes: SessionModeState | null = null;
   let legacyModels: SessionModelState | null = null;
+  let appliedInitialPermissionMode = false;
+  let appliedInitialModel = false;
   let sawSlashCommands = false;
   let sawModes = false;
   let sawModels = false;
@@ -810,6 +821,14 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
         session.updateMetadata((currentMetadata) =>
           mergeAcpSessionConfigIntoMetadata(currentMetadata, { configOptions }),
         );
+        if (opts.agentName === 'cursor' && currentPermissionMode && !appliedInitialPermissionMode) {
+          appliedInitialPermissionMode = true;
+          void switchPermissionModeIfRequested(currentPermissionMode);
+        }
+        if (opts.agentName === 'cursor' && currentModel && !appliedInitialModel) {
+          appliedInitialModel = true;
+          void switchModelIfRequested(currentModel);
+        }
       }
     }
 
@@ -827,6 +846,10 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
         session.updateMetadata((currentMetadata) =>
           mergeAcpSessionConfigIntoMetadata(currentMetadata, { modes }),
         );
+        if (opts.agentName === 'cursor' && currentPermissionMode && !appliedInitialPermissionMode) {
+          appliedInitialPermissionMode = true;
+          void switchPermissionModeIfRequested(currentPermissionMode);
+        }
       }
     }
 
@@ -844,6 +867,10 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
         session.updateMetadata((currentMetadata) =>
           mergeAcpSessionConfigIntoMetadata(currentMetadata, { models }),
         );
+        if (opts.agentName === 'cursor' && currentModel && !appliedInitialModel) {
+          appliedInitialModel = true;
+          void switchModelIfRequested(currentModel);
+        }
       }
     }
 

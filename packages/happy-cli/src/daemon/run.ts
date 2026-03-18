@@ -214,6 +214,7 @@ export async function startDaemon(): Promise<void> {
     const lastSeqBySessionId: Record<string, number> = {};
     const persistSessionTagBeforeRemove = (session: TrackedSession) => {
       if (session.directory && session.sessionTag) lastSessionTagByDirectory[session.directory] = session.sessionTag;
+      if (session.happySessionId && session.sessionTag) lastSessionTagBySessionId[session.happySessionId] = session.sessionTag;
     };
 
     /** Derive human-readable exit reason from code/signal when no webhook reason was given. */
@@ -1174,7 +1175,7 @@ export async function startDaemon(): Promise<void> {
             continue;
           }
 
-          const tag = lastSessionTagByDirectory[directory];
+          const tag = lastSessionTagBySessionId[id] ?? lastSessionTagByDirectory[directory];
           const agent = (lastAgentBySessionId[id] as 'cursor' | 'claude' | 'codex' | 'gemini') ?? 'cursor';
           logger.debug(`[DAEMON RUN] Auto-respawning session ${id} (${agent}) in ${directory} (seq ${prevSeq} → ${seq}, tag=${tag?.slice(0, 8) ?? '?'})`);
 
