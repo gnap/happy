@@ -499,8 +499,10 @@ export async function startDaemon(): Promise<void> {
           const tmuxEnv: Record<string, string> = {};
 
           // Add all daemon environment variables (filtering out undefined)
+          // Explicitly exclude HAPPY_CURSOR_SESSION_TAG so daemon's inherited tag
+          // does not pollute new sessions; only extraEnv may set it (for respawn).
           for (const [key, value] of Object.entries(process.env)) {
-            if (value !== undefined) {
+            if (value !== undefined && key !== 'HAPPY_CURSOR_SESSION_TAG') {
               tmuxEnv[key] = value;
             }
           }
@@ -617,12 +619,15 @@ export async function startDaemon(): Promise<void> {
           } else if (extraEnv.HAPPY_CURSOR_SESSION_TAG) {
             logger.debug(`[DAEMON RUN] Using caller-provided HAPPY_CURSOR_SESSION_TAG=${extraEnv.HAPPY_CURSOR_SESSION_TAG.slice(0, 8)}...`);
           }
+          // Strip HAPPY_CURSOR_SESSION_TAG from daemon's inherited env so it does not
+          // pollute new sessions. Only extraEnv may carry this key (set for respawn only).
+          const { HAPPY_CURSOR_SESSION_TAG: _stripTag, ...baseEnv } = process.env;
           const happyProcess = spawnHappyCLI(args, {
             cwd: directory,
             detached: true,  // Sessions stay alive when daemon stops
             stdio: ['ignore', 'pipe', 'pipe'],  // Capture stdout/stderr for debugging
             env: {
-              ...process.env,
+              ...baseEnv,
               ...extraEnv
             }
           });
