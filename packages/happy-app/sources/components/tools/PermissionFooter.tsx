@@ -27,8 +27,8 @@ export const PermissionFooter: React.FC<PermissionFooterProps> = ({ permission, 
     const [loadingAllEdits, setLoadingAllEdits] = useState(false);
     const [loadingForSession, setLoadingForSession] = useState(false);
     
-    // Check if this is a Codex session - check both metadata.flavor and tool name prefix
-    const isCodex = metadata?.flavor === 'codex' || toolName.startsWith('Codex');
+    // Codex/Cursor sessions use the same permission UI (Yes / Yes for session / Stop)
+    const isCodex = metadata?.flavor === 'codex' || metadata?.flavor === 'cursor' || metadata?.flavor === 'acp-cursor' || toolName.startsWith('Codex');
 
     const handleApprove = async () => {
         if (permission.status !== 'pending' || loadingButton !== null || loadingAllEdits || loadingForSession) return;

@@ -205,6 +205,38 @@ function SessionInfoContent({ session }: { session: Session }) {
         );
     }, [performDelete]);
 
+    const [cachedLastSeq, setCachedLastSeq] = useState<number | null>(null);
+    useEffect(() => {
+        if (session?.metadata?.flavor !== 'cursor' && session?.metadata?.flavor !== 'acp-cursor') {
+            setCachedLastSeq(null);
+            return;
+        }
+        getCachedLastSeq(session.id).then(setCachedLastSeq);
+        const unsubscribe = subscribeToCachedLastSeq((sessionId, lastSeq) => {
+            if (sessionId === session.id) setCachedLastSeq(lastSeq);
+        });
+        return unsubscribe;
+    }, [session?.id, session?.metadata?.flavor]);
+
+    const [rebuildingCache, performRebuildCache] = useHappyAction(async () => {
+        await sync.rebuildMessageCache(session.id);
+        setCachedLastSeq(null);
+    });
+
+    const handleRebuildMessageCache = useCallback(() => {
+        Modal.alert(
+            t('sessionInfo.rebuildMessageCache'),
+            t('sessionInfo.rebuildMessageCacheConfirm'),
+            [
+                { text: t('common.cancel'), style: 'cancel' },
+                {
+                    text: t('sessionInfo.rebuildMessageCache'),
+                    style: 'destructive',
+                    onPress: performRebuildCache
+                }
+            ]
+        );
+    }, [performRebuildCache]);
     const formatDate = useCallback((timestamp: number) => {
         return new Date(timestamp).toLocaleString();
     }, []);
@@ -329,12 +361,22 @@ function SessionInfoContent({ session }: { session: Session }) {
                         icon={<Ionicons name="time-outline" size={29} color="#007AFF" />}
                         showChevron={false}
                     />
-                    <Item
-                        title={t('sessionInfo.sequence')}
-                        detail={session.seq.toString()}
-                        icon={<Ionicons name="git-commit-outline" size={29} color="#007AFF" />}
-                        showChevron={false}
-                    />
+                    <View>
+                        <Item
+                            title={t('sessionInfo.sequence')}
+                            subtitle={t('sessionInfo.sequenceSubtitle')}
+                            detail={cachedLastSeq != null && cachedLastSeq !== session.seq ? `${cachedLastSeq}/${session.seq}` : session.seq.toString()}
+                            icon={<Ionicons name="git-commit-outline" size={29} color="#007AFF" />}
+                            showChevron={false}
+                            showDivider={false}
+                        />
+                        {(session.metadata?.flavor === 'cursor' || session.metadata?.flavor === 'acp-cursor') && (
+                            <CacheProgressBar
+                                totalSeq={session.seq}
+                                cachedBitmap={cachedBitmap}
+                            />
+                        )}
+                    </View>
                 </ItemGroup>
 
                 {/* Quick Actions */}
@@ -363,12 +405,22 @@ function SessionInfoContent({ session }: { session: Session }) {
                             onPress={handleArchiveSession}
                         />
                     )}
-                    <Item
-                        title={t('sessionInfo.deleteSession')}
-                        subtitle={t('sessionInfo.deleteSessionSubtitle')}
-                        icon={<Ionicons name="trash-outline" size={29} color="#FF3B30" />}
-                        onPress={handleDeleteSession}
-                    />
+                    {!sessionStatus.isConnected && !session.active && (
+                        <Item
+                            title={t('sessionInfo.deleteSession')}
+                            subtitle={t('sessionInfo.deleteSessionSubtitle')}
+                            icon={<Ionicons name="trash-outline" size={29} color="#FF3B30" />}
+                            onPress={handleDeleteSession}
+                        />
+                    )}
+                    {(session.metadata?.flavor === 'cursor' || session.metadata?.flavor === 'acp-cursor') && (
+                        <Item
+                            title={t('sessionInfo.rebuildMessageCache')}
+                            subtitle={t('sessionInfo.rebuildMessageCacheSubtitle')}
+                            icon={<Ionicons name="refresh-outline" size={29} color="#FF9500" />}
+                            onPress={handleRebuildMessageCache}
+                        />
+                    )}
                 </ItemGroup>
 
                 {/* Metadata */}
@@ -406,12 +458,12 @@ function SessionInfoContent({ session }: { session: Session }) {
                         <Item
                             title={t('sessionInfo.aiProvider')}
                             subtitle={(() => {
-                                const flavor = session.metadata.flavor || 'claude';
-                                if (flavor === 'claude') return 'Claude';
-                                if (flavor === 'gpt' || flavor === 'openai') return 'Codex';
-                                if (flavor === 'gemini') return 'Gemini';
-                                if (flavor === 'openclaw') return 'OpenClaw';
-                                return flavor;
+                                const flavor = (session.metadata.flavor || 'claude').toLowerCase();
+                                if (flavor === 'claude') return t('sessionInfo.aiProviderName.claude');
+                                if (flavor === 'cursor' || flavor === 'acp-cursor') return t('sessionInfo.aiProviderName.cursor');
+                                if (flavor === 'gemini') return t('sessionInfo.aiProviderName.gemini');
+                                if (flavor === 'codex' || flavor === 'gpt' || flavor === 'openai') return t('sessionInfo.aiProviderName.codex');
+                                return session.metadata.flavor ?? 'Claude';
                             })()}
                             icon={<Ionicons name="sparkles-outline" size={29} color="#5856D6" />}
                             showChevron={false}

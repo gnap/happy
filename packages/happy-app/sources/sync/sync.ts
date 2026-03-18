@@ -758,6 +758,28 @@ class Sync {
                 agentState
             };
             decryptedSessions.push(processedSession);
+
+            // Only eagerly catch up messages for active sessions (agent is running).
+            // Inactive/offline sessions are loaded lazily when the user opens them.
+            void (async () => {
+                for (const session of decryptedSessions) {
+                    if (session.metadata?.flavor !== 'cursor' && session.metadata?.flavor !== 'acp-cursor') continue;
+                    if (!session.active) continue; // skip offline sessions
+                    try {
+                        const cached = await getCachedLastSeq(session.id);
+                        if (cached != null && cached < session.seq) {
+                            log.log(`📥 fetchSessions: cached lastSeq ${cached} < session.seq ${session.seq} for ${session.id}, invalidating message sync`);
+                            this.getMessagesSync(session.id).invalidate();
+                        }
+                    } catch (e) {
+                        log.log(`📥 fetchSessions: getCachedLastSeq for ${session.id}: ${e}`);
+                    }
+                }
+            })();
+        } catch (err) {
+            log.log(`📥 fetchSessions failed: ${err instanceof Error ? err.message : String(err)}`);
+            // Apply empty list so UI shows empty state instead of endless spinner
+            this.applySessions([]);
         }
 
         // Apply to storage
