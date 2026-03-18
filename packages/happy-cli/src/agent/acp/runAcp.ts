@@ -459,10 +459,16 @@ function resolveRequestedLegacyModelCode(models: SessionModelState, requested: s
 
 class GenericAcpPermissionHandler extends BasePermissionHandler implements AcpPermissionHandler {
   private readonly logPrefix: string;
+  private readonly getCurrentPermissionMode: (() => string | undefined) | undefined;
 
-  constructor(session: ApiSessionClient, agentName: string) {
+  constructor(
+    session: ApiSessionClient,
+    agentName: string,
+    getCurrentPermissionMode?: () => string | undefined,
+  ) {
     super(session);
     this.logPrefix = `[${agentName}]`;
+    this.getCurrentPermissionMode = getCurrentPermissionMode;
   }
 
   protected getLogPrefix(): string {
@@ -470,6 +476,12 @@ class GenericAcpPermissionHandler extends BasePermissionHandler implements AcpPe
   }
 
   async handleToolCall(toolCallId: string, toolName: string, input: unknown): Promise<PermissionResult> {
+    const mode = this.getCurrentPermissionMode?.();
+    if (mode === 'force') {
+      logger.debug(`${this.logPrefix} Auto-approving tool (force mode): ${toolName} (${toolCallId})`);
+      return { decision: 'approved_for_session' };
+    }
+
     return new Promise<PermissionResult>((resolve, reject) => {
       this.pendingRequests.set(toolCallId, {
         resolve,
@@ -604,7 +616,7 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     reportToDaemonInterval = setInterval(() => reportSessionToDaemon(session.sessionId), 60_000);
   }
 
-  permissionHandler = new GenericAcpPermissionHandler(session, opts.agentName);
+  permissionHandler = new GenericAcpPermissionHandler(session, opts.agentName, () => currentPermissionMode);
   const sessionManager = new AcpSessionManager();
   const messageQueue = new MessageQueue2<AcpSwitchMode>((mode) => hashObject(mode));
   let currentPermissionMode: string | undefined = initialPermissionMode;
@@ -1132,6 +1144,7 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
       const turnEnded = waitForTurnEnd();
       try {
         if (typeof batch.mode.permissionMode === 'string' && batch.mode.permissionMode.length > 0) {
+          currentPermissionMode = batch.mode.permissionMode;
           await switchPermissionModeIfRequested(batch.mode.permissionMode);
         }
         if (typeof batch.mode.model === 'string' && batch.mode.model.length > 0) {
