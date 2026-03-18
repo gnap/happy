@@ -73,11 +73,9 @@ export const Avatar = React.memo((props: AvatarProps) => {
             const circleSize = Math.round(size * 0.35);
             const iconSize = effectiveFlavor === 'codex'
                 ? Math.round(size * 0.25)
-                : effectiveFlavor === 'cursor'
+                : effectiveFlavor === 'cursor' || effectiveFlavor === 'acp-cursor' || effectiveFlavor === 'claude'
                     ? Math.round(size * 0.28)
-                    : effectiveFlavor === 'claude'
-                        ? Math.round(size * 0.28)
-                        : Math.round(size * 0.35);
+                    : Math.round(size * 0.35);
 
             return (
                 <View style={[styles.container, { width: size, height: size }]}>
@@ -119,7 +117,7 @@ export const Avatar = React.memo((props: AvatarProps) => {
     const circleSize = Math.round(size * 0.35);
     const iconSize = effectiveFlavor === 'codex'
         ? Math.round(size * 0.25)
-        : effectiveFlavor === 'cursor' || effectiveFlavor === 'claude'
+        : effectiveFlavor === 'cursor' || effectiveFlavor === 'acp-cursor' || effectiveFlavor === 'claude'
             ? Math.round(size * 0.28)
             : Math.round(size * 0.35);
 
