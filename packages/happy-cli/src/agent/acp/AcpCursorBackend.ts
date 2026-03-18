@@ -49,14 +49,9 @@ function mapCursorKind(
 ): CursorToolMapping {
   if (kind === 'execute') {
     const cmd = typeof rawInput['command'] === 'string' ? rawInput['command'] : '';
-    // cursor-agent sends a semantic description in rawInput.description
-    // (e.g. "List directory contents", "Print hello world") — prefer it over
-    // the raw command so the App title is human-readable, matching the
-    // information richness of the runCursor stream-json path.
-    const semanticDesc = typeof rawInput['description'] === 'string' ? rawInput['description'] : null;
     return {
       appName: 'CursorBash',
-      description: semanticDesc || cmd || title || 'Terminal',
+      description: cmd || title || 'Terminal',
       args: { command: cmd },
     };
   }
@@ -507,11 +502,10 @@ export class AcpCursorBackend extends AcpBackend {
       ...params,
       update: {
         ...update,
-        // kind becomes the App tool name so startToolCall uses it as displayName fallback
+        // kind becomes the canonical tool name (CursorBash, etc.) for knownTools lookup
         kind: appName,
-        // title is cleared; startToolCall will use kind (appName) as displayName
-        title: undefined,
-        // description is picked up by startToolCall and forwarded in the tool-call message
+        // title = human-readable description so startToolCall emits it as toolName → App display title
+        title: description,
         description,
         rawInput: args,
       },
