@@ -541,6 +541,17 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     ...(initialPermissionMode ? { currentOperatingModeCode: initialPermissionMode } : {}),
     ...(initialModel ? { currentModelCode: initialModel } : {}),
   };
+  const daemonMetadata: Metadata = {
+    ...metadata,
+    hostPid: process.pid,
+    sessionTag,
+  };
+  let reportToDaemonInterval: ReturnType<typeof setInterval> | null = null;
+  const reportSessionToDaemon = (sessionId: string) => {
+    notifyDaemonSessionStarted(sessionId, daemonMetadata).catch((err) =>
+      logger.debug('[acp] Failed to report session to daemon:', err)
+    );
+  };
 
   // When started by the daemon, the machine is already registered — skip the redundant call.
   // Otherwise, parallelize machine registration and session creation since they are independent.
@@ -572,19 +583,25 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
       if (userMessageHandler) {
         newSession.onUserMessage(userMessageHandler);
       }
+      // Re-register run-specific RPC handlers so kill/abort work after reconnect.
+      newSession.rpcHandlerManager.registerHandler('abort', handleAbort);
+      registerKillSessionHandler(newSession.rpcHandlerManager, async () => {
+        shouldExit = true;
+        messageQueue.close();
+        clearPendingTurn(new Error('Session terminated'));
+        await handleAbort();
+      });
+      reportSessionToDaemon(newSession.sessionId);
+      if (reportToDaemonInterval === null) {
+        reportToDaemonInterval = setInterval(() => reportSessionToDaemon(session.sessionId), 60_000);
+      }
     },
   });
   session = initialSession;
 
-  let reportToDaemonInterval: ReturnType<typeof setInterval> | null = null;
   if (response) {
-    const reportToDaemon = () => {
-      notifyDaemonSessionStarted(response.id, metadata).catch((err) =>
-        logger.debug('[acp] Failed to report session to daemon:', err)
-      );
-    };
-    reportToDaemon();
-    reportToDaemonInterval = setInterval(reportToDaemon, 60_000);
+    reportSessionToDaemon(response.id);
+    reportToDaemonInterval = setInterval(() => reportSessionToDaemon(session.sessionId), 60_000);
   }
 
   permissionHandler = new GenericAcpPermissionHandler(session, opts.agentName);
