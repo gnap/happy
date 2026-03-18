@@ -464,7 +464,9 @@ export const storage = create<StorageState>()((set, get) => {
                 // Use centralized resolver for consistent state management
                 const presence = resolveSessionOnlineState(session);
 
-                // Draft: existing || saved || session. Permission/model: metadata first, then existing, then MMKV, then server.
+                // Draft: existing || saved || session. Permission: same as model — user's explicit local choice
+                // (existing/saved) takes priority over server-pushed metadata so an ACP permission change in the UI
+                // is not immediately overwritten by config_options_update / current_mode_update from the agent.
                 const existingDraft = state.sessions[session.id]?.draft;
                 const savedDraft = savedDrafts[session.id];
                 const existingPermissionMode = state.sessions[session.id]?.permissionMode;
@@ -472,11 +474,11 @@ export const storage = create<StorageState>()((set, get) => {
                 const defaultPermissionMode: PermissionModeKey = isSandboxEnabled(session.metadata) ? 'bypassPermissions' : 'default';
                 const metadataPermission = session.metadata?.currentOperatingModeCode?.trim();
                 const resolvedPermissionMode: PermissionModeKey =
-                    (metadataPermission && metadataPermission !== 'default' ? metadataPermission : undefined) ||
-                    (existingPermissionMode && existingPermissionMode !== 'default' ? existingPermissionMode : undefined) ||
-                    (savedPermissionMode && savedPermissionMode !== 'default' ? savedPermissionMode : undefined) ||
-                    (session.permissionMode && session.permissionMode !== 'default' ? session.permissionMode : undefined) ||
-                    (metadataPermission ? metadataPermission : undefined) ||
+                    (existingPermissionMode && existingPermissionMode !== 'default' ? existingPermissionMode : undefined) ??
+                    (savedPermissionMode && savedPermissionMode !== 'default' ? savedPermissionMode : undefined) ??
+                    (metadataPermission && metadataPermission !== 'default' ? metadataPermission : undefined) ??
+                    (session.permissionMode && session.permissionMode !== 'default' ? session.permissionMode : undefined) ??
+                    (metadataPermission ? metadataPermission : undefined) ??
                     defaultPermissionMode;
                 const metadataModel = session.metadata?.currentModelCode?.trim();
                 const existingModelMode = state.sessions[session.id]?.modelMode;
