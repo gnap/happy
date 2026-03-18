@@ -43,7 +43,7 @@ import type { PermissionMode } from '@/api/types';
  * because the mobile app has dedicated handling for codex messages.
  */
 
-import { createEnvelope } from '@slopus/happy-wire';
+import { createEnvelope, type SessionEvent } from '@slopus/happy-wire';
 
 /**
  * Convert tool result to App output-format shape: content must be string (or array of { type, text }).
@@ -859,7 +859,7 @@ export async function runCursor(opts: {
               codexIdByCallId.delete(msg.callId);
               const lazyResult = session.maybeLazyEncodeResult(msg.toolName, msg.callId, msg.result) as string | Record<string, unknown>;
               logger.debug(`[cursor] tool-call-result callId=${msg.callId.slice(0, 8)}... success=${msg.success}`);
-              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId, result: lazyResult }, { turn: turnId }));
+              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId, result: lazyResult } as SessionEvent, { turn: turnId }));
               break;
 
             case 'task_complete':
