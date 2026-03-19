@@ -49,9 +49,12 @@ function mapCursorKind(
 ): CursorToolMapping {
   if (kind === 'execute') {
     const cmd = typeof rawInput['command'] === 'string' ? rawInput['command'] : '';
+    // cursor-agent may send a human-readable description (e.g. "List directory contents")
+    const semanticDesc = typeof rawInput['description'] === 'string' ? rawInput['description'] : null;
+    const desc = (semanticDesc && semanticDesc.trim()) || cmd || title || 'Terminal';
     return {
       appName: 'CursorBash',
-      description: cmd || title || 'Terminal',
+      description: desc,
       args: { command: cmd },
     };
   }
@@ -59,7 +62,7 @@ function mapCursorKind(
     const filePath = typeof rawInput['path'] === 'string' ? rawInput['path'] : '';
     return {
       appName: 'CursorRead',
-      description: title || filePath || 'Read File',
+      description: filePath || 'Read File',
       args: { path: filePath },
     };
   }
@@ -67,7 +70,7 @@ function mapCursorKind(
     const filePath = typeof rawInput['path'] === 'string' ? rawInput['path'] : '';
     return {
       appName: 'CursorEdit',
-      description: title || filePath || 'Edit File',
+      description: filePath || 'Edit File',
       args: { path: filePath },
     };
   }
