@@ -89,9 +89,15 @@ export const knownTools = {
     },
     'CursorBash': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            if (opts.tool.title) {
+                return opts.tool.title;
+            }
             if (opts.tool.description) {
                 return opts.tool.description;
             }
+            // No semantic title from CLI — promote command to main title so it's not buried as subtitle
+            const cmd = typeof opts.tool.input?.command === 'string' ? opts.tool.input.command : '';
+            if (cmd) return cmd;
             return t('tools.names.terminal');
         },
         icon: ICON_TERMINAL,
@@ -102,16 +108,24 @@ export const knownTools = {
             command: z.string().describe('The command to execute'),
         }).partial().passthrough(),
         extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input?.command === 'string') {
-                return opts.tool.input.command;
-            }
-            return null;
+            // Only show raw command as subtitle when there's a separate semantic title above it.
+            // When title already IS the command (fallback path), hide the subtitle to avoid duplication.
+            const hasSemanticTitle = !!(opts.tool.title || opts.tool.description);
+            if (!hasSemanticTitle) return null;
+            const cmd = typeof opts.tool.input?.command === 'string' ? opts.tool.input.command : '';
+            return cmd || null;
         }
     },
     'CursorRead': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input?.path === 'string') {
+            if (typeof opts.tool.input?.path === 'string' && opts.tool.input.path) {
                 return resolvePath(opts.tool.input.path, opts.metadata);
+            }
+            if (opts.tool.title) {
+                return opts.tool.title;
+            }
+            if (opts.tool.description) {
+                return opts.tool.description;
             }
             return t('tools.names.readFile');
         },
@@ -123,7 +137,7 @@ export const knownTools = {
     },
     'CursorWrite': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input?.path === 'string') {
+            if (typeof opts.tool.input?.path === 'string' && opts.tool.input.path) {
                 return resolvePath(opts.tool.input.path, opts.metadata);
             }
             return t('tools.names.writeFile');
@@ -136,8 +150,22 @@ export const knownTools = {
     },
     'CursorEdit': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input?.path === 'string') {
-                return resolvePath(opts.tool.input.path, opts.metadata);
+            const inputPath = typeof opts.tool.input?.path === 'string' ? opts.tool.input.path : '';
+            if (inputPath) {
+                return resolvePath(inputPath, opts.metadata);
+            }
+            // ACP edit often has empty input.path until completion; use result.path (from diff) when present
+            const rawResult = opts.tool.result as { path?: string; success?: { path?: string } } | undefined;
+            const resultPath = typeof rawResult?.path === 'string' ? rawResult.path
+                : typeof rawResult?.success?.path === 'string' ? rawResult.success.path : '';
+            if (resultPath) {
+                return resolvePath(resultPath, opts.metadata);
+            }
+            if (opts.tool.title) {
+                return opts.tool.title;
+            }
+            if (opts.tool.description) {
+                return opts.tool.description;
             }
             return t('tools.names.editFile');
         },
