@@ -178,9 +178,11 @@ export class AcpSessionManager {
       // canonical name so the App can look up the correct knownTools entry.
       // Fall back to toolName only when kind is absent (non-cursor ACP agents).
       const name = msg.kind ?? msg.toolName;
-      // Use the human-readable toolName (e.g. "Run `ls -la`") as the display title.
-      const title = msg.toolName;
-      const description = msg.description ?? `Running ${name}`;
+      // Use the human-readable description as the display title (from backend; App shows envelope.ev.title).
+      const rawDesc = typeof msg.description === 'string' ? msg.description.trim() : '';
+      const fallbackLabel = `Running ${name}`;
+      const title = rawDesc || msg.toolName || fallbackLabel;
+      const description = rawDesc || fallbackLabel;
       return [
         ...flushed,
         createEnvelope('agent', {

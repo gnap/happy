@@ -89,14 +89,6 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
             description = subtitle;
         }
     }
-    // Fallback: use tool.description as subtitle when extractSubtitle didn't provide one.
-    // Useful for cursor ACP tools which send descriptive titles like "Read src/foo.ts (1-100)"
-    // or "grep -n \"pattern\"" in the description field.
-    // Skip CodexBash: its title already shows the command extracted from description.
-    if (!description && tool.name !== 'CodexBash' && tool.description &&
-        tool.description !== tool.name && tool.description !== toolTitle) {
-        description = tool.description;
-    }
     if (knownTool && knownTool.minimal !== undefined) {
         if (typeof knownTool.minimal === 'function') {
             minimal = knownTool.minimal({ tool, metadata: props.metadata, messages: props.messages });

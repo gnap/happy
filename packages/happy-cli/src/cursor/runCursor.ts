@@ -145,6 +145,27 @@ function toCodexToolShape(
   return { codexName: toolName, codexInput: args };
 }
 
+/**
+ * Derive a human-readable title from tool name and args.
+ * Uses the tool's primary input key (path for file tools, command for bash)
+ * so the App can display a meaningful title without relying on the agent's
+ * generic title field.
+ */
+function deriveToolTitle(toolName: string, args: Record<string, unknown> | undefined): string {
+  const a = args ?? {};
+  const path = typeof (a.path ?? a.file_path ?? a.filePath) === 'string'
+    ? String(a.path ?? a.file_path ?? a.filePath)
+    : '';
+  if (['CursorRead', 'Read', 'CursorWrite', 'Write', 'CursorEdit', 'Edit'].includes(toolName) && path) {
+    return path;
+  }
+  const cmd = typeof a.command === 'string' ? a.command : '';
+  if (['CursorBash', 'Bash'].includes(toolName) && cmd) {
+    return `Run \`${cmd.length > 80 ? cmd.slice(0, 77) + '...' : cmd}\``;
+  }
+  return toolName;
+}
+
 /** Enable with DEBUG=1 or HAPPY_SESSION_TIMING=1 to log startup phase timings (ms from runCursor entry). */
 function shouldLogStartupTiming(): boolean {
   return process.env.DEBUG === '1' || process.env.HAPPY_SESSION_TIMING === '1';
@@ -788,8 +809,7 @@ export async function runCursor(opts: {
             case 'tool_call_start':
               // Sidechain tool calls (from taskToolCall conversationSteps) — only send session envelope with subagent
               if (msg.subagentId) {
-                const sidechainTitle = msg.description
-                  ?? (typeof msg.args?.command === 'string' ? `Run \`${(msg.args.command as string).slice(0, 80)}\`` : `${msg.toolName} call`);
+                const sidechainTitle = msg.description ?? deriveToolTitle(msg.toolName, msg.args);
                 session.sendSessionProtocolMessage(createEnvelope('agent', {
                   t: 'tool-call-start',
                   call: msg.callId,
@@ -811,9 +831,7 @@ export async function runCursor(opts: {
               messageBuffer.addMessage(`Executing: ${msg.toolName} ${toolArgs}`, 'tool');
               codexIdByCallId.set(msg.callId, msg.callId);
               // Session protocol only; avoid sending codex/cursor tool-call so App does not show three summary cards (session + codex + cursor).
-              const cursorCmd = typeof msg.args?.command === 'string' ? msg.args.command : null;
-              const toolTitle = msg.description
-                ?? (cursorCmd ? `Run \`${cursorCmd.length > 80 ? cursorCmd.slice(0, 77) + '...' : cursorCmd}\`` : `${msg.toolName} call`);
+              const toolTitle = msg.description ?? deriveToolTitle(msg.toolName, msg.args);
               session.sendSessionProtocolMessage(createEnvelope('agent', {
                 t: 'tool-call-start',
                 call: msg.callId,

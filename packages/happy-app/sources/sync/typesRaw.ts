@@ -519,6 +519,8 @@ type NormalizedAgentContent =
         id: string;
         name: string;
         input: any;
+        /** Human-readable one-line display title (from envelope.ev.title). */
+        title?: string | null;
         description: string | null;
         uuid: string;
         parentUUID: string | null;
@@ -679,6 +681,7 @@ function normalizeSessionEnvelope(
         const cleanArgs: Record<string, unknown> = isLazy
             ? Object.fromEntries(Object.entries(rawArgs).filter(([k]) => k !== '_lazy'))
             : rawArgs;
+        const envelopeTitle = typeof envelope.ev.title === 'string' && envelope.ev.title ? envelope.ev.title : null;
         return {
             id: messageId,
             localId,
@@ -690,6 +693,7 @@ function normalizeSessionEnvelope(
                 id: envelope.ev.call,
                 name: envelope.ev.name || 'unknown',
                 input: cleanArgs,
+                title: envelopeTitle,
                 description: envelope.ev.description,
                 uuid: contentUUID,
                 parentUUID,
