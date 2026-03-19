@@ -6,7 +6,7 @@ const name = {
 }[variant];
 const bundleId = {
     development: "com.slopus.happy.dev.personal",
-    preview: "com.slopus.happy.preview",
+    preview: "com.slopus.happy.preview.personal",
     production: "com.ex3ndr.happy"
 }[variant];
 
