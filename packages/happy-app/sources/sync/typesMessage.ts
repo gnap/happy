@@ -8,6 +8,8 @@ export type ToolCall = {
     createdAt: number;
     startedAt: number | null;
     completedAt: number | null;
+    /** Human-readable one-line display title derived from the tool's primary input key (e.g. file path, command). */
+    title?: string | null;
     description: string | null;
     result?: any;
     permission?: {

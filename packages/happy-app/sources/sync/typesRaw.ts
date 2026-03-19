@@ -474,6 +474,8 @@ type NormalizedAgentContent =
         id: string;
         name: string;
         input: any;
+        /** Human-readable one-line display title (from envelope.ev.title). */
+        title?: string | null;
         description: string | null;
         uuid: string;
         parentUUID: string | null;
@@ -621,6 +623,14 @@ function normalizeSessionEnvelope(
     }
 
     if (envelope.ev.t === 'tool-call-start') {
+        // If the CLI truncated large content fields (_lazy marker), lift the flag out of
+        // the args object so it lives as proper metadata on the content block.
+        const rawArgs = envelope.ev.args as Record<string, unknown>;
+        const isLazy = rawArgs._lazy === true;
+        const cleanArgs: Record<string, unknown> = isLazy
+            ? Object.fromEntries(Object.entries(rawArgs).filter(([k]) => k !== '_lazy'))
+            : rawArgs;
+        const envelopeTitle = typeof envelope.ev.title === 'string' && envelope.ev.title ? envelope.ev.title : null;
         return {
             id: messageId,
             localId,
@@ -631,7 +641,8 @@ function normalizeSessionEnvelope(
                 type: 'tool-call',
                 id: envelope.ev.call,
                 name: envelope.ev.name || 'unknown',
-                input: envelope.ev.args,
+                input: cleanArgs,
+                title: envelopeTitle,
                 description: envelope.ev.description,
                 uuid: contentUUID,
                 parentUUID

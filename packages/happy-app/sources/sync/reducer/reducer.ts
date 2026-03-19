@@ -733,7 +733,12 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         if (message?.tool) {
                             message.realID = msg.id;
                             message.tool.input = mergeToolInputs(message.tool.input, c.input);
-                            message.tool.description = c.description;
+                            if (c.description !== null) {
+                                message.tool.description = c.description;
+                            }
+                            if (c.title) {
+                                message.tool.title = c.title;
+                            }
                             message.tool.startedAt = msg.createdAt;
                             // If permission was approved and shown as completed (no tool), now it's running
                             if (message.tool.permission?.status === 'approved' && message.tool.state === 'completed') {
@@ -758,6 +763,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             createdAt: permission ? permission.createdAt : msg.createdAt,  // Use permission timestamp if available
                             startedAt: msg.createdAt,
                             completedAt: null,
+                            title: c.title ?? null,
                             description: c.description,
                             result: undefined,
                         };
