@@ -63,7 +63,7 @@ function mapCursorKind(
     const filePath = typeof rawInput['path'] === 'string' ? rawInput['path'] : '';
     return {
       appName: 'CursorRead',
-      description: title || filePath || 'Read File',
+      description: filePath || 'Read File',
       args: { path: filePath },
     };
   }
@@ -71,7 +71,7 @@ function mapCursorKind(
     const filePath = typeof rawInput['path'] === 'string' ? rawInput['path'] : '';
     return {
       appName: 'CursorEdit',
-      description: title || filePath || 'Edit File',
+      description: filePath || 'Edit File',
       args: { path: filePath },
     };
   }
