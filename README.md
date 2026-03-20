@@ -56,6 +56,35 @@ happy codex
 
 On your computer, run `happy` instead of `claude` or `happy codex` instead of `codex` to start your AI through our wrapper. When you want to control your coding agent from your phone, it restarts the session in remote mode. To switch back to your computer, just press any key on your keyboard.
 
+## Happy Cursor
+
+Run [Cursor Agent](https://cursor.com) remotely through Happy — the same mobile control and push notifications you get with Claude Code and Codex, now for Cursor.
+
+```bash
+# Start Cursor Agent (auto-configures Happy MCP in .cursor/mcp.json)
+happy cursor
+
+# Resume the last session for this workspace
+happy cursor --resume
+```
+
+Happy automatically writes `.cursor/mcp.json` so the Cursor agent loads the Happy MCP server without any manual setup. Once running, send prompts from your phone or web browser and watch Cursor work in real time.
+
+### ACP Cursor
+
+You can also run Cursor via the **ACP** (Agent Communication Protocol) path. This uses Cursor’s built-in `cursor-agent acp` over stdio and maps ACP events to Happy’s session protocol, so you get the same mobile remote control and tool-call UI (read/edit/terminal/grep/etc.) without MCP setup.
+
+**Requirements:** `cursor-agent` must be on your PATH (e.g. from Cursor or Homebrew).
+
+```bash
+# Start Cursor Agent over ACP
+happy acp cursor
+
+# Use a specific binary (if not on PATH)
+CURSOR_AGENT_PATH=/path/to/cursor-agent happy acp cursor
+```
+
+Use `happy cursor` when you want MCP-based integration; use `happy acp cursor` when you prefer the ACP protocol or need a different Cursor/cursor-agent setup. See [Happy CLI README](packages/happy-cli/README.md) for path resolution and options.
 ## 🔥 Why Happy Coder?
 
 - 📱 **Mobile access to Claude Code and Codex** - Check what your AI is building while away from your desk
