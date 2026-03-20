@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { ApiClient } from '@/api/api';
 import type { ApiSessionClient } from '@/api/apiSession';
-import type { UserMessage } from '@/api/types';
+import type { UserMessage, Metadata } from '@/api/types';
 import type { AgentMessage } from '@/agent/core';
 import { AcpBackend, type AcpPermissionHandler } from './AcpBackend';
 import { AcpCursorBackend } from './AcpCursorBackend';
@@ -378,6 +378,57 @@ function resolveRequestedCode(options: AcpSelectableOption[], requested: string)
   return null;
 }
 
+function buildPermissionModeCandidates(agentName: string, requestedMode: string): string[] {
+  const trimmed = requestedMode.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  const unique = new Set<string>([trimmed]);
+  const normalized = normalizeComparable(trimmed);
+
+  // Cursor ACP often advertises mode IDs that differ from App keys:
+  // App sends `default | plan | ask | force` while ACP mode options are commonly
+  // `agent | plan | ask` (or `code` as an "agent/code" equivalent).
+  if (agentName === 'cursor') {
+    if (normalized === 'default') {
+      unique.add('agent');
+      unique.add('code');
+    } else if (
+      normalized === 'force' ||
+      normalized === 'bypasspermissions' ||
+      normalized === 'yolo' ||
+      normalized === 'safe-yolo'
+    ) {
+      unique.add('agent');
+      unique.add('code');
+      unique.add('default');
+    } else if (normalized === 'acceptedits') {
+      unique.add('code');
+      unique.add('agent');
+      unique.add('default');
+    } else if (normalized === 'read-only') {
+      unique.add('ask');
+      unique.add('plan');
+    }
+  }
+
+  return Array.from(unique);
+}
+
+function resolveRequestedCodeWithCandidates(
+  options: AcpSelectableOption[],
+  candidates: string[],
+): string | null {
+  for (const candidate of candidates) {
+    const resolved = resolveRequestedCode(options, candidate);
+    if (resolved) {
+      return resolved;
+    }
+  }
+  return null;
+}
+
 function resolveRequestedLegacyModeCode(modes: SessionModeState, requested: string): string | null {
   for (const mode of modes.availableModes) {
     if (mode.id === requested || mode.name === requested) {
@@ -493,12 +544,32 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     throw new Error('No machine ID found in settings');
   }
 
-  const { state, metadata } = createSessionMetadata({
+  const { state, metadata: baseMetadata } = createSessionMetadata({
     flavor: resolveSessionFlavor(opts.agentName),
     machineId: settings.machineId,
     startedBy: opts.startedBy,
     sandbox: settings.sandboxConfig,
   });
+
+  // Initial permission/model from App (daemon passes via env when spawning cursor-acp)
+  const initialPermissionMode = opts.agentName === 'cursor' ? process.env.HAPPY_CURSOR_INITIAL_PERMISSION_MODE?.trim() || undefined : undefined;
+  const initialModel = opts.agentName === 'cursor' ? (process.env.HAPPY_CURSOR_INITIAL_MODEL?.trim() || undefined) : undefined;
+  const metadata: Metadata = {
+    ...baseMetadata,
+    ...(initialPermissionMode ? { currentOperatingModeCode: initialPermissionMode } : {}),
+    ...(initialModel ? { currentModelCode: initialModel } : {}),
+  };
+  const daemonMetadata: Metadata = {
+    ...metadata,
+    hostPid: process.pid,
+    sessionTag,
+  };
+  let reportToDaemonInterval: ReturnType<typeof setInterval> | null = null;
+  const reportSessionToDaemon = (sessionId: string) => {
+    notifyDaemonSessionStarted(sessionId, daemonMetadata).catch((err) =>
+      logger.debug('[acp] Failed to report session to daemon:', err)
+    );
+  };
 
   // When started by the daemon, the machine is already registered — skip the redundant call.
   // Otherwise, parallelize machine registration and session creation since they are independent.
@@ -530,30 +601,38 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
       if (userMessageHandler) {
         newSession.onUserMessage(userMessageHandler);
       }
+      // Re-register run-specific RPC handlers so kill/abort work after reconnect.
+      newSession.rpcHandlerManager.registerHandler('abort', handleAbort);
+      registerKillSessionHandler(newSession.rpcHandlerManager, async () => {
+        shouldExit = true;
+        messageQueue.close();
+        clearPendingTurn(new Error('Session terminated'));
+        await handleAbort();
+      });
+      reportSessionToDaemon(newSession.sessionId);
+      if (reportToDaemonInterval === null) {
+        reportToDaemonInterval = setInterval(() => reportSessionToDaemon(session.sessionId), 60_000);
+      }
     },
   });
   session = initialSession;
 
-  let reportToDaemonInterval: ReturnType<typeof setInterval> | null = null;
   if (response) {
-    const reportToDaemon = () => {
-      notifyDaemonSessionStarted(response.id, metadata).catch((err) =>
-        logger.debug('[acp] Failed to report session to daemon:', err)
-      );
-    };
-    reportToDaemon();
-    reportToDaemonInterval = setInterval(reportToDaemon, 60_000);
+    reportSessionToDaemon(response.id);
+    reportToDaemonInterval = setInterval(() => reportSessionToDaemon(session.sessionId), 60_000);
   }
 
   permissionHandler = new GenericAcpPermissionHandler(session, opts.agentName, () => currentPermissionMode);
   const sessionManager = new AcpSessionManager();
   const messageQueue = new MessageQueue2<AcpSwitchMode>((mode) => hashObject(mode));
-  let currentPermissionMode: string | undefined;
-  let currentModel: string | null | undefined;
+  let currentPermissionMode: string | undefined = initialPermissionMode;
+  let currentModel: string | null | undefined = initialModel ?? undefined;
   let modeSelector: AcpConfigSelector | null = null;
   let modelSelector: AcpConfigSelector | null = null;
   let legacyModes: SessionModeState | null = null;
   let legacyModels: SessionModelState | null = null;
+  let appliedInitialPermissionMode = false;
+  let appliedInitialModel = false;
   let sawSlashCommands = false;
   let sawModes = false;
   let sawModels = false;
@@ -674,10 +753,17 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
       return;
     }
 
+    const requestedCandidates = buildPermissionModeCandidates(opts.agentName, requestedMode);
+    if (requestedCandidates.length === 0) {
+      return;
+    }
+
     if (modeSelector) {
-      const resolved = resolveRequestedCode(modeSelector.options, requestedMode);
+      const resolved = resolveRequestedCodeWithCandidates(modeSelector.options, requestedCandidates);
       if (!resolved) {
-        logger.debug(`[${opts.agentName}] Ignoring unknown ACP permission mode request: ${requestedMode}`);
+        logger.debug(
+          `[${opts.agentName}] Ignoring unknown ACP permission mode request: ${requestedMode} (candidates: ${requestedCandidates.join(', ')})`,
+        );
         return;
       }
       if (resolved === modeSelector.currentCode) {
@@ -697,9 +783,17 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
       return;
     }
 
-    const resolvedLegacyMode = resolveRequestedLegacyModeCode(legacyModes, requestedMode);
+    let resolvedLegacyMode: string | null = null;
+    for (const candidate of requestedCandidates) {
+      resolvedLegacyMode = resolveRequestedLegacyModeCode(legacyModes, candidate);
+      if (resolvedLegacyMode) {
+        break;
+      }
+    }
     if (!resolvedLegacyMode) {
-      logger.debug(`[${opts.agentName}] Ignoring unknown ACP legacy mode request: ${requestedMode}`);
+      logger.debug(
+        `[${opts.agentName}] Ignoring unknown ACP legacy mode request: ${requestedMode} (candidates: ${requestedCandidates.join(', ')})`,
+      );
       return;
     }
     if (resolvedLegacyMode === legacyModes.currentModeId) {
@@ -828,6 +922,14 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
         session.updateMetadata((currentMetadata) =>
           mergeAcpSessionConfigIntoMetadata(currentMetadata, { configOptions }),
         );
+        if (opts.agentName === 'cursor' && currentPermissionMode && !appliedInitialPermissionMode) {
+          appliedInitialPermissionMode = true;
+          void switchPermissionModeIfRequested(currentPermissionMode);
+        }
+        if (opts.agentName === 'cursor' && currentModel && !appliedInitialModel) {
+          appliedInitialModel = true;
+          void switchModelIfRequested(currentModel);
+        }
       }
     }
 
@@ -845,6 +947,10 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
         session.updateMetadata((currentMetadata) =>
           mergeAcpSessionConfigIntoMetadata(currentMetadata, { modes }),
         );
+        if (opts.agentName === 'cursor' && currentPermissionMode && !appliedInitialPermissionMode) {
+          appliedInitialPermissionMode = true;
+          void switchPermissionModeIfRequested(currentPermissionMode);
+        }
       }
     }
 
@@ -862,6 +968,10 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
         session.updateMetadata((currentMetadata) =>
           mergeAcpSessionConfigIntoMetadata(currentMetadata, { models }),
         );
+        if (opts.agentName === 'cursor' && currentModel && !appliedInitialModel) {
+          appliedInitialModel = true;
+          void switchModelIfRequested(currentModel);
+        }
       }
     }
 
