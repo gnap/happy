@@ -388,19 +388,38 @@ export async function runCursor(opts: {
   // Persist initial default mode so app reload can restore it
   syncModeToSessionMetadata('default', undefined);
 
-  // Query cursor-agent for available models and report to session metadata (best-effort, non-blocking)
-  fetchCursorModels().then((result) => {
-    if (!result || result.models.length === 0) {
-      logger.debug('[cursor] fetchCursorModels: no models returned, skipping metadata update');
-      return;
-    }
-    logger.debug(`[cursor] fetchCursorModels: ${result.models.length} models, current=${result.currentModelId}`);
-    session.updateMetadata((m) => ({
-      ...m,
-      models: result.models,
-      currentModelCode: m.currentModelCode ?? result.currentModelId,
-    })).catch((err) => logger.debug('[cursor] Failed to update models in session metadata', err));
-  }).catch((err) => logger.debug('[cursor] fetchCursorModels threw:', err));
+  // Refresh models from cursor-agent and update session metadata.
+  // If the stored currentModelCode is no longer in the list (model was renamed/removed),
+  // it resets to whatever cursor-agent currently considers the active model.
+  const refreshModelsMetadata = () => {
+    fetchCursorModels().then((result) => {
+      if (!result || result.models.length === 0) {
+        logger.debug('[cursor] refreshModelsMetadata: no models returned, skipping');
+        return;
+      }
+      logger.debug(`[cursor] refreshModelsMetadata: ${result.models.length} models, current=${result.currentModelId}`);
+      session.updateMetadata((m) => {
+        const validCodes = new Set(result.models.map((mo) => mo.code));
+        const stored = m.currentModelCode;
+        const isStoredValid = !stored || stored === 'default' || stored === 'auto' || validCodes.has(stored);
+        if (!isStoredValid) {
+          logger.debug(`[cursor] refreshModelsMetadata: stored model "${stored}" not in new list, resetting to "${result.currentModelId}"`);
+        }
+        return {
+          ...m,
+          models: result.models,
+          currentModelCode: isStoredValid ? (stored ?? result.currentModelId) : result.currentModelId,
+        };
+      }).catch((err) => logger.debug('[cursor] refreshModelsMetadata: failed to update metadata', err));
+    }).catch((err) => logger.debug('[cursor] refreshModelsMetadata threw:', err));
+  };
+
+  // Initial fetch at session start
+  refreshModelsMetadata();
+
+  // Periodic refresh so the App sees model list updates pushed by cursor-agent (every 5 min)
+  const MODEL_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+  const modelRefreshInterval = setInterval(refreshModelsMetadata, MODEL_REFRESH_INTERVAL_MS);
 
   // Report to daemon (once at start; also retry periodically so daemon sees us if it wasn't running at start).
   // 30s interval keeps liveness TTL (90s = 3× interval) well-fed even under transient network hiccups.
@@ -961,6 +980,10 @@ export async function runCursor(opts: {
         emitReadyIfIdle();
 
         logger.debug(`[cursor] Turn completed (queue: ${messageQueue.size()})`);
+
+        // Re-fetch models after each turn: cursor-agent may have received upstream model updates.
+        // This also validates currentModel and resets it if the key is no longer recognised.
+        refreshModelsMetadata();
       }
     }
 
@@ -1004,6 +1027,7 @@ export async function runCursor(opts: {
     }
 
     clearInterval(keepAliveInterval);
+    clearInterval(modelRefreshInterval);
     if (inkInstance) {
       inkInstance.unmount();
     }
