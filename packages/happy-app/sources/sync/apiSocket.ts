@@ -50,8 +50,23 @@ class ApiSocket {
     //
 
     connect() {
-        if (!this.config || this.socket) {
-            return;
+        if (!this.config) return;
+        if (this.socket) {
+            // Already have a socket; only force reconnect if we had disabled reconnection (e.g. after token refresh)
+            if (this.reconnectionDisabled) {
+                this.reconnectionDisabled = false;
+                this.disconnect();
+            } else if (this.socket.connected) {
+                return;
+            } else if (this.socket.active) {
+                // socket.io is still driving reconnection attempts; avoid tearing down its backoff.
+                return;
+            } else {
+                // Stale instance (not connected, not reconnecting) — replace so explicit connect() can recover.
+                this.socket.removeAllListeners();
+                this.socket.disconnect();
+                this.socket = null;
+            }
         }
 
         this.updateStatus('connecting');
@@ -234,6 +249,27 @@ class ApiSocket {
             if (!this.socket?.recovered) {
                 this.reconnectedListeners.forEach(listener => listener());
             }
+        });
+
+        // While status stays on the last `connect_error`, socket.io may still be retrying in the
+        // background — surface that so the UI isn't stuck looking "idle" on error.
+        const manager = this.socket.io;
+        manager.on('reconnect_attempt', () => {
+            this.updateStatus('connecting');
+        });
+        manager.on('reconnect_error', (err: Error) => {
+            if (!this.isAuthError(err)) {
+                this.updateStatus('error', err);
+            }
+        });
+        manager.on('reconnect_failed', () => {
+            if (this.reconnectionDisabled || !this.config) {
+                return;
+            }
+            const err = new Error('Socket reconnection failed after max attempts');
+            this.updateStatus('error', err);
+            this.disconnect();
+            this.connect();
         });
 
         this.socket.on('disconnect', (reason) => {

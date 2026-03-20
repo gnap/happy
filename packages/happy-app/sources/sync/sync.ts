@@ -153,6 +153,116 @@ class Sync {
                 this.maybeStartBackgroundSendWatchdog();
             }
         });
+        // Network reachability monitoring (iOS/Android only; expo-network behaves
+        // differently on web and the socket handles reconnection there anyway).
+        this.networkStateSubscription?.remove();
+        if (Platform.OS !== 'web') {
+            this.networkStateSubscription = Network.addNetworkStateListener(({ isConnected, type }) => {
+                const connected = isConnected ?? false;
+                const prevConnected = this.lastNetworkConnected;
+                const prevType = this.lastNetworkType;
+                this.lastNetworkConnected = connected;
+                this.lastNetworkType = type ?? null;
+
+                if (prevConnected === null) {
+                    // First event is the current state, not a transition — skip.
+                    return;
+                }
+
+                if (connected && !prevConnected) {
+                    log.log('🌐 Network became reachable, triggering reconnect');
+                    apiSocket.resumeReconnection();
+                } else if (!connected && prevConnected) {
+                    log.log('🌐 Network lost, pausing reconnection');
+                    apiSocket.pauseReconnection();
+                } else if (connected && type !== prevType) {
+                    // Network interface switched (e.g. WiFi → Cellular) while staying
+                    // connected. The underlying TCP connection may have been silently
+                    // dropped; probe immediately to confirm liveness.
+                    log.log(`🌐 Network interface changed (${prevType} → ${type}), probing connection`);
+                    apiSocket.resumeReconnection();
+                }
+            });
+        }
+
+        // On web/Tauri, AppState never fires — bridge window visibility and OS
+        // focus events to the same pause/resume logic used on iOS.
+        if (Platform.OS === 'web') {
+            this.#setupDesktopLifecycle();
+        }
+    }
+
+    /** Invalidate all data syncs (called on app resume / window becoming visible). */
+    #invalidateAllSyncs() {
+        this.purchasesSync.invalidate();
+        this.profileSync.invalidate();
+        this.machinesSync.invalidate();
+        this.pushTokenSync.invalidate();
+        this.sessionsSync.invalidate();
+        this.nativeUpdateSync.invalidate();
+        log.log('🖥️ Invalidating artifacts sync');
+        this.artifactsSync.invalidate();
+        this.friendsSync.invalidate();
+        this.friendRequestsSync.invalidate();
+        this.feedSync.invalidate();
+    }
+
+    /**
+     * Desktop (Tauri / browser) lifecycle management.
+     *
+     * visibilitychange is the primary signal:
+     *   hidden  → pauseReconnection  (window minimised or tab hidden)
+     *   visible → resumeReconnection + full sync invalidation
+     *
+     * Tauri WINDOW_FOCUS fires when the OS window regains focus without a
+     * visibility change (window was visible but behind another app). We only
+     * probe the socket here — no full invalidation needed.
+     */
+    async #setupDesktopLifecycle() {
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                log.log('🖥️ Window hidden — pausing reconnection');
+                apiSocket.pauseReconnection();
+            } else {
+                log.log('🖥️ Window visible — resuming and invalidating syncs');
+                apiSocket.resumeReconnection();
+                this.#invalidateAllSyncs();
+            }
+        });
+
+        // Match native `expo-network` behaviour: desktop has no reachability API, but the browser
+        // exposes online/offline. Without this, a broken connect can sit in `error` until the next
+        // visibility/focus event while socket.io backoff waits.
+        let onlineDebounce: ReturnType<typeof setTimeout> | null = null;
+        window.addEventListener('online', () => {
+            if (onlineDebounce !== null) {
+                clearTimeout(onlineDebounce);
+            }
+            onlineDebounce = setTimeout(() => {
+                onlineDebounce = null;
+                log.log('🌐 Window: network online — resuming socket');
+                apiSocket.resumeReconnection();
+            }, 300);
+        });
+        window.addEventListener('offline', () => {
+            if (onlineDebounce !== null) {
+                clearTimeout(onlineDebounce);
+                onlineDebounce = null;
+            }
+            log.log('🌐 Window: network offline — pausing socket');
+            apiSocket.pauseReconnection();
+        });
+
+        if (isRunningInTauri()) {
+            const { getCurrentWindow } = await import('@tauri-apps/api/window');
+            const { TauriEvent } = await import('@tauri-apps/api/event');
+            getCurrentWindow().listen(TauriEvent.WINDOW_FOCUS, () => {
+                if (!document.hidden) {
+                    log.log('🖥️ Window focused (Tauri) — probing connection');
+                    apiSocket.resumeReconnection();
+                }
+            });
+        }
     }
 
     async create(credentials: AuthCredentials, encryption: Encryption) {
