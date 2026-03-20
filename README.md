@@ -98,6 +98,22 @@ happy cursor --resume
 
 Happy automatically writes `.cursor/mcp.json` so the Cursor agent loads the Happy MCP server without any manual setup. Once running, send prompts from your phone or web browser and watch Cursor work in real time.
 
+### ACP Cursor
+
+You can also run Cursor via the **ACP** (Agent Communication Protocol) path. This uses Cursor’s built-in `cursor-agent acp` over stdio and maps ACP events to Happy’s session protocol, so you get the same mobile remote control and tool-call UI (read/edit/terminal/grep/etc.) without MCP setup.
+
+**Requirements:** `cursor-agent` must be on your PATH (e.g. from Cursor or Homebrew).
+
+```bash
+# Start Cursor Agent over ACP
+happy acp cursor
+
+# Use a specific binary (if not on PATH)
+CURSOR_AGENT_PATH=/path/to/cursor-agent happy acp cursor
+```
+
+Use `happy cursor` when you want MCP-based integration; use `happy acp cursor` when you prefer the ACP protocol or need a different Cursor/cursor-agent setup. See [Happy CLI README](packages/happy-cli/README.md) for path resolution and options.
+
 ## 🔥 Why Happy Coder?
 
 - 📱 **Mobile access to Claude Code, Codex, and Cursor** - Check what your AI is building while away from your desk
