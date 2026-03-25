@@ -896,7 +896,7 @@ export async function runCursor(opts: {
               codexIdByCallId.delete(msg.callId);
               const lazyResult = session.maybeLazyEncodeResult(msg.toolName, msg.callId, msg.result) as string | Record<string, unknown>;
               logger.debug(`[cursor] tool-call-result callId=${msg.callId.slice(0, 8)}... success=${msg.success}`);
-              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId, result: lazyResult } as SessionEvent, { turn: turnId }));
+              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId, ...(lazyResult !== undefined ? { result: lazyResult } : {}) }, { turn: turnId }));
               break;
 
             case 'task_complete':
