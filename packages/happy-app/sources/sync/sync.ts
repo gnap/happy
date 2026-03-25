@@ -260,6 +260,29 @@ class Sync {
             }
         });
 
+        // Match native `expo-network` behaviour: desktop has no reachability API, but the browser
+        // exposes online/offline. Without this, a broken connect can sit in `error` until the next
+        // visibility/focus event while socket.io backoff waits.
+        let onlineDebounce: ReturnType<typeof setTimeout> | null = null;
+        window.addEventListener('online', () => {
+            if (onlineDebounce !== null) {
+                clearTimeout(onlineDebounce);
+            }
+            onlineDebounce = setTimeout(() => {
+                onlineDebounce = null;
+                log.log('🌐 Window: network online — resuming socket');
+                apiSocket.resumeReconnection();
+            }, 300);
+        });
+        window.addEventListener('offline', () => {
+            if (onlineDebounce !== null) {
+                clearTimeout(onlineDebounce);
+                onlineDebounce = null;
+            }
+            log.log('🌐 Window: network offline — pausing socket');
+            apiSocket.pauseReconnection();
+        });
+
         if (isRunningInTauri()) {
             const { getCurrentWindow } = await import('@tauri-apps/api/window');
             const { TauriEvent } = await import('@tauri-apps/api/event');

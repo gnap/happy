@@ -49,7 +49,8 @@ function mapCursorKind(
 ): CursorToolMapping {
   if (kind === 'execute') {
     const cmd = typeof rawInput['command'] === 'string' ? rawInput['command'] : '';
-    // cursor-agent may send a human-readable description (e.g. "List directory contents")
+    // cursor-agent sends a semantic description in rawInput.description
+    // (e.g. "List directory contents") — prefer it so the App title is human-readable.
     const semanticDesc = typeof rawInput['description'] === 'string' ? rawInput['description'] : null;
     const desc = (semanticDesc && semanticDesc.trim()) || cmd || title || 'Terminal';
     return {
