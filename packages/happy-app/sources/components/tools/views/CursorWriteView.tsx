@@ -5,6 +5,7 @@ import { ToolSectionView } from '../../tools/ToolSectionView';
 import { ToolDiffView } from '@/components/tools/ToolDiffView';
 import { useSetting } from '@/sync/storage';
 import { parseUnifiedDiff } from '@/components/diff/calculateDiff';
+import { unwrapToolResult } from './toolResult';
 
 const LIST_DIFF_MAX_LINES = 4;
 
@@ -13,7 +14,7 @@ export const CursorWriteView = React.memo<ToolViewProps>(({ tool, compact }) => 
     const { input, result } = tool;
 
     // Prefer Cursor's pre-computed diffString from result.
-    const successResult = result?.success ?? result;
+    const successResult = unwrapToolResult(result);
     const diffString: string | undefined = typeof successResult?.diffString === 'string'
         ? successResult.diffString
         : typeof result?.diffString === 'string' ? result.diffString : undefined;

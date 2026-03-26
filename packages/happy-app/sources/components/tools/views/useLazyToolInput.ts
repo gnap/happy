@@ -3,6 +3,7 @@ import { useLocalSetting, storage } from '@/sync/storage';
 import { getToolCallFullContent } from '@/sync/ops';
 import { sync } from '@/sync/sync';
 import { ToolCall } from '@/sync/typesMessage';
+import { hasLazyResultMarker } from './toolResult';
 
 export type LazyToolInputState = {
     /** Resolved input: full content once loaded, truncated input while loading / on error */
@@ -13,12 +14,7 @@ export type LazyToolInputState = {
 };
 
 function hasLazyResult(tool: ToolCall): boolean {
-    if (!tool.result || typeof tool.result !== 'object') return false;
-    const r = tool.result as Record<string, unknown>;
-    if (r._lazyResult === true) return true;
-    const s = r.success;
-    if (s && typeof s === 'object' && (s as Record<string, unknown>)._lazyResult === true) return true;
-    return false;
+    return hasLazyResultMarker(tool.result);
 }
 
 /**
@@ -28,7 +24,7 @@ function hasLazyResult(tool: ToolCall): boolean {
  * - Large input fields (streamContent, old_string, new_string, content) are truncated;
  *   tool.lazyContent is set to true.
  * - Large result fields (beforeFullFileContent, afterFullFileContent) are truncated;
- *   result.success._lazyResult is set to true.
+ *   the lazy marker is set on the result payload for the App to fetch full content.
  *
  * A single RPC call fetches both full args and full result; each is written back into
  * the Zustand store and persisted to SQLite so subsequent opens skip the round-trip.

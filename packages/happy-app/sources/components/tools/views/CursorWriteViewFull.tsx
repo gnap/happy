@@ -4,6 +4,7 @@ import { ToolViewProps } from './_all';
 import { toolFullViewStyles } from '../ToolFullView';
 import { ToolDiffView } from '@/components/tools/ToolDiffView';
 import { useLazyToolInput } from './useLazyToolInput';
+import { unwrapToolResult } from './toolResult';
 
 export const CursorWriteViewFull = React.memo<ToolViewProps>(({ tool, sessionId, messageId }) => {
     // Fetches full args and/or full result via RPC when either tool.lazyContent or
@@ -13,7 +14,7 @@ export const CursorWriteViewFull = React.memo<ToolViewProps>(({ tool, sessionId,
     // Prefer afterFullFileContent from result (populated after RPC resolves the lazy result).
     // Fall back to input fields for in-progress tools.
     const { input, result } = tool;
-    const successResult = result?.success ?? result;
+    const successResult = unwrapToolResult(result);
     const contents = typeof successResult?.afterFullFileContent === 'string'
         ? successResult.afterFullFileContent
         : typeof input?.content === 'string' ? input.content

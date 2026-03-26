@@ -7,6 +7,7 @@ import { ToolDiffView } from '@/components/tools/ToolDiffView';
 import { trimIdent } from '@/utils/trimIdent';
 import { useLazyToolInput } from './useLazyToolInput';
 import { parseUnifiedDiff } from '@/components/diff/calculateDiff';
+import { unwrapToolResult } from './toolResult';
 
 export const CursorEditViewFull = React.memo<ToolViewProps>(({ tool, sessionId, messageId }) => {
     // Fetches full args and/or full result via RPC when either tool.lazyContent or
@@ -14,7 +15,7 @@ export const CursorEditViewFull = React.memo<ToolViewProps>(({ tool, sessionId, 
     const { loading } = useLazyToolInput(tool, sessionId, messageId);
 
     const { input, result } = tool;
-    const successResult = result?.success ?? result;
+    const successResult = unwrapToolResult(result);
 
     // Prefer Cursor's pre-computed diffString — small payload, always present before RPC resolves,
     // contains correct line numbers. Fall back to full-file before/after once RPC resolves.
