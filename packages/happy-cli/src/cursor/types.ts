@@ -133,13 +133,19 @@ export interface CursorSystemMessage {
     model?: string;
 }
 
+/** Some cursor-agent streams emit a startup user placeholder event. */
+export interface CursorUserMessage {
+    type: 'user';
+}
+
 /** Union of all cursor-agent stream-json message types */
 export type CursorStreamMessage =
     | CursorThinkingMessage
     | CursorAssistantMessage
     | CursorToolCallMessage
     | CursorResultMessage
-    | CursorSystemMessage;
+    | CursorSystemMessage
+    | CursorUserMessage;
 
 /** Mode configuration for cursor sessions */
 export interface CursorMode {
