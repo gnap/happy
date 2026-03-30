@@ -163,6 +163,11 @@ export class CursorMessageParser {
         break;
       }
 
+      case 'user': {
+        // cursor-agent may emit a startup/user placeholder event; it carries no actionable content.
+        break;
+      }
+
       case 'assistant': {
         // cursor-agent (--stream-partial-output) sends:
         //   1. Streaming deltas WITH timestamp_ms and WITHOUT model_call_id  → process

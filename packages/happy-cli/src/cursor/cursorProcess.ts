@@ -293,6 +293,20 @@ export class CursorProcess extends EventEmitter {
         }
       }
       logger.debug(`[cursor] Non-JSON line (first 200): ${trimmed.slice(0, 200)}`);
+      // Some provider errors or other messages are printed as plain text on stdout/stderr.
+      // Convert obvious provider error lines into a synthetic result message so the parser
+      // maps them into a session-level error event that will be sent to the App.
+      const providerErrorRegex = /provider error|We're having trouble connecting to the model provider|Provider Error/i;
+      if (providerErrorRegex.test(trimmed)) {
+        const synthetic: CursorStreamMessage = {
+          type: 'result',
+          subtype: 'error_during_execution',
+          is_error: true,
+          result: trimmed.slice(0, 1000),
+        } as unknown as CursorStreamMessage;
+        this.emit('message', synthetic);
+        return;
+      }
       if (/command not found|cursor-agent.*not found|not found/i.test(trimmed)) {
         this.emit('subprocessError', new Error(
           'cursor-agent not found. Install Cursor CLI on this machine (see https://docs.cursor.com) or set CURSOR_AGENT_PATH to the binary path.'
