@@ -167,10 +167,11 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
     try {
       const { runCursor } = await import('@/cursor/runCursor');
 
-      // Parse cursor options: --started-by, --cwd, --resume/-r
+      // Parse cursor options: --started-by, --cwd, --resume/-r, --resume-session-tag
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
       let workspaceRoot: string | undefined = undefined;
       let resumeSession = false;
+      let resumeSessionTag: string | undefined = undefined;
       for (let i = 1; i < args.length; i++) {
         if (args[i] === '--started-by') {
           startedBy = args[++i] as 'daemon' | 'terminal';
@@ -178,6 +179,8 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
           workspaceRoot = args[++i];
         } else if (args[i] === '--resume' || args[i] === '-r') {
           resumeSession = true;
+        } else if (args[i] === '--resume-session-tag' && args[i + 1]) {
+          resumeSessionTag = args[++i];
         }
       }
 
@@ -195,7 +198,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
         await new Promise(resolve => setTimeout(resolve, 200));
       }
 
-      await runCursor({ credentials, startedBy, workspaceRoot, resumeSession, cliStartTime });
+      await runCursor({ credentials, startedBy, workspaceRoot, resumeSession, resumeSessionTag, cliStartTime });
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error');
       if (process.env.DEBUG) {
@@ -428,11 +431,16 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
 
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
       let verbose = false;
+      let resumeSessionTag: string | undefined = undefined;
       const acpArgs: string[] = [];
       let customCommandMode = false;
       for (let i = 1; i < args.length; i++) {
         if (!customCommandMode && args[i] === '--started-by') {
           startedBy = args[++i] as 'daemon' | 'terminal';
+          continue;
+        }
+        if (!customCommandMode && args[i] === '--resume-session-tag' && args[i + 1]) {
+          resumeSessionTag = args[++i];
           continue;
         }
         if (!customCommandMode && args[i] === '--happy-starting-mode') {
@@ -468,6 +476,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
         credentials,
         startedBy,
         verbose,
+        resumeSessionTag,
         agentName: resolved.agentName,
         command: resolved.command,
         args: resolved.args,
@@ -591,7 +600,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
               const spawnResult = await spawnDaemonSession({
                 directory: one.path,
                 agent: (one.flavor === 'cursor' ? 'cursor' : one.flavor === 'claude' ? 'claude' : one.flavor === 'gemini' ? 'gemini' : 'cursor') as 'cursor' | 'claude' | 'gemini' | 'codex',
-                environmentVariables: one.tag ? { HAPPY_CURSOR_SESSION_TAG: one.tag } : undefined
+                resumeSessionTag: one.tag ?? undefined
               });
               if (spawnResult.success) {
                 console.log(`Session restarted from server list (spawned in ${one.path})`);

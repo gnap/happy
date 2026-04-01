@@ -138,6 +138,8 @@ export interface SpawnSessionOptions {
         // Cursor/ACP session reconnect tag
         HAPPY_CURSOR_SESSION_TAG?: string;  // Server session tag for reconnecting cursor-acp sessions
     };
+    /** Explicit session tag used when respawning/restarting cursor or ACP sessions. */
+    resumeSessionTag?: string;
 }
 
 export type SpawnSessionResult =

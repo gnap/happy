@@ -314,7 +314,7 @@ export async function startDaemon(): Promise<void> {
     const spawnSession = async (options: SpawnSessionOptions): Promise<SpawnSessionResult> => {
       logger.debugLargeJson('[DAEMON RUN] Spawning session', options);
 
-      const { directory, sessionId, machineId, approvedNewDirectoryCreation = true } = options;
+      const { directory, sessionId, machineId, approvedNewDirectoryCreation = true, resumeSessionTag: explicitResumeSessionTag } = options;
       let directoryCreated = false;
 
       try {
@@ -428,6 +428,15 @@ export async function startDaemon(): Promise<void> {
         extraEnv = expandEnvironmentVariables(extraEnv, process.env);
         logger.debug(`[DAEMON RUN] After variable expansion: ${Object.keys(extraEnv).join(', ')}`);
 
+        const resumeSessionTag =
+          explicitResumeSessionTag?.trim() ||
+          extraEnv.HAPPY_CURSOR_SESSION_TAG?.trim() ||
+          (sessionId ? (lastSessionTagBySessionId[sessionId] ?? lastSessionTagByDirectory[directory]) : undefined);
+        if (extraEnv.HAPPY_CURSOR_SESSION_TAG) {
+          delete extraEnv.HAPPY_CURSOR_SESSION_TAG;
+        }
+        const shouldPassResumeSessionTag = options.agent === 'cursor' || options.agent === 'cursor-acp' || options.agent === 'acp-cursor';
+
         // Fail-fast validation: Check that any auth variables present are fully expanded
         // Only validate variables that are actually set (different agents need different auth)
         const potentialAuthVars = ['ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'CODEX_HOME', 'AZURE_OPENAI_API_KEY', 'TOGETHER_API_KEY'];
@@ -488,7 +497,8 @@ export async function startDaemon(): Promise<void> {
           else if (options.agent === 'cursor') agent = 'cursor';
           else if (options.agent === 'cursor-acp' || options.agent === 'acp-cursor') agent = 'acp cursor';
           else agent = 'claude';
-          const fullCommand = `node --no-warnings --no-deprecation ${cliPath} ${agent} --happy-starting-mode remote --started-by daemon`;
+          const resumeArg = shouldPassResumeSessionTag && resumeSessionTag ? ` --resume-session-tag ${JSON.stringify(resumeSessionTag)}` : '';
+          const fullCommand = `node --no-warnings --no-deprecation ${cliPath} ${agent} --happy-starting-mode remote --started-by daemon${resumeArg}`;
 
           // Spawn in tmux with environment variables
           // IMPORTANT: Pass complete environment (process.env + extraEnv) because:
@@ -499,8 +509,6 @@ export async function startDaemon(): Promise<void> {
           const tmuxEnv: Record<string, string> = {};
 
           // Add all daemon environment variables (filtering out undefined)
-          // Explicitly exclude HAPPY_CURSOR_SESSION_TAG so daemon's inherited tag
-          // does not pollute new sessions; only extraEnv may set it (for respawn).
           for (const [key, value] of Object.entries(process.env)) {
             if (value !== undefined && key !== 'HAPPY_CURSOR_SESSION_TAG') {
               tmuxEnv[key] = value;
@@ -605,23 +613,12 @@ export async function startDaemon(): Promise<void> {
             '--happy-starting-mode', 'remote',
             '--started-by', 'daemon'
           ];
-
-          // When a sessionId is provided (e.g. restart from App or spawn-session API), look up
-          // the session tag so cursor reconnects to the same server session.
-          // Prefer sessionId-keyed map (exact match) over directory-keyed map (may be stale if multiple sessions share a directory).
-          // Skip if caller already provided HAPPY_CURSOR_SESSION_TAG explicitly.
-          if (sessionId && !extraEnv.HAPPY_CURSOR_SESSION_TAG) {
-            const sessionTagForResume = lastSessionTagBySessionId[sessionId] ?? lastSessionTagByDirectory[directory];
-            if (sessionTagForResume) {
-              extraEnv.HAPPY_CURSOR_SESSION_TAG = sessionTagForResume;
-              logger.debug(`[DAEMON RUN] Injecting HAPPY_CURSOR_SESSION_TAG=${sessionTagForResume.slice(0, 8)}... for session resume`);
-            }
-          } else if (extraEnv.HAPPY_CURSOR_SESSION_TAG) {
-            logger.debug(`[DAEMON RUN] Using caller-provided HAPPY_CURSOR_SESSION_TAG=${extraEnv.HAPPY_CURSOR_SESSION_TAG.slice(0, 8)}...`);
+          if (shouldPassResumeSessionTag && resumeSessionTag) {
+            args.push('--resume-session-tag', resumeSessionTag);
           }
-          // Strip HAPPY_CURSOR_SESSION_TAG from daemon's inherited env so it does not
-          // pollute new sessions. Only extraEnv may carry this key (set for respawn only).
-          const { HAPPY_CURSOR_SESSION_TAG: _stripTag, ...baseEnv } = process.env;
+
+          const baseEnv = { ...process.env };
+          delete baseEnv.HAPPY_CURSOR_SESSION_TAG;
           const happyProcess = spawnHappyCLI(args, {
             cwd: directory,
             detached: true,  // Sessions stay alive when daemon stops
@@ -880,11 +877,11 @@ export async function startDaemon(): Promise<void> {
       // Wait briefly for process to die
       await new Promise((r) => setTimeout(r, 500));
 
-      // Spawn new process, reconnecting to the same server session via HAPPY_CURSOR_SESSION_TAG
+      // Spawn new process, reconnecting to the same server session via explicit CLI arg.
       const result = await spawnSession({
         directory,
         agent,
-        environmentVariables: sessionTag ? { HAPPY_CURSOR_SESSION_TAG: sessionTag } : undefined,
+        resumeSessionTag: sessionTag,
       });
 
       if (result.type === 'success') {
@@ -1193,7 +1190,7 @@ export async function startDaemon(): Promise<void> {
           spawnSession({
             directory,
             agent,
-            environmentVariables: tag ? { HAPPY_CURSOR_SESSION_TAG: tag } : undefined
+            resumeSessionTag: tag
           }).catch((err: unknown) => {
             logger.debug(`[DAEMON RUN] Auto-respawn failed for session ${id}:`, err);
           });
