@@ -135,8 +135,6 @@ export interface SpawnSessionOptions {
         // Note: TMUX_TMPDIR is used by tmux to store socket files when default /tmp is not suitable
         // Common use case: When /tmp has limited space or different permissions
 
-        // Cursor/ACP session reconnect tag
-        HAPPY_CURSOR_SESSION_TAG?: string;  // Server session tag for reconnecting cursor-acp sessions
     };
     /** Explicit session tag used when respawning/restarting cursor or ACP sessions. */
     resumeSessionTag?: string;

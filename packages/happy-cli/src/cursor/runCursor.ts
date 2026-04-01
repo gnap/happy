@@ -200,22 +200,16 @@ export async function runCursor(opts: {
     logger.debug(`[cursor] Startup toRunCursorEntry: ${toRunCursorEntryMs}ms (index load + auth + daemon check → runCursor)`);
   }
 
-  // Default: new session. Resume only with --resume/-r, --resume-session-tag, or HAPPY_CURSOR_SESSION_TAG (compat).
+  // Default: new session. Resume only with --resume/-r or --resume-session-tag.
   const tagPath = join(configuration.happyHomeDir, CURSOR_SESSION_TAG_FILE);
   const workspacePathFile = join(configuration.happyHomeDir, CURSOR_SESSION_WORKSPACE_FILE);
   let sessionTag: string;
   let tagReused = false;
   const explicitResumeTag = opts.resumeSessionTag?.trim() || null;
-  const envSessionTag = process.env.HAPPY_CURSOR_SESSION_TAG?.trim() || null;
   if (explicitResumeTag) {
     sessionTag = explicitResumeTag;
     tagReused = true;
     logger.debug(`[cursor] Using session tag from CLI arg (--resume-session-tag): ${sessionTag.slice(0, 8)}...`);
-  } else if (envSessionTag) {
-    // Daemon restart: reconnect to exact session by tag
-    sessionTag = envSessionTag;
-    tagReused = true;
-    logger.debug(`[cursor] Using session tag from env (daemon restart): ${sessionTag.slice(0, 8)}...`);
   } else if (opts.resumeSession) {
     let savedTag: string | null = null;
     let savedWorkspace: string | null = null;

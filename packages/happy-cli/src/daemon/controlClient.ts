@@ -127,7 +127,7 @@ export async function archiveDaemonSession(sessionId: string): Promise<boolean> 
 
 /**
  * Spawn a new session in the given directory (e.g. to reconnect from server session list).
- * Optional agent and environmentVariables (e.g. HAPPY_CURSOR_SESSION_TAG for same server session).
+ * Optional agent plus explicit resumeSessionTag for reconnecting to the same server session.
  */
 export async function spawnDaemonSession(opts: {
   directory: string;

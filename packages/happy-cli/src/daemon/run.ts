@@ -430,11 +430,7 @@ export async function startDaemon(): Promise<void> {
 
         const resumeSessionTag =
           explicitResumeSessionTag?.trim() ||
-          extraEnv.HAPPY_CURSOR_SESSION_TAG?.trim() ||
           (sessionId ? (lastSessionTagBySessionId[sessionId] ?? lastSessionTagByDirectory[directory]) : undefined);
-        if (extraEnv.HAPPY_CURSOR_SESSION_TAG) {
-          delete extraEnv.HAPPY_CURSOR_SESSION_TAG;
-        }
         const shouldPassResumeSessionTag = options.agent === 'cursor' || options.agent === 'cursor-acp' || options.agent === 'acp-cursor';
 
         // Fail-fast validation: Check that any auth variables present are fully expanded
@@ -510,7 +506,7 @@ export async function startDaemon(): Promise<void> {
 
           // Add all daemon environment variables (filtering out undefined)
           for (const [key, value] of Object.entries(process.env)) {
-            if (value !== undefined && key !== 'HAPPY_CURSOR_SESSION_TAG') {
+            if (value !== undefined) {
               tmuxEnv[key] = value;
             }
           }
@@ -618,7 +614,6 @@ export async function startDaemon(): Promise<void> {
           }
 
           const baseEnv = { ...process.env };
-          delete baseEnv.HAPPY_CURSOR_SESSION_TAG;
           const happyProcess = spawnHappyCLI(args, {
             cwd: directory,
             detached: true,  // Sessions stay alive when daemon stops
