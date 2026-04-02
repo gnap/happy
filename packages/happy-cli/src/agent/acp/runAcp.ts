@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { ApiClient } from '@/api/api';
 import type { ApiSessionClient } from '@/api/apiSession';
+import type { UserMessage, Metadata } from '@/api/types';
 import type { AgentMessage } from '@/agent/core';
 import { AcpBackend, type AcpPermissionHandler } from './AcpBackend';
 import { DefaultTransport } from '@/agent/transport';
@@ -463,18 +464,30 @@ export async function runAcp(opts: {
     throw new Error('No machine ID found in settings');
   }
 
-  await api.getOrCreateMachine({
-    machineId: settings.machineId,
-    metadata: initialMachineMetadata,
-  });
-
-  const { state, metadata } = createSessionMetadata({
+  const { state, metadata: baseMetadata } = createSessionMetadata({
     flavor: resolveSessionFlavor(opts.agentName),
     machineId: settings.machineId,
     startedBy: opts.startedBy,
     sandbox: settings.sandboxConfig,
   });
-  const response = await api.getOrCreateSession({ tag: sessionTag, metadata, state });
+
+  // Initial permission/model from App (daemon passes via env when spawning cursor-acp)
+  const initialPermissionMode = opts.agentName === 'cursor' ? process.env.HAPPY_CURSOR_INITIAL_PERMISSION_MODE?.trim() || undefined : undefined;
+  const initialModel = opts.agentName === 'cursor' ? (process.env.HAPPY_CURSOR_INITIAL_MODEL?.trim() || undefined) : undefined;
+  const metadata: Metadata = {
+    ...baseMetadata,
+    ...(initialPermissionMode ? { currentOperatingModeCode: initialPermissionMode } : {}),
+    ...(initialModel ? { currentModelCode: initialModel } : {}),
+  };
+
+  // When started by the daemon, the machine is already registered — skip the redundant call.
+  // Otherwise, parallelize machine registration and session creation since they are independent.
+  const [, response] = await Promise.all([
+    opts.startedBy === 'daemon'
+      ? Promise.resolve(null)
+      : api.getOrCreateMachine({ machineId: settings.machineId, metadata: initialMachineMetadata }),
+    api.getOrCreateSession({ tag: sessionTag, metadata, state }),
+  ]);
   if (response) {
     logAcp('muted', `Happy Session ID: ${response.id}`);
   }
@@ -507,12 +520,14 @@ export async function runAcp(opts: {
   permissionHandler = new GenericAcpPermissionHandler(session, opts.agentName);
   const sessionManager = new AcpSessionManager();
   const messageQueue = new MessageQueue2<AcpSwitchMode>((mode) => hashObject(mode));
-  let currentPermissionMode: string | undefined;
-  let currentModel: string | null | undefined;
+  let currentPermissionMode: string | undefined = initialPermissionMode;
+  let currentModel: string | null | undefined = initialModel ?? undefined;
   let modeSelector: AcpConfigSelector | null = null;
   let modelSelector: AcpConfigSelector | null = null;
   let legacyModes: SessionModeState | null = null;
   let legacyModels: SessionModelState | null = null;
+  let appliedInitialPermissionMode = false;
+  let appliedInitialModel = false;
   let sawSlashCommands = false;
   let sawModes = false;
   let sawModels = false;
@@ -734,6 +749,14 @@ export async function runAcp(opts: {
         session.updateMetadata((currentMetadata) =>
           mergeAcpSessionConfigIntoMetadata(currentMetadata, { configOptions }),
         );
+        if (opts.agentName === 'cursor' && currentPermissionMode && !appliedInitialPermissionMode) {
+          appliedInitialPermissionMode = true;
+          void switchPermissionModeIfRequested(currentPermissionMode);
+        }
+        if (opts.agentName === 'cursor' && currentModel && !appliedInitialModel) {
+          appliedInitialModel = true;
+          void switchModelIfRequested(currentModel);
+        }
       }
     }
 
@@ -751,6 +774,10 @@ export async function runAcp(opts: {
         session.updateMetadata((currentMetadata) =>
           mergeAcpSessionConfigIntoMetadata(currentMetadata, { modes }),
         );
+        if (opts.agentName === 'cursor' && currentPermissionMode && !appliedInitialPermissionMode) {
+          appliedInitialPermissionMode = true;
+          void switchPermissionModeIfRequested(currentPermissionMode);
+        }
       }
     }
 
@@ -768,6 +795,10 @@ export async function runAcp(opts: {
         session.updateMetadata((currentMetadata) =>
           mergeAcpSessionConfigIntoMetadata(currentMetadata, { models }),
         );
+        if (opts.agentName === 'cursor' && currentModel && !appliedInitialModel) {
+          appliedInitialModel = true;
+          void switchModelIfRequested(currentModel);
+        }
       }
     }
 

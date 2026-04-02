@@ -11,9 +11,21 @@ import { createServer } from 'node:http';
 import { AddressInfo } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import type { SessionEnvelope } from '@slopus/happy-wire';
 
 import { ApiSessionClient } from '@/api/apiSession';
 import { logger } from '@/ui/logger';
+
+export interface HappyServerCursorContext {
+    getCurrentTurnId: () => string | null;
+    sendSessionEnvelope: (envelope: SessionEnvelope) => void;
+    workspacePath: string;
+    getAbortSignal?: () => AbortSignal;
+}
+
+export interface StartHappyServerOptions {
+    cursorContext?: HappyServerCursorContext;
+}
 
 function createMcpServer(handler: (title: string) => Promise<{ success: boolean; error?: string }>): McpServer {
     const mcp = new McpServer({
@@ -55,7 +67,7 @@ function createMcpServer(handler: (title: string) => Promise<{ success: boolean;
     return mcp;
 }
 
-export async function startHappyServer(client: ApiSessionClient): Promise<{ url: string; toolNames: string[]; stop: () => void }> {
+export async function startHappyServer(client: ApiSessionClient, _options?: StartHappyServerOptions): Promise<{ url: string; toolNames: string[]; stop: () => void }> {
     logger.debug(`[happyMCP] server:start sessionId=${client.sessionId}`);
 
     const handler = async (title: string): Promise<{ success: boolean; error?: string }> => {
@@ -76,6 +88,8 @@ export async function startHappyServer(client: ApiSessionClient): Promise<{ url:
             return { success: false, error: String(error) };
         }
     };
+
+    const toolNames = ['change_title'];
 
     const server = createServer(async (req, res) => {
         const mcp = createMcpServer(handler);
@@ -109,7 +123,7 @@ export async function startHappyServer(client: ApiSessionClient): Promise<{ url:
 
     return {
         url: baseUrl.toString(),
-        toolNames: ['change_title'],
+        toolNames,
         stop: () => {
             logger.debug(`[happyMCP] server:stop sessionId=${client.sessionId}`);
             server.close();

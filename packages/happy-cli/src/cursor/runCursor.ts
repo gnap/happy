@@ -288,6 +288,10 @@ export async function runCursor(opts: {
   }
 
 
+  // Sync current PID to server metadata so App always sees the latest PID after respawn.
+  session.updateMetadata((m) => ({ ...m, hostPid: process.pid }))
+    .catch((err) => logger.debug('[cursor] Failed to update hostPid in session metadata', err));
+
   //
   // Keep-alive
   //
@@ -406,10 +410,19 @@ export async function runCursor(opts: {
   }
 
   //
-  // Start Happy MCP server
+  // Start Happy MCP server and register it for cursor-agent via .cursor/mcp.json
+  // Expose current turn id and session send so spawn_subagent can emit subagent envelopes.
   //
 
-  const happyServer = await startHappyServer(session);
+  let currentTurnIdRef: string | null = null;
+  const happyServer = await startHappyServer(session, {
+    cursorContext: {
+      getCurrentTurnId: () => currentTurnIdRef,
+      sendSessionEnvelope: (envelope) => session.sendSessionProtocolMessage(envelope),
+      workspacePath,
+      getAbortSignal: () => abortController.signal,
+    },
+  });
   ensureCursorMcpHappy(workspacePath, happyServer.url);
   logger.debug(`[cursor] Happy MCP: url=${happyServer.url}, workspacePath=${workspacePath}, cursor-agent will be spawned with --approve-mcps`);
 
@@ -454,6 +467,10 @@ export async function runCursor(opts: {
       let accumulatedResponse = '';
       let hadToolCalls = false;
       const turnId = createId();
+
+      // Send user message so both old and new App show it in the session message list
+      session.sendOutputFormatMessage({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: userMessage } });
+      session.sendSessionProtocolMessage(createEnvelope('user', { t: 'text', text: userMessage }, { turn: turnId }));
       const messageParser = new CursorMessageParser();
       const codexIdByCallId = new Map<string, string>();
       /** Per-tool timeout: when fired we send tool_call_end (running in background) so App stops timer; process keeps running. */
@@ -501,6 +518,7 @@ export async function runCursor(opts: {
           model: cursorModel,
           signal: abortController.signal,
           timeoutMs: processTimeoutMs,
+          approveMcps: true, // load Happy MCP from .cursor/mcp.json without prompting
         });
         // Per-tool timeout: after this we send tool_call_end (running in background) so App stops timer; process keeps running.
         const perToolTimeoutMs = process.env.CURSOR_TOOL_CALL_TIMEOUT_MS
@@ -587,6 +605,7 @@ export async function runCursor(opts: {
                 const timeoutResultPayload = { type: 'tool-call-result' as const, callId: msg.callId, id: msg.callId, output: bgResult, is_error: false };
                 logger.debug(`[cursor] codex/cursor tool-call-result callId=${msg.callId.slice(0, 8)}... (timeout)`);
                 session.sendCodexMessage(timeoutResultPayload);
+                session.sendCursorMessage(timeoutResultPayload);
                 // New App: session only tool-call-end; no t:'text' for tool result
                 session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId }, { turn: turnId }));
               }, perToolTimeoutMs);
@@ -618,6 +637,7 @@ export async function runCursor(opts: {
               const resultPayload = { type: 'tool-call-result' as const, callId: msg.callId, id: msg.callId, output: msg.result, is_error: !msg.success };
               logger.debug(`[cursor] codex/cursor tool-call-result callId=${msg.callId.slice(0, 8)}... success=${msg.success}`);
               session.sendCodexMessage(resultPayload);
+              session.sendCursorMessage(resultPayload);
               // New App: session only gets tool-call-end; result is in tool card (no t:'text' for tool result)
               session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId }, { turn: turnId }));
               break;
@@ -647,6 +667,7 @@ export async function runCursor(opts: {
                 const turnEndPayload = { type: 'tool-call-result' as const, callId, id: callId, output: turnEndedResult, is_error: false };
                 logger.debug(`[cursor] codex/cursor tool-call-result callId=${callId.slice(0, 8)}... (turn ended)`);
                 session.sendCodexMessage(turnEndPayload);
+                session.sendCursorMessage(turnEndPayload);
                 // New App: session only tool-call-end; no t:'text' for tool result
                 session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: callId }, { turn: turnId }));
               }
@@ -702,27 +723,29 @@ export async function runCursor(opts: {
           const abortedPayload = { type: 'tool-call-result' as const, callId, id: callId, output: abortedResult, is_error: false };
           logger.debug(`[cursor] codex/cursor tool-call-result callId=${callId.slice(0, 8)}... (aborted)`);
           session.sendCodexMessage(abortedPayload);
+          session.sendCursorMessage(abortedPayload);
           // New App: session only tool-call-end; no t:'text' for tool result
           session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: callId }, { turn: turnId }));
         }
         const hadPendingToolCalls = codexIdByCallId.size > 0;
         codexIdByCallId.clear();
 
+        // If the turn didn't complete normally (no result message received), it's either
+        // cancelled (user abort) or failed (cursor-agent killed/crashed), never 'completed'.
         const status: 'completed' | 'failed' | 'cancelled' =
-          turnCompletedNormally ? 'completed' : (hadPendingToolCalls ? 'failed' : turnEndStatus);
-        session.sendCodexMessage( {
-          type: 'task_complete',
-          id: randomUUID(),
-        });
-        session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'turn-end', status }, { turn: turnId }));
+          turnCompletedNormally ? 'completed' : (turnEndStatus === 'cancelled' ? 'cancelled' : 'failed');
+        // Single turn-end signal: session lifecycle only. Sending codex + cursor task_complete as well caused turn summary to appear three times in the App.
+        session.sendSessionLifecycleEnvelope(createEnvelope('agent', { t: 'turn-end', status }, { turn: turnId }));
+
+        // 1.5.0 App only stops timer via ephemeral activity (keepAlive), not message content; send before flush so it’s not delayed
+        thinking = false;
+        session.keepAlive(thinking, 'remote');
 
         await session.flush();
 
         // Clear parser state for next turn
         messageParser.clear();
 
-        thinking = false;
-        session.keepAlive(thinking, 'remote');
         emitReadyIfIdle();
 
         logger.debug(`[cursor] Turn completed (queue: ${messageQueue.size()})`);

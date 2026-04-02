@@ -74,6 +74,20 @@ export interface DaemonLocallyPersistedState {
   startedWithCliVersion: string;
   lastHeartbeat?: string;
   daemonLogPath?: string;
+  lastSessionTagByDirectory?: Record<string, string>;
+  lastSessionTagBySessionId?: Record<string, string>;
+  lastDirectoryBySessionId?: Record<string, string>;
+  lastAgentBySessionId?: Record<string, string>;
+  stoppedSessions?: Array<{
+    happySessionId: string;
+    pid: number;
+    directory?: string;
+    sessionTag?: string;
+    agent?: string;
+    exitReason?: string;
+    exitTime?: number;
+    lastHeartbeat?: number;
+  }>;
 }
 
 export async function readSettings(): Promise<Settings> {

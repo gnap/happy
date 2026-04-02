@@ -5,7 +5,7 @@ import { ApiSessionClient } from './apiSession';
 import { ApiMachineClient } from './apiMachine';
 import { decodeBase64, encodeBase64, getRandomBytes, encrypt, decrypt, libsodiumEncryptForPublicKey } from './encryption';
 import { PushNotificationClient } from './pushNotifications';
-import { configuration } from '@/configuration';
+import { configuration, serverHttpsAgent } from '@/configuration';
 import chalk from 'chalk';
 import { Credentials } from '@/persistence';
 import { connectionState, isNetworkError } from '@/utils/serverConnectionErrors';
@@ -71,7 +71,8 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json'
           },
-          timeout: 60000 // 1 minute timeout for very bad network connections
+          timeout: 60000,
+          httpsAgent: serverHttpsAgent,
         }
       )
 
@@ -138,6 +139,31 @@ export class ApiClient {
   }
 
   /**
+   * List sessions changed since the given timestamp.
+   * Used by daemon heartbeat polling to auto-respawn stopped sessions.
+   */
+  async listChangedSessions(changedSince: number): Promise<Array<{ id: string; seq: number; active: boolean }>> {
+    try {
+      const response = await axios.get<{ sessions?: Array<{ id: string; seq: number; active: boolean }> }>(
+        `${configuration.serverUrl}/v2/sessions`,
+        {
+          params: { changedSince },
+          headers: {
+            'Authorization': `Bearer ${this.credential.token}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 60000,
+          httpsAgent: serverHttpsAgent,
+        }
+      );
+      return Array.isArray(response.data.sessions) ? response.data.sessions : [];
+    } catch (error) {
+      logger.debug('[API] [ERROR] Failed to list changed sessions:', error);
+      return [];
+    }
+  }
+
+  /**
    * Register or update machine with the server
    * Returns the current machine state from the server with decrypted metadata and daemonState
    */
@@ -191,7 +217,8 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json'
           },
-          timeout: 60000 // 1 minute timeout for very bad network connections
+          timeout: 60000,
+          httpsAgent: serverHttpsAgent,
         }
       );
 
@@ -302,7 +329,8 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json'
           },
-          timeout: 5000
+          timeout: 5000,
+          httpsAgent: serverHttpsAgent,
         }
       );
 
@@ -330,7 +358,8 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json'
           },
-          timeout: 5000
+          timeout: 5000,
+          httpsAgent: serverHttpsAgent,
         }
       );
 

@@ -5,7 +5,7 @@
 
 import { io, Socket } from 'socket.io-client';
 import { logger } from '@/ui/logger';
-import { configuration } from '@/configuration';
+import { configuration, serverHttpsAgent } from '@/configuration';
 import { MachineMetadata, DaemonState, Machine, Update, UpdateMachineBody } from './types';
 import { registerCommonHandlers, SpawnSessionOptions, SpawnSessionResult } from '../modules/common/registerCommonHandlers';
 import { encodeBase64, decodeBase64, encrypt, decrypt } from './encryption';
@@ -265,7 +265,7 @@ export class ApiMachineClient {
         logger.debug(`[API MACHINE] Connecting to ${serverUrl}`);
 
         this.socket = io(serverUrl, {
-            transports: ['websocket'],
+            transports: ['polling', 'websocket'],
             auth: {
                 token: this.token,
                 clientType: 'machine-scoped' as const,
@@ -274,7 +274,8 @@ export class ApiMachineClient {
             path: '/v1/updates',
             reconnection: true,
             reconnectionDelay: 1000,
-            reconnectionDelayMax: 5000
+            reconnectionDelayMax: 5000,
+            ...(typeof process !== 'undefined' && process.versions?.node && { agent: serverHttpsAgent as any }),
         });
 
         this.socket.on('connect', () => {

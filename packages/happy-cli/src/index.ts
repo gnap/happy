@@ -6,6 +6,8 @@
  * Simple argument parsing without any CLI framework dependencies
  */
 
+// Set IPv4 for all HTTPS before any other imports that may hit the server (auth, api, etc.)
+import '@/configuration'
 
 import chalk from 'chalk'
 import { runClaude, StartOptions } from '@/claude/runClaude'
@@ -44,10 +46,6 @@ import { handleResumeCommand } from '@/resume/handleResumeCommand'
 
   // Check if first argument is a subcommand
   const subcommand = args[0]
-  
-  // Log which subcommand was detected (for debugging)
-  if (!args.includes('--version')) {
-  }
 
   if (subcommand === 'doctor') {
     // Check for clean subcommand

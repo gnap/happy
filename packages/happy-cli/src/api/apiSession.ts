@@ -4,7 +4,7 @@ import { io, Socket } from 'socket.io-client'
 import { AgentState, ClientToServerEvents, Metadata, ServerToClientEvents, Session, Update, UserMessage, UserMessageSchema, Usage } from './types'
 import { decodeBase64, decrypt, encodeBase64, encrypt } from './encryption';
 import { backoff, delay } from '@/utils/time';
-import { configuration } from '@/configuration';
+import { configuration, serverHttpsAgent } from '@/configuration';
 import { RawJSONLines } from '@/claude/types';
 import { randomUUID } from 'node:crypto';
 import { AsyncLock } from '@/utils/lock';
@@ -46,6 +46,12 @@ export type ACPMessageData =
     | { type: 'token_count';[key: string]: unknown };
 
 export type ACPProvider = 'gemini' | 'codex' | 'claude' | 'opencode';
+
+/** Legacy Claude "output" format data shape for old App compatibility. App requires uuid or message is dropped. */
+export type OutputFormatData =
+    | { type: 'assistant'; uuid: string; parentUuid?: string | null; message: { role: 'assistant'; model: string; content: Array<{ type: 'text'; text: string } | { type: 'tool_use'; id: string; name: string; input: unknown }> } }
+    | { type: 'user'; uuid: string; parentUuid?: string | null; message: { role: 'user'; content: string } }
+    | { type: 'user'; uuid: string; parentUuid?: string | null; message: { role: 'user'; content: Array<{ type: 'tool_result'; tool_use_id: string; content: unknown; is_error?: boolean }> } };
 
 type V3SessionMessage = {
     id: string;
@@ -101,6 +107,7 @@ export class ApiSessionClient extends EventEmitter {
     private pendingOutbox: Array<{ content: string; localId: string }> = [];
     private readonly sendSync: InvalidateSync;
     private readonly receiveSync: InvalidateSync;
+    private fallbackPollInterval: ReturnType<typeof setInterval> | null = null;
 
     constructor(token: string, session: Session) {
         super()
@@ -141,9 +148,10 @@ export class ApiSessionClient extends EventEmitter {
             reconnectionAttempts: Infinity,
             reconnectionDelay: 1000,
             reconnectionDelayMax: 5000,
-            transports: ['websocket'],
+            transports: ['polling', 'websocket'],
             withCredentials: true,
-            autoConnect: false
+            autoConnect: false,
+            ...(typeof process !== 'undefined' && process.versions?.node && { agent: serverHttpsAgent as any }),
         });
 
         //
@@ -152,6 +160,7 @@ export class ApiSessionClient extends EventEmitter {
 
         this.socket.on('connect', () => {
             logger.debug('Socket connected successfully');
+            this.stopFallbackPoll();
             this.rpcHandlerManager.onSocketConnect(this.socket);
             this.receiveSync.invalidate();
         })
@@ -164,6 +173,7 @@ export class ApiSessionClient extends EventEmitter {
         this.socket.on('disconnect', (reason) => {
             logger.debug('[API] Socket disconnected:', reason);
             this.rpcHandlerManager.onSocketDisconnect();
+            this.startFallbackPoll();
         })
 
         this.socket.on('connect_error', (error) => {
@@ -173,6 +183,7 @@ export class ApiSessionClient extends EventEmitter {
                 logger.debug('[API] If running remotely (SSH/devcontainer), ensure outbound HTTPS/WSS to server is allowed. Using HTTP fallback for messages.');
             }
             this.rpcHandlerManager.onSocketDisconnect();
+            this.startFallbackPoll();
         })
 
         // Server events
@@ -319,7 +330,8 @@ export class ApiSessionClient extends EventEmitter {
                         limit: 100
                     },
                     headers: this.authHeaders(),
-                    timeout: 60000
+                    timeout: 60000,
+                    httpsAgent: serverHttpsAgent,
                 }
             );
 
@@ -390,6 +402,7 @@ export class ApiSessionClient extends EventEmitter {
                         {
                             headers: this.authHeaders(),
                             timeout: 60000,
+                        httpsAgent: serverHttpsAgent,
                         }
                     );
 
@@ -476,6 +489,22 @@ export class ApiSessionClient extends EventEmitter {
             }
         };
         this.enqueueMessage(content);
+    }
+
+    /**
+     * Legacy output-format message used by the older App.
+     * Keep the payload as-is so the App can render the session list entry.
+     */
+    sendOutputFormatMessage(body: OutputFormatData) {
+        this.enqueueMessage(body);
+    }
+
+    /**
+     * Cursor-specific compatibility wrapper.
+     * Cursor tool/result payloads currently follow the same shape as codex payloads.
+     */
+    sendCursorMessage(body: unknown) {
+        this.sendCodexMessage(body);
     }
 
     private enqueueSessionProtocolEnvelope(envelope: SessionEnvelope, invalidate: boolean = true) {
@@ -700,8 +729,31 @@ export class ApiSessionClient extends EventEmitter {
         });
     }
 
+    private startFallbackPoll() {
+        if (this.fallbackPollInterval !== null) return;
+        const intervalMs = 8000;
+        logger.debug(`[API] Socket disconnected, starting fallback HTTP poll every ${intervalMs}ms`);
+        this.receiveSync.invalidate();
+        this.fallbackPollInterval = setInterval(() => {
+            if (this.socket.connected) {
+                this.stopFallbackPoll();
+                return;
+            }
+            this.receiveSync.invalidate();
+        }, intervalMs);
+    }
+
+    private stopFallbackPoll() {
+        if (this.fallbackPollInterval !== null) {
+            clearInterval(this.fallbackPollInterval);
+            this.fallbackPollInterval = null;
+            logger.debug('[API] Stopped fallback HTTP poll');
+        }
+    }
+
     async close() {
         logger.debug('[API] socket.close() called');
+        this.stopFallbackPoll();
         this.sendSync.stop();
         this.receiveSync.stop();
         this.socket.close();
