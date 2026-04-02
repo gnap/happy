@@ -108,6 +108,8 @@ export class ApiSessionClient extends EventEmitter {
     private readonly sendSync: InvalidateSync;
     private readonly receiveSync: InvalidateSync;
     private fallbackPollInterval: ReturnType<typeof setInterval> | null = null;
+    /** Set in close() so disconnect/connect_error do not re-start fallback poll and leave the process hanging. */
+    private closing = false;
 
     constructor(token: string, session: Session) {
         super()
@@ -173,7 +175,7 @@ export class ApiSessionClient extends EventEmitter {
         this.socket.on('disconnect', (reason) => {
             logger.debug('[API] Socket disconnected:', reason);
             this.rpcHandlerManager.onSocketDisconnect();
-            this.startFallbackPoll();
+            if (!this.closing) this.startFallbackPoll();
         })
 
         this.socket.on('connect_error', (error) => {
@@ -183,7 +185,7 @@ export class ApiSessionClient extends EventEmitter {
                 logger.debug('[API] If running remotely (SSH/devcontainer), ensure outbound HTTPS/WSS to server is allowed. Using HTTP fallback for messages.');
             }
             this.rpcHandlerManager.onSocketDisconnect();
-            this.startFallbackPoll();
+            if (!this.closing) this.startFallbackPoll();
         })
 
         // Server events
@@ -761,6 +763,7 @@ export class ApiSessionClient extends EventEmitter {
 
     async close() {
         logger.debug('[API] socket.close() called');
+        this.closing = true;
         this.stopFallbackPoll();
         this.sendSync.stop();
         this.receiveSync.stop();

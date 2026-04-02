@@ -558,6 +558,16 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     ...(initialPermissionMode ? { currentOperatingModeCode: initialPermissionMode } : {}),
     ...(initialModel ? { currentModelCode: initialModel } : {}),
   };
+  const daemonMetadata: Metadata = {
+    ...metadata,
+    hostPid: process.pid,
+  };
+  let reportToDaemonInterval: ReturnType<typeof setInterval> | null = null;
+  const reportSessionToDaemon = (sessionId: string) => {
+    notifyDaemonSessionStarted(sessionId, daemonMetadata).catch((err) =>
+      logger.debug('[acp] Failed to report session to daemon:', err)
+    );
+  };
 
   // When started by the daemon, the machine is already registered — skip the redundant call.
   // Otherwise, parallelize machine registration and session creation since they are independent.
@@ -573,6 +583,26 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
 
   let session: ApiSessionClient;
   let permissionHandler: GenericAcpPermissionHandler;
+  const userMessageHandler = (message: UserMessage): void => {
+    if (!message.content.text) {
+      return;
+    }
+
+    if (typeof message.meta?.permissionMode === 'string') {
+      currentPermissionMode = message.meta.permissionMode;
+      logger.debug(`[${opts.agentName}] Requested ACP permission mode: ${currentPermissionMode}`);
+    }
+
+    if (message.meta && Object.prototype.hasOwnProperty.call(message.meta, 'model')) {
+      currentModel = message.meta.model ?? null;
+      logger.debug(`[${opts.agentName}] Requested ACP model: ${currentModel ?? 'null'}`);
+    }
+
+    messageQueue.push(message.content.text, {
+      permissionMode: currentPermissionMode,
+      model: currentModel,
+    });
+  };
   const { session: initialSession, reconnectionHandle } = setupOfflineReconnection({
     api,
     sessionTag,
@@ -584,16 +614,28 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
       if (permissionHandler) {
         permissionHandler.updateSession(newSession);
       }
+      if (userMessageHandler) {
+        newSession.onUserMessage(userMessageHandler);
+      }
+      // Re-register run-specific RPC handlers so kill/abort work after reconnect.
+      newSession.rpcHandlerManager.registerHandler('abort', handleAbort);
+      registerKillSessionHandler(newSession.rpcHandlerManager, async () => {
+        shouldExit = true;
+        messageQueue.close();
+        clearPendingTurn(new Error('Session terminated'));
+        await handleAbort();
+      });
+      reportSessionToDaemon(newSession.sessionId);
+      if (reportToDaemonInterval === null) {
+        reportToDaemonInterval = setInterval(() => reportSessionToDaemon(session.sessionId), 60_000);
+      }
     },
   });
   session = initialSession;
 
   if (response) {
-    try {
-      await notifyDaemonSessionStarted(response.id, metadata);
-    } catch (error) {
-      logger.debug('[acp] Failed to report session to daemon:', error);
-    }
+    reportSessionToDaemon(response.id);
+    reportToDaemonInterval = setInterval(() => reportSessionToDaemon(session.sessionId), 60_000);
   }
 
   permissionHandler = new GenericAcpPermissionHandler(session, opts.agentName, () => currentPermissionMode);
@@ -950,26 +992,7 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
 
   backend.onMessage(onBackendMessage);
 
-  session.onUserMessage((message) => {
-    if (!message.content.text) {
-      return;
-    }
-
-    if (typeof message.meta?.permissionMode === 'string') {
-      currentPermissionMode = message.meta.permissionMode;
-      logger.debug(`[${opts.agentName}] Requested ACP permission mode: ${currentPermissionMode}`);
-    }
-
-    if (message.meta && Object.prototype.hasOwnProperty.call(message.meta, 'model')) {
-      currentModel = message.meta.model ?? null;
-      logger.debug(`[${opts.agentName}] Requested ACP model: ${currentModel ?? 'null'}`);
-    }
-
-    messageQueue.push(message.content.text, {
-      permissionMode: currentPermissionMode,
-      model: currentModel,
-    });
-  });
+  session.onUserMessage(userMessageHandler);
   session.keepAlive(thinking, 'remote');
 
   const keepAliveInterval = setInterval(() => {
@@ -1058,6 +1081,10 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     }
   } finally {
     clearInterval(keepAliveInterval);
+    if (reportToDaemonInterval !== null) {
+      clearInterval(reportToDaemonInterval);
+      reportToDaemonInterval = null;
+    }
     reconnectionHandle?.cancel();
     clearPendingTurn(new Error('ACP runner shutting down'));
 
