@@ -465,8 +465,8 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
   const verbose = opts.verbose === true;
   // When daemon restarts an acp-cursor session, it passes --resume-session-tag so we
   // reconnect to the same server session instead of creating a new one.
-  const sessionTag = opts.resumeSessionTag?.trim() || randomUUID();
-
+  const sessionTag = opts.resumeSessionTag?.trim() || process.env.HAPPY_CURSOR_SESSION_TAG?.trim() || randomUUID();
+  connectionState.setBackend(opts.agentName);
 
   const api = await ApiClient.create(opts.credentials);
   const settings = await readSettings();
