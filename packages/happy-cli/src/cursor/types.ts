@@ -32,6 +32,7 @@ export interface CursorAssistantMessage {
 export interface CursorToolCallMessage {
     type: 'tool_call';
     subtype: 'completed' | 'started' | string;
+    description?: string;
     tool_call: {
         shellToolCall?: {
             args?: { command?: string };

@@ -433,11 +433,11 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
-    private enqueueMessage(content: unknown, invalidate: boolean = true) {
+    private enqueueMessage(content: unknown, invalidate: boolean = true, localId?: string) {
         const encrypted = encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, content));
         this.pendingOutbox.push({
             content: encrypted,
-            localId: randomUUID()
+            localId: localId ?? randomUUID()
         });
         if (invalidate) {
             this.sendSync.invalidate();
@@ -507,10 +507,24 @@ export class ApiSessionClient extends EventEmitter {
 
     /**
      * Cursor-specific compatibility wrapper.
-     * Cursor tool/result payloads currently follow the same shape as codex payloads.
+     * Cursor wire uses the same body shape as codex, but with type: 'cursor'.
      */
-    sendCursorMessage(body: unknown) {
-        this.sendCodexMessage(body);
+    sendCursorMessage(body: Parameters<ApiSessionClient['sendCodexMessage']>[0]) {
+        const content = {
+            role: 'agent',
+            content: {
+                type: 'cursor',
+                data: body,
+            },
+            meta: {
+                sentFrom: 'cli',
+            },
+        };
+        this.enqueueMessage(content);
+    }
+
+    private maybeLazyEncodeEnvelope(envelope: SessionEnvelope): SessionEnvelope {
+        return envelope;
     }
 
     /**
@@ -529,22 +543,12 @@ export class ApiSessionClient extends EventEmitter {
                 sentFrom: 'cli'
             }
         };
-
-        this.enqueueMessage(content, invalidate);
+        this.enqueueMessage(content, invalidate, envelope.id);
     }
 
     sendSessionProtocolMessage(envelope: SessionEnvelope) {
-        if (envelope.role !== 'user') {
-            this.enqueueSessionProtocolEnvelope(envelope);
-            return;
-        }
-
-        if (envelope.ev.t !== 'text') {
-            this.enqueueSessionProtocolEnvelope(envelope);
-            return;
-        }
-
-        this.enqueueSessionProtocolEnvelope(envelope);
+        const finalEnvelope = this.maybeLazyEncodeEnvelope(envelope);
+        this.enqueueSessionProtocolEnvelope(finalEnvelope);
     }
 
     /**

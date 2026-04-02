@@ -34,6 +34,7 @@ export type CursorParsedMessage =
 export class CursorMessageParser {
   /** key = toolKey (toolName + args hash), value = queue of callIds for that key */
   private pendingByKey: Map<string, string[]> = new Map();
+  private sawAssistantText = false;
 
   private toolKey(toolName: string, args: Record<string, unknown>): string {
     const canonical = JSON.stringify(args, Object.keys(args).sort());
@@ -89,18 +90,7 @@ export class CursorMessageParser {
       }
 
       case 'assistant': {
-        // cursor-agent (--stream-partial-output) sends:
-        //   1. Streaming deltas WITH timestamp_ms and WITHOUT model_call_id  → process
-        //   2. Intermediate consolidated messages WITH timestamp_ms AND model_call_id → skip (same text as delta, duplicates)
-        //   3. Final consolidated message WITHOUT timestamp_ms                → skip (same text as all deltas combined)
         const rawMsg = msg as unknown as Record<string, unknown>;
-        if (!rawMsg.timestamp_ms || rawMsg.model_call_id) {
-          if (process.env.CURSOR_AGENT_RAW_LOG === '1') {
-            const reason = !rawMsg.timestamp_ms ? 'no timestamp_ms' : 'has model_call_id';
-            try { appendFileSync(process.env.CURSOR_AGENT_RAW_LOG_FILE ?? '/tmp/cursor-agent-raw.log', `[assistant SKIPPED] ${reason}\n`); } catch { /* ignore */ }
-          }
-          break;
-        }
         const content = msg.message?.content;
         const blocks = Array.isArray(content) ? content : content && typeof content === 'object' ? [content] : [];
         for (const block of blocks) {
@@ -113,6 +103,7 @@ export class CursorMessageParser {
             if (process.env.CURSOR_AGENT_RAW_LOG === '1') {
               try { appendFileSync(process.env.CURSOR_AGENT_RAW_LOG_FILE ?? '/tmp/cursor-agent-raw.log', `[assistant delta] len=${text.length} text=${JSON.stringify(text.slice(0, 200))}\n`); } catch { /* ignore */ }
             }
+            this.sawAssistantText = true;
             results.push({ type: 'text_delta', text });
           }
         }
@@ -124,7 +115,14 @@ export class CursorMessageParser {
         if (!tc) break;
 
         if (tc.shellToolCall) {
-          const command = tc.shellToolCall.args?.command || '';
+          const shellArgs = tc.shellToolCall.args as Record<string, unknown> | undefined ?? {};
+          const command = typeof shellArgs.command === 'string' ? shellArgs.command : '';
+          const description =
+            typeof msg.description === 'string' && msg.description.trim().length > 0
+              ? msg.description
+              : typeof shellArgs.description === 'string' && shellArgs.description.trim().length > 0
+              ? shellArgs.description
+              : undefined;
           const key = this.toolKey('CursorBash', { command });
           if (msg.subtype === 'started') {
             const callId = this.pushCallId(key);
@@ -133,6 +131,7 @@ export class CursorMessageParser {
               toolName: 'CursorBash',
               args: { command },
               callId,
+              description,
             });
           } else if (msg.subtype === 'completed') {
             const callId = this.shiftCallId(key);
@@ -160,7 +159,14 @@ export class CursorMessageParser {
         }
 
         if (tc.readToolCall) {
-          const filePath = tc.readToolCall.args?.path || '';
+          const readArgs = tc.readToolCall.args as Record<string, unknown> | undefined ?? {};
+          const filePath = typeof readArgs.path === 'string' ? readArgs.path : '';
+          const description =
+            typeof msg.description === 'string' && msg.description.trim().length > 0
+              ? msg.description
+              : typeof readArgs.description === 'string' && readArgs.description.trim().length > 0
+                ? readArgs.description
+                : undefined;
           const key = this.toolKey('CursorRead', { path: filePath });
           if (msg.subtype === 'started') {
             const callId = this.pushCallId(key);
@@ -169,6 +175,7 @@ export class CursorMessageParser {
               toolName: 'CursorRead',
               args: { path: filePath },
               callId,
+              description,
             });
           } else if (msg.subtype === 'completed') {
             const callId = this.shiftCallId(key);
@@ -192,7 +199,14 @@ export class CursorMessageParser {
         }
 
         if (tc.writeToolCall) {
-          const filePath = tc.writeToolCall.args?.path || '';
+          const writeArgs = tc.writeToolCall.args as Record<string, unknown> | undefined ?? {};
+          const filePath = typeof writeArgs.path === 'string' ? writeArgs.path : '';
+          const description =
+            typeof msg.description === 'string' && msg.description.trim().length > 0
+              ? msg.description
+              : typeof writeArgs.description === 'string' && writeArgs.description.trim().length > 0
+                ? writeArgs.description
+                : undefined;
           const key = this.toolKey('CursorWrite', { path: filePath });
           if (msg.subtype === 'started') {
             const callId = this.pushCallId(key);
@@ -201,6 +215,7 @@ export class CursorMessageParser {
               toolName: 'CursorWrite',
               args: { path: filePath },
               callId,
+              description,
             });
           } else if (msg.subtype === 'completed') {
             const callId = this.shiftCallId(key);
@@ -224,7 +239,13 @@ export class CursorMessageParser {
         }
 
         if (tc.editToolCall) {
-          const args = tc.editToolCall.args || {};
+          const args = (tc.editToolCall.args as Record<string, unknown> | undefined) || {};
+          const description =
+            typeof msg.description === 'string' && msg.description.trim().length > 0
+              ? msg.description
+              : typeof args.description === 'string' && args.description.trim().length > 0
+                ? args.description
+                : undefined;
           const key = this.toolKey('CursorEdit', args);
           if (msg.subtype === 'started') {
             const callId = this.pushCallId(key);
@@ -233,6 +254,7 @@ export class CursorMessageParser {
               toolName: 'CursorEdit',
               args,
               callId,
+              description,
             });
           } else if (msg.subtype === 'completed') {
             const callId = this.shiftCallId(key);
@@ -258,6 +280,9 @@ export class CursorMessageParser {
       }
 
       case 'result': {
+        if (!this.sawAssistantText && typeof msg.result === 'string' && msg.result.trim().length > 0) {
+          results.push({ type: 'text_delta', text: msg.result });
+        }
         results.push({
           type: 'task_complete',
           sessionId: msg.session_id,
@@ -285,6 +310,7 @@ export class CursorMessageParser {
    */
   clear(): void {
     this.pendingByKey.clear();
+    this.sawAssistantText = false;
   }
 }
 
