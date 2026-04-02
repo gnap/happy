@@ -378,7 +378,8 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     private static readonly MAX_OUTBOX_BATCH_SIZE = 50;
-    private static readonly FLUSH_RETRY_STATUSES = [502, 503, 504];
+    // 404 is included: /v3/sessions/{id}/messages can transiently 404 during server deploys/routing issues
+    private static readonly FLUSH_RETRY_STATUSES = [404, 502, 503, 504];
     private static readonly FLUSH_RETRY_MAX = 3;
     private static readonly FLUSH_RETRY_BASE_MS = 1000;
 
@@ -421,6 +422,7 @@ export class ApiSessionClient extends EventEmitter {
                     if (!isRetryable || attempt === ApiSessionClient.FLUSH_RETRY_MAX) {
                         const data = axios.isAxiosError(error) ? error.response?.data : undefined;
                         logger.debug('[API] flushOutbox failed', { sessionId: this.sessionId, batchLength: batch.length, status, data, error });
+                        logger.warn(`[API] Failed to send ${batch.length} reply message(s) to server (will retry). Check network and server.`, { status, sessionId: this.sessionId });
                         throw error;
                     }
                     logger.debug('[API] flushOutbox retryable error', { status, attempt: attempt + 1, maxRetries: ApiSessionClient.FLUSH_RETRY_MAX });
