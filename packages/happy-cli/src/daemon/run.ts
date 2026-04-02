@@ -464,7 +464,7 @@ export async function startDaemon(): Promise<void> {
           // Explicitly exclude HAPPY_CURSOR_SESSION_TAG so daemon's inherited tag
           // does not pollute new sessions; only extraEnv may set it (for respawn).
           for (const [key, value] of Object.entries(process.env)) {
-            if (value !== undefined && key !== 'HAPPY_CURSOR_SESSION_TAG') {
+            if (value !== undefined) {
               tmuxEnv[key] = value;
             }
           }
