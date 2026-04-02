@@ -19,7 +19,7 @@ import packageJson from '../../package.json';
 /**
  * Backend flavor identifier for session metadata.
  */
-export type BackendFlavor = 'claude' | 'codex' | 'gemini' | 'opencode' | 'openclaw' | 'acp';
+export type BackendFlavor = 'claude' | 'codex' | 'gemini' | 'cursor' | 'opencode' | 'openclaw' | 'acp';
 
 /**
  * Options for creating session metadata.
@@ -31,6 +31,8 @@ export interface CreateSessionMetadataOptions {
     machineId: string;
     /** How the session was started */
     startedBy?: 'daemon' | 'terminal';
+    /** Workspace path (agent cwd); defaults to process.cwd() when not set */
+    path?: string;
     /** Active sandbox config for the session, or undefined when not used */
     sandbox?: SandboxConfig;
     /** Whether the backend runs with "dangerously skip permissions" behavior */
@@ -73,7 +75,7 @@ export function createSessionMetadata(opts: CreateSessionMetadataOptions): Sessi
     };
 
     const metadata: Metadata = {
-        path: process.cwd(),
+        path: opts.path !== undefined ? resolve(opts.path) : process.cwd(),
         host: os.hostname(),
         version: packageJson.version,
         os: os.platform(),

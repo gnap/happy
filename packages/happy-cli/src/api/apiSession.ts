@@ -97,7 +97,7 @@ export class ApiSessionClient extends EventEmitter {
         startedSubagents: new Set<string>(),
         activeSubagents: new Set<string>(),
     };
-    private lastSeq = 0;
+    private lastSeq: number;
     private pendingOutbox: Array<{ content: string; localId: string }> = [];
     private readonly sendSync: InvalidateSync;
     private readonly receiveSync: InvalidateSync;
@@ -112,6 +112,7 @@ export class ApiSessionClient extends EventEmitter {
         this.agentStateVersion = session.agentStateVersion;
         this.encryptionKey = session.encryptionKey;
         this.encryptionVariant = session.encryptionVariant;
+        this.lastSeq = session.seq ?? 0;
         this.sendSync = new InvalidateSync(() => this.flushOutbox());
         this.receiveSync = new InvalidateSync(() => this.fetchMessages());
 
@@ -122,7 +123,8 @@ export class ApiSessionClient extends EventEmitter {
             encryptionVariant: this.encryptionVariant,
             logger: (msg, data) => logger.debug(msg, data)
         });
-        registerCommonHandlers(this.rpcHandlerManager, this.metadata.path);
+        const workingDir = this.metadata?.path ?? process.cwd();
+        registerCommonHandlers(this.rpcHandlerManager, workingDir);
 
         //
         // Create socket
@@ -165,7 +167,11 @@ export class ApiSessionClient extends EventEmitter {
         })
 
         this.socket.on('connect_error', (error) => {
-            logger.debug('[API] Socket connection error:', error);
+            const msg = error?.message ?? String(error);
+            logger.debug('[API] Socket connection error:', msg);
+            if (msg && msg.length < 200) {
+                logger.debug('[API] If running remotely (SSH/devcontainer), ensure outbound HTTPS/WSS to server is allowed. Using HTTP fallback for messages.');
+            }
             this.rpcHandlerManager.onSocketDisconnect();
         })
 
@@ -181,18 +187,26 @@ export class ApiSessionClient extends EventEmitter {
 
                 if (data.body.t === 'new-message') {
                     const messageSeq = data.body.message?.seq;
-                    if (this.lastSeq === 0) {
-                        this.receiveSync.invalidate();
+                    const isEncrypted = data.body.message?.content?.t === 'encrypted';
+                    const acceptSeq = typeof messageSeq === 'number' && (this.lastSeq === 0 || messageSeq === this.lastSeq + 1);
+                    if (isEncrypted && acceptSeq) {
+                        const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.message.content.c));
+                        logger.debugLargeJson('[SOCKET] [UPDATE] Received update:', body);
+                        this.routeIncomingMessage(body);
+                        this.lastSeq = messageSeq;
                         return;
                     }
-                    if (typeof messageSeq !== 'number' || messageSeq !== this.lastSeq + 1 || data.body.message.content.t !== 'encrypted') {
-                        this.receiveSync.invalidate();
-                        return;
+                    if (!acceptSeq) {
+                        logger.debug('[API] new-message skipped (seq mismatch or missing seq), will fetch via HTTP', {
+                            messageSeq,
+                            lastSeq: this.lastSeq,
+                            expectedNext: this.lastSeq + 1,
+                        });
+                    } else if (!isEncrypted) {
+                        logger.debug('[API] new-message skipped (content not encrypted), will fetch via HTTP');
                     }
-                    const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.message.content.c));
-                    logger.debugLargeJson('[SOCKET] [UPDATE] Received update:', body)
-                    this.routeIncomingMessage(body);
-                    this.lastSeq = messageSeq;
+                    this.receiveSync.invalidate();
+                    return;
                 } else if (data.body.t === 'update-session') {
                     if (data.body.metadata && data.body.metadata.version > this.metadataVersion) {
                         this.metadata = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.metadata.value));
@@ -243,6 +257,7 @@ export class ApiSessionClient extends EventEmitter {
     private routeIncomingMessage(message: unknown) {
         const userResult = UserMessageSchema.safeParse(message);
         if (userResult.success) {
+            logger.debug('[API] User message from app received, routing to CLI');
             if (this.pendingMessageCallback) {
                 this.pendingMessageCallback(userResult.data);
             } else {
@@ -250,7 +265,47 @@ export class ApiSessionClient extends EventEmitter {
             }
             return;
         }
+        // Relaxed fallback: if it looks like a user text message (e.g. app sends content.type !== 'text'), normalize and route
+        const relaxed = this.normalizeToUserMessage(message);
+        if (relaxed) {
+            logger.debug('[API] User message from app received (relaxed parse), routing to CLI');
+            if (this.pendingMessageCallback) {
+                this.pendingMessageCallback(relaxed);
+            } else {
+                this.pendingMessages.push(relaxed);
+            }
+            return;
+        }
+        // Message from app didn't match UserMessageSchema - CLI won't show reply flow; log for debugging
+        logger.debug('[API] Incoming message not parsed as user message (no reply will be triggered)', {
+            parseError: userResult.error?.message,
+            receivedKeys: message && typeof message === 'object' ? Object.keys(message as object) : [],
+            contentType: message && typeof message === 'object' && (message as any).content ? (message as any).content?.type : undefined,
+        });
         this.emit('message', message);
+    }
+
+    /** Normalize app payload to UserMessage when strict schema fails (e.g. content.type is 'input' or missing). */
+    private normalizeToUserMessage(raw: unknown): UserMessage | null {
+        if (!raw || typeof raw !== 'object') return null;
+        const o = raw as Record<string, unknown>;
+        if (o.role !== 'user') return null;
+        const content = o.content;
+        if (!content || typeof content !== 'object') return null;
+        const c = content as Record<string, unknown>;
+        const text = typeof c.text === 'string' ? c.text : undefined;
+        if (text === undefined) return null;
+        return {
+            role: 'user',
+            content: { type: 'text', text },
+            localKey: typeof o.localKey === 'string' ? o.localKey : undefined,
+            meta: o.meta && typeof o.meta === 'object' ? (o.meta as UserMessage['meta']) : undefined,
+        };
+    }
+
+    /** For debugging: whether the real-time socket to the server is connected (vs HTTP fallback polling). */
+    isSocketConnected(): boolean {
+        return this.socket?.connected === true;
     }
 
     private async fetchMessages() {
@@ -309,6 +364,9 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     private static readonly MAX_OUTBOX_BATCH_SIZE = 50;
+    private static readonly FLUSH_RETRY_STATUSES = [502, 503, 504];
+    private static readonly FLUSH_RETRY_MAX = 3;
+    private static readonly FLUSH_RETRY_BASE_MS = 1000;
 
     private async flushOutbox() {
         // Send latest messages first so the user sees recent activity immediately,
@@ -317,22 +375,42 @@ export class ApiSessionClient extends EventEmitter {
             const batchSize = Math.min(this.pendingOutbox.length, ApiSessionClient.MAX_OUTBOX_BATCH_SIZE);
             const batch = this.pendingOutbox.splice(-batchSize, batchSize);
 
-            const response = await axios.post<V3PostSessionMessagesResponse>(
-                `${configuration.serverUrl}/v3/sessions/${encodeURIComponent(this.sessionId)}/messages`,
-                {
-                    messages: batch
-                },
-                {
-                    headers: this.authHeaders(),
-                    timeout: 60000
-                }
-            );
+            for (let attempt = 0; attempt <= ApiSessionClient.FLUSH_RETRY_MAX; attempt++) {
+                try {
+                    if (attempt > 0) {
+                        const delayMs = ApiSessionClient.FLUSH_RETRY_BASE_MS * Math.pow(2, attempt - 1);
+                        logger.debug(`[API] flushOutbox retry ${attempt}/${ApiSessionClient.FLUSH_RETRY_MAX} after ${delayMs}ms`);
+                        await new Promise((r) => setTimeout(r, delayMs));
+                    }
+                    const response = await axios.post<V3PostSessionMessagesResponse>(
+                        `${configuration.serverUrl}/v3/sessions/${encodeURIComponent(this.sessionId)}/messages`,
+                        {
+                            messages: batch
+                        },
+                        {
+                            headers: this.authHeaders(),
+                            timeout: 60000,
+                        }
+                    );
 
-            const messages = Array.isArray(response.data.messages) ? response.data.messages : [];
-            const maxSeq = messages.reduce((acc, message) => (
-                message.seq > acc ? message.seq : acc
-            ), this.lastSeq);
-            this.lastSeq = maxSeq;
+                    const messages = Array.isArray(response.data.messages) ? response.data.messages : [];
+                    const maxSeq = messages.reduce((acc, message) => (
+                        message.seq > acc ? message.seq : acc
+                    ), this.lastSeq);
+                    this.lastSeq = maxSeq;
+                    logger.debug(`[API] flushOutbox: sent ${batch.length} message(s) to server (replies visible in app)`);
+                    break;
+                } catch (error: unknown) {
+                    const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+                    const isRetryable = status !== undefined && ApiSessionClient.FLUSH_RETRY_STATUSES.includes(status);
+                    if (!isRetryable || attempt === ApiSessionClient.FLUSH_RETRY_MAX) {
+                        const data = axios.isAxiosError(error) ? error.response?.data : undefined;
+                        logger.debug('[API] flushOutbox failed', { sessionId: this.sessionId, batchLength: batch.length, status, data, error });
+                        throw error;
+                    }
+                    logger.debug('[API] flushOutbox retryable error', { status, attempt: attempt + 1, maxRetries: ApiSessionClient.FLUSH_RETRY_MAX });
+                }
+            }
         }
     }
 
@@ -351,7 +429,7 @@ export class ApiSessionClient extends EventEmitter {
      * Send message to session
      * @param body - Message body (can be MessageContent or raw content for agent messages)
      */
-    sendClaudeSessionMessage(body: RawJSONLines) {
+    sendClaudeSessionMessage(body: RawJSONLines): void | Promise<void> {
         const mapped = mapClaudeLogMessageToSessionEnvelopes(body, this.claudeSessionProtocolState);
         this.claudeSessionProtocolState.currentTurnId = mapped.currentTurnId;
         for (const envelope of mapped.envelopes) {
@@ -366,9 +444,9 @@ export class ApiSessionClient extends EventEmitter {
             }
         }
 
-        // Update metadata with summary if this is a summary message
+        // Update metadata with summary if this is a summary message (await so change_title can report failure)
         if (body.type === 'summary' && 'summary' in body && 'leafUuid' in body) {
-            this.updateMetadata((metadata) => ({
+            return this.updateMetadata((metadata) => ({
                 ...metadata,
                 summary: {
                     text: body.summary,
@@ -427,13 +505,28 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     /**
+     * Send a turn-end (or turn-start) session envelope in the shape the app expects for
+     * lifecycle/thinking timer: content.content.type === 'session' and content.content.data.ev.t.
+     * Use this only for turn-end/turn-start so the mobile app stops the timer; other session
+     * messages keep the normal envelope shape.
+     */
+    sendSessionLifecycleEnvelope(envelope: SessionEnvelope) {
+        const content = {
+            role: 'session',
+            content: { type: 'session', data: envelope },
+            meta: { sentFrom: 'cli' },
+        };
+        this.enqueueMessage(content);
+    }
+
+    /**
      * Send a generic agent message to the session using ACP (Agent Communication Protocol) format.
      * Works for any agent type (Gemini, Codex, Claude, etc.) - CLI normalizes to unified ACP format.
      * 
      * @param provider - The agent provider sending the message (e.g., 'gemini', 'codex', 'claude')
      * @param body - The message payload (type: 'message' | 'reasoning' | 'tool-call' | 'tool-result')
      */
-    sendAgentMessage(provider: 'gemini' | 'codex' | 'claude' | 'opencode' | 'openclaw', body: ACPMessageData) {
+    sendAgentMessage(provider: 'gemini' | 'codex' | 'claude' | 'cursor' | 'opencode' | 'openclaw' | 'acp', body: ACPMessageData) {
         let content = {
             role: 'agent',
             content: {
@@ -534,8 +627,11 @@ export class ApiSessionClient extends EventEmitter {
      * Update session metadata
      * @param handler - Handler function that returns the updated metadata
      */
-    updateMetadata(handler: (metadata: Metadata) => Metadata) {
-        this.metadataLock.inLock(async () => {
+    updateMetadata(handler: (metadata: Metadata) => Metadata): Promise<void> {
+        return this.metadataLock.inLock(async () => {
+            if (!this.socket.connected) {
+                throw new Error('Session real-time disconnected; title update requires WebSocket (check network / HAPPY_SERVER_URL)');
+            }
             await backoff(async () => {
                 let updated = handler(this.metadata!); // Weird state if metadata is null - should never happen but here we are
                 const answer = await this.socket.emitWithAck('update-metadata', { sid: this.sessionId, expectedVersion: this.metadataVersion, metadata: encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, updated)) });
@@ -549,7 +645,7 @@ export class ApiSessionClient extends EventEmitter {
                     }
                     throw new Error('Metadata version mismatch');
                 } else if (answer.result === 'error') {
-                    // Hard error - ignore
+                    throw new Error('Server rejected metadata update');
                 }
             });
         });
