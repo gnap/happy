@@ -47,7 +47,25 @@ import type { PermissionMode } from '@/api/types';
  * because the mobile app has dedicated handling for codex messages.
  */
 
-import { createEnvelope } from '@slopus/happy-wire';
+import { createEnvelope, type SessionEvent } from '@slopus/happy-wire';
+
+/**
+ * Convert tool result to App output-format shape: content must be string (or array of { type, text }).
+ * App schema does not accept object (e.g. { stdout, exitCode }); non-zero exitCode is treated as error.
+ */
+function toolResultForOutputFormat(result: unknown, isError: boolean): { content: string; is_error: boolean } {
+  if (typeof result === 'string') return { content: result, is_error: isError };
+  if (result && typeof result === 'object') {
+    const o = result as Record<string, unknown>;
+    if (typeof o.stdout === 'string') {
+      const exitCode = typeof o.exitCode === 'number' ? o.exitCode : 0;
+      return { content: o.stdout, is_error: isError || exitCode !== 0 };
+    }
+    if (typeof o.message === 'string') return { content: o.message, is_error: isError };
+    if (typeof o.stderr === 'string' && isError) return { content: o.stderr, is_error: true };
+  }
+  return { content: JSON.stringify(result ?? ''), is_error: isError };
+}
 import { createId } from '@paralleldrive/cuid2';
 import { CursorProcess } from './cursorProcess';
 import { CursorMessageParser, type CursorParsedMessage } from './cursorMessageParser';
@@ -777,7 +795,9 @@ export async function runCursor(opts: {
               session.sendCodexMessage(resultPayload);
               session.sendCursorMessage(resultPayload);
               // New App: session only gets tool-call-end; result is in tool card (no t:'text' for tool result)
-              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId }, { turn: turnId }));
+              const lazyResult = session.maybeLazyEncodeResult(msg.toolName, msg.callId, msg.result) as string | Record<string, unknown>;
+              logger.debug(`[cursor] tool-call-result callId=${msg.callId.slice(0, 8)}... success=${msg.success}`);
+              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId, result: lazyResult } as SessionEvent, { turn: turnId }));
               break;
 
             case 'task_complete':

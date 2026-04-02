@@ -164,7 +164,7 @@ export class AcpSessionManager {
       const call = this.ensureSessionCallId(msg.callId);
       return [
         ...flushed,
-        createEnvelope('agent', { t: 'tool-call-end', call }, turnOptions(this.currentTurnId, this.nextTime())),
+        createEnvelope('agent', { t: 'tool-call-end', call, result: msg.result } as SessionEvent, turnOptions(this.currentTurnId, this.nextTime())),
       ];
     }
 
