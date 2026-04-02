@@ -652,9 +652,12 @@ export async function startDaemon(): Promise<void> {
       pidToTrackedSession.set(happyProcess.pid, trackedSession);
 
       happyProcess.on('exit', (code, signal) => {
-        logger.debug(`[DAEMON RUN] Child PID ${happyProcess.pid} exited with code ${code}, signal ${signal}`);
+        const session = pidToTrackedSession.get(happyProcess.pid!);
+        const sessionId = session?.happySessionId ?? 'unknown';
+        const duration = session?.spawnTime ? Math.round((Date.now() - session.spawnTime) / 1000) : null;
+        logger.debug(`[DAEMON RUN] Child PID ${happyProcess.pid} (session ${sessionId}) exited: code=${code} signal=${signal}${duration !== null ? ` after ${duration}s` : ''}`);
         if (happyProcess.pid) {
-          onChildExited(happyProcess.pid);
+          onChildExited(happyProcess.pid, code, signal);
         }
       });
 
