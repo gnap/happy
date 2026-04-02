@@ -82,6 +82,11 @@ export class CursorMessageParser {
         break;
       }
 
+      case 'user': {
+        // cursor-agent may emit a startup/user placeholder event; it carries no actionable content.
+        break;
+      }
+
       case 'assistant': {
         const content = msg.message?.content;
         if (Array.isArray(content)) {
