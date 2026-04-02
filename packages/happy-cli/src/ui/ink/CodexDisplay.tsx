@@ -115,7 +115,7 @@ export const CodexDisplay: React.FC<CodexDisplayProps> = ({ messageBuffer, logPa
                 overflow="hidden"
             >
                 <Box flexDirection="column" marginBottom={1}>
-                    <Text color="gray" bold>🤖 Codex Agent Messages</Text>
+                    <Text color="gray" bold>🤖 {agentLabel} Agent Messages</Text>
                     <Text color="gray" dimColor>{'─'.repeat(Math.min(terminalWidth - 4, 60))}</Text>
                 </Box>
                 
