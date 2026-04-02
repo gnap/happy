@@ -201,29 +201,49 @@ export async function runCursor(opts: {
   const workspacePathFile = join(configuration.happyHomeDir, CURSOR_SESSION_WORKSPACE_FILE);
   let sessionTag: string;
   let tagReused = false;
-  const explicitResumeTag = opts.resumeSessionTag?.trim() || null;
-  if (explicitResumeTag) {
-    sessionTag = explicitResumeTag;
-    tagReused = true;
-    logger.debug(`[cursor] Using session tag from CLI arg (--resume-session-tag): ${sessionTag.slice(0, 8)}...`);
-  } else if (opts.resumeSession) {
-    let savedTag: string | null = null;
-    let savedWorkspace: string | null = null;
-    try {
-      if (existsSync(tagPath)) savedTag = readFileSync(tagPath, 'utf8').trim() || null;
-      if (existsSync(workspacePathFile)) savedWorkspace = readFileSync(workspacePathFile, 'utf8').trim() || null;
-    } catch {
-      /* ignore */
-    }
-    const sameWorkspace = savedWorkspace != null && resolve(savedWorkspace) === resolve(workspacePath);
-    if (savedTag && sameWorkspace) {
-      sessionTag = savedTag;
-      tagReused = true;
-    } else {
-      sessionTag = randomUUID();
-    }
-  } else {
+  if (process.env.HAPPY_CURSOR_NEW_SESSION === '1') {
     sessionTag = randomUUID();
+  } else {
+    const explicitResumeTag = opts.resumeSessionTag?.trim() || null;
+    if (explicitResumeTag) {
+      sessionTag = explicitResumeTag;
+      tagReused = true;
+      logger.debug(`[cursor] Using session tag from CLI arg (--resume-session-tag): ${sessionTag.slice(0, 8)}...`);
+    } else if (opts.resumeSession) {
+      let savedTag: string | null = null;
+      let savedWorkspace: string | null = null;
+      try {
+        if (existsSync(tagPath)) savedTag = readFileSync(tagPath, 'utf8').trim() || null;
+        if (existsSync(workspacePathFile)) savedWorkspace = readFileSync(workspacePathFile, 'utf8').trim() || null;
+      } catch {
+        /* ignore */
+      }
+      const sameWorkspace = savedWorkspace != null && resolve(savedWorkspace) === resolve(workspacePath);
+      if (savedTag && sameWorkspace) {
+        sessionTag = savedTag;
+        tagReused = true;
+        logger.debug(`[cursor] Reusing saved session tag: ${sessionTag.slice(0, 8)}...`);
+      } else {
+        sessionTag = randomUUID();
+      }
+    } else {
+      let savedTag: string | null = null;
+      let savedWorkspace: string | null = null;
+      try {
+        if (existsSync(tagPath)) savedTag = readFileSync(tagPath, 'utf8').trim() || null;
+        if (existsSync(workspacePathFile)) savedWorkspace = readFileSync(workspacePathFile, 'utf8').trim() || null;
+      } catch {
+        /* ignore */
+      }
+      const sameWorkspace = savedWorkspace != null && resolve(savedWorkspace) === resolve(workspacePath);
+      if (savedTag && sameWorkspace) {
+        sessionTag = savedTag;
+        tagReused = true;
+        logger.debug(`[cursor] Reusing saved session tag: ${sessionTag.slice(0, 8)}...`);
+      } else {
+        sessionTag = randomUUID();
+      }
+    }
   }
 
   // Load existing encryption key when reusing session to avoid key mismatch
