@@ -457,7 +457,25 @@ export function handleToolCallUpdate(
       logger.debug(`[AcpBackend] Tool call ${toolCallId} already tracked, status: ${status}`);
     }
   } else if (status === 'completed') {
-    completeToolCall(toolCallId, toolKind, update.content, ctx);
+    // cursor-agent ACP sends result in rawOutput; fall back to content for other agents
+    let result: unknown = update.rawOutput !== undefined ? update.rawOutput : update.content;
+    // cursor-agent ACP edit tool returns content as [{type:"diff", path, oldText, newText}].
+    // Normalize to a flat object so formatToolResult and maybeLazyEncodeResult can process it.
+    if (Array.isArray(result) && (toolKind === 'CursorEdit' || toolKind === 'edit')) {
+      const diffItem = (result as Array<unknown>).find(
+        (item): item is Record<string, unknown> =>
+          item !== null && typeof item === 'object' &&
+          (item as Record<string, unknown>)['type'] === 'diff',
+      );
+      if (diffItem) {
+        result = {
+          path: typeof diffItem['path'] === 'string' ? diffItem['path'] : '',
+          beforeFullFileContent: typeof diffItem['oldText'] === 'string' ? diffItem['oldText'] : '',
+          afterFullFileContent: typeof diffItem['newText'] === 'string' ? diffItem['newText'] : '',
+        };
+      }
+    }
+    completeToolCall(toolCallId, toolKind, result, ctx);
   } else if (status === 'failed' || status === 'cancelled') {
     failToolCall(toolCallId, status, toolKind, update.content, ctx);
   }

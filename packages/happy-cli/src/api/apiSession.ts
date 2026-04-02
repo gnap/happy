@@ -507,6 +507,14 @@ export class ApiSessionClient extends EventEmitter {
         this.sendCodexMessage(body);
     }
 
+    /**
+     * Encode tool results lazily when needed.
+     * Current cursor-acp flow already normalizes edit payloads upstream, so this is a pass-through.
+     */
+    maybeLazyEncodeResult(_toolName: string, _callId: string, result: unknown): unknown {
+        return result;
+    }
+
     private enqueueSessionProtocolEnvelope(envelope: SessionEnvelope, invalidate: boolean = true) {
         const content = {
             role: 'session',
