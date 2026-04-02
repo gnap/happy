@@ -15,12 +15,16 @@ export function startDaemonControlServer({
   getChildren,
   stopSession,
   spawnSession,
+  restartSession,
+  archiveSession,
   requestShutdown,
   onHappySessionWebhook
 }: {
   getChildren: () => TrackedSession[];
   stopSession: (sessionId: string) => boolean;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
+  restartSession: (sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
+  archiveSession: (sessionId: string) => boolean;
   requestShutdown: () => void;
   onHappySessionWebhook: (sessionId: string, metadata: Metadata) => void;
 }): Promise<{ port: number; stop: () => Promise<void> }> {
@@ -100,6 +104,47 @@ export function startDaemonControlServer({
 
       logger.debug(`[CONTROL SERVER] Stop session request: ${sessionId}`);
       const success = stopSession(sessionId);
+      return { success };
+    });
+
+    // Restart specific session
+    typed.post('/restart-session', {
+      schema: {
+        body: z.object({
+          sessionId: z.string()
+        }),
+        response: {
+          200: z.object({
+            success: z.boolean(),
+            newSessionId: z.string().optional(),
+            error: z.string().optional()
+          })
+        }
+      }
+    }, async (request) => {
+      const { sessionId } = request.body;
+
+      logger.debug(`[CONTROL SERVER] Restart session request: ${sessionId}`);
+      return await restartSession(sessionId);
+    });
+
+    // Archive specific stopped session
+    typed.post('/archive-session', {
+      schema: {
+        body: z.object({
+          sessionId: z.string()
+        }),
+        response: {
+          200: z.object({
+            success: z.boolean()
+          })
+        }
+      }
+    }, async (request) => {
+      const { sessionId } = request.body;
+
+      logger.debug(`[CONTROL SERVER] Archive session request: ${sessionId}`);
+      const success = archiveSession(sessionId);
       return { success };
     });
 

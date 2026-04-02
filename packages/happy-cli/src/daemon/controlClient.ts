@@ -118,6 +118,18 @@ export async function archiveDaemonSession(sessionId: string): Promise<boolean> 
   const result = await daemonPost('/archive-session', { sessionId });
   return result.success || false;
 }
+
+export async function restartDaemonSession(sessionId: string): Promise<{ success: boolean; newSessionId?: string; error?: string }> {
+  const result = await daemonPost('/restart-session', { sessionId });
+  if (result.error) return { success: false, error: result.error };
+  if (result.success) {
+    return {
+      success: true,
+      newSessionId: result.newSessionId,
+    };
+  }
+  return { success: false, error: (result as any).error ?? 'Restart failed' };
+}
 export async function stopDaemonHttp(): Promise<void> {
   await daemonPost('/stop');
 }

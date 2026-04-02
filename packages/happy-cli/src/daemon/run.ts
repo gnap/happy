@@ -294,8 +294,7 @@ export async function startDaemon(): Promise<void> {
     const spawnSession = async (options: SpawnSessionOptions): Promise<SpawnSessionResult> => {
       logger.debugLargeJson('[DAEMON RUN] Spawning session', options);
 
-      const { directory, sessionId, machineId, approvedNewDirectoryCreation = true } = options;
-      const explicitResumeSessionTag = options.resumeSessionTag;
+      const { directory, sessionId, machineId, approvedNewDirectoryCreation = true, resumeSessionTag: explicitResumeSessionTag } = options;
       let directoryCreated = false;
 
       try {
@@ -438,7 +437,7 @@ export async function startDaemon(): Promise<void> {
 
           // Construct command for the CLI
           const cliPath = join(projectPath(), 'dist', 'index.mjs');
-          // Determine agent command - support claude, codex, cursor, gemini, cursor-acp, acp-cursor, and openclaw.
+          // Determine agent command - support claude, codex, gemini, cursor, cursor-acp, acp-cursor
           const agent = options.agent === 'gemini'
             ? 'gemini'
             : options.agent === 'codex'
@@ -450,7 +449,8 @@ export async function startDaemon(): Promise<void> {
                   : options.agent === 'openclaw'
                     ? 'openclaw'
                     : 'claude';
-          const fullCommand = `node --no-warnings --no-deprecation ${cliPath} ${agent} --happy-starting-mode remote --started-by daemon`;
+          const resumeArg = shouldPassResumeSessionTag && resumeSessionTag ? ` --resume-session-tag ${JSON.stringify(resumeSessionTag)}` : '';
+          const fullCommand = `node --no-warnings --no-deprecation ${cliPath} ${agent} --happy-starting-mode remote --started-by daemon${resumeArg}`;
 
           // Spawn in tmux with environment variables
           // IMPORTANT: Pass complete environment (process.env + extraEnv) because:
@@ -461,8 +461,6 @@ export async function startDaemon(): Promise<void> {
           const tmuxEnv: Record<string, string> = {};
 
           // Add all daemon environment variables (filtering out undefined)
-          // Explicitly exclude HAPPY_CURSOR_SESSION_TAG so daemon's inherited tag
-          // does not pollute new sessions; only extraEnv may set it (for respawn).
           for (const [key, value] of Object.entries(process.env)) {
             if (value !== undefined) {
               tmuxEnv[key] = value;
@@ -568,8 +566,10 @@ export async function startDaemon(): Promise<void> {
             '--happy-starting-mode', 'remote',
             '--started-by', 'daemon'
           ];
-
           const { HAPPY_CURSOR_SESSION_TAG: _stripTag, ...baseEnv } = process.env;
+          if (shouldPassResumeSessionTag && resumeSessionTag) {
+            args.push('--resume-session-tag', resumeSessionTag);
+          }
           return spawnTrackedHappyProcess({
             args,
             cwd: directory,
@@ -804,11 +804,88 @@ export async function startDaemon(): Promise<void> {
       pidToTrackedSession.delete(pid);
     };
 
+    /** Remove a stopped session from the visible list (explicit user action). */
+    const archiveSession = (sessionId: string): boolean => {
+      let removed = stoppedSessions.delete(sessionId);
+      if (removed) {
+        logger.debug(`[DAEMON RUN] Archived session ${sessionId}`);
+      }
+      // Also handle the edge case where it's still in active tracking (e.g. archive while running)
+      for (const [pid, session] of pidToTrackedSession.entries()) {
+        if (session.happySessionId === sessionId) {
+          pidToTrackedSession.delete(pid);
+          logger.debug(`[DAEMON RUN] Archived active session ${sessionId} (PID ${pid})`);
+          removed = true;
+          break;
+        }
+      }
+      if (removed) persistNow();
+      return removed;
+    };
+
+    // Restart a session: kill existing process and spawn a new one reconnecting to the same server session
+    const restartSession = async (sessionId: string): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
+      logger.debug(`[DAEMON RUN] Restart session: ${sessionId}`);
+
+      // Find in active sessions first, then stoppedSessions, then recently-exited ring buffer
+      let found: TrackedSession | undefined;
+      for (const session of pidToTrackedSession.values()) {
+        if (session.happySessionId === sessionId) { found = session; break; }
+      }
+      if (!found) {
+        found = stoppedSessions.get(sessionId);
+        if (found) logger.debug(`[DAEMON RUN] Restart: session ${sessionId} found in stoppedSessions`);
+      }
+      if (!found) {
+        found = recentlyExited.slice().reverse().find((s: TrackedSession) => s.happySessionId === sessionId);
+        if (found) {
+          logger.debug(`[DAEMON RUN] Restart: session ${sessionId} found in recentlyExited (exitReason: ${found.exitReason ?? 'unknown'})`);
+        }
+      }
+
+      if (!found) {
+        logger.debug(`[DAEMON RUN] Restart: session ${sessionId} not found`);
+        return { success: false, error: 'Session not found' };
+      }
+
+      if (!found.directory) {
+        logger.debug(`[DAEMON RUN] Restart: session ${sessionId} has no directory`);
+        return { success: false, error: 'Session directory unknown (session may predate restart support)' };
+      }
+
+      const { directory, agent } = found;
+      const sessionTag = found.sessionTag ?? lastSessionTagBySessionId[sessionId] ?? lastSessionTagByDirectory[directory];
+
+      // Kill existing process if still running
+      stopSession(sessionId);
+
+      // Wait briefly for process to die
+      await new Promise((r) => setTimeout(r, 500));
+
+      // Spawn new process, reconnecting to the same server session via explicit CLI arg.
+      const result = await spawnSession({
+        directory,
+        agent,
+        resumeSessionTag: sessionTag,
+      });
+
+      if (result.type === 'success') {
+        // Remove old stopped entry — new session is live under a new ID
+        stoppedSessions.delete(sessionId);
+        logger.debug(`[DAEMON RUN] Restarted session ${sessionId} -> new session ${result.sessionId}`);
+        return { success: true, newSessionId: result.sessionId };
+      } else {
+        logger.debug(`[DAEMON RUN] Restart spawn failed:`, result);
+        return { success: false, error: result.type === 'error' ? result.errorMessage : 'Spawn failed' };
+      }
+    };
     // Start control server
     const { port: controlPort, stop: stopControlServer } = await startDaemonControlServer({
       getChildren: getCurrentChildren,
       stopSession,
       spawnSession,
+      restartSession,
+      archiveSession,
       requestShutdown: () => requestShutdown('happy-cli'),
       onHappySessionWebhook
     });
@@ -1083,7 +1160,7 @@ export async function startDaemon(): Promise<void> {
           spawnSession({
             directory,
             agent,
-            resumeSessionTag: tag ?? undefined
+            resumeSessionTag: tag ?? undefined,
           }).catch((err: unknown) => {
             logger.debug(`[DAEMON RUN] Auto-respawn failed for session ${id}:`, err);
           });

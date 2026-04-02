@@ -38,6 +38,7 @@ import { handleResumeCommand } from '@/resume/handleResumeCommand'
 
 (async () => {
   const args = process.argv.slice(2)
+  const cliStartTime = Date.now();
 
   // If --version is passed - do not log, its likely daemon inquiring about our version
   if (!args.includes('--version')) {
@@ -146,15 +147,18 @@ import { handleResumeCommand } from '@/resume/handleResumeCommand'
     try {
       const { runCursor } = await import('@/cursor/runCursor');
 
-      // Parse cursor options: --started-by, --cwd (workspace root for .cursor/mcp.json and agent cwd), --resume-session-tag
+      // Parse cursor options: --started-by, --cwd, --resume/-r, --resume-session-tag
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
       let workspaceRoot: string | undefined = process.env.HAPPY_CURSOR_WORKSPACE;
+      let resumeSession = false;
       let resumeSessionTag: string | undefined = undefined;
       for (let i = 1; i < args.length; i++) {
         if (args[i] === '--started-by') {
           startedBy = args[++i] as 'daemon' | 'terminal';
         } else if (args[i] === '--cwd' && args[i + 1]) {
           workspaceRoot = args[++i];
+        } else if (args[i] === '--resume' || args[i] === '-r') {
+          resumeSession = true;
         } else if (args[i] === '--resume-session-tag' && args[i + 1]) {
           resumeSessionTag = args[++i];
         }
@@ -177,7 +181,7 @@ import { handleResumeCommand } from '@/resume/handleResumeCommand'
         await new Promise(resolve => setTimeout(resolve, 200));
       }
 
-      await runCursor({ credentials, startedBy, workspaceRoot, resumeSessionTag });
+      await runCursor({ credentials, startedBy, workspaceRoot, resumeSession, resumeSessionTag, cliStartTime });
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
       if (process.env.DEBUG) {
@@ -422,6 +426,10 @@ import { handleResumeCommand } from '@/resume/handleResumeCommand'
           resumeSessionTag = args[++i];
           continue;
         }
+        if (!customCommandMode && args[i] === '--happy-starting-mode') {
+          i++; // consume value, not passed to cursor-agent
+          continue;
+        }
         if (!customCommandMode && args[i] === '--verbose') {
           verbose = true;
           continue;
@@ -576,6 +584,41 @@ import { handleResumeCommand } from '@/resume/handleResumeCommand'
       }
       return
 
+    } else if (daemonSubcommand === 'restart-session') {
+      const sessionId = args[2];
+      if (!sessionId) {
+        console.error('Usage: happy daemon restart-session <sessionId>')
+        process.exit(1)
+      }
+
+      try {
+        const { restartDaemonSession } = await import('./daemon/controlClient');
+        const result = await restartDaemonSession(sessionId);
+        if (result.success) {
+          console.log(`Session restarted successfully`);
+          if (result.newSessionId) console.log(`New session ID: ${result.newSessionId}`);
+          return;
+        }
+        console.error(`Failed to restart session: ${result.error ?? 'unknown error'}`);
+        process.exit(1);
+      } catch (error) {
+        console.log('No daemon running');
+      }
+      return
+    } else if (daemonSubcommand === 'archive-session') {
+      const sessionId = args[2];
+      if (!sessionId) {
+        console.error('Usage: happy daemon archive-session <sessionId>')
+        process.exit(1)
+      }
+      try {
+        const { archiveDaemonSession } = await import('./daemon/controlClient');
+        const success = await archiveDaemonSession(sessionId);
+        console.log(success ? `Session ${sessionId} archived.` : `Session ${sessionId} not found in stopped list.`)
+      } catch (error) {
+        console.log('No daemon running')
+      }
+      return
     } else if (daemonSubcommand === 'start') {
       // Spawn detached daemon process
       const child = spawnHappyCLI(['daemon', 'start-sync'], {
