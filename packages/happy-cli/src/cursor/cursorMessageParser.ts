@@ -89,14 +89,15 @@ export class CursorMessageParser {
       }
 
       case 'assistant': {
-        // cursor-agent (--stream-partial-output) sends individual streaming deltas WITH timestamp_ms,
-        // followed by a final consolidated 'assistant' message WITHOUT timestamp_ms that contains
-        // the complete response text. We must skip the final message to avoid duplicating already-
-        // streamed content. Only process messages that have timestamp_ms (streaming deltas).
+        // cursor-agent (--stream-partial-output) sends:
+        //   1. Streaming deltas WITH timestamp_ms and WITHOUT model_call_id  → process
+        //   2. Intermediate consolidated messages WITH timestamp_ms AND model_call_id → skip (same text as delta, duplicates)
+        //   3. Final consolidated message WITHOUT timestamp_ms                → skip (same text as all deltas combined)
         const rawMsg = msg as unknown as Record<string, unknown>;
-        if (!rawMsg.timestamp_ms) {
+        if (!rawMsg.timestamp_ms || rawMsg.model_call_id) {
           if (process.env.CURSOR_AGENT_RAW_LOG === '1') {
-            try { appendFileSync(process.env.CURSOR_AGENT_RAW_LOG_FILE ?? '/tmp/cursor-agent-raw.log', `[assistant SKIPPED final-consolidated] no timestamp_ms\n`); } catch { /* ignore */ }
+            const reason = !rawMsg.timestamp_ms ? 'no timestamp_ms' : 'has model_call_id';
+            try { appendFileSync(process.env.CURSOR_AGENT_RAW_LOG_FILE ?? '/tmp/cursor-agent-raw.log', `[assistant SKIPPED] ${reason}\n`); } catch { /* ignore */ }
           }
           break;
         }
