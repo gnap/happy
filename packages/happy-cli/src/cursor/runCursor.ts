@@ -417,6 +417,10 @@ export async function runCursor(opts: {
   session.updateMetadata((m) => ({ ...m, hostPid: process.pid }))
     .catch((err) => logger.debug('[cursor] Failed to update hostPid in session metadata', err));
 
+  // Sync current PID to server metadata so App always sees the latest PID after respawn.
+  session.updateMetadata((m) => ({ ...m, hostPid: process.pid }))
+    .catch((err) => logger.debug('[cursor] Failed to update hostPid in session metadata', err));
+
   //
   // Keep-alive
   //
@@ -735,6 +739,17 @@ export async function runCursor(opts: {
                 const bgResult = { runningInBackground: true, message: 'Tool still running; timer stopped. Response will continue when it completes.' };
                 logger.debug(`[cursor] Per-tool timeout for ${msg.callId.slice(0, 8)}... – sending tool_call_end (running in background)`);
                 messageBuffer.addMessage('Still running (timer stopped)', 'result');
+                const timeoutResultPayload = {
+                  type: 'tool-call-result' as const,
+                  callId: msg.callId,
+                  id: msg.callId,
+                  output: bgResult,
+                  is_error: false,
+                };
+                logger.debug(`[cursor] codex/cursor tool-call-result callId=${msg.callId.slice(0, 8)}... (timeout)`);
+                session.sendCodexMessage(timeoutResultPayload);
+                session.sendCursorMessage(timeoutResultPayload);
+                // New App: session only tool-call-end; no t:'text' for tool result
                 session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId }, { turn: turnId }));
               }, perToolTimeoutMs);
               toolCallTimeoutHandles.set(msg.callId, handle);
@@ -756,7 +771,17 @@ export async function runCursor(opts: {
               );
               codexIdByCallId.delete(msg.callId);
               const lazyResult = session.maybeLazyEncodeResult(msg.toolName, msg.callId, msg.result) as string | Record<string, unknown>;
-              logger.debug(`[cursor] tool-call-result callId=${msg.callId.slice(0, 8)}... success=${msg.success}`);
+              const resultPayload = {
+                type: 'tool-call-result' as const,
+                callId: msg.callId,
+                id: msg.callId,
+                output: msg.result,
+                is_error: !msg.success,
+              };
+              logger.debug(`[cursor] codex/cursor tool-call-result callId=${msg.callId.slice(0, 8)}... success=${msg.success}`);
+              session.sendCodexMessage(resultPayload);
+              session.sendCursorMessage(resultPayload);
+              // New App: session only gets tool-call-end; result is in tool card (no t:'text' for tool result)
               session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId, result: lazyResult } as SessionEvent, { turn: turnId }));
               break;
 
@@ -775,6 +800,21 @@ export async function runCursor(opts: {
               for (const [callId] of codexIdByCallId) {
                 logger.debug(`[cursor] Closing pending tool call ${callId} (turn completed without tool end)`);
                 messageBuffer.addMessage('Ended (turn completed)', 'result');
+                const turnEndedResult = {
+                  aborted: false,
+                  message: 'Tool call ended because the turn completed',
+                };
+                const turnEndPayload = {
+                  type: 'tool-call-result' as const,
+                  callId,
+                  id: callId,
+                  output: turnEndedResult,
+                  is_error: false,
+                };
+                logger.debug(`[cursor] codex/cursor tool-call-result callId=${callId.slice(0, 8)}... (turn ended)`);
+                session.sendCodexMessage(turnEndPayload);
+                session.sendCursorMessage(turnEndPayload);
+                // New App: session only tool-call-end; no t:'text' for tool result
                 session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: callId }, { turn: turnId }));
               }
               codexIdByCallId.clear();
@@ -815,6 +855,17 @@ export async function runCursor(opts: {
         for (const [callId] of codexIdByCallId) {
           logger.debug(`[cursor] Closing pending tool call ${callId} (no end from cursor-agent)`);
           messageBuffer.addMessage('Ended without result (aborted or exited)', 'result');
+          const abortedPayload = {
+            type: 'tool-call-result' as const,
+            callId,
+            id: callId,
+            output: abortedResult,
+            is_error: false,
+          };
+          logger.debug(`[cursor] codex/cursor tool-call-result callId=${callId.slice(0, 8)}... (aborted)`);
+          session.sendCodexMessage(abortedPayload);
+          session.sendCursorMessage(abortedPayload);
+          // New App: session only tool-call-end; no t:'text' for tool result
           session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: callId }, { turn: turnId }));
         }
         const hadPendingToolCalls = codexIdByCallId.size > 0;
