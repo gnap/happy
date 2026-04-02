@@ -22,6 +22,9 @@ pnpm-lock.yaml
 # Claude code session level settings
 .claude/settings.local.json
 
+# Cursor MCP config (local port)
+.cursor/mcp.json
+
 # Local installation and data directories
 .happy/
 .happy-dev/
