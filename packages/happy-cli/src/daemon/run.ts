@@ -428,8 +428,10 @@ export async function startDaemon(): Promise<void> {
           const tmuxEnv: Record<string, string> = {};
 
           // Add all daemon environment variables (filtering out undefined)
+          // Explicitly exclude HAPPY_CURSOR_SESSION_TAG so daemon's inherited tag
+          // does not pollute new sessions; only extraEnv may set it (for respawn).
           for (const [key, value] of Object.entries(process.env)) {
-            if (value !== undefined) {
+            if (value !== undefined && key !== 'HAPPY_CURSOR_SESSION_TAG') {
               tmuxEnv[key] = value;
             }
           }
@@ -527,13 +529,12 @@ export async function startDaemon(): Promise<void> {
             '--started-by', 'daemon'
           ];
 
-          // TODO: In future, sessionId could be used with --resume to continue existing sessions
-          // For now, we ignore it - each spawn creates a new session
+          const { HAPPY_CURSOR_SESSION_TAG: _stripTag, ...baseEnv } = process.env;
           return spawnTrackedHappyProcess({
             args,
             cwd: directory,
             env: {
-              ...process.env,
+              ...baseEnv,
               ...extraEnv
             },
             directoryCreated,
@@ -1042,7 +1043,7 @@ export async function startDaemon(): Promise<void> {
           spawnSession({
             directory,
             agent,
-            environmentVariables: tag ? { HAPPY_CURSOR_SESSION_TAG: tag } : undefined
+            resumeSessionTag: tag ?? undefined
           }).catch((err: unknown) => {
             logger.debug(`[DAEMON RUN] Auto-respawn failed for session ${id}:`, err);
           });
