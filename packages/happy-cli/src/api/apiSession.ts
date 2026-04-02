@@ -92,6 +92,8 @@ export class ApiSessionClient extends EventEmitter {
     private metadataLock = new AsyncLock();
     private encryptionKey: Uint8Array;
     private encryptionVariant: 'legacy' | 'dataKey';
+    /** The AES session key; exposed so callers can persist it after offline reconnection. */
+    get sessionEncryptionKey(): Uint8Array { return this.encryptionKey; }
     private claudeSessionProtocolState: ClaudeSessionProtocolState = {
         currentTurnId: null,
         uuidToProviderSubagent: new Map<string, string>(),
