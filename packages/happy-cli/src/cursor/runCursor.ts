@@ -53,6 +53,60 @@ import { CursorProcess } from './cursorProcess';
 import { CursorMessageParser, type CursorParsedMessage } from './cursorMessageParser';
 import type { CursorStreamMessage, CursorMode } from './types';
 
+interface CursorModelInfo {
+  code: string;
+  value: string;
+  description?: string | null;
+}
+
+interface CursorModelListResult {
+  models: CursorModelInfo[];
+  currentModelId: string;
+}
+
+async function fetchCursorModels(): Promise<CursorModelListResult | null> {
+  const apiKey = process.env.CURSOR_API_KEY?.trim()
+    || process.env.CURSOR_TOKEN?.trim()
+    || process.env.CURSOR_AUTH_TOKEN?.trim();
+  if (!apiKey) {
+    logger.debug('[cursor] fetchCursorModels: no Cursor API key found, skipping');
+    return null;
+  }
+
+  try {
+    const response = await fetch('https://api.cursor.com/v0/models', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      logger.debug(`[cursor] fetchCursorModels: request failed with ${response.status}`);
+      return null;
+    }
+
+    const payload = await response.json() as { models?: unknown };
+    const rawModels = Array.isArray(payload.models) ? payload.models : [];
+    const models = rawModels
+      .filter((model): model is string => typeof model === 'string' && model.trim().length > 0)
+      .map((code) => ({ code, value: code }));
+
+    if (models.length === 0) {
+      return null;
+    }
+
+    return {
+      models,
+      currentModelId: models[0]?.code ?? 'auto',
+    };
+  } catch (error) {
+    logger.debug('[cursor] fetchCursorModels threw:', error);
+    return null;
+  }
+}
+
 const CURSOR_SESSION_TAG_FILE = 'cursor-session-tag';
 const CURSOR_SESSION_WORKSPACE_FILE = 'cursor-session-workspace';
 const CURSOR_SESSION_KEY_FILE = 'cursor-session-key';
@@ -297,6 +351,39 @@ export async function runCursor(opts: {
       logger.debug('[START] Failed to report to daemon:', error);
     }
   }
+
+  // Refresh models from cursor-agent and update session metadata.
+  // If the stored currentModelCode is no longer in the list (model was renamed/removed),
+  // it resets to whatever cursor-agent currently considers the active model.
+  const refreshModelsMetadata = () => {
+    fetchCursorModels().then((result) => {
+      if (!result || result.models.length === 0) {
+        logger.debug('[cursor] refreshModelsMetadata: no models returned, skipping');
+        return;
+      }
+      logger.debug(`[cursor] refreshModelsMetadata: ${result.models.length} models, current=${result.currentModelId}`);
+      session.updateMetadata((m) => {
+        const validCodes = new Set(result.models.map((mo) => mo.code));
+        const stored = m.currentModelCode;
+        const isStoredValid = !stored || stored === 'default' || stored === 'auto' || validCodes.has(stored);
+        if (!isStoredValid) {
+          logger.debug(`[cursor] refreshModelsMetadata: stored model "${stored}" not in new list, resetting to "${result.currentModelId}"`);
+        }
+        return {
+          ...m,
+          models: result.models,
+          currentModelCode: isStoredValid ? (stored ?? result.currentModelId) : result.currentModelId,
+        };
+      }).catch((err) => logger.debug('[cursor] refreshModelsMetadata: failed to update metadata', err));
+    }).catch((err) => logger.debug('[cursor] refreshModelsMetadata threw:', err));
+  };
+
+  // Initial fetch at session start
+  refreshModelsMetadata();
+
+  // Periodic refresh so the App sees model list updates pushed by cursor-agent (every 5 min)
+  const MODEL_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+  const modelRefreshInterval = setInterval(refreshModelsMetadata, MODEL_REFRESH_INTERVAL_MS);
 
 
   // Sync current PID to server metadata so App always sees the latest PID after respawn.
@@ -760,6 +847,10 @@ export async function runCursor(opts: {
         emitReadyIfIdle();
 
         logger.debug(`[cursor] Turn completed (queue: ${messageQueue.size()})`);
+
+        // Re-fetch models after each turn: cursor-agent may have received upstream model updates.
+        // This also validates currentModel and resets it if the key is no longer recognised.
+        refreshModelsMetadata();
       }
     }
 
@@ -789,6 +880,7 @@ export async function runCursor(opts: {
     }
 
     clearInterval(keepAliveInterval);
+    clearInterval(modelRefreshInterval);
     if (inkInstance) {
       inkInstance.unmount();
     }
