@@ -670,7 +670,8 @@ export async function startDaemon(): Promise<void> {
       }
     };
 
-    // Stop a session by sessionId or PID fallback
+    // Stop a session by sessionId or PID fallback.
+    // Keep the session tracked until the real exit path runs so restart logic can still recover it.
     const stopSession = (sessionId: string): boolean => {
       logger.debug(`[DAEMON RUN] Attempting to stop session ${sessionId}`);
 
@@ -696,14 +697,39 @@ export async function startDaemon(): Promise<void> {
             }
           }
 
-          pidToTrackedSession.delete(pid);
-          logger.debug(`[DAEMON RUN] Removed session ${sessionId} from tracking`);
+          persistSessionTagBeforeRemove(session);
+          logger.debug(`[DAEMON RUN] Stop requested for session ${sessionId}; keeping it tracked until exit is observed`);
           return true;
         }
       }
 
       logger.debug(`[DAEMON RUN] Session ${sessionId} not found`);
       return false;
+    };
+
+    // Stop by PID only (no mapping required) - e.g. happy daemon stop-session --pid 88206.
+    // Keep tracked sessions in memory until exit is observed so restart-session can still
+    // find them if the process is only being stopped, not archived.
+    const stopSessionByPid = (pid: number): boolean => {
+      logger.debug(`[DAEMON RUN] Stop by PID: ${pid}`);
+      const session = pidToTrackedSession.get(pid);
+      if (session) persistSessionTagBeforeRemove(session);
+      try {
+        process.kill(pid, 'SIGTERM');
+        logger.debug(`[DAEMON RUN] Sent SIGTERM to PID ${pid}; waiting for exit before removing from tracking`);
+        return true;
+      } catch (err: unknown) {
+        const code = err && typeof err === 'object' && 'code' in err ? (err as NodeJS.ErrnoException).code : undefined;
+        if (code === 'ESRCH') {
+          // Process does not exist - synthesize the exit path so the daemon
+          // still records a stopped/recently-exited tombstone if this PID was tracked.
+          onChildExited(pid, null, 'SIGTERM');
+          logger.debug(`[DAEMON RUN] PID ${pid} already gone (ESRCH)`);
+          return true;
+        }
+        logger.debug(`[DAEMON RUN] Failed to kill PID ${pid}:`, err);
+        return false;
+      }
     };
 
     // Handle child process exit
