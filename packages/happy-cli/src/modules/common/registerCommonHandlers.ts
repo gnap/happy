@@ -120,7 +120,7 @@ export interface SpawnSessionOptions {
     directory: string;
     sessionId?: string;
     approvedNewDirectoryCreation?: boolean;
-    agent?: 'claude' | 'codex' | 'gemini' | 'cursor' | 'cursor-acp' | 'openclaw';
+    agent?: 'claude' | 'codex' | 'gemini' | 'cursor' | 'cursor-acp' | 'acp-cursor' | 'openclaw';
     environmentVariables?: Record<string, string>;
     token?: string;
     /** Explicit session tag used when respawning/restarting cursor or ACP sessions. */

@@ -13,7 +13,7 @@ import { startCaffeinate, stopCaffeinate } from '@/utils/caffeinate';
 import packageJson from '../../package.json';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { spawnHappyCLI } from '@/utils/spawnHappyCLI';
-import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquireDaemonLock, releaseDaemonLock } from '@/persistence';
+import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquireDaemonLock, releaseDaemonLock, readSettings, validateProfileForAgent, getProfileEnvironmentVariables } from '@/persistence';
 
 import { cleanupDaemonState, isDaemonRunningCurrentlyInstalledHappyVersion, stopDaemon } from './controlClient';
 import { startDaemonControlServer } from './controlServer';
@@ -39,6 +39,37 @@ export const initialMachineMetadata: MachineMetadata = {
   resumeSupport: detectResumeSupport(),
 };
 
+// Get environment variables for a profile, filtered for agent compatibility
+async function getProfileEnvironmentVariablesForAgent(
+  profileId: string,
+  agentType: 'claude' | 'codex' | 'gemini' | 'cursor' | 'cursor-acp' | 'acp-cursor'
+): Promise<Record<string, string>> {
+  try {
+    const settings = await readSettings();
+    const profiles = settings.profiles ?? [];
+    const profile = profiles.find((p) => p.id === profileId);
+
+    if (!profile) {
+      logger.debug(`[DAEMON RUN] Profile ${profileId} not found`);
+      return {};
+    }
+
+    // Check if profile is compatible with the agent
+    if (!validateProfileForAgent(profile, agentType)) {
+      logger.debug(`[DAEMON RUN] Profile ${profileId} not compatible with agent ${agentType}`);
+      return {};
+    }
+
+    // Get environment variables from profile (new schema)
+    const envVars = getProfileEnvironmentVariables(profile);
+
+    logger.debug(`[DAEMON RUN] Loaded ${Object.keys(envVars).length} environment variables from profile ${profileId} for agent ${agentType}`);
+    return envVars;
+  } catch (error) {
+    logger.debug('[DAEMON RUN] Failed to get profile environment variables:', error);
+    return {};
+  }
+}
 export async function startDaemon(): Promise<void> {
   // We don't have cleanup function at the time of server construction
   // Control flow is:
@@ -348,7 +379,7 @@ export async function startDaemon(): Promise<void> {
         const resumeSessionTag =
           explicitResumeSessionTag?.trim() ||
           (sessionId ? (lastSessionTagBySessionId[sessionId] ?? lastSessionTagByDirectory[directory]) : undefined);
-        const shouldPassResumeSessionTag = options.agent === 'cursor' || options.agent === 'cursor-acp';
+        const shouldPassResumeSessionTag = options.agent === 'cursor' || options.agent === 'cursor-acp' || options.agent === 'acp-cursor';
 
         // Fail fast if any passed-through environment variable still contains an
         // unresolved ${VAR} reference after expansion.
@@ -407,16 +438,18 @@ export async function startDaemon(): Promise<void> {
 
           // Construct command for the CLI
           const cliPath = join(projectPath(), 'dist', 'index.mjs');
-          // Determine agent command - support claude, codex, cursor, gemini, and openclaw (must match switch below)
+          // Determine agent command - support claude, codex, cursor, gemini, cursor-acp, acp-cursor, and openclaw.
           const agent = options.agent === 'gemini'
             ? 'gemini'
             : options.agent === 'codex'
               ? 'codex'
               : options.agent === 'cursor'
                 ? 'cursor'
-                : options.agent === 'openclaw'
-                  ? 'openclaw'
-                  : 'claude';
+                : options.agent === 'cursor-acp' || options.agent === 'acp-cursor'
+                  ? 'acp cursor'
+                  : options.agent === 'openclaw'
+                    ? 'openclaw'
+                    : 'claude';
           const fullCommand = `node --no-warnings --no-deprecation ${cliPath} ${agent} --happy-starting-mode remote --started-by daemon`;
 
           // Spawn in tmux with environment variables
@@ -424,7 +457,7 @@ export async function startDaemon(): Promise<void> {
           // 1. tmux sessions need daemon's expanded auth variables (e.g., ANTHROPIC_AUTH_TOKEN)
           // 2. Regular spawn uses env: { ...process.env, ...extraEnv }
           // 3. tmux needs explicit environment via -e flags to ensure all variables are available
-          const windowName = `happy-${Date.now()}-${agent}`;
+          const windowName = `happy-${Date.now()}-${agent.replace(/\s+/g, '-')}`;
           const tmuxEnv: Record<string, string> = {};
 
           // Add all daemon environment variables (filtering out undefined)
@@ -501,8 +534,9 @@ export async function startDaemon(): Promise<void> {
         if (!useTmux) {
           logger.debug(`[DAEMON RUN] Using regular process spawning`);
 
-          // Construct arguments for the CLI - support claude, codex, and gemini
+          // Construct arguments for the CLI - support claude, codex, gemini, cursor, cursor-acp, acp-cursor, and openclaw.
           let agentCommand: string;
+          let agentExtraArgs: string[] = [];
           switch (options.agent) {
             case 'claude':
             case undefined:
@@ -517,6 +551,11 @@ export async function startDaemon(): Promise<void> {
             case 'openclaw':
               agentCommand = 'openclaw';
               break;
+            case 'cursor-acp':
+            case 'acp-cursor':
+              agentCommand = 'acp';
+              agentExtraArgs = ['cursor'];
+              break;
             default:
               return {
                 type: 'error',
@@ -525,6 +564,7 @@ export async function startDaemon(): Promise<void> {
           }
           const args = [
             agentCommand,
+            ...agentExtraArgs,
             '--happy-starting-mode', 'remote',
             '--started-by', 'daemon'
           ];
@@ -1034,7 +1074,7 @@ export async function startDaemon(): Promise<void> {
           }
 
           const tag = lastSessionTagBySessionId[id] ?? lastSessionTagByDirectory[directory];
-          const agent = (lastAgentBySessionId[id] as 'cursor' | 'claude' | 'codex' | 'gemini') ?? 'cursor';
+          const agent = (lastAgentBySessionId[id] as 'cursor' | 'claude' | 'codex' | 'gemini' | 'acp-cursor') ?? 'cursor';
           logger.debug(`[DAEMON RUN] Auto-respawning session ${id} (${agent}) in ${directory} (seq ${prevSeq} → ${seq}, tag=${tag?.slice(0, 8) ?? '?'})`);
 
           lastSpawnAttemptBySessionId[id] = now;

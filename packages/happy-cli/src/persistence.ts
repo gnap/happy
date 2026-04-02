@@ -29,6 +29,167 @@ export const SandboxConfigSchema = z.object({
 
 export type SandboxConfig = z.infer<typeof SandboxConfigSchema>;
 
+export const EnvironmentVariableSchema = z.object({
+  name: z.string().min(1),
+  value: z.string(),
+});
+
+export const AnthropicConfigSchema = z.object({
+  baseUrl: z.string().optional(),
+  authToken: z.string().optional(),
+  model: z.string().optional(),
+});
+
+export const OpenAIConfigSchema = z.object({
+  apiKey: z.string().optional(),
+  baseUrl: z.string().optional(),
+  model: z.string().optional(),
+});
+
+export const AzureOpenAIConfigSchema = z.object({
+  apiKey: z.string().optional(),
+  endpoint: z.string().optional(),
+  apiVersion: z.string().optional(),
+  deploymentName: z.string().optional(),
+});
+
+export const TogetherAIConfigSchema = z.object({
+  apiKey: z.string().optional(),
+  model: z.string().optional(),
+});
+
+export const TmuxConfigSchema = z.object({
+  sessionName: z.string().optional(),
+  tmpDir: z.string().optional(),
+  updateEnvironment: z.boolean().optional(),
+});
+
+export const ProfileCompatibilitySchema = z.object({
+  claude: z.boolean().default(true),
+  codex: z.boolean().default(true),
+  gemini: z.boolean().default(true),
+  cursor: z.boolean().default(true),
+  'cursor-acp': z.boolean().default(true),
+  'acp-cursor': z.boolean().default(true),
+  opencode: z.boolean().default(true),
+  openclaw: z.boolean().default(true),
+});
+
+// AIBackendProfile schema - EXACT MATCH with GUI schema
+export const AIBackendProfileSchema = z.object({
+    id: z.string().uuid(),
+    name: z.string().min(1).max(100),
+    description: z.string().max(500).optional(),
+
+    // Agent-specific configurations
+    anthropicConfig: AnthropicConfigSchema.optional(),
+    openaiConfig: OpenAIConfigSchema.optional(),
+    azureOpenAIConfig: AzureOpenAIConfigSchema.optional(),
+    togetherAIConfig: TogetherAIConfigSchema.optional(),
+
+    // Tmux configuration
+    tmuxConfig: TmuxConfigSchema.optional(),
+
+    // Environment variables (validated)
+    environmentVariables: z.array(EnvironmentVariableSchema).default([]),
+
+    // Default session type for this profile
+    defaultSessionType: z.enum(['simple', 'worktree']).optional(),
+
+    // Default permission mode for this profile (supports both Claude and Codex modes)
+    defaultPermissionMode: z.enum([
+        'default', 'acceptEdits', 'bypassPermissions', 'plan',  // Claude modes
+        'read-only', 'safe-yolo', 'yolo'  // Codex modes
+    ]).optional(),
+
+    // Default model mode for this profile
+    defaultModelMode: z.string().optional(),
+
+    // Compatibility metadata
+    compatibility: ProfileCompatibilitySchema.default({ claude: true, codex: true, gemini: true }),
+
+    // Built-in profile indicator
+    isBuiltIn: z.boolean().default(false),
+
+    // Metadata
+    createdAt: z.number().default(() => Date.now()),
+    updatedAt: z.number().default(() => Date.now()),
+    version: z.string().default('1.0.0'),
+});
+
+export type AIBackendProfile = z.infer<typeof AIBackendProfileSchema>;
+
+// Helper functions matching the happy app exactly
+export function validateProfileForAgent(profile: AIBackendProfile, agent: 'claude' | 'codex' | 'gemini' | 'cursor' | 'cursor-acp' | 'acp-cursor'): boolean {
+  // cursor / cursor-acp / acp-cursor: profile compat doesn't filter cursor sessions — always allow
+  if (agent === 'cursor' || agent === 'cursor-acp' || agent === 'acp-cursor') return true;
+  return profile.compatibility[agent];
+}
+
+export function getProfileEnvironmentVariables(profile: AIBackendProfile): Record<string, string> {
+  const envVars: Record<string, string> = {};
+
+  // Add validated environment variables
+  profile.environmentVariables.forEach(envVar => {
+    envVars[envVar.name] = envVar.value;
+  });
+
+  // Add Anthropic config
+  if (profile.anthropicConfig) {
+    if (profile.anthropicConfig.baseUrl) envVars.ANTHROPIC_BASE_URL = profile.anthropicConfig.baseUrl;
+    if (profile.anthropicConfig.authToken) envVars.ANTHROPIC_AUTH_TOKEN = profile.anthropicConfig.authToken;
+    if (profile.anthropicConfig.model) envVars.ANTHROPIC_MODEL = profile.anthropicConfig.model;
+  }
+
+  // Add OpenAI config
+  if (profile.openaiConfig) {
+    if (profile.openaiConfig.apiKey) envVars.OPENAI_API_KEY = profile.openaiConfig.apiKey;
+    if (profile.openaiConfig.baseUrl) envVars.OPENAI_BASE_URL = profile.openaiConfig.baseUrl;
+    if (profile.openaiConfig.model) envVars.OPENAI_MODEL = profile.openaiConfig.model;
+  }
+
+  // Add Azure OpenAI config
+  if (profile.azureOpenAIConfig) {
+    if (profile.azureOpenAIConfig.apiKey) envVars.AZURE_OPENAI_API_KEY = profile.azureOpenAIConfig.apiKey;
+    if (profile.azureOpenAIConfig.endpoint) envVars.AZURE_OPENAI_ENDPOINT = profile.azureOpenAIConfig.endpoint;
+    if (profile.azureOpenAIConfig.apiVersion) envVars.AZURE_OPENAI_API_VERSION = profile.azureOpenAIConfig.apiVersion;
+    if (profile.azureOpenAIConfig.deploymentName) envVars.AZURE_OPENAI_DEPLOYMENT_NAME = profile.azureOpenAIConfig.deploymentName;
+  }
+
+  // Add Together AI config
+  if (profile.togetherAIConfig) {
+    if (profile.togetherAIConfig.apiKey) envVars.TOGETHER_API_KEY = profile.togetherAIConfig.apiKey;
+    if (profile.togetherAIConfig.model) envVars.TOGETHER_MODEL = profile.togetherAIConfig.model;
+  }
+
+  // Add Tmux config
+  if (profile.tmuxConfig) {
+    // Empty string means "use current/most recent session", so include it
+    if (profile.tmuxConfig.sessionName !== undefined) envVars.TMUX_SESSION_NAME = profile.tmuxConfig.sessionName;
+    if (profile.tmuxConfig.tmpDir) envVars.TMUX_TMPDIR = profile.tmuxConfig.tmpDir;
+    if (profile.tmuxConfig.updateEnvironment !== undefined) {
+      envVars.TMUX_UPDATE_ENVIRONMENT = profile.tmuxConfig.updateEnvironment.toString();
+    }
+  }
+
+  return envVars;
+}
+
+// Profile validation function using Zod schema
+export function validateProfile(profile: unknown): AIBackendProfile {
+  const result = AIBackendProfileSchema.safeParse(profile);
+  if (!result.success) {
+    throw new Error(`Invalid profile data: ${result.error.message}`);
+  }
+  return result.data;
+}
+
+
+// Profile versioning system
+// Profile version: Semver string for individual profile data compatibility (e.g., "1.0.0")
+// Used to version the AIBackendProfile schema itself (anthropicConfig, tmuxConfig, etc.)
+export const CURRENT_PROFILE_VERSION = '1.0.0';
+
 // Settings schema version: Integer for overall Settings structure compatibility
 // Incremented when Settings structure changes (e.g., adding profiles array was v1→v2)
 // Used for migration logic in readSettings()
@@ -42,6 +203,7 @@ interface Settings {
   daemonAutoStartWhenRunningHappy?: boolean
   chromeMode?: boolean
   sandboxConfig?: SandboxConfig
+  profiles?: AIBackendProfile[]
 }
 
 const defaultSettings: Settings = {
