@@ -146,14 +146,17 @@ import { handleResumeCommand } from '@/resume/handleResumeCommand'
     try {
       const { runCursor } = await import('@/cursor/runCursor');
 
-      // Parse cursor options: --started-by, --cwd (workspace root for .cursor/mcp.json and agent cwd)
+      // Parse cursor options: --started-by, --cwd (workspace root for .cursor/mcp.json and agent cwd), --resume-session-tag
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
       let workspaceRoot: string | undefined = process.env.HAPPY_CURSOR_WORKSPACE;
+      let resumeSessionTag: string | undefined = undefined;
       for (let i = 1; i < args.length; i++) {
         if (args[i] === '--started-by') {
           startedBy = args[++i] as 'daemon' | 'terminal';
         } else if (args[i] === '--cwd' && args[i + 1]) {
           workspaceRoot = args[++i];
+        } else if (args[i] === '--resume-session-tag' && args[i + 1]) {
+          resumeSessionTag = args[++i];
         }
       }
 
@@ -174,7 +177,7 @@ import { handleResumeCommand } from '@/resume/handleResumeCommand'
         await new Promise(resolve => setTimeout(resolve, 200));
       }
 
-      await runCursor({ credentials, startedBy, workspaceRoot });
+      await runCursor({ credentials, startedBy, workspaceRoot, resumeSessionTag });
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
       if (process.env.DEBUG) {
@@ -407,11 +410,16 @@ import { handleResumeCommand } from '@/resume/handleResumeCommand'
 
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
       let verbose = false;
+      let resumeSessionTag: string | undefined = undefined;
       const acpArgs: string[] = [];
       let customCommandMode = false;
       for (let i = 1; i < args.length; i++) {
         if (!customCommandMode && args[i] === '--started-by') {
           startedBy = args[++i] as 'daemon' | 'terminal';
+          continue;
+        }
+        if (!customCommandMode && args[i] === '--resume-session-tag' && args[i + 1]) {
+          resumeSessionTag = args[++i];
           continue;
         }
         if (!customCommandMode && args[i] === '--verbose') {
@@ -443,6 +451,7 @@ import { handleResumeCommand } from '@/resume/handleResumeCommand'
         credentials,
         startedBy,
         verbose,
+        resumeSessionTag,
         agentName: resolved.agentName,
         command: resolved.command,
         args: resolved.args,
