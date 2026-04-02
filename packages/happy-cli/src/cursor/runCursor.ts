@@ -587,9 +587,6 @@ export async function runCursor(opts: {
       const codexIdByCallId = new Map<string, string>();
       /** Per-tool timeout: when fired we send tool_call_end (running in background) so App stops timer; process keeps running. */
       const toolCallTimeoutHandles = new Map<string, ReturnType<typeof setTimeout>>();
-      const cancelTextFlushTimer = () => {
-        // The current cursor loop flushes text directly; keep this hook for title-refresh flows.
-      };
       let turnCompletedNormally = false;
       let turnEndStatus: 'completed' | 'failed' | 'cancelled' = 'completed';
 
@@ -598,6 +595,23 @@ export async function runCursor(opts: {
           const text = accumulatedResponse;
           accumulatedResponse = '';
           session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text }, { turn: turnId }));
+        }
+      };
+
+      // Deadline-based flush: ensures accumulated text is sent even if no \n\n or tool call arrives.
+      const TEXT_FLUSH_DEADLINE_MS = 3000;
+      let textFlushTimer: ReturnType<typeof setTimeout> | null = null;
+      const scheduleTextFlush = () => {
+        if (textFlushTimer !== null) return;
+        textFlushTimer = setTimeout(() => {
+          textFlushTimer = null;
+          flushAccumulatedText();
+        }, TEXT_FLUSH_DEADLINE_MS);
+      };
+      const cancelTextFlushTimer = () => {
+        if (textFlushTimer !== null) {
+          clearTimeout(textFlushTimer);
+          textFlushTimer = null;
         }
       };
 
@@ -659,6 +673,12 @@ export async function runCursor(opts: {
               accumulatedResponse += msg.text;
               messageBuffer.removeLastMessage('system');
               messageBuffer.addMessage(msg.text, 'assistant');
+              if (accumulatedResponse.includes('\n\n')) {
+                cancelTextFlushTimer();
+                flushAccumulatedText();
+              } else {
+                scheduleTextFlush();
+              }
               break;
 
             case 'thinking_delta':
