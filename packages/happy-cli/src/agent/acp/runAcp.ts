@@ -451,11 +451,14 @@ export async function runAcp(opts: {
   agentName: string;
   command: string;
   args: string[];
+  resumeSessionTag?: string;
   startedBy?: 'daemon' | 'terminal';
   verbose?: boolean;
 }): Promise<void> {
   const verbose = opts.verbose === true;
-  const sessionTag = randomUUID();
+  // When daemon restarts an acp-cursor session, it passes --resume-session-tag so we
+  // reconnect to the same server session instead of creating a new one.
+  const sessionTag = opts.resumeSessionTag?.trim() || randomUUID();
   connectionState.setBackend(opts.agentName);
 
   const api = await ApiClient.create(opts.credentials);

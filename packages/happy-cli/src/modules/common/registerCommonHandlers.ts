@@ -123,6 +123,8 @@ export interface SpawnSessionOptions {
     agent?: 'claude' | 'codex' | 'gemini' | 'cursor' | 'cursor-acp' | 'openclaw';
     environmentVariables?: Record<string, string>;
     token?: string;
+    /** Explicit session tag used when respawning/restarting cursor or ACP sessions. */
+    resumeSessionTag?: string;
 }
 
 export type SpawnSessionResult =

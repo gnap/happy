@@ -137,12 +137,13 @@ function toCodexToolShape(
 export async function runCursor(opts: {
   credentials: Credentials;
   startedBy?: 'daemon' | 'terminal';
+  resumeSessionTag?: string;
   /** Workspace root for session, .cursor/mcp.json, and cursor-agent cwd. Defaults to process.cwd(). Set via --cwd or HAPPY_CURSOR_WORKSPACE when running from monorepo so MCP is under repo root. */
   workspaceRoot?: string;
 }): Promise<void> {
   const workspacePath = opts.workspaceRoot != null ? resolve(opts.workspaceRoot) : process.cwd();
 
-  // Reuse session only when workspace unchanged; workspace change => new session
+  // Reuse session only when workspace unchanged; workspace change => new session.
   const tagPath = join(configuration.happyHomeDir, CURSOR_SESSION_TAG_FILE);
   const workspacePathFile = join(configuration.happyHomeDir, CURSOR_SESSION_WORKSPACE_FILE);
   let sessionTag: string;
@@ -150,20 +151,27 @@ export async function runCursor(opts: {
   if (process.env.HAPPY_CURSOR_NEW_SESSION === '1') {
     sessionTag = randomUUID();
   } else {
-    let savedTag: string | null = null;
-    let savedWorkspace: string | null = null;
-    try {
-      if (existsSync(tagPath)) savedTag = readFileSync(tagPath, 'utf8').trim() || null;
-      if (existsSync(workspacePathFile)) savedWorkspace = readFileSync(workspacePathFile, 'utf8').trim() || null;
-    } catch {
-      /* ignore */
-    }
-    const sameWorkspace = savedWorkspace != null && resolve(savedWorkspace) === resolve(workspacePath);
-    if (savedTag && sameWorkspace) {
-      sessionTag = savedTag;
+    const explicitResumeTag = opts.resumeSessionTag?.trim() || null;
+    if (explicitResumeTag) {
+      sessionTag = explicitResumeTag;
       tagReused = true;
+      logger.debug(`[cursor] Using session tag from CLI arg (--resume-session-tag): ${sessionTag.slice(0, 8)}...`);
     } else {
-      sessionTag = randomUUID();
+      let savedTag: string | null = null;
+      let savedWorkspace: string | null = null;
+      try {
+        if (existsSync(tagPath)) savedTag = readFileSync(tagPath, 'utf8').trim() || null;
+        if (existsSync(workspacePathFile)) savedWorkspace = readFileSync(workspacePathFile, 'utf8').trim() || null;
+      } catch {
+        /* ignore */
+      }
+      const sameWorkspace = savedWorkspace != null && resolve(savedWorkspace) === resolve(workspacePath);
+      if (savedTag && sameWorkspace) {
+        sessionTag = savedTag;
+        tagReused = true;
+      } else {
+        sessionTag = randomUUID();
+      }
     }
   }
 

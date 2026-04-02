@@ -79,11 +79,45 @@ export async function stopDaemonSession(sessionId: string): Promise<boolean> {
   return result.success || false;
 }
 
-export async function spawnDaemonSession(directory: string, sessionId?: string): Promise<any> {
-  const result = await daemonPost('/spawn-session', { directory, sessionId });
-  return result;
+export async function spawnDaemonSession(directory: string, sessionId?: string): Promise<any>;
+/**
+ * Spawn a new session in the given directory (e.g. to reconnect from server session list).
+ * Optional agent plus explicit resumeSessionTag for reconnecting to the same server session.
+ */
+export async function spawnDaemonSession(opts: {
+  directory: string;
+  agent?: 'claude' | 'codex' | 'cursor' | 'gemini';
+  environmentVariables?: Record<string, string>;
+  resumeSessionTag?: string;
+}): Promise<{ success: boolean; sessionId?: string; error?: string }>;
+export async function spawnDaemonSession(
+  arg1: string | {
+    directory: string;
+    agent?: 'claude' | 'codex' | 'cursor' | 'gemini';
+    environmentVariables?: Record<string, string>;
+    resumeSessionTag?: string;
+  },
+  sessionId?: string
+): Promise<any> {
+  if (typeof arg1 === 'string') {
+    return daemonPost('/spawn-session', { directory: arg1, sessionId });
+  }
+  const result = await daemonPost('/spawn-session', {
+    directory: arg1.directory,
+    agent: arg1.agent,
+    environmentVariables: arg1.environmentVariables,
+    resumeSessionTag: arg1.resumeSessionTag,
+  });
+  if (result.error) return { success: false, error: result.error };
+  if (result.success && result.sessionId) return { success: true, sessionId: result.sessionId };
+  if (result.success) return { success: true };
+  return { success: false, error: (result as any).error ?? 'Spawn failed' };
 }
 
+export async function archiveDaemonSession(sessionId: string): Promise<boolean> {
+  const result = await daemonPost('/archive-session', { sessionId });
+  return result.success || false;
+}
 export async function stopDaemonHttp(): Promise<void> {
   await daemonPost('/stop');
 }

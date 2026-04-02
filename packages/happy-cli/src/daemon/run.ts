@@ -264,6 +264,7 @@ export async function startDaemon(): Promise<void> {
       logger.debugLargeJson('[DAEMON RUN] Spawning session', options);
 
       const { directory, sessionId, machineId, approvedNewDirectoryCreation = true } = options;
+      const explicitResumeSessionTag = options.resumeSessionTag;
       let directoryCreated = false;
 
       try {
@@ -343,6 +344,11 @@ export async function startDaemon(): Promise<void> {
         // Example: ANTHROPIC_AUTH_TOKEN="${Z_AI_AUTH_TOKEN}" → ANTHROPIC_AUTH_TOKEN="sk-real-key"
         extraEnv = expandEnvironmentVariables(extraEnv, process.env);
         logger.debug(`[DAEMON RUN] After variable expansion: ${Object.keys(extraEnv).join(', ')}`);
+
+        const resumeSessionTag =
+          explicitResumeSessionTag?.trim() ||
+          (sessionId ? (lastSessionTagBySessionId[sessionId] ?? lastSessionTagByDirectory[directory]) : undefined);
+        const shouldPassResumeSessionTag = options.agent === 'cursor' || options.agent === 'cursor-acp';
 
         // Fail fast if any passed-through environment variable still contains an
         // unresolved ${VAR} reference after expansion.
