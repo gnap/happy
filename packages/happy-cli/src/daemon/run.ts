@@ -712,7 +712,8 @@ export async function startDaemon(): Promise<void> {
     };
 
     // Stop a session by sessionId or PID fallback.
-    // Keep the session tracked until the real exit path runs so restart logic can still recover it.
+    // Keep the session tracked until the real exit path runs so it can still
+    // move into stoppedSessions / recentlyExited and remain restartable.
     const stopSession = (sessionId: string): boolean => {
       logger.debug(`[DAEMON RUN] Attempting to stop session ${sessionId}`);
 
