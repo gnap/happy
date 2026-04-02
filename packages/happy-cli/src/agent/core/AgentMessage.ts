@@ -52,6 +52,8 @@ export interface ToolCallMessage {
   toolName: string;
   args: Record<string, unknown>;
   callId: ToolCallId;
+  kind?: string;
+  description?: string;
 }
 
 /**

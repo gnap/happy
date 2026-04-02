@@ -186,6 +186,32 @@ function toCodexToolShape(
 }
 
 /**
+ * Derive a human-readable title from tool name and args.
+ * Uses the tool's primary input key (path for file tools, command for bash)
+ * so the App can display a meaningful title without relying on the agent's
+ * generic title field.
+ */
+function deriveToolTitle(toolName: string, args: Record<string, unknown> | undefined): string {
+  const a = args ?? {};
+  const path = typeof (a.path ?? a.file_path ?? a.filePath) === 'string'
+    ? String(a.path ?? a.file_path ?? a.filePath)
+    : '';
+  if (['CursorRead', 'Read', 'CursorWrite', 'Write', 'CursorEdit', 'Edit'].includes(toolName) && path) {
+    return path;
+  }
+  const cmd = typeof a.command === 'string' ? a.command : '';
+  if (['CursorBash', 'Bash'].includes(toolName) && cmd) {
+    return `Run \`${cmd.length > 80 ? cmd.slice(0, 77) + '...' : cmd}\``;
+  }
+  return toolName;
+}
+
+/** Enable with DEBUG=1 or HAPPY_SESSION_TIMING=1 to log startup phase timings (ms from runCursor entry). */
+function shouldLogStartupTiming(): boolean {
+  return process.env.DEBUG === '1' || process.env.HAPPY_SESSION_TIMING === '1';
+}
+
+/**
  * Main entry point for the cursor command with ink UI.
  */
 export async function runCursor(opts: {
@@ -573,6 +599,9 @@ export async function runCursor(opts: {
       const codexIdByCallId = new Map<string, string>();
       /** Per-tool timeout: when fired we send tool_call_end (running in background) so App stops timer; process keeps running. */
       const toolCallTimeoutHandles = new Map<string, ReturnType<typeof setTimeout>>();
+      const cancelTextFlushTimer = () => {
+        // The current cursor loop flushes text directly; keep this hook for title-refresh flows.
+      };
       let turnCompletedNormally = false;
       let turnEndStatus: 'completed' | 'failed' | 'cancelled' = 'completed';
 
@@ -659,6 +688,20 @@ export async function runCursor(opts: {
               break;
 
             case 'tool_call_start':
+              // Sidechain tool calls (from taskToolCall conversationSteps) — only send session envelope with subagent.
+              if (msg.subagentId) {
+                const sidechainTitle = msg.description ?? deriveToolTitle(msg.toolName, msg.args);
+                session.sendSessionProtocolMessage(createEnvelope('agent', {
+                  t: 'tool-call-start',
+                  call: msg.callId,
+                  name: msg.toolName,
+                  title: sidechainTitle,
+                  description: sidechainTitle,
+                  args: msg.args,
+                }, { turn: turnId, subagent: msg.subagentId }));
+                break;
+              }
+              cancelTextFlushTimer();
               flushAccumulatedText();
               hadToolCalls = true;
               const toolArgs = JSON.stringify(msg.args).slice(0, 100);
@@ -677,11 +720,8 @@ export async function runCursor(opts: {
                 input: codexInput,
                 id: codexId,
               });
-              // Session protocol: timer uses tool-call-start / tool-call-end to stop
-              const cmd = Array.isArray((codexInput as { command?: unknown })?.command)
-                ? (codexInput as { command: string[] }).command.join(' ')
-                : (codexInput as { command?: string })?.command ?? '';
-              const toolTitle = cmd ? `Run \`${cmd.length > 80 ? cmd.slice(0, 77) + '...' : cmd}\`` : `${codexName} call`;
+              // Session protocol: timer uses tool-call-start / tool-call-end to stop.
+              const toolTitle = msg.description ?? deriveToolTitle(msg.toolName, msg.args);
               session.sendSessionProtocolMessage(createEnvelope('agent', {
                 t: 'tool-call-start',
                 call: msg.callId,

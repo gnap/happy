@@ -19,7 +19,7 @@ export type CursorParsedMessage =
   | { type: 'session_init'; sessionId: string; model?: string }
   | { type: 'thinking_delta'; text: string }
   | { type: 'text_delta'; text: string }
-  | { type: 'tool_call_start'; toolName: string; args: Record<string, unknown>; callId: string }
+  | { type: 'tool_call_start'; toolName: string; args: Record<string, unknown>; callId: string; description?: string; subagentId?: string }
   | { type: 'tool_call_end'; toolName: string; result: unknown; callId: string; success: boolean }
   | { type: 'task_started' }
   | { type: 'task_complete'; sessionId?: string; usage?: Record<string, unknown>; costUsd?: number; durationMs?: number }

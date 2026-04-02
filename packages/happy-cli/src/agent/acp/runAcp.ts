@@ -133,11 +133,14 @@ function formatAcpMessageForFrontend(agentName: string, msg: AgentMessage, detai
         text: `Outgoing message: ${formatTextForConsole(text)}`,
       };
     }
-    case 'tool-call':
+    case 'tool-call': {
+      const desc = (msg as { description?: string }).description;
+      const titleLine = typeof desc === 'string' && desc ? ` title="${desc}"` : '';
       return {
         kind: 'tool',
-        text: `Tool: ${msg.toolName} started (callId=${msg.callId})`,
+        text: `Tool: ${msg.toolName} started (callId=${msg.callId})${titleLine}`,
       };
+    }
     case 'tool-result':
       return {
         kind: 'tool',
@@ -237,9 +240,12 @@ function formatEnvelopeForServerLog(agentName: string, envelope: SessionEnvelope
     };
   }
   if (envelope.ev.t === 'tool-call-start') {
+    const title = (envelope.ev as { title?: string }).title ?? '';
+    const description = (envelope.ev as { description?: string }).description ?? '';
+    const titleDesc = title || description ? ` title="${title || description}"` : '';
     return {
       kind: 'tool',
-      text: `Tool start sent to server from ${agentName}: tool=${envelope.ev.name} callId=${envelope.ev.call} args=${formatUnknownForConsole(envelope.ev.args, ACP_EVENT_PREVIEW_CHARS)}`,
+      text: `Tool start sent to server from ${agentName}: tool=${envelope.ev.name} callId=${envelope.ev.call}${titleDesc} args=${formatUnknownForConsole(envelope.ev.args, ACP_EVENT_PREVIEW_CHARS)}`,
     };
   }
   if (envelope.ev.t === 'tool-call-end') {

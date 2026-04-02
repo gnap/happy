@@ -6,14 +6,6 @@ function turnOptions(turnId: string | null, time: number): CreateEnvelopeOptions
   return turnId ? { turn: turnId, time } : { time };
 }
 
-function buildToolTitle(toolName: string): string {
-  return toolName;
-}
-
-function buildToolDescription(toolName: string): string {
-  return `Running ${toolName}`;
-}
-
 function parseThinkingPayload(payload: unknown): { text: string; streaming: boolean } {
   if (typeof payload === 'string') {
     return { text: payload, streaming: false };
@@ -145,14 +137,22 @@ export class AcpSessionManager {
     if (msg.type === 'tool-call') {
       const flushed = this.flush();
       const call = this.ensureSessionCallId(msg.callId);
+      // Use the machine-readable kind ("CursorBash", "CursorEdit", …) as the
+      // canonical name so the App can look up the correct knownTools entry.
+      // Fall back to toolName only when kind is absent (non-cursor ACP agents).
+      const name = msg.kind ?? msg.toolName;
+      const rawDesc = typeof msg.description === 'string' ? msg.description.trim() : '';
+      const fallbackLabel = `Running ${name}`;
+      const title = rawDesc || msg.toolName || fallbackLabel;
+      const description = rawDesc || fallbackLabel;
       return [
         ...flushed,
         createEnvelope('agent', {
           t: 'tool-call-start',
           call,
-          name: msg.toolName,
-          title: buildToolTitle(msg.toolName),
-          description: buildToolDescription(msg.toolName),
+          name,
+          title,
+          description,
           args: msg.args,
         }, turnOptions(this.currentTurnId, this.nextTime())),
       ];
