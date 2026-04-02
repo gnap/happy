@@ -376,6 +376,57 @@ function resolveRequestedCode(options: AcpSelectableOption[], requested: string)
   return null;
 }
 
+function buildPermissionModeCandidates(agentName: string, requestedMode: string): string[] {
+  const trimmed = requestedMode.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  const unique = new Set<string>([trimmed]);
+  const normalized = normalizeComparable(trimmed);
+
+  // Cursor ACP often advertises mode IDs that differ from App keys:
+  // App sends `default | plan | ask | force` while ACP mode options are commonly
+  // `agent | plan | ask` (or `code` as an "agent/code" equivalent).
+  if (agentName === 'cursor') {
+    if (normalized === 'default') {
+      unique.add('agent');
+      unique.add('code');
+    } else if (
+      normalized === 'force' ||
+      normalized === 'bypasspermissions' ||
+      normalized === 'yolo' ||
+      normalized === 'safe-yolo'
+    ) {
+      unique.add('agent');
+      unique.add('code');
+      unique.add('default');
+    } else if (normalized === 'acceptedits') {
+      unique.add('code');
+      unique.add('agent');
+      unique.add('default');
+    } else if (normalized === 'read-only') {
+      unique.add('ask');
+      unique.add('plan');
+    }
+  }
+
+  return Array.from(unique);
+}
+
+function resolveRequestedCodeWithCandidates(
+  options: AcpSelectableOption[],
+  candidates: string[],
+): string | null {
+  for (const candidate of candidates) {
+    const resolved = resolveRequestedCode(options, candidate);
+    if (resolved) {
+      return resolved;
+    }
+  }
+  return null;
+}
+
 function resolveRequestedLegacyModeCode(modes: SessionModeState, requested: string): string | null {
   for (const mode of modes.availableModes) {
     if (mode.id === requested || mode.name === requested) {
@@ -635,10 +686,17 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
       return;
     }
 
+    const requestedCandidates = buildPermissionModeCandidates(opts.agentName, requestedMode);
+    if (requestedCandidates.length === 0) {
+      return;
+    }
+
     if (modeSelector) {
-      const resolved = resolveRequestedCode(modeSelector.options, requestedMode);
+      const resolved = resolveRequestedCodeWithCandidates(modeSelector.options, requestedCandidates);
       if (!resolved) {
-        logger.debug(`[${opts.agentName}] Ignoring unknown ACP permission mode request: ${requestedMode}`);
+        logger.debug(
+          `[${opts.agentName}] Ignoring unknown ACP permission mode request: ${requestedMode} (candidates: ${requestedCandidates.join(', ')})`,
+        );
         return;
       }
       if (resolved === modeSelector.currentCode) {
@@ -655,9 +713,17 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
       return;
     }
 
-    const resolvedLegacyMode = resolveRequestedLegacyModeCode(legacyModes, requestedMode);
+    let resolvedLegacyMode: string | null = null;
+    for (const candidate of requestedCandidates) {
+      resolvedLegacyMode = resolveRequestedLegacyModeCode(legacyModes, candidate);
+      if (resolvedLegacyMode) {
+        break;
+      }
+    }
     if (!resolvedLegacyMode) {
-      logger.debug(`[${opts.agentName}] Ignoring unknown ACP legacy mode request: ${requestedMode}`);
+      logger.debug(
+        `[${opts.agentName}] Ignoring unknown ACP legacy mode request: ${requestedMode} (candidates: ${requestedCandidates.join(', ')})`,
+      );
       return;
     }
     if (resolvedLegacyMode === legacyModes.currentModeId) {
