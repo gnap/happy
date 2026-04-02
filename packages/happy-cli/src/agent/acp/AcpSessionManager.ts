@@ -141,6 +141,7 @@ export class AcpSessionManager {
       // canonical name so the App can look up the correct knownTools entry.
       // Fall back to toolName only when kind is absent (non-cursor ACP agents).
       const name = msg.kind ?? msg.toolName;
+      // Use the human-readable toolName as the display title (CLI sends it from backend description).
       const rawDesc = typeof msg.description === 'string' ? msg.description.trim() : '';
       const fallbackLabel = `Running ${name}`;
       const title = rawDesc || msg.toolName || fallbackLabel;
