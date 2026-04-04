@@ -9,7 +9,7 @@ const mmkv = new MMKV();
 const NEW_SESSION_DRAFT_KEY = 'new-session-draft-v1';
 const REGISTERED_PUSH_TOKEN_KEY = 'registered-push-token-v1';
 
-export type NewSessionAgentType = 'claude' | 'codex' | 'gemini' | 'openclaw';
+export type NewSessionAgentType = 'claude' | 'codex' | 'cursor' | 'gemini' | 'openclaw';
 export type NewSessionSessionType = 'simple' | 'worktree';
 
 export interface NewSessionDraft {
@@ -141,7 +141,7 @@ export function loadNewSessionDraft(): NewSessionDraft | null {
         const input = typeof parsed.input === 'string' ? parsed.input : '';
         const selectedMachineId = typeof parsed.selectedMachineId === 'string' ? parsed.selectedMachineId : null;
         const selectedPath = typeof parsed.selectedPath === 'string' ? parsed.selectedPath : null;
-        const agentType: NewSessionAgentType = parsed.agentType === 'codex' || parsed.agentType === 'gemini' || parsed.agentType === 'openclaw'
+        const agentType: NewSessionAgentType = parsed.agentType === 'codex' || parsed.agentType === 'cursor' || parsed.agentType === 'gemini' || parsed.agentType === 'openclaw'
             ? parsed.agentType
             : 'claude';
         const permissionMode: PermissionModeKey = typeof parsed.permissionMode === 'string'

@@ -253,7 +253,7 @@ export function getAvailableModels(
 ): ModelMode[] {
     const metadataModels = mapMetadataOptions(metadata?.models);
     if (metadataModels.length > 0) {
-        if (flavor === 'codex' && !metadataModels.some((model) => model.key === 'default')) {
+        if ((flavor === 'codex' || flavor === 'cursor' || flavor === 'cursor-acp' || flavor === 'acp-cursor') && !metadataModels.some((model) => model.key === 'default')) {
             return [{ key: 'default', name: 'default model', description: null }, ...metadataModels];
         }
         return metadataModels;

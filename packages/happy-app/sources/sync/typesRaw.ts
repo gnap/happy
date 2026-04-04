@@ -283,7 +283,7 @@ const rawAgentRecordSchema = z.discriminatedUnion('type', [z.object({
     id: z.string(),
     data: agentEventSchema
 }), z.object({
-    type: z.literal('codex'),
+    type: z.enum(['codex', 'cursor']),
     data: z.discriminatedUnion('type', [
         z.object({ type: z.literal('reasoning'), message: z.string() }),
         z.object({ type: z.literal('message'), message: z.string() }),
@@ -883,7 +883,7 @@ export function normalizeRawMessage(id: string, localId: string | null, createdA
                 isSidechain: false,
             };
         }
-        if (raw.content.type === 'codex') {
+        if (raw.content.type === 'codex' || raw.content.type === 'cursor') {
             if (raw.content.data.type === 'message') {
                 // Cast codex messages to agent text messages
                 return {

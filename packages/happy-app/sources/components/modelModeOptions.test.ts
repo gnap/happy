@@ -23,7 +23,7 @@ describe('modelModeOptions', () => {
 
     it('builds claude permission fallbacks with translated names', () => {
         const modes = getClaudePermissionModes(translate);
-        expect(modes.map((mode) => mode.key)).toEqual(['default', 'acceptEdits', 'plan', 'dontAsk', 'bypassPermissions']);
+        expect(modes.map((mode) => mode.key)).toEqual(['default', 'plan', 'dontAsk', 'acceptEdits', 'bypassPermissions']);
         expect(modes[0].name).toBe('tr:agentInput.permissionMode.default');
     });
 
@@ -67,6 +67,19 @@ describe('modelModeOptions', () => {
         ]);
     });
 
+    it('adds cursor default model option when metadata models are present', () => {
+        const models = getAvailableModels('cursor', {
+            models: [
+                { code: 'auto', value: 'Auto', description: 'Preferred' },
+            ],
+        } as any, translate);
+
+        expect(models).toEqual([
+            { key: 'default', name: 'default model', description: null },
+            { key: 'auto', name: 'Auto', description: 'Preferred' },
+        ]);
+    });
+
     it('keeps codex permission modes hardcoded even when metadata modes exist', () => {
         const modes = getAvailablePermissionModes('codex', {
             operatingModes: [{ code: 'metadata-only', value: 'Metadata Mode', description: null }],
@@ -84,8 +97,8 @@ describe('modelModeOptions', () => {
         } as any, translate);
 
         expect(modes).toEqual([
-            { key: 'build', name: 'Build', description: 'Do build steps' },
-            { key: 'plan', name: 'Plan', description: 'Plan first' },
+            { key: 'build', name: 'build', description: 'Do build steps' },
+            { key: 'plan', name: 'plan', description: 'Plan first' },
         ]);
     });
 

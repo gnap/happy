@@ -24,6 +24,7 @@ import { useRouter } from 'expo-router';
 const flavorIcons = {
     claude: require('@/assets/images/icon-claude.png'),
     codex: require('@/assets/images/icon-gpt.png'),
+    cursor: require('@/assets/images/icon-cursor.png'),
     gemini: require('@/assets/images/icon-gemini.png'),
     openclaw: require('@/assets/images/icon-openclaw.png'),
 };
@@ -381,7 +382,9 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
                                     tintColor={
                                         (sessionStatus.state === 'permission_required' || sessionStatus.state === 'thinking')
                                             ? sessionStatus.statusDotColor
-                                            : flavor === 'codex' ? theme.colors.text : undefined
+                                            : flavor === 'codex' || flavor === 'cursor' || flavor === 'acp-cursor'
+                                                ? theme.colors.text
+                                                : undefined
                                     }
                                     opacity={sessionStatus.state === 'waiting' ? 0.5 : (sessionStatus.isConnected ? 1 : 0.3)}
                                 />

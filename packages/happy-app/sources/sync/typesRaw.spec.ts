@@ -471,6 +471,61 @@ describe('Zod Transform - WOLOG Content Normalization', () => {
                 }
             }
         });
+
+        it('accepts Cursor tool-call messages via cursor schema path', () => {
+            const cursorMessage = {
+                role: 'agent',
+                content: {
+                    type: 'cursor',
+                    data: {
+                        type: 'tool-call',
+                        callId: 'cursor_1',
+                        name: 'CursorBash',
+                        input: { command: 'pwd' },
+                        id: 'cursor-id-1'
+                    }
+                }
+            };
+
+            const result = RawRecordSchema.safeParse(cursorMessage);
+
+            expect(result.success).toBe(true);
+            if (result.success) {
+                const content = result.data.content;
+                if (content.type === 'cursor' && content.data.type === 'tool-call') {
+                    expect(content.data.type).toBe('tool-call');
+                    expect(content.data.callId).toBe('cursor_1');
+                    expect(content.data.name).toBe('CursorBash');
+                }
+            }
+        });
+
+        it('accepts Cursor tool-call-result messages via cursor schema path', () => {
+            const cursorMessage = {
+                role: 'agent',
+                content: {
+                    type: 'cursor',
+                    data: {
+                        type: 'tool-call-result',
+                        callId: 'cursor_result_1',
+                        output: 'command output',
+                        id: 'cursor-id-2'
+                    }
+                }
+            };
+
+            const result = RawRecordSchema.safeParse(cursorMessage);
+
+            expect(result.success).toBe(true);
+            if (result.success) {
+                const content = result.data.content;
+                if (content.type === 'cursor' && content.data.type === 'tool-call-result') {
+                    expect(content.data.type).toBe('tool-call-result');
+                    expect(content.data.callId).toBe('cursor_result_1');
+                    expect(content.data.output).toBe('command output');
+                }
+            }
+        });
     });
 
     describe('Handles unexpected data formats gracefully', () => {

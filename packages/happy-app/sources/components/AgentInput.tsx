@@ -67,7 +67,7 @@ interface AgentInputProps {
     };
     alwaysShowContextSize?: boolean;
     onFileViewerPress?: () => void;
-    agentType?: 'claude' | 'codex' | 'cursor' | 'gemini' | 'openclaw';
+    agentType?: 'claude' | 'codex' | 'cursor' | 'cursor-acp' | 'gemini' | 'openclaw';
     onAgentClick?: () => void;
     machineName?: string | null;
     onMachineClick?: () => void;

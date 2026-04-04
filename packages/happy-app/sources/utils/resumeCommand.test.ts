@@ -20,6 +20,24 @@ describe('buildResumeCommand', () => {
         })).toBe(`Set-Location -LiteralPath 'C:\\Users\\test\\project'; happy codex --resume 019ccca5-726b-7c61-b914-16de27dfab6e`);
     });
 
+    it('builds a Cursor resume command using the same thread id flow', () => {
+        expect(buildResumeCommand({
+            path: '/tmp/project',
+            os: 'darwin',
+            flavor: 'cursor',
+            codexThreadId: '019ccca5-726b-7c61-b914-16de27dfab6e',
+        })).toBe(`cd '/tmp/project' && happy codex --resume 019ccca5-726b-7c61-b914-16de27dfab6e`);
+    });
+
+    it('builds a Cursor ACP resume command using the same thread id flow', () => {
+        expect(buildResumeCommand({
+            path: '/tmp/project',
+            os: 'darwin',
+            flavor: 'acp-cursor',
+            codexThreadId: '019ccca5-726b-7c61-b914-16de27dfab6e',
+        })).toBe(`cd '/tmp/project' && happy codex --resume 019ccca5-726b-7c61-b914-16de27dfab6e`);
+    });
+
     it('falls back to the bare resume command when no path is available', () => {
         expect(buildResumeCommand({
             flavor: 'claude',

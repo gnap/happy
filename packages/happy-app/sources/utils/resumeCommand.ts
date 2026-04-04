@@ -24,7 +24,7 @@ function isWindows(metadata: ResumeCommandMetadata): boolean {
 }
 
 function buildResumeInvocation(metadata: ResumeCommandMetadata): string | null {
-    if ((metadata.flavor === 'codex' || metadata.flavor === 'openai' || metadata.flavor === 'gpt') && metadata.codexThreadId) {
+    if ((metadata.flavor === 'codex' || metadata.flavor === 'cursor' || metadata.flavor === 'cursor-acp' || metadata.flavor === 'acp-cursor' || metadata.flavor === 'openai' || metadata.flavor === 'gpt') && metadata.codexThreadId) {
         return `happy codex --resume ${metadata.codexThreadId}`;
     }
     if (metadata.claudeSessionId) {
