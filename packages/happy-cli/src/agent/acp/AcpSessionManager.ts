@@ -141,11 +141,20 @@ export class AcpSessionManager {
       // canonical name so the App can look up the correct knownTools entry.
       // Fall back to toolName only when kind is absent (non-cursor ACP agents).
       const name = msg.kind ?? msg.toolName;
-      // Use the human-readable toolName as the display title (CLI sends it from backend description).
+      const filePath = typeof msg.args === 'object' && msg.args !== null && typeof (msg.args as { path?: unknown }).path === 'string'
+        ? ((msg.args as { path: string }).path.trim())
+        : '';
+      const usesFilePathTitle = name === 'CursorRead' || name === 'CursorWrite' || name === 'CursorEdit';
+      // Cursor file tools read better when the path is shown first; other tools keep their
+      // human-readable backend description/title.
       const rawDesc = typeof msg.description === 'string' ? msg.description.trim() : '';
       const fallbackLabel = `Running ${name}`;
-      const title = rawDesc || msg.toolName || fallbackLabel;
-      const description = rawDesc || fallbackLabel;
+      const title = usesFilePathTitle
+        ? (filePath || rawDesc || msg.toolName || fallbackLabel)
+        : (rawDesc || msg.toolName || fallbackLabel);
+      const description = usesFilePathTitle
+        ? (filePath || rawDesc || fallbackLabel)
+        : (rawDesc || fallbackLabel);
       return [
         ...flushed,
         createEnvelope('agent', {

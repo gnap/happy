@@ -181,6 +181,29 @@ describe('AcpSessionManager tool mapping', () => {
     expect(envelopes[0].turn).toBe(start.turn);
   });
 
+  it('prefers the file path for CursorEdit tool-call titles', () => {
+    const mapper = new AcpSessionManager();
+    mapper.startTurn();
+
+    const envelopes = mapper.mapMessage({
+      type: 'tool-call',
+      callId: 'acp-call-1',
+      kind: 'CursorEdit',
+      toolName: 'Edit',
+      description: 'Edit File',
+      args: { path: 'src/app.ts' },
+    });
+
+    expect(envelopes).toHaveLength(1);
+    expect(envelopes[0].ev.t).toBe('tool-call-start');
+    if (envelopes[0].ev.t === 'tool-call-start') {
+      expect(envelopes[0].ev.name).toBe('CursorEdit');
+      expect(envelopes[0].ev.title).toBe('src/app.ts');
+      expect(envelopes[0].ev.description).toBe('src/app.ts');
+      expect(envelopes[0].ev.args).toEqual({ path: 'src/app.ts' });
+    }
+  });
+
   it('maps tool-result to paired tool-call-end', () => {
     const mapper = new AcpSessionManager();
     mapper.startTurn();
