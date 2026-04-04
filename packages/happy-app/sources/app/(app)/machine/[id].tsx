@@ -509,6 +509,15 @@ export default function MachineDetailScreen() {
                             }
                         />
                         <Item
+                            title="Cursor"
+                            showChevron={false}
+                            rightElement={
+                                <Text style={{ color: metadata.cliAvailability.cursor !== false ? '#34C759' : theme.colors.textSecondary, fontSize: 14 }}>
+                                    {metadata.cliAvailability.cursor !== false ? t('machine.cliInstalled') : t('machine.cliNotFound')}
+                                </Text>
+                            }
+                        />
+                        <Item
                             title="Gemini"
                             showChevron={false}
                             rightElement={
