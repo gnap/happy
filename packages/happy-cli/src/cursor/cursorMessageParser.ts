@@ -94,9 +94,10 @@ export class CursorMessageParser {
         // consolidated assistant message without timestamp_ms. Skip the final
         // consolidated payload so already-streamed text is not duplicated.
         const rawMsg = msg as unknown as Record<string, unknown>;
-        if (!('timestamp_ms' in rawMsg)) {
+        if (!rawMsg.timestamp_ms || rawMsg.model_call_id) {
           if (process.env.CURSOR_AGENT_RAW_LOG === '1') {
-            try { appendFileSync(process.env.CURSOR_AGENT_RAW_LOG_FILE ?? '/tmp/cursor-agent-raw.log', `[assistant SKIPPED final-consolidated] no timestamp_ms\n`); } catch { /* ignore */ }
+            const reason = !rawMsg.timestamp_ms ? 'no timestamp_ms' : 'has model_call_id';
+            try { appendFileSync(process.env.CURSOR_AGENT_RAW_LOG_FILE ?? '/tmp/cursor-agent-raw.log', `[assistant SKIPPED] ${reason}\n`); } catch { /* ignore */ }
           }
           break;
         }

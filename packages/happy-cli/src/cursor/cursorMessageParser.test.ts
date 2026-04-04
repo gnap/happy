@@ -18,4 +18,18 @@ describe('cursorMessageParser', () => {
 
     expect(result).toEqual([]);
   });
+
+  it('skips consolidated assistant messages with model_call_id', () => {
+    const result = parseCursorMessage({
+      type: 'assistant',
+      model_call_id: 'call-1',
+      timestamp_ms: 123,
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'duplicate text' }],
+      },
+    } as never);
+
+    expect(result).toEqual([]);
+  });
 });
