@@ -90,7 +90,16 @@ export class CursorMessageParser {
       }
 
       case 'assistant': {
+        // cursor-agent may emit streaming assistant deltas followed by a final
+        // consolidated assistant message without timestamp_ms. Skip the final
+        // consolidated payload so already-streamed text is not duplicated.
         const rawMsg = msg as unknown as Record<string, unknown>;
+        if (!('timestamp_ms' in rawMsg)) {
+          if (process.env.CURSOR_AGENT_RAW_LOG === '1') {
+            try { appendFileSync(process.env.CURSOR_AGENT_RAW_LOG_FILE ?? '/tmp/cursor-agent-raw.log', `[assistant SKIPPED final-consolidated] no timestamp_ms\n`); } catch { /* ignore */ }
+          }
+          break;
+        }
         const content = msg.message?.content;
         const blocks = Array.isArray(content) ? content : content && typeof content === 'object' ? [content] : [];
         for (const block of blocks) {
