@@ -7713,6 +7713,11 @@ expo-navigation-bar@~55.0.0:
     debug "^4.3.2"
     react-native-is-edge-to-edge "^1.2.1"
 
+expo-network@^55.0.11:
+  version "55.0.11"
+  resolved "https://registry.yarnpkg.com/expo-network/-/expo-network-55.0.11.tgz#00f5709aff0116c47cdb3aed20e89ea8e2d2b4db"
+  integrity sha512-p9wsKAJ9ksLpNdgGAMcLgktUGPqIouYkiHiUtZJJdZf2Yq2ZDjRt+N0MTVVdplVv9dvd3RfaO/JJ36AVXisdWg==
+
 expo-notifications@~55.0.0:
   version "55.0.13"
   resolved "https://registry.yarnpkg.com/expo-notifications/-/expo-notifications-55.0.13.tgz#b4dde5f294e22c25176435cea25fdfd0932bf62e"
@@ -13569,6 +13574,7 @@ toqr@^0.1.1:
   version "0.1.1"
   resolved "https://registry.yarnpkg.com/toqr/-/toqr-0.1.1.tgz#fb987ea706be36affc89336ca26543a16062725a"
   integrity sha512-FWAPzCIHZHnrE/5/w9MPk0kK25hSQSH2IKhYh9PyjS3SG/+IEMvlwIHbhz+oF7xl54I+ueZlVnMjyzdSwLmAwA==
+
 tr46@~0.0.3:
   version "0.0.3"
   resolved "https://registry.yarnpkg.com/tr46/-/tr46-0.0.3.tgz#8184fd347dac9cdc185992f3a6622e14b9d9ab6a"
