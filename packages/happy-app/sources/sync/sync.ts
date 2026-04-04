@@ -717,47 +717,49 @@ class Sync {
             lastMessage: ApiMessage | null;
         }>;
 
-        // Initialize all session encryptions first
-        const sessionKeys = new Map<string, Uint8Array | null>();
-        for (const session of sessions) {
-            if (session.dataEncryptionKey) {
-                let decrypted = await this.encryption.decryptEncryptionKey(session.dataEncryptionKey);
-                if (!decrypted) {
-                    console.error(`Failed to decrypt data encryption key for session ${session.id}`);
+        try {
+            // Initialize all session encryptions first
+            const sessionKeys = new Map<string, Uint8Array | null>();
+            for (const session of sessions) {
+                if (session.dataEncryptionKey) {
+                    let decrypted = await this.encryption.decryptEncryptionKey(session.dataEncryptionKey);
+                    if (!decrypted) {
+                        console.error(`Failed to decrypt data encryption key for session ${session.id}`);
+                        continue;
+                    }
+                    sessionKeys.set(session.id, decrypted);
+                } else {
+                    sessionKeys.set(session.id, null);
+                }
+            }
+            await this.encryption.initializeSessions(sessionKeys);
+
+            // Decrypt sessions
+            let decryptedSessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[] = [];
+            for (const session of sessions) {
+                // Get session encryption (should always exist after initialization)
+                const sessionEncryption = this.encryption.getSessionEncryption(session.id);
+                if (!sessionEncryption) {
+                    console.error(`Session encryption not found for ${session.id} - this should never happen`);
                     continue;
                 }
-                sessionKeys.set(session.id, decrypted);
-            } else {
-                sessionKeys.set(session.id, null);
+
+                // Decrypt metadata using session-specific encryption
+                let metadata = await sessionEncryption.decryptMetadata(session.metadataVersion, session.metadata);
+
+                // Decrypt agent state using session-specific encryption
+                let agentState = await sessionEncryption.decryptAgentState(session.agentStateVersion, session.agentState);
+
+                // Put it all together
+                const processedSession = {
+                    ...session,
+                    thinking: false,
+                    thinkingAt: 0,
+                    metadata,
+                    agentState
+                };
+                decryptedSessions.push(processedSession);
             }
-        }
-        await this.encryption.initializeSessions(sessionKeys);
-
-        // Decrypt sessions
-        let decryptedSessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[] = [];
-        for (const session of sessions) {
-            // Get session encryption (should always exist after initialization)
-            const sessionEncryption = this.encryption.getSessionEncryption(session.id);
-            if (!sessionEncryption) {
-                console.error(`Session encryption not found for ${session.id} - this should never happen`);
-                continue;
-            }
-
-            // Decrypt metadata using session-specific encryption
-            let metadata = await sessionEncryption.decryptMetadata(session.metadataVersion, session.metadata);
-
-            // Decrypt agent state using session-specific encryption
-            let agentState = await sessionEncryption.decryptAgentState(session.agentStateVersion, session.agentState);
-
-            // Put it all together
-            const processedSession = {
-                ...session,
-                thinking: false,
-                thinkingAt: 0,
-                metadata,
-                agentState
-            };
-            decryptedSessions.push(processedSession);
 
             // Only eagerly catch up messages for active sessions (agent is running).
             // Inactive/offline sessions are loaded lazily when the user opens them.
@@ -776,15 +778,15 @@ class Sync {
                     }
                 }
             })();
+
+            // Apply to storage
+            this.applySessions(decryptedSessions);
+            log.log(`📥 fetchSessions completed - processed ${decryptedSessions.length} sessions`);
         } catch (err) {
             log.log(`📥 fetchSessions failed: ${err instanceof Error ? err.message : String(err)}`);
             // Apply empty list so UI shows empty state instead of endless spinner
             this.applySessions([]);
         }
-
-        // Apply to storage
-        this.applySessions(decryptedSessions);
-        log.log(`📥 fetchSessions completed - processed ${decryptedSessions.length} sessions`);
 
     }
 
