@@ -37,8 +37,8 @@
     "start:production": "cross-env APP_ENV=production expo start",
     "web:test": "cross-env APP_ENV=development expo start --web --non-interactive",
     "// ==== macOS Desktop (Tauri) Variants ====": "echo comment",
-    "tauri:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
-    "tauri:build:dev": "tauri build --config src-tauri/tauri.dev.conf.json",
+    "tauri:dev": "cross-env CARGO_TARGET_DIR=/tmp/happy-tauri-target tauri dev --config src-tauri/tauri.dev.conf.json",
+    "tauri:build:dev": "cross-env CARGO_TARGET_DIR=/tmp/happy-tauri-target tauri build --config src-tauri/tauri.dev.conf.json",
     "tauri:build:preview": "tauri build --config src-tauri/tauri.preview.conf.json",
     "tauri:build:production": "tauri build"
   },

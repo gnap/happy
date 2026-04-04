@@ -148,6 +148,8 @@ export const MachineMetadataSchema = z.object({
         codex: z.boolean(),
         gemini: z.boolean(),
         openclaw: z.boolean(),
+        /** Present on newer CLIs; when absent, App treats Cursor as available unless explicitly false. */
+        cursor: z.boolean().optional(),
         detectedAt: z.number(),
     }).optional(),
     resumeSupport: z.object({

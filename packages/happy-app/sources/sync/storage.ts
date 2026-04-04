@@ -319,16 +319,21 @@ export const storage = create<StorageState>()((set, get) => {
                 // Use centralized resolver for consistent state management
                 const presence = resolveSessionOnlineState(session);
 
-                // Preserve existing draft and permission mode if they exist, or load from saved data
+                // Draft: existing || saved || session. Permission: user's explicit local choice
+                // (existing/saved) takes priority over server metadata so ACP config/mode updates from
+                // the agent do not immediately overwrite a mode the user picked in the session UI.
                 const existingDraft = state.sessions[session.id]?.draft;
                 const savedDraft = savedDrafts[session.id];
                 const existingPermissionMode = state.sessions[session.id]?.permissionMode;
                 const savedPermissionMode = savedPermissionModes[session.id];
                 const defaultPermissionMode: PermissionModeKey = isSandboxEnabled(session.metadata) ? 'bypassPermissions' : 'default';
+                const metadataPermission = session.metadata?.currentOperatingModeCode?.trim();
                 const resolvedPermissionMode: PermissionModeKey =
-                    (existingPermissionMode && existingPermissionMode !== 'default' ? existingPermissionMode : undefined) ||
-                    (savedPermissionMode && savedPermissionMode !== 'default' ? savedPermissionMode : undefined) ||
-                    (session.permissionMode && session.permissionMode !== 'default' ? session.permissionMode : undefined) ||
+                    (existingPermissionMode && existingPermissionMode !== 'default' ? existingPermissionMode : undefined) ??
+                    (savedPermissionMode && savedPermissionMode !== 'default' ? savedPermissionMode : undefined) ??
+                    (metadataPermission && metadataPermission !== 'default' ? metadataPermission : undefined) ??
+                    (session.permissionMode && session.permissionMode !== 'default' ? session.permissionMode : undefined) ??
+                    (metadataPermission ? metadataPermission : undefined) ??
                     defaultPermissionMode;
 
                 mergedSessions[session.id] = {

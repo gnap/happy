@@ -618,7 +618,12 @@ function NewSessionScreen() {
     const availableAgents = React.useMemo(() => {
         const availability = selectedMachine?.metadata?.cliAvailability;
         if (!availability) return ALL_AGENTS;
-        return ALL_AGENTS.filter(a => availability[a.key]);
+        return ALL_AGENTS.filter((a) => {
+            if (a.key === 'cursor') {
+                return availability.cursor !== false;
+            }
+            return Boolean(availability[a.key]);
+        });
     }, [selectedMachine]);
 
     // If current agent not available on this machine, switch to first available
