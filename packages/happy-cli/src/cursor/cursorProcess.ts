@@ -57,6 +57,8 @@ export interface CursorProcessEvents {
 export class CursorProcess extends EventEmitter {
   private child: ChildProcess | null = null;
   private buffer = '';
+  /** Separate buffer so interleaved stdout/stderr chunks do not corrupt line splitting. */
+  private stderrBuffer = '';
   private killed = false;
   private timeoutHandle: ReturnType<typeof setTimeout> | null = null;
 
@@ -165,6 +167,7 @@ export class CursorProcess extends EventEmitter {
         if (!text.includes('tcgetattr') && !text.includes('ioctl')) {
           logger.debug(`[cursor] stderr: ${text.trim()}`);
         }
+        this.processStderrChunk(text);
       });
 
       this.once('subprocessError', (err: Error) => {
@@ -177,6 +180,10 @@ export class CursorProcess extends EventEmitter {
         if (this.buffer.trim()) {
           this.parseLine(this.buffer);
           this.buffer = '';
+        }
+        if (this.stderrBuffer.trim()) {
+          this.parseLine(this.stderrBuffer);
+          this.stderrBuffer = '';
         }
         logger.debug(`[cursor] Process exited with code: ${code}`);
         this.emit('exit', code);
@@ -223,6 +230,16 @@ export class CursorProcess extends EventEmitter {
     this.buffer += text;
     const lines = this.buffer.split('\n');
     this.buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      this.parseLine(line);
+    }
+  }
+
+  private processStderrChunk(text: string): void {
+    this.stderrBuffer += text;
+    const lines = this.stderrBuffer.split('\n');
+    this.stderrBuffer = lines.pop() || '';
 
     for (const line of lines) {
       this.parseLine(line);
