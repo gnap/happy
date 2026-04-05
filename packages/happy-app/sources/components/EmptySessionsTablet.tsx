@@ -3,8 +3,6 @@ import { View, Text, Pressable } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Typography } from '@/constants/Typography';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { useAllMachines } from '@/sync/storage';
-import { isMachineOnline } from '@/utils/machineUtils';
 import { useRouter } from 'expo-router';
 
 const stylesheet = StyleSheet.create((theme) => ({
@@ -58,14 +56,9 @@ export function EmptySessionsTablet() {
     const { theme } = useUnistyles();
     const styles = stylesheet;
     const router = useRouter();
-    const machines = useAllMachines();
-    
-    const hasOnlineMachines = React.useMemo(() => {
-        return machines.some(machine => isMachineOnline(machine));
-    }, [machines]);
-    
+
     const handleStartNewSession = () => {
-        router.navigate('/new');
+        router.push('/new');
     };
     
     return (
@@ -81,31 +74,23 @@ export function EmptySessionsTablet() {
                 No active sessions
             </Text>
             
-            {hasOnlineMachines ? (
-                <>
-                    <Text style={styles.descriptionText}>
-                        Start a new session on any of your connected machines.
-                    </Text>
-                    <Pressable
-                        style={styles.button}
-                        onPress={handleStartNewSession}
-                    >
-                        <Ionicons
-                            name="add"
-                            size={20}
-                            color={theme.colors.button.primary.tint}
-                            style={styles.buttonIcon}
-                        />
-                        <Text style={styles.buttonText}>
-                            Start New Session
-                        </Text>
-                    </Pressable>
-                </>
-            ) : (
-                <Text style={styles.descriptionText}>
-                    Open a new terminal on your computer to start session.
+            <Text style={styles.descriptionText}>
+                Start a new session on any of your connected machines.
+            </Text>
+            <Pressable
+                style={styles.button}
+                onPress={handleStartNewSession}
+            >
+                <Ionicons
+                    name="add"
+                    size={20}
+                    color={theme.colors.button.primary.tint}
+                    style={styles.buttonIcon}
+                />
+                <Text style={styles.buttonText}>
+                    Start New Session
                 </Text>
-            )}
+            </Pressable>
         </View>
     );
 }

@@ -5,7 +5,9 @@ import { knownTools } from '@/components/tools/knownTools';
 import { ToolDiffView } from '@/components/tools/ToolDiffView';
 import { useSetting } from '@/sync/storage';
 
-export const WriteView = React.memo<ToolViewProps>(({ tool }) => {
+const LIST_DIFF_MAX_LINES = 4;
+
+export const WriteView = React.memo<ToolViewProps>(({ tool, compact }) => {
     const showLineNumbersInToolViews = useSetting('showLineNumbersInToolViews');
 
     let contents: string = '<no contents>';
@@ -22,6 +24,7 @@ export const WriteView = React.memo<ToolViewProps>(({ tool }) => {
                     newText={contents} 
                     showLineNumbers={showLineNumbersInToolViews}
                     showPlusMinusSymbols={showLineNumbersInToolViews}
+                    maxLines={compact ? LIST_DIFF_MAX_LINES : undefined}
                 />
             </ToolSectionView>
         </>

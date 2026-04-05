@@ -3,6 +3,10 @@ import { MessageMeta } from "./typesMessageMeta";
 
 export type ToolCall = {
     name: string;
+    /** Provider-assigned tool call id (e.g. Claude block.id, envelope.ev.call). Used for lazy-content RPC. */
+    callId?: string;
+    /** True when the CLI sent truncated content for this tool call; full content must be fetched via RPC. */
+    lazyContent?: boolean;
     state: 'running' | 'completed' | 'error';
     input: any;
     createdAt: number;

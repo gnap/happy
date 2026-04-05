@@ -56,6 +56,12 @@ interface SessionMessages {
     messagesMap: Record<string, Message>;
     reducerState: ReducerState;
     isLoaded: boolean;
+    /** Lowest seq currently loaded; 0 means unknown / full history loaded */
+    oldestSeq: number;
+    /** True if there are messages on the server with seq < oldestSeq */
+    hasOlderMessages: boolean;
+    /** True while an older-messages fetch is in flight */
+    isLoadingOlder: boolean;
 }
 
 // Machine type is now imported from storageTypes - represents persisted machine data
@@ -106,6 +112,9 @@ interface StorageState {
     applyReady: () => void;
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => { changed: string[], hasReadyEvent: boolean };
     applyMessagesLoaded: (sessionId: string) => void;
+    applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState, oldestSeq: number, hasOlderMessages: boolean) => void;
+    applyOlderMessages: (sessionId: string, olderMessages: NormalizedMessage[], newOldestSeq: number, hasOlderMessages: boolean) => void;
+    setLoadingOlder: (sessionId: string, loading: boolean) => void;
     applySettings: (settings: Settings, version: number) => void;
     applySettingsLocal: (settings: Partial<Settings>) => void;
     applyLocalSettings: (settings: Partial<LocalSettings>) => void;
@@ -518,7 +527,10 @@ export const storage = create<StorageState>()((set, get) => {
                     messages: [],
                     messagesMap: {},
                     reducerState: createReducer(),
-                    isLoaded: false
+                    isLoaded: false,
+                    oldestSeq: 0,
+                    hasOlderMessages: false,
+                    isLoadingOlder: false,
                 };
 
                 // Get the session's agentState if available
@@ -580,7 +592,10 @@ export const storage = create<StorageState>()((set, get) => {
                             messages: messagesArray,
                             messagesMap: mergedMessagesMap,
                             reducerState: existingSession.reducerState, // Explicitly include the mutated reducer state
-                            isLoaded: true
+                            isLoaded: true,
+                            oldestSeq: existingSession.oldestSeq,
+                            hasOlderMessages: existingSession.hasOlderMessages,
+                            isLoadingOlder: existingSession.isLoadingOlder,
                         }
                     }
                 };
@@ -650,7 +665,10 @@ export const storage = create<StorageState>()((set, get) => {
                             reducerState,
                             messages,
                             messagesMap,
-                            isLoaded: true
+                            isLoaded: true,
+                            oldestSeq: 0,
+                            hasOlderMessages: false,
+                            isLoadingOlder: false,
                         } satisfies SessionMessages
                     }
                 };
@@ -668,6 +686,73 @@ export const storage = create<StorageState>()((set, get) => {
             }
 
             return result;
+        }),
+        applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState, oldestSeq: number, hasOlderMessages: boolean) => set((state) => {
+            const messagesMap: Record<string, Message> = {};
+            for (const msg of messages) {
+                messagesMap[msg.id] = msg;
+            }
+            const sorted = [...messages].sort((a, b) => b.createdAt - a.createdAt);
+
+            return {
+                ...state,
+                sessionMessages: {
+                    ...state.sessionMessages,
+                    [sessionId]: {
+                        messages: sorted,
+                        messagesMap,
+                        reducerState,
+                        isLoaded: true,
+                        oldestSeq,
+                        hasOlderMessages,
+                        isLoadingOlder: false,
+                    } satisfies SessionMessages,
+                },
+            };
+        }),
+        applyOlderMessages: (sessionId: string, olderMessages: NormalizedMessage[], newOldestSeq: number, hasOlderMessages: boolean) => set((state) => {
+            const existing = state.sessionMessages[sessionId];
+            if (!existing) return state;
+
+            // Run a temporary reducer so older batches still materialize derived messages.
+            const tempReducer = createReducer();
+            const session = state.sessions[sessionId];
+            const reducerResult = reducer(tempReducer, olderMessages, session?.agentState ?? undefined);
+
+            const mergedMap = { ...existing.messagesMap };
+            for (const msg of reducerResult.messages) {
+                if (!mergedMap[msg.id]) {
+                    mergedMap[msg.id] = msg;
+                }
+            }
+
+            const sorted = Object.values(mergedMap).sort((a, b) => b.createdAt - a.createdAt);
+
+            return {
+                ...state,
+                sessionMessages: {
+                    ...state.sessionMessages,
+                    [sessionId]: {
+                        ...existing,
+                        messages: sorted,
+                        messagesMap: mergedMap,
+                        oldestSeq: newOldestSeq,
+                        hasOlderMessages,
+                        isLoadingOlder: false,
+                    } satisfies SessionMessages,
+                },
+            };
+        }),
+        setLoadingOlder: (sessionId: string, loading: boolean) => set((state) => {
+            const existing = state.sessionMessages[sessionId];
+            if (!existing) return state;
+            return {
+                ...state,
+                sessionMessages: {
+                    ...state.sessionMessages,
+                    [sessionId]: { ...existing, isLoadingOlder: loading },
+                },
+            };
         }),
         applySettingsLocal: (settings: Partial<Settings>) => set((state) => {
             saveSettings(applySettings(state.settings, settings), state.settingsVersion ?? 0);
@@ -1158,12 +1243,15 @@ export function useSession(id: string): Session | null {
 
 const emptyArray: unknown[] = [];
 
-export function useSessionMessages(sessionId: string): { messages: Message[], isLoaded: boolean } {
+export function useSessionMessages(sessionId: string): { messages: Message[], isLoaded: boolean, hasOlderMessages: boolean, isLoadingOlder: boolean, oldestSeq: number } {
     return storage(useShallow((state) => {
         const session = state.sessionMessages[sessionId];
         return {
             messages: session?.messages ?? emptyArray,
-            isLoaded: session?.isLoaded ?? false
+            isLoaded: session?.isLoaded ?? false,
+            hasOlderMessages: session?.hasOlderMessages ?? false,
+            isLoadingOlder: session?.isLoadingOlder ?? false,
+            oldestSeq: session?.oldestSeq ?? 0,
         };
     }));
 }

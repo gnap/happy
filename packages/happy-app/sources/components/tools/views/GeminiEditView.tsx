@@ -5,6 +5,8 @@ import { ToolDiffView } from '@/components/tools/ToolDiffView';
 import { trimIdent } from '@/utils/trimIdent';
 import { useSetting } from '@/sync/storage';
 
+const LIST_DIFF_MAX_LINES = 4;
+
 /**
  * Extract edit content from Gemini's nested input format.
  * 
@@ -52,7 +54,7 @@ function extractEditContent(input: any): { oldText: string; newText: string; pat
  * - newText (instead of new_string)
  * - path (instead of file_path)
  */
-export const GeminiEditView = React.memo<ToolViewProps>(({ tool }) => {
+export const GeminiEditView = React.memo<ToolViewProps>(({ tool, compact }) => {
     const showLineNumbersInToolViews = useSetting('showLineNumbersInToolViews');
     
     const { oldText, newText } = extractEditContent(tool.input);
@@ -67,6 +69,7 @@ export const GeminiEditView = React.memo<ToolViewProps>(({ tool }) => {
                     newText={newString} 
                     showLineNumbers={showLineNumbersInToolViews}
                     showPlusMinusSymbols={showLineNumbersInToolViews}
+                    maxLines={compact ? LIST_DIFF_MAX_LINES : undefined}
                 />
             </ToolSectionView>
         </>

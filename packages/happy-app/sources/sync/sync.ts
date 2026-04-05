@@ -13,7 +13,7 @@ import { randomUUID } from 'expo-crypto';
 import * as Notifications from 'expo-notifications';
 import { syncCurrentPushToken } from './pushRegistration';
 import { Platform, AppState, type AppStateStatus } from 'react-native';
-import { isRunningOnMac } from '@/utils/platform';
+import { isRunningInTauri, isRunningOnMac } from '@/utils/platform';
 import { NormalizedMessage, normalizeRawMessage, RawRecord } from './typesRaw';
 import { applySettings, Settings, settingsDefaults, settingsParse, SUPPORTED_SCHEMA_VERSION } from './settings';
 import { Profile, profileParse } from './profile';
@@ -41,6 +41,7 @@ import { fetchFeed } from './apiFeed';
 import { FeedItem } from './feedTypes';
 import { UserProfile } from './friendTypes';
 import { resolveMessageModeMeta } from './messageMeta';
+import { loadMessageCache, saveMessageCache, clearMessageCache, preloadSessionCacheDB, getCachedLastSeq } from './cache/messageCache';
 
 type V3GetSessionMessagesResponse = {
     messages: ApiMessage[];
@@ -1734,9 +1735,41 @@ class Sync {
                 throw new Error(`Session encryption not ready for ${sessionId}`);
             }
 
-            let afterSeq = this.sessionLastSeq.get(sessionId) ?? 0;
+            const session = storage.getState().sessions[sessionId];
+            if (!session) {
+                throw new Error(`Session not found for ${sessionId}`);
+            }
+
+            const existingSessionMessages = storage.getState().sessionMessages[sessionId];
+            if (!existingSessionMessages?.isLoaded) {
+                const cached = await loadMessageCache(session);
+                if (cached) {
+                    storage.getState().applyHydratedCache(
+                        sessionId,
+                        cached.messages,
+                        cached.reducerState,
+                        cached.oldestSeq,
+                        cached.hasOlderMessages,
+                    );
+                    this.sessionLastSeq.set(sessionId, cached.lastSeq);
+                    log.log(`💬 fetchMessages: hydrated from cache for ${sessionId} (lastSeq=${cached.lastSeq}, oldestSeq=${cached.oldestSeq}, ${cached.messages.length} messages)`);
+                } else {
+                    log.log(`💬 fetchMessages: no cache for ${sessionId} (will fetch from server)`);
+                }
+            }
+
+            const cachedLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
+            let afterSeq: number;
+            if (cachedLastSeq > 0) {
+                afterSeq = cachedLastSeq;
+            } else {
+                afterSeq = Math.max(0, (session.seq ?? 0) - 100);
+            }
+
             let hasMore = true;
             let totalNormalized = 0;
+            let oldestSeq = cachedLastSeq > 0 ? storage.getState().sessionMessages[sessionId]?.oldestSeq ?? 0 : 0;
+            let hasOlderMessages = cachedLastSeq > 0 ? storage.getState().sessionMessages[sessionId]?.hasOlderMessages ?? false : false;
 
             while (hasMore) {
                 const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
@@ -1778,6 +1811,38 @@ class Sync {
                     break;
                 }
                 afterSeq = maxSeq;
+
+                if (cachedLastSeq === 0 && oldestSeq === 0) {
+                    let minSeqInPage = afterSeq > 0 ? afterSeq + 1 : 1;
+                    for (const message of messages) {
+                        if (message.seq < minSeqInPage) {
+                            minSeqInPage = message.seq;
+                        }
+                    }
+                    oldestSeq = messages.length > 0 ? minSeqInPage : 1;
+                    hasOlderMessages = oldestSeq > 1;
+                }
+            }
+
+            if (cachedLastSeq === 0) {
+                if (oldestSeq === 0) {
+                    oldestSeq = 1;
+                    hasOlderMessages = false;
+                }
+                storage.getState().applyOlderMessages(sessionId, [], oldestSeq, hasOlderMessages);
+            }
+
+            const updatedSession = storage.getState().sessions[sessionId];
+            const sessionMsgs = storage.getState().sessionMessages[sessionId];
+            if (updatedSession && sessionMsgs) {
+                void saveMessageCache(
+                    updatedSession,
+                    sessionMsgs.messages,
+                    sessionMsgs.reducerState,
+                    this.sessionLastSeq.get(sessionId) ?? 0,
+                    sessionMsgs.oldestSeq,
+                    sessionMsgs.hasOlderMessages,
+                );
             }
 
             storage.getState().applyMessagesLoaded(sessionId);
@@ -1950,6 +2015,7 @@ class Sync {
             this.sessionMessageLocks.delete(sessionId);
             this.sessionMessageQueue.delete(sessionId);
             this.sessionQueueProcessing.delete(sessionId);
+            void clearMessageCache(sessionId);
 
             log.log(`🗑️ Session ${sessionId} deleted from local storage`);
         } else if (updateData.body.t === 'update-session') {
@@ -2400,6 +2466,8 @@ async function syncInit(credentials: AuthCredentials, restore: boolean) {
         throw new Error(`Invalid secret key length: ${secretKey.length}, expected 32`);
     }
     const encryption = await Encryption.create(secretKey);
+
+    await preloadSessionCacheDB();
 
     // Initialize tracking
     initializeTracking(encryption.anonID);

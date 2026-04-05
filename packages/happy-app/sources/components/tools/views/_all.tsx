@@ -17,12 +17,18 @@ import { CodexDiffView } from './CodexDiffView';
 import { AskUserQuestionView } from './AskUserQuestionView';
 import { GeminiEditView } from './GeminiEditView';
 import { GeminiExecuteView } from './GeminiExecuteView';
+import { CursorEditView } from './CursorEditView';
+import { CursorWriteView } from './CursorWriteView';
+import { CursorEditViewFull } from './CursorEditViewFull';
+import { CursorWriteViewFull } from './CursorWriteViewFull';
 
 export type ToolViewProps = {
     tool: ToolCall;
     metadata: Metadata | null;
     messages: Message[];
     sessionId?: string;
+    messageId?: string;
+    compact?: boolean;
 }
 
 // Type for tool view components
@@ -32,6 +38,9 @@ export type ToolViewComponent = React.ComponentType<ToolViewProps>;
 export const toolViewRegistry: Record<string, ToolViewComponent> = {
     Edit: EditView,
     Bash: BashView,
+    CursorBash: BashView,
+    CursorEdit: CursorEditView,
+    CursorWrite: CursorWriteView,
     CodexBash: CodexBashView,
     CodexPatch: CodexPatchView,
     CodexDiff: CodexDiffView,
@@ -50,6 +59,9 @@ export const toolViewRegistry: Record<string, ToolViewComponent> = {
 
 export const toolFullViewRegistry: Record<string, ToolViewComponent> = {
     Bash: BashViewFull,
+    CursorBash: BashViewFull,
+    CursorEdit: CursorEditViewFull,
+    CursorWrite: CursorWriteViewFull,
     CodexBash: CodexBashView,
     Edit: EditViewFull,
     MultiEdit: MultiEditViewFull,
@@ -74,6 +86,10 @@ export { CodexBashView } from './CodexBashView';
 export { CodexPatchView } from './CodexPatchView';
 export { CodexDiffView } from './CodexDiffView';
 export { BashViewFull } from './BashViewFull';
+export { CursorEditView } from './CursorEditView';
+export { CursorWriteView } from './CursorWriteView';
+export { CursorEditViewFull } from './CursorEditViewFull';
+export { CursorWriteViewFull } from './CursorWriteViewFull';
 export { EditViewFull } from './EditViewFull';
 export { MultiEditViewFull } from './MultiEditViewFull';
 export { ExitPlanToolView } from './ExitPlanToolView';

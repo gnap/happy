@@ -1,13 +1,14 @@
 import React, { useMemo } from 'react';
 import { View, Text, ViewStyle } from 'react-native';
-import { calculateUnifiedDiff, DiffToken } from '@/components/diff/calculateDiff';
+import { calculateUnifiedDiff, DiffToken, DiffResult } from '@/components/diff/calculateDiff';
 import { Typography } from '@/constants/Typography';
 import { useUnistyles } from 'react-native-unistyles';
 
 
 interface DiffViewProps {
-    oldText: string;
-    newText: string;
+    oldText?: string;
+    newText?: string;
+    parsedDiff?: DiffResult;
     contextLines?: number;
     showLineNumbers?: boolean;
     showPlusMinusSymbols?: boolean;
@@ -16,34 +17,39 @@ interface DiffViewProps {
     newTitle?: string;
     style?: ViewStyle;
     maxHeight?: number;
+    maxLines?: number;
     wrapLines?: boolean;
     fontScaleX?: number;
 }
 
 export const DiffView: React.FC<DiffViewProps> = ({
-    oldText,
-    newText,
+    oldText = '',
+    newText = '',
+    parsedDiff,
     contextLines = 3,
     showLineNumbers = true,
     showPlusMinusSymbols = true,
     wrapLines = false,
     style,
+    maxLines,
     fontScaleX = 1,
 }) => {
     // Always use light theme colors
     const { theme } = useUnistyles();
     const colors = theme.colors.diff;
 
-    // Calculate diff with inline highlighting
+    // Use pre-parsed diff when available; otherwise calculate it here.
     const { hunks } = useMemo(() => {
+        if (parsedDiff) {
+            return parsedDiff;
+        }
         return calculateUnifiedDiff(oldText, newText, contextLines);
-    }, [oldText, newText, contextLines]);
+    }, [parsedDiff, oldText, newText, contextLines]);
 
     // Styles
     const containerStyle: ViewStyle = {
         backgroundColor: theme.colors.surface,
         borderWidth: 0,
-        flex: 1,
         ...style,
     };
 
@@ -127,8 +133,14 @@ export const DiffView: React.FC<DiffViewProps> = ({
     // Render diff content as separate lines to prevent wrapping
     const renderDiffContent = () => {
         const lines: React.ReactNode[] = [];
-        
-        hunks.forEach((hunk, hunkIndex) => {
+        let renderedContentLines = 0;
+
+        for (let hunkIndex = 0; hunkIndex < hunks.length; hunkIndex++) {
+            const hunk = hunks[hunkIndex];
+            if (maxLines != null && renderedContentLines >= maxLines) {
+                break;
+            }
+
             // Add hunk header for non-first hunks
             if (hunkIndex > 0) {
                 lines.push(
@@ -150,7 +162,12 @@ export const DiffView: React.FC<DiffViewProps> = ({
                 );
             }
 
-            hunk.lines.forEach((line, lineIndex) => {
+            for (let lineIndex = 0; lineIndex < hunk.lines.length; lineIndex++) {
+                if (maxLines != null && renderedContentLines >= maxLines) {
+                    break;
+                }
+
+                const line = hunk.lines[lineIndex];
                 const isAdded = line.type === 'add';
                 const isRemoved = line.type === 'remove';
                 const textColor = isAdded ? colors.addedText : isRemoved ? colors.removedText : colors.contextText;
@@ -189,14 +206,15 @@ export const DiffView: React.FC<DiffViewProps> = ({
                         {renderLineContent(line.content, textColor, line.tokens)}
                     </Text>
                 );
-            });
-        });
+                renderedContentLines++;
+            }
+        }
         
         return lines;
     };
 
     return (
-        <View style={[containerStyle, { overflow: 'hidden' }]}>
+        <View style={containerStyle}>
             {renderDiffContent()}
         </View>
     );

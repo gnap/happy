@@ -117,7 +117,6 @@ export function runSubagent(opts: RunSubagentOptions): Promise<RunSubagentResult
   let lastText = '';
   let hadError = false;
   let errorMessage = '';
-  let eventCount = 0;
 
   return new Promise<RunSubagentResult>((resolve) => {
     let settled = false;
@@ -136,6 +135,7 @@ export function runSubagent(opts: RunSubagentOptions): Promise<RunSubagentResult
       timeoutMs: timeoutMs ?? 600_000, // 10 min default for subagent
     });
 
+    let eventCount = 0;
     proc.on('message', (rawMsg: CursorStreamMessage) => {
       const typeInfo = 'type' in rawMsg ? rawMsg.type : 'unknown';
       const subtypeInfo = 'subtype' in rawMsg && rawMsg.subtype ? `.${rawMsg.subtype}` : '';

@@ -6,6 +6,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { ToolCall } from '@/sync/typesMessage';
 import { useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
+import { MarkdownView } from '@/components/markdown/MarkdownView';
 
 interface FilteredTool {
     tool: ToolCall;
@@ -13,11 +14,29 @@ interface FilteredTool {
     state: 'running' | 'completed' | 'error';
 }
 
-export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages }) => {
+function extractTaskResult(result: unknown): string | null {
+    if (typeof result === 'string' && result.trim()) {
+        return result;
+    }
+    if (Array.isArray(result)) {
+        const text = result
+            .filter((block: any) => block?.type === 'text' && typeof block?.text === 'string')
+            .map((block: any) => block.text as string)
+            .join('\n\n');
+        return text.trim() || null;
+    }
+    return null;
+}
+
+export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages, compact }) => {
     const { theme } = useUnistyles();
     const filtered: FilteredTool[] = [];
+    let lastAgentText: string | null = null;
 
     for (let m of messages) {
+        if (m.kind === 'agent-text' && m.text) {
+            lastAgentText = m.text;
+        }
         if (m.kind === 'tool-call') {
             const knownTool = knownTools[m.tool.name as keyof typeof knownTools] as any;
             
@@ -37,14 +56,22 @@ export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages })
             }
 
             if (m.tool.state === 'running' || m.tool.state === 'completed' || m.tool.state === 'error') {
+                let displayTitle = title;
+                if (title === t('tools.names.terminal') && m.tool.description?.startsWith('Run `') && m.tool.description.endsWith('`')) {
+                    displayTitle = m.tool.description.slice(5, -1);
+                }
                 filtered.push({
                     tool: m.tool,
-                    title,
+                    title: displayTitle,
                     state: m.tool.state
                 });
             }
         }
     }
+
+    const resultSummary = !compact && tool.state === 'completed'
+        ? (extractTaskResult(tool.result) ?? lastAgentText)
+        : null;
 
     const styles = StyleSheet.create({
         container: {
@@ -57,6 +84,9 @@ export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages })
             paddingVertical: 4,
             paddingLeft: 4,
             paddingRight: 2
+        },
+        toolIconWrap: {
+            marginRight: 8,
         },
         toolTitle: {
             fontSize: 14,
@@ -90,38 +120,53 @@ export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages })
             fontStyle: 'italic',
             opacity: 0.7,
         },
+        summaryContainer: {
+            paddingHorizontal: 4,
+            paddingTop: 8,
+        },
     });
 
-    if (filtered.length === 0) {
+    if (filtered.length === 0 && !resultSummary) {
         return null;
     }
 
     const visibleTools = filtered.slice(filtered.length - 3);
     const remainingCount = filtered.length - 3;
+    const iconSize = 16;
 
     return (
         <View style={styles.container}>
-            {visibleTools.map((item, index) => (
-                <View key={`${item.tool.name}-${index}`} style={styles.toolItem}>
-                    <Text style={styles.toolTitle}>{item.title}</Text>
-                    <View style={styles.statusContainer}>
-                        {item.state === 'running' && (
-                            <ActivityIndicator size={Platform.OS === 'ios' ? "small" : 14 as any} color={theme.colors.warning} />
-                        )}
-                        {item.state === 'completed' && (
-                            <Ionicons name="checkmark-circle" size={16} color={theme.colors.success} />
-                        )}
-                        {item.state === 'error' && (
-                            <Ionicons name="close-circle" size={16} color={theme.colors.textDestructive} />
-                        )}
+            {visibleTools.map((item, index) => {
+                const knownTool = knownTools[item.tool.name as keyof typeof knownTools] as any;
+                const icon = knownTool?.icon ? knownTool.icon(iconSize, theme.colors.textSecondary) : null;
+                return (
+                    <View key={`${item.tool.name}-${index}`} style={styles.toolItem}>
+                        {icon != null && <View style={styles.toolIconWrap}>{icon}</View>}
+                        <Text style={styles.toolTitle} numberOfLines={1}>{item.title}</Text>
+                        <View style={styles.statusContainer}>
+                            {item.state === 'running' && (
+                                <ActivityIndicator size={Platform.OS === 'ios' ? "small" : 14 as any} color={theme.colors.warning} />
+                            )}
+                            {item.state === 'completed' && (
+                                <Ionicons name="checkmark-circle" size={16} color={theme.colors.success} />
+                            )}
+                            {item.state === 'error' && (
+                                <Ionicons name="close-circle" size={16} color={theme.colors.textDestructive} />
+                            )}
+                        </View>
                     </View>
-                </View>
-            ))}
+                );
+            })}
             {remainingCount > 0 && (
                 <View style={styles.moreToolsItem}>
                     <Text style={styles.moreToolsText}>
                         {t('tools.taskView.moreTools', { count: remainingCount })}
                     </Text>
+                </View>
+            )}
+            {resultSummary != null && (
+                <View style={styles.summaryContainer}>
+                    <MarkdownView markdown={resultSummary} />
                 </View>
             )}
         </View>

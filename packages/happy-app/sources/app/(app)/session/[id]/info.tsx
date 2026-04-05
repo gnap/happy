@@ -1,4 +1,4 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { View, Text, Animated } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -23,6 +23,7 @@ import { useHappyAction } from '@/hooks/useHappyAction';
 import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 import { copySessionMetadataToClipboard } from '@/utils/copySessionMetadataToClipboard';
 import { HappyError } from '@/utils/errors';
+import { getCachedLastSeq, subscribeToCachedLastSeq } from '@/sync/cache/messageCache';
 
 // Animated status dot component
 function StatusDot({ color, isPulsing, size = 8 }: { color: string; isPulsing?: boolean; size?: number }) {
@@ -121,6 +122,33 @@ function formatDangerouslySkipPermissionsMetadata(
     }
 
     return 'Unknown';
+}
+
+function CacheProgressBar({ cachedLastSeq, totalSeq }: { cachedLastSeq: number | null; totalSeq: number }) {
+    const { theme } = useUnistyles();
+
+    if (cachedLastSeq == null || totalSeq <= 0) {
+        return null;
+    }
+
+    const progress = Math.max(0, Math.min(1, cachedLastSeq / totalSeq));
+
+    return (
+        <View style={{
+            height: 6,
+            marginTop: 8,
+            marginHorizontal: 16,
+            borderRadius: 999,
+            overflow: 'hidden',
+            backgroundColor: theme.colors.divider,
+        }}>
+            <View style={{
+                width: `${progress * 100}%`,
+                height: '100%',
+                backgroundColor: theme.colors.status.connected,
+            }} />
+        </View>
+    );
 }
 
 function SessionInfoContent({ session }: { session: Session }) {
@@ -373,7 +401,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                         {(session.metadata?.flavor === 'cursor' || session.metadata?.flavor === 'acp-cursor') && (
                             <CacheProgressBar
                                 totalSeq={session.seq}
-                                cachedBitmap={cachedBitmap}
+                                cachedLastSeq={cachedLastSeq}
                             />
                         )}
                     </View>

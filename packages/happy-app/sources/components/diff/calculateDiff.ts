@@ -294,3 +294,74 @@ export function getDiffStats(oldText: string, newText: string): { additions: num
     const result = calculateUnifiedDiff(oldText, newText);
     return result.stats;
 }
+
+/**
+ * Parse a unified diff string into the internal DiffResult format.
+ * This is used for Cursor tool payloads that already include a diff string.
+ */
+export function parseUnifiedDiff(diffString: string): DiffResult {
+    if (!diffString) {
+        return { hunks: [], stats: { additions: 0, deletions: 0 } };
+    }
+
+    const rawLines = diffString.split('\n');
+    const hunkHeaderRe = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+
+    let additions = 0;
+    let deletions = 0;
+    const hunks: DiffHunk[] = [];
+    let currentLines: DiffLine[] = [];
+    let oldN = 1;
+    let newN = 1;
+    let hunkOldStart = 1;
+    let hunkNewStart = 1;
+
+    const flushHunk = () => {
+        if (currentLines.length === 0) {
+            return;
+        }
+
+        const oldCount = currentLines.filter(line => line.type !== 'add').length;
+        const newCount = currentLines.filter(line => line.type !== 'remove').length;
+        hunks.push({
+            oldStart: hunkOldStart,
+            oldLines: oldCount,
+            newStart: hunkNewStart,
+            newLines: newCount,
+            lines: currentLines,
+        });
+        currentLines = [];
+    };
+
+    for (const raw of rawLines) {
+        const hunkMatch = raw.match(hunkHeaderRe);
+        if (hunkMatch) {
+            flushHunk();
+            hunkOldStart = parseInt(hunkMatch[1], 10);
+            hunkNewStart = parseInt(hunkMatch[2], 10);
+            oldN = hunkOldStart;
+            newN = hunkNewStart;
+            continue;
+        }
+
+        if (raw.startsWith('--- ') || raw.startsWith('+++ ') || raw.startsWith('diff ') || raw.startsWith('index ') || raw.startsWith('\\ ')) {
+            continue;
+        }
+
+        const prefix = raw[0];
+        const content = raw.slice(1);
+        if (prefix === '+') {
+            currentLines.push({ type: 'add', content, newLineNumber: newN++ });
+            additions++;
+        } else if (prefix === '-') {
+            currentLines.push({ type: 'remove', content, oldLineNumber: oldN++ });
+            deletions++;
+        } else if (prefix === ' ') {
+            currentLines.push({ type: 'normal', content, oldLineNumber: oldN++, newLineNumber: newN++ });
+        }
+    }
+
+    flushHunk();
+
+    return { hunks, stats: { additions, deletions } };
+}

@@ -1,47 +1,51 @@
 import * as React from 'react';
 import { ScrollView, View } from 'react-native';
 import { DiffView } from '@/components/diff/DiffView';
+import { DiffResult } from '@/components/diff/calculateDiff';
 import { useSetting } from '@/sync/storage';
 
 interface ToolDiffViewProps {
-    oldText: string;
-    newText: string;
+    oldText?: string;
+    newText?: string;
+    parsedDiff?: DiffResult;
     style?: any;
     showLineNumbers?: boolean;
     showPlusMinusSymbols?: boolean;
+    maxLines?: number;
 }
 
 export const ToolDiffView = React.memo<ToolDiffViewProps>(({ 
-    oldText, 
-    newText, 
-    style, 
+    oldText = '',
+    newText = '',
+    parsedDiff,
+    style,
     showLineNumbers = false,
-    showPlusMinusSymbols = false 
+    showPlusMinusSymbols = false,
+    maxLines,
 }) => {
     const wrapLines = useSetting('wrapLinesInDiffs');
-    
+
     const diffView = (
-        <DiffView 
-            oldText={oldText} 
-            newText={newText} 
+        <DiffView
+            oldText={oldText}
+            newText={newText}
+            parsedDiff={parsedDiff}
             wrapLines={wrapLines}
             showLineNumbers={showLineNumbers}
             showPlusMinusSymbols={showPlusMinusSymbols}
-            style={{ flex: 1, ...style }}
+            maxLines={maxLines}
+            style={wrapLines ? { flex: 1, ...style } : { minWidth: '100%' }}
         />
     );
-    
+
     if (wrapLines) {
-        // When wrapping lines, no horizontal scroll needed
         return <View style={{ flex: 1 }}>{diffView}</View>;
     }
-    
-    // When not wrapping, use horizontal scroll
+
     return (
-        <ScrollView 
-            horizontal 
+        <ScrollView
+            horizontal
             showsHorizontalScrollIndicator={true}
-            contentContainerStyle={{ flexGrow: 1 }}
         >
             {diffView}
         </ScrollView>

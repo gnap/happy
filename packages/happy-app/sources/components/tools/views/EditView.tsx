@@ -6,8 +6,9 @@ import { knownTools } from '../../tools/knownTools';
 import { trimIdent } from '@/utils/trimIdent';
 import { useSetting } from '@/sync/storage';
 
+const LIST_DIFF_MAX_LINES = 4;
 
-export const EditView = React.memo<ToolViewProps>(({ tool }) => {
+export const EditView = React.memo<ToolViewProps>(({ tool, compact }) => {
     const showLineNumbersInToolViews = useSetting('showLineNumbersInToolViews');
     
     let oldString = '';
@@ -26,6 +27,7 @@ export const EditView = React.memo<ToolViewProps>(({ tool }) => {
                     newText={newString} 
                     showLineNumbers={showLineNumbersInToolViews}
                     showPlusMinusSymbols={showLineNumbersInToolViews}
+                    maxLines={compact ? LIST_DIFF_MAX_LINES : undefined}
                 />
             </ToolSectionView>
         </>

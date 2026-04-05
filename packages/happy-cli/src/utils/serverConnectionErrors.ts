@@ -153,9 +153,11 @@ export function startOfflineReconnection<TSession>(
      * Only 5xx or network errors trigger retry.
      */
     const defaultHealthCheck = async () => {
+        const { serverHttpsAgent } = await import('@/configuration');
         await axios.get(`${config.serverUrl}/v1/sessions`, {
             timeout: 5000,
-            validateStatus: (status) => status < 500 // 4xx = server is up, 5xx = server error
+            validateStatus: (status) => status < 500, // 4xx = server is up, 5xx = server error
+            httpsAgent: serverHttpsAgent,
         });
     };
 
@@ -236,7 +238,9 @@ export function startOfflineReconnection<TSession>(
 /** All network error codes that trigger offline mode */
 export const NETWORK_ERROR_CODES = [
     'ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT',
-    'ECONNRESET', 'EHOSTUNREACH', 'ENETUNREACH'
+    'ECONNRESET', 'EHOSTUNREACH', 'ENETUNREACH',
+    // Axios request timeout (timeout: N exceeded) and cancellation
+    'ECONNABORTED', 'ERR_CANCELED',
 ] as const;
 
 /** Check if error code indicates server unreachable */

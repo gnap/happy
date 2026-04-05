@@ -50,10 +50,12 @@ export interface StatusMessage {
 export interface ToolCallMessage {
   type: 'tool-call';
   toolName: string;
+  /** Raw tool kind from the agent (e.g. "execute", "read", "search") */
+  kind?: string;
+  /** Human-readable description for display (e.g. the command string or file path). */
+  description?: string;
   args: Record<string, unknown>;
   callId: ToolCallId;
-  kind?: string;
-  description?: string;
 }
 
 /**
