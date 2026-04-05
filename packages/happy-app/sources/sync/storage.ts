@@ -774,31 +774,61 @@ export const storage = create<StorageState>()((set, get) => {
             const existing = state.sessionMessages[sessionId];
             if (!existing) return state;
 
-            // Run a temporary reducer so older batches still materialize derived messages.
-            const tempReducer = createReducer();
+            const totalSeq = state.sessions[sessionId]?.seq ?? 0;
+            const cachedBitmap = computeBitmap(newOldestSeq, existing.newestSeq, totalSeq);
+
+            if (olderMessages.length === 0) {
+                return {
+                    ...state,
+                    sessionMessages: {
+                        ...state.sessionMessages,
+                        [sessionId]: {
+                            ...existing,
+                            oldestSeq: newOldestSeq,
+                            cachedBitmap,
+                            hasOlderMessages,
+                            isLoadingOlder: false,
+                            isFetching: false,
+                        } satisfies SessionMessages,
+                    },
+                };
+            }
+
             const session = state.sessions[sessionId];
-            const reducerResult = reducer(tempReducer, olderMessages, session?.agentState ?? undefined);
+            // Merge into the live reducer so tool/user state stays consistent with newer rows.
+            const reducerResult = reducer(existing.reducerState, olderMessages, session?.agentState ?? undefined);
 
             const mergedMap = { ...existing.messagesMap };
             for (const msg of reducerResult.messages) {
-                if (!mergedMap[msg.id]) {
-                    mergedMap[msg.id] = msg;
-                }
+                mergedMap[msg.id] = msg;
             }
 
             const sorted = Object.values(mergedMap).sort((a, b) => b.createdAt - a.createdAt);
 
-            const totalSeq = state.sessions[sessionId]?.seq ?? 0;
-            const cachedBitmap = computeBitmap(newOldestSeq, existing.newestSeq, totalSeq);
+            let updatedSessions = state.sessions;
+            if (session && (reducerResult.todos !== undefined || existing.reducerState.latestUsage)) {
+                updatedSessions = {
+                    ...state.sessions,
+                    [sessionId]: {
+                        ...session,
+                        ...(reducerResult.todos !== undefined && { todos: reducerResult.todos }),
+                        ...(existing.reducerState.latestUsage && {
+                            latestUsage: { ...existing.reducerState.latestUsage },
+                        }),
+                    },
+                };
+            }
 
             return {
                 ...state,
+                sessions: updatedSessions,
                 sessionMessages: {
                     ...state.sessionMessages,
                     [sessionId]: {
                         ...existing,
                         messages: sorted,
                         messagesMap: mergedMap,
+                        reducerState: existing.reducerState,
                         oldestSeq: newOldestSeq,
                         cachedBitmap,
                         hasOlderMessages,

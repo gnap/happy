@@ -28,6 +28,7 @@ import { log } from '@/log';
 import { gitStatusSync } from './gitStatusSync';
 import { projectManager } from './projectManager';
 import { AsyncLock } from '@/utils/lock';
+import { olderAfterSeq } from './cacheSegment';
 import * as Network from 'expo-network';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { Message } from './typesMessage';
@@ -956,6 +957,107 @@ class Sync {
     public refreshSessions = async () => {
         return this.sessionsSync.invalidateAndAwait();
     }
+
+    /**
+     * Load the next chunk of older messages (seq strictly below the current window).
+     * Uses the same session lock as fetchMessages to avoid overlapping applies.
+     */
+    public loadOlderMessages = async (sessionId: string): Promise<void> => {
+        const lock = this.getSessionMessageLock(sessionId);
+        await lock.inLock(async () => {
+            const sessionMsgs = storage.getState().sessionMessages[sessionId];
+            const session = storage.getState().sessions[sessionId];
+            if (!sessionMsgs?.isLoaded || !sessionMsgs.hasOlderMessages || sessionMsgs.isLoadingOlder) {
+                return;
+            }
+            if (sessionMsgs.oldestSeq <= 1) {
+                storage.getState().applyOlderMessages(sessionId, [], 1, false);
+                return;
+            }
+
+            const encryption = this.encryption.getSessionEncryption(sessionId);
+            if (!encryption) {
+                log.log(`💬 loadOlderMessages: encryption not ready for ${sessionId}`);
+                return;
+            }
+
+            storage.getState().setLoadingOlder(sessionId, true);
+            try {
+                const afterSeq = olderAfterSeq(sessionMsgs.oldestSeq);
+                log.log(`💬 loadOlderMessages: session=${sessionId} afterSeq=${afterSeq} oldestSeq=${sessionMsgs.oldestSeq}`);
+                const response = await apiSocket.request(
+                    `/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`,
+                );
+                if (!response.ok) {
+                    throw new Error(`loadOlderMessages failed: ${response.status}`);
+                }
+                const data = await response.json() as V3GetSessionMessagesResponse;
+                const rawMessages = Array.isArray(data.messages) ? data.messages : [];
+                if (rawMessages.length === 0) {
+                    storage.getState().applyOlderMessages(sessionId, [], sessionMsgs.oldestSeq, false);
+                    return;
+                }
+
+                let minSeq = Number.POSITIVE_INFINITY;
+                for (const m of rawMessages) {
+                    if (typeof m.seq === 'number' && m.seq < minSeq) {
+                        minSeq = m.seq;
+                    }
+                }
+
+                const decryptedMessages = await encryption.decryptMessages(rawMessages);
+                const normalizedMessages: NormalizedMessage[] = [];
+                for (let i = 0; i < decryptedMessages.length; i++) {
+                    const decrypted = decryptedMessages[i];
+                    if (!decrypted) {
+                        continue;
+                    }
+                    let normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
+                    if (!normalized) {
+                        continue;
+                    }
+                    if (normalized.role === 'user' && normalized.content.type === 'text') {
+                        const claimedLocalId = this.resolveLocalIdForIncoming(
+                            sessionId,
+                            normalized.id,
+                            normalized.content.text,
+                            normalized.createdAt,
+                        );
+                        if (claimedLocalId) {
+                            normalized = { ...normalized, localId: claimedLocalId };
+                        }
+                    }
+                    normalizedMessages.push(normalized);
+                }
+
+                if (normalizedMessages.length === 0) {
+                    storage.getState().applyOlderMessages(sessionId, [], sessionMsgs.oldestSeq, false);
+                    return;
+                }
+
+                const newOldestSeq = Number.isFinite(minSeq) ? minSeq : sessionMsgs.oldestSeq;
+                const stillOlder = newOldestSeq > 1;
+                storage.getState().applyOlderMessages(sessionId, normalizedMessages, newOldestSeq, stillOlder);
+
+                const updatedSession = storage.getState().sessions[sessionId];
+                const updatedMsgs = storage.getState().sessionMessages[sessionId];
+                if (updatedSession && updatedMsgs) {
+                    const lastSeq = this.sessionLastSeq.get(sessionId) ?? updatedMsgs.newestSeq;
+                    void saveMessageCache(
+                        updatedSession,
+                        updatedMsgs.messages,
+                        updatedMsgs.reducerState,
+                        lastSeq,
+                        updatedMsgs.oldestSeq,
+                        updatedMsgs.hasOlderMessages,
+                    );
+                }
+            } catch (e) {
+                log.log(`💬 loadOlderMessages error: ${e instanceof Error ? e.message : String(e)}`);
+                storage.getState().setLoadingOlder(sessionId, false);
+            }
+        });
+    };
 
     public getCredentials() {
         return this.credentials;
