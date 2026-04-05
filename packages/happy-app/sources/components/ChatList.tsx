@@ -1,7 +1,8 @@
 import * as React from 'react';
 import { useSession, useSessionMessages } from "@/sync/storage";
+import { mergeAdjacentAgentTextMessages } from '@/sync/mergeAdjacentAgentTextMessages';
 import { ActivityIndicator, FlatList, Platform, View } from 'react-native';
-import { useCallback } from 'react';
+import { useCallback, useMemo } from 'react';
 import { useHeaderHeight } from '@/utils/responsive';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MessageView } from './MessageView';
@@ -11,11 +12,15 @@ import { Message } from '@/sync/typesMessage';
 
 export const ChatList = React.memo((props: { session: Session }) => {
     const { messages } = useSessionMessages(props.session.id);
+    const displayMessages = useMemo(
+        () => mergeAdjacentAgentTextMessages(messages as Message[]),
+        [messages],
+    );
     return (
         <ChatListInternal
             metadata={props.session.metadata}
             sessionId={props.session.id}
-            messages={messages}
+            messages={displayMessages}
         />
     )
 });
