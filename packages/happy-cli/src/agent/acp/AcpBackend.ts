@@ -393,7 +393,6 @@ export class AcpBackend implements AgentBackend {
           cwd: this.options.cwd,
           env: { ...process.env, ...this.options.env },
           stdio: ['pipe', 'pipe', 'pipe'],
-          windowsHide: true,
         });
       } else {
         this.process = spawn(this.options.command, args, {

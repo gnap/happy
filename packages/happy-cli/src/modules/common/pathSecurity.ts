@@ -22,7 +22,6 @@ export function validatePath(targetPath: string, workingDirectory: string): Path
     if (!resolvedTarget.startsWith(resolvedWorkingDir + '/') && resolvedTarget !== resolvedWorkingDir) {
         return {
             valid: false,
-            resolvedPath: resolvedTarget,
             error: `Access denied: Path '${targetPath}' is outside the working directory`
         };
     }

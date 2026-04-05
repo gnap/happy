@@ -27,8 +27,7 @@ export function run(args: string[], options?: RipgrepOptions): Promise<RipgrepRe
     return new Promise((resolve, reject) => {
         const child = spawn('node', [RUNNER_PATH, JSON.stringify(args)], {
             stdio: ['pipe', 'pipe', 'pipe'],
-            cwd: options?.cwd,
-            windowsHide: true,
+            cwd: options?.cwd
         });
 
         let stdout = '';

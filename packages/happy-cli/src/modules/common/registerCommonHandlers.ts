@@ -377,6 +377,8 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
             return { success: false, error: validation.error };
         }
 
+        const rootPath = validation.resolvedPath!;
+
         // Helper function to build tree recursively
         async function buildTree(path: string, name: string, currentDepth: number): Promise<TreeNode | null> {
             try {
@@ -438,7 +440,6 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
             }
 
             // Get the base name for the root node
-            const rootPath = validation.resolvedPath!;
             const baseName = rootPath === '/' ? '/' : rootPath.split('/').pop() || rootPath;
             const tree = await buildTree(rootPath, baseName, 0);
 

@@ -121,7 +121,7 @@ function HeaderRight() {
 
     return (
         <Pressable
-            onPress={() => router.navigate('/new')}
+            onPress={() => router.push('/new')}
             hitSlop={15}
             style={styles.headerButton}
         >

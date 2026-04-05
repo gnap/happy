@@ -28,8 +28,7 @@ function getGlobalClaudeVersion(): string | null {
             encoding: 'utf8',
             stdio: ['pipe', 'pipe', 'pipe'],
             cwd: homedir(),
-            env: cleanEnv,
-            windowsHide: true,
+            env: cleanEnv
         }).trim()
         // Output format: "2.0.54 (Claude Code)" or similar
         const match = output.match(/(\d+\.\d+\.\d+)/)
@@ -97,8 +96,7 @@ function findGlobalClaudePath(): string | null {
             encoding: 'utf8',
             stdio: ['pipe', 'pipe', 'pipe'],
             cwd: homeDir,
-            env: cleanEnv,
-            windowsHide: true,
+            env: cleanEnv
         })
         logger.debug('[Claude SDK] Global claude command available (checked with clean PATH)')
         return 'claude'
@@ -113,8 +111,7 @@ function findGlobalClaudePath(): string | null {
                 encoding: 'utf8',
                 stdio: ['pipe', 'pipe', 'pipe'],
                 cwd: homeDir,
-                env: cleanEnv,
-                windowsHide: true,
+                env: cleanEnv
             }).trim()
             if (result && existsSync(result)) {
                 logger.debug(`[Claude SDK] Found global claude path via which: ${result}`)

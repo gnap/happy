@@ -93,7 +93,6 @@ export function readGeminiLocalConfig(): GeminiLocalConfig {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
         timeout: 5000,
-        windowsHide: true,
       }).trim();
       if (gcloudToken && gcloudToken.length > 0) {
         token = gcloudToken;

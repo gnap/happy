@@ -80,7 +80,6 @@ export async function startRealtimeSession(sessionId: string, initialContext?: s
             initialContext,
             token: response.token,
             agentId: response.agentId,
-            userId: response.elevenUserId,
         });
     } catch (error) {
         console.error('Failed to start realtime session:', error);

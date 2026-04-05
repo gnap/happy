@@ -9,12 +9,6 @@ import type { VoiceSession, VoiceSessionConfig } from './types';
 // Static reference to the conversation hook instance
 let conversationInstance: ReturnType<typeof useConversation> | null = null;
 
-// VAD state for user speech detection
-const VAD_THRESHOLD = 0.5;
-const VAD_SILENCE_MS = 300;
-let vadSilenceTimer: ReturnType<typeof setTimeout> | null = null;
-let agentIsSpeaking = false;
-
 // Global voice session implementation
 class RealtimeVoiceSessionImpl implements VoiceSession {
 
@@ -56,8 +50,7 @@ class RealtimeVoiceSessionImpl implements VoiceSession {
                         language: elevenLabsLanguage
                     }
                 },
-                ...(config.token ? { conversationToken: config.token } : { agentId: config.agentId }),
-                ...(config.userId ? { userId: config.userId } : {}),
+                ...(config.token ? { conversationToken: config.token } : { agentId: config.agentId })
             };
             
             const conversationId = await conversationInstance.startSession(sessionConfig);
@@ -71,7 +64,6 @@ class RealtimeVoiceSessionImpl implements VoiceSession {
 
     async endSession(): Promise<void> {
         if (!conversationInstance) {
-            storage.getState().setRealtimeStatus('disconnected');
             return;
         }
 
@@ -134,36 +126,10 @@ export const RealtimeVoiceSession: React.FC = () => {
         },
         onModeChange: (data) => {
             console.log('Realtime mode change:', data);
-
             const mode = data.mode as string;
-            agentIsSpeaking = mode === 'speaking';
+            const isSpeaking = mode === 'speaking';
 
-            if (agentIsSpeaking) {
-                storage.getState().setRealtimeMode('agent-speaking');
-            } else {
-                storage.getState().setRealtimeMode('idle');
-            }
-        },
-        onVadScore: (data) => {
-            const { vadScore } = data;
-            if (agentIsSpeaking) return;
-
-            if (vadScore > VAD_THRESHOLD) {
-                if (vadSilenceTimer) {
-                    clearTimeout(vadSilenceTimer);
-                    vadSilenceTimer = null;
-                }
-                storage.getState().setRealtimeMode('user-speaking', true);
-            } else {
-                if (!vadSilenceTimer) {
-                    vadSilenceTimer = setTimeout(() => {
-                        vadSilenceTimer = null;
-                        if (!agentIsSpeaking) {
-                            storage.getState().setRealtimeMode('idle');
-                        }
-                    }, VAD_SILENCE_MS);
-                }
-            }
+            storage.getState().setRealtimeMode(isSpeaking ? 'speaking' : 'idle');
         },
         onDebug: (message) => {
             console.debug('Realtime debug:', message);

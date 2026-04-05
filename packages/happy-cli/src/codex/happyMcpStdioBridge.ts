@@ -1,3 +1,4 @@
+/// <reference types="node" />
 /**
  * Happy MCP STDIO Bridge
  *

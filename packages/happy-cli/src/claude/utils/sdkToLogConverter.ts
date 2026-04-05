@@ -33,8 +33,7 @@ function getGitBranch(cwd: string): string | undefined {
         const branch = execSync('git rev-parse --abbrev-ref HEAD', {
             cwd,
             encoding: 'utf8',
-            stdio: ['ignore', 'pipe', 'ignore'],
-            windowsHide: true,
+            stdio: ['ignore', 'pipe', 'ignore']
         }).trim()
         return branch || undefined
     } catch {

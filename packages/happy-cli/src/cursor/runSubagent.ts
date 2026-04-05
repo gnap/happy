@@ -117,6 +117,7 @@ export function runSubagent(opts: RunSubagentOptions): Promise<RunSubagentResult
   let lastText = '';
   let hadError = false;
   let errorMessage = '';
+  let eventCount = 0;
 
   return new Promise<RunSubagentResult>((resolve) => {
     let settled = false;
@@ -136,19 +137,27 @@ export function runSubagent(opts: RunSubagentOptions): Promise<RunSubagentResult
     });
 
     proc.on('message', (rawMsg: CursorStreamMessage) => {
+      const typeInfo = 'type' in rawMsg ? rawMsg.type : 'unknown';
+      const subtypeInfo = 'subtype' in rawMsg && rawMsg.subtype ? `.${rawMsg.subtype}` : '';
+      logger.debug(`[subagent] message: ${typeInfo}${subtypeInfo}`);
       const parsed = parser.parse(rawMsg);
       for (const msg of parsed) {
-        if (msg.type === 'text_delta') lastText = msg.text;
+        if (msg.type === 'text_delta') lastText += msg.text;
         if (msg.type === 'error') {
           hadError = true;
           errorMessage = msg.message;
         }
         const ev = parsedMessageToSessionEvent(msg);
-        if (ev) onEvent(ev);
+        if (ev) {
+          eventCount++;
+          logger.debug(`[subagent] emit event #${eventCount}: ${ev.t}`);
+          onEvent(ev);
+        }
       }
     });
 
     proc.on('exit', (code) => {
+      logger.debug(`[subagent] exit code=${code}, events=${eventCount}, lastText=${lastText.length}chars, hadError=${hadError}`);
       if (hadError) {
         finish({ success: false, error: errorMessage, summary: lastText.slice(0, 500) });
       } else if (code !== 0) {
