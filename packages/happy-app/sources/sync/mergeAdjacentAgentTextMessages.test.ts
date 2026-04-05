@@ -12,7 +12,7 @@ describe('mergeAdjacentAgentTextMessages', () => {
         expect(merged).toHaveLength(1);
         expect(merged[0]?.kind).toBe('agent-text');
         if (merged[0]?.kind !== 'agent-text') throw new Error('expected agent-text');
-        expect(merged[0].text).toBe('first flush\n\nsecond flush');
+        expect(merged[0].text).toBe('first flush second flush');
         expect(merged[0].id).toBe('b');
     });
 
@@ -31,5 +31,16 @@ describe('mergeAdjacentAgentTextMessages', () => {
             { kind: 'agent-text', id: 'b', localId: null, createdAt: 2, text: 'out2' },
         ];
         expect(mergeAdjacentAgentTextMessages(messages)).toHaveLength(2);
+    });
+
+    it('joins alphanumeric chunk boundaries with a space', () => {
+        const messages: Message[] = [
+            { kind: 'agent-text', id: 'b', localId: null, createdAt: 2, text: 'world' },
+            { kind: 'agent-text', id: 'a', localId: null, createdAt: 1, text: 'hello' },
+        ];
+        const merged = mergeAdjacentAgentTextMessages(messages);
+        expect(merged[0]?.kind).toBe('agent-text');
+        if (merged[0]?.kind !== 'agent-text') throw new Error('expected agent-text');
+        expect(merged[0].text).toBe('hello world');
     });
 });

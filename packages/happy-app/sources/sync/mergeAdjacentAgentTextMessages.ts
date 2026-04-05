@@ -1,5 +1,19 @@
 import type { Message } from './typesMessage';
 
+function joinAssistantTextChunks(prev: string, next: string): string {
+    if (!prev) {
+        return next;
+    }
+    if (!next) {
+        return prev;
+    }
+    if (prev.endsWith('\n') || next.startsWith('\n')) {
+        return prev + next;
+    }
+    const needsSpace = /[a-zA-Z0-9]$/.test(prev) && /^[a-zA-Z0-9]/.test(next);
+    return needsSpace ? `${prev} ${next}` : prev + next;
+}
+
 /**
  * Cursor / session-protocol streaming often persists assistant output as multiple
  * messages in one turn. The chat UI renders each as a separate row with vertical
@@ -22,11 +36,11 @@ export function mergeAdjacentAgentTextMessages(messages: Message[]): Message[] {
             prev?.kind === 'agent-text' &&
             !prev.isThinking
         ) {
-            const gap =
-                prev.text.endsWith('\n') || msg.text.startsWith('\n') ? '' : '\n\n';
+            // Do not insert `\n\n` here: that splits parseMarkdown into multiple
+            // paragraph blocks, each with block margins — looks like extra blank lines.
             out[out.length - 1] = {
                 ...prev,
-                text: prev.text + gap + msg.text,
+                text: joinAssistantTextChunks(prev.text, msg.text),
                 createdAt: Math.max(prev.createdAt, msg.createdAt),
             };
         } else {

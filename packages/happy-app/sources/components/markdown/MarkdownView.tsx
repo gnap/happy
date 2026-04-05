@@ -66,7 +66,20 @@ export const MarkdownView = React.memo((props: {
             <View style={{ width: '100%' }}>
                 {blocks.map((block, index) => {
                     if (block.type === 'text') {
-                        return <RenderTextBlock spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} onLinkPress={handleLinkPress} />;
+                        const prevBlock = index > 0 ? blocks[index - 1] : null;
+                        const nextBlock = index < blocks.length - 1 ? blocks[index + 1] : null;
+                        return (
+                            <RenderTextBlock
+                                spans={block.content}
+                                key={index}
+                                first={index === 0}
+                                last={index === blocks.length - 1}
+                                selectable={selectable}
+                                onLinkPress={handleLinkPress}
+                                denseTop={prevBlock?.type === 'text'}
+                                denseBottom={nextBlock?.type === 'text'}
+                            />
+                        );
                     } else if (block.type === 'header') {
                         return <RenderHeaderBlock level={block.level} spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} onLinkPress={handleLinkPress} />;
                     } else if (block.type === 'horizontal-rule') {
@@ -126,8 +139,31 @@ type RenderSpanProps = {
     onLinkPress: (url: string) => void;
 };
 
-function RenderTextBlock(props: { spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, onLinkPress: (url: string) => void }) {
-    return <Text selectable={props.selectable} style={[style.text, props.first && style.first, props.last && style.last]}><RenderSpans spans={props.spans} baseStyle={style.text} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>;
+function RenderTextBlock(props: {
+    spans: MarkdownSpan[];
+    first: boolean;
+    last: boolean;
+    selectable: boolean;
+    onLinkPress: (url: string) => void;
+    /** Previous markdown block is also plain text — avoid double paragraph margin. */
+    denseTop?: boolean;
+    /** Next markdown block is also plain text */
+    denseBottom?: boolean;
+}) {
+    return (
+        <Text
+            selectable={props.selectable}
+            style={[
+                style.text,
+                props.first && style.first,
+                props.last && style.last,
+                props.denseTop && style.textDenseTop,
+                props.denseBottom && style.textDenseBottom,
+            ]}
+        >
+            <RenderSpans spans={props.spans} baseStyle={style.text} selectable={props.selectable} onLinkPress={props.onLinkPress} />
+        </Text>
+    );
 }
 
 function RenderHeaderBlock(props: { level: 1 | 2 | 3 | 4 | 5 | 6, spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, onLinkPress: (url: string) => void }) {
@@ -356,6 +392,12 @@ const style = StyleSheet.create((theme) => ({
         marginBottom: 8,
         color: theme.colors.text,
         fontWeight: '400',
+    },
+    textDenseTop: {
+        marginTop: 4,
+    },
+    textDenseBottom: {
+        marginBottom: 4,
     },
 
     italic: {
