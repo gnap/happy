@@ -16,6 +16,9 @@ import { MermaidRenderer } from './MermaidRenderer';
 import { t } from '@/text';
 import { isHttpMarkdownLink } from './linkUtils';
 
+/** react-native-web uses DOM text layout; default CSS collapses `\n` to a space. */
+const webPreserveNewlines = Platform.OS === 'web' ? ({ whiteSpace: 'pre-line' } as const) : {};
+
 // Option type for callback
 export type Option = {
     title: string;
@@ -392,6 +395,7 @@ const style = StyleSheet.create((theme) => ({
         marginBottom: 8,
         color: theme.colors.text,
         fontWeight: '400',
+        ...webPreserveNewlines,
     },
     textDenseTop: {
         marginTop: 4,
@@ -414,6 +418,7 @@ const style = StyleSheet.create((theme) => ({
         fontSize: 16,
         lineHeight: 24,
         color: theme.colors.text,
+        ...webPreserveNewlines,
     },
     link: {
         ...Typography.default(),
@@ -428,6 +433,7 @@ const style = StyleSheet.create((theme) => ({
     header: {
         ...Typography.default('semiBold'),
         color: theme.colors.text,
+        ...webPreserveNewlines,
     },
     header1: {
         fontSize: 16,
@@ -553,6 +559,7 @@ const style = StyleSheet.create((theme) => ({
         fontSize: 14,
         lineHeight: 20,
         color: theme.colors.textSecondary,
+        ...webPreserveNewlines,
     },
     copyButtonContainer: {
         position: 'absolute',
@@ -615,6 +622,7 @@ const style = StyleSheet.create((theme) => ({
         fontSize: 16,
         lineHeight: 24,
         color: theme.colors.text,
+        ...webPreserveNewlines,
     },
 
     //
@@ -664,12 +672,14 @@ const style = StyleSheet.create((theme) => ({
         color: theme.colors.text,
         fontSize: 16,
         lineHeight: 24,
+        ...webPreserveNewlines,
     },
     tableCellText: {
         ...Typography.default(),
         color: theme.colors.text,
         fontSize: 16,
         lineHeight: 24,
+        ...webPreserveNewlines,
     },
 
     // Add global style for Web platform (Unistyles supports this via compiler plugin)

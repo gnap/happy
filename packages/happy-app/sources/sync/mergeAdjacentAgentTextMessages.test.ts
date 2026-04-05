@@ -12,7 +12,7 @@ describe('mergeAdjacentAgentTextMessages', () => {
         expect(merged).toHaveLength(1);
         expect(merged[0]?.kind).toBe('agent-text');
         if (merged[0]?.kind !== 'agent-text') throw new Error('expected agent-text');
-        expect(merged[0].text).toBe('first flush second flush');
+        expect(merged[0].text).toBe('first flush\n\nsecond flush');
         expect(merged[0].id).toBe('b');
     });
 
@@ -33,7 +33,7 @@ describe('mergeAdjacentAgentTextMessages', () => {
         expect(mergeAdjacentAgentTextMessages(messages)).toHaveLength(2);
     });
 
-    it('joins alphanumeric chunk boundaries with a space', () => {
+    it('inserts a paragraph break between chunks when neither side has a newline', () => {
         const messages: Message[] = [
             { kind: 'agent-text', id: 'b', localId: null, createdAt: 2, text: 'world' },
             { kind: 'agent-text', id: 'a', localId: null, createdAt: 1, text: 'hello' },
@@ -41,13 +41,13 @@ describe('mergeAdjacentAgentTextMessages', () => {
         const merged = mergeAdjacentAgentTextMessages(messages);
         expect(merged[0]?.kind).toBe('agent-text');
         if (merged[0]?.kind !== 'agent-text') throw new Error('expected agent-text');
-        expect(merged[0].text).toBe('hello world');
+        expect(merged[0].text).toBe('hello\n\nworld');
     });
 
-    it('uses a line break (not a space) between chunks that look like separate lines', () => {
+    it('does not add an extra blank line when the boundary already has a newline', () => {
         const messages: Message[] = [
             { kind: 'agent-text', id: 'b', localId: null, createdAt: 2, text: 'Line two' },
-            { kind: 'agent-text', id: 'a', localId: null, createdAt: 1, text: 'Line one' },
+            { kind: 'agent-text', id: 'a', localId: null, createdAt: 1, text: 'Line one\n' },
         ];
         const merged = mergeAdjacentAgentTextMessages(messages);
         expect(merged[0]?.kind).toBe('agent-text');
