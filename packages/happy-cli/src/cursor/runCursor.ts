@@ -631,24 +631,20 @@ export async function runCursor(opts: {
         }
       };
 
-      // Debounced flush: cursor-agent often streams chunks that contain "\n\n" inside code blocks or
-      // lists. Flushing on any `includes('\n\n')` split one assistant reply into multiple session
-      // messages (extra paragraph breaks in the App). Idle debounce + tool/final flush is enough.
-      const TEXT_FLUSH_DEBOUNCE_MS = 300;
-      let textDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-      const scheduleTextDebouncedFlush = () => {
-        if (textDebounceTimer !== null) {
-          clearTimeout(textDebounceTimer);
-        }
-        textDebounceTimer = setTimeout(() => {
-          textDebounceTimer = null;
+      // Deadline-based flush: ensures accumulated text is sent even if no \n\n or tool call arrives.
+      const TEXT_FLUSH_DEADLINE_MS = 3000;
+      let textFlushTimer: ReturnType<typeof setTimeout> | null = null;
+      const scheduleTextFlush = () => {
+        if (textFlushTimer !== null) return;
+        textFlushTimer = setTimeout(() => {
+          textFlushTimer = null;
           flushAccumulatedText();
-        }, TEXT_FLUSH_DEBOUNCE_MS);
+        }, TEXT_FLUSH_DEADLINE_MS);
       };
-      const cancelTextDebounceTimer = () => {
-        if (textDebounceTimer !== null) {
-          clearTimeout(textDebounceTimer);
-          textDebounceTimer = null;
+      const cancelTextFlushTimer = () => {
+        if (textFlushTimer !== null) {
+          clearTimeout(textFlushTimer);
+          textFlushTimer = null;
         }
       };
 
@@ -712,7 +708,12 @@ export async function runCursor(opts: {
               accumulatedResponse += msg.text;
               messageBuffer.removeLastMessage('system');
               messageBuffer.addMessage(msg.text, 'assistant');
-              scheduleTextDebouncedFlush();
+              if (accumulatedResponse.includes('\n\n')) {
+                cancelTextFlushTimer();
+                flushAccumulatedText();
+              } else {
+                scheduleTextFlush();
+              }
               break;
 
             case 'thinking_delta':
@@ -733,7 +734,7 @@ export async function runCursor(opts: {
                 }, { turn: turnId, subagent: msg.subagentId }));
                 break;
               }
-              cancelTextDebounceTimer();
+              cancelTextFlushTimer();
               flushAccumulatedText();
               hadToolCalls = true;
               const toolArgs = JSON.stringify(msg.args).slice(0, 100);
@@ -865,7 +866,6 @@ export async function runCursor(opts: {
           session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: errorMsg }, { turn: turnId }));
         }
       } finally {
-        cancelTextDebounceTimer();
         flushAccumulatedText();
         for (const h of toolCallTimeoutHandles.values()) clearTimeout(h);
         toolCallTimeoutHandles.clear();
