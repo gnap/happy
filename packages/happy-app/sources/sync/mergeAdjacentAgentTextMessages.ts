@@ -10,8 +10,22 @@ function joinAssistantTextChunks(prev: string, next: string): string {
     if (prev.endsWith('\n') || next.startsWith('\n')) {
         return prev + next;
     }
-    const needsSpace = /[a-zA-Z0-9]$/.test(prev) && /^[a-zA-Z0-9]/.test(next);
-    return needsSpace ? `${prev} ${next}` : prev + next;
+    // Boundary already has whitespace from the stream — do not add another separator.
+    if (/\s$/.test(prev) || /^\s/.test(next)) {
+        return prev + next;
+    }
+    const alnumTouch = /[a-zA-Z0-9]$/.test(prev) && /^[a-zA-Z0-9]/.test(next);
+    if (alnumTouch) {
+        // "hello" + "world" and "first flush" + "second flush" need a word space.
+        // "Line one" + "Line two" should stay separate lines (lowercase → capital word boundary).
+        const looksLikeNewLine = /[a-z]$/.test(prev) && /^[A-Z]/.test(next);
+        if (!looksLikeNewLine) {
+            return `${prev} ${next}`;
+        }
+    }
+    // Single \n keeps one markdown paragraph (see parseMarkdownBlock hard-wrap merge) without
+    // the extra blank line / margins that `\n\n` used to create between streamed chunks.
+    return `${prev}\n${next}`;
 }
 
 /**

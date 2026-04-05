@@ -43,4 +43,15 @@ describe('mergeAdjacentAgentTextMessages', () => {
         if (merged[0]?.kind !== 'agent-text') throw new Error('expected agent-text');
         expect(merged[0].text).toBe('hello world');
     });
+
+    it('uses a line break (not a space) between chunks that look like separate lines', () => {
+        const messages: Message[] = [
+            { kind: 'agent-text', id: 'b', localId: null, createdAt: 2, text: 'Line two' },
+            { kind: 'agent-text', id: 'a', localId: null, createdAt: 1, text: 'Line one' },
+        ];
+        const merged = mergeAdjacentAgentTextMessages(messages);
+        expect(merged[0]?.kind).toBe('agent-text');
+        if (merged[0]?.kind !== 'agent-text') throw new Error('expected agent-text');
+        expect(merged[0].text).toBe('Line one\nLine two');
+    });
 });
