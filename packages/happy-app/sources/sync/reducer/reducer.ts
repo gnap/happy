@@ -231,6 +231,8 @@ function isDuplicateSidechainPrompt(
 
 export type ReducerResult = {
     messages: Message[];
+    /** Internal message ids created or updated in this reducer pass (for voice hooks / incremental UI). */
+    changed: Set<string>;
     todos?: TodoItem[];
     usage?: {
         inputTokens: number;
@@ -293,6 +295,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
     for (const msg of nonSidechainMessages) {
         // Check if we've already processed this message
         if (msg.role === 'user' && msg.localId && state.localIds.has(msg.localId)) {
+            // Register server-assigned id so later fetches (e.g. GET without localId) dedupe via messageIds.
+            state.messageIds.set(msg.id, state.localIds.get(msg.localId)!);
             continue;
         }
         if (state.messageIds.has(msg.id)) {
@@ -647,6 +651,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
         if (msg.role === 'user') {
             // Check if we've seen this localId before
             if (msg.localId && state.localIds.has(msg.localId)) {
+                state.messageIds.set(msg.id, state.localIds.get(msg.localId)!);
                 continue;
             }
             // Check if we've seen this message ID before
@@ -1127,6 +1132,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
 
     return {
         messages: newMessages,
+        changed,
         todos: state.latestTodos?.todos,
         usage: state.latestUsage ? {
             inputTokens: state.latestUsage.inputTokens,
