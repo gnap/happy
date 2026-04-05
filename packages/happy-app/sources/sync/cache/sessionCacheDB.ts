@@ -129,7 +129,7 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
     async getSessionCache(sessionId: string): Promise<CachedSessionRow | null> {
         await this.ensureReady();
         const row = await this.db.getFirstAsync(
-            'SELECT session_id, last_seq, schema_version, cached_at, reducer_state FROM session_cache WHERE session_id = ?',
+            'SELECT session_id, last_seq, oldest_seq, has_older_messages, schema_version, cached_at, reducer_state FROM session_cache WHERE session_id = ?',
             [sessionId]
         ) as Record<string, unknown> | null;
 
