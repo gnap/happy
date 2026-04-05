@@ -6,7 +6,7 @@ describe('mergeAdjacentAgentTextMessages', () => {
     it('merges consecutive agent-text in chronological order', () => {
         const messages: Message[] = [
             { kind: 'agent-text', id: 'a', localId: null, createdAt: 2, text: 'second flush' },
-            { kind: 'agent-text', id: 'b', localId: null, createdAt: 1, text: 'first flush' },
+            { kind: 'agent-text', id: 'b', localId: null, createdAt: 1, text: 'first flush ' },
         ];
         const merged = mergeAdjacentAgentTextMessages(messages);
         expect(merged).toHaveLength(1);
@@ -33,38 +33,16 @@ describe('mergeAdjacentAgentTextMessages', () => {
         expect(mergeAdjacentAgentTextMessages(messages)).toHaveLength(2);
     });
 
-    it('joins token-sized ASCII chunks with spaces (no paragraph breaks)', () => {
+    it('preserves token-level spacing carried by the stream', () => {
         const messages: Message[] = [
-            { kind: 'agent-text', id: 'c', localId: null, createdAt: 3, text: 'brown' },
-            { kind: 'agent-text', id: 'b', localId: null, createdAt: 2, text: 'quick' },
+            { kind: 'agent-text', id: 'c', localId: null, createdAt: 3, text: ' brown' },
+            { kind: 'agent-text', id: 'b', localId: null, createdAt: 2, text: ' quick' },
             { kind: 'agent-text', id: 'a', localId: null, createdAt: 1, text: 'The' },
         ];
         const merged = mergeAdjacentAgentTextMessages(messages);
         expect(merged[0]?.kind).toBe('agent-text');
         if (merged[0]?.kind !== 'agent-text') throw new Error('expected agent-text');
         expect(merged[0].text).toBe('The quick brown');
-    });
-
-    it('does not insert a space when punctuation already separates tokens', () => {
-        const messages: Message[] = [
-            { kind: 'agent-text', id: 'b', localId: null, createdAt: 2, text: '**bold**' },
-            { kind: 'agent-text', id: 'a', localId: null, createdAt: 1, text: 'see ' },
-        ];
-        const merged = mergeAdjacentAgentTextMessages(messages);
-        expect(merged[0]?.kind).toBe('agent-text');
-        if (merged[0]?.kind !== 'agent-text') throw new Error('expected agent-text');
-        expect(merged[0].text).toBe('see **bold**');
-    });
-
-    it('adds a space after sentence end when the stream omits it', () => {
-        const messages: Message[] = [
-            { kind: 'agent-text', id: 'b', localId: null, createdAt: 2, text: 'Next' },
-            { kind: 'agent-text', id: 'a', localId: null, createdAt: 1, text: 'Done.' },
-        ];
-        const merged = mergeAdjacentAgentTextMessages(messages);
-        expect(merged[0]?.kind).toBe('agent-text');
-        if (merged[0]?.kind !== 'agent-text') throw new Error('expected agent-text');
-        expect(merged[0].text).toBe('Done. Next');
     });
 
     it('does not add extra blank lines when the stream already has a newline', () => {

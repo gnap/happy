@@ -1,40 +1,11 @@
 import type { Message } from './typesMessage';
 
 /**
- * Join two streamed assistant fragments without turning every token into its own paragraph.
- * (Inserting `\n\n` between chunks breaks token-level streaming: "The" + "quick" becomes two blocks.)
- *
- * - Respect newlines already present in the stream.
- * - If either side already has whitespace at the join, do nothing extra.
- * - If ASCII letters/digits would run together, insert a single space (word boundary).
- * - If sentence punctuation meets a following letter, insert a space ("Done." + "Next").
- * - Otherwise concatenate (markdown punctuation, CJK, URLs, etc.).
+ * Streamed assistant output already carries its own whitespace/newlines at the
+ * chunk boundary. We only concatenate fragments here so the UI does not invent
+ * spaces or paragraph breaks.
  */
 function joinAssistantTextChunks(prev: string, next: string): string {
-    if (!prev) {
-        return next;
-    }
-    if (!next) {
-        return prev;
-    }
-    if (prev.endsWith('\n') || next.startsWith('\n')) {
-        return prev + next;
-    }
-    if (/\s$/.test(prev) || /^\s/.test(next)) {
-        return prev + next;
-    }
-
-    const prevLast = prev[prev.length - 1] ?? '';
-    const nextFirst = next[0] ?? '';
-    const wouldGlueWords =
-        /[a-zA-Z0-9]/.test(prevLast) && /[a-zA-Z0-9]/.test(nextFirst);
-    if (wouldGlueWords) {
-        return `${prev} ${next}`;
-    }
-    if (/[.!?…]/.test(prevLast) && /[a-zA-Z0-9]/.test(nextFirst)) {
-        return `${prev} ${next}`;
-    }
-
     return prev + next;
 }
 
