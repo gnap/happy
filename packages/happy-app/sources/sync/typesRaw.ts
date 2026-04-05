@@ -54,6 +54,7 @@ const sessionToolCallStartEventSchema = z.object({
 const sessionToolCallEndEventSchema = z.object({
     t: z.literal('tool-call-end'),
     call: z.string(),
+    result: z.unknown().optional(),
 });
 
 const sessionFileEventSchema = z.object({
@@ -652,6 +653,8 @@ function normalizeSessionEnvelope(
     }
 
     if (envelope.ev.t === 'tool-call-end') {
+        const endEv = envelope.ev;
+        const resultPayload = 'result' in endEv ? endEv.result : undefined;
         return {
             id: messageId,
             localId,
@@ -661,7 +664,7 @@ function normalizeSessionEnvelope(
             content: [{
                 type: 'tool-result',
                 tool_use_id: envelope.ev.call,
-                content: null,
+                content: resultPayload !== undefined ? resultPayload : null,
                 is_error: false,
                 uuid: contentUUID,
                 parentUUID

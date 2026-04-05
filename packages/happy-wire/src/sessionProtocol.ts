@@ -41,6 +41,8 @@ export const sessionToolCallStartEventSchema = z.object({
 export const sessionToolCallEndEventSchema = z.object({
   t: z.literal('tool-call-end'),
   call: z.string(),
+  /** Tool output payload (e.g. CursorEdit diff); optional for legacy end-only events. */
+  result: z.unknown().optional(),
 });
 
 export const sessionFileEventSchema = z.object({

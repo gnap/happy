@@ -1,5 +1,9 @@
 import { logger } from '@/ui/logger'
 import { EventEmitter } from 'node:events'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { createTwoFilesPatch } from 'diff'
 import { io, Socket } from 'socket.io-client'
 import { AgentState, ClientToServerEvents, Metadata, ServerToClientEvents, Session, Update, UserMessage, UserMessageSchema, Usage } from './types'
 import { decodeBase64, decrypt, encodeBase64, encrypt } from './encryption';
@@ -19,6 +23,50 @@ import {
 } from '@/claude/utils/sessionProtocolMapper';
 import { InvalidateSync } from '@/utils/sync';
 import axios from 'axios';
+
+const LAZY_TOOL_CONTENT_ENABLED = process.env.HAPPY_LAZY_TOOL_CONTENT !== '0';
+const LAZY_DIFF_TOOL_NAMES = new Set(['CursorEdit', 'CursorWrite']);
+const LAZY_DIFF_TOOL_FIELDS: Record<string, string[]> = {
+    CursorEdit: ['old_string', 'new_string', 'streamContent'],
+    CursorWrite: ['content', 'streamContent'],
+};
+const LAZY_RESULT_STRIP_FIELDS_BY_TOOL: Record<string, string[]> = {
+    CursorEdit: ['beforeFullFileContent', 'afterFullFileContent'],
+    CursorWrite: ['afterFullFileContent'],
+};
+const LAZY_RESULT_PREVIEW_FIELDS_BY_TOOL: Record<string, string[]> = {
+    CursorEdit: ['diffString'],
+    CursorWrite: ['diffString'],
+};
+const LAZY_DIFF_STRING_MAX_LINES = 15;
+const LAZY_CONTENT_THRESHOLD = 400;
+
+function truncateByLines(s: string, maxLines: number): string {
+    let pos = 0;
+    let lineCount = 0;
+    while (pos < s.length && lineCount < maxLines) {
+        const nl = s.indexOf('\n', pos);
+        if (nl === -1) { pos = s.length; lineCount += 1; break; }
+        pos = nl + 1;
+        lineCount += 1;
+    }
+    return s.slice(0, pos);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function unwrapResultWrapper(result: unknown): { wrapperKey: string | null; wrapper: Record<string, unknown> | null; payload: Record<string, unknown> | null } {
+    if (!isRecord(result)) {
+        return { wrapperKey: null, wrapper: null, payload: null };
+    }
+    const wrapperKey = ['success', 'result', 'output', 'data'].find((key) => isRecord(result[key]));
+    if (!wrapperKey) {
+        return { wrapperKey: null, wrapper: null, payload: result };
+    }
+    return { wrapperKey, wrapper: result, payload: result[wrapperKey] as Record<string, unknown> };
+}
 
 /**
  * ACP (Agent Communication Protocol) message data types.
@@ -112,6 +160,47 @@ export class ApiSessionClient extends EventEmitter {
     private fallbackPollInterval: ReturnType<typeof setInterval> | null = null;
     /** Set in close() so disconnect/connect_error do not re-start fallback poll and leave the process hanging. */
     private closing = false;
+    /** Directory where full tool-call args/results are persisted for RPC reads. */
+    private get toolContentDir(): string {
+        const base = this.metadata?.path ?? process.cwd();
+        return join(base, '.happy', 'tool-content');
+    }
+
+    private persistToolCallContent(callId: string, args: Record<string, unknown>): void {
+        try {
+            mkdirSync(this.toolContentDir, { recursive: true });
+            writeFileSync(join(this.toolContentDir, `${callId}.json`), JSON.stringify(args), 'utf8');
+        } catch (err) {
+            logger.debug('[lazy] Failed to persist tool content to disk', { callId, err });
+        }
+    }
+
+    private async loadToolCallContentFromDisk(callId: string): Promise<Record<string, unknown> | null> {
+        try {
+            const raw = await readFile(join(this.toolContentDir, `${callId}.json`), 'utf8');
+            return JSON.parse(raw) as Record<string, unknown>;
+        } catch {
+            return null;
+        }
+    }
+
+    private persistToolCallResult(callId: string, result: unknown): void {
+        try {
+            mkdirSync(this.toolContentDir, { recursive: true });
+            writeFileSync(join(this.toolContentDir, `${callId}_result.json`), JSON.stringify(result), 'utf8');
+        } catch (err) {
+            logger.debug('[lazy] Failed to persist tool result to disk', { callId, err });
+        }
+    }
+
+    private async loadToolCallResultFromDisk(callId: string): Promise<unknown | null> {
+        try {
+            const raw = await readFile(join(this.toolContentDir, `${callId}_result.json`), 'utf8');
+            return JSON.parse(raw);
+        } catch {
+            return null;
+        }
+    }
 
     constructor(token: string, session: Session) {
         super()
@@ -136,6 +225,16 @@ export class ApiSessionClient extends EventEmitter {
         });
         const workingDir = this.metadata?.path ?? process.cwd();
         registerCommonHandlers(this.rpcHandlerManager, workingDir);
+        this.rpcHandlerManager.registerHandler('getToolCallFullContent', async ({ callId }: { callId: string }) => {
+            const [args, result] = await Promise.all([
+                this.loadToolCallContentFromDisk(callId),
+                this.loadToolCallResultFromDisk(callId),
+            ]);
+            if (args || result !== null) {
+                return { success: true, ...(args ? { args } : {}), ...(result !== null ? { result } : {}) };
+            }
+            return { success: false, error: 'Content not found' };
+        });
 
         //
         // Create socket
@@ -524,15 +623,100 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     private maybeLazyEncodeEnvelope(envelope: SessionEnvelope): SessionEnvelope {
-        return envelope;
+        if (!LAZY_TOOL_CONTENT_ENABLED) return envelope;
+        if (envelope.ev.t !== 'tool-call-start') return envelope;
+        if (!LAZY_DIFF_TOOL_NAMES.has(envelope.ev.name)) return envelope;
+        if (!isRecord(envelope.ev.args)) return envelope;
+
+        const originalArgs = envelope.ev.args as Record<string, unknown>;
+        const fields = LAZY_DIFF_TOOL_FIELDS[envelope.ev.name] ?? [];
+        const compactArgs: Record<string, unknown> = { ...originalArgs };
+        let wasTruncated = false;
+
+        for (const field of fields) {
+            if (typeof compactArgs[field] === 'string' && (compactArgs[field] as string).length > LAZY_CONTENT_THRESHOLD) {
+                compactArgs[field] = (compactArgs[field] as string).slice(0, LAZY_CONTENT_THRESHOLD);
+                wasTruncated = true;
+            }
+        }
+
+        if (!wasTruncated) return envelope;
+
+        compactArgs._lazy = true;
+        this.persistToolCallContent(envelope.ev.call, originalArgs);
+        return {
+            ...envelope,
+            ev: {
+                ...envelope.ev,
+                args: compactArgs,
+            },
+        };
     }
 
     /**
      * Encode tool results lazily when needed.
-     * Current cursor-acp flow already normalizes edit payloads upstream, so this is a pass-through.
+     * CursorEdit / CursorWrite can carry full-file snapshots; keep compact diffs on the wire
+     * and persist full payloads so full view can fetch them via RPC.
      */
-    maybeLazyEncodeResult(_toolName: string, _callId: string, result: unknown): unknown {
-        return result;
+    maybeLazyEncodeResult(toolName: string, callId: string, result: unknown): unknown {
+        if (!LAZY_TOOL_CONTENT_ENABLED) return result;
+        if (!LAZY_DIFF_TOOL_NAMES.has(toolName)) return result;
+        if (!isRecord(result)) return result;
+
+        const { wrapperKey, wrapper, payload } = unwrapResultWrapper(result);
+        if (!payload) return result;
+
+        const stripFields = LAZY_RESULT_STRIP_FIELDS_BY_TOOL[toolName] ?? [];
+        const previewFields = LAZY_RESULT_PREVIEW_FIELDS_BY_TOOL[toolName] ?? [];
+        const compactPayload: Record<string, unknown> = { ...payload };
+        let wasTruncated = false;
+
+        let recomputedDiffBody: string | null = null;
+        if (toolName === 'CursorEdit') {
+            const before = typeof payload.beforeFullFileContent === 'string' ? payload.beforeFullFileContent : null;
+            const after = typeof payload.afterFullFileContent === 'string' ? payload.afterFullFileContent : null;
+            const filePath = typeof payload.path === 'string' ? payload.path : 'file';
+            if (before !== null && after !== null) {
+                try {
+                    const patch = createTwoFilesPatch(filePath, filePath, before, after, '', '', { context: 3 });
+                    const patchLines = patch.split('\n');
+                    const hunkStart = patchLines.findIndex((line) => line.startsWith('@@ -'));
+                    recomputedDiffBody = hunkStart >= 0 ? patchLines.slice(hunkStart).join('\n') : patch;
+                    compactPayload.diffString = truncateByLines(recomputedDiffBody, LAZY_DIFF_STRING_MAX_LINES);
+                    wasTruncated = true;
+                } catch (err) {
+                    logger.debug('[lazy] Failed to compute unified diff', { callId, err });
+                }
+            }
+        }
+
+        for (const field of stripFields) {
+            if (typeof compactPayload[field] === 'string' && (compactPayload[field] as string).length > 0) {
+                delete compactPayload[field];
+                wasTruncated = true;
+            }
+        }
+
+        for (const field of previewFields) {
+            if (typeof compactPayload[field] === 'string') {
+                const original = compactPayload[field] as string;
+                const truncated = truncateByLines(original, LAZY_DIFF_STRING_MAX_LINES);
+                if (truncated.length < original.length) {
+                    compactPayload[field] = truncated;
+                    wasTruncated = true;
+                }
+            }
+        }
+
+        if (!wasTruncated) return result;
+
+        compactPayload._lazyResult = true;
+        const persistPayload = recomputedDiffBody !== null
+            ? { ...payload, diffString: recomputedDiffBody }
+            : payload;
+        const persistResult = wrapper && wrapperKey ? { ...wrapper, [wrapperKey]: persistPayload } : persistPayload;
+        this.persistToolCallResult(callId, persistResult);
+        return wrapper && wrapperKey ? { ...wrapper, [wrapperKey]: compactPayload } : compactPayload;
     }
 
     private enqueueSessionProtocolEnvelope(envelope: SessionEnvelope, invalidate: boolean = true) {

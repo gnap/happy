@@ -47,7 +47,7 @@ import type { PermissionMode } from '@/api/types';
  * because the mobile app has dedicated handling for codex messages.
  */
 
-import { createEnvelope, type SessionEvent } from '@slopus/happy-wire';
+import { createEnvelope } from '@slopus/happy-wire';
 
 /**
  * Convert tool result to App output-format shape: content must be string (or array of { type, text }).
@@ -802,7 +802,7 @@ export async function runCursor(opts: {
               session.sendCodexMessage(resultPayload);
               session.sendCursorMessage(resultPayload);
               // New App: session only gets tool-call-end; result is in tool card (no t:'text' for tool result)
-              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId, result: lazyResult } as SessionEvent, { turn: turnId }));
+              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId, result: lazyResult }, { turn: turnId }));
               break;
 
             case 'task_complete':

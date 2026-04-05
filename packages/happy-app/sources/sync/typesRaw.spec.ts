@@ -1761,6 +1761,36 @@ describe('Zod Transform - WOLOG Content Normalization', () => {
             }
         });
 
+        it('normalizes tool-call-end with inline result (compact tool diff payload)', () => {
+            const payload = { success: { diffString: '@@ -1,1 +1,1 @@\n-old\n+new\n' } };
+            const end = normalizeRawMessage('db-tool-end-result', null, 1, {
+                ...base,
+                content: {
+                    type: 'session',
+                    data: {
+                        id: 'env-tool-end-result',
+                        time: 1,
+                        role: 'agent',
+                        turn: 'turn-1',
+                        ev: {
+                            t: 'tool-call-end',
+                            call: 'call-edit-1',
+                            result: payload,
+                        },
+                    },
+                },
+            });
+            expect(end).toBeTruthy();
+            if (end && end.role === 'agent') {
+                expect(end.content[0]).toMatchObject({
+                    type: 'tool-result',
+                    tool_use_id: 'call-edit-1',
+                    content: payload,
+                    is_error: false,
+                });
+            }
+        });
+
         it('maps turn-end to ready event and drops turn-start', () => {
             const turnStart = normalizeRawMessage('db-5', null, 1, {
                 ...base,
