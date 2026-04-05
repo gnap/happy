@@ -56,4 +56,21 @@ describe('parseMarkdown', () => {
             { styles: [], text: ' for more.', url: null },
         ]);
     });
+
+    it('merges hard-wrapped assistant lines into one text block (blank line starts new paragraph)', () => {
+        const blocks = parseMarkdown(
+            ['First line wrapped by the model', 'second line same paragraph', '', 'New paragraph here'].join('\n'),
+        );
+
+        expect(blocks).toHaveLength(2);
+        expect(blocks[0]?.type).toBe('text');
+        expect(blocks[1]?.type).toBe('text');
+        if (blocks[0]?.type !== 'text' || blocks[1]?.type !== 'text') {
+            throw new Error('Expected two text blocks');
+        }
+        expect(blocks[0].content).toEqual([
+            { styles: [], text: 'First line wrapped by the model\nsecond line same paragraph', url: null },
+        ]);
+        expect(blocks[1].content).toEqual([{ styles: [], text: 'New paragraph here', url: null }]);
+    });
 });

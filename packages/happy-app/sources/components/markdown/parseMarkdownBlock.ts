@@ -1,6 +1,40 @@
 import type { MarkdownBlock, MarkdownSpan } from "./parseMarkdown";
 import { parseMarkdownSpans } from "./parseMarkdownSpans";
 
+/** True if this line opens a non-paragraph markdown block (list, heading, table, etc.). */
+function isMarkdownBlockStart(trimmed: string): boolean {
+    if (!trimmed) {
+        return false;
+    }
+    for (let i = 1; i <= 6; i++) {
+        if (trimmed.startsWith(`${'#'.repeat(i)} `)) {
+            return true;
+        }
+    }
+    if (trimmed.startsWith('```')) {
+        return true;
+    }
+    if (trimmed === '---') {
+        return true;
+    }
+    if (trimmed.startsWith('<options>')) {
+        return true;
+    }
+    if (/^!\[([^\]]*)\]\(([^)]+)\)$/.test(trimmed)) {
+        return true;
+    }
+    if (/^\d+\.\s+/.test(trimmed)) {
+        return true;
+    }
+    if (/^[-*+]\s+/.test(trimmed)) {
+        return true;
+    }
+    if (trimmed.includes('|') && !trimmed.startsWith('```')) {
+        return true;
+    }
+    return false;
+}
+
 // Split a pipe-delimited table row into cells, stripping only the leading/trailing
 // empty strings caused by outer pipes while preserving interior empty cells.
 function splitTableRow(line: string): string[] {
@@ -185,9 +219,28 @@ export function parseMarkdownBlock(markdown: string) {
             }
         }
 
-        // Fallback
+        // Fallback: plain paragraph — merge consecutive lines until a blank line or block start.
+        // Models often hard-wrap at ~80 cols; one line per block used to apply marginTop/Bottom
+        // per line in MarkdownView, which looked like stray paragraph breaks in assistant bubbles.
         if (trimmed.length > 0) {
-            blocks.push({ type: 'text', content: parseMarkdownSpans(trimmed, false) });
+            const paraLines: string[] = [line];
+            while (index < lines.length) {
+                const nextLine = lines[index];
+                const nextTrim = nextLine.trim();
+                if (nextTrim === '') {
+                    index++;
+                    break;
+                }
+                if (isMarkdownBlockStart(nextTrim)) {
+                    break;
+                }
+                paraLines.push(nextLine);
+                index++;
+            }
+            const merged = paraLines.join('\n').trim();
+            if (merged.length > 0) {
+                blocks.push({ type: 'text', content: parseMarkdownSpans(merged, false) });
+            }
         }
     }
     return blocks;
