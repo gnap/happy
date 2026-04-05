@@ -2062,10 +2062,13 @@ class Sync {
                     // Update session
                     const session = storage.getState().sessions[updateData.body.sid];
                     if (session) {
+                        // Container `updateData.seq` is per-account update stream (Account.seq), not session
+                        // message ledger seq. Keep `Session.seq` aligned with server session message high-water.
+                        const messageLedgerSeq = updateData.body.message.seq;
                         this.applySessions([{
                             ...session,
                             updatedAt: updateData.createdAt,
-                            seq: updateData.seq,
+                            seq: Math.max(session.seq ?? 0, messageLedgerSeq),
                             // Update thinking state based on task lifecycle events
                             ...(isTaskComplete ? { thinking: false } : {}),
                             ...(isTaskStarted ? { thinking: true } : {})
@@ -2154,7 +2157,7 @@ class Sync {
                         ? updateData.body.metadata.version
                         : session.metadataVersion,
                     updatedAt: updateData.createdAt,
-                    seq: updateData.seq
+                    // Do not assign `updateData.seq` here — it is Account update-stream seq, not Session.seq.
                 }]);
 
                 // Invalidate git status when agent state changes (files may have been modified)
