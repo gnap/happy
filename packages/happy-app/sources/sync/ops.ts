@@ -126,6 +126,17 @@ interface SessionKillResponse {
     message: string;
 }
 
+interface GetToolCallFullContentRequest {
+    callId: string;
+}
+
+interface GetToolCallFullContentResponse {
+    success: boolean;
+    args?: Record<string, unknown>;
+    result?: unknown;
+    error?: string;
+}
+
 // Response types for spawn session
 export type SpawnSessionResult =
     | { type: 'success'; sessionId: string }
@@ -527,6 +538,29 @@ export async function sessionDelete(sessionId: string): Promise<{ success: boole
         return {
             success: false,
             message: error instanceof Error ? error.message : 'Unknown error'
+        };
+    }
+}
+
+/**
+ * Fetch the full (non-truncated) tool call input from the CLI cache.
+ * Only relevant when the CLI was started with HAPPY_LAZY_TOOL_CONTENT=1.
+ */
+export async function getToolCallFullContent(
+    sessionId: string,
+    callId: string
+): Promise<GetToolCallFullContentResponse> {
+    try {
+        const response = await apiSocket.sessionRPC<GetToolCallFullContentResponse, GetToolCallFullContentRequest>(
+            sessionId,
+            'getToolCallFullContent',
+            { callId }
+        );
+        return response;
+    } catch (error) {
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error'
         };
     }
 }

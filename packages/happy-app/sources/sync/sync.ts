@@ -42,6 +42,7 @@ import { FeedItem } from './feedTypes';
 import { UserProfile } from './friendTypes';
 import { resolveMessageModeMeta } from './messageMeta';
 import { loadMessageCache, saveMessageCache, clearMessageCache, preloadSessionCacheDB, getCachedLastSeq } from './cache/messageCache';
+import type { MessageMeta } from './typesMessageMeta';
 
 type V3GetSessionMessagesResponse = {
     messages: ApiMessage[];
@@ -76,6 +77,10 @@ class Sync {
     private sendAbortControllers = new Map<string, AbortController>();
     private sessionLastSeq = new Map<string, number>();
     private pendingOutbox = new Map<string, OutboxMessage[]>();
+    /** Pending optimistic sends: used to re-attach localId when the server echoes user text without localId (session protocol). */
+    private sentMessageLocalIds = new Map<string, Array<{ localId: string; text: string; createdAt: number }>>();
+    /** server message id → client localId, shared by fetchMessages and socket so both paths dedupe the same bubble. */
+    private claimedServerMessageIds = new Map<string, string>();
     private sessionMessageQueue = new Map<string, NormalizedMessage[]>();
     private sessionQueueProcessing = new Set<string>();
     private sessionMessageLocks = new Map<string, AsyncLock>();
@@ -95,6 +100,9 @@ class Sync {
     private activityAccumulator: ActivityUpdateAccumulator;
     private pendingSettings: Partial<Settings> = loadPendingSettings();
     private appState: AppStateStatus = AppState.currentState;
+    private networkStateSubscription: { remove(): void } | null = null;
+    private lastNetworkConnected: boolean | null = null;
+    private lastNetworkType: string | null = null;
     private backgroundSendTimeout: ReturnType<typeof setTimeout> | null = null;
     private backgroundSendNotificationId: string | null = null;
     private backgroundSendStartedAt: number | null = null;
@@ -292,6 +300,36 @@ class Sync {
         this.anonID = encryption.anonID;
         this.serverID = parseToken(credentials.token);
         await this.#init();
+    }
+
+    /**
+     * Persist the current in-memory state for a session to SQLite.
+     * Called after resolving lazy tool content so the full content is saved to cache.
+     */
+    saveSessionCache = async (sessionId: string): Promise<void> => {
+        const state = storage.getState();
+        const session = state.sessions[sessionId];
+        const sessionMsgs = state.sessionMessages[sessionId];
+        if (!session || !sessionMsgs) return;
+        const lastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
+        const oldestSeq = sessionMsgs.oldestSeq;
+        const hasOlderMessages = sessionMsgs.hasOlderMessages ?? false;
+        await saveMessageCache(session, sessionMsgs.messages, sessionMsgs.reducerState, lastSeq, oldestSeq, hasOlderMessages);
+    }
+
+    /**
+     * Clear the local message cache for a session and trigger a full refetch.
+     * Only meaningful for Cursor sessions; safe to call on any session.
+     */
+    rebuildMessageCache = async (sessionId: string): Promise<void> => {
+        log.log(`🔄 rebuildMessageCache: clearing cache for ${sessionId}`);
+
+        await clearMessageCache(sessionId);
+
+        this.sessionLastSeq.delete(sessionId);
+        storage.getState().deleteSessionMessages(sessionId);
+
+        this.onSessionVisible(sessionId);
     }
 
     async #init() {
@@ -571,6 +609,11 @@ class Sync {
         // Generate local ID
         const localId = randomUUID();
 
+        const createdAt = Date.now();
+        const sentPending = this.sentMessageLocalIds.get(sessionId) ?? [];
+        sentPending.push({ localId, text, createdAt });
+        this.sentMessageLocalIds.set(sessionId, sentPending);
+
         // Determine sentFrom based on platform
         let sentFrom: string;
         if (Platform.OS === 'web') {
@@ -608,12 +651,16 @@ class Sync {
         };
         const encryptedRawRecord = await encryption.encryptRawRecord(content);
 
-        // Add to messages - normalize the raw record
-        const createdAt = Date.now();
-        const normalizedMessage = normalizeRawMessage(localId, localId, createdAt, content);
-        if (normalizedMessage) {
-            this.enqueueMessages(sessionId, [normalizedMessage]);
-        }
+        const optimisticMessage: NormalizedMessage = {
+            id: localId,
+            localId,
+            createdAt,
+            role: 'user',
+            content: { type: 'text', text },
+            isSidechain: false,
+            meta: content.meta as MessageMeta | undefined,
+        };
+        this.applyMessages(sessionId, [optimisticMessage]);
 
         let pending = this.pendingOutbox.get(sessionId);
         if (!pending) {
@@ -1197,17 +1244,16 @@ class Sync {
     private fetchMachines = async () => {
         if (!this.credentials) return;
 
-        console.log('📊 Sync: Fetching machines...');
-        const API_ENDPOINT = getServerUrl();
-        const response = await fetch(`${API_ENDPOINT}/v1/machines`, {
+        console.log(`📊 Sync: Fetching machines from ${getServerUrl()}`);
+        const response = await apiSocket.request('/v1/machines', {
             headers: {
-                'Authorization': `Bearer ${this.credentials.token}`,
                 'Content-Type': 'application/json'
             }
         });
 
         if (!response.ok) {
-            console.error(`Failed to fetch machines: ${response.status}`);
+            const body = await response.text().catch(() => '');
+            console.error(`Failed to fetch machines: status=${response.status} body=${body.slice(0, 200)}`);
             return;
         }
 
@@ -1725,6 +1771,32 @@ class Sync {
         }
     }
 
+    private resolveSentMessageLocalId(sessionId: string, text: string, createdAt: number): string | null {
+        const pending = this.sentMessageLocalIds.get(sessionId);
+        if (!pending || pending.length === 0) return null;
+        let best: { localId: string; createdAt: number } | null = null;
+        for (const entry of pending) {
+            if (entry.text !== text) continue;
+            const delta = Math.abs(entry.createdAt - createdAt);
+            if (delta > 5 * 60 * 1000) continue;
+            if (!best || delta < Math.abs(best.createdAt - createdAt)) {
+                best = entry;
+            }
+        }
+        return best?.localId ?? null;
+    }
+
+    private resolveLocalIdForIncoming(sessionId: string, serverMsgId: string, text: string, createdAt: number): string | null {
+        const existing = this.claimedServerMessageIds.get(serverMsgId);
+        if (existing) return existing;
+
+        const localId = this.resolveSentMessageLocalId(sessionId, text, createdAt);
+        if (localId) {
+            this.claimedServerMessageIds.set(serverMsgId, localId);
+        }
+        return localId;
+    }
+
     private fetchMessages = async (sessionId: string) => {
         log.log(`💬 fetchMessages starting for session ${sessionId} - acquiring lock`);
         const lock = this.getSessionMessageLock(sessionId);
@@ -1750,6 +1822,7 @@ class Sync {
                         cached.reducerState,
                         cached.oldestSeq,
                         cached.hasOlderMessages,
+                        cached.lastSeq,
                     );
                     this.sessionLastSeq.set(sessionId, cached.lastSeq);
                     log.log(`💬 fetchMessages: hydrated from cache for ${sessionId} (lastSeq=${cached.lastSeq}, oldestSeq=${cached.oldestSeq}, ${cached.messages.length} messages)`);
@@ -1759,11 +1832,24 @@ class Sync {
             }
 
             const cachedLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
+            const sessionSeq = session.seq ?? 0;
+            if (cachedLastSeq > 0 && cachedLastSeq >= sessionSeq) {
+                log.log(`💬 fetchMessages: already up-to-date for ${sessionId} (lastSeq=${cachedLastSeq} >= seq=${sessionSeq}), skipping fetch`);
+                storage.getState().applyMessagesLoaded(sessionId);
+                return;
+            }
+
+            const alreadyLoaded = storage.getState().sessionMessages[sessionId]?.isLoaded ?? false;
+            const hasPendingOutbox = (this.pendingOutbox.get(sessionId)?.length ?? 0) > 0;
+            if (alreadyLoaded && !hasPendingOutbox) {
+                storage.getState().setFetching(sessionId, true);
+            }
+
             let afterSeq: number;
             if (cachedLastSeq > 0) {
                 afterSeq = cachedLastSeq;
             } else {
-                afterSeq = Math.max(0, (session.seq ?? 0) - 100);
+                afterSeq = Math.max(0, sessionSeq - 100);
             }
 
             let hasMore = true;
@@ -1771,57 +1857,68 @@ class Sync {
             let oldestSeq = cachedLastSeq > 0 ? storage.getState().sessionMessages[sessionId]?.oldestSeq ?? 0 : 0;
             let hasOlderMessages = cachedLastSeq > 0 ? storage.getState().sessionMessages[sessionId]?.hasOlderMessages ?? false : false;
 
-            while (hasMore) {
-                const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
-                if (!response.ok) {
-                    throw new Error(`Failed to fetch messages for ${sessionId}: ${response.status}`);
-                }
-                const data = await response.json() as V3GetSessionMessagesResponse;
-                const messages = Array.isArray(data.messages) ? data.messages : [];
-
-                let maxSeq = afterSeq;
-                for (const message of messages) {
-                    if (message.seq > maxSeq) {
-                        maxSeq = message.seq;
+            try {
+                while (hasMore) {
+                    const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
+                    if (!response.ok) {
+                        throw new Error(`Failed to fetch messages for ${sessionId}: ${response.status}`);
                     }
-                }
+                    const data = await response.json() as V3GetSessionMessagesResponse;
+                    const messages = Array.isArray(data.messages) ? data.messages : [];
 
-                const decryptedMessages = await encryption.decryptMessages(messages);
-                const normalizedMessages: NormalizedMessage[] = [];
-                for (let i = 0; i < decryptedMessages.length; i++) {
-                    const decrypted = decryptedMessages[i];
-                    if (!decrypted) {
-                        continue;
-                    }
-                    const normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
-                    if (normalized) {
-                        normalizedMessages.push(normalized);
-                    }
-                }
-
-                if (normalizedMessages.length > 0) {
-                    totalNormalized += normalizedMessages.length;
-                    this.enqueueMessages(sessionId, normalizedMessages);
-                }
-
-                this.sessionLastSeq.set(sessionId, maxSeq);
-                hasMore = !!data.hasMore;
-                if (hasMore && maxSeq === afterSeq) {
-                    log.log(`💬 fetchMessages: pagination stalled for ${sessionId}, stopping to avoid infinite loop`);
-                    break;
-                }
-                afterSeq = maxSeq;
-
-                if (cachedLastSeq === 0 && oldestSeq === 0) {
-                    let minSeqInPage = afterSeq > 0 ? afterSeq + 1 : 1;
+                    let maxSeq = afterSeq;
                     for (const message of messages) {
-                        if (message.seq < minSeqInPage) {
-                            minSeqInPage = message.seq;
+                        if (message.seq > maxSeq) {
+                            maxSeq = message.seq;
                         }
                     }
-                    oldestSeq = messages.length > 0 ? minSeqInPage : 1;
-                    hasOlderMessages = oldestSeq > 1;
+
+                    const decryptedMessages = await encryption.decryptMessages(messages);
+                    const normalizedMessages: NormalizedMessage[] = [];
+                    for (let i = 0; i < decryptedMessages.length; i++) {
+                        const decrypted = decryptedMessages[i];
+                        if (!decrypted) {
+                            continue;
+                        }
+                        let normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
+                        if (!normalized) {
+                            continue;
+                        }
+                        if (normalized.role === 'user' && normalized.content.type === 'text') {
+                        const claimedLocalId = this.resolveLocalIdForIncoming(sessionId, normalized.id, normalized.content.text, normalized.createdAt);
+                            if (claimedLocalId) {
+                                normalized = { ...normalized, localId: claimedLocalId };
+                            }
+                        }
+                        normalizedMessages.push(normalized);
+                    }
+
+                    if (normalizedMessages.length > 0) {
+                        totalNormalized += normalizedMessages.length;
+                        this.enqueueMessages(sessionId, normalizedMessages);
+                    }
+
+                    this.sessionLastSeq.set(sessionId, maxSeq);
+                    hasMore = !!data.hasMore;
+                    if (hasMore && maxSeq === afterSeq) {
+                        log.log(`💬 fetchMessages: pagination stalled for ${sessionId}, stopping to avoid infinite loop`);
+                        break;
+                    }
+                    afterSeq = maxSeq;
+
+                    if (cachedLastSeq === 0 && oldestSeq === 0) {
+                        let minSeqInPage = afterSeq > 0 ? afterSeq + 1 : 1;
+                        for (const message of messages) {
+                            if (message.seq < minSeqInPage) {
+                                minSeqInPage = message.seq;
+                            }
+                        }
+                        oldestSeq = messages.length > 0 ? minSeqInPage : 1;
+                        hasOlderMessages = oldestSeq > 1;
+                    }
                 }
+            } finally {
+                storage.getState().setFetching(sessionId, false);
             }
 
             if (cachedLastSeq === 0) {
@@ -1832,6 +1929,9 @@ class Sync {
                 storage.getState().applyOlderMessages(sessionId, [], oldestSeq, hasOlderMessages);
             }
 
+            const lastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
+            storage.getState().setNewestSeq(sessionId, lastSeq);
+
             const updatedSession = storage.getState().sessions[sessionId];
             const sessionMsgs = storage.getState().sessionMessages[sessionId];
             if (updatedSession && sessionMsgs) {
@@ -1839,7 +1939,7 @@ class Sync {
                     updatedSession,
                     sessionMsgs.messages,
                     sessionMsgs.reducerState,
-                    this.sessionLastSeq.get(sessionId) ?? 0,
+                    lastSeq,
                     sessionMsgs.oldestSeq,
                     sessionMsgs.hasOlderMessages,
                 );
@@ -1917,6 +2017,13 @@ class Sync {
                 const decrypted = await encryption.decryptMessage(updateData.body.message);
                 if (decrypted) {
                     lastMessage = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
+                    const sid = updateData.body.sid;
+                    if (lastMessage && lastMessage.role === 'user' && lastMessage.content.type === 'text') {
+                        const claimedLocalId = this.resolveLocalIdForIncoming(sid, lastMessage.id, lastMessage.content.text, lastMessage.createdAt);
+                        if (claimedLocalId) {
+                            lastMessage = { ...lastMessage, localId: claimedLocalId };
+                        }
+                    }
 
                     // Check for task lifecycle events to update thinking state
                     // This ensures UI updates even if volatile activity updates are lost
@@ -2015,6 +2122,7 @@ class Sync {
             this.sessionMessageLocks.delete(sessionId);
             this.sessionMessageQueue.delete(sessionId);
             this.sessionQueueProcessing.delete(sessionId);
+            this.sentMessageLocalIds.delete(sessionId);
             void clearMessageCache(sessionId);
 
             log.log(`🗑️ Session ${sessionId} deleted from local storage`);

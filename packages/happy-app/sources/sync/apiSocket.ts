@@ -4,6 +4,17 @@ import { Encryption } from './encryption/encryption';
 import { storage } from './storage';
 
 //
+// Constants (aligned with CLI/daemon reconnection behavior)
+//
+
+/** Min delay before first reconnection attempt (ms) */
+const RECONNECT_DELAY_MIN = 2000;
+/** Max delay between attempts (ms) - caps after several failures */
+const RECONNECT_DELAY_MAX = 30000;
+/** Jitter factor 0–1 to avoid thundering herd */
+const RECONNECT_RANDOMIZATION_FACTOR = 0.5;
+
+//
 // Types
 //
 
@@ -12,10 +23,14 @@ export interface SyncSocketConfig {
     token: string;
 }
 
+export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error' | 'auth_error';
+
 export interface SyncSocketState {
     isConnected: boolean;
-    connectionStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
+    connectionStatus: ConnectionStatus;
     lastError: Error | null;
+    /** If true, reconnection was stopped due to auth failure (e.g. 401) */
+    authFailure?: boolean;
 }
 
 export type SyncSocketListener = (state: SyncSocketState) => void;
@@ -32,8 +47,12 @@ class ApiSocket {
     private encryption: Encryption | null = null;
     private messageHandlers: Map<string, (data: any) => void> = new Map();
     private reconnectedListeners: Set<() => void> = new Set();
-    private statusListeners: Set<(status: 'disconnected' | 'connecting' | 'connected' | 'error') => void> = new Set();
-    private currentStatus: 'disconnected' | 'connecting' | 'connected' | 'error' = 'disconnected';
+    private statusListeners: Set<(status: ConnectionStatus) => void> = new Set();
+    private authErrorListeners: Set<() => void> = new Set();
+    private currentStatus: ConnectionStatus = 'disconnected';
+    private lastError: Error | null = null;
+    /** When true, do not reconnect (e.g. after 401) */
+    private reconnectionDisabled = false;
 
     //
     // Initialization
@@ -70,6 +89,7 @@ class ApiSocket {
         }
 
         this.updateStatus('connecting');
+        this.lastError = null;
 
         this.socket = io(this.config.endpoint, {
             path: '/v1/updates',
@@ -78,17 +98,20 @@ class ApiSocket {
                 clientType: 'user-scoped' as const
             },
             transports: ['websocket'],
-            reconnection: true,
-            reconnectionDelay: 1000,
-            reconnectionDelayMax: 5000,
-            reconnectionAttempts: Infinity
+            reconnection: !this.reconnectionDisabled,
+            reconnectionDelay: RECONNECT_DELAY_MIN,
+            reconnectionDelayMax: RECONNECT_DELAY_MAX,
+            reconnectionAttempts: Infinity,
+            randomizationFactor: RECONNECT_RANDOMIZATION_FACTOR,
         });
 
         this.setupEventHandlers();
     }
 
     disconnect() {
+        this.reconnectionDisabled = false;
         if (this.socket) {
+            this.socket.removeAllListeners();
             this.socket.disconnect();
             this.socket = null;
         }
@@ -104,12 +127,20 @@ class ApiSocket {
         return () => this.reconnectedListeners.delete(listener);
     };
 
-    onStatusChange = (listener: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => void) => {
+    onStatusChange = (listener: (status: ConnectionStatus) => void) => {
         this.statusListeners.add(listener);
-        // Immediately notify with current status
         listener(this.currentStatus);
         return () => this.statusListeners.delete(listener);
     };
+
+    /** Called when server returns 401 / auth invalid; reconnection is stopped until token refresh. */
+    onAuthError = (listener: () => void) => {
+        this.authErrorListeners.add(listener);
+        return () => this.authErrorListeners.delete(listener);
+    };
+
+    getLastError = (): Error | null => this.lastError;
+    isAuthFailure = (): boolean => this.currentStatus === 'auth_error';
 
     //
     // Message Handling
@@ -141,7 +172,8 @@ class ApiSocket {
         if (result.ok) {
             return await sessionEncryption.decryptRaw(result.result) as R;
         }
-        throw new Error('RPC call failed');
+        const message = (result as { error?: string }).error || 'RPC call failed';
+        throw new Error(message);
     }
 
     /**
@@ -161,7 +193,8 @@ class ApiSocket {
         if (result.ok) {
             return await machineEncryption.decryptRaw(result.result) as R;
         }
-        throw new Error(result.error || 'RPC call failed');
+        const message = (result as { error?: string }).error || 'RPC call failed';
+        throw new Error(message);
     }
 
     send(event: string, data: any) {
@@ -217,6 +250,70 @@ class ApiSocket {
         }
     }
 
+    /**
+     * Called when the app goes to background.
+     * If not currently connected, tears down the socket entirely so socket.io's
+     * reconnection timers don't fire while the JS thread is suspended by iOS.
+     * A live connected socket is left intact so the OS can keep it open.
+     */
+    pauseReconnection() {
+        if (this.currentStatus !== 'connected') {
+            this.disconnect();
+        }
+    }
+
+    /**
+     * Called when the app comes back to foreground.
+     * - If connected: sends an application-level ping to verify the connection
+     *   is still alive (silent TCP drops during iOS suspend are common). Forces
+     *   a reconnect if no pong arrives within 5 seconds.
+     * - If not connected (and not already in progress): creates a fresh socket
+     *   immediately, resetting socket.io's exponential backoff from scratch.
+     * - If connecting: leaves the in-progress attempt alone.
+     */
+    resumeReconnection() {
+        if (this.currentStatus === 'connected' && this.socket?.connected) {
+            this.probeConnection();
+        } else if (this.currentStatus !== 'connecting') {
+            if (this.socket) {
+                this.socket.removeAllListeners();
+                this.socket.disconnect();
+                this.socket = null;
+            }
+            this.reconnectionDisabled = false;
+            this.connect();
+        }
+    }
+
+    /**
+     * Emits an application-level ping and waits for the server ACK.
+     * If no response within timeoutMs the connection is treated as stale and
+     * a fresh reconnect is forced.
+     */
+    private probeConnection(timeoutMs = 5000) {
+        if (!this.socket) return;
+        let settled = false;
+
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            this.disconnect();
+            this.connect();
+        }, timeoutMs);
+
+        try {
+            this.socket.emit('ping', () => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+            });
+        } catch {
+            clearTimeout(timer);
+            this.disconnect();
+            this.connect();
+        }
+    }
+
     //
     // Private Methods
     //
@@ -229,11 +326,34 @@ class ApiSocket {
         }
     }
 
-    private updateStatus(status: 'disconnected' | 'connecting' | 'connected' | 'error') {
+    private updateStatus(status: ConnectionStatus, error?: Error) {
+        if (error) this.lastError = error;
         if (this.currentStatus !== status) {
             this.currentStatus = status;
             this.statusListeners.forEach(listener => listener(status));
         }
+    }
+
+    /** Stop reconnection and mark as auth failure (e.g. 401). Call from connect_error. */
+    private stopReconnectionAndNotifyAuthError(error: Error) {
+        this.reconnectionDisabled = true;
+        this.lastError = error;
+        if (this.socket) {
+            this.socket.removeAllListeners();
+            this.socket.disconnect();
+            this.socket = null;
+        }
+        this.updateStatus('auth_error', error);
+        this.authErrorListeners.forEach(listener => listener());
+    }
+
+    private isAuthError(error: unknown): boolean {
+        if (!error || typeof error !== 'object') return false;
+        const msg = String((error as Error).message ?? '').toLowerCase();
+        const code = (error as { code?: string; status?: number }).code ?? (error as { status?: number }).status;
+        if (code === 401 || code === 'UNAUTHORIZED') return true;
+        if (msg.includes('401') || msg.includes('unauthorized') || msg.includes('authentication')) return true;
+        return false;
     }
 
     private setupEventHandlers() {
@@ -245,6 +365,7 @@ class ApiSocket {
                 console.log('🔌 SyncSocket: Connected, recovered: ' + this.socket?.recovered);
                 console.log('🔌 SyncSocket: Socket ID:', this.socket?.id);
             }
+            this.lastError = null;
             this.updateStatus('connected');
             if (!this.socket?.recovered) {
                 this.reconnectedListeners.forEach(listener => listener());
@@ -276,22 +397,31 @@ class ApiSocket {
             if (this.isVerboseLogging()) {
                 console.log('🔌 SyncSocket: Disconnected', reason);
             }
+            if (this.reconnectionDisabled) return;
             this.updateStatus('disconnected');
         });
 
         // Error events
-        this.socket.on('connect_error', (error) => {
+        this.socket.on('connect_error', (error: Error & { code?: string; status?: number }) => {
             if (this.isVerboseLogging()) {
                 console.error('🔌 SyncSocket: Connection error', error);
             }
-            this.updateStatus('error');
+            if (this.isAuthError(error)) {
+                this.stopReconnectionAndNotifyAuthError(error);
+                return;
+            }
+            this.updateStatus('error', error);
         });
 
-        this.socket.on('error', (error) => {
+        this.socket.on('error', (error: Error) => {
             if (this.isVerboseLogging()) {
                 console.error('🔌 SyncSocket: Error', error);
             }
-            this.updateStatus('error');
+            if (this.isAuthError(error)) {
+                this.stopReconnectionAndNotifyAuthError(error);
+                return;
+            }
+            this.updateStatus('error', error);
         });
 
         // Message handling

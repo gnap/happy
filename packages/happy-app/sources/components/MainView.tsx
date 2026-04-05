@@ -140,6 +140,12 @@ const HeaderTitle = React.memo(({ activeTab }: { activeTab: ActiveTabType }) => 
                     isPulsing: false,
                     text: t('status.error'),
                 };
+            case 'auth_error':
+                return {
+                    color: theme.colors.status.error,
+                    isPulsing: false,
+                    text: t('status.auth_error'),
+                };
             default:
                 return {
                     color: theme.colors.status.default,

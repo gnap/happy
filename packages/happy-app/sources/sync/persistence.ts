@@ -4,6 +4,7 @@ import { LocalSettings, localSettingsDefaults, localSettingsParse } from './loca
 import { Purchases, purchasesDefaults, purchasesParse } from './purchases';
 import { Profile, profileDefaults, profileParse } from './profile';
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
+import { clearAllMessageCaches } from './cache/messageCache';
 
 const mmkv = new MMKV();
 const NEW_SESSION_DRAFT_KEY = 'new-session-draft-v1';
@@ -239,6 +240,7 @@ export function retrieveTempText(id: string): string | null {
     return null;
 }
 
-export function clearPersistence() {
+export async function clearPersistence() {
+    await clearAllMessageCaches();
     mmkv.clearAll();
 }

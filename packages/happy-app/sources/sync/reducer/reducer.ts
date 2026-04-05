@@ -659,6 +659,23 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                 continue;
             }
 
+            // Server sometimes echoes user text without localId; fold onto the optimistic bubble when text matches.
+            if (!msg.localId) {
+                const optimisticMids = new Set(state.localIds.values());
+                let foldedTo: string | null = null;
+                for (const [mid, existing] of state.messages) {
+                    if (existing.role !== 'user' || existing.text !== msg.content.text) continue;
+                    if (!optimisticMids.has(mid)) continue;
+                    if (Math.abs(existing.createdAt - msg.createdAt) > 120_000) continue;
+                    foldedTo = mid;
+                    break;
+                }
+                if (foldedTo) {
+                    state.messageIds.set(msg.id, foldedTo);
+                    continue;
+                }
+            }
+
             // Create a new message
             let mid = allocateId();
             state.messages.set(mid, {

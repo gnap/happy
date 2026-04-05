@@ -7,11 +7,12 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Avatar } from '@/components/Avatar';
-import { useSession, useIsDataReady } from '@/sync/storage';
+import { useSession, useIsDataReady, useSessionMessages } from '@/sync/storage';
 import { getSessionName, useSessionStatus, formatOSPlatform, formatPathRelativeToHome, getSessionAvatarId, getResumeCommand } from '@/utils/sessionUtils';
 import * as Clipboard from 'expo-clipboard';
 import { Modal } from '@/modal';
 import { sessionKill, sessionDelete } from '@/sync/ops';
+import { sync } from '@/sync/sync';
 import { maybeCleanupWorktree } from '@/hooks/useWorktreeCleanup';
 import { useUnistyles } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
@@ -24,6 +25,7 @@ import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 import { copySessionMetadataToClipboard } from '@/utils/copySessionMetadataToClipboard';
 import { HappyError } from '@/utils/errors';
 import { getCachedLastSeq, subscribeToCachedLastSeq } from '@/sync/cache/messageCache';
+import { getBitmapSegments } from '@/sync/cacheSegment';
 
 // Animated status dot component
 function StatusDot({ color, isPulsing, size = 8 }: { color: string; isPulsing?: boolean; size?: number }) {
@@ -124,15 +126,11 @@ function formatDangerouslySkipPermissionsMetadata(
     return 'Unknown';
 }
 
-function CacheProgressBar({ cachedLastSeq, totalSeq }: { cachedLastSeq: number | null; totalSeq: number }) {
+function LinearCacheProgressBar({ totalSeq, cachedLastSeq }: { totalSeq: number; cachedLastSeq: number }) {
     const { theme } = useUnistyles();
-
-    if (cachedLastSeq == null || totalSeq <= 0) {
-        return null;
-    }
+    if (totalSeq <= 0 || cachedLastSeq <= 0) return null;
 
     const progress = Math.max(0, Math.min(1, cachedLastSeq / totalSeq));
-
     return (
         <View style={{
             height: 6,
@@ -151,6 +149,70 @@ function CacheProgressBar({ cachedLastSeq, totalSeq }: { cachedLastSeq: number |
     );
 }
 
+/**
+ * Segmented cache progress under Sequence: each segment ≈ 100 messages; green = fully loaded in memory.
+ * Left → right is oldest → newest (same as scroll direction).
+ */
+function CacheProgressBar({
+    totalSeq,
+    cachedBitmap,
+    cachedLastSeq,
+    loadedMessageCount,
+}: {
+    totalSeq: number;
+    cachedBitmap: number;
+    cachedLastSeq: number | null;
+    loadedMessageCount: number;
+}) {
+    const { theme } = useUnistyles();
+    if (totalSeq <= 0) return null;
+
+    const segments = getBitmapSegments(cachedBitmap, totalSeq);
+    const hasAnyGreen = segments.some(Boolean);
+
+    if (!hasAnyGreen) {
+        if (loadedMessageCount > 0) {
+            const totalSegments = Math.min(Math.ceil(totalSeq / 100), 30);
+            const loadedSegments = Math.min(totalSegments, Math.max(1, Math.ceil(loadedMessageCount / 100)));
+            return (
+                <View style={{ height: 4, marginHorizontal: 16, marginBottom: 6, marginTop: 8, flexDirection: 'row', gap: 2 }}>
+                    {Array.from({ length: totalSegments }, (_, i) => {
+                        const cached = i >= totalSegments - loadedSegments;
+                        return (
+                            <View
+                                key={i}
+                                style={{
+                                    flex: 1,
+                                    height: '100%',
+                                    borderRadius: 1,
+                                    backgroundColor: cached ? '#34C759' : theme.colors.divider,
+                                }}
+                            />
+                        );
+                    })}
+                </View>
+            );
+        }
+        return <LinearCacheProgressBar totalSeq={totalSeq} cachedLastSeq={cachedLastSeq ?? 0} />;
+    }
+
+    return (
+        <View style={{ height: 4, marginHorizontal: 16, marginBottom: 6, marginTop: 8, flexDirection: 'row', gap: 2 }}>
+            {segments.map((cached, i) => (
+                <View
+                    key={i}
+                    style={{
+                        flex: 1,
+                        height: '100%',
+                        borderRadius: 1,
+                        backgroundColor: cached ? '#34C759' : theme.colors.divider,
+                    }}
+                />
+            ))}
+        </View>
+    );
+}
+
 function SessionInfoContent({ session }: { session: Session }) {
     const { theme } = useUnistyles();
     const router = useRouter();
@@ -162,6 +224,20 @@ function SessionInfoContent({ session }: { session: Session }) {
         resumeSession,
         resumeSessionSubtitle,
     } = useSessionQuickActions(session);
+
+    const { messages: sessionMessages, cachedBitmap } = useSessionMessages(session.id);
+    const [cachedLastSeq, setCachedLastSeq] = useState<number | null>(null);
+    useEffect(() => {
+        if (session?.metadata?.flavor !== 'cursor' && session?.metadata?.flavor !== 'acp-cursor') {
+            setCachedLastSeq(null);
+            return;
+        }
+        getCachedLastSeq(session.id).then(setCachedLastSeq);
+        const unsubscribe = subscribeToCachedLastSeq((sessionId, lastSeq) => {
+            if (sessionId === session.id) setCachedLastSeq(lastSeq);
+        });
+        return unsubscribe;
+    }, [session?.id, session?.metadata?.flavor]);
     
     // Check if CLI version is outdated
     const isCliOutdated = session.metadata?.version && !isVersionSupported(session.metadata.version, MINIMUM_CLI_VERSION);
@@ -232,19 +308,6 @@ function SessionInfoContent({ session }: { session: Session }) {
             ]
         );
     }, [performDelete]);
-
-    const [cachedLastSeq, setCachedLastSeq] = useState<number | null>(null);
-    useEffect(() => {
-        if (session?.metadata?.flavor !== 'cursor' && session?.metadata?.flavor !== 'acp-cursor') {
-            setCachedLastSeq(null);
-            return;
-        }
-        getCachedLastSeq(session.id).then(setCachedLastSeq);
-        const unsubscribe = subscribeToCachedLastSeq((sessionId, lastSeq) => {
-            if (sessionId === session.id) setCachedLastSeq(lastSeq);
-        });
-        return unsubscribe;
-    }, [session?.id, session?.metadata?.flavor]);
 
     const [rebuildingCache, performRebuildCache] = useHappyAction(async () => {
         await sync.rebuildMessageCache(session.id);
@@ -401,7 +464,9 @@ function SessionInfoContent({ session }: { session: Session }) {
                         {(session.metadata?.flavor === 'cursor' || session.metadata?.flavor === 'acp-cursor') && (
                             <CacheProgressBar
                                 totalSeq={session.seq}
+                                cachedBitmap={cachedBitmap}
                                 cachedLastSeq={cachedLastSeq}
+                                loadedMessageCount={sessionMessages.length}
                             />
                         )}
                     </View>

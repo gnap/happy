@@ -21,6 +21,7 @@ import { isMutableTool } from "@/components/tools/knownTools";
 import { projectManager } from "./projectManager";
 import { DecryptedArtifact } from "./artifactTypes";
 import { FeedItem } from "./feedTypes";
+import { computeBitmap } from "./cacheSegment";
 
 // Debounce timer for realtimeMode changes
 let realtimeModeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -56,12 +57,20 @@ interface SessionMessages {
     messagesMap: Record<string, Message>;
     reducerState: ReducerState;
     isLoaded: boolean;
+    /** Highest seq represented in the loaded window; 0 means unknown */
+    newestSeq: number;
+    /**
+     * Bitmap of which 100-message segments are fully present in memory (see cacheSegment.ts).
+     */
+    cachedBitmap: number;
     /** Lowest seq currently loaded; 0 means unknown / full history loaded */
     oldestSeq: number;
     /** True if there are messages on the server with seq < oldestSeq */
     hasOlderMessages: boolean;
     /** True while an older-messages fetch is in flight */
     isLoadingOlder: boolean;
+    /** True while fetchMessages is waiting on the network (incremental loads only) */
+    isFetching: boolean;
 }
 
 // Machine type is now imported from storageTypes - represents persisted machine data
@@ -101,7 +110,7 @@ interface StorageState {
     friendsLoaded: boolean;  // True after initial friends fetch
     realtimeStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
     realtimeMode: 'idle' | 'speaking';
-    socketStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
+    socketStatus: 'disconnected' | 'connecting' | 'connected' | 'error' | 'auth_error';
     socketLastConnectedAt: number | null;
     socketLastDisconnectedAt: number | null;
     isDataReady: boolean;
@@ -112,9 +121,14 @@ interface StorageState {
     applyReady: () => void;
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => { changed: string[], hasReadyEvent: boolean };
     applyMessagesLoaded: (sessionId: string) => void;
-    applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState, oldestSeq: number, hasOlderMessages: boolean) => void;
+    applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState, oldestSeq: number, hasOlderMessages: boolean, lastSeq: number) => void;
     applyOlderMessages: (sessionId: string, olderMessages: NormalizedMessage[], newOldestSeq: number, hasOlderMessages: boolean) => void;
     setLoadingOlder: (sessionId: string, loading: boolean) => void;
+    setFetching: (sessionId: string, fetching: boolean) => void;
+    setNewestSeq: (sessionId: string, newestSeq: number) => void;
+    deleteSessionMessages: (sessionId: string) => void;
+    resolveToolCallLazyContent: (sessionId: string, messageId: string, fullInput: Record<string, unknown>) => boolean;
+    resolveToolCallLazyResult: (sessionId: string, messageId: string, fullResult: unknown) => boolean;
     applySettings: (settings: Settings, version: number) => void;
     applySettingsLocal: (settings: Partial<Settings>) => void;
     applyLocalSettings: (settings: Partial<LocalSettings>) => void;
@@ -128,7 +142,7 @@ interface StorageState {
     setRealtimeStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => void;
     setRealtimeMode: (mode: 'idle' | 'speaking', immediate?: boolean) => void;
     clearRealtimeModeDebounce: () => void;
-    setSocketStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => void;
+    setSocketStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error' | 'auth_error') => void;
     getActiveSessions: () => Session[];
     updateSessionDraft: (sessionId: string, draft: string | null) => void;
     updateSessionPermissionMode: (sessionId: string, mode: string) => void;
@@ -456,7 +470,13 @@ export const storage = create<StorageState>()((set, get) => {
                         messages: messagesArray,
                         messagesMap: mergedMessagesMap,
                         reducerState: existingSessionMessages.reducerState, // The reducer modifies state in-place, so this has the updates
-                        isLoaded: existingSessionMessages.isLoaded
+                        isLoaded: existingSessionMessages.isLoaded,
+                        oldestSeq: existingSessionMessages.oldestSeq,
+                        newestSeq: existingSessionMessages.newestSeq,
+                        cachedBitmap: existingSessionMessages.cachedBitmap,
+                        hasOlderMessages: existingSessionMessages.hasOlderMessages,
+                        isLoadingOlder: existingSessionMessages.isLoadingOlder,
+                        isFetching: existingSessionMessages.isFetching,
                     };
 
                     // IMPORTANT: Copy latestUsage from reducerState to Session for immediate availability
@@ -529,8 +549,11 @@ export const storage = create<StorageState>()((set, get) => {
                     reducerState: createReducer(),
                     isLoaded: false,
                     oldestSeq: 0,
+                    newestSeq: 0,
+                    cachedBitmap: 0,
                     hasOlderMessages: false,
                     isLoadingOlder: false,
+                    isFetching: false,
                 };
 
                 // Get the session's agentState if available
@@ -594,8 +617,11 @@ export const storage = create<StorageState>()((set, get) => {
                             reducerState: existingSession.reducerState, // Explicitly include the mutated reducer state
                             isLoaded: true,
                             oldestSeq: existingSession.oldestSeq,
+                            newestSeq: existingSession.newestSeq,
+                            cachedBitmap: existingSession.cachedBitmap,
                             hasOlderMessages: existingSession.hasOlderMessages,
                             isLoadingOlder: existingSession.isLoadingOlder,
+                            isFetching: existingSession.isFetching,
                         }
                     }
                 };
@@ -667,8 +693,11 @@ export const storage = create<StorageState>()((set, get) => {
                             messagesMap,
                             isLoaded: true,
                             oldestSeq: 0,
+                            newestSeq: 0,
+                            cachedBitmap: 0,
                             hasOlderMessages: false,
                             isLoadingOlder: false,
+                            isFetching: false,
                         } satisfies SessionMessages
                     }
                 };
@@ -679,7 +708,8 @@ export const storage = create<StorageState>()((set, get) => {
                         ...state.sessionMessages,
                         [sessionId]: {
                             ...existingSession,
-                            isLoaded: true
+                            isLoaded: true,
+                            isFetching: false,
                         } satisfies SessionMessages
                     }
                 };
@@ -687,12 +717,25 @@ export const storage = create<StorageState>()((set, get) => {
 
             return result;
         }),
-        applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState, oldestSeq: number, hasOlderMessages: boolean) => set((state) => {
+        setFetching: (sessionId: string, fetching: boolean) => set((state) => {
+            const existing = state.sessionMessages[sessionId];
+            if (!existing) return state;
+            return {
+                ...state,
+                sessionMessages: {
+                    ...state.sessionMessages,
+                    [sessionId]: { ...existing, isFetching: fetching },
+                },
+            };
+        }),
+        applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState, oldestSeq: number, hasOlderMessages: boolean, lastSeq: number) => set((state) => {
             const messagesMap: Record<string, Message> = {};
             for (const msg of messages) {
                 messagesMap[msg.id] = msg;
             }
             const sorted = [...messages].sort((a, b) => b.createdAt - a.createdAt);
+            const totalSeq = state.sessions[sessionId]?.seq ?? 0;
+            const cachedBitmap = computeBitmap(oldestSeq, lastSeq, totalSeq);
 
             return {
                 ...state,
@@ -704,9 +747,26 @@ export const storage = create<StorageState>()((set, get) => {
                         reducerState,
                         isLoaded: true,
                         oldestSeq,
+                        newestSeq: lastSeq,
+                        cachedBitmap,
                         hasOlderMessages,
                         isLoadingOlder: false,
+                        isFetching: false,
                     } satisfies SessionMessages,
+                },
+            };
+        }),
+        setNewestSeq: (sessionId: string, newestSeq: number) => set((state) => {
+            const existing = state.sessionMessages[sessionId];
+            if (!existing) return state;
+            const newNewestSeq = Math.max(existing.newestSeq, newestSeq);
+            const totalSeq = state.sessions[sessionId]?.seq ?? 0;
+            const cachedBitmap = computeBitmap(existing.oldestSeq, newNewestSeq, totalSeq);
+            return {
+                ...state,
+                sessionMessages: {
+                    ...state.sessionMessages,
+                    [sessionId]: { ...existing, newestSeq: newNewestSeq, cachedBitmap },
                 },
             };
         }),
@@ -728,6 +788,9 @@ export const storage = create<StorageState>()((set, get) => {
 
             const sorted = Object.values(mergedMap).sort((a, b) => b.createdAt - a.createdAt);
 
+            const totalSeq = state.sessions[sessionId]?.seq ?? 0;
+            const cachedBitmap = computeBitmap(newOldestSeq, existing.newestSeq, totalSeq);
+
             return {
                 ...state,
                 sessionMessages: {
@@ -737,12 +800,83 @@ export const storage = create<StorageState>()((set, get) => {
                         messages: sorted,
                         messagesMap: mergedMap,
                         oldestSeq: newOldestSeq,
+                        cachedBitmap,
                         hasOlderMessages,
                         isLoadingOlder: false,
+                        isFetching: false,
                     } satisfies SessionMessages,
                 },
             };
         }),
+        deleteSessionMessages: (sessionId: string) => set((state) => {
+            const { [sessionId]: _deleted, ...remaining } = state.sessionMessages;
+            return { ...state, sessionMessages: remaining };
+        }),
+        resolveToolCallLazyContent: (sessionId: string, messageId: string, fullInput: Record<string, unknown>): boolean => {
+            let updated = false;
+            set((state) => {
+                const sessionMessages = state.sessionMessages[sessionId];
+                if (!sessionMessages) return state;
+
+                const msg = sessionMessages.messagesMap[messageId];
+                if (!msg || msg.kind !== 'tool-call') return state;
+
+                const updatedTool = { ...msg.tool, input: fullInput, lazyContent: false };
+                const updatedMsg = { ...msg, tool: updatedTool };
+
+                const reducerMsg = sessionMessages.reducerState.messages.get(messageId);
+                if (reducerMsg?.tool) {
+                    reducerMsg.tool.input = fullInput;
+                    reducerMsg.tool.lazyContent = false;
+                }
+
+                updated = true;
+                return {
+                    ...state,
+                    sessionMessages: {
+                        ...state.sessionMessages,
+                        [sessionId]: {
+                            ...sessionMessages,
+                            messagesMap: { ...sessionMessages.messagesMap, [messageId]: updatedMsg },
+                            messages: sessionMessages.messages.map(m => m.id === messageId ? updatedMsg : m),
+                        },
+                    },
+                };
+            });
+            return updated;
+        },
+        resolveToolCallLazyResult: (sessionId: string, messageId: string, fullResult: unknown): boolean => {
+            let updated = false;
+            set((state) => {
+                const sessionMessages = state.sessionMessages[sessionId];
+                if (!sessionMessages) return state;
+
+                const msg = sessionMessages.messagesMap[messageId];
+                if (!msg || msg.kind !== 'tool-call') return state;
+
+                const updatedTool = { ...msg.tool, result: fullResult };
+                const updatedMsg = { ...msg, tool: updatedTool };
+
+                const reducerMsg = sessionMessages.reducerState.messages.get(messageId);
+                if (reducerMsg?.tool) {
+                    reducerMsg.tool.result = fullResult;
+                }
+
+                updated = true;
+                return {
+                    ...state,
+                    sessionMessages: {
+                        ...state.sessionMessages,
+                        [sessionId]: {
+                            ...sessionMessages,
+                            messagesMap: { ...sessionMessages.messagesMap, [messageId]: updatedMsg },
+                            messages: sessionMessages.messages.map(m => m.id === messageId ? updatedMsg : m),
+                        },
+                    },
+                };
+            });
+            return updated;
+        },
         setLoadingOlder: (sessionId: string, loading: boolean) => set((state) => {
             const existing = state.sessionMessages[sessionId];
             if (!existing) return state;
@@ -862,7 +996,7 @@ export const storage = create<StorageState>()((set, get) => {
                 realtimeModeDebounceTimer = null;
             }
         },
-        setSocketStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => set((state) => {
+        setSocketStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error' | 'auth_error') => set((state) => {
             const now = Date.now();
             const updates: Partial<StorageState> = {
                 socketStatus: status
@@ -1243,7 +1377,7 @@ export function useSession(id: string): Session | null {
 
 const emptyArray: unknown[] = [];
 
-export function useSessionMessages(sessionId: string): { messages: Message[], isLoaded: boolean, hasOlderMessages: boolean, isLoadingOlder: boolean, oldestSeq: number } {
+export function useSessionMessages(sessionId: string): { messages: Message[], isLoaded: boolean, hasOlderMessages: boolean, isLoadingOlder: boolean, isFetching: boolean, oldestSeq: number, newestSeq: number, cachedBitmap: number } {
     return storage(useShallow((state) => {
         const session = state.sessionMessages[sessionId];
         return {
@@ -1251,7 +1385,10 @@ export function useSessionMessages(sessionId: string): { messages: Message[], is
             isLoaded: session?.isLoaded ?? false,
             hasOlderMessages: session?.hasOlderMessages ?? false,
             isLoadingOlder: session?.isLoadingOlder ?? false,
+            isFetching: session?.isFetching ?? false,
             oldestSeq: session?.oldestSeq ?? 0,
+            newestSeq: session?.newestSeq ?? 0,
+            cachedBitmap: session?.cachedBitmap ?? 0,
         };
     }));
 }

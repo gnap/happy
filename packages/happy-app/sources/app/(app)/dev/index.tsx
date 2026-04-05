@@ -10,6 +10,7 @@ import * as Application from 'expo-application';
 import { useLocalSettingMutable, useSocketStatus } from '@/sync/storage';
 import { Modal } from '@/modal';
 import { sync } from '@/sync/sync';
+import { clearPersistence } from '@/sync/persistence';
 import { getServerUrl, setServerUrl, validateServerUrl, getLogServerUrl, setLogServerUrl } from '@/sync/serverConfig';
 import { Switch } from '@/components/Switch';
 import { useUnistyles } from 'react-native-unistyles';
@@ -82,7 +83,7 @@ export default function DevScreen() {
             { confirmText: 'Clear', destructive: true }
         );
         if (confirmed) {
-            console.log('Cache cleared');
+            await clearPersistence();
             Modal.alert('Success', 'Cache has been cleared');
         }
     };
@@ -113,7 +114,7 @@ export default function DevScreen() {
 
         if (status === 'connected' && lastConnectedAt) {
             return `Connected ${formatTimeAgo(lastConnectedAt)}`;
-        } else if ((status === 'disconnected' || status === 'error') && lastDisconnectedAt) {
+        } else if ((status === 'disconnected' || status === 'error' || status === 'auth_error') && lastDisconnectedAt) {
             return `Last connected ${formatTimeAgo(lastDisconnectedAt)}`;
         } else if (status === 'connecting') {
             return 'Connecting to server...';
@@ -131,6 +132,8 @@ export default function DevScreen() {
                 return <ActivityIndicator size="small" color={theme.colors.textSecondary} />;
             case 'error':
                 return <Ionicons name="close-circle" size={22} color="#FF3B30" />;
+            case 'auth_error':
+                return <Ionicons name="key-outline" size={22} color="#FF3B30" />;
             case 'disconnected':
                 return <Ionicons name="close-circle" size={22} color="#FF9500" />;
             default:
