@@ -19,6 +19,9 @@ import { isHttpMarkdownLink } from './linkUtils';
 /** react-native-web uses DOM text layout; default CSS collapses `\n` to a space. */
 const webPreserveNewlines = Platform.OS === 'web' ? ({ whiteSpace: 'pre-line' } as const) : {};
 
+/** Inline `` `code` `` must keep consecutive spaces; `pre-line` collapses them on web. */
+const webInlineCodeWhitespace = Platform.OS === 'web' ? ({ whiteSpace: 'pre-wrap' } as const) : {};
+
 // Option type for callback
 export type Option = {
     title: string;
@@ -418,7 +421,7 @@ const style = StyleSheet.create((theme) => ({
         fontSize: 16,
         lineHeight: 24,
         color: theme.colors.text,
-        ...webPreserveNewlines,
+        ...webInlineCodeWhitespace,
     },
     link: {
         ...Typography.default(),
