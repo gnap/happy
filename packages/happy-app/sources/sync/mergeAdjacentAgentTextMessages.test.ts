@@ -55,4 +55,15 @@ describe('mergeAdjacentAgentTextMessages', () => {
         if (merged[0]?.kind !== 'agent-text') throw new Error('expected agent-text');
         expect(merged[0].text).toBe('Line one\nLine two');
     });
+
+    it('does not invent spacing when the next chunk has no leading whitespace', () => {
+        const messages: Message[] = [
+            { kind: 'agent-text', id: 'b', localId: null, createdAt: 2, text: 'quick' },
+            { kind: 'agent-text', id: 'a', localId: null, createdAt: 1, text: 'The' },
+        ];
+        const merged = mergeAdjacentAgentTextMessages(messages);
+        expect(merged[0]?.kind).toBe('agent-text');
+        if (merged[0]?.kind !== 'agent-text') throw new Error('expected agent-text');
+        expect(merged[0].text).toBe('Thequick');
+    });
 });
