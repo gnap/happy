@@ -1,6 +1,7 @@
 import axios from 'axios'
 import { logger } from '@/ui/logger'
 import type { AgentState, CreateSessionResponse, Metadata, Session, Machine, MachineMetadata, DaemonState } from '@/api/types'
+import { sanitizeSessionMetadataForApp } from '@/api/types';
 import { ApiSessionClient } from './apiSession';
 import { ApiMachineClient } from './apiMachine';
 import { decodeBase64, encodeBase64, getRandomBytes, encrypt, decrypt, libsodiumEncryptForPublicKey } from './encryption';
@@ -62,7 +63,7 @@ export class ApiClient {
         `${configuration.serverUrl}/v1/sessions`,
         {
           tag: opts.tag,
-          metadata: encodeBase64(encrypt(encryptionKey, encryptionVariant, opts.metadata)),
+          metadata: encodeBase64(encrypt(encryptionKey, encryptionVariant, sanitizeSessionMetadataForApp(opts.metadata) as Metadata)),
           agentState: opts.state ? encodeBase64(encrypt(encryptionKey, encryptionVariant, opts.state)) : null,
           dataEncryptionKey: dataEncryptionKey ? encodeBase64(dataEncryptionKey) : null,
         },
@@ -88,7 +89,11 @@ export class ApiClient {
         encryptionKey: encryptionKey,
         encryptionVariant: encryptionVariant
       }
-      return session;
+      return {
+        ...session,
+        metadata: session.metadata ? (sanitizeSessionMetadataForApp(session.metadata) as Metadata) : session.metadata,
+        requestedMetadata: opts.metadata,
+      };
     } catch (error) {
       logger.debug('[API] [ERROR] Failed to get or create session:', error);
 
@@ -276,8 +281,8 @@ export class ApiClient {
     }
   }
 
-  sessionSyncClient(session: Session): ApiSessionClient {
-    return new ApiSessionClient(this.credential.token, session);
+  sessionSyncClient(session: Session, websocketOnly: boolean = true): ApiSessionClient {
+    return new ApiSessionClient(this.credential.token, session, websocketOnly);
   }
 
   machineSyncClient(machine: Machine, websocketOnly: boolean = false): ApiMachineClient {

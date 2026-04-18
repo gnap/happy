@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createTwoFilesPatch } from 'diff'
 import { io, Socket } from 'socket.io-client'
-import { AgentState, ClientToServerEvents, Metadata, ServerToClientEvents, Session, Update, UserMessage, UserMessageSchema, Usage } from './types'
+import { AgentState, ClientToServerEvents, Metadata, ServerToClientEvents, Session, Update, UserMessage, UserMessageSchema, Usage, buildSyncedSessionMetadata, sanitizeSessionMetadataForApp, shouldSyncSessionMetadata } from './types'
 import { decodeBase64, decrypt, encodeBase64, encrypt } from './encryption';
 import { backoff, delay } from '@/utils/time';
 import { configuration, serverHttpsAgent } from '@/configuration';
@@ -181,6 +181,7 @@ export class ApiSessionClient extends EventEmitter {
     private metadataLock = new AsyncLock();
     private encryptionKey: Uint8Array;
     private encryptionVariant: 'legacy' | 'dataKey';
+    private requestedMetadata: Metadata | null = null;
     /** The AES session key; exposed so callers can persist it after offline reconnection. */
     get sessionEncryptionKey(): Uint8Array { return this.encryptionKey; }
     /** Resolves when the WebSocket first connects; used by updateMetadata to wait for initial connection. */
@@ -341,7 +342,7 @@ export class ApiSessionClient extends EventEmitter {
     /** Set in close() so disconnect/connect_error do not re-start fallback poll and leave the process hanging. */
     private closing = false;
 
-    constructor(token: string, session: Session) {
+    constructor(token: string, session: Session, private websocketOnly: boolean = true) {
         super()
         this.token = token;
         this.sessionId = session.id;
@@ -349,6 +350,7 @@ export class ApiSessionClient extends EventEmitter {
         this.metadataVersion = session.metadataVersion;
         this.agentState = session.agentState;
         this.agentStateVersion = session.agentStateVersion;
+        this.requestedMetadata = session.requestedMetadata ?? null;
         this.encryptionKey = session.encryptionKey;
         this.encryptionVariant = session.encryptionVariant;
         this.lastSeq = session.seq ?? 0;
@@ -399,7 +401,7 @@ export class ApiSessionClient extends EventEmitter {
             reconnectionAttempts: Infinity,
             reconnectionDelay: 1000,
             reconnectionDelayMax: 5000,
-            transports: ['polling', 'websocket'],
+            transports: this.websocketOnly ? ['websocket'] : ['polling', 'websocket'],
             withCredentials: true,
             autoConnect: false,
             ...(typeof process !== 'undefined' && process.versions?.node && { agent: serverHttpsAgent as any }),
@@ -415,6 +417,12 @@ export class ApiSessionClient extends EventEmitter {
             this.socketConnectedResolve = undefined;
             this.stopFallbackPoll();
             this.rpcHandlerManager.onSocketConnect(this.socket);
+            if (this.requestedMetadata && shouldSyncSessionMetadata(this.metadata, this.requestedMetadata)) {
+                logger.debug('[API] Session metadata changed, syncing static metadata to server');
+                this.updateMetadata((currentMetadata) => buildSyncedSessionMetadata(currentMetadata, this.requestedMetadata as Metadata)).catch((error) => {
+                    logger.debug('[API] Failed to sync session metadata on connect:', error);
+                });
+            }
             this.receiveSync.invalidate();
         })
 
@@ -482,7 +490,8 @@ export class ApiSessionClient extends EventEmitter {
                     return;
                 } else if (data.body.t === 'update-session') {
                     if (data.body.metadata && data.body.metadata.version > this.metadataVersion) {
-                        this.metadata = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.metadata.value));
+                        const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.metadata.value));
+                        this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
                         this.metadataVersion = data.body.metadata.version;
                     }
                     if (data.body.agentState && data.body.agentState.version > this.agentStateVersion) {
@@ -1025,15 +1034,17 @@ export class ApiSessionClient extends EventEmitter {
                 await Promise.race([this.socketConnectedPromise, timeout]);
             }
             await backoff(async () => {
-                let updated = handler(this.metadata!); // Weird state if metadata is null - should never happen but here we are
+                let updated = sanitizeSessionMetadataForApp(handler(this.metadata!)) as Metadata; // Weird state if metadata is null - should never happen but here we are
                 const answer = await this.socket.emitWithAck('update-metadata', { sid: this.sessionId, expectedVersion: this.metadataVersion, metadata: encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, updated)) });
                 if (answer.result === 'success') {
-                    this.metadata = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
+                    const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
+                    this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
                     this.metadataVersion = answer.version;
                 } else if (answer.result === 'version-mismatch') {
                     if (answer.version > this.metadataVersion) {
                         this.metadataVersion = answer.version;
-                        this.metadata = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
+                        const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
+                        this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
                     }
                     throw new Error('Metadata version mismatch');
                 } else if (answer.result === 'error') {

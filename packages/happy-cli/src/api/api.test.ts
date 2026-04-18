@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ApiClient } from './api';
 import axios from 'axios';
 import { connectionState } from '@/utils/serverConnectionErrors';
+import { buildSyncedSessionMetadata, sanitizeSessionMetadataForApp, shouldSyncSessionMetadata } from './types';
 
 // Use vi.hoisted to ensure mock functions are available when vi.mock factory runs
 const { mockPost, mockIsAxiosError } = vi.hoisted(() => ({
@@ -308,6 +309,65 @@ describe('Api server error handling', () => {
             );
 
             consoleSpy.mockRestore();
+        });
+    });
+
+    describe('sanitizeSessionMetadataForApp', () => {
+        it('strips app-incompatible fields but preserves flavor and core metadata', () => {
+            const sanitized = sanitizeSessionMetadataForApp({
+                ...testMetadata,
+                flavor: 'cursor',
+                happyLibDir: '/home/user/.happy/lib',
+                happyToolsDir: '/home/user/.happy/tools',
+                startedFromDaemon: true,
+                startedBy: 'daemon',
+                lifecycleState: 'running',
+                lifecycleStateSince: 123,
+                archivedBy: 'cli',
+                archiveReason: 'test',
+            });
+
+            expect(sanitized).toMatchObject({
+                path: testMetadata.path,
+                host: testMetadata.host,
+                homeDir: testMetadata.homeDir,
+                happyHomeDir: testMetadata.happyHomeDir,
+                flavor: 'cursor',
+            });
+            expect((sanitized as Record<string, unknown>).happyLibDir).toBeUndefined();
+            expect((sanitized as Record<string, unknown>).happyToolsDir).toBeUndefined();
+            expect((sanitized as Record<string, unknown>).startedBy).toBeUndefined();
+            expect((sanitized as Record<string, unknown>).lifecycleState).toBeUndefined();
+        });
+    });
+
+    describe('session metadata sync helpers', () => {
+        it('detects stale static metadata', () => {
+            expect(shouldSyncSessionMetadata(null, testMetadata)).toBe(true);
+            expect(shouldSyncSessionMetadata(testMetadata, testMetadata)).toBe(false);
+            expect(shouldSyncSessionMetadata(
+                { ...testMetadata, host: 'old-host' },
+                testMetadata
+            )).toBe(true);
+        });
+
+        it('preserves dynamic metadata while refreshing static fields', () => {
+            const current = {
+                ...testMetadata,
+                summary: { text: 'keep me', updatedAt: 1 },
+                currentModelCode: 'gpt-4o',
+            };
+            const next = {
+                ...testMetadata,
+                host: 'new-host',
+                flavor: 'cursor',
+            };
+            const synced = buildSyncedSessionMetadata(current, next);
+
+            expect(synced.host).toBe('new-host');
+            expect(synced.flavor).toBe('cursor');
+            expect(synced.summary).toEqual({ text: 'keep me', updatedAt: 1 });
+            expect(synced.currentModelCode).toBe('gpt-4o');
         });
     });
 });
