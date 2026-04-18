@@ -280,8 +280,8 @@ export class ApiClient {
     return new ApiSessionClient(this.credential.token, session);
   }
 
-  machineSyncClient(machine: Machine): ApiMachineClient {
-    return new ApiMachineClient(this.credential.token, machine);
+  machineSyncClient(machine: Machine, websocketOnly: boolean = false): ApiMachineClient {
+    return new ApiMachineClient(this.credential.token, machine, websocketOnly);
   }
 
   push(): PushNotificationClient {

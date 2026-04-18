@@ -4,13 +4,48 @@
  */
 
 import { io, Socket } from 'socket.io-client';
+import os from 'os';
 import { logger } from '@/ui/logger';
 import { configuration, serverHttpsAgent } from '@/configuration';
+import { projectPath } from '@/projectPath';
 import { MachineMetadata, DaemonState, Machine, Update, UpdateMachineBody } from './types';
 import { registerCommonHandlers, SpawnSessionOptions, SpawnSessionResult } from '../modules/common/registerCommonHandlers';
 import { encodeBase64, decodeBase64, encrypt, decrypt } from './encryption';
 import { backoff } from '@/utils/time';
 import { RpcHandlerManager } from './rpc/RpcHandlerManager';
+
+function getLocalMachineMetadata(): MachineMetadata {
+    return {
+        host: os.hostname(),
+        platform: os.platform(),
+        happyCliVersion: configuration.currentCliVersion,
+        homeDir: os.homedir(),
+        happyHomeDir: configuration.happyHomeDir,
+        happyLibDir: projectPath(),
+    };
+}
+
+export function shouldSyncMachineMetadata(current: MachineMetadata | null, next: MachineMetadata): boolean {
+    if (!current) {
+        return true;
+    }
+
+    return (
+        current.host !== next.host ||
+        current.platform !== next.platform ||
+        current.happyCliVersion !== next.happyCliVersion ||
+        current.homeDir !== next.homeDir ||
+        current.happyHomeDir !== next.happyHomeDir ||
+        current.happyLibDir !== next.happyLibDir
+    );
+}
+
+export function buildSyncedMachineMetadata(current: MachineMetadata | null, local: MachineMetadata): MachineMetadata {
+    return {
+        ...(current ?? {}),
+        ...local,
+    };
+}
 
 interface ServerToDaemonEvents {
     update: (data: Update) => void;
@@ -82,7 +117,8 @@ export class ApiMachineClient {
 
     constructor(
         private token: string,
-        private machine: Machine
+        private machine: Machine,
+        private websocketOnly: boolean = false
     ) {
         // Initialize RPC handler manager
         this.rpcHandlerManager = new RpcHandlerManager({
@@ -217,8 +253,17 @@ export class ApiMachineClient {
         const serverUrl = configuration.serverUrl.replace(/^http/, 'ws');
         logger.debug(`[API MACHINE] Connecting to ${serverUrl}`);
 
+        const socketOptions = this.websocketOnly
+            ? {
+                transports: ['websocket'],
+                upgrade: false,
+              }
+            : {
+                transports: ['polling', 'websocket'],
+              };
+
         this.socket = io(serverUrl, {
-            transports: ['polling', 'websocket'],
+            ...socketOptions,
             auth: {
                 token: this.token,
                 clientType: 'machine-scoped' as const,
@@ -233,6 +278,15 @@ export class ApiMachineClient {
 
         this.socket.on('connect', () => {
             logger.debug('[API MACHINE] Connected to server');
+
+            const localMetadata = getLocalMachineMetadata();
+
+            if (shouldSyncMachineMetadata(this.machine.metadata, localMetadata)) {
+                logger.debug('[API MACHINE] Local machine metadata changed, syncing static metadata');
+                this.updateMachineMetadata((metadata) => buildSyncedMachineMetadata(metadata, localMetadata)).catch((error) => {
+                    logger.debug('[API MACHINE] Failed to sync machine metadata on connect:', error);
+                });
+            }
 
             // Update daemon state to running
             // We need to override previous state because the daemon (this process)
