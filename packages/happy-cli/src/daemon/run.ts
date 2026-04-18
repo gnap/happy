@@ -854,8 +854,29 @@ export async function startDaemon(): Promise<void> {
       }
 
       if (!found) {
-        logger.debug(`[DAEMON RUN] Restart: session ${sessionId} not found`);
-        return { success: false, error: 'Session not found' };
+        const persistedDirectory = lastDirectoryBySessionId[sessionId];
+        if (persistedDirectory) {
+          const persistedAgentRaw = lastAgentBySessionId[sessionId];
+          const persistedAgent = (
+            persistedAgentRaw === 'claude' ||
+            persistedAgentRaw === 'codex' ||
+            persistedAgentRaw === 'cursor' ||
+            persistedAgentRaw === 'gemini' ||
+            persistedAgentRaw === 'acp-cursor'
+          ) ? persistedAgentRaw : 'cursor';
+          found = {
+            startedBy: 'daemon',
+            happySessionId: sessionId,
+            pid: -1,
+            directory: persistedDirectory,
+            sessionTag: lastSessionTagBySessionId[sessionId] ?? lastSessionTagByDirectory[persistedDirectory],
+            agent: persistedAgent,
+          };
+          logger.debug(`[DAEMON RUN] Restart: session ${sessionId} restored from persisted directory/tag mapping`);
+        } else {
+          logger.debug(`[DAEMON RUN] Restart: session ${sessionId} not found`);
+          return { success: false, error: 'Session not found' };
+        }
       }
 
       if (!found.directory) {
@@ -867,7 +888,9 @@ export async function startDaemon(): Promise<void> {
       const sessionTag = found.sessionTag ?? lastSessionTagBySessionId[sessionId] ?? lastSessionTagByDirectory[directory];
 
       // Kill existing process if still running
-      stopSession(sessionId);
+      if (found.pid > 0) {
+        stopSession(sessionId);
+      }
 
       // Wait briefly for process to die
       await new Promise((r) => setTimeout(r, 500));

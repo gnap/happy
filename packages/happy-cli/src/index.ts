@@ -607,13 +607,21 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
                 if (spawnResult.sessionId) console.log(`New session ID: ${spawnResult.sessionId}`);
                 return;
               }
+              result = { success: false, error: spawnResult.error ?? result.error };
+            } else if (one) {
+              result = {
+                success: false,
+                error: 'Session found on server, but its workspace path is unavailable to this client (metadata not decryptable).'
+              };
             }
           }
         }
         console.error(`Failed to restart session: ${result.error ?? 'unknown error'}`);
         process.exit(1);
       } catch (error) {
-        console.log('No daemon running');
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.error(`Failed to restart session: ${errorMessage}`);
+        process.exit(1);
       }
       return
 
