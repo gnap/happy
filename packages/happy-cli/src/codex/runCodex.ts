@@ -9,24 +9,20 @@ import { randomUUID } from 'node:crypto';
 import { logger } from '@/ui/logger';
 import { Credentials, readSettings, writeSessionPidFile, removeSessionPidFile } from '@/persistence';
 import { initialMachineMetadata } from '@/daemon/run';
-import { configuration } from '@/configuration';
-import packageJson from '../../package.json';
 import os from 'node:os';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
 import { projectPath } from '@/projectPath';
-import { resolve, join } from 'node:path';
+import { join } from 'node:path';
 import { createSessionMetadata } from '@/utils/createSessionMetadata';
 import fs from 'node:fs';
 import { startHappyServer } from '@/claude/utils/startHappyServer';
 import { MessageBuffer } from "@/ui/ink/messageBuffer";
 import { CodexDisplay } from "@/ui/ink/CodexDisplay";
-import { trimIdent } from "@/utils/trimIdent";
 import type { CodexSessionConfig } from './types';
 import { CHANGE_TITLE_INSTRUCTION } from '@/gemini/constants';
 import { notifyDaemonSessionStarted, notifyDaemonSessionEnding } from "@/daemon/controlClient";
 import { registerKillSessionHandler } from "@/claude/registerKillSessionHandler";
-import { delay } from "@/utils/time";
 import { stopCaffeinate } from "@/utils/caffeinate";
 import { connectionState } from '@/utils/serverConnectionErrors';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
@@ -155,7 +151,7 @@ export async function runCodex(opts: {
     const DAEMON_REPORT_INTERVAL_MS = 60_000;
     const reportToDaemon = () => {
         if (!response) return;
-        notifyDaemonSessionStarted(session.sessionId, { ...metadata, hostPid: process.pid }).then((result) => {
+        notifyDaemonSessionStarted(session.sessionId, { ...metadata, hostPid: process.pid, sessionTag }).then((result) => {
             if (result?.error) logger.debug(`[START] Daemon report failed:`, result.error);
         }).catch((err) => logger.debug('[START] Daemon report error:', err));
     };
@@ -199,7 +195,7 @@ export async function runCodex(opts: {
             model: messageModel,
         };
         const isA2A = (message.meta as { origin?: string } | undefined)?.origin === 'a2a';
-    if (isA2A) {
+        if (isA2A) {
             messageQueue.pushIsolated(message.content.text, enhancedMode);
         } else {
             messageQueue.push(message.content.text, enhancedMode);
@@ -507,7 +503,7 @@ export async function runCodex(opts: {
         }
         if (msg.type === 'patch_apply_begin') {
             // Handle the start of a patch operation
-            let { auto_approved, changes } = msg;
+            const { changes } = msg;
 
             // Add UI feedback for patch operation
             const changeCount = Object.keys(changes).length;
@@ -516,7 +512,7 @@ export async function runCodex(opts: {
         }
         if (msg.type === 'patch_apply_end') {
             // Handle the end of a patch operation
-            let { stdout, stderr, success } = msg;
+            const { stdout, stderr, success } = msg;
 
             // Add UI feedback for completion
             if (success) {

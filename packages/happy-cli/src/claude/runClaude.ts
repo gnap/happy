@@ -105,6 +105,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         happyToolsDir: resolve(projectPath(), 'tools', 'unpacked'),
         startedFromDaemon: options.startedBy === 'daemon',
         hostPid: process.pid,
+        sessionTag,
         startedBy: options.startedBy || 'terminal',
         // Initialize lifecycle state
         lifecycleState: 'running',
@@ -387,7 +388,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             disallowedTools: messageDisallowedTools
         };
         const isA2A = (message.meta as { origin?: string } | undefined)?.origin === 'a2a';
-    if (isA2A) {
+        if (isA2A) {
             messageQueue.pushIsolated(message.content.text, enhancedMode);
         } else {
             messageQueue.push(message.content.text, enhancedMode);

@@ -13,7 +13,7 @@ import { startCaffeinate, stopCaffeinate } from '@/utils/caffeinate';
 import packageJson from '../../package.json';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { spawnHappyCLI } from '@/utils/spawnHappyCLI';
-import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquireDaemonLock, releaseDaemonLock, readSettings, getActiveProfile, getEnvironmentVariables, validateProfileForAgent, getProfileEnvironmentVariables } from '@/persistence';
+import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquireDaemonLock, releaseDaemonLock, readSettings, validateProfileForAgent, getProfileEnvironmentVariables } from '@/persistence';
 
 import { cleanupDaemonState, isDaemonRunningCurrentlyInstalledHappyVersion, stopDaemon } from './controlClient';
 import { startDaemonControlServer } from './controlServer';
@@ -430,7 +430,7 @@ export async function startDaemon(): Promise<void> {
 
         const resumeSessionTag =
           explicitResumeSessionTag?.trim() ||
-          (sessionId ? (lastSessionTagBySessionId[sessionId] ?? lastSessionTagByDirectory[directory]) : undefined);
+          (sessionId ? lastSessionTagBySessionId[sessionId] : undefined);
         const shouldPassResumeSessionTag =
           options.agent === 'cursor' ||
           options.agent === 'cursor-acp' ||
@@ -541,6 +541,7 @@ export async function startDaemon(): Promise<void> {
               tmuxSessionId: tmuxResult.sessionId,
               directoryCreated,
               directory,
+              sessionTag: resumeSessionTag,
               agent: options.agent ?? 'cursor',
               message: directoryCreated
                 ? `The path '${directory}' did not exist. We created a new folder and spawned a new session in tmux session '${tmuxSessionName}'. Use 'tmux attach -t ${tmuxSessionName}' to view the session.`
@@ -656,6 +657,7 @@ export async function startDaemon(): Promise<void> {
             childProcess: happyProcess,
             directoryCreated,
             directory,
+            sessionTag: resumeSessionTag,
             agent: options.agent ?? 'cursor',
             spawnTime: Date.now(),
             message: directoryCreated ? `The path '${directory}' did not exist. We created a new folder and spawned a new session there.` : undefined
@@ -1213,7 +1215,11 @@ export async function startDaemon(): Promise<void> {
             continue;
           }
 
-          const tag = lastSessionTagBySessionId[id] ?? lastSessionTagByDirectory[directory];
+          const tag = lastSessionTagBySessionId[id];
+          if (!tag) {
+            logger.debug(`[DAEMON RUN] Auto-respawn skipped for session ${id}: no session-specific tag is known`);
+            continue;
+          }
           const agent = (lastAgentBySessionId[id] as 'cursor' | 'claude' | 'codex' | 'gemini' | 'acp-cursor') ?? 'cursor';
           logger.debug(`[DAEMON RUN] Auto-respawning session ${id} (${agent}) in ${directory} (seq ${prevSeq} → ${seq}, tag=${tag?.slice(0, 8) ?? '?'})`);
 
