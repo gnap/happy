@@ -641,7 +641,9 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
   let sawModes = false;
   let sawModels = false;
 
-  const happyServer = await startHappyServer(session);
+  const happyServer = await startHappyServer(session, {
+    onA2aMessage: (message) => userMessageHandler?.(message),
+  });
   const mcpServers = {
     happy: {
       command: join(projectPath(), 'bin', 'happy-mcp.mjs'),
@@ -1057,10 +1059,16 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
       logger.debug(`[${opts.agentName}] Requested ACP model: ${currentModel ?? 'null'}`);
     }
 
-    messageQueue.push(message.content.text, {
+    const mode = {
       permissionMode: currentPermissionMode,
       model: currentModel,
-    });
+    };
+    const isA2A = (message.meta as { origin?: string } | undefined)?.origin === 'a2a';
+    if (isA2A) {
+      messageQueue.pushIsolated(message.content.text, mode);
+    } else {
+      messageQueue.push(message.content.text, mode);
+    }
   };
   session.onUserMessage(userMessageHandler);
   session.keepAlive(thinking, 'remote');

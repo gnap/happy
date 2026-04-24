@@ -6,10 +6,10 @@
  * spawn_subagent uses MCP Tasks (experimental) so the SDK handles polling
  * server-side: cursor-agent sees a single blocking tool call that resolves
  * when the sub-agent finishes, removing the need for manual get_subagent polling.
- */
+*/
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createServer } from "node:http";
+import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { InMemoryTaskStore, InMemoryTaskMessageQueue } from "@modelcontextprotocol/sdk/experimental/tasks";
 import { AddressInfo } from "node:net";
@@ -18,6 +18,7 @@ import { createId } from "@paralleldrive/cuid2";
 import { createEnvelope, type SessionEnvelope } from "@slopus/happy-wire";
 import { logger } from "@/ui/logger";
 import { ApiSessionClient } from "@/api/apiSession";
+import type { UserMessage } from "@/api/types";
 import { randomUUID } from "node:crypto";
 import { SubagentManager } from "@/cursor/subagentManager";
 
@@ -30,6 +31,96 @@ export interface HappyServerCursorContext {
 
 export interface StartHappyServerOptions {
     cursorContext?: HappyServerCursorContext;
+    onA2aMessage?: (message: UserMessage) => Promise<void> | void;
+}
+
+function extractA2aText(body: unknown): string | null {
+    if (typeof body === 'string') {
+        const trimmed = body.trim();
+        return trimmed || null;
+    }
+
+    if (!body || typeof body !== 'object') {
+        return null;
+    }
+
+    const record = body as Record<string, unknown>;
+    if (typeof record.text === 'string') {
+        const trimmed = record.text.trim();
+        if (trimmed) return trimmed;
+    }
+    if (typeof record.message === 'string') {
+        const trimmed = record.message.trim();
+        if (trimmed) return trimmed;
+    }
+    if (typeof record.content === 'string') {
+        const trimmed = record.content.trim();
+        if (trimmed) return trimmed;
+    }
+
+    const content = record.content;
+    if (content && typeof content === 'object') {
+        const contentRecord = content as Record<string, unknown>;
+        if (typeof contentRecord.text === 'string') {
+            const trimmed = contentRecord.text.trim();
+            if (trimmed) return trimmed;
+        }
+        if (typeof contentRecord.message === 'string') {
+            const trimmed = contentRecord.message.trim();
+            if (trimmed) return trimmed;
+        }
+        if (Array.isArray(contentRecord.parts)) {
+            const texts = contentRecord.parts
+                .map((part) => {
+                    if (typeof part === 'string') return part;
+                    if (!part || typeof part !== 'object') return null;
+                    const partRecord = part as Record<string, unknown>;
+                    if (typeof partRecord.text === 'string') return partRecord.text;
+                    if (typeof partRecord.content === 'string') return partRecord.content;
+                    return null;
+                })
+                .filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
+                .map((part) => part.trim());
+            const joined = texts.join('\n').trim();
+            if (joined) return joined;
+        }
+    }
+
+    if (Array.isArray(record.parts)) {
+        const texts = record.parts
+            .map((part) => {
+                if (typeof part === 'string') return part;
+                if (!part || typeof part !== 'object') return null;
+                const partRecord = part as Record<string, unknown>;
+                if (typeof partRecord.text === 'string') return partRecord.text;
+                if (typeof partRecord.content === 'string') return partRecord.content;
+                return null;
+            })
+            .filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
+            .map((part) => part.trim());
+        const joined = texts.join('\n').trim();
+        if (joined) return joined;
+    }
+
+    return null;
+}
+
+async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+
+    const raw = Buffer.concat(chunks).toString('utf8').trim();
+    if (!raw) {
+        return null;
+    }
+
+    try {
+        return JSON.parse(raw) as unknown;
+    } catch {
+        return raw;
+    }
 }
 
 export async function startHappyServer(client: ApiSessionClient, options?: StartHappyServerOptions) {
@@ -64,8 +155,8 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
     const taskMessageQueue = new InMemoryTaskMessageQueue();
 
     const mcp = new McpServer({
-        name: "Happy MCP",
-        version: "1.0.0",
+        name: `Happy MCP ${client.sessionId.slice(0, 8)}`,
+        version: "1.0.1",
     }, {
         taskStore,
         taskMessageQueue,
@@ -107,7 +198,19 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
         }
     });
 
-    const toolNames: string[] = ['change_title'];
+    let a2aUrl = '';
+    mcp.registerTool('get_a2a_message_uri', {
+        description: 'Get the local HTTP URI that accepts POSTed A2A-compatible messages for this session.',
+        title: 'Get A2A Message URI',
+        inputSchema: {},
+    }, async () => {
+        return {
+            content: [{ type: 'text', text: a2aUrl }],
+            isError: false,
+        };
+    });
+
+    const toolNames: string[] = ['change_title', 'get_a2a_message_uri'];
 
     let subagentManager: SubagentManager | null = null;
 
@@ -277,6 +380,70 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
     await mcp.connect(transport);
 
     //
+    // Create the local HTTP A2A server.
+    //
+
+    const a2aServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Headers', 'content-type');
+        res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+
+        if (req.method === 'OPTIONS') {
+            res.writeHead(204).end();
+            return;
+        }
+
+        if (req.method !== 'POST' || req.url !== '/a2a/message') {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Not found' }));
+            return;
+        }
+
+        try {
+            const body = await readJsonBody(req);
+            const text = extractA2aText(body);
+            if (!text) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Missing message text' }));
+                return;
+            }
+
+            if (!options?.onA2aMessage) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'A2A message handler not configured' }));
+                return;
+            }
+
+            await options.onA2aMessage({
+                role: 'user',
+                content: { type: 'text', text },
+                meta: { origin: 'a2a' },
+            });
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true }));
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: message }));
+        }
+    });
+
+    a2aUrl = await new Promise<string>((resolve, reject) => {
+        a2aServer.listen(0, '127.0.0.1', () => {
+            const addr = a2aServer.address();
+            if (addr && typeof addr === 'object') {
+                resolve(`http://127.0.0.1:${addr.port}/a2a/message`);
+                return;
+            }
+            reject(new Error('Failed to get A2A server address'));
+        });
+        a2aServer.on('error', reject);
+    });
+
+    logger.debug(`[happyMCP] a2a:server ready sessionId=${client.sessionId} url=${a2aUrl}`);
+
+    //
     // Create the HTTP server
     //
 
@@ -302,12 +469,14 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
 
     return {
         url: baseUrl.toString(),
+        a2aUrl,
         toolNames,
         stop: () => {
             logger.debug(`[happyMCP] server:stop sessionId=${client.sessionId}`);
             subagentManager?.dispose();
             mcp.close();
             server.close();
+            a2aServer.close();
         }
     }
 }

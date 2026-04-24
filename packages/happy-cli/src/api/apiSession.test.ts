@@ -54,6 +54,7 @@ vi.mock('@/ui/logger', () => ({
 
 vi.mock('@/api/rpc/RpcHandlerManager', () => ({
     RpcHandlerManager: class {
+        registerHandler = vi.fn();
         onSocketConnect = vi.fn();
         onSocketDisconnect = vi.fn();
         handleRequest = vi.fn(async () => '');
@@ -134,6 +135,22 @@ async function waitForCheck(check: () => void, timeoutMs = 2000) {
     throw lastError;
 }
 
+function makeEmptyFetchResponse() {
+    return {
+        data: {
+            messages: [],
+            hasMore: false
+        }
+    };
+}
+
+async function clearInitialFetch() {
+    await waitForCheck(() => {
+        expect(mockAxiosGet).toHaveBeenCalled();
+    });
+    mockAxiosGet.mockClear();
+}
+
 describe('ApiSessionClient v3 messages API migration', () => {
     let socketHandlers: SocketHandlers;
     let mockSocket: any;
@@ -149,6 +166,7 @@ describe('ApiSessionClient v3 messages API migration', () => {
         socketHandlers = {};
         session = makeSession();
         delete process.env.ENABLE_SESSION_PROTOCOL_SEND;
+        mockAxiosGet.mockResolvedValue(makeEmptyFetchResponse());
 
         mockSocket = {
             connected: true,
@@ -539,6 +557,7 @@ describe('ApiSessionClient v3 messages API migration', () => {
         const client = new ApiSessionClient('fake-token', session);
         const onUserMessage = vi.fn();
         client.onUserMessage(onUserMessage);
+        await clearInitialFetch();
 
         const userMessage = {
             role: 'user',
@@ -579,10 +598,54 @@ describe('ApiSessionClient v3 messages API migration', () => {
         expect((client as any).lastSeq).toBe(1);
     });
 
+    it('fetchMessages normalizes A2A parts into isolated user messages', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        const onUserMessage = vi.fn();
+        client.onUserMessage(onUserMessage);
+        await clearInitialFetch();
+
+        const a2aMessage = {
+            role: 'user',
+            parts: [
+                { type: 'text', text: 'hello' },
+                { type: 'text', text: 'world' }
+            ]
+        };
+
+        mockAxiosGet.mockResolvedValueOnce({
+            data: {
+                messages: [
+                    {
+                        id: 'msg-1',
+                        seq: 1,
+                        content: {
+                            t: 'encrypted',
+                            c: encryptContent(session, a2aMessage)
+                        },
+                        localId: null,
+                        createdAt: 1000,
+                        updatedAt: 1000
+                    }
+                ],
+                hasMore: false
+            }
+        });
+
+        await (client as any).fetchMessages();
+
+        expect(onUserMessage).toHaveBeenCalledTimes(1);
+        expect(onUserMessage).toHaveBeenCalledWith(expect.objectContaining({
+            role: 'user',
+            content: { type: 'text', text: 'hello\nworld' },
+            meta: expect.objectContaining({ origin: 'a2a' })
+        }));
+    });
+
     it('fetchMessages uses incremental cursor and paginates while hasMore is true', async () => {
         const client = new ApiSessionClient('fake-token', session);
         const onUserMessage = vi.fn();
         client.onUserMessage(onUserMessage);
+        await clearInitialFetch();
 
         (client as any).lastSeq = 2;
 
@@ -638,6 +701,7 @@ describe('ApiSessionClient v3 messages API migration', () => {
 
     it('fetchMessages stops pagination when hasMore is true but seq cursor does not advance', async () => {
         const client = new ApiSessionClient('fake-token', session);
+        await clearInitialFetch();
         (client as any).lastSeq = 2;
 
         mockAxiosGet
@@ -662,6 +726,7 @@ describe('ApiSessionClient v3 messages API migration', () => {
         const onMessage = vi.fn();
         client.onUserMessage(onUserMessage);
         client.on('message', onMessage);
+        await clearInitialFetch();
 
         const userMessage = {
             role: 'user',
@@ -707,10 +772,11 @@ describe('ApiSessionClient v3 messages API migration', () => {
         expect(onMessage).toHaveBeenCalledWith(agentMessage);
     });
 
-    it('applies consecutive new-message updates directly (fast path)', () => {
+    it('applies consecutive new-message updates directly (fast path)', async () => {
         const client = new ApiSessionClient('fake-token', session);
         const onUserMessage = vi.fn();
         client.onUserMessage(onUserMessage);
+        await clearInitialFetch();
 
         (client as any).lastSeq = 1;
         const userMessage = {
@@ -728,6 +794,7 @@ describe('ApiSessionClient v3 messages API migration', () => {
 
     it('invalidates receive sync and fetches on seq gap', async () => {
         const client = new ApiSessionClient('fake-token', session);
+        await clearInitialFetch();
         (client as any).lastSeq = 1;
 
         mockAxiosGet.mockResolvedValueOnce({
@@ -750,6 +817,7 @@ describe('ApiSessionClient v3 messages API migration', () => {
 
     it('invalidates receive sync on first message when lastSeq is 0', async () => {
         const client = new ApiSessionClient('fake-token', session);
+        await clearInitialFetch();
 
         mockAxiosGet.mockResolvedValueOnce({
             data: {
@@ -771,6 +839,7 @@ describe('ApiSessionClient v3 messages API migration', () => {
 
     it('invalidates receive sync for duplicate and stale seq values', async () => {
         const client = new ApiSessionClient('fake-token', session);
+        await clearInitialFetch();
         (client as any).lastSeq = 5;
 
         mockAxiosGet.mockResolvedValue({
@@ -790,10 +859,9 @@ describe('ApiSessionClient v3 messages API migration', () => {
         })));
 
         await waitForCheck(() => {
-            expect(mockAxiosGet).toHaveBeenCalledTimes(2);
+            expect(mockAxiosGet).toHaveBeenCalledTimes(1);
         });
         expect(mockAxiosGet.mock.calls[0][1].params.after_seq).toBe(5);
-        expect(mockAxiosGet.mock.calls[1][1].params.after_seq).toBe(5);
     });
 
     it('updates lastSeq after successful outbox flush and never moves it backward', async () => {
@@ -844,6 +912,7 @@ describe('ApiSessionClient v3 messages API migration', () => {
 
     it('triggers receive catch-up fetch on socket reconnect', async () => {
         new ApiSessionClient('fake-token', session);
+        await clearInitialFetch();
 
         mockAxiosGet.mockResolvedValueOnce({
             data: {
@@ -862,6 +931,8 @@ describe('ApiSessionClient v3 messages API migration', () => {
 
     it('stops send and receive sync loops on close', async () => {
         const client = new ApiSessionClient('fake-token', session);
+        await clearInitialFetch();
+        mockAxiosPost.mockClear();
         await client.close();
 
         mockAxiosGet.mockResolvedValue({

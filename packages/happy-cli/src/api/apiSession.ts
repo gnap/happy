@@ -121,6 +121,45 @@ const LAZY_RESULT_PREVIEW_FIELDS_BY_TOOL: Record<string, string[]> = {
     CursorWrite: ['diffString'],
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return !!value && typeof value === 'object';
+}
+
+function extractA2ATextFromParts(parts: unknown): string | null {
+    if (!Array.isArray(parts)) {
+        return null;
+    }
+
+    const texts: string[] = [];
+    for (const part of parts) {
+        if (typeof part === 'string') {
+            if (part.trim().length > 0) {
+                texts.push(part);
+            }
+            continue;
+        }
+
+        if (!isRecord(part)) {
+            continue;
+        }
+
+        if (typeof part.text === 'string' && part.text.trim().length > 0) {
+            texts.push(part.text);
+            continue;
+        }
+
+        if (typeof part.message === 'string' && part.message.trim().length > 0) {
+            texts.push(part.message);
+        }
+    }
+
+    if (texts.length === 0) {
+        return null;
+    }
+
+    return texts.join('\n');
+}
+
 /** Max lines kept in the compact diffString preview. */
 const LAZY_DIFF_STRING_MAX_LINES = 15;
 
@@ -555,7 +594,7 @@ export class ApiSessionClient extends EventEmitter {
         // Relaxed fallback: if it looks like a user text message (e.g. app sends content.type !== 'text'), normalize and route
         const relaxed = this.normalizeToUserMessage(message);
         if (relaxed) {
-            logger.debug('[API] User message from app received (relaxed parse), routing to CLI');
+            logger.debug(`[API] User message from ${relaxed.meta?.origin === 'a2a' ? 'A2A compat' : 'relaxed'} parse, routing to CLI`);
             if (this.pendingMessageCallback) {
                 this.pendingMessageCallback(relaxed);
             } else {
@@ -572,21 +611,32 @@ export class ApiSessionClient extends EventEmitter {
         this.emit('message', message);
     }
 
-    /** Normalize app payload to UserMessage when strict schema fails (e.g. content.type is 'input' or missing). */
+    /** Normalize app payload to UserMessage when strict schema fails (e.g. content.type is 'input', parts[] payload, or missing). */
     private normalizeToUserMessage(raw: unknown): UserMessage | null {
-        if (!raw || typeof raw !== 'object') return null;
-        const o = raw as Record<string, unknown>;
-        if (o.role !== 'user') return null;
-        const content = o.content;
-        if (!content || typeof content !== 'object') return null;
-        const c = content as Record<string, unknown>;
-        const text = typeof c.text === 'string' ? c.text : undefined;
-        if (text === undefined) return null;
+        if (!isRecord(raw) || raw.role !== 'user') return null;
+
+        const localKey = typeof raw.localKey === 'string' ? raw.localKey : undefined;
+        const meta = isRecord(raw.meta) ? (raw.meta as UserMessage['meta']) : undefined;
+
+        const content = raw.content;
+        const text = typeof content === 'string'
+            ? content
+            : isRecord(content) && typeof content.text === 'string'
+                ? content.text
+                : extractA2ATextFromParts(content)
+                ?? (isRecord(content) && 'parts' in content ? extractA2ATextFromParts(content.parts) : null)
+                ?? extractA2ATextFromParts(raw.parts);
+
+        if (text === null) return null;
+
+        const isA2A = Array.isArray(raw.parts) || Array.isArray(content) || (isRecord(content) && Array.isArray(content.parts));
         return {
             role: 'user',
             content: { type: 'text', text },
-            localKey: typeof o.localKey === 'string' ? o.localKey : undefined,
-            meta: o.meta && typeof o.meta === 'object' ? (o.meta as UserMessage['meta']) : undefined,
+            localKey,
+            meta: isA2A
+                ? { ...(meta ?? {}), origin: 'a2a' }
+                : meta,
         };
     }
 

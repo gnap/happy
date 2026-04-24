@@ -31,6 +31,7 @@ import { stopCaffeinate } from "@/utils/caffeinate";
 import { connectionState } from '@/utils/serverConnectionErrors';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
 import type { ApiSessionClient } from '@/api/apiSession';
+import type { UserMessage } from '@/api/types';
 import { resolveCodexExecutionPolicy } from './executionPolicy';
 import { mapCodexMcpMessageToSessionEnvelopes, mapCodexProcessorMessageToSessionEnvelopes } from './utils/sessionProtocolMapper';
 
@@ -69,6 +70,7 @@ export async function runCodex(opts: {
     credentials: Credentials;
     startedBy?: 'daemon' | 'terminal';
     noSandbox?: boolean;
+    resumeSessionTag?: string;
 }): Promise<void> {
     // Use shared PermissionMode type for cross-agent compatibility
     type PermissionMode = import('@/api/types').PermissionMode;
@@ -81,7 +83,7 @@ export async function runCodex(opts: {
     // Define session
     //
 
-    const sessionTag = randomUUID();
+    const sessionTag = opts.resumeSessionTag?.trim() || randomUUID();
 
     // Set backend for offline warnings (before any API calls)
     connectionState.setBackend('Codex');
@@ -170,7 +172,8 @@ export async function runCodex(opts: {
     let currentPermissionMode: import('@/api/types').PermissionMode | undefined = undefined;
     let currentModel: string | undefined = undefined;
 
-    session.onUserMessage((message) => {
+    let handleUserMessage: ((message: UserMessage) => void) | null = null;
+    handleUserMessage = (message) => {
         // Resolve permission mode (accept all modes, will be mapped in switch statement)
         let messagePermissionMode = currentPermissionMode;
         if (message.meta?.permissionMode) {
@@ -195,8 +198,14 @@ export async function runCodex(opts: {
             permissionMode: messagePermissionMode || 'default',
             model: messageModel,
         };
-        messageQueue.push(message.content.text, enhancedMode);
-    });
+        const isA2A = (message.meta as { origin?: string } | undefined)?.origin === 'a2a';
+    if (isA2A) {
+            messageQueue.pushIsolated(message.content.text, enhancedMode);
+        } else {
+            messageQueue.push(message.content.text, enhancedMode);
+        }
+    };
+    session.onUserMessage(handleUserMessage);
     let thinking = false;
     let currentTurnId: string | null = null;
     let codexStartedSubagents = new Set<string>();
@@ -545,7 +554,9 @@ export async function runCodex(opts: {
     });
 
     // Start Happy MCP server (HTTP) and prepare STDIO bridge config for Codex
-    const happyServer = await startHappyServer(session);
+    const happyServer = await startHappyServer(session, {
+        onA2aMessage: (message) => handleUserMessage?.(message),
+    });
     const bridgeCommand = join(projectPath(), 'bin', 'happy-mcp.mjs');
     const mcpServers = {
         happy: {

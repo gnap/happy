@@ -37,6 +37,7 @@ import { connectionState } from '@/utils/serverConnectionErrors';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
 import type { ApiSessionClient } from '@/api/apiSession';
 import type { PermissionMode } from '@/api/types';
+import type { UserMessage } from '@/api/types';
 
 /**
  * Use native codex message format (type: 'codex') instead of ACP format
@@ -329,7 +330,7 @@ export async function runCursor(opts: {
     })).catch((err) => logger.debug('[Cursor] Failed to sync mode to session metadata', err));
   };
 
-  const handleUserMessage = (message: { content: { text: string }; meta?: { permissionMode?: string; model?: string | null } }) => {
+  const handleUserMessage = (message: UserMessage) => {
     let messagePermissionMode = currentPermissionMode;
     if (message.meta?.permissionMode) {
       const validModes: PermissionMode[] = ['default', 'plan', 'ask', 'force'];
@@ -362,7 +363,12 @@ export async function runCursor(opts: {
       session.updateMetadata((m) => ({ ...m, currentOperatingModeCode: effectivePermission, currentModelCode: effectiveModel, dangerouslySkipPermissions })).catch((err) => logger.debug('[Cursor] Failed to persist permission/model to session metadata', err));
     }
     logger.debug(`[cursor] User message queued (length: ${message.content.text.length})`);
-    messageQueue.push(message.content.text, mode);
+    const isA2A = (message.meta as { origin?: string } | undefined)?.origin === 'a2a';
+    if (isA2A) {
+      messageQueue.pushIsolated(message.content.text, mode);
+    } else {
+      messageQueue.push(message.content.text, mode);
+    }
   };
 
   // Handle server unreachable - offline stub with hot reconnection
@@ -615,7 +621,10 @@ export async function runCursor(opts: {
       workspacePath,
       getAbortSignal: () => abortController.signal,
     },
-  } : {});
+    onA2aMessage: handleUserMessage,
+  } : {
+    onA2aMessage: handleUserMessage,
+  });
   ensureCursorMcpHappy(workspacePath, happyServer.url);
   step('mcpServer');
   logger.debug(`[cursor] Happy MCP: url=${happyServer.url}, workspacePath=${workspacePath}, subagentMcp=${enableSubagentMcp}`);

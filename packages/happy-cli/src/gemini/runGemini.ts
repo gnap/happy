@@ -30,6 +30,7 @@ import { stopCaffeinate } from '@/utils/caffeinate';
 import { connectionState } from '@/utils/serverConnectionErrors';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
 import type { ApiSessionClient } from '@/api/apiSession';
+import type { UserMessage } from '@/api/types';
 
 import { createGeminiBackend } from '@/agent/factories/gemini';
 import type { AgentBackend, AgentMessage } from '@/agent';
@@ -59,13 +60,14 @@ import { ConversationHistory } from '@/gemini/utils/conversationHistory';
 export async function runGemini(opts: {
   credentials: Credentials;
   startedBy?: 'daemon' | 'terminal';
+  resumeSessionTag?: string;
 }): Promise<void> {
   //
   // Define session
   //
 
   
-  const sessionTag = randomUUID();
+  const sessionTag = opts.resumeSessionTag?.trim() || randomUUID();
 
   // Set backend for offline warnings (before any API calls)
   connectionState.setBackend('Gemini');
@@ -216,7 +218,8 @@ export async function runGemini(opts: {
   let currentPermissionMode: PermissionMode | undefined = undefined;
   let currentModel: string | undefined = undefined;
 
-  session.onUserMessage((message) => {
+  let handleUserMessage: ((message: UserMessage) => void) | null = null;
+  handleUserMessage = (message) => {
     // Resolve permission mode (validate) - same as Codex
     let messagePermissionMode = currentPermissionMode;
     if (message.meta?.permissionMode) {
@@ -286,11 +289,17 @@ export async function runGemini(opts: {
       model: messageModel,
       originalUserMessage, // Store original message separately
     };
-    messageQueue.push(fullPrompt, mode);
+    const isA2A = (message.meta as { origin?: string } | undefined)?.origin === 'a2a';
+    if (isA2A) {
+      messageQueue.pushIsolated(fullPrompt, mode);
+    } else {
+      messageQueue.push(fullPrompt, mode);
+    }
     
     // Record user message in conversation history for context preservation
     conversationHistory.addUserMessage(originalUserMessage);
-  });
+  };
+  session.onUserMessage(handleUserMessage);
 
   let thinking = false;
   session.keepAlive(thinking, 'remote');
@@ -525,7 +534,9 @@ export async function runGemini(opts: {
   // Start Happy MCP server and create Gemini backend
   //
 
-  const happyServer = await startHappyServer(session);
+  const happyServer = await startHappyServer(session, {
+    onA2aMessage: (message) => handleUserMessage?.(message),
+  });
   const bridgeCommand = join(projectPath(), 'bin', 'happy-mcp.mjs');
   const mcpServers = {
     happy: {

@@ -5,6 +5,7 @@ import { ApiClient } from '@/api/api';
 import { logger } from '@/ui/logger';
 import { loop } from '@/claude/loop';
 import { AgentState, Metadata } from '@/api/types';
+import type { UserMessage } from '@/api/types';
 import packageJson from '../../package.json';
 import { Credentials, readSettings, writeSessionPidFile, removeSessionPidFile } from '@/persistence';
 import { EnhancedMode, PermissionMode } from './loop';
@@ -41,6 +42,8 @@ export interface StartOptions {
     claudeArgs?: string[]
     startedBy?: 'daemon' | 'terminal'
     noSandbox?: boolean
+    /** Explicit session tag to resume when daemon respawns this Claude process. */
+    resumeSessionTag?: string
     /** JavaScript runtime to use for spawning Claude Code (default: 'node') */
     jsRuntime?: JsRuntime
 }
@@ -50,7 +53,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     logger.debug(`[CLAUDE] This is the Claude agent, NOT Gemini`);
     
     const workingDirectory = process.cwd();
-    const sessionTag = randomUUID();
+    const sessionTag = options.resumeSessionTag?.trim() || randomUUID();
 
     // Log environment info at startup
     logger.debugLargeJson('[START] Happy process started', getEnvironmentInfo());
@@ -196,8 +199,12 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     const session = api.sessionSyncClient(response);
     writeSessionPidFile(session.sessionId);
 
+    let handleUserMessage: ((message: UserMessage) => void) | null = null;
+
     // Start Happy MCP server
-    const happyServer = await startHappyServer(session);
+    const happyServer = await startHappyServer(session, {
+        onA2aMessage: (message) => handleUserMessage?.(message),
+    });
     logger.debug(`[START] Happy MCP server started at ${happyServer.url}`);
 
     // Variable to track current session instance (updated via onSessionReady callback)
@@ -262,7 +269,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     let currentAppendSystemPrompt: string | undefined = undefined; // Track current append system prompt
     let currentAllowedTools: string[] | undefined = undefined; // Track current allowed tools
     let currentDisallowedTools: string[] | undefined = undefined; // Track current disallowed tools
-    session.onUserMessage((message) => {
+    handleUserMessage = (message) => {
 
         // Resolve permission mode from meta - pass through as-is, mapping happens at SDK boundary
         let messagePermissionMode: PermissionMode | undefined = currentPermissionMode;
@@ -379,9 +386,15 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             allowedTools: messageAllowedTools,
             disallowedTools: messageDisallowedTools
         };
-        messageQueue.push(message.content.text, enhancedMode);
+        const isA2A = (message.meta as { origin?: string } | undefined)?.origin === 'a2a';
+    if (isA2A) {
+            messageQueue.pushIsolated(message.content.text, enhancedMode);
+        } else {
+            messageQueue.push(message.content.text, enhancedMode);
+        }
         logger.debugLargeJson('User message pushed to queue:', message)
-    });
+    };
+    session.onUserMessage(handleUserMessage);
 
     // Setup signal handlers for graceful shutdown
     const cleanup = async () => {

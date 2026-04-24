@@ -183,6 +183,7 @@ describe.skipIf(!await isServerHealthy())('Daemon Integration Tests', { timeout:
 
     const result = await restartDaemonSession(sessionId);
     expect(result.success).toBe(true);
+    expect(result.newSessionId).toBe(sessionId);
 
     const sessions = await listDaemonSessions();
     expect(sessions.some((s: any) => s.happySessionId === sessionId)).toBe(true);

@@ -431,7 +431,13 @@ export async function startDaemon(): Promise<void> {
         const resumeSessionTag =
           explicitResumeSessionTag?.trim() ||
           (sessionId ? (lastSessionTagBySessionId[sessionId] ?? lastSessionTagByDirectory[directory]) : undefined);
-        const shouldPassResumeSessionTag = options.agent === 'cursor' || options.agent === 'cursor-acp' || options.agent === 'acp-cursor';
+        const shouldPassResumeSessionTag =
+          options.agent === 'cursor' ||
+          options.agent === 'cursor-acp' ||
+          options.agent === 'acp-cursor' ||
+          options.agent === 'claude' ||
+          options.agent === 'codex' ||
+          options.agent === 'gemini';
 
         // Fail-fast validation: Check that any auth variables present are fully expanded
         // Only validate variables that are actually set (different agents need different auth)
@@ -836,6 +842,7 @@ export async function startDaemon(): Promise<void> {
     // Restart a session: kill existing process and spawn a new one reconnecting to the same server session
     const restartSession = async (sessionId: string): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
       logger.debug(`[DAEMON RUN] Restart session: ${sessionId}`);
+      const persistedState = await readDaemonState();
 
       // Find in active sessions first, then stoppedSessions, then recently-exited ring buffer
       let found: TrackedSession | undefined;
@@ -869,7 +876,7 @@ export async function startDaemon(): Promise<void> {
             happySessionId: sessionId,
             pid: -1,
             directory: persistedDirectory,
-            sessionTag: lastSessionTagBySessionId[sessionId] ?? lastSessionTagByDirectory[persistedDirectory],
+            sessionTag: lastSessionTagBySessionId[sessionId] ?? persistedState?.lastSessionTagBySessionId?.[sessionId],
             agent: persistedAgent,
           };
           logger.debug(`[DAEMON RUN] Restart: session ${sessionId} restored from persisted directory/tag mapping`);
@@ -885,7 +892,15 @@ export async function startDaemon(): Promise<void> {
       }
 
       const { directory, agent } = found;
-      const sessionTag = found.sessionTag ?? lastSessionTagBySessionId[sessionId] ?? lastSessionTagByDirectory[directory];
+      const sessionTag =
+        found.sessionTag ??
+        lastSessionTagBySessionId[sessionId] ??
+        persistedState?.lastSessionTagBySessionId?.[sessionId];
+
+      if (!sessionTag) {
+        logger.debug(`[DAEMON RUN] Restart: session ${sessionId} is missing its own session tag`);
+        return { success: false, error: 'Session tag unknown for this session; cannot safely restart' };
+      }
 
       // Kill existing process if still running
       if (found.pid > 0) {
