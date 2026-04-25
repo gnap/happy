@@ -1027,6 +1027,7 @@ export async function startDaemon(): Promise<void> {
       getRecentlyExited,
       stopSession,
       stopSessionByPid,
+      port: configuration.daemonHttpPort,
       spawnSession,
       restartSession,
       archiveSession,

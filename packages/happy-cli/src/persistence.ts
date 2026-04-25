@@ -228,6 +228,7 @@ interface Settings {
   activeProfileId?: string
   profiles: AIBackendProfile[]
   sandboxConfig?: SandboxConfig
+  daemonHttpPort?: number
   // CLI-local environment variable cache (not synced)
   localEnvironmentVariables: Record<string, Record<string, string>> // profileId -> env vars
 }

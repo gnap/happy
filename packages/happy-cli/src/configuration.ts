@@ -5,7 +5,7 @@
  * Environment files should be loaded using Node's --env-file flag
  */
 
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import https from 'node:https'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -13,6 +13,49 @@ import packageJson from '../package.json'
 
 /** HTTPS agent that forces IPv4 for server requests (avoids ETIMEDOUT on IPv6-unreachable hosts). */
 export const serverHttpsAgent = new https.Agent({ family: 4 })
+export const DEFAULT_DAEMON_HTTP_PORT = 55672
+
+function parseDaemonHttpPort(rawPort: unknown): number | null {
+  if (typeof rawPort !== 'string' && typeof rawPort !== 'number') return null
+
+  const parsed = Number.parseInt(String(rawPort), 10)
+  if (Number.isInteger(parsed) && parsed > 0 && parsed <= 65535) {
+    return parsed
+  }
+
+  return null
+}
+
+function readDaemonHttpPortFromSettings(settingsFile: string): { port: number | null; hadValue: boolean } {
+  if (!existsSync(settingsFile)) return { port: null, hadValue: false }
+
+  try {
+    const raw = JSON.parse(readFileSync(settingsFile, 'utf8'))
+    return {
+      port: parseDaemonHttpPort(raw?.daemonHttpPort),
+      hadValue: raw?.daemonHttpPort !== undefined,
+    }
+  } catch {
+    return { port: null, hadValue: false }
+  }
+}
+
+function resolveDaemonHttpPort(settingsFile: string, legacyEnvPort: string | undefined): number {
+  const configuredPort = readDaemonHttpPortFromSettings(settingsFile)
+  if (configuredPort.port !== null) return configuredPort.port
+
+  const fallbackPort = parseDaemonHttpPort(legacyEnvPort)
+  if (fallbackPort !== null) {
+    return fallbackPort
+  }
+
+  if (configuredPort.hadValue || legacyEnvPort) {
+    console.warn(
+      `Invalid daemon port configuration. Falling back to ${DEFAULT_DAEMON_HTTP_PORT}.`,
+    )
+  }
+  return DEFAULT_DAEMON_HTTP_PORT
+}
 
 // Force all HTTPS in this process to use IPv4 (catches axios, socket.io, etc. that do not pass agent).
 if (typeof process !== 'undefined' && process.versions?.node) {
@@ -31,6 +74,7 @@ class Configuration {
   public readonly privateKeyFile: string
   public readonly daemonStateFile: string
   public readonly daemonLockFile: string
+  public readonly daemonHttpPort: number
   public readonly currentCliVersion: string
 
   public readonly isExperimentalEnabled: boolean
@@ -59,6 +103,7 @@ class Configuration {
     this.privateKeyFile = join(this.happyHomeDir, 'access.key')
     this.daemonStateFile = join(this.happyHomeDir, 'daemon.state.json')
     this.daemonLockFile = join(this.happyHomeDir, 'daemon.state.json.lock')
+    this.daemonHttpPort = resolveDaemonHttpPort(this.settingsFile, process.env.HAPPY_DAEMON_HTTP_PORT)
 
     this.isExperimentalEnabled = ['true', '1', 'yes'].includes(process.env.HAPPY_EXPERIMENTAL?.toLowerCase() || '');
     this.disableCaffeinate = ['true', '1', 'yes'].includes(process.env.HAPPY_DISABLE_CAFFEINATE?.toLowerCase() || '');

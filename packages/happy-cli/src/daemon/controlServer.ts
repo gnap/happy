@@ -18,6 +18,7 @@ export function startDaemonControlServer({
   getRecentlyExited,
   stopSession,
   stopSessionByPid,
+  port,
   spawnSession,
   restartSession,
   archiveSession,
@@ -29,6 +30,7 @@ export function startDaemonControlServer({
   getRecentlyExited: () => TrackedSession[];
   stopSession: (sessionId: string) => boolean;
   stopSessionByPid: (pid: number) => boolean;
+  port: number;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
   restartSession: (sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
   archiveSession: (sessionId: string) => boolean;
@@ -367,17 +369,17 @@ export function startDaemonControlServer({
       return { status: 'stopping' };
     });
 
-    app.listen({ port: 0, host: '127.0.0.1' }, (err, address) => {
+    app.listen({ port, host: '127.0.0.1' }, (err, address) => {
       if (err) {
         logger.debug('[CONTROL SERVER] Failed to start:', err);
         throw err;
       }
 
-      const port = parseInt(address.split(':').pop()!);
-      logger.debug(`[CONTROL SERVER] Started on port ${port}`);
+      const boundPort = parseInt(address.split(':').pop()!, 10);
+      logger.debug(`[CONTROL SERVER] Started on port ${boundPort}`);
 
       resolve({
-        port,
+        port: boundPort,
         stop: async () => {
           logger.debug('[CONTROL SERVER] Stopping server');
           await app.close();
