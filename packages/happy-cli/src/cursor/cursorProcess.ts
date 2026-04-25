@@ -18,6 +18,38 @@ import { logger } from '@/ui/logger';
 import type { CursorStreamMessage } from './types';
 
 const CURSOR_AGENT_NAME = 'cursor-agent';
+const PTY_BASH_EXEC_COMMAND = 'exec "$0" "$@"';
+
+function shellEscapePosix(arg: string): string {
+  return `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
+export function buildCursorPtySpawn(
+  cursorAgentPath: string,
+  cursorArgs: string[],
+  isLinux: boolean,
+): { command: string; args: string[] } {
+  if (isLinux) {
+    const linuxCommand = [
+      '/bin/bash',
+      '-l',
+      '-c',
+      PTY_BASH_EXEC_COMMAND,
+      cursorAgentPath,
+      ...cursorArgs,
+    ].map(shellEscapePosix).join(' ');
+
+    return {
+      command: 'stdbuf',
+      args: ['-o0', 'script', '-q', '/dev/null', '-c', linuxCommand],
+    };
+  }
+
+  return {
+    command: 'script',
+    args: ['-q', '/dev/null', '/bin/bash', '-l', '-c', PTY_BASH_EXEC_COMMAND, cursorAgentPath, ...cursorArgs],
+  };
+}
 
 export type CursorExecutionMode = 'default' | 'plan' | 'ask';
 
@@ -122,13 +154,10 @@ export class CursorProcess extends EventEmitter {
       logger.debug('[cursor] MCP: --approve-mcps enabled so Happy loads from .cursor/mcp.json');
     }
 
-    cursorArgs.push(prompt);
+    cursorArgs.push('--', prompt);
 
     const cursorAgentPath = resolveCursorAgentPath();
-    const escapedArgs = cursorArgs.map((a) => `"${a.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`);
-    const fullCommand = `${cursorAgentPath} ${escapedArgs.join(' ')}`;
-
-    logger.debug(`[cursor] Spawning: ${fullCommand.slice(0, 200)}...`);
+    logger.debug(`[cursor] Spawning: ${[cursorAgentPath, ...cursorArgs].join(' ').slice(0, 200)}...`);
 
     const noPty = process.env.CURSOR_AGENT_NO_PTY === '1';
     const isLinux = process.platform === 'linux';
@@ -198,12 +227,8 @@ export class CursorProcess extends EventEmitter {
         logger.debug('[cursor] Spawning cursor-agent directly (no PTY)');
       } else {
         // PTY via script (same as pre-ACP): spawn script so cursor-agent runs inside a PTY; script is a system binary so spawn always works
-        const scriptArgs = isLinux
-          ? ['-q', '/dev/null', '-c', `/bin/bash -l -c ${JSON.stringify(fullCommand)}`]
-          : ['-q', '/dev/null', '/bin/bash', '-l', '-c', fullCommand];
-        const spawnCmd = isLinux ? 'stdbuf' : 'script';
-        const spawnArgs = isLinux ? ['-o0', 'script', ...scriptArgs] : scriptArgs;
-        child = spawn(spawnCmd, spawnArgs, spawnOptions);
+        const ptySpawn = buildCursorPtySpawn(cursorAgentPath, cursorArgs, isLinux);
+        child = spawn(ptySpawn.command, ptySpawn.args, spawnOptions);
         logger.debug('[cursor] Spawning cursor-agent with script (PTY)');
       }
 
