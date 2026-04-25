@@ -120,6 +120,21 @@ export async function restartDaemonSession(sessionId: string): Promise<{ success
   return result;
 }
 
+export async function getDaemonA2aMessageUri(sessionId: string): Promise<string | null> {
+  const state = await readDaemonState();
+  if (!state?.httpPort || !state?.pid) {
+    return null;
+  }
+
+  try {
+    process.kill(state.pid, 0);
+  } catch {
+    return null;
+  }
+
+  return `http://127.0.0.1:${state.httpPort}/a2a/${encodeURIComponent(sessionId)}/message`;
+}
+
 export async function archiveDaemonSession(sessionId: string): Promise<boolean> {
   const result = await daemonPost('/archive-session', { sessionId });
   return result.success || false;

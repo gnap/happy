@@ -21,6 +21,9 @@ import { ApiSessionClient } from "@/api/apiSession";
 import type { UserMessage } from "@/api/types";
 import { randomUUID } from "node:crypto";
 import { SubagentManager } from "@/cursor/subagentManager";
+import { buildA2ASubagentCardEnvelopes } from "@/a2a/subagentCard";
+import { extractA2aText, extractA2aTitle } from "@/a2a/parse";
+import { getDaemonA2aMessageUri } from "@/daemon/controlClient";
 
 export interface HappyServerCursorContext {
     getCurrentTurnId: () => string | null;
@@ -32,77 +35,7 @@ export interface HappyServerCursorContext {
 export interface StartHappyServerOptions {
     cursorContext?: HappyServerCursorContext;
     onA2aMessage?: (message: UserMessage) => Promise<void> | void;
-}
-
-function extractA2aText(body: unknown): string | null {
-    if (typeof body === 'string') {
-        const trimmed = body.trim();
-        return trimmed || null;
-    }
-
-    if (!body || typeof body !== 'object') {
-        return null;
-    }
-
-    const record = body as Record<string, unknown>;
-    if (typeof record.text === 'string') {
-        const trimmed = record.text.trim();
-        if (trimmed) return trimmed;
-    }
-    if (typeof record.message === 'string') {
-        const trimmed = record.message.trim();
-        if (trimmed) return trimmed;
-    }
-    if (typeof record.content === 'string') {
-        const trimmed = record.content.trim();
-        if (trimmed) return trimmed;
-    }
-
-    const content = record.content;
-    if (content && typeof content === 'object') {
-        const contentRecord = content as Record<string, unknown>;
-        if (typeof contentRecord.text === 'string') {
-            const trimmed = contentRecord.text.trim();
-            if (trimmed) return trimmed;
-        }
-        if (typeof contentRecord.message === 'string') {
-            const trimmed = contentRecord.message.trim();
-            if (trimmed) return trimmed;
-        }
-        if (Array.isArray(contentRecord.parts)) {
-            const texts = contentRecord.parts
-                .map((part) => {
-                    if (typeof part === 'string') return part;
-                    if (!part || typeof part !== 'object') return null;
-                    const partRecord = part as Record<string, unknown>;
-                    if (typeof partRecord.text === 'string') return partRecord.text;
-                    if (typeof partRecord.content === 'string') return partRecord.content;
-                    return null;
-                })
-                .filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
-                .map((part) => part.trim());
-            const joined = texts.join('\n').trim();
-            if (joined) return joined;
-        }
-    }
-
-    if (Array.isArray(record.parts)) {
-        const texts = record.parts
-            .map((part) => {
-                if (typeof part === 'string') return part;
-                if (!part || typeof part !== 'object') return null;
-                const partRecord = part as Record<string, unknown>;
-                if (typeof partRecord.text === 'string') return partRecord.text;
-                if (typeof partRecord.content === 'string') return partRecord.content;
-                return null;
-            })
-            .filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
-            .map((part) => part.trim());
-        const joined = texts.join('\n').trim();
-        if (joined) return joined;
-    }
-
-    return null;
+    useDaemonA2ARoute?: boolean;
 }
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
@@ -198,7 +131,8 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
         }
     });
 
-    let a2aUrl = '';
+    const startedByDaemon = options?.useDaemonA2ARoute === true;
+    let a2aUrl = startedByDaemon ? (await getDaemonA2aMessageUri(client.sessionId) ?? '') : '';
     mcp.registerTool('get_a2a_message_uri', {
         description: 'Get the local HTTP URI that accepts POSTed A2A-compatible messages for this session.',
         title: 'Get A2A Message URI',
@@ -379,69 +313,77 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
     });
     await mcp.connect(transport);
 
-    //
-    // Create the local HTTP A2A server.
-    //
+    let a2aServer: ReturnType<typeof createServer> | null = null;
+    if (!startedByDaemon) {
+        //
+        // Create the local HTTP A2A server.
+        //
+        a2aServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            res.setHeader('Access-Control-Allow-Headers', 'content-type');
+            res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
 
-    const a2aServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Access-Control-Allow-Headers', 'content-type');
-        res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-
-        if (req.method === 'OPTIONS') {
-            res.writeHead(204).end();
-            return;
-        }
-
-        if (req.method !== 'POST' || req.url !== '/a2a/message') {
-            res.writeHead(404, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Not found' }));
-            return;
-        }
-
-        try {
-            const body = await readJsonBody(req);
-            const text = extractA2aText(body);
-            if (!text) {
-                res.writeHead(400, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: 'Missing message text' }));
+            if (req.method === 'OPTIONS') {
+                res.writeHead(204).end();
                 return;
             }
 
-            if (!options?.onA2aMessage) {
+            if (req.method !== 'POST' || req.url !== '/a2a/message') {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Not found' }));
+                return;
+            }
+
+            try {
+                const body = await readJsonBody(req);
+                const text = extractA2aText(body);
+                const title = extractA2aTitle(body);
+                if (!text) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Missing message text' }));
+                    return;
+                }
+
+                if (!options?.onA2aMessage) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'A2A message handler not configured' }));
+                    return;
+                }
+
+                await options.onA2aMessage({
+                    role: 'user',
+                    content: { type: 'text', text },
+                    meta: { origin: 'a2a' },
+                });
+                for (const envelope of buildA2ASubagentCardEnvelopes(text, { title })) {
+                    client.sendSessionProtocolMessage(envelope);
+                }
+
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true }));
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
                 res.writeHead(500, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: 'A2A message handler not configured' }));
-                return;
+                res.end(JSON.stringify({ success: false, error: message }));
             }
-
-            await options.onA2aMessage({
-                role: 'user',
-                content: { type: 'text', text },
-                meta: { origin: 'a2a' },
-            });
-
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: true }));
-        } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: false, error: message }));
-        }
-    });
-
-    a2aUrl = await new Promise<string>((resolve, reject) => {
-        a2aServer.listen(0, '127.0.0.1', () => {
-            const addr = a2aServer.address();
-            if (addr && typeof addr === 'object') {
-                resolve(`http://127.0.0.1:${addr.port}/a2a/message`);
-                return;
-            }
-            reject(new Error('Failed to get A2A server address'));
         });
-        a2aServer.on('error', reject);
-    });
 
-    logger.debug(`[happyMCP] a2a:server ready sessionId=${client.sessionId} url=${a2aUrl}`);
+        a2aUrl = await new Promise<string>((resolve, reject) => {
+            a2aServer!.listen(0, '127.0.0.1', () => {
+                const addr = a2aServer!.address();
+                if (addr && typeof addr === 'object') {
+                    resolve(`http://127.0.0.1:${addr.port}/a2a/message`);
+                    return;
+                }
+                reject(new Error('Failed to get A2A server address'));
+            });
+            a2aServer!.on('error', reject);
+        });
+
+        logger.debug(`[happyMCP] a2a:server ready sessionId=${client.sessionId} url=${a2aUrl}`);
+    } else {
+        logger.debug(`[happyMCP] a2a:using-daemon-route sessionId=${client.sessionId} url=${a2aUrl}`);
+    }
 
     //
     // Create the HTTP server
@@ -476,7 +418,7 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
             subagentManager?.dispose();
             mcp.close();
             server.close();
-            a2aServer.close();
+            a2aServer?.close();
         }
     }
 }

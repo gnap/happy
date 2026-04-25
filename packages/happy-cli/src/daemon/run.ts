@@ -26,6 +26,10 @@ import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
 /** Time to wait for a spawned session to report via /session-started webhook before failing the spawn (Cursor cold start can exceed 30s). */
 const SESSION_WEBHOOK_TIMEOUT_MS = 60_000;
 
+function isRunningUnderSystemdService(): boolean {
+  return typeof process.env.INVOCATION_ID === 'string' && process.env.INVOCATION_ID.length > 0;
+}
+
 // Prepare initial metadata
 export const initialMachineMetadata: MachineMetadata = {
   host: os.hostname(),
@@ -136,13 +140,19 @@ export async function startDaemon(): Promise<void> {
   // Check if already running
   // Check if running daemon version matches current CLI version
   const runningDaemonVersionMatches = await isDaemonRunningCurrentlyInstalledHappyVersion();
-  if (!runningDaemonVersionMatches) {
+  const launchedBySystemd = isRunningUnderSystemdService();
+  if (runningDaemonVersionMatches) {
+    if (launchedBySystemd) {
+      logger.debug('[DAEMON RUN] Running under systemd with an existing daemon; stopping old daemon so service can take over');
+      await stopDaemon();
+    } else {
+      logger.debug('[DAEMON RUN] Daemon version matches, keeping existing daemon');
+      console.log('Daemon already running with matching version');
+      process.exit(0);
+    }
+  } else {
     logger.debug('[DAEMON RUN] Daemon version mismatch detected, restarting daemon with current CLI version');
     await stopDaemon();
-  } else {
-    logger.debug('[DAEMON RUN] Daemon version matches, keeping existing daemon');
-    console.log('Daemon already running with matching version');
-    process.exit(0);
   }
 
   // Acquire exclusive lock (proves daemon is running)
@@ -230,6 +240,76 @@ export async function startDaemon(): Promise<void> {
       return 'unknown';
     };
 
+    const terminateTrackedProcess = (pid: number, session: TrackedSession, reason: string) => {
+      logger.debug(`[DAEMON RUN] ${reason}: terminating PID ${pid}`);
+      session.exitReason = reason;
+      session.exitTime = session.exitTime ?? Date.now();
+      persistSessionTagBeforeRemove(session);
+      pushRecentlyExited(session);
+      pidToAwaiter.delete(pid);
+      pidToTrackedSession.delete(pid);
+
+      try {
+        if (session.startedBy === 'daemon' && session.childProcess) {
+          session.childProcess.kill('SIGTERM');
+        } else {
+          process.kill(pid, 'SIGTERM');
+        }
+      } catch (err: unknown) {
+        const code = err && typeof err === 'object' && 'code' in err ? (err as NodeJS.ErrnoException).code : undefined;
+        if (code !== 'ESRCH') {
+          logger.debug(`[DAEMON RUN] Failed to terminate PID ${pid}:`, err);
+        }
+      }
+    };
+
+    const activeSessionsBySessionId = (sessionId: string): Array<[number, TrackedSession]> =>
+      Array.from(pidToTrackedSession.entries())
+        .filter(([, session]) => session.happySessionId === sessionId);
+
+    const waitForPidsToExit = async (pids: number[], timeoutMs = 5_000) => {
+      const deadline = Date.now() + timeoutMs;
+      let remaining = pids;
+
+      while (remaining.length > 0 && Date.now() < deadline) {
+        remaining = remaining.filter((pid) => {
+          try { process.kill(pid, 0); return true; } catch { return false; }
+        });
+        if (remaining.length > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      }
+
+      for (const pid of remaining) {
+        logger.debug(`[DAEMON RUN] PID ${pid} did not exit after SIGTERM; sending SIGKILL`);
+        try { process.kill(pid, 'SIGKILL'); } catch { /* ignore */ }
+      }
+    };
+
+    const replaceDuplicateActiveSessions = (sessionId: string, currentPid: number): boolean => {
+      const currentSession = pidToTrackedSession.get(currentPid);
+      const currentSpawnTime = currentSession?.spawnTime ?? 0;
+
+      for (const [pid, session] of activeSessionsBySessionId(sessionId)) {
+        if (pid === currentPid) continue;
+
+        const existingSpawnTime = session.spawnTime ?? 0;
+        if (existingSpawnTime > currentSpawnTime) {
+          const current = currentSession ?? {
+            startedBy: 'happy directly - likely by user from terminal',
+            happySessionId: sessionId,
+            pid: currentPid,
+          } as TrackedSession;
+          terminateTrackedProcess(currentPid, current, `duplicate session ${sessionId} replaced by newer tracked PID ${pid}`);
+          return false;
+        }
+
+        terminateTrackedProcess(pid, session, `duplicate session ${sessionId} replaced by PID ${currentPid}`);
+      }
+
+      return true;
+    };
+
     /** Called by /session-ending webhook: session process pre-announces its exit reason. */
     const onSessionEnding = (sessionId: string, pid: number, reason: string, exitCode?: number, archive?: boolean) => {
       const session = pidToTrackedSession.get(pid);
@@ -261,6 +341,10 @@ export async function startDaemon(): Promise<void> {
 
       logger.debug(`[DAEMON RUN] Session webhook: ${sessionId}, PID: ${pid}, started by: ${sessionMetadata.startedBy || 'unknown'}`);
       logger.debug(`[DAEMON RUN] Current tracked sessions before webhook: ${Array.from(pidToTrackedSession.keys()).join(', ')}`);
+      if (!replaceDuplicateActiveSessions(sessionId, pid)) {
+        return;
+      }
+      stoppedSessions.delete(sessionId);
 
       // Check if we already have this PID (daemon-spawned)
       const existingSession = pidToTrackedSession.get(pid);
@@ -848,8 +932,9 @@ export async function startDaemon(): Promise<void> {
 
       // Find in active sessions first, then stoppedSessions, then recently-exited ring buffer
       let found: TrackedSession | undefined;
-      for (const session of pidToTrackedSession.values()) {
-        if (session.happySessionId === sessionId) { found = session; break; }
+      const activeMatches = activeSessionsBySessionId(sessionId);
+      if (activeMatches.length > 0) {
+        found = activeMatches[0][1];
       }
       if (!found) {
         found = stoppedSessions.get(sessionId);
@@ -865,6 +950,11 @@ export async function startDaemon(): Promise<void> {
       if (!found) {
         const persistedDirectory = lastDirectoryBySessionId[sessionId];
         if (persistedDirectory) {
+          const unexpectedActiveMatches = activeSessionsBySessionId(sessionId);
+          if (unexpectedActiveMatches.length > 0) {
+            logger.debug(`[DAEMON RUN] Restart: refusing persisted restore for ${sessionId}; ${unexpectedActiveMatches.length} active process(es) still exist`);
+            return { success: false, error: 'Session has active process(es); cannot restore from persisted mapping' };
+          }
           const persistedAgentRaw = lastAgentBySessionId[sessionId];
           const persistedAgent = (
             persistedAgentRaw === 'claude' ||
@@ -904,13 +994,14 @@ export async function startDaemon(): Promise<void> {
         return { success: false, error: 'Session tag unknown for this session; cannot safely restart' };
       }
 
-      // Kill existing process if still running
-      if (found.pid > 0) {
-        stopSession(sessionId);
+      const activePids = activeSessionsBySessionId(sessionId);
+      if (activePids.length > 0) {
+        logger.debug(`[DAEMON RUN] Restart: terminating ${activePids.length} active process(es) for ${sessionId} before respawn`);
+        for (const [pid, session] of activePids) {
+          terminateTrackedProcess(pid, session, `restart requested for session ${sessionId}`);
+        }
+        await waitForPidsToExit(activePids.map(([pid]) => pid));
       }
-
-      // Wait briefly for process to die
-      await new Promise((r) => setTimeout(r, 500));
 
       // Spawn new process, reconnecting to the same server session via explicit CLI arg.
       const result = await spawnSession({

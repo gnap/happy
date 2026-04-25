@@ -642,6 +642,7 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
   let sawModels = false;
 
   const happyServer = await startHappyServer(session, {
+    useDaemonA2ARoute: opts.startedBy === 'daemon',
     onA2aMessage: (message) => userMessageHandler?.(message),
   });
   const mcpServers = {

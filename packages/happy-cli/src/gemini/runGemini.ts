@@ -532,6 +532,7 @@ export async function runGemini(opts: {
   //
 
   const happyServer = await startHappyServer(session, {
+    useDaemonA2ARoute: opts.startedBy === 'daemon',
     onA2aMessage: (message) => handleUserMessage?.(message),
   });
   const bridgeCommand = join(projectPath(), 'bin', 'happy-mcp.mjs');

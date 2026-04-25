@@ -10,6 +10,8 @@ import { logger } from '@/ui/logger';
 import { Metadata } from '@/api/types';
 import { TrackedSession } from './types';
 import { SpawnSessionOptions, SpawnSessionResult } from '@/modules/common/registerCommonHandlers';
+import { extractA2aText, extractA2aTitle } from '@/a2a/parse';
+import { sendA2aMessage } from './sendA2aMessage';
 
 export function startDaemonControlServer({
   getChildren,
@@ -64,6 +66,52 @@ export function startDaemonControlServer({
       onHappySessionWebhook(sessionId, metadata);
 
       return { status: 'ok' as const };
+    });
+
+    typed.post('/a2a/:sessionId/message', {
+      schema: {
+        params: z.object({
+          sessionId: z.string(),
+        }),
+        body: z.any(),
+        response: {
+          200: z.object({
+            success: z.boolean(),
+            messageId: z.string().optional(),
+            seq: z.number().optional(),
+          }),
+          400: z.object({
+            success: z.literal(false),
+            error: z.string(),
+          }),
+          500: z.object({
+            success: z.literal(false),
+            error: z.string(),
+          }),
+        },
+      }
+    }, async (request, reply) => {
+      const { sessionId } = request.params;
+      const text = extractA2aText(request.body);
+      const title = extractA2aTitle(request.body);
+
+      if (!text) {
+        reply.code(400);
+        return { success: false as const, error: 'Missing message text' };
+      }
+
+      logger.debug(`[CONTROL SERVER] A2A forward request: ${sessionId}`);
+      const result = await sendA2aMessage(sessionId, text, { title });
+      if (!result.success) {
+        reply.code(500);
+        return { success: false as const, error: result.error ?? 'Failed to forward A2A message' };
+      }
+
+      return {
+        success: true,
+        messageId: result.messageId,
+        seq: result.seq,
+      };
     });
 
     // List all tracked sessions (active + stopped-but-not-archived)

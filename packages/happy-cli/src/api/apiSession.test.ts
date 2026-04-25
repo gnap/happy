@@ -641,6 +641,117 @@ describe('ApiSessionClient v3 messages API migration', () => {
         }));
     });
 
+    it('fetchMessages routes A2A session text envelopes to CLI without requiring a raw user message', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        const onUserMessage = vi.fn();
+        client.onUserMessage(onUserMessage);
+        await clearInitialFetch();
+
+        const a2aSessionEnvelope = {
+            role: 'session',
+            content: {
+                id: 'env-1',
+                time: 1000,
+                role: 'agent',
+                turn: 'turn-1',
+                subagent: 'card-1',
+                ev: {
+                    t: 'text',
+                    text: 'hello from session envelope'
+                }
+            },
+            meta: {
+                sentFrom: 'cli',
+                origin: 'a2a'
+            }
+        };
+
+        mockAxiosGet.mockResolvedValueOnce({
+            data: {
+                messages: [
+                    {
+                        id: 'msg-session-a2a',
+                        seq: 2,
+                        content: {
+                            t: 'encrypted',
+                            c: encryptContent(session, a2aSessionEnvelope)
+                        },
+                        localId: null,
+                        createdAt: 2000,
+                        updatedAt: 2000
+                    }
+                ],
+                hasMore: false
+            }
+        });
+
+        await (client as any).fetchMessages();
+
+        expect(onUserMessage).toHaveBeenCalledTimes(1);
+        expect(onUserMessage).toHaveBeenCalledWith(expect.objectContaining({
+            role: 'user',
+            content: { type: 'text', text: 'hello from session envelope' },
+            meta: expect.objectContaining({ origin: 'a2a' })
+        }));
+    });
+
+    it('deduplicates A2A session text envelopes seen from socket and HTTP fetch', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        const onUserMessage = vi.fn();
+        client.onUserMessage(onUserMessage);
+        await clearInitialFetch();
+
+        const a2aSessionEnvelope = {
+            role: 'session',
+            content: {
+                id: 'same-envelope-id',
+                time: 1000,
+                role: 'agent',
+                turn: 'turn-1',
+                subagent: 'card-1',
+                ev: {
+                    t: 'text',
+                    text: 'dedupe me'
+                }
+            },
+            meta: {
+                sentFrom: 'cli',
+                origin: 'a2a'
+            }
+        };
+
+        (client as any).routeIncomingMessage(a2aSessionEnvelope);
+
+        mockAxiosGet.mockResolvedValueOnce({
+            data: {
+                messages: [
+                    {
+                        id: 'msg-session-a2a',
+                        seq: 2,
+                        content: {
+                            t: 'encrypted',
+                            c: encryptContent(session, a2aSessionEnvelope)
+                        },
+                        localId: null,
+                        createdAt: 2000,
+                        updatedAt: 2000
+                    }
+                ],
+                hasMore: false
+            }
+        });
+
+        await (client as any).fetchMessages();
+
+        expect(onUserMessage).toHaveBeenCalledTimes(1);
+        expect(onUserMessage).toHaveBeenCalledWith(expect.objectContaining({
+            role: 'user',
+            content: { type: 'text', text: 'dedupe me' },
+            localKey: 'same-envelope-id',
+            meta: expect.objectContaining({ origin: 'a2a' })
+        }));
+    });
+
     it('fetchMessages uses incremental cursor and paginates while hasMore is true', async () => {
         const client = new ApiSessionClient('fake-token', session);
         const onUserMessage = vi.fn();

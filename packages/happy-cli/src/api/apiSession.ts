@@ -226,6 +226,7 @@ export class ApiSessionClient extends EventEmitter {
     /** Resolves when the WebSocket first connects; used by updateMetadata to wait for initial connection. */
     private socketConnectedPromise: Promise<void>;
     private socketConnectedResolve: (() => void) | undefined;
+    private routedA2ASessionEnvelopeIds = new Set<string>();
     /** Directory where full tool-call args are persisted across session restarts. */
     private get toolContentDir(): string {
         const base = this.metadata?.path ?? process.cwd();
@@ -380,6 +381,10 @@ export class ApiSessionClient extends EventEmitter {
     private fallbackPollInterval: ReturnType<typeof setInterval> | null = null;
     /** Set in close() so disconnect/connect_error do not re-start fallback poll and leave the process hanging. */
     private closing = false;
+
+    getMetadata(): Metadata | null {
+        return this.metadata;
+    }
 
     constructor(token: string, session: Session, private websocketOnly: boolean = true) {
         super()
@@ -613,6 +618,11 @@ export class ApiSessionClient extends EventEmitter {
 
     /** Normalize app payload to UserMessage when strict schema fails (e.g. content.type is 'input', parts[] payload, or missing). */
     private normalizeToUserMessage(raw: unknown): UserMessage | null {
+        const a2aSessionMessage = this.normalizeA2ASessionEnvelopeToUserMessage(raw);
+        if (a2aSessionMessage) {
+            return a2aSessionMessage;
+        }
+
         if (!isRecord(raw) || raw.role !== 'user') return null;
 
         const localKey = typeof raw.localKey === 'string' ? raw.localKey : undefined;
@@ -637,6 +647,40 @@ export class ApiSessionClient extends EventEmitter {
             meta: isA2A
                 ? { ...(meta ?? {}), origin: 'a2a' }
                 : meta,
+        };
+    }
+
+    private normalizeA2ASessionEnvelopeToUserMessage(raw: unknown): UserMessage | null {
+        if (!isRecord(raw) || raw.role !== 'session') return null;
+
+        const meta = isRecord(raw.meta) ? raw.meta : null;
+        if (meta?.origin !== 'a2a') return null;
+
+        const content = isRecord(raw.content) ? raw.content : null;
+        if (!content || content.role !== 'agent') return null;
+        const envelopeId = typeof content.id === 'string' ? content.id : null;
+        if (envelopeId && this.routedA2ASessionEnvelopeIds.has(envelopeId)) {
+            return null;
+        }
+
+        const ev = isRecord(content.ev) ? content.ev : null;
+        if (!ev || ev.t !== 'text' || typeof ev.text !== 'string' || ev.text.trim().length === 0) {
+            return null;
+        }
+
+        if (envelopeId) {
+            this.routedA2ASessionEnvelopeIds.add(envelopeId);
+            if (this.routedA2ASessionEnvelopeIds.size > 1000) {
+                this.routedA2ASessionEnvelopeIds.clear();
+                this.routedA2ASessionEnvelopeIds.add(envelopeId);
+            }
+        }
+
+        return {
+            role: 'user',
+            content: { type: 'text', text: ev.text.trim() },
+            localKey: envelopeId ?? undefined,
+            meta: { origin: 'a2a' },
         };
     }
 

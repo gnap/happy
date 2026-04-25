@@ -204,6 +204,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
 
     // Start Happy MCP server
     const happyServer = await startHappyServer(session, {
+        useDaemonA2ARoute: options.startedBy === 'daemon',
         onA2aMessage: (message) => handleUserMessage?.(message),
     });
     logger.debug(`[START] Happy MCP server started at ${happyServer.url}`);

@@ -318,6 +318,7 @@ export async function runCursor(opts: {
     permissionMode: mode.permissionMode,
     model: mode.model ?? null,
   }));
+  const pendingA2ATexts: string[] = [];
   let currentPermissionMode: PermissionMode | undefined = undefined;
   let currentModel: string | undefined = undefined;
   const syncModeToSessionMetadata = (permissionMode: PermissionMode, model: string | undefined) => {
@@ -365,7 +366,8 @@ export async function runCursor(opts: {
     logger.debug(`[cursor] User message queued (length: ${message.content.text.length})`);
     const isA2A = (message.meta as { origin?: string } | undefined)?.origin === 'a2a';
     if (isA2A) {
-      messageQueue.pushIsolated(message.content.text, mode);
+      pendingA2ATexts.push(message.content.text);
+      messageQueue.pushIsolated(message.content.text, mode, { origin: 'a2a' });
     } else {
       messageQueue.push(message.content.text, mode);
     }
@@ -615,6 +617,7 @@ export async function runCursor(opts: {
   let currentTurnIdRef: string | null = null;
   const enableSubagentMcp = process.env.HAPPY_SUBAGENT_MCP === '1';
   const happyServer = await startHappyServer(session, enableSubagentMcp ? {
+    useDaemonA2ARoute: opts.startedBy === 'daemon',
     cursorContext: {
       getCurrentTurnId: () => currentTurnIdRef,
       sendSessionEnvelope: (envelope) => session.sendSessionProtocolMessage(envelope),
@@ -623,6 +626,7 @@ export async function runCursor(opts: {
     },
     onA2aMessage: handleUserMessage,
   } : {
+    useDaemonA2ARoute: opts.startedBy === 'daemon',
     onA2aMessage: handleUserMessage,
   });
   ensureCursorMcpHappy(workspacePath, happyServer.url);
@@ -696,7 +700,7 @@ export async function runCursor(opts: {
         break;
       }
 
-      const { message: userMessage, mode } = batch;
+      const { message: userMessage, mode, meta } = batch;
       messageBuffer.addMessage(userMessage, 'user');
       logger.debug(`[cursor] Processing message (length: ${userMessage.length}); spawning cursor-agent`);
 
@@ -708,9 +712,18 @@ export async function runCursor(opts: {
       let hadToolCalls = false;
       const turnId = createId();
       currentTurnIdRef = turnId;
+      const queuedA2AText = pendingA2ATexts[0];
+      const isA2ABatch =
+        (!!meta && typeof meta === 'object' && (meta as { origin?: string }).origin === 'a2a')
+        || (batch.isolate && queuedA2AText === userMessage);
+      if (batch.isolate && queuedA2AText === userMessage) {
+        pendingA2ATexts.shift();
+      }
 
       // Send user message: session protocol only. Store (old) App already has the user message from app send; dual-send output format would duplicate it. New App renders from this envelope.
-      session.sendSessionProtocolMessage(createEnvelope('user', { t: 'text', text: userMessage }, { turn: turnId }));
+      if (!isA2ABatch) {
+        session.sendSessionProtocolMessage(createEnvelope('user', { t: 'text', text: userMessage }, { turn: turnId }));
+      }
       const messageParser = new CursorMessageParser();
       const codexIdByCallId = new Map<string, string>();
       /** Per-tool timeout: when fired we send tool_call_end (running in background) so App stops timer; process keeps running. */

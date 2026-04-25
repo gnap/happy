@@ -1,11 +1,15 @@
 import axios from 'axios';
-import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { configuration, serverHttpsAgent } from '@/configuration';
 import { encrypt, encodeBase64 } from '@/api/encryption';
 import { readCredentials, readDaemonState } from '@/persistence';
+import { buildA2ASubagentCardEnvelopes, wrapA2ASessionEnvelope } from '@/a2a/subagentCard';
+
+type SendA2AOptions = {
+  title?: string;
+};
 
 async function readCursorSessionKey(sessionId: string): Promise<Uint8Array | null> {
   const state = await readDaemonState();
@@ -30,7 +34,7 @@ async function readCursorSessionKey(sessionId: string): Promise<Uint8Array | nul
   return null;
 }
 
-export async function sendA2aMessage(sessionId: string, text: string): Promise<{ success: boolean; error?: string; messageId?: string; seq?: number }> {
+export async function sendA2aMessage(sessionId: string, text: string, options: SendA2AOptions = {}): Promise<{ success: boolean; error?: string; messageId?: string; seq?: number }> {
   const credentials = await readCredentials();
   if (!credentials) {
     return { success: false, error: 'No CLI credentials found' };
@@ -41,24 +45,15 @@ export async function sendA2aMessage(sessionId: string, text: string): Promise<{
     return { success: false, error: `No cursor session key found for ${sessionId}` };
   }
 
-  const record = {
-    role: 'user',
-    parts: [{ type: 'text', text }],
-    meta: {
-      sentFrom: 'cli',
-      origin: 'a2a',
-    },
-  };
-
-  const encrypted = encodeBase64(encrypt(sessionKey, credentials.encryption.type, record));
+  const a2aCardMessages = buildA2ASubagentCardEnvelopes(text, { title: options.title }).map((envelope) => ({
+    content: encodeBase64(encrypt(sessionKey, credentials.encryption.type, wrapA2ASessionEnvelope(envelope))),
+    localId: envelope.id,
+  }));
   const response = await axios.post(
     `${configuration.serverUrl}/v3/sessions/${encodeURIComponent(sessionId)}/messages`,
     {
       messages: [
-        {
-          content: encrypted,
-          localId: randomUUID(),
-        },
+        ...a2aCardMessages,
       ],
     },
     {
@@ -71,7 +66,8 @@ export async function sendA2aMessage(sessionId: string, text: string): Promise<{
     },
   );
 
-  const message = Array.isArray(response.data?.messages) ? response.data.messages[0] : null;
+  const messages = Array.isArray(response.data?.messages) ? response.data.messages : [];
+  const message = messages[messages.length - 1] ?? null;
   return {
     success: true,
     messageId: message?.id,

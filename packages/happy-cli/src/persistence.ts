@@ -599,6 +599,7 @@ export async function clearDaemonState(): Promise<void> {
   const hasDataToPreserve =
     (existing?.stoppedSessions?.length ?? 0) > 0 ||
     Object.keys(existing?.lastDirectoryBySessionId ?? {}).length > 0 ||
+    Object.keys(existing?.lastSessionTagBySessionId ?? {}).length > 0 ||
     Object.keys(existing?.lastSessionTagByDirectory ?? {}).length > 0 ||
     Object.keys(existing?.lastAgentBySessionId ?? {}).length > 0;
 
@@ -607,6 +608,7 @@ export async function clearDaemonState(): Promise<void> {
     writeFileAtomically(configuration.daemonStateFile, JSON.stringify({
       stoppedSessions: existing!.stoppedSessions,
       lastDirectoryBySessionId: existing!.lastDirectoryBySessionId,
+      lastSessionTagBySessionId: existing!.lastSessionTagBySessionId,
       lastSessionTagByDirectory: existing!.lastSessionTagByDirectory,
       lastAgentBySessionId: existing!.lastAgentBySessionId,
     }, null, 2));
