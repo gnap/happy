@@ -54,7 +54,6 @@ import { join } from 'node:path';
 import { projectPath } from '@/projectPath';
 import { logger } from '@/ui/logger';
 import { existsSync } from 'node:fs';
-import { isBun } from './runtime';
 
 /**
  * Spawn the Happy CLI with the given arguments in a cross-platform way.
@@ -77,11 +76,11 @@ export function spawnHappyCLI(args: string[], options: SpawnOptions = {}): Child
   } else {
     directory = process.cwd()
   }
-  // Note: We're actually executing 'node' with the calculated entrypoint path below,
-  // bypassing the 'happy' wrapper that would normally be found in the shell's PATH.
-  // However, we log it as 'happy' here because other engineers are typically looking
-  // for when "happy" was started and don't care about the underlying node process
-  // details and flags we use to achieve the same result.
+  // Note: We execute the current Node.js binary directly with the calculated
+  // entrypoint path below, bypassing the 'happy' wrapper that would normally be
+  // found in the shell's PATH. We still log it as 'happy' because other engineers
+  // are typically looking for when "happy" was started and do not care about the
+  // underlying runtime binary details and flags we use to achieve the same result.
   const fullCommand = `happy ${args.join(' ')}`;
   logger.debug(`[SPAWN HAPPY CLI] Spawning: ${fullCommand} in ${directory}`);
   
@@ -99,7 +98,6 @@ export function spawnHappyCLI(args: string[], options: SpawnOptions = {}): Child
     logger.debug(`[SPAWN HAPPY CLI] ${errorMessage}`);
     throw new Error(errorMessage);
   }
-  
-  const runtime = isBun() ? 'bun' : 'node';
-  return spawn(runtime, nodeArgs, options);
+
+  return spawn(process.execPath, nodeArgs, options);
 }
