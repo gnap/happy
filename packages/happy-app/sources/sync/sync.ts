@@ -249,16 +249,30 @@ class Sync {
      * probe the socket here — no full invalidation needed.
      */
     async #setupDesktopLifecycle() {
+        const onDesktopFocus = () => {
+            log.log('🖥️ Desktop focused — resuming socket and recovering pending sends');
+            apiSocket.resumeReconnection();
+            this.recoverPendingOutbox();
+        };
+
+        const onDesktopBlur = () => {
+            log.log('🖥️ Desktop blurred — pausing socket');
+            apiSocket.pauseReconnection();
+        };
+
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
                 log.log('🖥️ Window hidden — pausing reconnection');
-                apiSocket.pauseReconnection();
+                onDesktopBlur();
             } else {
                 log.log('🖥️ Window visible — resuming and invalidating syncs');
-                apiSocket.resumeReconnection();
+                onDesktopFocus();
                 this.#invalidateAllSyncs();
             }
         });
+
+        window.addEventListener('focus', onDesktopFocus);
+        window.addEventListener('blur', onDesktopBlur);
 
         // Match native `expo-network` behaviour: desktop has no reachability API, but the browser
         // exposes online/offline. Without this, a broken connect can sit in `error` until the next
@@ -289,7 +303,7 @@ class Sync {
             getCurrentWindow().listen(TauriEvent.WINDOW_FOCUS, () => {
                 if (!document.hidden) {
                     log.log('🖥️ Window focused (Tauri) — probing connection');
-                    apiSocket.resumeReconnection();
+                    onDesktopFocus();
                 }
             });
         }
@@ -384,6 +398,12 @@ class Sync {
         // Also invalidate git status sync for this session
         gitStatusSync.getSync(sessionId).invalidate();
 
+        // If this session still has pending outbox messages, recover from stale
+        // request state after the user returns to the session.
+        if ((this.pendingOutbox.get(sessionId)?.length ?? 0) > 0) {
+            this.recoverPendingOutbox();
+        }
+
         // Notify voice assistant about session visibility
         const session = storage.getState().sessions[sessionId];
         if (session) {
@@ -442,6 +462,21 @@ class Sync {
             this.sendSync.set(sessionId, sync);
         }
         return sync;
+    }
+
+    private recoverPendingOutbox() {
+        if (!this.hasPendingOutboxMessages()) {
+            return;
+        }
+
+        for (const controller of this.sendAbortControllers.values()) {
+            controller.abort();
+        }
+        this.sendAbortControllers.clear();
+
+        for (const sessionId of this.pendingOutbox.keys()) {
+            this.getSendSync(sessionId).invalidate();
+        }
     }
 
     private enqueueMessages(sessionId: string, messages: NormalizedMessage[]) {
@@ -2249,6 +2284,7 @@ class Sync {
             for (const sync of this.sendSync.values()) {
                 sync.invalidate();
             }
+            this.recoverPendingOutbox();
         });
     }
 

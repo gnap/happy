@@ -12,6 +12,8 @@ const RECONNECT_DELAY_MIN = 2000;
 const RECONNECT_DELAY_MAX = 30000;
 /** Jitter factor 0–1 to avoid thundering herd */
 const RECONNECT_RANDOMIZATION_FACTOR = 0.5;
+/** HTTP request timeout for sync RPCs */
+const REQUEST_TIMEOUT_MS = 30_000;
 
 /** Network error codes that warrant retry (same idea as CLI NETWORK_ERROR_CODES) */
 const RETRYABLE_ERROR_HINTS = ['ECONNREFUSED', 'ETIMEDOUT', 'ECONNRESET', 'ENETUNREACH', 'timeout', 'Network'];
@@ -231,10 +233,39 @@ class ApiSocket {
             ...options?.headers
         };
 
-        return fetch(url, {
-            ...options,
-            headers
-        });
+        const timeoutController = new AbortController();
+        let timedOut = false;
+        const timeoutId = setTimeout(() => {
+            timedOut = true;
+            timeoutController.abort();
+        }, REQUEST_TIMEOUT_MS);
+
+        const abortListener = () => {
+            timeoutController.abort();
+        };
+        if (options?.signal) {
+            if (options.signal.aborted) {
+                clearTimeout(timeoutId);
+                throw new Error(`Request aborted before start: ${path}`);
+            }
+            options.signal.addEventListener('abort', abortListener, { once: true });
+        }
+
+        try {
+            return await fetch(url, {
+                ...options,
+                headers,
+                signal: timeoutController.signal,
+            });
+        } catch (error) {
+            if (timedOut) {
+                throw new Error(`Request timed out after ${REQUEST_TIMEOUT_MS / 1000}s: ${path}`);
+            }
+            throw error;
+        } finally {
+            clearTimeout(timeoutId);
+            options?.signal?.removeEventListener('abort', abortListener);
+        }
     }
 
     //
