@@ -12,7 +12,7 @@ import { configuration } from '@/configuration';
 import { startCaffeinate, stopCaffeinate } from '@/utils/caffeinate';
 import packageJson from '../../package.json';
 import { getEnvironmentInfo } from '@/ui/doctor';
-import { spawnHappyCLI } from '@/utils/spawnHappyCLI';
+import { getHappyCliLaunchSpec, spawnHappyCLI } from '@/utils/spawnHappyCLI';
 import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquireDaemonLock, releaseDaemonLock, readSettings, validateProfileForAgent, getProfileEnvironmentVariables } from '@/persistence';
 
 import { cleanupDaemonState, isDaemonRunningCurrentlyInstalledHappyVersion, stopDaemon } from './controlClient';
@@ -605,7 +605,6 @@ export async function startDaemon(): Promise<void> {
           const tmux = getTmuxUtilities(tmuxSessionName);
 
           // Construct command for the CLI
-          const cliPath = join(projectPath(), 'dist', 'index.mjs');
           // Determine agent command - support claude, codex, gemini, cursor, cursor-acp, acp-cursor
           let agent: string;
           if (options.agent === 'gemini') agent = 'gemini';
@@ -613,8 +612,19 @@ export async function startDaemon(): Promise<void> {
           else if (options.agent === 'cursor') agent = 'cursor';
           else if (options.agent === 'cursor-acp' || options.agent === 'acp-cursor') agent = 'acp cursor';
           else agent = 'claude';
-          const resumeArg = shouldPassResumeSessionTag && resumeSessionTag ? ` --resume-session-tag ${JSON.stringify(resumeSessionTag)}` : '';
-          const fullCommand = `node --no-warnings --no-deprecation ${cliPath} ${agent} --happy-starting-mode remote --started-by daemon${resumeArg}`;
+          const launchSpec = getHappyCliLaunchSpec();
+          const tmuxCommandArgs = [
+            ...launchSpec.argsPrefix,
+            ...agent.split(' '),
+            '--happy-starting-mode', 'remote',
+            '--started-by', 'daemon',
+          ];
+          if (shouldPassResumeSessionTag && resumeSessionTag) {
+            tmuxCommandArgs.push('--resume-session-tag', resumeSessionTag);
+          }
+          const fullCommand = [launchSpec.executable, ...tmuxCommandArgs]
+            .map((part) => JSON.stringify(part))
+            .join(' ');
 
           // Spawn in tmux with environment variables
           // IMPORTANT: Pass complete environment (process.env + extraEnv) because:

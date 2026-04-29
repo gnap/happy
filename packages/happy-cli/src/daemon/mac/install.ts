@@ -18,6 +18,7 @@ import { execSync } from 'child_process';
 import { logger } from '@/ui/logger';
 import { trimIdent } from '@/utils/trimIdent';
 import os from 'os';
+import { getHappyCliLaunchSpec } from '@/utils/spawnHappyCLI';
 
 const PLIST_LABEL = 'com.happy-cli.daemon';
 
@@ -55,9 +56,8 @@ export async function install(): Promise<void> {
             }
         }
 
-        // Get the path to the happy CLI executable
-        const happyPath = process.argv[0]; // Node.js executable
-        const scriptPath = process.argv[1]; // Script path
+        const launchSpec = getHappyCliLaunchSpec();
+        const runtimeEnv = launchSpec.runtime === 'bun' ? 'bun' : 'node';
 
         // Create plist content
         const plistContent = trimIdent(`
@@ -70,8 +70,8 @@ export async function install(): Promise<void> {
                 
                 <key>ProgramArguments</key>
                 <array>
-                    <string>${happyPath}</string>
-                    <string>${scriptPath}</string>
+                    <string>${launchSpec.executable}</string>
+                    ${launchSpec.argsPrefix.map((arg) => `<string>${arg}</string>`).join('\n                    ')}
                     <string>daemon</string>
                     <string>start-sync</string>
                 </array>
@@ -80,6 +80,8 @@ export async function install(): Promise<void> {
                 <dict>
                     <key>HAPPY_DAEMON_MODE</key>
                     <string>true</string>
+                    <key>HAPPY_CLI_RUNTIME</key>
+                    <string>${runtimeEnv}</string>
                     <key>PATH</key>
                     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
                 </dict>

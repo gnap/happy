@@ -16,6 +16,7 @@ import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'os';
 import { projectPath } from '@/projectPath';
+import { getHappyCliLaunchSpec } from '@/utils/spawnHappyCLI';
 
 export const SERVICE_NAME = 'happy-daemon';
 
@@ -61,16 +62,20 @@ export function getServiceActiveState(): 'active' | 'inactive' | 'failed' | 'unk
 
 export function generateServiceContent(): string {
   const home = os.homedir();
-  const nodePath = process.execPath;
-  const entrypoint = join(projectPath(), 'dist', 'index.mjs');
+  const launchSpec = getHappyCliLaunchSpec();
   const happyHomeDir = process.env.HAPPY_HOME_DIR ?? join(home, '.happy');
   const happyServerUrl = process.env.HAPPY_SERVER_URL ?? '';
   const happyProjectRoot = process.env.HAPPY_PROJECT_ROOT ?? projectPath();
+  const execStart = [launchSpec.executable, ...launchSpec.argsPrefix, 'daemon', 'start-sync']
+    .map((part) => JSON.stringify(part))
+    .join(' ');
+  const runtime = launchSpec.runtime;
 
   const envLines = [
     `Environment=HOME=${home}`,
     `Environment=HAPPY_HOME_DIR=${happyHomeDir}`,
     `Environment=HAPPY_PROJECT_ROOT=${happyProjectRoot}`,
+    `Environment=HAPPY_CLI_RUNTIME=${runtime}`,
     ...(happyServerUrl ? [`Environment=HAPPY_SERVER_URL=${happyServerUrl}`] : []),
   ].join('\n');
 
@@ -82,7 +87,7 @@ export function generateServiceContent(): string {
     '',
     '[Service]',
     'Type=simple',
-    `ExecStart=${nodePath} --no-warnings --no-deprecation ${entrypoint} daemon start-sync`,
+    `ExecStart=${execStart}`,
     `WorkingDirectory=${projectPath()}`,
     envLines,
     'Restart=on-failure',

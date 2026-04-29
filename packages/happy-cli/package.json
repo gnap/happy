@@ -10,6 +10,7 @@
   "repository": "slopus/happy-cli",
   "bin": {
     "happy": "./bin/happy.mjs",
+    "happy-bun": "./bin/happy-bun.mjs",
     "happy-mcp": "./bin/happy-mcp.mjs"
   },
   "main": "./dist/index.cjs",
@@ -58,13 +59,14 @@
     "why do we need to build before running tests / dev?": "We need the binary to be built so we run daemon commands which directly run the binary - we don't want them to go out of sync or have custom spawn logic depending how we started happy",
     "typecheck": "tsc --noEmit",
     "build": "npx tsc --noEmit && tsup",
+    "build:bun": "npx tsc --noEmit && bun build ./src/index.ts --outfile ./dist/index.bun.mjs --target bun --packages external",
     "test": "$npm_execpath run build && vitest run",
     "start": "$npm_execpath run build && node ./bin/happy.mjs",
     "cli": "tsx src/index.ts",
     "dev": "tsx src/index.ts",
     "dev:local-server": "$npm_execpath run build && tsx --env-file .env.dev-local-server src/index.ts",
     "dev:integration-test-env": "$npm_execpath run build && tsx --env-file .env.integration-test src/index.ts",
-    "prepublishOnly": "$npm_execpath run build && $npm_execpath test",
+    "prepublishOnly": "$npm_execpath run build && $npm_execpath run build:bun && $npm_execpath test",
     "release": "npx --no-install release-it",
     "postinstall": "node scripts/unpack-tools.cjs",
     "// ==== Dev/Stable Variant Management ====": "",
