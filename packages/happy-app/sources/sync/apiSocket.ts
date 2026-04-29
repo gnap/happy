@@ -1,6 +1,7 @@
 import { io, Socket } from 'socket.io-client';
 import { TokenStorage } from '@/auth/tokenStorage';
 import { Encryption } from './encryption/encryption';
+import { isRunningInTauri } from '@/utils/platform';
 
 //
 // Constants (aligned with CLI/daemon reconnection behavior)
@@ -17,6 +18,14 @@ const REQUEST_TIMEOUT_MS = 30_000;
 
 /** Network error codes that warrant retry (same idea as CLI NETWORK_ERROR_CODES) */
 const RETRYABLE_ERROR_HINTS = ['ECONNREFUSED', 'ETIMEDOUT', 'ECONNRESET', 'ENETUNREACH', 'timeout', 'Network'];
+
+function shouldUseTauriHttp(path: string, method: string): boolean {
+    // Tauri plugin-http is more reliable for the hung foreground send we see on Linux,
+    // but large GET /messages payloads are noticeably slower over the IPC bridge.
+    return isRunningInTauri()
+        && method === 'POST'
+        && /^\/v3\/sessions\/[^/]+\/messages$/.test(path);
+}
 
 //
 // Types
@@ -228,6 +237,7 @@ class ApiSocket {
         }
 
         const url = `${this.config.endpoint}${path}`;
+        const method = (options?.method ?? 'GET').toUpperCase();
         const headers = {
             'Authorization': `Bearer ${credentials.token}`,
             ...options?.headers
@@ -252,11 +262,18 @@ class ApiSocket {
         }
 
         try {
-            return await fetch(url, {
+            const requestInit: RequestInit = {
                 ...options,
                 headers,
                 signal: timeoutController.signal,
-            });
+            };
+
+            if (shouldUseTauriHttp(path, method)) {
+                const { fetch: tauriFetch } = await import('@tauri-apps/plugin-http');
+                return await tauriFetch(url, requestInit);
+            }
+
+            return await fetch(url, requestInit);
         } catch (error) {
             if (timedOut) {
                 throw new Error(`Request timed out after ${REQUEST_TIMEOUT_MS / 1000}s: ${path}`);

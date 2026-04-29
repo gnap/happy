@@ -1905,6 +1905,40 @@ class Sync {
     }
 
     /**
+     * If we later see the server echo a user message that matches one of our optimistic
+     * outbox entries, treat it as delivered even if the original POST is still retrying.
+     * This prevents Linux/Tauri foreground sends from spinning forever after a lost response.
+     */
+    private markOutboxMessageDelivered(sessionId: string, localId: string) {
+        storage.getState().removeOutboxEntry(localId);
+
+        const pending = this.pendingOutbox.get(sessionId);
+        if (pending) {
+            const remaining = pending.filter((message) => message.localId !== localId);
+            if (remaining.length !== pending.length) {
+                if (remaining.length === 0) {
+                    this.pendingOutbox.delete(sessionId);
+
+                    // If the queue is now empty but the original request is still hung,
+                    // abort it so InvalidateSync can settle and future sends are not blocked.
+                    const controller = this.sendAbortControllers.get(sessionId);
+                    if (controller) {
+                        controller.abort();
+                    }
+                } else {
+                    this.pendingOutbox.set(sessionId, remaining);
+                }
+            }
+        }
+
+        if (!this.hasPendingOutboxMessages()) {
+            this.clearBackgroundSendWatchdog();
+            void this.cancelBackgroundSendTimeoutNotification();
+            this.backgroundSendStartedAt = null;
+        }
+    }
+
+    /**
      * In session-protocol mode, user messages are echoed back as session envelopes without
      * the original localId. This method checks if an incoming user message (with localId=null)
      * matches a recently sent message and, if so, claims and returns the original localId.
@@ -1939,6 +1973,7 @@ class Sync {
         const localId = this.claimSentMessageLocalId(sessionId, text);
         if (localId) {
             this.claimedServerMessageIds.set(serverMsgId, localId);
+            this.markOutboxMessageDelivered(sessionId, localId);
             console.log(`[Sync] resolveLocalId: ${serverMsgId} → ${localId} (text="${text}")`);
         }
         return localId;
