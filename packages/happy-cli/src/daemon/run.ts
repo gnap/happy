@@ -40,6 +40,36 @@ export const initialMachineMetadata: MachineMetadata = {
   happyLibDir: projectPath()
 };
 
+/**
+ * Check whether a PID is running and not a zombie/defunct process.
+ * `process.kill(pid, 0)` reports zombies as alive on Unix, so we inspect `/proc`
+ * on Linux and treat state `Z` as dead.
+ */
+async function isPidRunningAndNotZombie(pid: number): Promise<boolean> {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+
+  if (os.platform() !== 'linux') {
+    return true;
+  }
+
+  try {
+    const stat = await fs.readFile(`/proc/${pid}/stat`, 'utf8');
+    const closingParen = stat.lastIndexOf(')');
+    if (closingParen === -1 || closingParen + 2 >= stat.length) {
+      return true;
+    }
+
+    const state = stat.slice(closingParen + 2, closingParen + 3);
+    return state !== 'Z';
+  } catch {
+    return false;
+  }
+}
+
 // Get environment variables for a profile, filtered for agent compatibility
 async function getProfileEnvironmentVariablesForAgent(
   profileId: string,
@@ -1037,35 +1067,39 @@ export async function startDaemon(): Promise<void> {
     });
 
     // Periodic liveness check: verify sessions are still running by checking their PID.
-    // - PID alive   → keep session, just note if heartbeat is stale
-    // - PID gone    → evict (process is dead regardless of heartbeat state)
+    // - PID alive and not zombie → keep session, just note if heartbeat is stale
+    // - PID gone or zombie       → evict (process is dead regardless of heartbeat state)
     // Sessions with a childProcess also get cleaned up via the 'exit' event,
     // but the PID check here catches any that slip through (e.g. SIGKILL).
     const SESSION_HEARTBEAT_STALE_MS = 90_000; // 3× heartbeat interval
     const ttlCleanupInterval = setInterval(() => {
-      const now = Date.now();
-      for (const [pid, session] of pidToTrackedSession.entries()) {
-        const pidAlive = (() => { try { process.kill(pid, 0); return true; } catch { return false; } })();
-        if (!pidAlive) {
-          if (!session.exitReason) {
-            session.exitReason = 'evicted (pid missing — no exit event received)';
-            session.exitTime = session.exitTime ?? Date.now();
+      void (async () => {
+        const now = Date.now();
+        for (const [pid, session] of pidToTrackedSession.entries()) {
+          const pidAlive = await isPidRunningAndNotZombie(pid);
+          if (!pidAlive) {
+            if (!session.exitReason) {
+              session.exitReason = 'evicted (pid missing or zombie — no exit event received)';
+              session.exitTime = session.exitTime ?? Date.now();
+            }
+            logger.debug(`[DAEMON RUN] Evicting dead session ${session.happySessionId} (PID ${pid} not found or zombie, reason: ${session.exitReason})`);
+            persistSessionTagBeforeRemove(session);
+            pushRecentlyExited(session);
+            if (session.happySessionId) {
+              stoppedSessions.set(session.happySessionId, { ...session, childProcess: undefined });
+              persistNow();
+            }
+            pidToTrackedSession.delete(pid);
+            continue;
           }
-          logger.debug(`[DAEMON RUN] Evicting dead session ${session.happySessionId} (PID ${pid} not found, reason: ${session.exitReason})`);
-          persistSessionTagBeforeRemove(session);
-          pushRecentlyExited(session);
-          if (session.happySessionId) {
-            stoppedSessions.set(session.happySessionId, { ...session, childProcess: undefined });
-            persistNow();
+          // PID alive: just log if heartbeat is stale (for visibility), do not evict
+          if (session.lastHeartbeat && now - session.lastHeartbeat > SESSION_HEARTBEAT_STALE_MS) {
+            logger.debug(`[DAEMON RUN] Session ${session.happySessionId} (PID ${pid}) is alive but heartbeat is stale (${Math.round((now - session.lastHeartbeat) / 1000)}s ago)`);
           }
-          pidToTrackedSession.delete(pid);
-          continue;
         }
-        // PID alive: just log if heartbeat is stale (for visibility), do not evict
-        if (session.lastHeartbeat && now - session.lastHeartbeat > SESSION_HEARTBEAT_STALE_MS) {
-          logger.debug(`[DAEMON RUN] Session ${session.happySessionId} (PID ${pid}) is alive but heartbeat is stale (${Math.round((now - session.lastHeartbeat) / 1000)}s ago)`);
-        }
-      }
+      })().catch((error) => {
+        logger.debug('[DAEMON RUN] TTL cleanup error:', error);
+      });
     }, 30_000);
     ttlCleanupInterval.unref(); // don't prevent daemon from exiting
 
@@ -1190,11 +1224,9 @@ export async function startDaemon(): Promise<void> {
 
       // Prune stale sessions
       for (const [pid, session] of pidToTrackedSession.entries()) {
-        try {
-          process.kill(pid, 0);
-        } catch {
+        if (!(await isPidRunningAndNotZombie(pid))) {
           logger.debug(`[DAEMON RUN] Moving stale session PID ${pid} to stoppedSessions`);
-          if (!session.exitReason) session.exitReason = 'evicted (pid missing — detected in heartbeat)';
+          if (!session.exitReason) session.exitReason = 'evicted (pid missing or zombie — detected in heartbeat)';
           session.exitTime = session.exitTime ?? Date.now();
           persistSessionTagBeforeRemove(session);
           pushRecentlyExited(session);
