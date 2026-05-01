@@ -10,6 +10,7 @@ import https from 'node:https'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import packageJson from '../package.json'
+import { isNode } from '@/utils/runtime'
 
 /** HTTPS agent that forces IPv4 for server requests (avoids ETIMEDOUT on IPv6-unreachable hosts). */
 export const serverHttpsAgent = new https.Agent({ family: 4 })
@@ -58,7 +59,7 @@ function resolveDaemonHttpPort(settingsFile: string, legacyEnvPort: string | und
 }
 
 // Force all HTTPS in this process to use IPv4 (catches axios, socket.io, etc. that do not pass agent).
-if (typeof process !== 'undefined' && process.versions?.node) {
+if (isNode()) {
   (https as any).globalAgent = serverHttpsAgent
 }
 

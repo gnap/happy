@@ -69,4 +69,11 @@ describe('spawnHappyCLI', () => {
       { cwd: '/tmp/project' },
     );
   });
+
+  it('throws when bun entrypoint is missing', () => {
+    process.env.HAPPY_CLI_RUNTIME = 'bun';
+    mockExistsSync.mockImplementation(() => false);
+
+    expect(() => getHappyCliLaunchSpec()).toThrow(/build:bun/);
+  });
 });

@@ -1202,7 +1202,8 @@ export async function startDaemon(): Promise<void> {
     });
     logger.debug(`[DAEMON RUN] Machine registered: ${machine.id}`);
 
-    // Create realtime machine session
+    // Create realtime machine session.
+    // Use websocket-only here; Bun has been verified to connect successfully on this path.
     const apiMachine = api.machineSyncClient(machine, true);
 
     // Set RPC handlers

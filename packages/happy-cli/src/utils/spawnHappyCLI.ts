@@ -99,9 +99,11 @@ export function getHappyCliLaunchSpec(runtime: HappyCliRuntime = getConfiguredHa
   const projectRoot = projectPath();
   const nodeEntrypoint = join(projectRoot, 'dist', 'index.mjs');
   const bunEntrypoint = join(projectRoot, 'dist', 'index.bun.mjs');
-  const entrypoint = runtime === 'bun'
-    ? (existsSync(bunEntrypoint) ? bunEntrypoint : nodeEntrypoint)
-    : nodeEntrypoint;
+  if (runtime === 'bun' && !existsSync(bunEntrypoint)) {
+    throw new Error(`Bun entrypoint ${bunEntrypoint} does not exist. Run "yarn workspace happy-coder build:bun" before starting Bun-based processes.`);
+  }
+
+  const entrypoint = runtime === 'bun' ? bunEntrypoint : nodeEntrypoint;
 
   if (runtime === 'bun') {
     return {

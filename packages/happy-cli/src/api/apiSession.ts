@@ -12,6 +12,7 @@ import { configuration, serverHttpsAgent } from '@/configuration';
 import { RawJSONLines } from '@/claude/types';
 import { randomUUID } from 'node:crypto';
 import { AsyncLock } from '@/utils/lock';
+import { isNode } from '@/utils/runtime';
 import { RpcHandlerManager } from './rpc/RpcHandlerManager';
 import { registerCommonHandlers } from '../modules/common/registerCommonHandlers';
 import { calculateCost } from '@/utils/pricing';
@@ -448,7 +449,7 @@ export class ApiSessionClient extends EventEmitter {
             transports: this.websocketOnly ? ['websocket'] : ['polling', 'websocket'],
             withCredentials: true,
             autoConnect: false,
-            ...(typeof process !== 'undefined' && process.versions?.node && { agent: serverHttpsAgent as any }),
+            ...(isNode() && { agent: serverHttpsAgent as any }),
         });
 
         //

@@ -12,6 +12,7 @@ import { MachineMetadata, DaemonState, Machine, Update, UpdateMachineBody } from
 import { registerCommonHandlers, SpawnSessionOptions, SpawnSessionResult } from '../modules/common/registerCommonHandlers';
 import { encodeBase64, decodeBase64, encrypt, decrypt } from './encryption';
 import { backoff } from '@/utils/time';
+import { isBun, isNode } from '@/utils/runtime';
 import { RpcHandlerManager } from './rpc/RpcHandlerManager';
 
 function getLocalMachineMetadata(): MachineMetadata {
@@ -250,7 +251,7 @@ export class ApiMachineClient {
     }
 
     connect() {
-        const serverUrl = configuration.serverUrl.replace(/^http/, 'ws');
+        const serverUrl = configuration.serverUrl;
         logger.debug(`[API MACHINE] Connecting to ${serverUrl}`);
 
         const socketOptions = this.websocketOnly
@@ -258,9 +259,14 @@ export class ApiMachineClient {
                 transports: ['websocket'],
                 upgrade: false,
               }
-            : {
-                transports: ['polling', 'websocket'],
-              };
+            : isBun()
+                ? {
+                    transports: ['polling'],
+                    upgrade: false,
+                  }
+                : {
+                    transports: ['polling', 'websocket'],
+                  };
 
         this.socket = io(serverUrl, {
             ...socketOptions,
@@ -270,10 +276,11 @@ export class ApiMachineClient {
                 machineId: this.machine.id
             },
             path: '/v1/updates',
+            withCredentials: true,
             reconnection: true,
             reconnectionDelay: 1000,
             reconnectionDelayMax: 5000,
-            ...(typeof process !== 'undefined' && process.versions?.node && { agent: serverHttpsAgent as any }),
+            ...(isNode() && { agent: serverHttpsAgent as any }),
         });
 
         this.socket.on('connect', () => {
