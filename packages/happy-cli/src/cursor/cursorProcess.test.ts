@@ -1,6 +1,25 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import os from 'node:os';
 
-import { buildCursorPtySpawn } from './cursorProcess';
+const mocks = vi.hoisted(() => ({
+  mockExistsSync: vi.fn(),
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    existsSync: mocks.mockExistsSync,
+  };
+});
+
+import { buildCursorPtySpawn, resolveCursorAgentPath } from './cursorProcess';
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  delete process.env.CURSOR_AGENT_PATH;
+  mocks.mockExistsSync.mockReset();
+});
 
 describe('buildCursorPtySpawn', () => {
   it('passes the prompt as argv on macOS PTY runs', () => {
@@ -32,5 +51,20 @@ describe('buildCursorPtySpawn', () => {
     expect(spec.args[5]).toContain(`'/usr/local/bin/cursor-agent' '--print' '--' '-start
 contains \`backticks\` and '\\''quotes'\\'''`);
     expect(spec.args[5]).toContain(`'/bin/bash' '-l' '-c' 'exec "$0" "$@"'`);
+  });
+});
+
+describe('resolveCursorAgentPath', () => {
+  it('prefers CURSOR_AGENT_PATH when provided', () => {
+    process.env.CURSOR_AGENT_PATH = '/custom/bin/cursor-agent';
+
+    expect(resolveCursorAgentPath()).toBe('/custom/bin/cursor-agent');
+  });
+
+  it('prefers ~/.local/bin/cursor-agent before PATH lookup', () => {
+    const localBin = `${os.homedir()}/.local/bin/cursor-agent`;
+    mocks.mockExistsSync.mockImplementation((candidate) => candidate === localBin);
+
+    expect(resolveCursorAgentPath()).toBe(localBin);
   });
 });

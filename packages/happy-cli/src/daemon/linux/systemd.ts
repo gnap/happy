@@ -62,7 +62,7 @@ export function getServiceActiveState(): 'active' | 'inactive' | 'failed' | 'unk
 
 export function generateServiceContent(): string {
   const home = os.homedir();
-  const launchSpec = getHappyCliLaunchSpec();
+  const launchSpec = getHappyCliLaunchSpec('bun');
   const happyHomeDir = process.env.HAPPY_HOME_DIR ?? join(home, '.happy');
   const happyServerUrl = process.env.HAPPY_SERVER_URL ?? '';
   const happyProjectRoot = process.env.HAPPY_PROJECT_ROOT ?? projectPath();

@@ -13,6 +13,8 @@
 
 import { execFile, execSync, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { logger } from '@/ui/logger';
 import type { CursorStreamMessage } from './types';
@@ -54,21 +56,39 @@ export function buildCursorPtySpawn(
 export type CursorExecutionMode = 'default' | 'plan' | 'ask';
 
 /** Resolve cursor-agent to an absolute path for use inside script's bash (so it works with minimal PATH). */
-function resolveCursorAgentPath(): string {
+export function resolveCursorAgentPath(): string {
   const envPath = process.env.CURSOR_AGENT_PATH;
   if (envPath && envPath.length > 0) {
     return envPath;
   }
+  const home = homedir();
+  const preferred = [
+    join(home, '.local/bin/cursor-agent'),
+    '/opt/homebrew/bin/cursor-agent',
+    '/usr/local/bin/cursor-agent',
+    '/usr/bin/cursor-agent',
+  ];
+  for (const candidate of preferred) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
   try {
     const fromWhich = execSync(`which ${CURSOR_AGENT_NAME}`, {
       encoding: 'utf8',
-      env: { ...process.env, PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin' },
+      env: {
+        ...process.env,
+        PATH: [
+          join(home, '.local/bin'),
+          process.env.PATH || '/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin',
+        ].filter(Boolean).join(':'),
+      },
     }).trim();
     if (fromWhich) return fromWhich;
   } catch {
     /* which failed */
   }
-  const fallbacks = ['/opt/homebrew/bin/cursor-agent', '/usr/local/bin/cursor-agent'];
+  const fallbacks = ['/opt/homebrew/bin/cursor-agent', '/usr/local/bin/cursor-agent', '/usr/bin/cursor-agent'];
   for (const p of fallbacks) {
     if (existsSync(p)) return p;
   }
