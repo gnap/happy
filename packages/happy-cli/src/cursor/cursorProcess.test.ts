@@ -46,11 +46,11 @@ describe('buildCursorPtySpawn', () => {
     const spec = buildCursorPtySpawn('/usr/local/bin/cursor-agent', ['--print', '--', prompt], true);
 
     expect(spec.command).toBe('stdbuf');
-    expect(spec.args[0]).toBe('-o0');
-    expect(spec.args[1]).toBe('script');
+    expect(spec.args.slice(0, 5)).toEqual(['-o0', 'script', '-q', '-e', '-c']);
     expect(spec.args[5]).toContain(`'/usr/local/bin/cursor-agent' '--print' '--' '-start
 contains \`backticks\` and '\\''quotes'\\'''`);
     expect(spec.args[5]).toContain(`'/bin/bash' '-l' '-c' 'exec "$0" "$@"'`);
+    expect(spec.args[6]).toBe('/dev/null');
   });
 });
 

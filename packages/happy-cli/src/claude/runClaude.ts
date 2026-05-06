@@ -29,6 +29,7 @@ import { claudeLocal } from '@/claude/claudeLocal';
 import { createSessionScanner } from '@/claude/utils/sessionScanner';
 import { Session } from './session';
 import { applySandboxPermissionPolicy, resolveInitialClaudePermissionMode } from './utils/permissionMode';
+import { normalizeClaudeModelForSdk } from './utils/model';
 
 /** JavaScript runtime to use for spawning Claude Code */
 export type JsRuntime = 'node' | 'bun'
@@ -265,7 +266,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     // Forward messages to the queue
     // Permission modes: Use the unified 7-mode type, mapping happens at SDK boundary in claudeRemote.ts
     let currentPermissionMode: PermissionMode | undefined = initialPermissionMode;
-    let currentModel = options.model; // Track current model state
+    let currentModel = normalizeClaudeModelForSdk(options.model); // Track current model state
     let currentFallbackModel: string | undefined = undefined; // Track current fallback model
     let currentCustomSystemPrompt: string | undefined = undefined; // Track current custom system prompt
     let currentAppendSystemPrompt: string | undefined = undefined; // Track current append system prompt
@@ -286,7 +287,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         // Resolve model - use message.meta.model if provided, otherwise use current model
         let messageModel = currentModel;
         if (message.meta?.hasOwnProperty('model')) {
-            messageModel = message.meta.model || undefined; // null becomes undefined
+            messageModel = normalizeClaudeModelForSdk(message.meta.model);
             currentModel = messageModel;
             logger.debug(`[loop] Model updated from user message: ${messageModel || 'reset to default'}`);
         } else {
@@ -306,7 +307,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         // Resolve fallback model - use message.meta.fallbackModel if provided, otherwise use current fallback model
         let messageFallbackModel = currentFallbackModel;
         if (message.meta?.hasOwnProperty('fallbackModel')) {
-            messageFallbackModel = message.meta.fallbackModel || undefined; // null becomes undefined
+            messageFallbackModel = normalizeClaudeModelForSdk(message.meta.fallbackModel);
             currentFallbackModel = messageFallbackModel;
             logger.debug(`[loop] Fallback model updated from user message: ${messageFallbackModel || 'reset to none'}`);
         } else {
@@ -462,7 +463,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     // Create claude loop
     const exitCode = await loop({
         path: workingDirectory,
-        model: options.model,
+        model: normalizeClaudeModelForSdk(options.model),
         permissionMode: initialPermissionMode,
         startingMode: options.startingMode,
         messageQueue,

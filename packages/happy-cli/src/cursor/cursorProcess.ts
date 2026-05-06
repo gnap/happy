@@ -43,7 +43,7 @@ export function buildCursorPtySpawn(
 
     return {
       command: 'stdbuf',
-      args: ['-o0', 'script', '-q', '/dev/null', '-c', linuxCommand],
+      args: ['-o0', 'script', '-q', '-e', '-c', linuxCommand, '/dev/null'],
     };
   }
 
