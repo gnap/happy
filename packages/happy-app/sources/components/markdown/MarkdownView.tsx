@@ -1,4 +1,5 @@
 import { MarkdownSpan, parseMarkdown } from './parseMarkdown';
+import { parseMarkdownSpans } from './parseMarkdownSpans';
 import { Link } from 'expo-router';
 import * as React from 'react';
 import { Pressable, ScrollView, View, Platform } from 'react-native';
@@ -237,8 +238,8 @@ function RenderTableBlock(props: {
     first: boolean,
     last: boolean
 }) {
-    const renderTableCellText = (value: string | undefined) => (
-        value && value.length > 0 ? value : '\u00A0'
+    const renderTableCellSpans = (value: string | undefined) => (
+        parseMarkdownSpans(value && value.length > 0 ? value : '\u00A0', false)
     );
     const columnCount = props.headers.length;
     const rowCount = props.rows.length;
@@ -264,7 +265,9 @@ function RenderTableBlock(props: {
                         >
                             {/* Header cell for this column */}
                             <View style={[style.tableCell, style.tableHeaderCell, style.tableCellFirst]}>
-                                <Text style={style.tableHeaderText}>{renderTableCellText(header)}</Text>
+                                <Text style={style.tableHeaderText}>
+                                    <RenderSpans spans={renderTableCellSpans(header)} baseStyle={style.tableHeaderText} />
+                                </Text>
                             </View>
                             {/* Data cells for this column */}
                             {props.rows.map((row, rowIndex) => (
@@ -275,7 +278,9 @@ function RenderTableBlock(props: {
                                         isLastRow(rowIndex) && style.tableCellLast
                                     ]}
                                 >
-                                    <Text style={style.tableCellText}>{renderTableCellText(row[colIndex])}</Text>
+                                    <Text style={style.tableCellText}>
+                                        <RenderSpans spans={renderTableCellSpans(row[colIndex])} baseStyle={style.tableCellText} />
+                                    </Text>
                                 </View>
                             ))}
                         </View>
