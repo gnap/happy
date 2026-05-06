@@ -237,6 +237,9 @@ function RenderTableBlock(props: {
     first: boolean,
     last: boolean
 }) {
+    const renderTableCellText = (value: string | undefined) => (
+        value && value.length > 0 ? value : '\u00A0'
+    );
     const columnCount = props.headers.length;
     const rowCount = props.rows.length;
     const isLastRow = (rowIndex: number) => rowIndex === rowCount - 1;
@@ -261,7 +264,7 @@ function RenderTableBlock(props: {
                         >
                             {/* Header cell for this column */}
                             <View style={[style.tableCell, style.tableHeaderCell, style.tableCellFirst]}>
-                                <Text style={style.tableHeaderText}>{header}</Text>
+                                <Text style={style.tableHeaderText}>{renderTableCellText(header)}</Text>
                             </View>
                             {/* Data cells for this column */}
                             {props.rows.map((row, rowIndex) => (
@@ -272,7 +275,7 @@ function RenderTableBlock(props: {
                                         isLastRow(rowIndex) && style.tableCellLast
                                     ]}
                                 >
-                                    <Text style={style.tableCellText}>{row[colIndex] ?? ''}</Text>
+                                    <Text style={style.tableCellText}>{renderTableCellText(row[colIndex])}</Text>
                                 </View>
                             ))}
                         </View>

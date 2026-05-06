@@ -1,6 +1,12 @@
 import type { MarkdownBlock } from "./parseMarkdown";
 import { parseMarkdownSpans } from "./parseMarkdownSpans";
 
+function parseTableCells(line: string): string[] {
+    const trimmed = line.trim();
+    const withoutOuterPipes = trimmed.replace(/^\|/, '').replace(/\|$/, '');
+    return withoutOuterPipes.split('|').map(cell => cell.trim());
+}
+
 function parseTable(lines: string[], startIndex: number): { table: MarkdownBlock | null; nextIndex: number } {
     let index = startIndex;
     const tableLines: string[] = [];
@@ -24,13 +30,9 @@ function parseTable(lines: string[], startIndex: number): { table: MarkdownBlock
     }
 
     // Extract header cells from the first line, filtering out empty cells that may result from leading/trailing pipes
-    const headerLine = tableLines[0].trim();
-    const headers = headerLine
-        .split('|')
-        .map(cell => cell.trim())
-        .filter(cell => cell.length > 0);
+    const headers = parseTableCells(tableLines[0]);
 
-    if (headers.length === 0) {
+    if (headers.length === 0 || headers.every(cell => cell.length === 0)) {
         return { table: null, nextIndex: startIndex };
     }
 
@@ -38,14 +40,12 @@ function parseTable(lines: string[], startIndex: number): { table: MarkdownBlock
     const rows: string[][] = [];
     for (let i = 2; i < tableLines.length; i++) {
         const rowLine = tableLines[i].trim();
-        if (rowLine.startsWith('|')) {
-            const rowCells = rowLine
-                .split('|')
-                .map(cell => cell.trim())
-                .filter(cell => cell.length > 0);
+        if (rowLine.includes('|')) {
+            const rowCells = parseTableCells(rowLine);
 
-            // Include rows that contain actual content, filtering out empty rows
-            if (rowCells.length > 0) {
+            // Include rows that contain actual content, while preserving empty cells
+            // so later columns stay aligned with the header.
+            if (rowCells.some(cell => cell.length > 0)) {
                 rows.push(rowCells);
             }
         }
