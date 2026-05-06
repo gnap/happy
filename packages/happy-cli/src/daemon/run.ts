@@ -228,6 +228,8 @@ export async function startDaemon(): Promise<void> {
      * Keyed by happySessionId. Shown in 'daemon list' alongside active sessions.
      */
     const stoppedSessions = new Map<string, TrackedSession>();
+    /** Session IDs that have been explicitly archived and must never respawn. */
+    const archivedSessionIds: Record<string, number> = {};
 
     // Helper functions
     const getCurrentChildren = (): TrackedSession[] => [
@@ -255,6 +257,10 @@ export async function startDaemon(): Promise<void> {
     const persistSessionTagBeforeRemove = (session: TrackedSession) => {
       if (session.directory && session.sessionTag) lastSessionTagByDirectory[session.directory] = session.sessionTag;
       if (session.happySessionId && session.sessionTag) lastSessionTagBySessionId[session.happySessionId] = session.sessionTag;
+    };
+    const markSessionArchived = (sessionId: string) => {
+      archivedSessionIds[sessionId] = Date.now();
+      stoppedSessions.delete(sessionId);
     };
 
     /** Derive human-readable exit reason from code/signal when no webhook reason was given. */
@@ -348,6 +354,10 @@ export async function startDaemon(): Promise<void> {
         if (exitCode !== undefined) session.exitCode = exitCode;
         if (archive) session.pendingArchive = true;
         logger.debug(`[DAEMON RUN] Session ending (self-reported): ${sessionId} PID ${pid} reason="${reason}" archive=${archive ?? false}`);
+        if (archive) {
+          markSessionArchived(sessionId);
+          persistNow();
+        }
       } else {
         // Process already evicted — still record for history if it matches a recently-exited entry
         const recent = recentlyExited.slice().reverse().find((s: TrackedSession) => s.pid === pid && s.happySessionId === sessionId);
@@ -355,6 +365,10 @@ export async function startDaemon(): Promise<void> {
           recent.exitReason = reason;
           if (exitCode !== undefined) recent.exitCode = exitCode;
           logger.debug(`[DAEMON RUN] Session ending (self-reported, already evicted): ${sessionId} PID ${pid} reason="${reason}"`);;
+        }
+        if (archive) {
+          markSessionArchived(sessionId);
+          persistNow();
         }
       }
     };
@@ -932,6 +946,10 @@ export async function startDaemon(): Promise<void> {
         if (session.pendingArchive) {
           // App-initiated archive (killSession RPC): do not keep in list
           logger.debug(`[DAEMON RUN] Session ${session.happySessionId} (PID ${pid}) archived by app, removing from list`);
+          if (session.happySessionId) {
+            markSessionArchived(session.happySessionId);
+            persistNow();
+          }
         } else {
           // Process exited on its own (pause / signal / crash): keep visible until user archives
           logger.debug(`[DAEMON RUN] Session ${session.happySessionId} (PID ${pid}) exited (reason: ${session.exitReason}), moving to stoppedSessions`);
@@ -961,7 +979,10 @@ export async function startDaemon(): Promise<void> {
           break;
         }
       }
-      if (removed) persistNow();
+      if (removed) {
+        markSessionArchived(sessionId);
+        persistNow();
+      }
       return removed;
     };
 
@@ -990,6 +1011,10 @@ export async function startDaemon(): Promise<void> {
       if (!found) {
         const persistedDirectory = lastDirectoryBySessionId[sessionId];
         if (persistedDirectory) {
+          if (archivedSessionIds[sessionId]) {
+            logger.debug(`[DAEMON RUN] Restart: refusing archived session ${sessionId}`);
+            return { success: false, error: 'Session has been archived and cannot be restarted' };
+          }
           const unexpectedActiveMatches = activeSessionsBySessionId(sessionId);
           if (unexpectedActiveMatches.length > 0) {
             logger.debug(`[DAEMON RUN] Restart: refusing persisted restore for ${sessionId}; ${unexpectedActiveMatches.length} active process(es) still exist`);
@@ -1119,12 +1144,14 @@ export async function startDaemon(): Promise<void> {
     if (prevState?.lastSessionTagBySessionId) Object.assign(lastSessionTagBySessionId, prevState.lastSessionTagBySessionId);
     if (prevState?.lastDirectoryBySessionId) Object.assign(lastDirectoryBySessionId, prevState.lastDirectoryBySessionId);
     if (prevState?.lastAgentBySessionId) Object.assign(lastAgentBySessionId, prevState.lastAgentBySessionId);
+    if (prevState?.archivedSessionIds) Object.assign(archivedSessionIds, prevState.archivedSessionIds);
     // Restore stopped sessions from previous daemon state (tombstone survives clean shutdown)
     const persistedStopped = prevState?.stoppedSessions;
     if (persistedStopped) {
       const MAX_STOPPED_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
       const now = Date.now();
       for (const s of persistedStopped) {
+        if (archivedSessionIds[s.happySessionId]) continue;
         if (s.exitTime && now - s.exitTime > MAX_STOPPED_AGE_MS) continue;
         stoppedSessions.set(s.happySessionId, {
           startedBy: 'daemon',
@@ -1165,6 +1192,7 @@ export async function startDaemon(): Promise<void> {
         lastSessionTagBySessionId: { ...lastSessionTagBySessionId },
         lastDirectoryBySessionId: { ...lastDirectoryBySessionId },
         lastAgentBySessionId: { ...lastAgentBySessionId },
+        archivedSessionIds: { ...archivedSessionIds },
         stoppedSessions: serializeStoppedSessions(),
       });
     };
@@ -1178,6 +1206,7 @@ export async function startDaemon(): Promise<void> {
       lastSessionTagBySessionId: { ...lastSessionTagBySessionId },
       lastDirectoryBySessionId: { ...lastDirectoryBySessionId },
       lastAgentBySessionId: { ...lastAgentBySessionId },
+      archivedSessionIds: { ...archivedSessionIds },
       stoppedSessions: serializeStoppedSessions(),
     };
     writeDaemonState(fileState);
@@ -1334,6 +1363,11 @@ export async function startDaemon(): Promise<void> {
 
           // Server still considers session active
           if (active) continue;
+
+          if (archivedSessionIds[id]) {
+            logger.debug(`[DAEMON RUN] Auto-respawn skipped for archived session ${id}`);
+            continue;
+          }
 
           // Session is already running locally
           const isRunning = Array.from(pidToTrackedSession.values()).some(s => s.happySessionId === id);

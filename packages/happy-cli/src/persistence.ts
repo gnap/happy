@@ -303,6 +303,8 @@ export interface DaemonLocallyPersistedState {
     exitTime?: number;
     lastHeartbeat?: number;
   }>;
+  /** Session IDs that have been explicitly archived and must never respawn. */
+  archivedSessionIds?: Record<string, number>;
 }
 
 function writeFileAtomically(filePath: string, content: string): void {
@@ -602,7 +604,8 @@ export async function clearDaemonState(): Promise<void> {
     Object.keys(existing?.lastDirectoryBySessionId ?? {}).length > 0 ||
     Object.keys(existing?.lastSessionTagBySessionId ?? {}).length > 0 ||
     Object.keys(existing?.lastSessionTagByDirectory ?? {}).length > 0 ||
-    Object.keys(existing?.lastAgentBySessionId ?? {}).length > 0;
+    Object.keys(existing?.lastAgentBySessionId ?? {}).length > 0 ||
+    Object.keys(existing?.archivedSessionIds ?? {}).length > 0;
 
   if (hasDataToPreserve) {
     // Write tombstone: no pid/httpPort (signals daemon is stopped), but keep session data
@@ -612,6 +615,7 @@ export async function clearDaemonState(): Promise<void> {
       lastSessionTagBySessionId: existing!.lastSessionTagBySessionId,
       lastSessionTagByDirectory: existing!.lastSessionTagByDirectory,
       lastAgentBySessionId: existing!.lastAgentBySessionId,
+      archivedSessionIds: existing!.archivedSessionIds,
     }, null, 2));
   } else if (existsSync(configuration.daemonStateFile)) {
     await unlink(configuration.daemonStateFile);
