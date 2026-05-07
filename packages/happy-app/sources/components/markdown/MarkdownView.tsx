@@ -6,6 +6,7 @@ import { Pressable, ScrollView, View, Platform } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { StyleSheet } from 'react-native-unistyles';
 import { Text } from '../StyledText';
+import { ExternalLink } from '../ExternalLink';
 import { Typography } from '@/constants/Typography';
 import { SimpleSyntaxHighlighter } from '../SimpleSyntaxHighlighter';
 import { Modal } from '@/modal';
@@ -232,8 +233,12 @@ function RenderSpans(props: { spans: MarkdownSpan[], baseStyle?: any }) {
     return (<>
         {props.spans.map((span, index) => {
             if (span.url) {
-                if (!isRunningInTauri()) {
+                if (Platform.OS === 'web') {
                     return <Link key={index} href={span.url as any} target="_blank" style={[style.link, span.styles.map(s => style[s])]}>{span.text}</Link>
+                }
+
+                if (!isRunningInTauri()) {
+                    return <ExternalLink key={index} href={span.url} style={[style.link, span.styles.map(s => style[s])]}>{span.text}</ExternalLink>
                 }
 
                 return (
