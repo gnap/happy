@@ -15,11 +15,22 @@ import { useRouter } from 'expo-router';
 import * as Clipboard from 'expo-clipboard';
 import { MermaidRenderer } from './MermaidRenderer';
 import { t } from '@/text';
+import { isRunningInTauri } from '@/utils/platform';
 
 // Option type for callback
 export type Option = {
     title: string;
 };
+
+async function openMarkdownLink(url: string) {
+    try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('open_external_url', { url });
+    } catch (error) {
+        console.error('Failed to open markdown link:', error);
+        Modal.alert(t('common.error'), url);
+    }
+}
 
 export const MarkdownView = React.memo((props: { 
     markdown: string;
@@ -221,7 +232,20 @@ function RenderSpans(props: { spans: MarkdownSpan[], baseStyle?: any }) {
     return (<>
         {props.spans.map((span, index) => {
             if (span.url) {
-                return <Link key={index} href={span.url as any} target="_blank" style={[style.link, span.styles.map(s => style[s])]}>{span.text}</Link>
+                if (!isRunningInTauri()) {
+                    return <Link key={index} href={span.url as any} target="_blank" style={[style.link, span.styles.map(s => style[s])]}>{span.text}</Link>
+                }
+
+                return (
+                    <Text
+                        key={index}
+                        selectable
+                        onPress={() => void openMarkdownLink(span.url!)}
+                        style={[props.baseStyle, style.link, style.desktopLink, span.styles.map(s => style[s])]}
+                    >
+                        {span.text}
+                    </Text>
+                );
             } else {
                 return <Text key={index} selectable style={[props.baseStyle, span.styles.map(s => style[s])]}>{span.text}</Text>
             }
@@ -326,6 +350,10 @@ const style = StyleSheet.create((theme) => ({
         ...Typography.default(),
         color: theme.colors.textLink,
         fontWeight: '400',
+    },
+    desktopLink: {
+        fontWeight: '600',
+        textDecorationLine: 'underline',
     },
 
     // Headers
