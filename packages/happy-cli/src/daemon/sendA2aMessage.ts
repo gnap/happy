@@ -11,18 +11,33 @@ type SendA2AOptions = {
   title?: string;
 };
 
-async function readCursorSessionKey(sessionId: string): Promise<Uint8Array | null> {
+function getSessionKeyPrefix(agent?: string): 'cursor' | 'claude' | null {
+  if (!agent) return null;
+  if (agent === 'claude') return 'claude';
+  if (agent === 'cursor' || agent === 'cursor-acp' || agent === 'acp-cursor') return 'cursor';
+  return null;
+}
+
+async function readSessionKey(sessionId: string): Promise<Uint8Array | null> {
   const state = await readDaemonState();
+  const agent = state?.lastAgentBySessionId?.[sessionId];
+  const knownPrefix = getSessionKeyPrefix(agent);
+  const cursorTagFallback = existsSync(join(configuration.happyHomeDir, 'cursor-session-tag'))
+    ? (await readFile(join(configuration.happyHomeDir, 'cursor-session-tag'), 'utf8')).trim()
+    : '';
   const tag = state?.lastSessionTagBySessionId?.[sessionId]
     ?? state?.lastSessionTagByDirectory?.[state?.lastDirectoryBySessionId?.[sessionId] ?? '']
-    ?? (existsSync(join(configuration.happyHomeDir, 'cursor-session-tag'))
-      ? (await readFile(join(configuration.happyHomeDir, 'cursor-session-tag'), 'utf8')).trim()
-      : '');
+    ?? (knownPrefix !== 'claude' ? cursorTagFallback : '');
+  const keyPrefixes = (() => {
+    if (knownPrefix) return [knownPrefix];
+    // Fall back to both known agent key families for older daemon state.
+    return ['cursor', 'claude'] as const;
+  })();
 
-  const keyCandidates = [
-    tag ? join(configuration.happyHomeDir, `cursor-session-key-${tag}`) : null,
-    join(configuration.happyHomeDir, 'cursor-session-key'),
-  ].filter((v): v is string => !!v);
+  const keyCandidates = keyPrefixes.flatMap((prefix) => [
+    tag ? join(configuration.happyHomeDir, `${prefix}-session-key-${tag}`) : null,
+    join(configuration.happyHomeDir, `${prefix}-session-key`),
+  ]).filter((v): v is string => !!v);
 
   for (const keyPath of keyCandidates) {
     if (!existsSync(keyPath)) continue;
@@ -40,9 +55,14 @@ export async function sendA2aMessage(sessionId: string, text: string, options: S
     return { success: false, error: 'No CLI credentials found' };
   }
 
-  const sessionKey = await readCursorSessionKey(sessionId);
+  const sessionKey = await readSessionKey(sessionId);
   if (!sessionKey) {
-    return { success: false, error: `No cursor session key found for ${sessionId}` };
+    const state = await readDaemonState();
+    const agent = state?.lastAgentBySessionId?.[sessionId];
+    return {
+      success: false,
+      error: `No session key found for ${sessionId}${agent ? ` (agent=${agent})` : ''}`,
+    };
   }
 
   const a2aCardMessages = buildA2ASubagentCardEnvelopes(text, { title: options.title }).map((envelope) => ({
