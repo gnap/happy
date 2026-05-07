@@ -208,6 +208,10 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
 
     logger.debug(`Session created: ${response.id}`);
     writeClaudeSessionEncryptionKey(sessionTag, response.encryptionKey);
+    const initialClaudeSessionId = response.metadata?.claudeSessionId ?? null;
+    if (initialClaudeSessionId) {
+        logger.debug(`[START] Restoring Claude session ID from metadata: ${initialClaudeSessionId}`);
+    }
 
     // Report to daemon on startup and every 60s so daemon re-discovers sessions after restart
     const reportToDaemon = () => {
@@ -527,6 +531,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         model: normalizeClaudeModelForSdk(options.model),
         permissionMode: initialPermissionMode,
         startingMode: options.startingMode,
+        initialSessionId: initialClaudeSessionId,
         messageQueue,
         api,
         allowedTools: happyServer.toolNames.map(toolName => `mcp__happy__${toolName}`),

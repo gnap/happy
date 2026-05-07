@@ -6,6 +6,34 @@ import { createSessionScanner } from "./utils/sessionScanner";
 
 export type LauncherResult = { type: 'switch' } | { type: 'exit', code: number };
 
+function formatLaunchError(error: unknown): Record<string, unknown> {
+    if (error instanceof Error) {
+        return {
+            name: error.name,
+            message: error.message,
+            stack: error.stack,
+            cause: error.cause instanceof Error
+                ? formatLaunchError(error.cause)
+                : error.cause,
+        };
+    }
+
+    if (error && typeof error === 'object') {
+        const record = error as Record<string, unknown>;
+        return {
+            ...record,
+            name: record.name ?? 'UnknownError',
+            message: record.message ?? 'Unknown launch error',
+            stack: record.stack,
+        };
+    }
+
+    return {
+        rawType: typeof error,
+        value: String(error),
+    };
+}
+
 export async function claudeLocalLauncher(session: Session): Promise<LauncherResult> {
 
     // Create scanner
@@ -129,7 +157,7 @@ export async function claudeLocalLauncher(session: Session): Promise<LauncherRes
                     break;
                 }
             } catch (e) {
-                logger.debug('[local]: launch error', e);
+                logger.debug('[local]: launch error', formatLaunchError(e));
                 // If Claude exited with non-zero exit code, propagate it
                 if (e instanceof ExitCodeError) {
                     session.client.closeClaudeSessionTurn('failed');

@@ -23,6 +23,34 @@ interface PermissionsField {
     allowedTools?: string[];
 }
 
+function formatLaunchError(error: unknown): Record<string, unknown> {
+    if (error instanceof Error) {
+        return {
+            name: error.name,
+            message: error.message,
+            stack: error.stack,
+            cause: error.cause instanceof Error
+                ? formatLaunchError(error.cause)
+                : error.cause,
+        };
+    }
+
+    if (error && typeof error === 'object') {
+        const record = error as Record<string, unknown>;
+        return {
+            ...record,
+            name: record.name ?? 'UnknownError',
+            message: record.message ?? 'Unknown launch error',
+            stack: record.stack,
+        };
+    }
+
+    return {
+        rawType: typeof error,
+        value: String(error),
+    };
+}
+
 export async function claudeRemoteLauncher(session: Session): Promise<'switch' | 'exit'> {
     logger.debug('[claudeRemoteLauncher] Starting remote launcher');
 
@@ -402,7 +430,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     session.client.sendSessionEvent({ type: 'message', message: 'Aborted by user' });
                 }
             } catch (e) {
-                logger.debug('[remote]: launch error', e);
+                logger.debug('[remote]: launch error', formatLaunchError(e));
                 if (!exitReason) {
                     session.client.closeClaudeSessionTurn('failed');
                     session.client.sendSessionEvent({ type: 'message', message: 'Process exited unexpectedly' });

@@ -28,6 +28,7 @@ interface LoopOptions {
     model?: string
     permissionMode?: PermissionMode
     startingMode?: 'local' | 'remote'
+    initialSessionId?: string | null
     onModeChange: (mode: 'local' | 'remote') => void
     mcpServers: Record<string, any>
     session: ApiSessionClient
@@ -52,7 +53,7 @@ export async function loop(opts: LoopOptions): Promise<number> {
         api: opts.api,
         client: opts.session,
         path: opts.path,
-        sessionId: null,
+        sessionId: opts.initialSessionId ?? null,
         claudeEnvVars: opts.claudeEnvVars,
         claudeArgs: opts.claudeArgs,
         mcpServers: opts.mcpServers,
