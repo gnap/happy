@@ -233,24 +233,24 @@ function RenderSpans(props: { spans: MarkdownSpan[], baseStyle?: any }) {
     return (<>
         {props.spans.map((span, index) => {
             if (span.url) {
+                if (isRunningInTauri()) {
+                    return (
+                        <Text
+                            key={index}
+                            selectable
+                            onPress={() => void openMarkdownLink(span.url!)}
+                            style={[props.baseStyle, style.link, style.desktopLink, span.styles.map(s => style[s])]}
+                        >
+                            {span.text}
+                        </Text>
+                    );
+                }
+
                 if (Platform.OS === 'web') {
                     return <Link key={index} href={span.url as any} target="_blank" style={[style.link, span.styles.map(s => style[s])]}>{span.text}</Link>
                 }
 
-                if (!isRunningInTauri()) {
-                    return <ExternalLink key={index} href={span.url} style={[style.link, span.styles.map(s => style[s])]}>{span.text}</ExternalLink>
-                }
-
-                return (
-                    <Text
-                        key={index}
-                        selectable
-                        onPress={() => void openMarkdownLink(span.url!)}
-                        style={[props.baseStyle, style.link, style.desktopLink, span.styles.map(s => style[s])]}
-                    >
-                        {span.text}
-                    </Text>
-                );
+                return <ExternalLink key={index} href={span.url} style={[style.link, span.styles.map(s => style[s])]}>{span.text}</ExternalLink>
             } else {
                 return <Text key={index} selectable style={[props.baseStyle, span.styles.map(s => style[s])]}>{span.text}</Text>
             }
