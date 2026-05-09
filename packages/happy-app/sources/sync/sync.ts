@@ -68,6 +68,7 @@ type OutboxMessage = {
 
 class Sync {
     private static readonly BACKGROUND_SEND_TIMEOUT_MS = 30_000;
+    private static readonly DESKTOP_SESSION_REFRESH_COOLDOWN_MS = 15_000;
     encryption!: Encryption;
     serverID!: string;
     anonID!: string;
@@ -112,6 +113,7 @@ class Sync {
     private appState: AppStateStatus = AppState.currentState;
     private appStateSubscription: ReturnType<typeof AppState.addEventListener> | null = null;
     private networkStateSubscription: ReturnType<typeof Network.addNetworkStateListener> | null = null;
+    private lastDesktopSessionRefreshAt = 0;
     /** Last known network connectivity; null until first change event fires. */
     private lastNetworkConnected: boolean | null = null;
     /** Last known network type; used to detect interface switches (e.g. WiFi → Cellular). */
@@ -237,6 +239,18 @@ class Sync {
         this.feedSync.invalidate();
     }
 
+    #refreshSessionsAfterDesktopProbe() {
+        const now = Date.now();
+        if (now - this.lastDesktopSessionRefreshAt < Sync.DESKTOP_SESSION_REFRESH_COOLDOWN_MS) {
+            log.log('🖥️ Desktop sessions refresh skipped — cooldown active');
+            return;
+        }
+
+        this.lastDesktopSessionRefreshAt = now;
+        log.log('🖥️ Desktop sessions refresh — invalidating sessions sync after confirmed connection');
+        this.sessionsSync.invalidate();
+    }
+
     /**
      * Desktop (Tauri / browser) lifecycle management.
      *
@@ -249,9 +263,8 @@ class Sync {
      * probe the socket here — no full invalidation needed.
      */
     async #setupDesktopLifecycle() {
-        const onDesktopFocus = () => {
-            log.log('🖥️ Desktop focused — resuming socket and recovering pending sends');
-            apiSocket.resumeReconnection();
+        const recoverDesktopPendingWork = () => {
+            log.log('🖥️ Desktop focused — recovering pending sends');
             this.recoverPendingOutbox();
         };
 
@@ -266,12 +279,19 @@ class Sync {
                 onDesktopBlur();
             } else {
                 log.log('🖥️ Window visible — resuming and invalidating syncs');
-                onDesktopFocus();
+                void apiSocket.resumeReconnection();
+                recoverDesktopPendingWork();
                 this.#invalidateAllSyncs();
             }
         });
 
-        window.addEventListener('focus', onDesktopFocus);
+        window.addEventListener('focus', () => {
+            if (!isRunningInTauri()) {
+                log.log('🖥️ Window focused — resuming socket and recovering pending sends');
+                void apiSocket.resumeReconnection();
+                recoverDesktopPendingWork();
+            }
+        });
         window.addEventListener('blur', onDesktopBlur);
 
         // Match native `expo-network` behaviour: desktop has no reachability API, but the browser
@@ -303,7 +323,12 @@ class Sync {
             getCurrentWindow().listen(TauriEvent.WINDOW_FOCUS, () => {
                 if (!document.hidden) {
                     log.log('🖥️ Window focused (Tauri) — probing connection');
-                    onDesktopFocus();
+                    void apiSocket.resumeReconnection().then((connected) => {
+                        if (connected) {
+                            this.#refreshSessionsAfterDesktopProbe();
+                        }
+                    });
+                    recoverDesktopPendingWork();
                 }
             });
         }
@@ -2277,6 +2302,7 @@ class Sync {
         // Subscribe to connection state changes
         apiSocket.onReconnected(() => {
             log.log('🔌 Socket reconnected');
+            this.lastDesktopSessionRefreshAt = Date.now();
             this.sessionsSync.invalidate();
             this.machinesSync.invalidate();
             log.log('🔌 Socket reconnected: Invalidating artifacts sync');

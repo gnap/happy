@@ -325,9 +325,9 @@ class ApiSocket {
      *   immediately, resetting socket.io's exponential backoff from scratch.
      * - If connecting: leaves the in-progress attempt alone.
      */
-    resumeReconnection() {
+    async resumeReconnection(): Promise<boolean> {
         if (this.currentStatus === 'connected' && this.socket?.connected) {
-            this.probeConnection();
+            return await this.probeConnection();
         } else if (this.currentStatus !== 'connecting') {
             // Ensure clean state, then connect immediately (new socket = backoff reset).
             if (this.socket) {
@@ -339,6 +339,7 @@ class ApiSocket {
             this.connect();
         }
         // 'connecting': in-progress attempt, leave it alone.
+        return false;
     }
 
     /**
@@ -346,28 +347,37 @@ class ApiSocket {
      * If no response within timeoutMs the connection is treated as stale and
      * a fresh reconnect is forced.
      */
-    private probeConnection(timeoutMs = 5000) {
-        if (!this.socket) return;
+    private probeConnection(timeoutMs = 5000): Promise<boolean> {
+        if (!this.socket) return Promise.resolve(false);
         let settled = false;
+        let timer: ReturnType<typeof setTimeout> | null = null;
 
-        const timer = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            this.disconnect();
-            this.connect();
-        }, timeoutMs);
-
-        try {
-            this.socket.emit('ping', () => {
+        return new Promise<boolean>((resolve) => {
+            const finish = (value: boolean) => {
                 if (settled) return;
                 settled = true;
-                clearTimeout(timer);
-            });
-        } catch {
-            clearTimeout(timer);
-            this.disconnect();
-            this.connect();
-        }
+                if (timer !== null) {
+                    clearTimeout(timer);
+                }
+                resolve(value);
+            };
+
+            timer = setTimeout(() => {
+                finish(false);
+                this.disconnect();
+                this.connect();
+            }, timeoutMs);
+
+            try {
+                this.socket.emit('ping', () => {
+                    finish(true);
+                });
+            } catch {
+                finish(false);
+                this.disconnect();
+                this.connect();
+            }
+        });
     }
 
     //
