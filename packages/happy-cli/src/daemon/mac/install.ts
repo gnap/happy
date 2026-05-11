@@ -89,7 +89,9 @@ export async function install(): Promise<void> {
             }
         }
 
-        const launchSpec = getHappyCliLaunchSpec();
+        // LaunchAgent should run the Bun bundle directly so the daemon stays on bun
+        // even when the interactive shell or installer itself is running under Node.
+        const launchSpec = getHappyCliLaunchSpec('bun');
         const runtimeEnv = launchSpec.runtime === 'bun' ? 'bun' : 'node';
         const launchdPath = `${os.homedir()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`;
 
