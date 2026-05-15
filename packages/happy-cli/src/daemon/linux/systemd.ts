@@ -71,11 +71,20 @@ export function generateServiceContent(): string {
     .join(' ');
   const runtime = launchSpec.runtime;
 
+  // Capture the install-time PATH so the daemon (and its child agent processes)
+  // can find user-installed CLIs like homebrew's `claude`, `cursor-agent`, `git`,
+  // etc. systemd's --user default PATH is just `/usr/local/bin:/usr/bin`, which
+  // misses common locations such as /home/linuxbrew/.linuxbrew/bin, ~/.local/bin,
+  // ~/.cargo/bin, ~/.bun/bin. We resolve this once at install time using the
+  // shell PATH of whoever ran `happy daemon install`.
+  const installPath = process.env.PATH;
+
   const envLines = [
     `Environment=HOME=${home}`,
     `Environment=HAPPY_HOME_DIR=${happyHomeDir}`,
     `Environment=HAPPY_PROJECT_ROOT=${happyProjectRoot}`,
     `Environment=HAPPY_CLI_RUNTIME=${runtime}`,
+    ...(installPath ? [`Environment=PATH=${installPath}`] : []),
     ...(happyServerUrl ? [`Environment=HAPPY_SERVER_URL=${happyServerUrl}`] : []),
   ].join('\n');
 
@@ -92,6 +101,8 @@ export function generateServiceContent(): string {
     envLines,
     'Restart=on-failure',
     'RestartSec=5s',
+    // Only signal the daemon main PID. `mixed` / `control-group` would SIGKILL every
+    // process in the service cgroup and defeat detached session spawns (daemon/run.ts).
     'KillMode=process',
     '',
     '[Install]',
