@@ -774,8 +774,10 @@ export async function runCursor(opts: {
         if (isA2ABatch) {
           const inboxSnapshotPath = writeA2AInboxSnapshot(workspacePath, sessionId, turnId, session.getA2AInbox());
           const inbox = session.getA2AInbox();
+          const unreadMessages = inbox.messages.filter((message) => !message.readAt);
+          const unreadCount = unreadMessages.length;
+          const unreadIds = unreadMessages.map((message) => message.id);
           const summary = buildA2AInboxNotificationWithPreview(inbox);
-          const unreadCount = inbox.messages.filter((message) => !message.readAt).length;
           const inboxTitle = unreadCount === 1 ? 'A2A inbox (1 unread)' : `A2A inbox (${unreadCount} unread)`;
           for (const envelope of buildA2ASubagentCardEnvelopes(summary, {
             title: inboxTitle,
@@ -783,6 +785,9 @@ export async function runCursor(opts: {
             turnId: createId(),
           })) {
             session.sendSessionProtocolMessage(envelope);
+          }
+          if (unreadIds.length > 0) {
+            session.markA2AMessagesRead(unreadIds);
           }
           prompt = buildA2ATurnPrompt(userMessage, inboxSnapshotPath);
         }

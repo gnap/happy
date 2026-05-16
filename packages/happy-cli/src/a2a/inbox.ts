@@ -33,6 +33,31 @@ export function upsertA2AInboxMessage(
   return next;
 }
 
+export function mergeA2AInboxState(
+  current: A2AInboxState | null | undefined,
+  incoming: A2AInboxState | null | undefined,
+): A2AInboxState {
+  const next = cloneA2AInboxState(current);
+  for (const message of cloneA2AInboxState(incoming).messages) {
+    const existingIndex = next.messages.findIndex((item) => item.id === message.id);
+    if (existingIndex === -1) {
+      next.messages.push({
+        ...cloneMessage(message),
+        readAt: message.readAt ?? null,
+      });
+      continue;
+    }
+
+    const existing = next.messages[existingIndex];
+    next.messages[existingIndex] = {
+      ...existing,
+      ...message,
+      readAt: existing.readAt ?? message.readAt ?? null,
+    };
+  }
+  return next;
+}
+
 export function markA2AInboxMessageRead(
   inbox: A2AInboxState | null | undefined,
   id: string,

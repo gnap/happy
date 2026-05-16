@@ -6,6 +6,7 @@ import {
   cloneA2AInboxState,
   getA2AUnreadCount,
   listA2AInboxMessages,
+  mergeA2AInboxState,
   markA2AInboxMessageRead,
   markA2AInboxMessagesRead,
   upsertA2AInboxMessage,
@@ -75,5 +76,25 @@ describe('A2A inbox helpers', () => {
     });
     const readInbox = markA2AInboxMessageRead(inbox, 'one', 9000);
     expect(readInbox.messages[0]).toEqual(expect.objectContaining({ id: 'one', readAt: 9000 }));
+  });
+
+  it('merges remote inbox updates without losing local read markers', () => {
+    const local = markA2AInboxMessageRead(
+      upsertA2AInboxMessage(undefined, {
+        id: 'one',
+        text: 'first',
+        createdAt: 1000,
+      }),
+      'one',
+      9000,
+    );
+    const remote = upsertA2AInboxMessage(undefined, {
+      id: 'one',
+      text: 'first',
+      createdAt: 1000,
+    });
+
+    const merged = mergeA2AInboxState(local, remote);
+    expect(merged.messages[0]).toEqual(expect.objectContaining({ id: 'one', readAt: 9000 }));
   });
 });

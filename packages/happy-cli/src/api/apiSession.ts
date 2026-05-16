@@ -26,6 +26,7 @@ import { InvalidateSync } from '@/utils/sync';
 import axios from 'axios';
 import {
     cloneA2AInboxState,
+    mergeA2AInboxState,
     markA2AInboxMessageRead,
     markA2AInboxMessagesRead,
     upsertA2AInboxMessage,
@@ -551,7 +552,7 @@ export class ApiSessionClient extends EventEmitter {
                         this.agentState = data.body.agentState.value ? decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.agentState.value)) : null;
                         this.agentStateVersion = data.body.agentState.version;
                         if (this.agentState?.a2aInbox !== undefined) {
-                            this.a2aInbox = cloneA2AInboxState(this.agentState.a2aInbox);
+                            this.a2aInbox = mergeA2AInboxState(this.a2aInbox, this.agentState.a2aInbox);
                         }
                     }
                 } else if (data.body.t === 'update-machine') {
@@ -1250,7 +1251,7 @@ export class ApiSessionClient extends EventEmitter {
                     this.agentState = answer.agentState ? decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.agentState)) : null;
                     this.agentStateVersion = answer.version;
                     if (this.agentState?.a2aInbox !== undefined) {
-                        this.a2aInbox = cloneA2AInboxState(this.agentState.a2aInbox);
+                        this.a2aInbox = mergeA2AInboxState(this.a2aInbox, this.agentState.a2aInbox);
                     }
                     logger.debug('Agent state updated', this.agentState);
                 } else if (answer.result === 'version-mismatch') {
@@ -1258,7 +1259,7 @@ export class ApiSessionClient extends EventEmitter {
                         this.agentStateVersion = answer.version;
                         this.agentState = answer.agentState ? decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.agentState)) : null;
                         if (this.agentState?.a2aInbox !== undefined) {
-                            this.a2aInbox = cloneA2AInboxState(this.agentState.a2aInbox);
+                            this.a2aInbox = mergeA2AInboxState(this.a2aInbox, this.agentState.a2aInbox);
                         }
                     }
                     throw new Error('Agent state version mismatch');
