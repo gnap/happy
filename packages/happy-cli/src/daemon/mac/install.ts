@@ -65,6 +65,31 @@ function getLaunchctlDomain(): string {
     return `gui/${uid}`;
 }
 
+function xmlEscape(value: string): string {
+    return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+}
+
+function collectInheritedDaemonEnv(): Array<[string, string]> {
+    const prefixPattern = /^(DEEPSEEK_|ANTHROPIC_|CLAUDE_CODE_)/;
+    const reserved = new Set([
+        'HAPPY_DAEMON_MODE',
+        'HAPPY_CLI_RUNTIME',
+        'HAPPY_VARIANT',
+        'HAPPY_HOME_DIR',
+        'PATH',
+    ]);
+
+    return Object.entries(process.env)
+        .filter(([key, value]) => prefixPattern.test(key) && value != null && !reserved.has(key))
+        .map(([key, value]) => [key, value as string] as [string, string])
+        .sort(([a], [b]) => a.localeCompare(b));
+}
+
 export async function install(): Promise<void> {
     try {
         const variant = resolveVariant();
@@ -94,6 +119,13 @@ export async function install(): Promise<void> {
         const launchSpec = getHappyCliLaunchSpec('bun');
         const runtimeEnv = launchSpec.runtime === 'bun' ? 'bun' : 'node';
         const launchdPath = `${os.homedir()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`;
+        const inheritedEnv = collectInheritedDaemonEnv();
+
+        logger.info(
+            inheritedEnv.length > 0
+                ? `Capturing daemon Claude env keys: ${inheritedEnv.map(([key]) => key).join(', ')}`
+                : 'No Claude/DeepSeek env vars found to capture from installer environment.'
+        );
 
         const plistContent = trimIdent(`
             <?xml version="1.0" encoding="UTF-8"?>
@@ -123,6 +155,7 @@ export async function install(): Promise<void> {
                     <string>${happyHomeDir}</string>
                     <key>PATH</key>
                     <string>${launchdPath}</string>
+                    ${inheritedEnv.map(([key, value]) => `\n                    <key>${key}</key>\n                    <string>${xmlEscape(value)}</string>`).join('')}
                 </dict>
 
                 <key>RunAtLoad</key>
@@ -148,7 +181,8 @@ export async function install(): Promise<void> {
             mkdirSync(dir, { recursive: true });
         }
         writeFileSync(plistFile, plistContent);
-        chmodSync(plistFile, 0o644);
+        // The plist can contain sensitive daemon environment variables, so keep it user-only.
+        chmodSync(plistFile, 0o600);
 
         logger.info(`Created daemon plist at ${plistFile}`);
 
