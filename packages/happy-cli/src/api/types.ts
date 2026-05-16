@@ -172,6 +172,7 @@ export type Machine = {
 export const MessageMetaSchema = z.object({
   sentFrom: z.string().optional(), // Source identifier
   origin: z.enum(['app', 'a2a']).optional(), // Where the message came from
+  a2aTrigger: z.boolean().optional(), // Internal A2A turn trigger; keep out of the visible app stream
   permissionMode: z.enum(['default', 'acceptEdits', 'bypassPermissions', 'plan', 'read-only', 'safe-yolo', 'yolo', 'ask', 'force']).optional(), // Permission mode for this message
   model: z.string().nullable().optional(), // Model name for this message (null = reset)
   fallbackModel: z.string().nullable().optional(), // Fallback model for this message (null = reset)
@@ -270,6 +271,18 @@ export type Metadata = {
   flavor?: string
   sandbox?: SandboxConfig | null
   dangerouslySkipPermissions?: boolean | null
+};
+
+export type A2AInboxMessage = {
+  id: string,
+  text: string,
+  createdAt: number,
+  readAt?: number | null,
+  title?: string,
+};
+
+export type A2AInboxState = {
+  messages: A2AInboxMessage[],
 };
 
 export type AppCompatibleSessionMetadata = Omit<
@@ -381,6 +394,7 @@ export type AgentState = {
   controlledByUser?: boolean | null | undefined
   /** Cursor chat ID for resuming cursor-agent conversation across restarts */
   cursorChatId?: string | null
+  a2aInbox?: A2AInboxState
   requests?: {
     [id: string]: {
       tool: string,

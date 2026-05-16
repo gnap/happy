@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createTwoFilesPatch } from 'diff'
 import { io, Socket } from 'socket.io-client'
-import { AgentState, ClientToServerEvents, Metadata, ServerToClientEvents, Session, Update, UserMessage, UserMessageSchema, Usage, buildSyncedSessionMetadata, sanitizeSessionMetadataForApp, shouldSyncSessionMetadata } from './types'
+import { AgentState, A2AInboxMessage, ClientToServerEvents, Metadata, ServerToClientEvents, Session, Update, UserMessage, UserMessageSchema, Usage, buildSyncedSessionMetadata, sanitizeSessionMetadataForApp, shouldSyncSessionMetadata } from './types'
 import { decodeBase64, decrypt, encodeBase64, encrypt } from './encryption';
 import { backoff, delay } from '@/utils/time';
 import { configuration, serverHttpsAgent } from '@/configuration';
@@ -24,6 +24,12 @@ import {
 } from '@/claude/utils/sessionProtocolMapper';
 import { InvalidateSync } from '@/utils/sync';
 import axios from 'axios';
+import {
+    cloneA2AInboxState,
+    markA2AInboxMessageRead,
+    markA2AInboxMessagesRead,
+    upsertA2AInboxMessage,
+} from '@/a2a/inbox';
 
 /**
  * ACP (Agent Communication Protocol) message data types.
@@ -213,6 +219,7 @@ export class ApiSessionClient extends EventEmitter {
     private metadataVersion: number;
     private agentState: AgentState | null;
     private agentStateVersion: number;
+    private a2aInbox: NonNullable<AgentState['a2aInbox']>;
     private socket: Socket<ServerToClientEvents, ClientToServerEvents>;
     private pendingMessages: UserMessage[] = [];
     private pendingMessageCallback: ((message: UserMessage) => void) | null = null;
@@ -395,6 +402,7 @@ export class ApiSessionClient extends EventEmitter {
         this.metadataVersion = session.metadataVersion;
         this.agentState = session.agentState;
         this.agentStateVersion = session.agentStateVersion;
+        this.a2aInbox = cloneA2AInboxState(session.agentState?.a2aInbox);
         this.requestedMetadata = session.requestedMetadata ?? null;
         this.encryptionKey = session.encryptionKey;
         this.encryptionVariant = session.encryptionVariant;
@@ -542,6 +550,9 @@ export class ApiSessionClient extends EventEmitter {
                     if (data.body.agentState && data.body.agentState.version > this.agentStateVersion) {
                         this.agentState = data.body.agentState.value ? decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.agentState.value)) : null;
                         this.agentStateVersion = data.body.agentState.version;
+                        if (this.agentState?.a2aInbox !== undefined) {
+                            this.a2aInbox = cloneA2AInboxState(this.agentState.a2aInbox);
+                        }
                     }
                 } else if (data.body.t === 'update-machine') {
                     // Session clients shouldn't receive machine updates - log warning
@@ -586,7 +597,33 @@ export class ApiSessionClient extends EventEmitter {
         };
     }
 
+    private ingestA2AInboxFromTrigger(raw: unknown) {
+        if (!isRecord(raw) || raw.role !== 'user') {
+            return;
+        }
+
+        const meta = isRecord(raw.meta) ? raw.meta : null;
+        if (meta?.origin !== 'a2a' && meta?.a2aTrigger !== true) {
+            return;
+        }
+
+        const inboxMessage = isRecord(raw.a2aInboxMessage) ? raw.a2aInboxMessage : null;
+        if (!inboxMessage || typeof inboxMessage.text !== 'string' || inboxMessage.text.trim().length === 0) {
+            return;
+        }
+
+        const triggerId = typeof raw.localKey === 'string' && raw.localKey.trim().length > 0 ? raw.localKey : randomUUID();
+        this.recordA2AMessage({
+            id: triggerId,
+            title: typeof inboxMessage.title === 'string' && inboxMessage.title.trim().length > 0 ? inboxMessage.title.trim() : undefined,
+            text: inboxMessage.text.trim(),
+            createdAt: typeof inboxMessage.createdAt === 'number' ? inboxMessage.createdAt : Date.now(),
+        });
+    }
+
     private routeIncomingMessage(message: unknown) {
+        this.ingestA2AInboxFromTrigger(message);
+
         const userResult = UserMessageSchema.safeParse(message);
         if (userResult.success) {
             logger.debug('[API] User message from app received, routing to CLI');
@@ -646,7 +683,7 @@ export class ApiSessionClient extends EventEmitter {
             content: { type: 'text', text },
             localKey,
             meta: isA2A
-                ? { ...(meta ?? {}), origin: 'a2a' }
+                ? { ...(meta ?? {}), origin: 'a2a', a2aTrigger: true }
                 : meta,
         };
     }
@@ -677,12 +714,62 @@ export class ApiSessionClient extends EventEmitter {
             }
         }
 
+        this.recordA2AMessage({
+            id: envelopeId ?? randomUUID(),
+            text: ev.text.trim(),
+            createdAt: typeof content.time === 'number' ? content.time : Date.now(),
+        });
+        return null;
+    }
+
+    getAgentState(): AgentState | null {
+        if (!this.agentState) {
+            return null;
+        }
         return {
-            role: 'user',
-            content: { type: 'text', text: ev.text.trim() },
-            localKey: envelopeId ?? undefined,
-            meta: { origin: 'a2a' },
+            ...this.agentState,
+            a2aInbox: cloneA2AInboxState(this.a2aInbox),
         };
+    }
+
+    getA2AInbox() {
+        return cloneA2AInboxState(this.a2aInbox);
+    }
+
+    recordA2AMessage(message: A2AInboxMessage): void {
+        this.a2aInbox = upsertA2AInboxMessage(this.a2aInbox, message);
+        this.agentState = {
+            ...(this.agentState ?? {}),
+            a2aInbox: cloneA2AInboxState(this.a2aInbox),
+        };
+        this.updateAgentState((currentState) => ({
+            ...currentState,
+            a2aInbox: cloneA2AInboxState(this.a2aInbox),
+        }));
+    }
+
+    markA2AMessageRead(id: string): void {
+        this.a2aInbox = markA2AInboxMessageRead(this.a2aInbox, id);
+        this.agentState = {
+            ...(this.agentState ?? {}),
+            a2aInbox: cloneA2AInboxState(this.a2aInbox),
+        };
+        this.updateAgentState((currentState) => ({
+            ...currentState,
+            a2aInbox: cloneA2AInboxState(this.a2aInbox),
+        }));
+    }
+
+    markA2AMessagesRead(ids: string[]): void {
+        this.a2aInbox = markA2AInboxMessagesRead(this.a2aInbox, ids);
+        this.agentState = {
+            ...(this.agentState ?? {}),
+            a2aInbox: cloneA2AInboxState(this.a2aInbox),
+        };
+        this.updateAgentState((currentState) => ({
+            ...currentState,
+            a2aInbox: cloneA2AInboxState(this.a2aInbox),
+        }));
     }
 
     /** For debugging: whether the real-time socket to the server is connected (vs HTTP fallback polling). */
@@ -1162,11 +1249,17 @@ export class ApiSessionClient extends EventEmitter {
                 if (answer.result === 'success') {
                     this.agentState = answer.agentState ? decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.agentState)) : null;
                     this.agentStateVersion = answer.version;
+                    if (this.agentState?.a2aInbox !== undefined) {
+                        this.a2aInbox = cloneA2AInboxState(this.agentState.a2aInbox);
+                    }
                     logger.debug('Agent state updated', this.agentState);
                 } else if (answer.result === 'version-mismatch') {
                     if (answer.version > this.agentStateVersion) {
                         this.agentStateVersion = answer.version;
                         this.agentState = answer.agentState ? decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.agentState)) : null;
+                        if (this.agentState?.a2aInbox !== undefined) {
+                            this.a2aInbox = cloneA2AInboxState(this.agentState.a2aInbox);
+                        }
                     }
                     throw new Error('Agent state version mismatch');
                 } else if (answer.result === 'error') {

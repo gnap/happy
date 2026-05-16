@@ -21,8 +21,8 @@ import { ApiSessionClient } from "@/api/apiSession";
 import type { UserMessage } from "@/api/types";
 import { randomUUID } from "node:crypto";
 import { SubagentManager } from "@/cursor/subagentManager";
-import { buildA2ASubagentCardEnvelopes } from "@/a2a/subagentCard";
 import { extractA2aText, extractA2aTitle } from "@/a2a/parse";
+import { buildA2AInboxNotificationWithPreview, getA2AUnreadCount, listA2AInboxMessages } from "@/a2a/inbox";
 import { getDaemonA2aMessageUri } from "@/daemon/controlClient";
 
 export interface HappyServerCursorContext {
@@ -144,7 +144,86 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
         };
     });
 
-    const toolNames: string[] = ['change_title', 'get_a2a_message_uri'];
+    const ctx = options?.cursorContext;
+
+    mcp.registerTool('list_a2a_messages', {
+        description: 'List messages in the A2A inbox. Use unreadOnly to focus on new messages, then mark the consumed ids as read before replying.',
+        title: 'List Inbox Messages',
+        inputSchema: {
+            unreadOnly: z.boolean().optional().describe('Only return unread messages'),
+            limit: z.number().int().positive().max(100).optional().describe('Maximum number of messages to return'),
+        },
+    }, async (args) => {
+        const inbox = client.getA2AInbox();
+        const messages = listA2AInboxMessages(inbox, {
+            unreadOnly: args.unreadOnly,
+            limit: args.limit,
+        });
+        return {
+            content: [{ type: 'text', text: JSON.stringify({
+                unreadCount: getA2AUnreadCount(inbox),
+                messages,
+            }, null, 2) }],
+            isError: false,
+        };
+    });
+
+    mcp.registerTool('read_a2a_message', {
+        description: 'Read a single inbox message by id without changing its read state. After reading, mark it as read with mark_a2a_message_read.',
+        title: 'Read Inbox Message',
+        inputSchema: {
+            id: z.string().describe('A2A inbox message id'),
+        },
+    }, async (args) => {
+        const inbox = client.getA2AInbox();
+        const message = client.getA2AInbox().messages.find((item) => item.id === args.id);
+        if (!message) {
+            return { content: [{ type: 'text', text: `A2A message ${args.id} not found.` }], isError: true };
+        }
+        return {
+            content: [{ type: 'text', text: JSON.stringify(message, null, 2) }],
+            isError: false,
+        };
+    });
+
+    mcp.registerTool('mark_a2a_message_read', {
+        description: 'Mark a single inbox message as read. Use this after reading the message content.',
+        title: 'Mark Inbox Message Read',
+        inputSchema: {
+            id: z.string().describe('A2A inbox message id'),
+        },
+    }, async (args) => {
+        client.markA2AMessageRead(args.id);
+        const message = client.getA2AInbox().messages.find((item) => item.id === args.id);
+        return {
+            content: [{ type: 'text', text: JSON.stringify({
+                id: args.id,
+                readAt: message?.readAt ?? null,
+            }, null, 2) }],
+            isError: false,
+        };
+    });
+
+    mcp.registerTool('mark_a2a_messages_read', {
+        description: 'Mark multiple inbox messages as read after consuming them from the inbox.',
+        title: 'Mark Inbox Messages Read',
+        inputSchema: {
+            ids: z.array(z.string()).min(1).describe('A2A inbox message ids'),
+        },
+    }, async (args) => {
+        client.markA2AMessagesRead(args.ids);
+        const inbox = client.getA2AInbox();
+        const updated = inbox.messages.filter((item) => args.ids.includes(item.id));
+        return {
+            content: [{ type: 'text', text: JSON.stringify({
+                ids: args.ids,
+                updated,
+            }, null, 2) }],
+            isError: false,
+        };
+    });
+
+    const toolNames: string[] = ['change_title', 'get_a2a_message_uri', 'list_a2a_messages', 'read_a2a_message', 'mark_a2a_message_read', 'mark_a2a_messages_read'];
 
     let subagentManager: SubagentManager | null = null;
 
@@ -350,14 +429,18 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
                     return;
                 }
 
+                client.recordA2AMessage({
+                    id: randomUUID(),
+                    title,
+                    text,
+                    createdAt: Date.now(),
+                });
+
                 await options.onA2aMessage({
                     role: 'user',
-                    content: { type: 'text', text },
-                    meta: { origin: 'a2a' },
+                    content: { type: 'text', text: buildA2AInboxNotificationWithPreview(client.getA2AInbox()) },
+                    meta: { origin: 'a2a', a2aTrigger: true },
                 });
-                for (const envelope of buildA2ASubagentCardEnvelopes(text, { title })) {
-                    client.sendSessionProtocolMessage(envelope);
-                }
 
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ success: true }));

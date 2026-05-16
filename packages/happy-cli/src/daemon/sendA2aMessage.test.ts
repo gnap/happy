@@ -3,15 +3,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   mockReadDaemonState: vi.fn(),
   mockReadCredentials: vi.fn(),
-  mockReadFile: vi.fn(),
+  mockReadFileSync: vi.fn(),
   mockExistsSync: vi.fn(),
+  mockMkdirSync: vi.fn(),
+  mockWriteFileSync: vi.fn(),
   mockAxiosPost: vi.fn(),
   mockEncrypt: vi.fn((key: Uint8Array, _variant: unknown, payload: unknown) => payload),
   mockEncodeBase64: vi.fn(() => 'encoded'),
-  mockBuildA2ASubagentCardEnvelopes: vi.fn(() => [
-    { id: 'a2a-envelope-1', t: 'text', text: 'hello' },
-  ]),
-  mockWrapA2ASessionEnvelope: vi.fn((envelope: unknown) => envelope),
 }));
 
 vi.mock('axios', () => ({
@@ -22,10 +20,9 @@ vi.mock('axios', () => ({
 
 vi.mock('node:fs', () => ({
   existsSync: mocks.mockExistsSync,
-}));
-
-vi.mock('node:fs/promises', () => ({
-  readFile: mocks.mockReadFile,
+  mkdirSync: mocks.mockMkdirSync,
+  readFileSync: mocks.mockReadFileSync,
+  writeFileSync: mocks.mockWriteFileSync,
 }));
 
 vi.mock('@/persistence', () => ({
@@ -36,11 +33,6 @@ vi.mock('@/persistence', () => ({
 vi.mock('@/api/encryption', () => ({
   encrypt: mocks.mockEncrypt,
   encodeBase64: mocks.mockEncodeBase64,
-}));
-
-vi.mock('@/a2a/subagentCard', () => ({
-  buildA2ASubagentCardEnvelopes: mocks.mockBuildA2ASubagentCardEnvelopes,
-  wrapA2ASessionEnvelope: mocks.mockWrapA2ASessionEnvelope,
 }));
 
 vi.mock('@/configuration', () => ({
@@ -70,7 +62,7 @@ describe('sendA2aMessage', () => {
         ],
       },
     });
-    mocks.mockReadFile.mockResolvedValue('Y2xpLXNlY3JldA==');
+    mocks.mockReadFileSync.mockReturnValue('Y2xpLXNlY3JldA==');
     mocks.mockEncodeBase64.mockReturnValue('encoded');
   });
 
@@ -90,7 +82,7 @@ describe('sendA2aMessage', () => {
       messageId: 'msg-1',
       seq: 1,
     });
-    expect(mocks.mockReadFile).toHaveBeenCalledWith('/home/test/.happy/claude-session-key-tag-claude', 'utf8');
+    expect(mocks.mockReadFileSync).toHaveBeenCalledWith('/home/test/.happy/claude-session-key-tag-claude', 'utf8');
     expect(mocks.mockAxiosPost).toHaveBeenCalledWith(
       'https://server.example.test/v3/sessions/session-claude/messages',
       expect.objectContaining({
@@ -102,6 +94,27 @@ describe('sendA2aMessage', () => {
       }),
       expect.any(Object),
     );
+    expect(mocks.mockWriteFileSync).toHaveBeenCalledWith(
+      expect.stringMatching(/\/home\/test\/\.happy\/a2a-inbox\/session-claude-\d+\.json$/),
+      expect.stringContaining('"title": "A2A inbox (1 unread)"'),
+      'utf8',
+    );
+    expect(mocks.mockEncrypt.mock.calls[0][2]).toEqual(expect.objectContaining({
+      role: 'user',
+      localKey: expect.stringMatching(/^session-claude-\d+$/),
+      content: expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('A2A inbox (1 unread).'),
+      }),
+      meta: expect.objectContaining({
+        origin: 'a2a',
+        a2aTrigger: true,
+      }),
+      a2aInboxMessage: expect.objectContaining({
+        title: null,
+        text: 'hello from a2a',
+      }),
+    }));
   });
 
   it('uses the Cursor session key for Cursor sessions', async () => {
@@ -120,6 +133,6 @@ describe('sendA2aMessage', () => {
       messageId: 'msg-1',
       seq: 1,
     });
-    expect(mocks.mockReadFile).toHaveBeenCalledWith('/home/test/.happy/cursor-session-key-tag-cursor', 'utf8');
+    expect(mocks.mockReadFileSync).toHaveBeenCalledWith('/home/test/.happy/cursor-session-key-tag-cursor', 'utf8');
   });
 });

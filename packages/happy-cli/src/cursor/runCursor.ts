@@ -35,6 +35,8 @@ import { registerKillSessionHandler } from '@/claude/registerKillSessionHandler'
 import { stopCaffeinate } from '@/utils/caffeinate';
 import { connectionState } from '@/utils/serverConnectionErrors';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
+import { buildA2AInboxNotificationWithPreview, buildA2ATurnPrompt, listA2AInboxMessages } from '@/a2a/inbox';
+import { buildA2ASubagentCardEnvelopes } from '@/a2a/subagentCard';
 import type { ApiSessionClient } from '@/api/apiSession';
 import type { PermissionMode } from '@/api/types';
 import type { UserMessage } from '@/api/types';
@@ -94,6 +96,23 @@ function ensureCursorMcpHappy(workspacePath: string, happyUrl: string): void {
   } catch (e) {
     logger.debug('[cursor] Could not write .cursor/mcp.json:', e);
   }
+}
+
+function writeA2AInboxSnapshot(workspacePath: string, sessionId: string, turnId: string, inbox: ReturnType<ApiSessionClient['getA2AInbox']>): string {
+  const dir = join(workspacePath, '.happy', 'a2a-inbox');
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+  const filePath = join(dir, `${sessionId}-${turnId}.json`);
+  const unreadMessages = listA2AInboxMessages(inbox, { unreadOnly: true, limit: 100 });
+  const snapshot = {
+    sessionId,
+    turnId,
+    unreadCount: unreadMessages.length,
+    messages: unreadMessages,
+  };
+  writeFileSync(filePath, JSON.stringify(snapshot, null, 2));
+  return filePath;
 }
 
 /**
@@ -318,7 +337,6 @@ export async function runCursor(opts: {
     permissionMode: mode.permissionMode,
     model: mode.model ?? null,
   }));
-  const pendingA2ATexts: string[] = [];
   let currentPermissionMode: PermissionMode | undefined = undefined;
   let currentModel: string | undefined = undefined;
   const syncModeToSessionMetadata = (permissionMode: PermissionMode, model: string | undefined) => {
@@ -363,11 +381,11 @@ export async function runCursor(opts: {
       const dangerouslySkipPermissions = effectivePermission === 'force';
       session.updateMetadata((m) => ({ ...m, currentOperatingModeCode: effectivePermission, currentModelCode: effectiveModel, dangerouslySkipPermissions })).catch((err) => logger.debug('[Cursor] Failed to persist permission/model to session metadata', err));
     }
-    logger.debug(`[cursor] User message queued (length: ${message.content.text.length})`);
     const isA2A = (message.meta as { origin?: string } | undefined)?.origin === 'a2a';
+    const isA2ATrigger = (message.meta as { a2aTrigger?: boolean } | undefined)?.a2aTrigger === true;
+    logger.debug(`[cursor] User message queued (length: ${message.content.text.length})${isA2ATrigger ? ' [a2a-trigger]' : ''}`);
     if (isA2A) {
-      pendingA2ATexts.push(message.content.text);
-      messageQueue.pushIsolated(message.content.text, mode, { origin: 'a2a' });
+      messageQueue.pushIsolated(message.content.text, mode, { origin: 'a2a', a2aTrigger: isA2ATrigger });
     } else {
       messageQueue.push(message.content.text, mode);
     }
@@ -616,7 +634,7 @@ export async function runCursor(opts: {
 
   let currentTurnIdRef: string | null = null;
   const enableSubagentMcp = process.env.HAPPY_SUBAGENT_MCP === '1';
-  const happyServer = await startHappyServer(session, enableSubagentMcp ? {
+  const happyServer = await startHappyServer(session, {
     useDaemonA2ARoute: opts.startedBy === 'daemon',
     cursorContext: {
       getCurrentTurnId: () => currentTurnIdRef,
@@ -624,9 +642,6 @@ export async function runCursor(opts: {
       workspacePath,
       getAbortSignal: () => abortController.signal,
     },
-    onA2aMessage: handleUserMessage,
-  } : {
-    useDaemonA2ARoute: opts.startedBy === 'daemon',
     onA2aMessage: handleUserMessage,
   });
   ensureCursorMcpHappy(workspacePath, happyServer.url);
@@ -701,26 +716,22 @@ export async function runCursor(opts: {
       }
 
       const { message: userMessage, mode, meta } = batch;
-      messageBuffer.addMessage(userMessage, 'user');
+      const isA2ATrigger = !!(meta && typeof meta === 'object' && (meta as { a2aTrigger?: boolean }).a2aTrigger === true);
+      const isA2ABatch =
+        isA2ATrigger
+        || (!!meta && typeof meta === 'object' && (meta as { origin?: string }).origin === 'a2a');
+      messageBuffer.addMessage(userMessage, isA2ABatch ? 'system' : 'user');
       logger.debug(`[cursor] Processing message (length: ${userMessage.length}); spawning cursor-agent`);
 
-      // Cursor has no change_title MCP tool, so don't append that instruction (unlike Codex/Gemini)
-      const prompt = userMessage;
+      let prompt = userMessage;
 
       // Accumulated response text for final message to mobile
       let accumulatedResponse = '';
       let hadToolCalls = false;
       const turnId = createId();
       currentTurnIdRef = turnId;
-      const queuedA2AText = pendingA2ATexts[0];
-      const isA2ABatch =
-        (!!meta && typeof meta === 'object' && (meta as { origin?: string }).origin === 'a2a')
-        || (batch.isolate && queuedA2AText === userMessage);
-      if (batch.isolate && queuedA2AText === userMessage) {
-        pendingA2ATexts.shift();
-      }
 
-      // Send user message: session protocol only. Store (old) App already has the user message from app send; dual-send output format would duplicate it. New App renders from this envelope.
+      // For A2A turns we keep the prompt internal and emit the A2A reminder envelope right as the turn starts.
       if (!isA2ABatch) {
         session.sendSessionProtocolMessage(createEnvelope('user', { t: 'text', text: userMessage }, { turn: turnId }));
       }
@@ -759,6 +770,22 @@ export async function runCursor(opts: {
       try {
         thinking = true;
         session.keepAlive(thinking, 'remote');
+
+        if (isA2ABatch) {
+          const inboxSnapshotPath = writeA2AInboxSnapshot(workspacePath, sessionId, turnId, session.getA2AInbox());
+          const inbox = session.getA2AInbox();
+          const summary = buildA2AInboxNotificationWithPreview(inbox);
+          const unreadCount = inbox.messages.filter((message) => !message.readAt).length;
+          const inboxTitle = unreadCount === 1 ? 'A2A inbox (1 unread)' : `A2A inbox (${unreadCount} unread)`;
+          for (const envelope of buildA2ASubagentCardEnvelopes(summary, {
+            title: inboxTitle,
+            description: summary,
+            turnId: createId(),
+          })) {
+            session.sendSessionProtocolMessage(envelope);
+          }
+          prompt = buildA2ATurnPrompt(userMessage, inboxSnapshotPath);
+        }
 
         // Send turn-start in wrapped shape (type: 'session', data) so store App lifecycle check sees contentType === 'session'
         session.sendSessionLifecycleEnvelope(createEnvelope('agent', { t: 'turn-start' }, { turn: turnId }));

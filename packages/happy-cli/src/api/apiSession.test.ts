@@ -7,12 +7,14 @@ const {
     mockIo,
     mockAxiosGet,
     mockAxiosPost,
+    mockReadFileSync,
     mockBackoff,
     mockDelay
 } = vi.hoisted(() => ({
     mockIo: vi.fn(),
     mockAxiosGet: vi.fn(),
     mockAxiosPost: vi.fn(),
+    mockReadFileSync: vi.fn(),
     mockBackoff: vi.fn(async <T>(callback: () => Promise<T>) => {
         let lastError: unknown;
         for (let i = 0; i < 20; i += 1) {
@@ -25,6 +27,13 @@ const {
         throw lastError;
     }),
     mockDelay: vi.fn(async () => undefined)
+}));
+
+vi.mock('node:fs', () => ({
+    appendFileSync: vi.fn(),
+    mkdirSync: vi.fn(),
+    readFileSync: mockReadFileSync,
+    writeFileSync: vi.fn(),
 }));
 
 vi.mock('socket.io-client', () => ({
@@ -598,7 +607,7 @@ describe('ApiSessionClient v3 messages API migration', () => {
         expect((client as any).lastSeq).toBe(1);
     });
 
-    it('fetchMessages normalizes A2A parts into isolated user messages', async () => {
+    it('fetchMessages normalizes A2A parts into hidden trigger messages', async () => {
         const client = new ApiSessionClient('fake-token', session);
         const onUserMessage = vi.fn();
         client.onUserMessage(onUserMessage);
@@ -606,6 +615,7 @@ describe('ApiSessionClient v3 messages API migration', () => {
 
         const a2aMessage = {
             role: 'user',
+            localKey: 'msg-a2a-1',
             parts: [
                 { type: 'text', text: 'hello' },
                 { type: 'text', text: 'world' }
@@ -637,11 +647,68 @@ describe('ApiSessionClient v3 messages API migration', () => {
         expect(onUserMessage).toHaveBeenCalledWith(expect.objectContaining({
             role: 'user',
             content: { type: 'text', text: 'hello\nworld' },
-            meta: expect.objectContaining({ origin: 'a2a' })
+            meta: expect.objectContaining({ origin: 'a2a', a2aTrigger: true })
         }));
+        expect(client.getA2AInbox().messages).toHaveLength(0);
     });
 
-    it('fetchMessages routes A2A session text envelopes to CLI without requiring a raw user message', async () => {
+    it('fetchMessages records A2A trigger snapshot messages in the inbox before routing them', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        const onUserMessage = vi.fn();
+        client.onUserMessage(onUserMessage);
+        await clearInitialFetch();
+
+        const a2aMessage = {
+            role: 'user',
+            localKey: 'a2a-local-key-1',
+            content: {
+                type: 'text',
+                text: 'A2A inbox (1 unread). Snapshot: /tmp/a2a.json',
+            },
+            meta: {
+                origin: 'a2a',
+                a2aTrigger: true,
+            },
+            a2aInboxMessage: {
+                title: 'Inbox item',
+                text: 'hello from another agent',
+                createdAt: 1000,
+            },
+        };
+
+        mockAxiosGet.mockResolvedValueOnce({
+            data: {
+                messages: [
+                    {
+                        id: 'msg-2',
+                        seq: 2,
+                        content: {
+                            t: 'encrypted',
+                            c: encryptContent(session, a2aMessage)
+                        },
+                        localId: null,
+                        createdAt: 2000,
+                        updatedAt: 2000
+                    }
+                ],
+                hasMore: false
+            }
+        });
+
+        await (client as any).fetchMessages();
+
+        expect(onUserMessage).toHaveBeenCalledTimes(1);
+        expect(client.getA2AInbox().messages).toEqual([
+            expect.objectContaining({
+                id: 'a2a-local-key-1',
+                title: 'Inbox item',
+                text: 'hello from another agent',
+                readAt: null,
+            }),
+        ]);
+    });
+
+    it('fetchMessages stores A2A session text envelopes in inbox without routing a visible message', async () => {
         const client = new ApiSessionClient('fake-token', session);
         const onUserMessage = vi.fn();
         client.onUserMessage(onUserMessage);
@@ -687,15 +754,17 @@ describe('ApiSessionClient v3 messages API migration', () => {
 
         await (client as any).fetchMessages();
 
-        expect(onUserMessage).toHaveBeenCalledTimes(1);
-        expect(onUserMessage).toHaveBeenCalledWith(expect.objectContaining({
-            role: 'user',
-            content: { type: 'text', text: 'hello from session envelope' },
-            meta: expect.objectContaining({ origin: 'a2a' })
-        }));
+        expect(onUserMessage).not.toHaveBeenCalled();
+        expect(client.getA2AInbox().messages).toEqual([
+            expect.objectContaining({
+                id: 'env-1',
+                text: 'hello from session envelope',
+                readAt: null,
+            }),
+        ]);
     });
 
-    it('deduplicates A2A session text envelopes seen from socket and HTTP fetch', async () => {
+    it('deduplicates A2A session text envelopes seen from socket and HTTP fetch without emitting a user message', async () => {
         const client = new ApiSessionClient('fake-token', session);
         const onUserMessage = vi.fn();
         client.onUserMessage(onUserMessage);
@@ -743,13 +812,38 @@ describe('ApiSessionClient v3 messages API migration', () => {
 
         await (client as any).fetchMessages();
 
-        expect(onUserMessage).toHaveBeenCalledTimes(1);
-        expect(onUserMessage).toHaveBeenCalledWith(expect.objectContaining({
-            role: 'user',
-            content: { type: 'text', text: 'dedupe me' },
-            localKey: 'same-envelope-id',
-            meta: expect.objectContaining({ origin: 'a2a' })
-        }));
+        expect(onUserMessage).not.toHaveBeenCalled();
+    });
+
+    it('records A2A inbox messages and read markers through the public API', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        await clearInitialFetch();
+
+        client.recordA2AMessage({
+            id: 'inbox-1',
+            text: 'original a2a text',
+            title: 'Inbox item',
+            createdAt: 1234,
+        });
+
+        expect(client.getA2AInbox().messages).toEqual([
+            expect.objectContaining({
+                id: 'inbox-1',
+                title: 'Inbox item',
+                text: 'original a2a text',
+                createdAt: 1234,
+                readAt: null,
+            }),
+        ]);
+
+        client.markA2AMessageRead('inbox-1');
+
+        expect(client.getA2AInbox().messages).toEqual([
+            expect.objectContaining({
+                id: 'inbox-1',
+                readAt: expect.any(Number),
+            }),
+        ]);
     });
 
     it('fetchMessages uses incremental cursor and paginates while hasMore is true', async () => {
