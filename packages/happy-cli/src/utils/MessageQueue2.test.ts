@@ -477,4 +477,27 @@ describe('MessageQueue2', () => {
         expect(batch3?.message).toBe('after-1');
         expect(batch3?.mode.type).toBe('A');
     });
+
+    it('should wake a blocked waiter via poke without enqueueing messages', async () => {
+        const queue = new MessageQueue2<{ type: string }>((mode) => mode.type);
+        const waitPromise = queue.waitForMessagesAndGetAsString();
+        await new Promise((r) => setTimeout(r, 10));
+        queue.poke();
+        const batch = await waitPromise;
+        expect(batch).toBeNull();
+        expect(queue.size()).toBe(0);
+    });
+
+    it('should coalesce consecutive isolated A2A inbox turns into one dequeue', async () => {
+        const queue = new MessageQueue2<{ type: string }>((mode) => mode.type);
+        const a2aMeta = { a2aInboxTurn: true };
+
+        queue.pushIsolated('', { type: 'A' }, a2aMeta);
+        queue.pushIsolated('', { type: 'A' }, a2aMeta);
+        queue.pushIsolated('', { type: 'A' }, a2aMeta);
+
+        const batch = await queue.waitForMessagesAndGetAsString();
+        expect(batch?.message).toBe('\n\n');
+        expect(batch?.isolate).toBe(true);
+    });
 });

@@ -35,7 +35,7 @@ import { registerKillSessionHandler } from '@/claude/registerKillSessionHandler'
 import { stopCaffeinate } from '@/utils/caffeinate';
 import { connectionState } from '@/utils/serverConnectionErrors';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
-import { buildA2AInboxNotificationWithPreview, buildA2ATurnPrompt, listA2AInboxMessages } from '@/a2a/inbox';
+import { buildA2AInboxNotificationWithPreview, buildA2ATurnPrompt, getA2AUnreadCount, hasUnreadA2AInboxMessages, listA2AInboxMessages } from '@/a2a/inbox';
 import { buildA2ASubagentCardEnvelopes } from '@/a2a/subagentCard';
 import type { ApiSessionClient } from '@/api/apiSession';
 import type { PermissionMode } from '@/api/types';
@@ -339,6 +339,9 @@ export async function runCursor(opts: {
   }));
   let currentPermissionMode: PermissionMode | undefined = undefined;
   let currentModel: string | undefined = undefined;
+  let a2aTurnQueued = false;
+  let a2aInboxTurnActive = false;
+  let scheduleA2ATurnIfNeeded: (mode: CursorMode) => void = () => {};
   const syncModeToSessionMetadata = (permissionMode: PermissionMode, model: string | undefined) => {
     const dangerouslySkipPermissions = permissionMode === 'force';
     session.updateMetadata((m) => ({
@@ -381,14 +384,14 @@ export async function runCursor(opts: {
       const dangerouslySkipPermissions = effectivePermission === 'force';
       session.updateMetadata((m) => ({ ...m, currentOperatingModeCode: effectivePermission, currentModelCode: effectiveModel, dangerouslySkipPermissions })).catch((err) => logger.debug('[Cursor] Failed to persist permission/model to session metadata', err));
     }
-    const isA2A = (message.meta as { origin?: string } | undefined)?.origin === 'a2a';
     const isA2ATrigger = (message.meta as { a2aTrigger?: boolean } | undefined)?.a2aTrigger === true;
-    logger.debug(`[cursor] User message queued (length: ${message.content.text.length})${isA2ATrigger ? ' [a2a-trigger]' : ''}`);
-    if (isA2A) {
-      messageQueue.pushIsolated(message.content.text, mode, { origin: 'a2a', a2aTrigger: isA2ATrigger });
-    } else {
-      messageQueue.push(message.content.text, mode);
+    if (isA2ATrigger) {
+      logger.debug('[cursor] A2A message recorded in inbox; poking message loop');
+      messageQueue.poke();
+      return;
     }
+    logger.debug(`[cursor] User message queued (length: ${message.content.text.length})`);
+    messageQueue.push(message.content.text, mode);
   };
 
   // Handle server unreachable - offline stub with hot reconnection
@@ -409,6 +412,25 @@ export async function runCursor(opts: {
     },
   });
   session = initialSession;
+  const currentCursorMode = (): CursorMode => ({
+    permissionMode: currentPermissionMode ?? 'default',
+    model: currentModel,
+  });
+  scheduleA2ATurnIfNeeded = (mode: CursorMode) => {
+    const unreadCount = getA2AUnreadCount(session.getA2AInbox());
+    if (unreadCount === 0) {
+      return;
+    }
+    if (a2aTurnQueued) {
+      return;
+    }
+    a2aTurnQueued = true;
+    logger.debug(`[cursor] A2A inbox peek: scheduling turn for ${unreadCount} unread message(s)`);
+    messageQueue.pushIsolated('', mode, { a2aInboxTurn: true });
+  };
+  const peekA2AInboxInLoop = (mode?: CursorMode) => {
+    scheduleA2ATurnIfNeeded(mode ?? currentCursorMode());
+  };
   session.onUserMessage(handleUserMessage);
   step('sessionConnect');
   writeSessionPidFile(session.sessionId);
@@ -518,6 +540,7 @@ export async function runCursor(opts: {
     try {
       abortController.abort();
       messageQueue.reset();
+      a2aTurnQueued = false;
     } catch (error) {
       logger.debug('[Cursor] Error during abort:', error);
     } finally {
@@ -636,6 +659,7 @@ export async function runCursor(opts: {
   const enableSubagentMcp = process.env.HAPPY_SUBAGENT_MCP === '1';
   const happyServer = await startHappyServer(session, {
     useDaemonA2ARoute: opts.startedBy === 'daemon',
+    isA2AInboxTurnActive: () => a2aInboxTurnActive,
     cursorContext: {
       getCurrentTurnId: () => currentTurnIdRef,
       sendSessionEnvelope: (envelope) => session.sendSessionProtocolMessage(envelope),
@@ -705,6 +729,8 @@ export async function runCursor(opts: {
 
   try {
     while (!shouldExit) {
+      peekA2AInboxInLoop();
+
       const waitSignal = abortController.signal;
       const batch = await messageQueue.waitForMessagesAndGetAsString(waitSignal);
       if (!batch) {
@@ -712,16 +738,24 @@ export async function runCursor(opts: {
           logger.debug('[cursor] Wait aborted while idle, continuing');
           continue;
         }
+        if (!shouldExit) {
+          continue;
+        }
         break;
       }
 
       const { message: userMessage, mode, meta } = batch;
-      const isA2ATrigger = !!(meta && typeof meta === 'object' && (meta as { a2aTrigger?: boolean }).a2aTrigger === true);
-      const isA2ABatch =
-        isA2ATrigger
-        || (!!meta && typeof meta === 'object' && (meta as { origin?: string }).origin === 'a2a');
-      messageBuffer.addMessage(userMessage, isA2ABatch ? 'system' : 'user');
-      logger.debug(`[cursor] Processing message (length: ${userMessage.length}); spawning cursor-agent`);
+      const isA2AInboxTurn = !!(meta && typeof meta === 'object' && (meta as { a2aInboxTurn?: boolean }).a2aInboxTurn === true);
+      if (isA2AInboxTurn) {
+        a2aTurnQueued = false;
+        if (!hasUnreadA2AInboxMessages(session.getA2AInbox())) {
+          logger.debug('[cursor] A2A inbox turn dequeued with no unread messages; skipping');
+          continue;
+        }
+        a2aInboxTurnActive = true;
+      }
+      messageBuffer.addMessage(userMessage, isA2AInboxTurn ? 'system' : 'user');
+      logger.debug(`[cursor] Processing message (length: ${userMessage.length})${isA2AInboxTurn ? ' [a2a-inbox-turn]' : ''}; spawning cursor-agent`);
 
       let prompt = userMessage;
 
@@ -731,8 +765,8 @@ export async function runCursor(opts: {
       const turnId = createId();
       currentTurnIdRef = turnId;
 
-      // For A2A turns we keep the prompt internal and emit the A2A reminder envelope right as the turn starts.
-      if (!isA2ABatch) {
+      // For A2A inbox turns we keep the prompt internal and emit the A2A card right as the turn starts.
+      if (!isA2AInboxTurn) {
         session.sendSessionProtocolMessage(createEnvelope('user', { t: 'text', text: userMessage }, { turn: turnId }));
       }
       const messageParser = new CursorMessageParser();
@@ -771,14 +805,16 @@ export async function runCursor(opts: {
         thinking = true;
         session.keepAlive(thinking, 'remote');
 
-        if (isA2ABatch) {
+        if (isA2AInboxTurn) {
           const inboxSnapshotPath = writeA2AInboxSnapshot(workspacePath, sessionId, turnId, session.getA2AInbox());
           const inbox = session.getA2AInbox();
-          const unreadMessages = inbox.messages.filter((message) => !message.readAt);
-          const unreadCount = unreadMessages.length;
-          const unreadIds = unreadMessages.map((message) => message.id);
+          const unreadCount = getA2AUnreadCount(inbox);
           const summary = buildA2AInboxNotificationWithPreview(inbox);
-          const inboxTitle = unreadCount === 1 ? 'A2A inbox (1 unread)' : `A2A inbox (${unreadCount} unread)`;
+          const inboxTitle = unreadCount === 0
+            ? 'A2A inbox'
+            : unreadCount === 1
+              ? 'A2A inbox (1 unread)'
+              : `A2A inbox (${unreadCount} unread)`;
           for (const envelope of buildA2ASubagentCardEnvelopes(summary, {
             title: inboxTitle,
             description: summary,
@@ -786,10 +822,7 @@ export async function runCursor(opts: {
           })) {
             session.sendSessionProtocolMessage(envelope);
           }
-          if (unreadIds.length > 0) {
-            session.markA2AMessagesRead(unreadIds);
-          }
-          prompt = buildA2ATurnPrompt(userMessage, inboxSnapshotPath);
+          prompt = buildA2ATurnPrompt(summary, inboxSnapshotPath, unreadCount);
         }
 
         // Send turn-start in wrapped shape (type: 'session', data) so store App lifecycle check sees contentType === 'session'
@@ -1032,6 +1065,9 @@ export async function runCursor(opts: {
         // Clear parser state for next turn
         messageParser.clear();
         currentTurnIdRef = null;
+        if (isA2AInboxTurn) {
+          a2aInboxTurnActive = false;
+        }
         emitReadyIfIdle();
 
         logger.debug(`[cursor] Turn completed (queue: ${messageQueue.size()})`);

@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createTwoFilesPatch } from 'diff'
 import { io, Socket } from 'socket.io-client'
-import { AgentState, A2AInboxMessage, ClientToServerEvents, Metadata, ServerToClientEvents, Session, Update, UserMessage, UserMessageSchema, Usage, buildSyncedSessionMetadata, sanitizeSessionMetadataForApp, shouldSyncSessionMetadata } from './types'
+import { AgentState, A2AInboxMessage, ClientToServerEvents, MessageMeta, Metadata, ServerToClientEvents, Session, Update, UserMessage, UserMessageSchema, Usage, buildSyncedSessionMetadata, sanitizeSessionMetadataForApp, shouldSyncSessionMetadata } from './types'
 import { decodeBase64, decrypt, encodeBase64, encrypt } from './encryption';
 import { backoff, delay } from '@/utils/time';
 import { configuration, serverHttpsAgent } from '@/configuration';
@@ -619,19 +619,19 @@ export class ApiSessionClient extends EventEmitter {
         };
     }
 
-    private ingestA2AInboxFromTrigger(raw: unknown) {
+    private ingestA2AInboxFromTrigger(raw: unknown): string | undefined {
         if (!isRecord(raw) || raw.role !== 'user') {
-            return;
+            return undefined;
         }
 
         const meta = isRecord(raw.meta) ? raw.meta : null;
         if (meta?.origin !== 'a2a' && meta?.a2aTrigger !== true) {
-            return;
+            return undefined;
         }
 
         const inboxMessage = isRecord(raw.a2aInboxMessage) ? raw.a2aInboxMessage : null;
         if (!inboxMessage || typeof inboxMessage.text !== 'string' || inboxMessage.text.trim().length === 0) {
-            return;
+            return undefined;
         }
 
         const triggerId = typeof raw.localKey === 'string' && raw.localKey.trim().length > 0 ? raw.localKey : randomUUID();
@@ -641,18 +641,36 @@ export class ApiSessionClient extends EventEmitter {
             text: inboxMessage.text.trim(),
             createdAt: typeof inboxMessage.createdAt === 'number' ? inboxMessage.createdAt : Date.now(),
         });
+        return triggerId;
+    }
+
+    private withA2AInboxMessageMeta<T extends { meta?: MessageMeta; localKey?: string }>(
+        message: T,
+        triggerInboxMessageId?: string,
+    ): T {
+        if (!triggerInboxMessageId) {
+            return message;
+        }
+        return {
+            ...message,
+            meta: {
+                ...(message.meta ?? {}),
+                a2aInboxMessageId: triggerInboxMessageId,
+            },
+        };
     }
 
     private routeIncomingMessage(message: unknown) {
-        this.ingestA2AInboxFromTrigger(message);
+        const triggerInboxMessageId = this.ingestA2AInboxFromTrigger(message);
 
         const userResult = UserMessageSchema.safeParse(message);
         if (userResult.success) {
             logger.debug('[API] User message from app received, routing to CLI');
+            const routed = this.withA2AInboxMessageMeta(userResult.data, triggerInboxMessageId);
             if (this.pendingMessageCallback) {
-                this.pendingMessageCallback(userResult.data);
+                this.pendingMessageCallback(routed);
             } else {
-                this.pendingMessages.push(userResult.data);
+                this.pendingMessages.push(routed);
             }
             return;
         }
@@ -660,10 +678,11 @@ export class ApiSessionClient extends EventEmitter {
         const relaxed = this.normalizeToUserMessage(message);
         if (relaxed) {
             logger.debug(`[API] User message from ${relaxed.meta?.origin === 'a2a' ? 'A2A compat' : 'relaxed'} parse, routing to CLI`);
+            const routed = this.withA2AInboxMessageMeta(relaxed, triggerInboxMessageId);
             if (this.pendingMessageCallback) {
-                this.pendingMessageCallback(relaxed);
+                this.pendingMessageCallback(routed);
             } else {
-                this.pendingMessages.push(relaxed);
+                this.pendingMessages.push(routed);
             }
             return;
         }

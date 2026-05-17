@@ -36,6 +36,8 @@ export interface StartHappyServerOptions {
     cursorContext?: HappyServerCursorContext;
     onA2aMessage?: (message: UserMessage) => Promise<void> | void;
     useDaemonA2ARoute?: boolean;
+    /** When false, inbox mark MCP tools reject (consume+mark must happen in the active A2A turn). */
+    isA2AInboxTurnActive?: () => boolean;
 }
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
@@ -146,14 +148,26 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
 
     const ctx = options?.cursorContext;
 
+    const requireA2AInboxTurn = (action: string) => {
+        if (options?.isA2AInboxTurnActive?.()) {
+            return null;
+        }
+        return {
+            content: [{ type: 'text' as const, text: `${action} is only available during an active A2A inbox turn.` }],
+            isError: true,
+        };
+    };
+
     mcp.registerTool('list_a2a_messages', {
-        description: 'List messages in the A2A inbox. Use unreadOnly to focus on new messages, then mark the consumed ids as read before replying.',
+        description: 'List messages in the A2A inbox. Call at the start of each A2A inbox turn with unreadOnly=true before read/mark.',
         title: 'List Inbox Messages',
         inputSchema: {
             unreadOnly: z.boolean().optional().describe('Only return unread messages'),
             limit: z.number().int().positive().max(100).optional().describe('Maximum number of messages to return'),
         },
     }, async (args) => {
+        const blocked = requireA2AInboxTurn('List inbox messages');
+        if (blocked) return blocked;
         const inbox = client.getA2AInbox();
         const messages = listA2AInboxMessages(inbox, {
             unreadOnly: args.unreadOnly,
@@ -169,13 +183,14 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
     });
 
     mcp.registerTool('read_a2a_message', {
-        description: 'Read a single inbox message by id without changing its read state. After reading, mark it as read with mark_a2a_message_read.',
+        description: 'Read a single inbox message by id without changing its read state. Call during the A2A inbox turn for each unread id you will handle.',
         title: 'Read Inbox Message',
         inputSchema: {
             id: z.string().describe('A2A inbox message id'),
         },
     }, async (args) => {
-        const inbox = client.getA2AInbox();
+        const blocked = requireA2AInboxTurn('Read inbox message');
+        if (blocked) return blocked;
         const message = client.getA2AInbox().messages.find((item) => item.id === args.id);
         if (!message) {
             return { content: [{ type: 'text', text: `A2A message ${args.id} not found.` }], isError: true };
@@ -187,12 +202,14 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
     });
 
     mcp.registerTool('mark_a2a_message_read', {
-        description: 'Mark a single inbox message as read. Use this after reading the message content.',
+        description: 'Mark a single inbox message as read in this A2A inbox turn, after read_a2a_message.',
         title: 'Mark Inbox Message Read',
         inputSchema: {
             id: z.string().describe('A2A inbox message id'),
         },
     }, async (args) => {
+        const blocked = requireA2AInboxTurn('Mark inbox message read');
+        if (blocked) return blocked;
         client.markA2AMessageRead(args.id);
         const message = client.getA2AInbox().messages.find((item) => item.id === args.id);
         return {
@@ -205,12 +222,14 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
     });
 
     mcp.registerTool('mark_a2a_messages_read', {
-        description: 'Mark multiple inbox messages as read after consuming them from the inbox.',
+        description: 'Mark multiple inbox messages as read in this A2A inbox turn after you have read and handled them.',
         title: 'Mark Inbox Messages Read',
         inputSchema: {
             ids: z.array(z.string()).min(1).describe('A2A inbox message ids'),
         },
     }, async (args) => {
+        const blocked = requireA2AInboxTurn('Mark inbox messages read');
+        if (blocked) return blocked;
         client.markA2AMessagesRead(args.ids);
         const inbox = client.getA2AInbox();
         const updated = inbox.messages.filter((item) => args.ids.includes(item.id));

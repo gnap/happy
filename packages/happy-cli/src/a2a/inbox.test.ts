@@ -5,6 +5,7 @@ import {
   buildA2ATurnPrompt,
   cloneA2AInboxState,
   getA2AUnreadCount,
+  hasUnreadA2AInboxMessages,
   listA2AInboxMessages,
   mergeA2AInboxState,
   markA2AInboxMessageRead,
@@ -61,11 +62,19 @@ describe('A2A inbox helpers', () => {
     expect(buildA2AInboxNotificationWithPreview(inbox)).toContain('Reminder: first message');
   });
 
-  it('builds a hidden prompt that instructs the model to consume inbox items', () => {
+  it('builds a hidden prompt that requires MCP inbox consumption in this turn', () => {
     const prompt = buildA2ATurnPrompt(buildA2AInboxNotification(1));
     expect(prompt).toContain('A2A inbox (1 unread)');
-    expect(prompt).toContain('Read the inbox first');
-    expect(prompt).not.toContain('mark consumed ids read');
+    expect(prompt).toContain('list_a2a_messages');
+    expect(prompt).toContain('mark_a2a_messages_read');
+    expect(prompt).toContain('in this turn');
+    expect(prompt).toContain('do not leave unread messages for a later turn');
+  });
+
+  it('encourages one-turn batch handling when multiple messages are stacked', () => {
+    const prompt = buildA2ATurnPrompt(buildA2AInboxNotification(4), '/tmp/inbox.json', 4);
+    expect(prompt).toContain('4 unread inbox messages stacked');
+    expect(prompt).toContain('one combined summary');
   });
 
   it('marks a single message as read', () => {
@@ -97,4 +106,32 @@ describe('A2A inbox helpers', () => {
     const merged = mergeA2AInboxState(local, remote);
     expect(merged.messages[0]).toEqual(expect.objectContaining({ id: 'one', readAt: 9000 }));
   });
+
+  it('peeks unread inbox work for turn scheduling', () => {
+    const inbox = upsertA2AInboxMessage(undefined, {
+      id: 'one',
+      text: 'pending',
+      createdAt: 1000,
+    });
+    expect(hasUnreadA2AInboxMessages(inbox)).toBe(true);
+    expect(hasUnreadA2AInboxMessages(markA2AInboxMessageRead(inbox, 'one', 9000))).toBe(false);
+  });
+
+  it('merges remote read markers without marking local unread rows as read', () => {
+    const local = upsertA2AInboxMessage(undefined, {
+      id: 'one',
+      text: 'still unread locally',
+      createdAt: 1000,
+    });
+    const remote = upsertA2AInboxMessage(undefined, {
+      id: 'one',
+      text: 'still unread locally',
+      createdAt: 1000,
+      readAt: 9000,
+    });
+
+    const merged = mergeA2AInboxState(local, remote);
+    expect(merged.messages[0]).toEqual(expect.objectContaining({ id: 'one', readAt: null }));
+  });
+
 });

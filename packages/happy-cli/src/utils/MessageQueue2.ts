@@ -1,5 +1,12 @@
 import { logger } from "@/ui/logger";
 
+function isA2AInboxTurnMeta(meta: unknown): boolean {
+    if (!meta || typeof meta !== 'object') {
+        return false;
+    }
+    return (meta as { a2aInboxTurn?: boolean }).a2aInboxTurn === true;
+}
+
 interface QueueItem<T> {
     message: string;
     mode: T;
@@ -256,6 +263,19 @@ export class MessageQueue2<T> {
         return this.queue.length;
     }
 
+    /** Wake a blocked waitForMessages without enqueueing work (e.g. new A2A inbox rows). */
+    poke(): void {
+        if (this.closed) {
+            return;
+        }
+        if (this.waiter) {
+            logger.debug('[MessageQueue2] Poking waiter');
+            const waiter = this.waiter;
+            this.waiter = null;
+            waiter(true);
+        }
+    }
+
     /**
      * Wait for messages and return all messages with the same mode as a single string
      * Returns { message: string, mode: T } or null if aborted/closed
@@ -300,7 +320,17 @@ export class MessageQueue2<T> {
         if (firstItem.isolate) {
             const item = this.queue.shift()!;
             sameModeMessages.push(item.message);
-            logger.debug(`[MessageQueue2] Collected isolated message with mode hash: ${targetModeHash}`);
+            if (isA2AInboxTurnMeta(item.meta)) {
+                while (this.queue.length > 0
+                    && this.queue[0].isolate
+                    && this.queue[0].modeHash === targetModeHash
+                    && isA2AInboxTurnMeta(this.queue[0].meta)) {
+                    sameModeMessages.push(this.queue.shift()!.message);
+                }
+                logger.debug(`[MessageQueue2] Collected ${sameModeMessages.length} coalesced A2A inbox turn(s) with mode hash: ${targetModeHash}`);
+            } else {
+                logger.debug(`[MessageQueue2] Collected isolated message with mode hash: ${targetModeHash}`);
+            }
         } else {
             // Collect all messages with the same mode until we hit an isolated message
             while (this.queue.length > 0 &&
