@@ -40,6 +40,7 @@ import { buildA2ASubagentCardEnvelopes } from '@/a2a/subagentCard';
 import type { ApiSessionClient } from '@/api/apiSession';
 import type { PermissionMode } from '@/api/types';
 import type { UserMessage } from '@/api/types';
+import { parseSpecialCommand } from '@/parsers/specialCommands';
 
 /**
  * Use native codex message format (type: 'codex') instead of ACP format
@@ -64,6 +65,42 @@ function toolResultForOutputFormat(result: unknown, isError: boolean): { content
     if (typeof o.stderr === 'string' && isError) return { content: o.stderr, is_error: true };
   }
   return { content: JSON.stringify(result ?? ''), is_error: isError };
+}
+
+function formatCursorUsageLog(params: {
+  sessionId: string;
+  turnId: string;
+  cursorChatId: string | null;
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+  };
+  costUsd?: number;
+  durationMs?: number;
+}): string {
+  const usage = params.usage;
+  const inputTokens = usage?.input_tokens;
+  const outputTokens = usage?.output_tokens;
+  const cacheReadInputTokens = usage?.cache_read_input_tokens;
+  const cacheCreationInputTokens = usage?.cache_creation_input_tokens;
+  const totalTokens = typeof inputTokens === 'number' && typeof outputTokens === 'number'
+    ? inputTokens + outputTokens
+    : undefined;
+
+  return JSON.stringify({
+    sessionId: params.sessionId,
+    turnId: params.turnId,
+    cursorChatId: params.cursorChatId,
+    inputTokens,
+    outputTokens,
+    cacheReadInputTokens,
+    cacheCreationInputTokens,
+    totalTokens,
+    costUsd: params.costUsd,
+    durationMs: params.durationMs,
+  });
 }
 import { createId } from '@paralleldrive/cuid2';
 import { CursorProcess, fetchCursorModels } from './cursorProcess';
@@ -384,6 +421,12 @@ export async function runCursor(opts: {
       const dangerouslySkipPermissions = effectivePermission === 'force';
       session.updateMetadata((m) => ({ ...m, currentOperatingModeCode: effectivePermission, currentModelCode: effectiveModel, dangerouslySkipPermissions })).catch((err) => logger.debug('[Cursor] Failed to persist permission/model to session metadata', err));
     }
+    const specialCommand = parseSpecialCommand(message.content.text);
+    if (specialCommand.type === 'compact') {
+      logger.debug('[cursor] Detected /compact command; scheduling interactive compression turn');
+      messageQueue.pushIsolateAndClear('', mode, { cursorCompactTurn: true });
+      return;
+    }
     const isA2ATrigger = (message.meta as { a2aTrigger?: boolean } | undefined)?.a2aTrigger === true;
     if (isA2ATrigger) {
       logger.debug('[cursor] A2A message recorded in inbox; poking message loop');
@@ -417,7 +460,19 @@ export async function runCursor(opts: {
     model: currentModel,
   });
   scheduleA2ATurnIfNeeded = (mode: CursorMode) => {
-    const unreadCount = getA2AUnreadCount(session.getA2AInbox());
+    const unreadMessages = listA2AInboxMessages(session.getA2AInbox(), { unreadOnly: true });
+    const compactMessage = unreadMessages.find((message) => parseSpecialCommand(message.text).type === 'compact');
+    if (compactMessage) {
+      if (a2aTurnQueued) {
+        return;
+      }
+      a2aTurnQueued = true;
+      logger.debug(`[cursor] A2A compact command peek: scheduling interactive compression turn for message ${compactMessage.id}`);
+      session.markA2AMessageRead(compactMessage.id);
+      messageQueue.pushIsolateAndClear('', mode, { cursorCompactTurn: true });
+      return;
+    }
+    const unreadCount = unreadMessages.length;
     if (unreadCount === 0) {
       return;
     }
@@ -746,6 +801,7 @@ export async function runCursor(opts: {
 
       const { message: userMessage, mode, meta } = batch;
       const isA2AInboxTurn = !!(meta && typeof meta === 'object' && (meta as { a2aInboxTurn?: boolean }).a2aInboxTurn === true);
+      const isCursorCompactTurn = !!(meta && typeof meta === 'object' && (meta as { cursorCompactTurn?: boolean }).cursorCompactTurn === true);
       if (isA2AInboxTurn) {
         a2aTurnQueued = false;
         if (!hasUnreadA2AInboxMessages(session.getA2AInbox())) {
@@ -754,8 +810,12 @@ export async function runCursor(opts: {
         }
         a2aInboxTurnActive = true;
       }
-      messageBuffer.addMessage(userMessage, isA2AInboxTurn ? 'system' : 'user');
-      logger.debug(`[cursor] Processing message (length: ${userMessage.length})${isA2AInboxTurn ? ' [a2a-inbox-turn]' : ''}; spawning cursor-agent`);
+      if (isCursorCompactTurn) {
+        messageBuffer.addMessage('Summarizing...', 'system');
+      } else {
+        messageBuffer.addMessage(userMessage, isA2AInboxTurn ? 'system' : 'user');
+      }
+      logger.debug(`[cursor] Processing message (length: ${userMessage.length})${isA2AInboxTurn ? ' [a2a-inbox-turn]' : ''}${isCursorCompactTurn ? ' [compact-turn]' : ''}; spawning cursor-agent`);
 
       let prompt = userMessage;
 
@@ -766,8 +826,10 @@ export async function runCursor(opts: {
       currentTurnIdRef = turnId;
 
       // For A2A inbox turns we keep the prompt internal and emit the A2A card right as the turn starts.
-      if (!isA2AInboxTurn) {
+      if (!isA2AInboxTurn && !isCursorCompactTurn) {
         session.sendSessionProtocolMessage(createEnvelope('user', { t: 'text', text: userMessage }, { turn: turnId }));
+      } else if (isCursorCompactTurn) {
+        session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'service', text: 'Summarizing...' }, { turn: turnId }));
       }
       const messageParser = new CursorMessageParser();
       const codexIdByCallId = new Map<string, string>();
@@ -994,9 +1056,14 @@ export async function runCursor(opts: {
               if (msg.sessionId) {
                 cursorChatId = msg.sessionId;
               }
-              if (msg.costUsd !== undefined) {
-                logger.debug(`[cursor] Cost: $${msg.costUsd}, Duration: ${msg.durationMs}ms`);
-              }
+              logger.debug(`[cursor] Turn usage ${formatCursorUsageLog({
+                sessionId: session.sessionId,
+                turnId,
+                cursorChatId,
+                usage: msg.usage,
+                costUsd: msg.costUsd,
+                durationMs: msg.durationMs,
+              })}`);
               // Close any tool calls that never got tool_call_end (e.g. long-running shell still running when turn ended)
               // so the App stops their timers as soon as we know the turn is complete
               const turnEndedResult = { turnEnded: true, message: 'Turn completed; tool did not report end' };
@@ -1016,7 +1083,15 @@ export async function runCursor(opts: {
         }
 
         // Run the process (blocks until exit)
-        await cursorProc.run(prompt);
+        if (isCursorCompactTurn) {
+          await cursorProc.runInteractiveCommand('/compress');
+          const summarySuccessMessage = 'Summary completed successfully.';
+          messageBuffer.addMessage(summarySuccessMessage, 'status');
+          session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'service', text: summarySuccessMessage }, { turn: turnId }));
+          turnCompletedNormally = true;
+        } else {
+          await cursorProc.run(prompt);
+        }
 
         first = false;
 

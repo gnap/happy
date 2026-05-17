@@ -175,6 +175,7 @@ export const MessageMetaSchema = z.object({
   a2aTrigger: z.boolean().optional(), // Transport marker: new row was written to a2aInbox (does not enqueue turn text)
   a2aInboxMessageId: z.string().optional(), // Inbox row id for the message that just arrived
   a2aInboxTurn: z.boolean().optional(), // Internal scheduler: run one cursor turn to drain unread inbox via MCP
+  cursorCompactTurn: z.boolean().optional(), // Internal scheduler: run one interactive cursor-agent /compress turn
   permissionMode: z.enum(['default', 'acceptEdits', 'bypassPermissions', 'plan', 'read-only', 'safe-yolo', 'yolo', 'ask', 'force']).optional(), // Permission mode for this message
   model: z.string().nullable().optional(), // Model name for this message (null = reset)
   fallbackModel: z.string().nullable().optional(), // Fallback model for this message (null = reset)

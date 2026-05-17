@@ -21,6 +21,7 @@ import type { AgentBackend, AgentMessage, AgentMessageHandler, SessionId, StartS
 import { CursorProcess } from './cursorProcess';
 import { CursorMessageParser, type CursorParsedMessage } from './cursorMessageParser';
 import type { CursorStreamMessage } from './types';
+import { parseSpecialCommand } from '@/parsers/specialCommands';
 
 function toAgentToolShape(
   toolName: string,
@@ -153,6 +154,7 @@ export class CursorBackend implements AgentBackend {
     });
 
     const flushText = (): void => { /* no accumulation for ACP path; we emit text deltas */ };
+    const specialCommand = parseSpecialCommand(prompt);
 
     /* Idle timeout is only scheduled after we receive at least one stream message (thinking/assistant/result).
        This avoids ending the turn during cursor-agent startup delay (e.g. first line broken, "user" type only). */
@@ -225,7 +227,12 @@ export class CursorBackend implements AgentBackend {
     });
 
     try {
-      await cursorProc.run(prompt);
+      if (specialCommand.type === 'compact') {
+        logger.debug('[CursorBackend] /compact command detected - running interactive compression turn');
+        await cursorProc.runInteractiveCommand('/compress');
+      } else {
+        await cursorProc.run(prompt);
+      }
     } catch (error) {
       const isAbort = error instanceof Error && error.name === 'AbortError';
       for (const h of toolCallTimeoutHandles.values()) clearTimeout(h);

@@ -21,6 +21,15 @@ import type { CursorStreamMessage } from './types';
 
 const CURSOR_AGENT_NAME = 'cursor-agent';
 const PTY_BASH_EXEC_COMMAND = 'exec "$0" "$@"';
+const INTERACTIVE_READY_PATTERNS = [
+  /Add a follow-up/i,
+  /Add a message/i,
+  /No active session\./i,
+  /Rendering latest messages/i,
+  /\bAuto-run\b/i,
+  /Use \/full-conversation to render everything/i,
+];
+const INTERACTIVE_INPUT_FALLBACK_MS = 15000;
 
 function shellEscapePosix(arg: string): string {
   return `'${arg.replace(/'/g, `'\\''`)}'`;
@@ -51,6 +60,44 @@ export function buildCursorPtySpawn(
     command: 'script',
     args: ['-q', '/dev/null', '/bin/bash', '-l', '-c', PTY_BASH_EXEC_COMMAND, cursorAgentPath, ...cursorArgs],
   };
+}
+
+export function buildCursorArgs(
+  options: CursorProcessOptions,
+  interactive: boolean,
+): string[] {
+  const cursorArgs: string[] = [];
+  if (!interactive) {
+    cursorArgs.push('--print');
+    cursorArgs.push('--output-format', 'stream-json');
+    cursorArgs.push('--stream-partial-output'); // stream assistant/result deltas instead of only at end
+    cursorArgs.push('--trust'); // Non-interactive: avoid "Workspace Trust Required" prompt
+  }
+
+  if (options.executionMode === 'plan') {
+    cursorArgs.push('--mode', 'plan');
+  } else if (options.executionMode === 'ask') {
+    cursorArgs.push('--mode', 'ask');
+  }
+  // Default force to true when unspecified so ACP path (CursorBackend) keeps --force
+  if (options.force !== false) {
+    cursorArgs.push('--force');
+  }
+
+  if (options.model) {
+    cursorArgs.push('--model', options.model);
+  }
+
+  if (options.resumeChatId) {
+    cursorArgs.push('--resume', options.resumeChatId);
+  }
+  if (options.approveMcps) {
+    cursorArgs.push('--approve-mcps');
+    cursorArgs.push('--workspace', options.cwd);
+    logger.debug('[cursor] MCP: --approve-mcps enabled so Happy loads from .cursor/mcp.json');
+  }
+
+  return cursorArgs;
 }
 
 export type CursorExecutionMode = 'default' | 'plan' | 'ask';
@@ -144,38 +191,28 @@ export class CursorProcess extends EventEmitter {
    * Spawn cursor-agent and send a prompt. Returns when the process exits.
    */
   async run(prompt: string): Promise<void> {
-    const cursorArgs = [
-      '--print',
-      '--output-format', 'stream-json',
-      '--stream-partial-output', // stream assistant/result deltas instead of only at end
-      '--trust', // Non-interactive: avoid "Workspace Trust Required" prompt
-    ];
-
-    if (this.options.executionMode === 'plan') {
-      cursorArgs.push('--mode', 'plan');
-    } else if (this.options.executionMode === 'ask') {
-      cursorArgs.push('--mode', 'ask');
-    }
-    // Default force to true when unspecified so ACP path (CursorBackend) keeps --force
-    if (this.options.force !== false) {
-      cursorArgs.push('--force');
-    }
-
-    if (this.options.model) {
-      cursorArgs.push('--model', this.options.model);
-    }
-
-    if (this.options.resumeChatId) {
-      cursorArgs.push('--resume', this.options.resumeChatId);
-    }
-    if (this.options.approveMcps) {
-      cursorArgs.push('--approve-mcps');
-      cursorArgs.push('--workspace', this.options.cwd);
-      logger.debug('[cursor] MCP: --approve-mcps enabled so Happy loads from .cursor/mcp.json');
-    }
-
+    const cursorArgs = buildCursorArgs(this.options, false);
     cursorArgs.push('--', prompt);
+    return this.spawnAndRun(cursorArgs, { interactive: false });
+  }
 
+  /**
+   * Spawn cursor-agent interactively and send a slash command such as /compress.
+   * Returns when the interactive session exits explicitly.
+   */
+  async runInteractiveCommand(command: string): Promise<void> {
+    const cursorArgs = buildCursorArgs(this.options, true);
+    return this.spawnAndRun(cursorArgs, {
+      interactive: true,
+      stdinInput: `${command}\n`,
+      resolveOnInteractiveReady: true,
+    });
+  }
+
+  private spawnAndRun(
+    cursorArgs: string[],
+    options: { interactive: boolean; stdinInput?: string; interactiveIdleMs?: number; resolveOnInteractiveReady?: boolean },
+  ): Promise<void> {
     const cursorAgentPath = resolveCursorAgentPath();
     logger.debug(`[cursor] Spawning: ${[cursorAgentPath, ...cursorArgs].join(' ').slice(0, 200)}...`);
 
@@ -191,14 +228,74 @@ export class CursorProcess extends EventEmitter {
     };
 
     const spawnOptions: SpawnOptions = {
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: options.interactive ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'],
       cwd: this.options.cwd,
       env: env as Record<string, string>,
     };
 
     return new Promise<void>((resolve, reject) => {
+      let settled = false;
       let subprocessError: Error | null = null;
+      let interactiveIdleTimer: ReturnType<typeof setTimeout> | null = null;
+      let interactiveInputTimer: ReturnType<typeof setTimeout> | null = null;
+      let interactiveInputSent = false;
+      let interactiveCompletionSent = false;
+      let interactiveScreenBuffer = '';
+      const resolveOnce = (): void => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      const rejectOnce = (error: Error): void => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+      const clearInteractiveIdleTimer = () => {
+        if (interactiveIdleTimer) {
+          clearTimeout(interactiveIdleTimer);
+          interactiveIdleTimer = null;
+        }
+      };
+      const clearInteractiveInputTimer = () => {
+        if (interactiveInputTimer) {
+          clearTimeout(interactiveInputTimer);
+          interactiveInputTimer = null;
+        }
+      };
+      const sendInteractiveInput = (reason: string) => {
+        if (!options.interactive || !options.stdinInput || interactiveInputSent) return;
+        interactiveInputSent = true;
+        clearInteractiveInputTimer();
+        try {
+          child.stdin?.write(options.stdinInput);
+          logger.debug(`[cursor] Interactive command sent (${reason})`);
+          armInteractiveIdleTimer();
+        } catch (error) {
+          logger.debug('[cursor] Failed to write interactive command:', error);
+        }
+      };
+      const maybeResolveInteractiveCompletion = (reason: string) => {
+        if (!options.interactive || !options.resolveOnInteractiveReady || interactiveCompletionSent) return;
+        if (!interactiveInputSent || !interactiveReady()) return;
+        interactiveCompletionSent = true;
+        clearInteractiveIdleTimer();
+        logger.debug(`[cursor] Interactive command completed (${reason})`);
+        resolveOnce();
+      };
+      const interactiveReady = (): boolean => INTERACTIVE_READY_PATTERNS.some((pattern) => pattern.test(interactiveScreenBuffer));
+      const maybeSendInteractiveInput = (reason: string) => {
+        if (!options.interactive) return;
+        if (!interactiveInputSent && options.stdinInput && interactiveReady()) {
+          sendInteractiveInput(reason);
+          interactiveScreenBuffer = '';
+          return;
+        }
+      };
+
       const onExit = (code: number | null) => {
+        clearInteractiveIdleTimer();
+        clearInteractiveInputTimer();
         this.cleanup();
         if (this.buffer.trim()) {
           const lines = this.buffer.split('\n').map((l) => l.trim()).filter(Boolean);
@@ -211,9 +308,11 @@ export class CursorProcess extends EventEmitter {
         logger.debug(`[cursor] Process exited with code: ${code}`);
         this.emit('exit', code);
         if (subprocessError) {
-          reject(subprocessError);
+          rejectOnce(subprocessError);
         } else {
-          resolve();
+          if (!options.resolveOnInteractiveReady || !interactiveCompletionSent) {
+            resolveOnce();
+          }
         }
       };
 
@@ -244,22 +343,57 @@ export class CursorProcess extends EventEmitter {
       let child: ChildProcess;
       if (noPty) {
         child = spawn(cursorAgentPath, cursorArgs, spawnOptions);
-        logger.debug('[cursor] Spawning cursor-agent directly (no PTY)');
+        logger.debug(`[cursor] Spawning cursor-agent directly (no PTY${options.interactive ? ', interactive' : ''})`);
       } else {
-        // PTY via script (same as pre-ACP): spawn script so cursor-agent runs inside a PTY; script is a system binary so spawn always works
         const ptySpawn = buildCursorPtySpawn(cursorAgentPath, cursorArgs, isLinux);
         child = spawn(ptySpawn.command, ptySpawn.args, spawnOptions);
-        logger.debug('[cursor] Spawning cursor-agent with script (PTY)');
+        logger.debug(`[cursor] Spawning cursor-agent with script (PTY${options.interactive ? ', interactive' : ''})`);
       }
 
       this.child = child;
+
+      if (options.interactive && options.stdinInput) {
+        interactiveInputTimer = setTimeout(() => {
+          sendInteractiveInput(`fallback after ${INTERACTIVE_INPUT_FALLBACK_MS}ms`);
+        }, INTERACTIVE_INPUT_FALLBACK_MS);
+      }
+
+      const armInteractiveIdleTimer = () => {
+        if (!options.interactive || !options.interactiveIdleMs || options.interactiveIdleMs <= 0) return;
+        clearInteractiveIdleTimer();
+        interactiveIdleTimer = setTimeout(() => {
+          logger.debug(`[cursor] Interactive command idle for ${options.interactiveIdleMs}ms, stopping cursor-agent`);
+          this.kill();
+        }, options.interactiveIdleMs);
+      };
+
       child.stdout?.on('data', (data: Buffer) => {
-        this.processChunk(data.toString());
+        const text = data.toString();
+        if (options.interactive) {
+          interactiveScreenBuffer += text;
+          if (interactiveScreenBuffer.length > 12000) {
+            interactiveScreenBuffer = interactiveScreenBuffer.slice(-12000);
+          }
+        }
+        this.processChunk(text);
+        maybeSendInteractiveInput('stdout ready');
+        maybeResolveInteractiveCompletion('stdout ready');
+        armInteractiveIdleTimer();
       });
       child.stderr?.on('data', (data: Buffer) => {
         // Some cursor-agent failures only surface on stderr. Reuse the same line parser so
         // provider/model errors can be promoted into synthetic stream messages.
-        this.processChunk(data.toString());
+        const text = data.toString();
+        if (options.interactive) {
+          interactiveScreenBuffer += text;
+          if (interactiveScreenBuffer.length > 12000) {
+            interactiveScreenBuffer = interactiveScreenBuffer.slice(-12000);
+          }
+        }
+        this.processChunk(text);
+        maybeSendInteractiveInput('stderr ready');
+        maybeResolveInteractiveCompletion('stderr ready');
+        armInteractiveIdleTimer();
       });
       child.on('close', (code) => {
         if (this.options.signal) {
@@ -268,6 +402,8 @@ export class CursorProcess extends EventEmitter {
         onExit(code);
       });
       child.on('error', (err) => {
+        clearInteractiveIdleTimer();
+        clearInteractiveInputTimer();
         this.cleanup();
         this.emit('error', err);
         reject(err);
