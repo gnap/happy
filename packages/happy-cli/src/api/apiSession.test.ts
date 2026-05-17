@@ -1042,17 +1042,12 @@ describe('ApiSessionClient v3 messages API migration', () => {
         expect(mockAxiosGet.mock.calls[0][1].params.after_seq).toBe(0);
     });
 
-    it('invalidates receive sync for duplicate and stale seq values', async () => {
+    it('ignores duplicate and stale socket notifications without HTTP fetch', async () => {
         const client = new ApiSessionClient('fake-token', session);
         await clearInitialFetch();
         (client as any).lastSeq = 5;
 
-        mockAxiosGet.mockResolvedValue({
-            data: {
-                messages: [],
-                hasMore: false
-            }
-        });
+        const getCallsBefore = mockAxiosGet.mock.calls.length;
 
         emitSocketEvent('update', createNewMessageUpdate(5, encryptContent(session, {
             role: 'user',
@@ -1063,10 +1058,8 @@ describe('ApiSessionClient v3 messages API migration', () => {
             content: { type: 'text', text: 'stale' }
         })));
 
-        await waitForCheck(() => {
-            expect(mockAxiosGet).toHaveBeenCalledTimes(1);
-        });
-        expect(mockAxiosGet.mock.calls[0][1].params.after_seq).toBe(5);
+        await new Promise((r) => setTimeout(r, 50));
+        expect(mockAxiosGet.mock.calls.length).toBe(getCallsBefore);
     });
 
     it('updates lastSeq after successful outbox flush and never moves it backward', async () => {

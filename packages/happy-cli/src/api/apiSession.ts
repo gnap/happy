@@ -531,14 +531,35 @@ export class ApiSessionClient extends EventEmitter {
                         this.lastSeq = messageSeq;
                         return;
                     }
-                    if (!acceptSeq) {
-                        logger.debug('[API] new-message skipped (seq mismatch or missing seq), will fetch via HTTP', {
+                    if (typeof messageSeq === 'number' && messageSeq <= this.lastSeq) {
+                        logger.debug('[API] new-message ignored (seq already applied via HTTP or outbox)', {
+                            messageSeq,
+                            lastSeq: this.lastSeq,
+                            reason: messageSeq === this.lastSeq ? 'duplicate' : 'stale',
+                        });
+                        return;
+                    }
+
+                    if (typeof messageSeq !== 'number') {
+                        logger.debug('[API] new-message missing seq, will fetch via HTTP', {
+                            lastSeq: this.lastSeq,
+                        });
+                    } else if (messageSeq > this.lastSeq + 1) {
+                        logger.debug('[API] new-message seq gap, will fetch via HTTP', {
                             messageSeq,
                             lastSeq: this.lastSeq,
                             expectedNext: this.lastSeq + 1,
                         });
                     } else if (!isEncrypted) {
-                        logger.debug('[API] new-message skipped (content not encrypted), will fetch via HTTP');
+                        logger.debug('[API] new-message not encrypted, will fetch via HTTP', {
+                            messageSeq,
+                            lastSeq: this.lastSeq,
+                        });
+                    } else {
+                        logger.debug('[API] new-message needs HTTP catch-up', {
+                            messageSeq,
+                            lastSeq: this.lastSeq,
+                        });
                     }
                     this.receiveSync.invalidate();
                     return;
