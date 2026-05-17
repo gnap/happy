@@ -257,12 +257,9 @@ export class CursorProcess extends EventEmitter {
         this.processChunk(data.toString());
       });
       child.stderr?.on('data', (data: Buffer) => {
-        const text = data.toString();
-        if (process.env.CURSOR_AGENT_VERBOSE === '1') {
-          logger.debug(`[cursor-agent stderr] ${text.trim()}`);
-        } else if (!text.includes('tcgetattr') && !text.includes('ioctl')) {
-          logger.debug(`[cursor] stderr: ${text.trim()}`);
-        }
+        // Some cursor-agent failures only surface on stderr. Reuse the same line parser so
+        // provider/model errors can be promoted into synthetic stream messages.
+        this.processChunk(data.toString());
       });
       child.on('close', (code) => {
         if (this.options.signal) {
@@ -341,8 +338,7 @@ export class CursorProcess extends EventEmitter {
       // Some provider errors or other messages are printed as plain text on stdout/stderr.
       // Convert obvious provider error lines into a synthetic result message so the parser
       // maps them into a session-level error event that will be sent to the App.
-      const providerErrorRegex = /provider error|We're having trouble connecting to the model provider|Provider Error/i;
-      if (providerErrorRegex.test(trimmed)) {
+      if (isCursorProviderErrorLine(trimmed)) {
         const synthetic: CursorStreamMessage = {
           type: 'result',
           subtype: 'error_during_execution',
@@ -372,6 +368,10 @@ function isShellNoise(line: string): boolean {
     || /^Type help /.test(line)
     || /^\w+@\w+/.test(line)
     || /^\(process \d+\)/.test(line);
+}
+
+function isCursorProviderErrorLine(line: string): boolean {
+  return /provider error|we're having trouble connecting to the model provider|invalid model|unknown model|unsupported model|model .{0,60}not available|model .{0,60}not found/i.test(line);
 }
 
 export interface CursorModelInfo {

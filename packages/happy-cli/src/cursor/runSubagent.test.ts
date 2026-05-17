@@ -32,7 +32,9 @@ import { runSubagent } from './runSubagent';
 
 function feedMessages(proc: any, msgs: CursorStreamMessage[]) {
   for (const m of msgs) {
-    proc.emit('message', m);
+    proc.emit('message', m.type === 'assistant' && !('timestamp_ms' in m)
+      ? { ...m, timestamp_ms: Date.now() }
+      : m);
   }
 }
 
@@ -173,7 +175,7 @@ describe('runSubagent', () => {
     expect(result.error).toBe('Something went wrong');
 
     const errorEvents = events.filter(
-      (e) => e.t === 'text' && 'text' in e && e.text.startsWith('Error:'),
+      (e) => e.t === 'service' && 'text' in e && e.text.startsWith('Error:'),
     );
     expect(errorEvents).toHaveLength(1);
   });

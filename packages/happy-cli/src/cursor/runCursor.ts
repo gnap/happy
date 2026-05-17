@@ -1010,8 +1010,7 @@ export async function runCursor(opts: {
 
             case 'error':
               messageBuffer.addMessage(`Error: ${msg.message}`, 'status');
-              const errorText = `Error: ${msg.message}`;
-              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: errorText }, { turn: turnId }));
+              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'service', text: `Error: ${msg.message}` }, { turn: turnId }));
               break;
           }
         }
@@ -1031,7 +1030,7 @@ export async function runCursor(opts: {
           const errorMsg = error instanceof Error ? error.message : 'Process error';
           logger.debug('[cursor] Error:', error);
           messageBuffer.addMessage(errorMsg, 'status');
-          session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: errorMsg }, { turn: turnId }));
+          session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'service', text: `Error: ${errorMsg}` }, { turn: turnId }));
         }
       } finally {
         cancelTextFlushTimer();
