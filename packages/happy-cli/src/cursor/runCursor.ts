@@ -78,7 +78,7 @@ function readUsageNumber(usage: CursorUsageRecord | undefined, keys: string[]): 
   return undefined;
 }
 
-function normalizeCursorUsage(usage?: CursorUsageRecord): {
+function normalizeCursorUsage(usage?: CursorUsageRecord, apiCallCount = 1): {
   inputTokens?: number;
   outputTokens?: number;
   cacheReadInputTokens?: number;
@@ -95,12 +95,14 @@ function normalizeCursorUsage(usage?: CursorUsageRecord): {
     ?? (typeof inputTokens === 'number' && typeof outputTokens === 'number'
       ? inputTokens + outputTokens
       : undefined);
-  // context_window_status from Cursor's server gives the authoritative per-call value but is not
-  // forwarded in stream-json. cursor-agent accumulates cacheReadTokens across all API calls within
-  // a turn, so for long multi-call turns it is inflated. We use it as-is; the error only shows up
-  // in extreme long-running turns and the value is still a reasonable order-of-magnitude estimate.
-  const contextSize = (inputTokens ?? 0) + (cacheReadInputTokens ?? 0) + (cacheCreationInputTokens ?? 0)
-    || undefined;
+  // cursor-agent accumulates cacheReadTokens across all N API calls within a turn.
+  // Each call reads ≈ C_final from cache (small per-call growth), so:
+  //   accumulated_cacheRead ≈ N × C_final  →  C_final ≈ accumulated_cacheRead / N
+  // N = tool_call_count + 1 (each tool call is one round-trip; +1 for the final response).
+  const n = Math.max(apiCallCount, 1);
+  const contextSize = cacheReadInputTokens !== undefined
+    ? Math.round(cacheReadInputTokens / n)
+    : ((inputTokens ?? 0) + (cacheCreationInputTokens ?? 0)) || undefined;
   return {
     inputTokens,
     outputTokens,
@@ -117,18 +119,17 @@ function formatCursorUsageLog(params: {
   turnId: string;
   cursorChatId: string | null;
   usage?: CursorUsageRecord;
+  apiCallCount?: number;
   costUsd?: number;
   durationMs?: number;
 }): string {
-  const normalized = normalizeCursorUsage(params.usage);
-  const contextSize = typeof params.usage?.['contextSize'] === 'number' ? params.usage['contextSize'] : undefined;
+  const normalized = normalizeCursorUsage(params.usage, params.apiCallCount);
 
   return JSON.stringify({
     sessionId: params.sessionId,
     turnId: params.turnId,
     cursorChatId: params.cursorChatId,
     ...normalized,
-    ...(contextSize !== undefined ? { contextSize } : {}),
     costUsd: params.costUsd,
     durationMs: params.durationMs,
   });
@@ -871,6 +872,7 @@ export async function runCursor(opts: {
       const toolCallTimeoutHandles = new Map<string, ReturnType<typeof setTimeout>>();
       let turnCompletedNormally = false;
       let turnEndStatus: 'completed' | 'failed' | 'cancelled' = 'completed';
+      let turnToolCallCount = 0;
       lastTaskCompleteUsage = undefined;
       lastTaskCompleteCostUsd = undefined;
       lastTaskCompleteDurationMs = undefined;
@@ -1036,6 +1038,7 @@ export async function runCursor(opts: {
               logger.debug(`[cursor] Shell/tool started: ${msg.toolName} ${cmdPreview} (callId: ${msg.callId.slice(0, 8)}..., pending: ${codexIdByCallId.size + 1})`);
               messageBuffer.addMessage(`Executing: ${msg.toolName} ${toolArgs}`, 'tool');
               codexIdByCallId.set(msg.callId, msg.callId);
+              turnToolCallCount++;
               // Session protocol only; avoid sending codex/cursor tool-call so App does not show three summary cards (session + codex + cursor).
               const toolTitle = msg.description ?? deriveToolTitle(msg.toolName, msg.args);
               session.sendSessionProtocolMessage(createEnvelope('agent', {
@@ -1093,7 +1096,7 @@ export async function runCursor(opts: {
               if (msg.sessionId) {
                 cursorChatId = msg.sessionId;
               }
-              const { usage: _raw, ...normalizedFields } = normalizeCursorUsage(msg.usage);
+              const { usage: _raw, ...normalizedFields } = normalizeCursorUsage(msg.usage, turnToolCallCount + 1);
               lastTaskCompleteUsage = normalizedFields.contextSize !== undefined
                 ? { ...normalizedFields, ...msg.usage }
                 : msg.usage;
@@ -1104,6 +1107,7 @@ export async function runCursor(opts: {
                 turnId,
                 cursorChatId,
                 usage: msg.usage,
+                apiCallCount: turnToolCallCount + 1,
                 costUsd: msg.costUsd,
                 durationMs: msg.durationMs,
               })}`);
