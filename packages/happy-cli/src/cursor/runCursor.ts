@@ -84,6 +84,7 @@ function normalizeCursorUsage(usage?: CursorUsageRecord): {
   cacheReadInputTokens?: number;
   cacheCreationInputTokens?: number;
   totalTokens?: number;
+  contextSize?: number;
   usage?: CursorUsageRecord;
 } {
   const inputTokens = readUsageNumber(usage, ['input_tokens', 'inputTokens', 'prompt_tokens', 'promptTokens']);
@@ -94,12 +95,19 @@ function normalizeCursorUsage(usage?: CursorUsageRecord): {
     ?? (typeof inputTokens === 'number' && typeof outputTokens === 'number'
       ? inputTokens + outputTokens
       : undefined);
+  // context_window_status from Cursor's server gives the authoritative per-call value but is not
+  // forwarded in stream-json. cursor-agent accumulates cacheReadTokens across all API calls within
+  // a turn, so for long multi-call turns it is inflated. We use it as-is; the error only shows up
+  // in extreme long-running turns and the value is still a reasonable order-of-magnitude estimate.
+  const contextSize = (inputTokens ?? 0) + (cacheReadInputTokens ?? 0) + (cacheCreationInputTokens ?? 0)
+    || undefined;
   return {
     inputTokens,
     outputTokens,
     cacheReadInputTokens,
     cacheCreationInputTokens,
     totalTokens,
+    contextSize,
     usage,
   };
 }
@@ -778,11 +786,6 @@ export async function runCursor(opts: {
   let lastTaskCompleteUsage: CursorUsageRecord | undefined;
   let lastTaskCompleteCostUsd: number | undefined;
   let lastTaskCompleteDurationMs: number | undefined;
-  // Running context size across turns within this daemon session.
-  // cursor-agent's cacheReadTokens is accumulated across all API calls per turn (can be 10x actual
-  // context window for long multi-call turns). The correct metric is: seed from the first turn's
-  // cacheRead when it looks like a single-call read, then grow by cacheWrite + netInput each turn.
-  let cumulativeContextSize = 0;
 
   // Send "It's ready!" once on startup so mobile can open this session (critical when reusing session after restart)
   emitReadyIfIdle();
@@ -1091,31 +1094,16 @@ export async function runCursor(opts: {
                 cursorChatId = msg.sessionId;
               }
               const { usage: _raw, ...normalizedFields } = normalizeCursorUsage(msg.usage);
-              // cacheReadInputTokens from cursor-agent is accumulated across ALL API calls in a
-              // turn (each call re-reads the growing cache), so it cannot be used directly for
-              // context size. Instead we maintain a running sum:
-              //   - if this is the first turn and cacheRead looks like a single-call value
-              //     (< 500k — safe for any model up to 500k context), seed from it;
-              //   - otherwise grow by cacheWrite (new tokens added to cache this turn) + netInput.
-              const MAX_SINGLE_CALL_CACHE = 500_000;
-              const cacheWrite = normalizedFields.cacheCreationInputTokens ?? 0;
-              const netInput = normalizedFields.inputTokens ?? 0;
-              const cacheRead = normalizedFields.cacheReadInputTokens ?? 0;
-              if (cumulativeContextSize === 0 && cacheRead > 0 && cacheRead <= MAX_SINGLE_CALL_CACHE) {
-                // Likely the first turn of a resumed session — cacheRead is the real context size.
-                cumulativeContextSize = cacheRead + cacheWrite + netInput;
-              } else {
-                cumulativeContextSize += cacheWrite + netInput;
-              }
-              const contextSize = cumulativeContextSize || undefined;
-              lastTaskCompleteUsage = { ...normalizedFields, ...(contextSize !== undefined ? { contextSize } : {}), ...msg.usage };
+              lastTaskCompleteUsage = normalizedFields.contextSize !== undefined
+                ? { ...normalizedFields, ...msg.usage }
+                : msg.usage;
               lastTaskCompleteCostUsd = msg.costUsd;
               lastTaskCompleteDurationMs = msg.durationMs;
               logger.debug(`[cursor] Turn usage ${formatCursorUsageLog({
                 sessionId: session.sessionId,
                 turnId,
                 cursorChatId,
-                usage: { ...msg.usage, contextSize },
+                usage: msg.usage,
                 costUsd: msg.costUsd,
                 durationMs: msg.durationMs,
               })}`);
