@@ -33,6 +33,13 @@ describe('session protocol schemas', () => {
       { t: 'turn-start' },
       { t: 'start', title: 'Research agent' },
       { t: 'turn-end', status: 'completed' },
+      {
+        t: 'turn-end',
+        status: 'completed',
+        usage: { inputTokens: 12, outputTokens: 34, cacheReadTokens: 56 },
+        costUsd: 0.42,
+        durationMs: 1234,
+      },
       { t: 'stop' },
     ];
 
@@ -47,6 +54,7 @@ describe('session protocol schemas', () => {
     expect(sessionEventSchema.safeParse({ t: 'file', ref: 'x', name: 'x', size: 1, image: { width: 10, height: 10 } }).success).toBe(false);
     expect(sessionEventSchema.safeParse({ t: 'turn-end' }).success).toBe(false);
     expect(sessionEventSchema.safeParse({ t: 'turn-end', status: 'canceled' }).success).toBe(false);
+    expect(sessionEventSchema.safeParse({ t: 'turn-end', status: 'completed', usage: [] }).success).toBe(false);
     expect(sessionEventSchema.safeParse({ t: 'start', title: 1 }).success).toBe(false);
     expect(sessionEventSchema.safeParse({ t: 'service' }).success).toBe(false);
     expect(sessionEventSchema.safeParse({ t: 'not-real' }).success).toBe(false);

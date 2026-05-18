@@ -120,6 +120,21 @@ export async function restartDaemonSession(sessionId: string): Promise<{ success
   return result;
 }
 
+export async function getDaemonA2aMessageUri(sessionId: string): Promise<string | null> {
+  const state = await readDaemonState();
+  if (!state?.httpPort || !state?.pid) {
+    return null;
+  }
+
+  try {
+    process.kill(state.pid, 0);
+  } catch {
+    return null;
+  }
+
+  return `http://127.0.0.1:${state.httpPort}/a2a/${encodeURIComponent(sessionId)}/message`;
+}
+
 export async function archiveDaemonSession(sessionId: string): Promise<boolean> {
   const result = await daemonPost('/archive-session', { sessionId });
   return result.success || false;
@@ -127,17 +142,19 @@ export async function archiveDaemonSession(sessionId: string): Promise<boolean> 
 
 /**
  * Spawn a new session in the given directory (e.g. to reconnect from server session list).
- * Optional agent and environmentVariables (e.g. HAPPY_CURSOR_SESSION_TAG for same server session).
+ * Optional agent plus explicit resumeSessionTag for reconnecting to the same server session.
  */
 export async function spawnDaemonSession(opts: {
   directory: string;
   agent?: 'claude' | 'codex' | 'cursor' | 'gemini';
   environmentVariables?: Record<string, string>;
+  resumeSessionTag?: string;
 }): Promise<{ success: boolean; sessionId?: string; error?: string }> {
   const result = await daemonPost('/spawn-session', {
     directory: opts.directory,
     agent: opts.agent,
-    environmentVariables: opts.environmentVariables
+    environmentVariables: opts.environmentVariables,
+    resumeSessionTag: opts.resumeSessionTag
   });
   if (result.error) return { success: false, error: result.error };
   if (result.success && result.sessionId) return { success: true, sessionId: result.sessionId };

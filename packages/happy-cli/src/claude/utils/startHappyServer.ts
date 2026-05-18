@@ -6,10 +6,10 @@
  * spawn_subagent uses MCP Tasks (experimental) so the SDK handles polling
  * server-side: cursor-agent sees a single blocking tool call that resolves
  * when the sub-agent finishes, removing the need for manual get_subagent polling.
- */
+*/
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createServer } from "node:http";
+import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { InMemoryTaskStore, InMemoryTaskMessageQueue } from "@modelcontextprotocol/sdk/experimental/tasks";
 import { AddressInfo } from "node:net";
@@ -18,8 +18,12 @@ import { createId } from "@paralleldrive/cuid2";
 import { createEnvelope, type SessionEnvelope } from "@slopus/happy-wire";
 import { logger } from "@/ui/logger";
 import { ApiSessionClient } from "@/api/apiSession";
+import type { UserMessage } from "@/api/types";
 import { randomUUID } from "node:crypto";
 import { SubagentManager } from "@/cursor/subagentManager";
+import { extractA2aText, extractA2aTitle } from "@/a2a/parse";
+import { buildA2AInboxNotificationWithPreview, getA2AUnreadCount, listA2AInboxMessages } from "@/a2a/inbox";
+import { getDaemonA2aMessageUri } from "@/daemon/controlClient";
 
 export interface HappyServerCursorContext {
     getCurrentTurnId: () => string | null;
@@ -30,6 +34,28 @@ export interface HappyServerCursorContext {
 
 export interface StartHappyServerOptions {
     cursorContext?: HappyServerCursorContext;
+    onA2aMessage?: (message: UserMessage) => Promise<void> | void;
+    useDaemonA2ARoute?: boolean;
+    /** When false, inbox mark MCP tools reject (consume+mark must happen in the active A2A turn). */
+    isA2AInboxTurnActive?: () => boolean;
+}
+
+async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+
+    const raw = Buffer.concat(chunks).toString('utf8').trim();
+    if (!raw) {
+        return null;
+    }
+
+    try {
+        return JSON.parse(raw) as unknown;
+    } catch {
+        return raw;
+    }
 }
 
 export async function startHappyServer(client: ApiSessionClient, options?: StartHappyServerOptions) {
@@ -64,8 +90,8 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
     const taskMessageQueue = new InMemoryTaskMessageQueue();
 
     const mcp = new McpServer({
-        name: "Happy MCP",
-        version: "1.0.0",
+        name: `Happy MCP ${client.sessionId.slice(0, 8)}`,
+        version: "1.0.1",
     }, {
         taskStore,
         taskMessageQueue,
@@ -107,7 +133,116 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
         }
     });
 
-    const toolNames: string[] = ['change_title'];
+    const startedByDaemon = options?.useDaemonA2ARoute === true;
+    let a2aUrl = startedByDaemon ? (await getDaemonA2aMessageUri(client.sessionId) ?? '') : '';
+    mcp.registerTool('get_a2a_message_uri', {
+        description: 'Get the local HTTP URI that accepts POSTed A2A-compatible messages for this session.',
+        title: 'Get A2A Message URI',
+        inputSchema: {},
+    }, async () => {
+        return {
+            content: [{ type: 'text', text: a2aUrl }],
+            isError: false,
+        };
+    });
+
+    const ctx = options?.cursorContext;
+
+    const requireA2AInboxTurn = (action: string) => {
+        if (options?.isA2AInboxTurnActive?.()) {
+            return null;
+        }
+        return {
+            content: [{ type: 'text' as const, text: `${action} is only available during an active A2A inbox turn.` }],
+            isError: true,
+        };
+    };
+
+    mcp.registerTool('list_a2a_messages', {
+        description: 'List messages in the A2A inbox. Call at the start of each A2A inbox turn with unreadOnly=true before read/mark.',
+        title: 'List Inbox Messages',
+        inputSchema: {
+            unreadOnly: z.boolean().optional().describe('Only return unread messages'),
+            limit: z.number().int().positive().max(100).optional().describe('Maximum number of messages to return'),
+        },
+    }, async (args) => {
+        const blocked = requireA2AInboxTurn('List inbox messages');
+        if (blocked) return blocked;
+        const inbox = client.getA2AInbox();
+        const messages = listA2AInboxMessages(inbox, {
+            unreadOnly: args.unreadOnly,
+            limit: args.limit,
+        });
+        return {
+            content: [{ type: 'text', text: JSON.stringify({
+                unreadCount: getA2AUnreadCount(inbox),
+                messages,
+            }, null, 2) }],
+            isError: false,
+        };
+    });
+
+    mcp.registerTool('read_a2a_message', {
+        description: 'Read a single inbox message by id without changing its read state. Call during the A2A inbox turn for each unread id you will handle.',
+        title: 'Read Inbox Message',
+        inputSchema: {
+            id: z.string().describe('A2A inbox message id'),
+        },
+    }, async (args) => {
+        const blocked = requireA2AInboxTurn('Read inbox message');
+        if (blocked) return blocked;
+        const message = client.getA2AInbox().messages.find((item) => item.id === args.id);
+        if (!message) {
+            return { content: [{ type: 'text', text: `A2A message ${args.id} not found.` }], isError: true };
+        }
+        return {
+            content: [{ type: 'text', text: JSON.stringify(message, null, 2) }],
+            isError: false,
+        };
+    });
+
+    mcp.registerTool('mark_a2a_message_read', {
+        description: 'Mark a single inbox message as read in this A2A inbox turn, after read_a2a_message.',
+        title: 'Mark Inbox Message Read',
+        inputSchema: {
+            id: z.string().describe('A2A inbox message id'),
+        },
+    }, async (args) => {
+        const blocked = requireA2AInboxTurn('Mark inbox message read');
+        if (blocked) return blocked;
+        client.markA2AMessageRead(args.id);
+        const message = client.getA2AInbox().messages.find((item) => item.id === args.id);
+        return {
+            content: [{ type: 'text', text: JSON.stringify({
+                id: args.id,
+                readAt: message?.readAt ?? null,
+            }, null, 2) }],
+            isError: false,
+        };
+    });
+
+    mcp.registerTool('mark_a2a_messages_read', {
+        description: 'Mark multiple inbox messages as read in this A2A inbox turn after you have read and handled them.',
+        title: 'Mark Inbox Messages Read',
+        inputSchema: {
+            ids: z.array(z.string()).min(1).describe('A2A inbox message ids'),
+        },
+    }, async (args) => {
+        const blocked = requireA2AInboxTurn('Mark inbox messages read');
+        if (blocked) return blocked;
+        client.markA2AMessagesRead(args.ids);
+        const inbox = client.getA2AInbox();
+        const updated = inbox.messages.filter((item) => args.ids.includes(item.id));
+        return {
+            content: [{ type: 'text', text: JSON.stringify({
+                ids: args.ids,
+                updated,
+            }, null, 2) }],
+            isError: false,
+        };
+    });
+
+    const toolNames: string[] = ['change_title', 'get_a2a_message_uri', 'list_a2a_messages', 'read_a2a_message', 'mark_a2a_message_read', 'mark_a2a_messages_read'];
 
     let subagentManager: SubagentManager | null = null;
 
@@ -276,6 +411,82 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
     });
     await mcp.connect(transport);
 
+    let a2aServer: ReturnType<typeof createServer> | null = null;
+    if (!startedByDaemon) {
+        //
+        // Create the local HTTP A2A server.
+        //
+        a2aServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            res.setHeader('Access-Control-Allow-Headers', 'content-type');
+            res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+
+            if (req.method === 'OPTIONS') {
+                res.writeHead(204).end();
+                return;
+            }
+
+            if (req.method !== 'POST' || req.url !== '/a2a/message') {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Not found' }));
+                return;
+            }
+
+            try {
+                const body = await readJsonBody(req);
+                const text = extractA2aText(body);
+                const title = extractA2aTitle(body);
+                if (!text) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Missing message text' }));
+                    return;
+                }
+
+                if (!options?.onA2aMessage) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'A2A message handler not configured' }));
+                    return;
+                }
+
+                client.recordA2AMessage({
+                    id: randomUUID(),
+                    title,
+                    text,
+                    createdAt: Date.now(),
+                });
+
+                await options.onA2aMessage({
+                    role: 'user',
+                    content: { type: 'text', text: buildA2AInboxNotificationWithPreview(client.getA2AInbox()) },
+                    meta: { origin: 'a2a', a2aTrigger: true },
+                });
+
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true }));
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, error: message }));
+            }
+        });
+
+        a2aUrl = await new Promise<string>((resolve, reject) => {
+            a2aServer!.listen(0, '127.0.0.1', () => {
+                const addr = a2aServer!.address();
+                if (addr && typeof addr === 'object') {
+                    resolve(`http://127.0.0.1:${addr.port}/a2a/message`);
+                    return;
+                }
+                reject(new Error('Failed to get A2A server address'));
+            });
+            a2aServer!.on('error', reject);
+        });
+
+        logger.debug(`[happyMCP] a2a:server ready sessionId=${client.sessionId} url=${a2aUrl}`);
+    } else {
+        logger.debug(`[happyMCP] a2a:using-daemon-route sessionId=${client.sessionId} url=${a2aUrl}`);
+    }
+
     //
     // Create the HTTP server
     //
@@ -302,12 +513,14 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
 
     return {
         url: baseUrl.toString(),
+        a2aUrl,
         toolNames,
         stop: () => {
             logger.debug(`[happyMCP] server:stop sessionId=${client.sessionId}`);
             subagentManager?.dispose();
             mcp.close();
             server.close();
+            a2aServer?.close();
         }
     }
 }

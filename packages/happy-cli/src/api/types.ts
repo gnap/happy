@@ -118,6 +118,7 @@ export type Session = {
   metadataVersion: number,
   agentState: AgentState | null,
   agentStateVersion: number,
+  requestedMetadata?: Metadata,
 }
 
 /**
@@ -170,6 +171,11 @@ export type Machine = {
  */
 export const MessageMetaSchema = z.object({
   sentFrom: z.string().optional(), // Source identifier
+  origin: z.enum(['app', 'a2a']).optional(), // Where the message came from
+  a2aTrigger: z.boolean().optional(), // Transport marker: new row was written to a2aInbox (does not enqueue turn text)
+  a2aInboxMessageId: z.string().optional(), // Inbox row id for the message that just arrived
+  a2aInboxTurn: z.boolean().optional(), // Internal scheduler: run one cursor turn to drain unread inbox via MCP
+  cursorCompactTurn: z.boolean().optional(), // Internal scheduler: run one interactive cursor-agent /compress turn
   permissionMode: z.enum(['default', 'acceptEdits', 'bypassPermissions', 'plan', 'read-only', 'safe-yolo', 'yolo', 'ask', 'force']).optional(), // Permission mode for this message
   model: z.string().nullable().optional(), // Model name for this message (null = reset)
   fallbackModel: z.string().nullable().optional(), // Fallback model for this message (null = reset)
@@ -270,10 +276,128 @@ export type Metadata = {
   dangerouslySkipPermissions?: boolean | null
 };
 
+export type A2AInboxMessage = {
+  id: string,
+  text: string,
+  createdAt: number,
+  readAt?: number | null,
+  title?: string,
+};
+
+export type A2AInboxState = {
+  messages: A2AInboxMessage[],
+};
+
+export type AppCompatibleSessionMetadata = Omit<
+  Metadata,
+  'happyLibDir' | 'happyToolsDir' | 'startedFromDaemon' | 'startedBy' | 'lifecycleState' | 'lifecycleStateSince' | 'archivedBy' | 'archiveReason' | 'sessionTag'
+>;
+
+const SESSION_STATIC_METADATA_KEYS = [
+  'path',
+  'host',
+  'version',
+  'os',
+  'machineId',
+  'homeDir',
+  'happyHomeDir',
+  'hostPid',
+  'flavor',
+  'sandbox',
+  'dangerouslySkipPermissions',
+] as const;
+
+/**
+ * App-compatible session metadata subset.
+ *
+ * The mobile app currently uses a strict schema for session metadata and
+ * rejects unknown fields. Keep server-bound session metadata limited to the
+ * fields the app understands so historical and live sessions remain readable.
+ */
+export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatibleSessionMetadata {
+  const {
+    models,
+    currentModelCode,
+    operatingModes,
+    currentOperatingModeCode,
+    thoughtLevels,
+    currentThoughtLevelCode,
+    path,
+    host,
+    version,
+    name,
+    os,
+    summary,
+    machineId,
+    claudeSessionId,
+    tools,
+    slashCommands,
+    homeDir,
+    happyHomeDir,
+    hostPid,
+    flavor,
+    sandbox,
+    dangerouslySkipPermissions,
+  } = metadata;
+
+  return {
+    ...(models !== undefined ? { models } : {}),
+    ...(currentModelCode !== undefined ? { currentModelCode } : {}),
+    ...(operatingModes !== undefined ? { operatingModes } : {}),
+    ...(currentOperatingModeCode !== undefined ? { currentOperatingModeCode } : {}),
+    ...(thoughtLevels !== undefined ? { thoughtLevels } : {}),
+    ...(currentThoughtLevelCode !== undefined ? { currentThoughtLevelCode } : {}),
+    path,
+    host,
+    ...(version !== undefined ? { version } : {}),
+    ...(name !== undefined ? { name } : {}),
+    ...(os !== undefined ? { os } : {}),
+    ...(summary !== undefined ? { summary } : {}),
+    ...(machineId !== undefined ? { machineId } : {}),
+    ...(claudeSessionId !== undefined ? { claudeSessionId } : {}),
+    ...(tools !== undefined ? { tools } : {}),
+    ...(slashCommands !== undefined ? { slashCommands } : {}),
+    ...(homeDir !== undefined ? { homeDir } : {}),
+    ...(happyHomeDir !== undefined ? { happyHomeDir } : {}),
+    ...(hostPid !== undefined ? { hostPid } : {}),
+    ...(flavor !== undefined ? { flavor } : {}),
+    ...(sandbox !== undefined ? { sandbox } : {}),
+    ...(dangerouslySkipPermissions !== undefined ? { dangerouslySkipPermissions } : {}),
+  } as AppCompatibleSessionMetadata;
+}
+
+export function shouldSyncSessionMetadata(current: Metadata | null, next: Metadata): boolean {
+  if (!current) {
+    return true;
+  }
+
+  return SESSION_STATIC_METADATA_KEYS.some((key) => current[key] !== next[key]);
+}
+
+export function buildSyncedSessionMetadata(current: Metadata | null, next: Metadata): Metadata {
+  return {
+    ...(current ?? {}),
+    path: next.path,
+    host: next.host,
+    version: next.version,
+    os: next.os,
+    machineId: next.machineId,
+    homeDir: next.homeDir,
+    happyHomeDir: next.happyHomeDir,
+    happyLibDir: next.happyLibDir ?? current?.happyLibDir ?? '',
+    happyToolsDir: next.happyToolsDir ?? current?.happyToolsDir ?? '',
+    hostPid: next.hostPid,
+    flavor: next.flavor,
+    sandbox: next.sandbox,
+    dangerouslySkipPermissions: next.dangerouslySkipPermissions,
+  };
+}
+
 export type AgentState = {
   controlledByUser?: boolean | null | undefined
   /** Cursor chat ID for resuming cursor-agent conversation across restarts */
   cursorChatId?: string | null
+  a2aInbox?: A2AInboxState
   requests?: {
     [id: string]: {
       tool: string,

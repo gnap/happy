@@ -142,7 +142,7 @@ class Logger {
   
   info(message: string, ...args: unknown[]): void {
     this.logToConsole('info', '', message, ...args)
-    this.debug(message, args)
+    this.debug(message, ...args)
   }
   
   infoDeveloper(message: string, ...args: unknown[]): void {
@@ -165,30 +165,33 @@ class Logger {
   }
   
   private logToConsole(level: 'debug' | 'error' | 'info' | 'warn', prefix: string, message: string, ...args: unknown[]): void {
+    const timestampPrefix = configuration.isDaemonProcess ? `[${this.localTimezoneTimestamp()}]` : ''
+    const renderedPrefix = [timestampPrefix, prefix].filter(Boolean).join(' ')
+
     switch (level) {
       case 'debug': {
-        console.log(chalk.gray(prefix), message, ...args)
+        console.log(chalk.gray(renderedPrefix), message, ...args)
         break
       }
 
       case 'error': {
-        console.error(chalk.red(prefix), message, ...args)
+        console.error(chalk.red(renderedPrefix), message, ...args)
         break
       }
 
       case 'info': {
-        console.log(chalk.blue(prefix), message, ...args)
+        console.log(chalk.blue(renderedPrefix), message, ...args)
         break
       }
 
       case 'warn': {
-        console.log(chalk.yellow(prefix), message, ...args)
+        console.log(chalk.yellow(renderedPrefix), message, ...args)
         break
       }
 
       default: {
         this.debug('Unknown log level:', level)
-        console.log(chalk.blue(prefix), message, ...args)
+        console.log(chalk.blue(renderedPrefix), message, ...args)
         break
       }
     }

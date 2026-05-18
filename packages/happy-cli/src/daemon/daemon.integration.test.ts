@@ -21,6 +21,7 @@ import path, { join } from 'path';
 import { configuration } from '@/configuration';
 import { 
   listDaemonSessions, 
+  restartDaemonSession,
   stopDaemonSession, 
   spawnDaemonSession, 
   stopDaemonHttp, 
@@ -155,6 +156,39 @@ describe.skipIf(!await isServerHealthy())('Daemon Integration Tests', { timeout:
     // Clean up - stop the spawned session
     expect(spawnedSession.happySessionId).toBeDefined();
     await stopDaemonSession(spawnedSession.happySessionId);
+  });
+
+  it('should restart a session from persisted mapping when it is no longer tracked', async () => {
+    const sessionId = 'test-session-restart-from-mapping';
+    const mockMetadata: Metadata = {
+      path: '/tmp',
+      host: 'test-host',
+      homeDir: '/test/home',
+      happyHomeDir: '/test/happy-home',
+      happyLibDir: '/test/happy-lib',
+      happyToolsDir: '/test/happy-tools',
+      hostPid: 99998,
+      startedBy: 'terminal',
+      machineId: 'test-machine-123',
+      sessionTag: 'test-session-tag-restart-from-mapping',
+      flavor: 'cursor',
+    };
+
+    await notifyDaemonSessionStarted(sessionId, mockMetadata);
+    expect((await listDaemonSessions()).some((s: any) => s.happySessionId === sessionId)).toBe(true);
+
+    // Stop by session ID to persist directory/tag mapping but remove the live tracked session.
+    expect(await stopDaemonSession(sessionId)).toBe(true);
+    expect(await listDaemonSessions()).toEqual([]);
+
+    const result = await restartDaemonSession(sessionId);
+    expect(result.success).toBe(true);
+    expect(result.newSessionId).toBe(sessionId);
+
+    const sessions = await listDaemonSessions();
+    expect(sessions.some((s: any) => s.happySessionId === sessionId)).toBe(true);
+
+    await stopDaemonSession(sessionId);
   });
 
   it('stress test: spawn / stop', { timeout: 60_000 }, async () => {

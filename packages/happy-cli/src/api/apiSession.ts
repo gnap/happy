@@ -5,13 +5,14 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createTwoFilesPatch } from 'diff'
 import { io, Socket } from 'socket.io-client'
-import { AgentState, ClientToServerEvents, Metadata, ServerToClientEvents, Session, Update, UserMessage, UserMessageSchema, Usage } from './types'
+import { AgentState, A2AInboxMessage, ClientToServerEvents, MessageMeta, Metadata, ServerToClientEvents, Session, Update, UserMessage, UserMessageSchema, Usage, buildSyncedSessionMetadata, sanitizeSessionMetadataForApp, shouldSyncSessionMetadata } from './types'
 import { decodeBase64, decrypt, encodeBase64, encrypt } from './encryption';
 import { backoff, delay } from '@/utils/time';
 import { configuration, serverHttpsAgent } from '@/configuration';
 import { RawJSONLines } from '@/claude/types';
 import { randomUUID } from 'node:crypto';
 import { AsyncLock } from '@/utils/lock';
+import { isNode } from '@/utils/runtime';
 import { RpcHandlerManager } from './rpc/RpcHandlerManager';
 import { registerCommonHandlers } from '../modules/common/registerCommonHandlers';
 import { calculateCost } from '@/utils/pricing';
@@ -23,6 +24,13 @@ import {
 } from '@/claude/utils/sessionProtocolMapper';
 import { InvalidateSync } from '@/utils/sync';
 import axios from 'axios';
+import {
+    cloneA2AInboxState,
+    mergeA2AInboxState,
+    markA2AInboxMessageRead,
+    markA2AInboxMessagesRead,
+    upsertA2AInboxMessage,
+} from '@/a2a/inbox';
 
 /**
  * ACP (Agent Communication Protocol) message data types.
@@ -121,6 +129,45 @@ const LAZY_RESULT_PREVIEW_FIELDS_BY_TOOL: Record<string, string[]> = {
     CursorWrite: ['diffString'],
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return !!value && typeof value === 'object';
+}
+
+function extractA2ATextFromParts(parts: unknown): string | null {
+    if (!Array.isArray(parts)) {
+        return null;
+    }
+
+    const texts: string[] = [];
+    for (const part of parts) {
+        if (typeof part === 'string') {
+            if (part.trim().length > 0) {
+                texts.push(part);
+            }
+            continue;
+        }
+
+        if (!isRecord(part)) {
+            continue;
+        }
+
+        if (typeof part.text === 'string' && part.text.trim().length > 0) {
+            texts.push(part.text);
+            continue;
+        }
+
+        if (typeof part.message === 'string' && part.message.trim().length > 0) {
+            texts.push(part.message);
+        }
+    }
+
+    if (texts.length === 0) {
+        return null;
+    }
+
+    return texts.join('\n');
+}
+
 /** Max lines kept in the compact diffString preview. */
 const LAZY_DIFF_STRING_MAX_LINES = 15;
 
@@ -173,6 +220,7 @@ export class ApiSessionClient extends EventEmitter {
     private metadataVersion: number;
     private agentState: AgentState | null;
     private agentStateVersion: number;
+    private a2aInbox: NonNullable<AgentState['a2aInbox']>;
     private socket: Socket<ServerToClientEvents, ClientToServerEvents>;
     private pendingMessages: UserMessage[] = [];
     private pendingMessageCallback: ((message: UserMessage) => void) | null = null;
@@ -181,11 +229,13 @@ export class ApiSessionClient extends EventEmitter {
     private metadataLock = new AsyncLock();
     private encryptionKey: Uint8Array;
     private encryptionVariant: 'legacy' | 'dataKey';
+    private requestedMetadata: Metadata | null = null;
     /** The AES session key; exposed so callers can persist it after offline reconnection. */
     get sessionEncryptionKey(): Uint8Array { return this.encryptionKey; }
     /** Resolves when the WebSocket first connects; used by updateMetadata to wait for initial connection. */
     private socketConnectedPromise: Promise<void>;
     private socketConnectedResolve: (() => void) | undefined;
+    private routedA2ASessionEnvelopeIds = new Set<string>();
     /** Directory where full tool-call args are persisted across session restarts. */
     private get toolContentDir(): string {
         const base = this.metadata?.path ?? process.cwd();
@@ -341,7 +391,11 @@ export class ApiSessionClient extends EventEmitter {
     /** Set in close() so disconnect/connect_error do not re-start fallback poll and leave the process hanging. */
     private closing = false;
 
-    constructor(token: string, session: Session) {
+    getMetadata(): Metadata | null {
+        return this.metadata;
+    }
+
+    constructor(token: string, session: Session, private websocketOnly: boolean = true) {
         super()
         this.token = token;
         this.sessionId = session.id;
@@ -349,6 +403,8 @@ export class ApiSessionClient extends EventEmitter {
         this.metadataVersion = session.metadataVersion;
         this.agentState = session.agentState;
         this.agentStateVersion = session.agentStateVersion;
+        this.a2aInbox = cloneA2AInboxState(session.agentState?.a2aInbox);
+        this.requestedMetadata = session.requestedMetadata ?? null;
         this.encryptionKey = session.encryptionKey;
         this.encryptionVariant = session.encryptionVariant;
         this.lastSeq = session.seq ?? 0;
@@ -399,10 +455,10 @@ export class ApiSessionClient extends EventEmitter {
             reconnectionAttempts: Infinity,
             reconnectionDelay: 1000,
             reconnectionDelayMax: 5000,
-            transports: ['polling', 'websocket'],
+            transports: this.websocketOnly ? ['websocket'] : ['polling', 'websocket'],
             withCredentials: true,
             autoConnect: false,
-            ...(typeof process !== 'undefined' && process.versions?.node && { agent: serverHttpsAgent as any }),
+            ...(isNode() && { agent: serverHttpsAgent as any }),
         });
 
         //
@@ -415,6 +471,12 @@ export class ApiSessionClient extends EventEmitter {
             this.socketConnectedResolve = undefined;
             this.stopFallbackPoll();
             this.rpcHandlerManager.onSocketConnect(this.socket);
+            if (this.requestedMetadata && shouldSyncSessionMetadata(this.metadata, this.requestedMetadata)) {
+                logger.debug('[API] Session metadata changed, syncing static metadata to server');
+                this.updateMetadata((currentMetadata) => buildSyncedSessionMetadata(currentMetadata, this.requestedMetadata as Metadata)).catch((error) => {
+                    logger.debug('[API] Failed to sync session metadata on connect:', error);
+                });
+            }
             this.receiveSync.invalidate();
         })
 
@@ -469,25 +531,50 @@ export class ApiSessionClient extends EventEmitter {
                         this.lastSeq = messageSeq;
                         return;
                     }
-                    if (!acceptSeq) {
-                        logger.debug('[API] new-message skipped (seq mismatch or missing seq), will fetch via HTTP', {
+                    if (typeof messageSeq === 'number' && messageSeq <= this.lastSeq) {
+                        logger.debug('[API] new-message ignored (seq already applied via HTTP or outbox)', {
+                            messageSeq,
+                            lastSeq: this.lastSeq,
+                            reason: messageSeq === this.lastSeq ? 'duplicate' : 'stale',
+                        });
+                        return;
+                    }
+
+                    if (typeof messageSeq !== 'number') {
+                        logger.debug('[API] new-message missing seq, will fetch via HTTP', {
+                            lastSeq: this.lastSeq,
+                        });
+                    } else if (messageSeq > this.lastSeq + 1) {
+                        logger.debug('[API] new-message seq gap, will fetch via HTTP', {
                             messageSeq,
                             lastSeq: this.lastSeq,
                             expectedNext: this.lastSeq + 1,
                         });
                     } else if (!isEncrypted) {
-                        logger.debug('[API] new-message skipped (content not encrypted), will fetch via HTTP');
+                        logger.debug('[API] new-message not encrypted, will fetch via HTTP', {
+                            messageSeq,
+                            lastSeq: this.lastSeq,
+                        });
+                    } else {
+                        logger.debug('[API] new-message needs HTTP catch-up', {
+                            messageSeq,
+                            lastSeq: this.lastSeq,
+                        });
                     }
                     this.receiveSync.invalidate();
                     return;
                 } else if (data.body.t === 'update-session') {
                     if (data.body.metadata && data.body.metadata.version > this.metadataVersion) {
-                        this.metadata = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.metadata.value));
+                        const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.metadata.value));
+                        this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
                         this.metadataVersion = data.body.metadata.version;
                     }
                     if (data.body.agentState && data.body.agentState.version > this.agentStateVersion) {
                         this.agentState = data.body.agentState.value ? decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.agentState.value)) : null;
                         this.agentStateVersion = data.body.agentState.version;
+                        if (this.agentState?.a2aInbox !== undefined) {
+                            this.a2aInbox = mergeA2AInboxState(this.a2aInbox, this.agentState.a2aInbox);
+                        }
                     }
                 } else if (data.body.t === 'update-machine') {
                     // Session clients shouldn't receive machine updates - log warning
@@ -532,25 +619,70 @@ export class ApiSessionClient extends EventEmitter {
         };
     }
 
+    private ingestA2AInboxFromTrigger(raw: unknown): string | undefined {
+        if (!isRecord(raw) || raw.role !== 'user') {
+            return undefined;
+        }
+
+        const meta = isRecord(raw.meta) ? raw.meta : null;
+        if (meta?.origin !== 'a2a' && meta?.a2aTrigger !== true) {
+            return undefined;
+        }
+
+        const inboxMessage = isRecord(raw.a2aInboxMessage) ? raw.a2aInboxMessage : null;
+        if (!inboxMessage || typeof inboxMessage.text !== 'string' || inboxMessage.text.trim().length === 0) {
+            return undefined;
+        }
+
+        const triggerId = typeof raw.localKey === 'string' && raw.localKey.trim().length > 0 ? raw.localKey : randomUUID();
+        this.recordA2AMessage({
+            id: triggerId,
+            title: typeof inboxMessage.title === 'string' && inboxMessage.title.trim().length > 0 ? inboxMessage.title.trim() : undefined,
+            text: inboxMessage.text.trim(),
+            createdAt: typeof inboxMessage.createdAt === 'number' ? inboxMessage.createdAt : Date.now(),
+        });
+        return triggerId;
+    }
+
+    private withA2AInboxMessageMeta<T extends { meta?: MessageMeta; localKey?: string }>(
+        message: T,
+        triggerInboxMessageId?: string,
+    ): T {
+        if (!triggerInboxMessageId) {
+            return message;
+        }
+        return {
+            ...message,
+            meta: {
+                ...(message.meta ?? {}),
+                a2aInboxMessageId: triggerInboxMessageId,
+            },
+        };
+    }
+
     private routeIncomingMessage(message: unknown) {
+        const triggerInboxMessageId = this.ingestA2AInboxFromTrigger(message);
+
         const userResult = UserMessageSchema.safeParse(message);
         if (userResult.success) {
             logger.debug('[API] User message from app received, routing to CLI');
+            const routed = this.withA2AInboxMessageMeta(userResult.data, triggerInboxMessageId);
             if (this.pendingMessageCallback) {
-                this.pendingMessageCallback(userResult.data);
+                this.pendingMessageCallback(routed);
             } else {
-                this.pendingMessages.push(userResult.data);
+                this.pendingMessages.push(routed);
             }
             return;
         }
         // Relaxed fallback: if it looks like a user text message (e.g. app sends content.type !== 'text'), normalize and route
         const relaxed = this.normalizeToUserMessage(message);
         if (relaxed) {
-            logger.debug('[API] User message from app received (relaxed parse), routing to CLI');
+            logger.debug(`[API] User message from ${relaxed.meta?.origin === 'a2a' ? 'A2A compat' : 'relaxed'} parse, routing to CLI`);
+            const routed = this.withA2AInboxMessageMeta(relaxed, triggerInboxMessageId);
             if (this.pendingMessageCallback) {
-                this.pendingMessageCallback(relaxed);
+                this.pendingMessageCallback(routed);
             } else {
-                this.pendingMessages.push(relaxed);
+                this.pendingMessages.push(routed);
             }
             return;
         }
@@ -563,22 +695,122 @@ export class ApiSessionClient extends EventEmitter {
         this.emit('message', message);
     }
 
-    /** Normalize app payload to UserMessage when strict schema fails (e.g. content.type is 'input' or missing). */
+    /** Normalize app payload to UserMessage when strict schema fails (e.g. content.type is 'input', parts[] payload, or missing). */
     private normalizeToUserMessage(raw: unknown): UserMessage | null {
-        if (!raw || typeof raw !== 'object') return null;
-        const o = raw as Record<string, unknown>;
-        if (o.role !== 'user') return null;
-        const content = o.content;
-        if (!content || typeof content !== 'object') return null;
-        const c = content as Record<string, unknown>;
-        const text = typeof c.text === 'string' ? c.text : undefined;
-        if (text === undefined) return null;
+        const a2aSessionMessage = this.normalizeA2ASessionEnvelopeToUserMessage(raw);
+        if (a2aSessionMessage) {
+            return a2aSessionMessage;
+        }
+
+        if (!isRecord(raw) || raw.role !== 'user') return null;
+
+        const localKey = typeof raw.localKey === 'string' ? raw.localKey : undefined;
+        const meta = isRecord(raw.meta) ? (raw.meta as UserMessage['meta']) : undefined;
+
+        const content = raw.content;
+        const text = typeof content === 'string'
+            ? content
+            : isRecord(content) && typeof content.text === 'string'
+                ? content.text
+                : extractA2ATextFromParts(content)
+                ?? (isRecord(content) && 'parts' in content ? extractA2ATextFromParts(content.parts) : null)
+                ?? extractA2ATextFromParts(raw.parts);
+
+        if (text === null) return null;
+
+        const isA2A = Array.isArray(raw.parts) || Array.isArray(content) || (isRecord(content) && Array.isArray(content.parts));
         return {
             role: 'user',
             content: { type: 'text', text },
-            localKey: typeof o.localKey === 'string' ? o.localKey : undefined,
-            meta: o.meta && typeof o.meta === 'object' ? (o.meta as UserMessage['meta']) : undefined,
+            localKey,
+            meta: isA2A
+                ? { ...(meta ?? {}), origin: 'a2a', a2aTrigger: true }
+                : meta,
         };
+    }
+
+    private normalizeA2ASessionEnvelopeToUserMessage(raw: unknown): UserMessage | null {
+        if (!isRecord(raw) || raw.role !== 'session') return null;
+
+        const meta = isRecord(raw.meta) ? raw.meta : null;
+        if (meta?.origin !== 'a2a') return null;
+
+        const content = isRecord(raw.content) ? raw.content : null;
+        if (!content || content.role !== 'agent') return null;
+        const envelopeId = typeof content.id === 'string' ? content.id : null;
+        if (envelopeId && this.routedA2ASessionEnvelopeIds.has(envelopeId)) {
+            return null;
+        }
+
+        const ev = isRecord(content.ev) ? content.ev : null;
+        if (!ev || ev.t !== 'text' || typeof ev.text !== 'string' || ev.text.trim().length === 0) {
+            return null;
+        }
+
+        if (envelopeId) {
+            this.routedA2ASessionEnvelopeIds.add(envelopeId);
+            if (this.routedA2ASessionEnvelopeIds.size > 1000) {
+                this.routedA2ASessionEnvelopeIds.clear();
+                this.routedA2ASessionEnvelopeIds.add(envelopeId);
+            }
+        }
+
+        this.recordA2AMessage({
+            id: envelopeId ?? randomUUID(),
+            text: ev.text.trim(),
+            createdAt: typeof content.time === 'number' ? content.time : Date.now(),
+        });
+        return null;
+    }
+
+    getAgentState(): AgentState | null {
+        if (!this.agentState) {
+            return null;
+        }
+        return {
+            ...this.agentState,
+            a2aInbox: cloneA2AInboxState(this.a2aInbox),
+        };
+    }
+
+    getA2AInbox() {
+        return cloneA2AInboxState(this.a2aInbox);
+    }
+
+    recordA2AMessage(message: A2AInboxMessage): void {
+        this.a2aInbox = upsertA2AInboxMessage(this.a2aInbox, message);
+        this.agentState = {
+            ...(this.agentState ?? {}),
+            a2aInbox: cloneA2AInboxState(this.a2aInbox),
+        };
+        this.updateAgentState((currentState) => ({
+            ...currentState,
+            a2aInbox: cloneA2AInboxState(this.a2aInbox),
+        }));
+    }
+
+    markA2AMessageRead(id: string): void {
+        this.a2aInbox = markA2AInboxMessageRead(this.a2aInbox, id);
+        this.agentState = {
+            ...(this.agentState ?? {}),
+            a2aInbox: cloneA2AInboxState(this.a2aInbox),
+        };
+        this.updateAgentState((currentState) => ({
+            ...currentState,
+            a2aInbox: cloneA2AInboxState(this.a2aInbox),
+        }));
+    }
+
+    markA2AMessagesRead(ids: string[]): void {
+        this.a2aInbox = markA2AInboxMessagesRead(this.a2aInbox, ids);
+        this.agentState = {
+            ...(this.agentState ?? {}),
+            a2aInbox: cloneA2AInboxState(this.a2aInbox),
+        };
+        this.updateAgentState((currentState) => ({
+            ...currentState,
+            a2aInbox: cloneA2AInboxState(this.a2aInbox),
+        }));
     }
 
     /** For debugging: whether the real-time socket to the server is connected (vs HTTP fallback polling). */
@@ -1025,15 +1257,17 @@ export class ApiSessionClient extends EventEmitter {
                 await Promise.race([this.socketConnectedPromise, timeout]);
             }
             await backoff(async () => {
-                let updated = handler(this.metadata!); // Weird state if metadata is null - should never happen but here we are
+                let updated = sanitizeSessionMetadataForApp(handler(this.metadata!)) as Metadata; // Weird state if metadata is null - should never happen but here we are
                 const answer = await this.socket.emitWithAck('update-metadata', { sid: this.sessionId, expectedVersion: this.metadataVersion, metadata: encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, updated)) });
                 if (answer.result === 'success') {
-                    this.metadata = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
+                    const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
+                    this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
                     this.metadataVersion = answer.version;
                 } else if (answer.result === 'version-mismatch') {
                     if (answer.version > this.metadataVersion) {
                         this.metadataVersion = answer.version;
-                        this.metadata = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
+                        const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
+                        this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
                     }
                     throw new Error('Metadata version mismatch');
                 } else if (answer.result === 'error') {
@@ -1056,11 +1290,17 @@ export class ApiSessionClient extends EventEmitter {
                 if (answer.result === 'success') {
                     this.agentState = answer.agentState ? decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.agentState)) : null;
                     this.agentStateVersion = answer.version;
+                    if (this.agentState?.a2aInbox !== undefined) {
+                        this.a2aInbox = mergeA2AInboxState(this.a2aInbox, this.agentState.a2aInbox);
+                    }
                     logger.debug('Agent state updated', this.agentState);
                 } else if (answer.result === 'version-mismatch') {
                     if (answer.version > this.agentStateVersion) {
                         this.agentStateVersion = answer.version;
                         this.agentState = answer.agentState ? decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.agentState)) : null;
+                        if (this.agentState?.a2aInbox !== undefined) {
+                            this.a2aInbox = mergeA2AInboxState(this.a2aInbox, this.agentState.a2aInbox);
+                        }
                     }
                     throw new Error('Agent state version mismatch');
                 } else if (answer.result === 'error') {

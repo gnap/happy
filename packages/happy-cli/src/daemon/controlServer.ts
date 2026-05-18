@@ -10,12 +10,15 @@ import { logger } from '@/ui/logger';
 import { Metadata } from '@/api/types';
 import { TrackedSession } from './types';
 import { SpawnSessionOptions, SpawnSessionResult } from '@/modules/common/registerCommonHandlers';
+import { extractA2aText, extractA2aTitle } from '@/a2a/parse';
+import { sendA2aMessage } from './sendA2aMessage';
 
 export function startDaemonControlServer({
   getChildren,
   getRecentlyExited,
   stopSession,
   stopSessionByPid,
+  port,
   spawnSession,
   restartSession,
   archiveSession,
@@ -27,6 +30,7 @@ export function startDaemonControlServer({
   getRecentlyExited: () => TrackedSession[];
   stopSession: (sessionId: string) => boolean;
   stopSessionByPid: (pid: number) => boolean;
+  port: number;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
   restartSession: (sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
   archiveSession: (sessionId: string) => boolean;
@@ -64,6 +68,52 @@ export function startDaemonControlServer({
       onHappySessionWebhook(sessionId, metadata);
 
       return { status: 'ok' as const };
+    });
+
+    typed.post('/a2a/:sessionId/message', {
+      schema: {
+        params: z.object({
+          sessionId: z.string(),
+        }),
+        body: z.any(),
+        response: {
+          200: z.object({
+            success: z.boolean(),
+            messageId: z.string().optional(),
+            seq: z.number().optional(),
+          }),
+          400: z.object({
+            success: z.literal(false),
+            error: z.string(),
+          }),
+          500: z.object({
+            success: z.literal(false),
+            error: z.string(),
+          }),
+        },
+      }
+    }, async (request, reply) => {
+      const { sessionId } = request.params;
+      const text = extractA2aText(request.body);
+      const title = extractA2aTitle(request.body);
+
+      if (!text) {
+        reply.code(400);
+        return { success: false as const, error: 'Missing message text' };
+      }
+
+      logger.debug(`[CONTROL SERVER] A2A forward request: ${sessionId}`);
+      const result = await sendA2aMessage(sessionId, text, { title });
+      if (!result.success) {
+        reply.code(500);
+        return { success: false as const, error: result.error ?? 'Failed to forward A2A message' };
+      }
+
+      return {
+        success: true,
+        messageId: result.messageId,
+        seq: result.seq,
+      };
     });
 
     // List all tracked sessions (active + stopped-but-not-archived)
@@ -142,7 +192,8 @@ export function startDaemonControlServer({
           directory: z.string(),
           sessionId: z.string().optional(),
           agent: z.enum(['claude', 'codex', 'cursor', 'cursor-acp', 'gemini']).optional(),
-          environmentVariables: z.record(z.string()).optional()
+          environmentVariables: z.record(z.string()).optional(),
+          resumeSessionTag: z.string().optional()
         }),
         response: {
           200: z.object({
@@ -163,10 +214,10 @@ export function startDaemonControlServer({
         }
       }
     }, async (request, reply) => {
-      const { directory, sessionId, agent, environmentVariables } = request.body;
+      const { directory, sessionId, agent, environmentVariables, resumeSessionTag } = request.body;
 
       logger.debug(`[CONTROL SERVER] Spawn session request: dir=${directory}, sessionId=${sessionId || 'new'}, agent=${agent ?? 'default'}`);
-      const result = await spawnSession({ directory, sessionId, agent, environmentVariables });
+      const result = await spawnSession({ directory, sessionId, agent, environmentVariables, resumeSessionTag });
 
       switch (result.type) {
         case 'success':
@@ -318,17 +369,17 @@ export function startDaemonControlServer({
       return { status: 'stopping' };
     });
 
-    app.listen({ port: 0, host: '127.0.0.1' }, (err, address) => {
+    app.listen({ port, host: '127.0.0.1' }, (err, address) => {
       if (err) {
         logger.debug('[CONTROL SERVER] Failed to start:', err);
         throw err;
       }
 
-      const port = parseInt(address.split(':').pop()!);
-      logger.debug(`[CONTROL SERVER] Started on port ${port}`);
+      const boundPort = parseInt(address.split(':').pop()!, 10);
+      logger.debug(`[CONTROL SERVER] Started on port ${boundPort}`);
 
       resolve({
-        port,
+        port: boundPort,
         stop: async () => {
           logger.debug('[CONTROL SERVER] Stopping server');
           await app.close();

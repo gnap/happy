@@ -40,9 +40,16 @@ function getGlobalClaudeVersion(): string | null {
 }
 
 /**
- * Create a clean environment without local node_modules/.bin in PATH
- * This ensures we find the global claude, not the local one
- * Also removes conflicting Bun environment variables when running in Bun
+ * Create a clean environment with only the workspace's local node_modules/.bin
+ * stripped from PATH. This prevents picking up a `claude` shim that some user's
+ * project may have installed locally, while still respecting all other user
+ * PATH entries (homebrew, ~/.local/bin, ~/.cargo/bin, system dirs, etc.).
+ *
+ * Earlier versions stripped any PATH entry that started with cwd, which had a
+ * nasty side-effect: when cwd happened to be under $HOME, every user-installed
+ * tool under $HOME was also wiped out (e.g. `/home/user/.local/bin`).
+ *
+ * Also removes conflicting Bun environment variables when running in Bun.
  */
 export function getCleanEnv(): NodeJS.ProcessEnv {
     const env = { ...process.env }
@@ -54,17 +61,26 @@ export function getCleanEnv(): NodeJS.ProcessEnv {
     const actualPathKey = Object.keys(env).find(k => k.toLowerCase() === 'path') || pathKey
 
     if (env[actualPathKey]) {
-        // Remove any path that contains the current working directory (local node_modules/.bin)
-        const cleanPath = env[actualPathKey]!
+        // Only strip the workspace-local bin dirs that npm/yarn/pnpm inject.
+        // Anything else under cwd (e.g. nested tools the user installed there)
+        // is left alone — it's not our business to nuke it.
+        const stripDirs = new Set(
+            [
+                join(cwd, 'node_modules', '.bin'),
+                join(cwd, '.bin'),
+            ].map(normalizePathForCompare)
+        )
+
+        const original = env[actualPathKey]!
+        const cleanPath = original
             .split(pathSep)
-            .filter(p => {
-                const normalizedP = p.replace(/\\/g, '/').toLowerCase()
-                const normalizedCwd = cwd.replace(/\\/g, '/').toLowerCase()
-                return !normalizedP.startsWith(normalizedCwd)
-            })
+            .filter(p => !stripDirs.has(normalizePathForCompare(p)))
             .join(pathSep)
-        env[actualPathKey] = cleanPath
-        logger.debug(`[Claude SDK] Cleaned PATH, removed local paths from: ${cwd}`)
+
+        if (cleanPath !== original) {
+            env[actualPathKey] = cleanPath
+            logger.debug(`[Claude SDK] Stripped local node_modules/.bin from PATH for cwd: ${cwd}`)
+        }
     }
 
     // Remove Bun-specific environment variables that can interfere with Node.js processes
@@ -78,6 +94,13 @@ export function getCleanEnv(): NodeJS.ProcessEnv {
     }
 
     return env
+}
+
+function normalizePathForCompare(p: string): string {
+    // On Windows path comparisons are case-insensitive; on POSIX they are
+    // case-sensitive. We only fold case for the win32 variant.
+    const normalized = p.replace(/\\/g, '/').replace(/\/+$/, '')
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized
 }
 
 /**

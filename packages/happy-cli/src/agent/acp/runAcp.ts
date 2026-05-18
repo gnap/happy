@@ -527,6 +527,8 @@ export interface RunAcpOptions {
   args?: string[];
   startedBy?: 'daemon' | 'terminal';
   verbose?: boolean;
+  /** Explicit session tag to resume when daemon respawns this ACP process. */
+  resumeSessionTag?: string;
   /** When set, use this backend instead of spawning AcpBackend from command/args. */
   backend?: import('@/agent/core').AgentBackend;
   /** Custom transport handler; used when backend is not provided. Defaults to DefaultTransport. */
@@ -535,9 +537,9 @@ export interface RunAcpOptions {
 
 export async function runAcp(opts: RunAcpOptions): Promise<void> {
   const verbose = opts.verbose === true;
-  // When daemon restarts an acp-cursor session, it passes HAPPY_CURSOR_SESSION_TAG so we
+  // When daemon restarts an acp-cursor session, it passes --resume-session-tag so we
   // reconnect to the same server session instead of creating a new one.
-  const sessionTag = process.env.HAPPY_CURSOR_SESSION_TAG?.trim() || randomUUID();
+  const sessionTag = opts.resumeSessionTag?.trim() || randomUUID();
   connectionState.setBackend(opts.agentName);
 
   const api = await ApiClient.create(opts.credentials);
@@ -639,7 +641,10 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
   let sawModes = false;
   let sawModels = false;
 
-  const happyServer = await startHappyServer(session);
+  const happyServer = await startHappyServer(session, {
+    useDaemonA2ARoute: opts.startedBy === 'daemon',
+    onA2aMessage: (message) => userMessageHandler?.(message),
+  });
   const mcpServers = {
     happy: {
       command: join(projectPath(), 'bin', 'happy-mcp.mjs'),
@@ -1055,10 +1060,16 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
       logger.debug(`[${opts.agentName}] Requested ACP model: ${currentModel ?? 'null'}`);
     }
 
-    messageQueue.push(message.content.text, {
+    const mode = {
       permissionMode: currentPermissionMode,
       model: currentModel,
-    });
+    };
+    const isA2A = (message.meta as { origin?: string } | undefined)?.origin === 'a2a';
+    if (isA2A) {
+      messageQueue.pushIsolated(message.content.text, mode);
+    } else {
+      messageQueue.push(message.content.text, mode);
+    }
   };
   session.onUserMessage(userMessageHandler);
   session.keepAlive(thinking, 'remote');

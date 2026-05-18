@@ -141,6 +141,12 @@ export class Session {
      */
     clearSessionId = (): void => {
         this.sessionId = null;
+        void this.client.updateMetadata((metadata) => {
+            const { claudeSessionId, ...rest } = metadata;
+            return rest;
+        }).catch((error) => {
+            logger.debug('[Session] Failed to clear Claude session ID', error);
+        });
         logger.debug('[Session] Session ID cleared');
     }
 

@@ -6,9 +6,9 @@
 
 import { FileHandle } from 'node:fs/promises'
 import { readFile, writeFile, mkdir, open, unlink, rename, stat } from 'node:fs/promises'
-import { existsSync, writeFileSync, readFileSync, unlinkSync, mkdirSync } from 'node:fs'
+import { existsSync, writeFileSync, readFileSync, unlinkSync, mkdirSync, renameSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { constants } from 'node:fs'
 import { configuration } from '@/configuration'
 import * as z from 'zod';
@@ -228,6 +228,7 @@ interface Settings {
   activeProfileId?: string
   profiles: AIBackendProfile[]
   sandboxConfig?: SandboxConfig
+  daemonHttpPort?: number
   // CLI-local environment variable cache (not synced)
   localEnvironmentVariables: Record<string, Record<string, string>> // profileId -> env vars
 }
@@ -302,6 +303,34 @@ export interface DaemonLocallyPersistedState {
     exitTime?: number;
     lastHeartbeat?: number;
   }>;
+  /** Session IDs that have been explicitly archived and must never respawn. */
+  archivedSessionIds?: Record<string, number>;
+}
+
+function writeFileAtomically(filePath: string, content: string): void {
+  const directory = dirname(filePath);
+  const tempFilePath = join(
+    directory,
+    `.${basename(filePath)}.${process.pid}.${Date.now()}.tmp`
+  );
+
+  if (!existsSync(directory)) {
+    mkdirSync(directory, { recursive: true });
+  }
+
+  try {
+    writeFileSync(tempFilePath, content, 'utf-8');
+    renameSync(tempFilePath, filePath);
+  } catch (error) {
+    try {
+      if (existsSync(tempFilePath)) {
+        unlinkSync(tempFilePath);
+      }
+    } catch {
+      // Best-effort cleanup only; preserve the original error.
+    }
+    throw error;
+  }
 }
 
 export async function readSettings(): Promise<Settings> {
@@ -375,7 +404,7 @@ export async function writeSettings(settings: Settings): Promise<void> {
     schemaVersion: settings.schemaVersion ?? SUPPORTED_SCHEMA_VERSION
   };
 
-  await writeFile(configuration.settingsFile, JSON.stringify(settingsWithVersion, null, 2))
+  writeFileAtomically(configuration.settingsFile, JSON.stringify(settingsWithVersion, null, 2))
 }
 
 /**
@@ -506,7 +535,7 @@ export async function writeCredentialsLegacy(credentials: { secret: Uint8Array, 
   if (!existsSync(configuration.happyHomeDir)) {
     await mkdir(configuration.happyHomeDir, { recursive: true })
   }
-  await writeFile(configuration.privateKeyFile, JSON.stringify({
+  writeFileAtomically(configuration.privateKeyFile, JSON.stringify({
     secret: encodeBase64(credentials.secret),
     token: credentials.token
   }, null, 2));
@@ -516,7 +545,7 @@ export async function writeCredentialsDataKey(credentials: { publicKey: Uint8Arr
   if (!existsSync(configuration.happyHomeDir)) {
     await mkdir(configuration.happyHomeDir, { recursive: true })
   }
-  await writeFile(configuration.privateKeyFile, JSON.stringify({
+  writeFileAtomically(configuration.privateKeyFile, JSON.stringify({
     encryption: { publicKey: encodeBase64(credentials.publicKey), machineKey: encodeBase64(credentials.machineKey) },
     token: credentials.token
   }, null, 2));
@@ -553,10 +582,12 @@ export async function readDaemonState(): Promise<DaemonLocallyPersistedState | n
 }
 
 /**
- * Write daemon state to local file (synchronously for atomic operation)
+ * Write daemon state to local file atomically.
+ * We write to a temp file in the same directory first, then rename into place,
+ * so ENOSPC or partial writes do not clobber the previous state file.
  */
 export function writeDaemonState(state: DaemonLocallyPersistedState): void {
-  writeFileSync(configuration.daemonStateFile, JSON.stringify(state, null, 2), 'utf-8');
+  writeFileAtomically(configuration.daemonStateFile, JSON.stringify(state, null, 2));
 }
 
 /**
@@ -571,17 +602,21 @@ export async function clearDaemonState(): Promise<void> {
   const hasDataToPreserve =
     (existing?.stoppedSessions?.length ?? 0) > 0 ||
     Object.keys(existing?.lastDirectoryBySessionId ?? {}).length > 0 ||
+    Object.keys(existing?.lastSessionTagBySessionId ?? {}).length > 0 ||
     Object.keys(existing?.lastSessionTagByDirectory ?? {}).length > 0 ||
-    Object.keys(existing?.lastAgentBySessionId ?? {}).length > 0;
+    Object.keys(existing?.lastAgentBySessionId ?? {}).length > 0 ||
+    Object.keys(existing?.archivedSessionIds ?? {}).length > 0;
 
   if (hasDataToPreserve) {
     // Write tombstone: no pid/httpPort (signals daemon is stopped), but keep session data
-    writeFileSync(configuration.daemonStateFile, JSON.stringify({
+    writeFileAtomically(configuration.daemonStateFile, JSON.stringify({
       stoppedSessions: existing!.stoppedSessions,
       lastDirectoryBySessionId: existing!.lastDirectoryBySessionId,
+      lastSessionTagBySessionId: existing!.lastSessionTagBySessionId,
       lastSessionTagByDirectory: existing!.lastSessionTagByDirectory,
       lastAgentBySessionId: existing!.lastAgentBySessionId,
-    }, null, 2), 'utf-8');
+      archivedSessionIds: existing!.archivedSessionIds,
+    }, null, 2));
   } else if (existsSync(configuration.daemonStateFile)) {
     await unlink(configuration.daemonStateFile);
   }

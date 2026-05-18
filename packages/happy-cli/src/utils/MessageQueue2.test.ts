@@ -456,4 +456,48 @@ describe('MessageQueue2', () => {
         expect(batch3?.message).toBe('after-isolated');
         expect(batch3?.mode.type).toBe('B');
     });
+
+    it('should isolate a single message without clearing earlier queued messages', async () => {
+        const queue = new MessageQueue2<{ type: string }>((mode) => mode.type);
+
+        queue.push('before-1', { type: 'A' });
+        queue.push('before-2', { type: 'A' });
+        queue.pushIsolated('a2a', { type: 'A' });
+        queue.push('after-1', { type: 'A' });
+
+        const batch1 = await queue.waitForMessagesAndGetAsString();
+        expect(batch1?.message).toBe('before-1\nbefore-2');
+        expect(batch1?.mode.type).toBe('A');
+
+        const batch2 = await queue.waitForMessagesAndGetAsString();
+        expect(batch2?.message).toBe('a2a');
+        expect(batch2?.mode.type).toBe('A');
+
+        const batch3 = await queue.waitForMessagesAndGetAsString();
+        expect(batch3?.message).toBe('after-1');
+        expect(batch3?.mode.type).toBe('A');
+    });
+
+    it('should wake a blocked waiter via poke without enqueueing messages', async () => {
+        const queue = new MessageQueue2<{ type: string }>((mode) => mode.type);
+        const waitPromise = queue.waitForMessagesAndGetAsString();
+        await new Promise((r) => setTimeout(r, 10));
+        queue.poke();
+        const batch = await waitPromise;
+        expect(batch).toBeNull();
+        expect(queue.size()).toBe(0);
+    });
+
+    it('should coalesce consecutive isolated A2A inbox turns into one dequeue', async () => {
+        const queue = new MessageQueue2<{ type: string }>((mode) => mode.type);
+        const a2aMeta = { a2aInboxTurn: true };
+
+        queue.pushIsolated('', { type: 'A' }, a2aMeta);
+        queue.pushIsolated('', { type: 'A' }, a2aMeta);
+        queue.pushIsolated('', { type: 'A' }, a2aMeta);
+
+        const batch = await queue.waitForMessagesAndGetAsString();
+        expect(batch?.message).toBe('\n\n');
+        expect(batch?.isolate).toBe(true);
+    });
 });

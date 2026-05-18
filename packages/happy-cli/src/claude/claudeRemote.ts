@@ -12,6 +12,7 @@ import { awaitFileExist } from "@/modules/watcher/awaitFileExist";
 import { systemPrompt } from "./utils/systemPrompt";
 import { PermissionResult } from "./sdk/types";
 import type { JsRuntime } from "./runClaude";
+import { normalizeClaudeModelForSdk } from "./utils/model";
 
 export async function claudeRemote(opts: {
 
@@ -113,13 +114,15 @@ export async function claudeRemote(opts: {
 
     // Prepare SDK options
     let mode = initial.mode;
+    const model = normalizeClaudeModelForSdk(initial.mode.model);
+    const fallbackModel = normalizeClaudeModelForSdk(initial.mode.fallbackModel);
     const sdkOptions: QueryOptions = {
         cwd: opts.path,
         resume: startFrom ?? undefined,
         mcpServers: opts.mcpServers,
         permissionMode: mapToClaudeMode(initial.mode.permissionMode),
-        model: initial.mode.model,
-        fallbackModel: initial.mode.fallbackModel,
+        model,
+        fallbackModel,
         customSystemPrompt: initial.mode.customSystemPrompt ? initial.mode.customSystemPrompt + '\n\n' + systemPrompt : undefined,
         appendSystemPrompt: initial.mode.appendSystemPrompt ? initial.mode.appendSystemPrompt + '\n\n' + systemPrompt : systemPrompt,
         allowedTools: initial.mode.allowedTools ? initial.mode.allowedTools.concat(opts.allowedTools) : opts.allowedTools,

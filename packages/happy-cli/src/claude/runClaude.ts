@@ -1,10 +1,13 @@
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 import { ApiClient } from '@/api/api';
 import { logger } from '@/ui/logger';
 import { loop } from '@/claude/loop';
 import { AgentState, Metadata } from '@/api/types';
+import type { UserMessage } from '@/api/types';
 import packageJson from '../../package.json';
 import { Credentials, readSettings, writeSessionPidFile, removeSessionPidFile } from '@/persistence';
 import { EnhancedMode, PermissionMode } from './loop';
@@ -15,22 +18,56 @@ import { extractSDKMetadataAsync } from '@/claude/sdk/metadataExtractor';
 import { parseSpecialCommand } from '@/parsers/specialCommands';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { configuration } from '@/configuration';
-import { notifyDaemonSessionStarted } from '@/daemon/controlClient';
+import { notifyDaemonSessionStarted, notifyDaemonSessionEnding } from '@/daemon/controlClient';
 import { initialMachineMetadata } from '@/daemon/run';
 import { startHappyServer } from '@/claude/utils/startHappyServer';
 import { startHookServer } from '@/claude/utils/startHookServer';
 import { generateHookSettingsFile, cleanupHookSettingsFile } from '@/claude/utils/generateHookSettings';
 import { registerKillSessionHandler } from './registerKillSessionHandler';
 import { projectPath } from '../projectPath';
-import { resolve } from 'node:path';
 import { startOfflineReconnection, connectionState } from '@/utils/serverConnectionErrors';
 import { claudeLocal } from '@/claude/claudeLocal';
 import { createSessionScanner } from '@/claude/utils/sessionScanner';
 import { Session } from './session';
 import { applySandboxPermissionPolicy, resolveInitialClaudePermissionMode } from './utils/permissionMode';
+import { normalizeClaudeModelForSdk } from './utils/model';
 
 /** JavaScript runtime to use for spawning Claude Code */
 export type JsRuntime = 'node' | 'bun'
+
+const CLAUDE_SESSION_KEY_FILE = 'claude-session-key';
+
+function getClaudeSessionKeyPaths(sessionTag: string): string[] {
+    return [
+        join(configuration.happyHomeDir, `${CLAUDE_SESSION_KEY_FILE}-${sessionTag}`),
+        join(configuration.happyHomeDir, CLAUDE_SESSION_KEY_FILE),
+    ];
+}
+
+function readClaudeSessionEncryptionKey(sessionTag: string): Uint8Array | undefined {
+    for (const keyPath of getClaudeSessionKeyPaths(sessionTag)) {
+        try {
+            if (!existsSync(keyPath)) continue;
+            const raw = readFileSync(keyPath, 'utf8').trim();
+            if (!raw) continue;
+            return new Uint8Array(Buffer.from(raw, 'base64'));
+        } catch (error) {
+            logger.debug('[CLAUDE] Failed to read session encryption key', { keyPath, error });
+        }
+    }
+    return undefined;
+}
+
+function writeClaudeSessionEncryptionKey(sessionTag: string, key: Uint8Array): void {
+    const encodedKey = Buffer.from(key).toString('base64');
+    for (const keyPath of getClaudeSessionKeyPaths(sessionTag)) {
+        try {
+            writeFileSync(keyPath, encodedKey, 'utf8');
+        } catch (error) {
+            logger.debug('[CLAUDE] Failed to persist session encryption key', { keyPath, error });
+        }
+    }
+}
 
 export interface StartOptions {
     model?: string
@@ -41,6 +78,8 @@ export interface StartOptions {
     claudeArgs?: string[]
     startedBy?: 'daemon' | 'terminal'
     noSandbox?: boolean
+    /** Explicit session tag to resume when daemon respawns this Claude process. */
+    resumeSessionTag?: string
     /** JavaScript runtime to use for spawning Claude Code (default: 'node') */
     jsRuntime?: JsRuntime
 }
@@ -50,7 +89,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     logger.debug(`[CLAUDE] This is the Claude agent, NOT Gemini`);
     
     const workingDirectory = process.cwd();
-    const sessionTag = randomUUID();
+    const sessionTag = options.resumeSessionTag?.trim() || randomUUID();
 
     // Log environment info at startup
     logger.debugLargeJson('[START] Happy process started', getEnvironmentInfo());
@@ -66,6 +105,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
 
     // Create session service
     const api = await ApiClient.create(credentials);
+    const existingEncryptionKey = readClaudeSessionEncryptionKey(sessionTag);
 
     // Create a new session
     let state: AgentState = {};
@@ -102,6 +142,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         happyToolsDir: resolve(projectPath(), 'tools', 'unpacked'),
         startedFromDaemon: options.startedBy === 'daemon',
         hostPid: process.pid,
+        sessionTag,
         startedBy: options.startedBy || 'terminal',
         // Initialize lifecycle state
         lifecycleState: 'running',
@@ -117,7 +158,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         options.startedBy === 'daemon'
             ? Promise.resolve(null)
             : api.getOrCreateMachine({ machineId, metadata: initialMachineMetadata }),
-        api.getOrCreateSession({ tag: sessionTag, metadata, state }),
+        api.getOrCreateSession({ tag: sessionTag, metadata, state, existingEncryptionKey }),
     ]);
 
     // Handle server unreachable case - run Claude locally with hot reconnection
@@ -166,6 +207,11 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     }
 
     logger.debug(`Session created: ${response.id}`);
+    writeClaudeSessionEncryptionKey(sessionTag, response.encryptionKey);
+    const initialClaudeSessionId = response.metadata?.claudeSessionId ?? null;
+    if (initialClaudeSessionId) {
+        logger.debug(`[START] Restoring Claude session ID from metadata: ${initialClaudeSessionId}`);
+    }
 
     // Report to daemon on startup and every 60s so daemon re-discovers sessions after restart
     const reportToDaemon = () => {
@@ -196,8 +242,13 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     const session = api.sessionSyncClient(response);
     writeSessionPidFile(session.sessionId);
 
+    let handleUserMessage: ((message: UserMessage) => void) | null = null;
+
     // Start Happy MCP server
-    const happyServer = await startHappyServer(session);
+    const happyServer = await startHappyServer(session, {
+        useDaemonA2ARoute: options.startedBy === 'daemon',
+        onA2aMessage: (message) => handleUserMessage?.(message),
+    });
     logger.debug(`[START] Happy MCP server started at ${happyServer.url}`);
 
     // Variable to track current session instance (updated via onSessionReady callback)
@@ -256,13 +307,13 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     // Forward messages to the queue
     // Permission modes: Use the unified 7-mode type, mapping happens at SDK boundary in claudeRemote.ts
     let currentPermissionMode: PermissionMode | undefined = initialPermissionMode;
-    let currentModel = options.model; // Track current model state
+    let currentModel = normalizeClaudeModelForSdk(options.model); // Track current model state
     let currentFallbackModel: string | undefined = undefined; // Track current fallback model
     let currentCustomSystemPrompt: string | undefined = undefined; // Track current custom system prompt
     let currentAppendSystemPrompt: string | undefined = undefined; // Track current append system prompt
     let currentAllowedTools: string[] | undefined = undefined; // Track current allowed tools
     let currentDisallowedTools: string[] | undefined = undefined; // Track current disallowed tools
-    session.onUserMessage((message) => {
+    handleUserMessage = (message) => {
 
         // Resolve permission mode from meta - pass through as-is, mapping happens at SDK boundary
         let messagePermissionMode: PermissionMode | undefined = currentPermissionMode;
@@ -277,7 +328,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         // Resolve model - use message.meta.model if provided, otherwise use current model
         let messageModel = currentModel;
         if (message.meta?.hasOwnProperty('model')) {
-            messageModel = message.meta.model || undefined; // null becomes undefined
+            messageModel = normalizeClaudeModelForSdk(message.meta.model);
             currentModel = messageModel;
             logger.debug(`[loop] Model updated from user message: ${messageModel || 'reset to default'}`);
         } else {
@@ -297,7 +348,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         // Resolve fallback model - use message.meta.fallbackModel if provided, otherwise use current fallback model
         let messageFallbackModel = currentFallbackModel;
         if (message.meta?.hasOwnProperty('fallbackModel')) {
-            messageFallbackModel = message.meta.fallbackModel || undefined; // null becomes undefined
+            messageFallbackModel = normalizeClaudeModelForSdk(message.meta.fallbackModel);
             currentFallbackModel = messageFallbackModel;
             logger.debug(`[loop] Fallback model updated from user message: ${messageFallbackModel || 'reset to none'}`);
         } else {
@@ -379,25 +430,39 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             allowedTools: messageAllowedTools,
             disallowedTools: messageDisallowedTools
         };
-        messageQueue.push(message.content.text, enhancedMode);
+        const isA2A = (message.meta as { origin?: string } | undefined)?.origin === 'a2a';
+        if (isA2A) {
+            messageQueue.pushIsolated(message.content.text, enhancedMode);
+        } else {
+            messageQueue.push(message.content.text, enhancedMode);
+        }
         logger.debugLargeJson('User message pushed to queue:', message)
-    });
+    };
+    session.onUserMessage(handleUserMessage);
 
     // Setup signal handlers for graceful shutdown
-    const cleanup = async () => {
-        logger.debug('[START] Received termination signal, cleaning up...');
+    let cleanupStarted = false;
+    let exitSignalName: string | null = null;
+
+    const cleanup = async (archive = false) => {
+        if (cleanupStarted) return;
+        cleanupStarted = true;
+
+        logger.debug(`[START] Cleaning up (archive=${archive})...`);
         removeSessionPidFile();
 
         try {
             // Update lifecycle state to archived before closing
             if (session) {
-                await session.updateMetadata((currentMetadata) => ({
-                    ...currentMetadata,
-                    lifecycleState: 'archived',
-                    lifecycleStateSince: Date.now(),
-                    archivedBy: 'cli',
-                    archiveReason: 'User terminated'
-                }));
+                if (archive) {
+                    await session.updateMetadata((currentMetadata) => ({
+                        ...currentMetadata,
+                        lifecycleState: 'archived',
+                        lifecycleStateSince: Date.now(),
+                        archivedBy: 'cli',
+                        archiveReason: 'User terminated'
+                    }));
+                }
 
                 // Cleanup session resources (intervals, callbacks)
                 currentSession?.cleanup();
@@ -405,6 +470,13 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 // Send session death message
                 session.sendSessionDeath();
                 await session.flush();
+                await notifyDaemonSessionEnding(
+                    session.sessionId,
+                    process.pid,
+                    exitSignalName ? `signal: ${exitSignalName}` : (archive ? 'killed by app (RPC)' : 'terminated'),
+                    0,
+                    archive
+                );
                 await session.close();
             }
 
@@ -422,34 +494,44 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             process.exit(0);
         } catch (error) {
             logger.debug('[START] Error during cleanup:', error);
+            if (session) {
+                await notifyDaemonSessionEnding(
+                    session.sessionId,
+                    process.pid,
+                    exitSignalName ? `signal: ${exitSignalName} (cleanup error: ${error instanceof Error ? error.message : String(error)})` : `cleanup error: ${error instanceof Error ? error.message : String(error)}`,
+                    1,
+                    archive
+                ).catch(() => {});
+            }
             process.exit(1);
         }
     };
 
     // Handle termination signals (反注册: send session-end on exit)
-    process.on('SIGTERM', cleanup);
-    process.on('SIGINT', cleanup);
-    process.on('SIGHUP', cleanup);
+    process.on('SIGTERM', () => { exitSignalName = 'SIGTERM'; void cleanup(false); });
+    process.on('SIGINT', () => { exitSignalName = 'SIGINT'; void cleanup(false); });
+    process.on('SIGHUP', () => { exitSignalName = 'SIGHUP'; void cleanup(false); });
 
     // Handle uncaught exceptions and rejections
     process.on('uncaughtException', (error) => {
         logger.debug('[START] Uncaught exception:', error);
-        cleanup();
+        void cleanup(false);
     });
 
     process.on('unhandledRejection', (reason) => {
         logger.debug('[START] Unhandled rejection:', reason);
-        cleanup();
+        void cleanup(false);
     });
 
-    registerKillSessionHandler(session.rpcHandlerManager, cleanup);
+    registerKillSessionHandler(session.rpcHandlerManager, () => cleanup(true));
 
     // Create claude loop
     const exitCode = await loop({
         path: workingDirectory,
-        model: options.model,
+        model: normalizeClaudeModelForSdk(options.model),
         permissionMode: initialPermissionMode,
         startingMode: options.startingMode,
+        initialSessionId: initialClaudeSessionId,
         messageQueue,
         api,
         allowedTools: happyServer.toolNames.map(toolName => `mcp__happy__${toolName}`),
@@ -490,6 +572,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     // Wait for socket to flush
     logger.debug('Waiting for socket to flush...');
     await session.flush();
+
+    await notifyDaemonSessionEnding(session.sessionId, process.pid, 'completed normally (exit 0)', 0, false);
 
     // Close session
     logger.debug('Closing session...');

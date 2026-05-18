@@ -1,11 +1,8 @@
 /**
- * Uninstallation script for Happy daemon LaunchDaemon
- * 
- * NOTE: This uninstallation method is currently NOT USED since we moved away from
- * system-level daemon installation. See install.ts for the full explanation.
- * 
- * This code is kept for potential future use if we decide to offer system-level 
- * installation/uninstallation as an option.
+ * Uninstallation script for Happy daemon LaunchAgent / LaunchDaemon.
+ *
+ * Variant-aware: defaults to "stable" but uninstalls the dev plist when
+ * HAPPY_VARIANT=dev is set in the environment.
  */
 
 import { existsSync, unlinkSync } from 'fs';
@@ -13,14 +10,25 @@ import { execSync } from 'child_process';
 import os from 'os';
 import { logger } from '@/ui/logger';
 
-const PLIST_LABEL = 'com.happy-cli.daemon';
+type Variant = 'stable' | 'dev';
 
-function getPlistPath(): string {
+const PLIST_LABEL_BASE = 'com.happy-cli.daemon';
+
+function resolveVariant(): Variant {
+    const raw = (process.env.HAPPY_VARIANT || '').toLowerCase();
+    return raw === 'dev' ? 'dev' : 'stable';
+}
+
+function resolvePlistLabel(variant: Variant): string {
+    return variant === 'dev' ? `${PLIST_LABEL_BASE}.dev` : PLIST_LABEL_BASE;
+}
+
+function getPlistPath(label: string): string {
     const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
     if (isRoot) {
-        return `/Library/LaunchDaemons/${PLIST_LABEL}.plist`;
+        return `/Library/LaunchDaemons/${label}.plist`;
     }
-    return `${os.homedir()}/Library/LaunchAgents/${PLIST_LABEL}.plist`;
+    return `${os.homedir()}/Library/LaunchAgents/${label}.plist`;
 }
 
 function getLaunchctlDomain(): string {
@@ -32,23 +40,27 @@ function getLaunchctlDomain(): string {
 
 export async function uninstall(): Promise<void> {
     try {
-        const PLIST_FILE = getPlistPath();
+        const variant = resolveVariant();
+        const label = resolvePlistLabel(variant);
+        const plistFile = getPlistPath(label);
         const domain = getLaunchctlDomain();
 
-        if (!existsSync(PLIST_FILE)) {
+        logger.info(`Uninstalling Happy CLI daemon (variant: ${variant}, label: ${label})`);
+
+        if (!existsSync(plistFile)) {
             logger.info('Daemon plist not found. Nothing to uninstall.');
             return;
         }
 
         try {
-            execSync(`launchctl bootout ${domain} ${PLIST_FILE}`, { stdio: 'inherit' });
+            execSync(`launchctl bootout ${domain} ${plistFile}`, { stdio: 'inherit' });
             logger.info('Daemon stopped successfully');
         } catch {
             logger.info('Failed to unload daemon (it might not be running)');
         }
 
-        unlinkSync(PLIST_FILE);
-        logger.info(`Removed daemon plist from ${PLIST_FILE}`);
+        unlinkSync(plistFile);
+        logger.info(`Removed daemon plist from ${plistFile}`);
         logger.info('Daemon uninstalled successfully');
     } catch (error) {
         logger.debug('Failed to uninstall daemon:', error);

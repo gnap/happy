@@ -35,8 +35,12 @@ import { registerKillSessionHandler } from '@/claude/registerKillSessionHandler'
 import { stopCaffeinate } from '@/utils/caffeinate';
 import { connectionState } from '@/utils/serverConnectionErrors';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
+import { buildA2AInboxNotificationWithPreview, buildA2ATurnPrompt, getA2AUnreadCount, hasUnreadA2AInboxMessages, listA2AInboxMessages } from '@/a2a/inbox';
+import { buildA2ASubagentCardEnvelopes } from '@/a2a/subagentCard';
 import type { ApiSessionClient } from '@/api/apiSession';
 import type { PermissionMode } from '@/api/types';
+import type { UserMessage } from '@/api/types';
+import { parseSpecialCommand } from '@/parsers/specialCommands';
 
 /**
  * Use native codex message format (type: 'codex') instead of ACP format
@@ -61,6 +65,64 @@ function toolResultForOutputFormat(result: unknown, isError: boolean): { content
     if (typeof o.stderr === 'string' && isError) return { content: o.stderr, is_error: true };
   }
   return { content: JSON.stringify(result ?? ''), is_error: isError };
+}
+
+type CursorUsageRecord = Record<string, unknown>;
+
+function readUsageNumber(usage: CursorUsageRecord | undefined, keys: string[]): number | undefined {
+  if (!usage) return undefined;
+  for (const key of keys) {
+    const value = usage[key];
+    if (typeof value === 'number') return value;
+  }
+  return undefined;
+}
+
+function normalizeCursorUsage(usage?: CursorUsageRecord): {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
+  totalTokens?: number;
+  usage?: CursorUsageRecord;
+} {
+  const inputTokens = readUsageNumber(usage, ['input_tokens', 'inputTokens', 'prompt_tokens', 'promptTokens']);
+  const outputTokens = readUsageNumber(usage, ['output_tokens', 'outputTokens', 'completion_tokens', 'completionTokens']);
+  const cacheReadInputTokens = readUsageNumber(usage, ['cache_read_input_tokens', 'cacheReadInputTokens']);
+  const cacheCreationInputTokens = readUsageNumber(usage, ['cache_creation_input_tokens', 'cacheCreationInputTokens']);
+  const totalTokens = readUsageNumber(usage, ['total_tokens', 'totalTokens', 'tokens', 'tokenCount'])
+    ?? (typeof inputTokens === 'number' && typeof outputTokens === 'number'
+      ? inputTokens + outputTokens
+      : undefined);
+
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadInputTokens,
+    cacheCreationInputTokens,
+    totalTokens,
+    usage,
+  };
+}
+
+function formatCursorUsageLog(params: {
+  sessionId: string;
+  turnId: string;
+  cursorChatId: string | null;
+  usage?: CursorUsageRecord;
+  costUsd?: number;
+  durationMs?: number;
+}): string {
+  const normalized = normalizeCursorUsage(params.usage);
+
+  return JSON.stringify({
+    sessionId: params.sessionId,
+    turnId: params.turnId,
+    cursorChatId: params.cursorChatId,
+    ...normalized,
+    costUsd: params.costUsd,
+    durationMs: params.durationMs,
+  });
 }
 import { createId } from '@paralleldrive/cuid2';
 import { CursorProcess, fetchCursorModels } from './cursorProcess';
@@ -93,6 +155,23 @@ function ensureCursorMcpHappy(workspacePath: string, happyUrl: string): void {
   } catch (e) {
     logger.debug('[cursor] Could not write .cursor/mcp.json:', e);
   }
+}
+
+function writeA2AInboxSnapshot(workspacePath: string, sessionId: string, turnId: string, inbox: ReturnType<ApiSessionClient['getA2AInbox']>): string {
+  const dir = join(workspacePath, '.happy', 'a2a-inbox');
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+  const filePath = join(dir, `${sessionId}-${turnId}.json`);
+  const unreadMessages = listA2AInboxMessages(inbox, { unreadOnly: true, limit: 100 });
+  const snapshot = {
+    sessionId,
+    turnId,
+    unreadCount: unreadMessages.length,
+    messages: unreadMessages,
+  };
+  writeFileSync(filePath, JSON.stringify(snapshot, null, 2));
+  return filePath;
 }
 
 /**
@@ -181,6 +260,8 @@ export async function runCursor(opts: {
   workspaceRoot?: string;
   /** Resume last session for same workspace (--resume / -r). Default: false (new session). */
   resumeSession?: boolean;
+  /** Explicit session tag to resume when daemon respawns this cursor process. */
+  resumeSessionTag?: string;
   /** Set by index.ts: Date.now() at start of CLI async IIFE, so we can report "time to runCursor entry". */
   cliStartTime?: number;
 }): Promise<void> {
@@ -198,17 +279,16 @@ export async function runCursor(opts: {
     logger.debug(`[cursor] Startup toRunCursorEntry: ${toRunCursorEntryMs}ms (index load + auth + daemon check → runCursor)`);
   }
 
-  // Default: new session. Resume only with --resume/-r or HAPPY_CURSOR_SESSION_TAG (daemon restart).
+  // Default: new session. Resume only with --resume/-r or --resume-session-tag.
   const tagPath = join(configuration.happyHomeDir, CURSOR_SESSION_TAG_FILE);
   const workspacePathFile = join(configuration.happyHomeDir, CURSOR_SESSION_WORKSPACE_FILE);
   let sessionTag: string;
   let tagReused = false;
-  const envSessionTag = process.env.HAPPY_CURSOR_SESSION_TAG?.trim() || null;
-  if (envSessionTag) {
-    // Daemon restart: reconnect to exact session by tag
-    sessionTag = envSessionTag;
+  const explicitResumeTag = opts.resumeSessionTag?.trim() || null;
+  if (explicitResumeTag) {
+    sessionTag = explicitResumeTag;
     tagReused = true;
-    logger.debug(`[cursor] Using session tag from env (daemon restart): ${sessionTag.slice(0, 8)}...`);
+    logger.debug(`[cursor] Using session tag from CLI arg (--resume-session-tag): ${sessionTag.slice(0, 8)}...`);
   } else if (opts.resumeSession) {
     let savedTag: string | null = null;
     let savedWorkspace: string | null = null;
@@ -318,6 +398,9 @@ export async function runCursor(opts: {
   }));
   let currentPermissionMode: PermissionMode | undefined = undefined;
   let currentModel: string | undefined = undefined;
+  let a2aTurnQueued = false;
+  let a2aInboxTurnActive = false;
+  let scheduleA2ATurnIfNeeded: (mode: CursorMode) => void = () => {};
   const syncModeToSessionMetadata = (permissionMode: PermissionMode, model: string | undefined) => {
     const dangerouslySkipPermissions = permissionMode === 'force';
     session.updateMetadata((m) => ({
@@ -328,7 +411,7 @@ export async function runCursor(opts: {
     })).catch((err) => logger.debug('[Cursor] Failed to sync mode to session metadata', err));
   };
 
-  const handleUserMessage = (message: { content: { text: string }; meta?: { permissionMode?: string; model?: string | null } }) => {
+  const handleUserMessage = (message: UserMessage) => {
     let messagePermissionMode = currentPermissionMode;
     if (message.meta?.permissionMode) {
       const validModes: PermissionMode[] = ['default', 'plan', 'ask', 'force'];
@@ -360,6 +443,18 @@ export async function runCursor(opts: {
       const dangerouslySkipPermissions = effectivePermission === 'force';
       session.updateMetadata((m) => ({ ...m, currentOperatingModeCode: effectivePermission, currentModelCode: effectiveModel, dangerouslySkipPermissions })).catch((err) => logger.debug('[Cursor] Failed to persist permission/model to session metadata', err));
     }
+    const specialCommand = parseSpecialCommand(message.content.text);
+    if (specialCommand.type === 'compact') {
+      logger.debug('[cursor] Detected /compact command; scheduling interactive compression turn');
+      messageQueue.pushIsolateAndClear('', mode, { cursorCompactTurn: true });
+      return;
+    }
+    const isA2ATrigger = (message.meta as { a2aTrigger?: boolean } | undefined)?.a2aTrigger === true;
+    if (isA2ATrigger) {
+      logger.debug('[cursor] A2A message recorded in inbox; poking message loop');
+      messageQueue.poke();
+      return;
+    }
     logger.debug(`[cursor] User message queued (length: ${message.content.text.length})`);
     messageQueue.push(message.content.text, mode);
   };
@@ -382,6 +477,37 @@ export async function runCursor(opts: {
     },
   });
   session = initialSession;
+  const currentCursorMode = (): CursorMode => ({
+    permissionMode: currentPermissionMode ?? 'default',
+    model: currentModel,
+  });
+  scheduleA2ATurnIfNeeded = (mode: CursorMode) => {
+    const unreadMessages = listA2AInboxMessages(session.getA2AInbox(), { unreadOnly: true });
+    const compactMessage = unreadMessages.find((message) => parseSpecialCommand(message.text).type === 'compact');
+    if (compactMessage) {
+      if (a2aTurnQueued) {
+        return;
+      }
+      a2aTurnQueued = true;
+      logger.debug(`[cursor] A2A compact command peek: scheduling interactive compression turn for message ${compactMessage.id}`);
+      session.markA2AMessageRead(compactMessage.id);
+      messageQueue.pushIsolateAndClear('', mode, { cursorCompactTurn: true });
+      return;
+    }
+    const unreadCount = unreadMessages.length;
+    if (unreadCount === 0) {
+      return;
+    }
+    if (a2aTurnQueued) {
+      return;
+    }
+    a2aTurnQueued = true;
+    logger.debug(`[cursor] A2A inbox peek: scheduling turn for ${unreadCount} unread message(s)`);
+    messageQueue.pushIsolated('', mode, { a2aInboxTurn: true });
+  };
+  const peekA2AInboxInLoop = (mode?: CursorMode) => {
+    scheduleA2ATurnIfNeeded(mode ?? currentCursorMode());
+  };
   session.onUserMessage(handleUserMessage);
   step('sessionConnect');
   writeSessionPidFile(session.sessionId);
@@ -491,6 +617,7 @@ export async function runCursor(opts: {
     try {
       abortController.abort();
       messageQueue.reset();
+      a2aTurnQueued = false;
     } catch (error) {
       logger.debug('[Cursor] Error during abort:', error);
     } finally {
@@ -607,14 +734,17 @@ export async function runCursor(opts: {
 
   let currentTurnIdRef: string | null = null;
   const enableSubagentMcp = process.env.HAPPY_SUBAGENT_MCP === '1';
-  const happyServer = await startHappyServer(session, enableSubagentMcp ? {
+  const happyServer = await startHappyServer(session, {
+    useDaemonA2ARoute: opts.startedBy === 'daemon',
+    isA2AInboxTurnActive: () => a2aInboxTurnActive,
     cursorContext: {
       getCurrentTurnId: () => currentTurnIdRef,
       sendSessionEnvelope: (envelope) => session.sendSessionProtocolMessage(envelope),
       workspacePath,
       getAbortSignal: () => abortController.signal,
     },
-  } : {});
+    onA2aMessage: handleUserMessage,
+  });
   ensureCursorMcpHappy(workspacePath, happyServer.url);
   step('mcpServer');
   logger.debug(`[cursor] Happy MCP: url=${happyServer.url}, workspacePath=${workspacePath}, subagentMcp=${enableSubagentMcp}`);
@@ -644,6 +774,9 @@ export async function runCursor(opts: {
   //
 
   let first = true;
+  let lastTaskCompleteUsage: CursorUsageRecord | undefined;
+  let lastTaskCompleteCostUsd: number | undefined;
+  let lastTaskCompleteDurationMs: number | undefined;
 
   // Send "It's ready!" once on startup so mobile can open this session (critical when reusing session after restart)
   emitReadyIfIdle();
@@ -676,6 +809,8 @@ export async function runCursor(opts: {
 
   try {
     while (!shouldExit) {
+      peekA2AInboxInLoop();
+
       const waitSignal = abortController.signal;
       const batch = await messageQueue.waitForMessagesAndGetAsString(waitSignal);
       if (!batch) {
@@ -683,15 +818,31 @@ export async function runCursor(opts: {
           logger.debug('[cursor] Wait aborted while idle, continuing');
           continue;
         }
+        if (!shouldExit) {
+          continue;
+        }
         break;
       }
 
-      const { message: userMessage, mode } = batch;
-      messageBuffer.addMessage(userMessage, 'user');
-      logger.debug(`[cursor] Processing message (length: ${userMessage.length}); spawning cursor-agent`);
+      const { message: userMessage, mode, meta } = batch;
+      const isA2AInboxTurn = !!(meta && typeof meta === 'object' && (meta as { a2aInboxTurn?: boolean }).a2aInboxTurn === true);
+      const isCursorCompactTurn = !!(meta && typeof meta === 'object' && (meta as { cursorCompactTurn?: boolean }).cursorCompactTurn === true);
+      if (isA2AInboxTurn) {
+        a2aTurnQueued = false;
+        if (!hasUnreadA2AInboxMessages(session.getA2AInbox())) {
+          logger.debug('[cursor] A2A inbox turn dequeued with no unread messages; skipping');
+          continue;
+        }
+        a2aInboxTurnActive = true;
+      }
+      if (isCursorCompactTurn) {
+        messageBuffer.addMessage('Summarizing...', 'system');
+      } else {
+        messageBuffer.addMessage(userMessage, isA2AInboxTurn ? 'system' : 'user');
+      }
+      logger.debug(`[cursor] Processing message (length: ${userMessage.length})${isA2AInboxTurn ? ' [a2a-inbox-turn]' : ''}${isCursorCompactTurn ? ' [compact-turn]' : ''}; spawning cursor-agent`);
 
-      // Cursor has no change_title MCP tool, so don't append that instruction (unlike Codex/Gemini)
-      const prompt = userMessage;
+      let prompt = userMessage;
 
       // Accumulated response text for final message to mobile
       let accumulatedResponse = '';
@@ -699,14 +850,21 @@ export async function runCursor(opts: {
       const turnId = createId();
       currentTurnIdRef = turnId;
 
-      // Send user message: session protocol only. Store (old) App already has the user message from app send; dual-send output format would duplicate it. New App renders from this envelope.
-      session.sendSessionProtocolMessage(createEnvelope('user', { t: 'text', text: userMessage }, { turn: turnId }));
+      // For A2A inbox turns we keep the prompt internal and emit the A2A card right as the turn starts.
+      if (!isA2AInboxTurn && !isCursorCompactTurn) {
+        session.sendSessionProtocolMessage(createEnvelope('user', { t: 'text', text: userMessage }, { turn: turnId }));
+      } else if (isCursorCompactTurn) {
+        session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'service', text: 'Summarizing...' }, { turn: turnId }));
+      }
       const messageParser = new CursorMessageParser();
       const codexIdByCallId = new Map<string, string>();
       /** Per-tool timeout: when fired we send tool_call_end (running in background) so App stops timer; process keeps running. */
       const toolCallTimeoutHandles = new Map<string, ReturnType<typeof setTimeout>>();
       let turnCompletedNormally = false;
       let turnEndStatus: 'completed' | 'failed' | 'cancelled' = 'completed';
+      lastTaskCompleteUsage = undefined;
+      lastTaskCompleteCostUsd = undefined;
+      lastTaskCompleteDurationMs = undefined;
 
       const flushAccumulatedText = () => {
         if (accumulatedResponse.trim()) {
@@ -736,6 +894,26 @@ export async function runCursor(opts: {
       try {
         thinking = true;
         session.keepAlive(thinking, 'remote');
+
+        if (isA2AInboxTurn) {
+          const inboxSnapshotPath = writeA2AInboxSnapshot(workspacePath, sessionId, turnId, session.getA2AInbox());
+          const inbox = session.getA2AInbox();
+          const unreadCount = getA2AUnreadCount(inbox);
+          const summary = buildA2AInboxNotificationWithPreview(inbox);
+          const inboxTitle = unreadCount === 0
+            ? 'A2A inbox'
+            : unreadCount === 1
+              ? 'A2A inbox (1 unread)'
+              : `A2A inbox (${unreadCount} unread)`;
+          for (const envelope of buildA2ASubagentCardEnvelopes(summary, {
+            title: inboxTitle,
+            description: summary,
+            turnId: createId(),
+          })) {
+            session.sendSessionProtocolMessage(envelope);
+          }
+          prompt = buildA2ATurnPrompt(summary, inboxSnapshotPath, unreadCount);
+        }
 
         // Send turn-start in wrapped shape (type: 'session', data) so store App lifecycle check sees contentType === 'session'
         session.sendSessionLifecycleEnvelope(createEnvelope('agent', { t: 'turn-start' }, { turn: turnId }));
@@ -896,7 +1074,7 @@ export async function runCursor(opts: {
               codexIdByCallId.delete(msg.callId);
               const lazyResult = session.maybeLazyEncodeResult(msg.toolName, msg.callId, msg.result) as string | Record<string, unknown>;
               logger.debug(`[cursor] tool-call-result callId=${msg.callId.slice(0, 8)}... success=${msg.success}`);
-              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId, result: lazyResult } as SessionEvent, { turn: turnId }));
+              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId, ...(lazyResult !== undefined ? { result: lazyResult } : {}) }, { turn: turnId }));
               break;
 
             case 'task_complete':
@@ -906,9 +1084,17 @@ export async function runCursor(opts: {
               if (msg.sessionId) {
                 cursorChatId = msg.sessionId;
               }
-              if (msg.costUsd !== undefined) {
-                logger.debug(`[cursor] Cost: $${msg.costUsd}, Duration: ${msg.durationMs}ms`);
-              }
+              lastTaskCompleteUsage = msg.usage;
+              lastTaskCompleteCostUsd = msg.costUsd;
+              lastTaskCompleteDurationMs = msg.durationMs;
+              logger.debug(`[cursor] Turn usage ${formatCursorUsageLog({
+                sessionId: session.sessionId,
+                turnId,
+                cursorChatId,
+                usage: msg.usage,
+                costUsd: msg.costUsd,
+                durationMs: msg.durationMs,
+              })}`);
               // Close any tool calls that never got tool_call_end (e.g. long-running shell still running when turn ended)
               // so the App stops their timers as soon as we know the turn is complete
               const turnEndedResult = { turnEnded: true, message: 'Turn completed; tool did not report end' };
@@ -922,14 +1108,21 @@ export async function runCursor(opts: {
 
             case 'error':
               messageBuffer.addMessage(`Error: ${msg.message}`, 'status');
-              const errorText = `Error: ${msg.message}`;
-              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: errorText }, { turn: turnId }));
+              session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'service', text: `Error: ${msg.message}` }, { turn: turnId }));
               break;
           }
         }
 
         // Run the process (blocks until exit)
-        await cursorProc.run(prompt);
+        if (isCursorCompactTurn) {
+          await cursorProc.runInteractiveCommand('/compress');
+          const summarySuccessMessage = 'Summary completed successfully.';
+          messageBuffer.addMessage(summarySuccessMessage, 'status');
+          session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'service', text: summarySuccessMessage }, { turn: turnId }));
+          turnCompletedNormally = true;
+        } else {
+          await cursorProc.run(prompt);
+        }
 
         first = false;
 
@@ -943,7 +1136,7 @@ export async function runCursor(opts: {
           const errorMsg = error instanceof Error ? error.message : 'Process error';
           logger.debug('[cursor] Error:', error);
           messageBuffer.addMessage(errorMsg, 'status');
-          session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: errorMsg }, { turn: turnId }));
+          session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'service', text: `Error: ${errorMsg}` }, { turn: turnId }));
         }
       } finally {
         cancelTextFlushTimer();
@@ -966,7 +1159,13 @@ export async function runCursor(opts: {
         const status: 'completed' | 'failed' | 'cancelled' =
           turnCompletedNormally ? 'completed' : (turnEndStatus === 'cancelled' ? 'cancelled' : 'failed');
         // Single turn-end signal: session lifecycle only. Sending codex + cursor task_complete as well caused turn summary to appear three times in the App.
-        session.sendSessionLifecycleEnvelope(createEnvelope('agent', { t: 'turn-end', status }, { turn: turnId }));
+        session.sendSessionLifecycleEnvelope(createEnvelope('agent', {
+          t: 'turn-end',
+          status,
+          ...(lastTaskCompleteUsage ? { usage: lastTaskCompleteUsage } : {}),
+          ...(lastTaskCompleteCostUsd !== undefined ? { costUsd: lastTaskCompleteCostUsd } : {}),
+          ...(lastTaskCompleteDurationMs !== undefined ? { durationMs: lastTaskCompleteDurationMs } : {}),
+        }, { turn: turnId }));
 
         // 1.5.0 App only stops timer via ephemeral activity (keepAlive), not message content; send before flush so it’s not delayed
         thinking = false;
@@ -977,6 +1176,9 @@ export async function runCursor(opts: {
         // Clear parser state for next turn
         messageParser.clear();
         currentTurnIdRef = null;
+        if (isA2AInboxTurn) {
+          a2aInboxTurnActive = false;
+        }
         emitReadyIfIdle();
 
         logger.debug(`[cursor] Turn completed (queue: ${messageQueue.size()})`);

@@ -32,6 +32,7 @@ import { spawnHappyCLI } from './utils/spawnHappyCLI'
 import { claudeCliPath } from './claude/claudeLocal'
 import { execFileSync } from 'node:child_process'
 import { extractNoSandboxFlag } from './utils/sandboxFlags'
+import { sendA2aMessage } from './daemon/sendA2aMessage'
 
 
 (async () => {
@@ -142,17 +143,20 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
       
       // Parse startedBy argument
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
+      let resumeSessionTag: string | undefined = undefined;
       const codexArgs = extractNoSandboxFlag(args.slice(1));
       for (let i = 0; i < codexArgs.args.length; i++) {
         if (codexArgs.args[i] === '--started-by') {
           startedBy = codexArgs.args[++i] as 'daemon' | 'terminal';
+        } else if (codexArgs.args[i] === '--resume-session-tag' && codexArgs.args[i + 1]) {
+          resumeSessionTag = codexArgs.args[++i];
         }
       }
       
       const {
         credentials
       } = await authAndSetupMachineIfNeeded();
-      await runCodex({credentials, startedBy, noSandbox: codexArgs.noSandbox});
+      await runCodex({credentials, startedBy, noSandbox: codexArgs.noSandbox, resumeSessionTag});
       // Do not force exit here; allow instrumentation to show lingering handles
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
@@ -167,10 +171,11 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
     try {
       const { runCursor } = await import('@/cursor/runCursor');
 
-      // Parse cursor options: --started-by, --cwd, --resume/-r
+      // Parse cursor options: --started-by, --cwd, --resume/-r, --resume-session-tag
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
       let workspaceRoot: string | undefined = undefined;
       let resumeSession = false;
+      let resumeSessionTag: string | undefined = undefined;
       for (let i = 1; i < args.length; i++) {
         if (args[i] === '--started-by') {
           startedBy = args[++i] as 'daemon' | 'terminal';
@@ -178,6 +183,8 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
           workspaceRoot = args[++i];
         } else if (args[i] === '--resume' || args[i] === '-r') {
           resumeSession = true;
+        } else if (args[i] === '--resume-session-tag' && args[i + 1]) {
+          resumeSessionTag = args[++i];
         }
       }
 
@@ -195,7 +202,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
         await new Promise(resolve => setTimeout(resolve, 200));
       }
 
-      await runCursor({ credentials, startedBy, workspaceRoot, resumeSession, cliStartTime });
+      await runCursor({ credentials, startedBy, workspaceRoot, resumeSession, resumeSessionTag, cliStartTime });
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error');
       if (process.env.DEBUG) {
@@ -390,9 +397,12 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
       
       // Parse startedBy argument
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
+      let resumeSessionTag: string | undefined = undefined;
       for (let i = 1; i < args.length; i++) {
         if (args[i] === '--started-by') {
           startedBy = args[++i] as 'daemon' | 'terminal';
+        } else if (args[i] === '--resume-session-tag' && args[i + 1]) {
+          resumeSessionTag = args[++i];
         }
       }
       
@@ -413,7 +423,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
         await new Promise(resolve => setTimeout(resolve, 200));
       }
 
-      await runGemini({credentials, startedBy});
+      await runGemini({credentials, startedBy, resumeSessionTag});
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
       if (process.env.DEBUG) {
@@ -428,11 +438,16 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
 
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
       let verbose = false;
+      let resumeSessionTag: string | undefined = undefined;
       const acpArgs: string[] = [];
       let customCommandMode = false;
       for (let i = 1; i < args.length; i++) {
         if (!customCommandMode && args[i] === '--started-by') {
           startedBy = args[++i] as 'daemon' | 'terminal';
+          continue;
+        }
+        if (!customCommandMode && args[i] === '--resume-session-tag' && args[i + 1]) {
+          resumeSessionTag = args[++i];
           continue;
         }
         if (!customCommandMode && args[i] === '--happy-starting-mode') {
@@ -468,6 +483,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
         credentials,
         startedBy,
         verbose,
+        resumeSessionTag,
         agentName: resolved.agentName,
         command: resolved.command,
         args: resolved.args,
@@ -576,10 +592,17 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
         let result = await restartDaemonSession(sessionId);
         if (result.success) {
           console.log(`Session restarted successfully`);
-          if (result.newSessionId) console.log(`New session ID: ${result.newSessionId}`);
+          if (result.newSessionId && result.newSessionId !== sessionId) {
+            console.log(`New session ID: ${result.newSessionId}`);
+          } else if (result.newSessionId) {
+            console.log(`Session ID: ${result.newSessionId}`);
+          }
           return;
         }
-        const notFound = (result.error ?? '').toLowerCase().includes('not found') || (result.error ?? '').includes('Session directory unknown');
+        const notFound =
+          (result.error ?? '').toLowerCase().includes('not found') ||
+          (result.error ?? '').includes('Session directory unknown') ||
+          (result.error ?? '').includes('Session tag unknown');
         if (notFound) {
           const { readCredentials } = await import('./persistence');
           const credentials = await readCredentials();
@@ -591,20 +614,28 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
               const spawnResult = await spawnDaemonSession({
                 directory: one.path,
                 agent: (one.flavor === 'cursor' ? 'cursor' : one.flavor === 'claude' ? 'claude' : one.flavor === 'gemini' ? 'gemini' : 'cursor') as 'cursor' | 'claude' | 'gemini' | 'codex',
-                environmentVariables: one.tag ? { HAPPY_CURSOR_SESSION_TAG: one.tag } : undefined
+                resumeSessionTag: one.tag ?? undefined
               });
               if (spawnResult.success) {
                 console.log(`Session restarted from server list (spawned in ${one.path})`);
                 if (spawnResult.sessionId) console.log(`New session ID: ${spawnResult.sessionId}`);
                 return;
               }
+              result = { success: false, error: spawnResult.error ?? result.error };
+            } else if (one) {
+              result = {
+                success: false,
+                error: 'Session found on server, but its workspace path is unavailable to this client (metadata not decryptable).'
+              };
             }
           }
         }
         console.error(`Failed to restart session: ${result.error ?? 'unknown error'}`);
         process.exit(1);
       } catch (error) {
-        console.log('No daemon running');
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.error(`Failed to restart session: ${errorMessage}`);
+        process.exit(1);
       }
       return
 
@@ -620,6 +651,30 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
         console.log(success ? `Session ${sessionId} archived.` : `Session ${sessionId} not found in stopped list.`)
       } catch (error) {
         console.log('No daemon running')
+      }
+      return
+
+    } else if (daemonSubcommand === 'send-a2a') {
+      const sessionId = args[2]
+      const text = args.slice(3).join(' ').trim()
+      if (!sessionId || !text) {
+        console.error('Usage: happy daemon send-a2a <sessionId> <message...>')
+        process.exit(1)
+      }
+
+      try {
+        const result = await sendA2aMessage(sessionId, text)
+        if (!result.success) {
+          console.error(`Failed to send A2A message: ${result.error ?? 'unknown error'}`)
+          process.exit(1)
+        }
+        console.log(`A2A message sent to ${sessionId}`)
+        if (result.messageId) console.log(`Message ID: ${result.messageId}`)
+        if (result.seq !== undefined) console.log(`Seq: ${result.seq}`)
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error)
+        console.error(`Failed to send A2A message: ${errorMessage}`)
+        process.exit(1)
       }
       return
 
@@ -693,6 +748,7 @@ ${chalk.bold('Usage:')}
   happy daemon list               List sessions (alive + stopped, until archived)
   happy daemon restart-session    Restart a hung/dead session (resumes same chat)
   happy daemon archive-session    Remove a stopped session from the list
+  happy daemon send-a2a           Send an A2A user message to a session
 
   If you want to kill all happy related processes run 
   ${chalk.cyan('happy doctor clean')}
@@ -716,6 +772,7 @@ ${chalk.bold('To clean up runaway processes:')} Use ${chalk.cyan('happy doctor c
     let showVersion = false
     let chromeOverride: boolean | undefined = undefined  // Track explicit --chrome or --no-chrome
     const unknownArgs: string[] = [] // Collect unknown args to pass through to claude
+    let resumeSessionTag: string | undefined = undefined
     const parsedSandboxFlag = extractNoSandboxFlag(args)
     options.noSandbox = parsedSandboxFlag.noSandbox
     args.length = 0
@@ -739,6 +796,8 @@ ${chalk.bold('To clean up runaway processes:')} Use ${chalk.cyan('happy doctor c
         unknownArgs.push('--dangerously-skip-permissions')
       } else if (arg === '--started-by') {
         options.startedBy = args[++i] as 'daemon' | 'terminal'
+      } else if (arg === '--resume-session-tag' && args[i + 1]) {
+        resumeSessionTag = args[++i]
       } else if (arg === '--js-runtime') {
         const runtime = args[++i]
         if (runtime !== 'node' && runtime !== 'bun') {
@@ -781,6 +840,7 @@ ${chalk.bold('To clean up runaway processes:')} Use ${chalk.cyan('happy doctor c
         }
       }
     }
+    options.resumeSessionTag = resumeSessionTag
 
     // Add unknown args to claudeArgs
     if (unknownArgs.length > 0) {

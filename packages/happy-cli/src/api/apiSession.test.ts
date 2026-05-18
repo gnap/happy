@@ -7,12 +7,14 @@ const {
     mockIo,
     mockAxiosGet,
     mockAxiosPost,
+    mockReadFileSync,
     mockBackoff,
     mockDelay
 } = vi.hoisted(() => ({
     mockIo: vi.fn(),
     mockAxiosGet: vi.fn(),
     mockAxiosPost: vi.fn(),
+    mockReadFileSync: vi.fn(),
     mockBackoff: vi.fn(async <T>(callback: () => Promise<T>) => {
         let lastError: unknown;
         for (let i = 0; i < 20; i += 1) {
@@ -25,6 +27,13 @@ const {
         throw lastError;
     }),
     mockDelay: vi.fn(async () => undefined)
+}));
+
+vi.mock('node:fs', () => ({
+    appendFileSync: vi.fn(),
+    mkdirSync: vi.fn(),
+    readFileSync: mockReadFileSync,
+    writeFileSync: vi.fn(),
 }));
 
 vi.mock('socket.io-client', () => ({
@@ -54,6 +63,7 @@ vi.mock('@/ui/logger', () => ({
 
 vi.mock('@/api/rpc/RpcHandlerManager', () => ({
     RpcHandlerManager: class {
+        registerHandler = vi.fn();
         onSocketConnect = vi.fn();
         onSocketDisconnect = vi.fn();
         handleRequest = vi.fn(async () => '');
@@ -134,6 +144,22 @@ async function waitForCheck(check: () => void, timeoutMs = 2000) {
     throw lastError;
 }
 
+function makeEmptyFetchResponse() {
+    return {
+        data: {
+            messages: [],
+            hasMore: false
+        }
+    };
+}
+
+async function clearInitialFetch() {
+    await waitForCheck(() => {
+        expect(mockAxiosGet).toHaveBeenCalled();
+    });
+    mockAxiosGet.mockClear();
+}
+
 describe('ApiSessionClient v3 messages API migration', () => {
     let socketHandlers: SocketHandlers;
     let mockSocket: any;
@@ -149,6 +175,7 @@ describe('ApiSessionClient v3 messages API migration', () => {
         socketHandlers = {};
         session = makeSession();
         delete process.env.ENABLE_SESSION_PROTOCOL_SEND;
+        mockAxiosGet.mockResolvedValue(makeEmptyFetchResponse());
 
         mockSocket = {
             connected: true,
@@ -539,6 +566,7 @@ describe('ApiSessionClient v3 messages API migration', () => {
         const client = new ApiSessionClient('fake-token', session);
         const onUserMessage = vi.fn();
         client.onUserMessage(onUserMessage);
+        await clearInitialFetch();
 
         const userMessage = {
             role: 'user',
@@ -579,10 +607,250 @@ describe('ApiSessionClient v3 messages API migration', () => {
         expect((client as any).lastSeq).toBe(1);
     });
 
+    it('fetchMessages normalizes A2A parts into hidden trigger messages', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        const onUserMessage = vi.fn();
+        client.onUserMessage(onUserMessage);
+        await clearInitialFetch();
+
+        const a2aMessage = {
+            role: 'user',
+            localKey: 'msg-a2a-1',
+            parts: [
+                { type: 'text', text: 'hello' },
+                { type: 'text', text: 'world' }
+            ]
+        };
+
+        mockAxiosGet.mockResolvedValueOnce({
+            data: {
+                messages: [
+                    {
+                        id: 'msg-1',
+                        seq: 1,
+                        content: {
+                            t: 'encrypted',
+                            c: encryptContent(session, a2aMessage)
+                        },
+                        localId: null,
+                        createdAt: 1000,
+                        updatedAt: 1000
+                    }
+                ],
+                hasMore: false
+            }
+        });
+
+        await (client as any).fetchMessages();
+
+        expect(onUserMessage).toHaveBeenCalledTimes(1);
+        expect(onUserMessage).toHaveBeenCalledWith(expect.objectContaining({
+            role: 'user',
+            content: { type: 'text', text: 'hello\nworld' },
+            meta: expect.objectContaining({ origin: 'a2a', a2aTrigger: true })
+        }));
+        expect(client.getA2AInbox().messages).toHaveLength(0);
+    });
+
+    it('fetchMessages records A2A trigger snapshot messages in the inbox before routing them', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        const onUserMessage = vi.fn();
+        client.onUserMessage(onUserMessage);
+        await clearInitialFetch();
+
+        const a2aMessage = {
+            role: 'user',
+            localKey: 'a2a-local-key-1',
+            content: {
+                type: 'text',
+                text: 'A2A inbox (1 unread). Snapshot: /tmp/a2a.json',
+            },
+            meta: {
+                origin: 'a2a',
+                a2aTrigger: true,
+            },
+            a2aInboxMessage: {
+                title: 'Inbox item',
+                text: 'hello from another agent',
+                createdAt: 1000,
+            },
+        };
+
+        mockAxiosGet.mockResolvedValueOnce({
+            data: {
+                messages: [
+                    {
+                        id: 'msg-2',
+                        seq: 2,
+                        content: {
+                            t: 'encrypted',
+                            c: encryptContent(session, a2aMessage)
+                        },
+                        localId: null,
+                        createdAt: 2000,
+                        updatedAt: 2000
+                    }
+                ],
+                hasMore: false
+            }
+        });
+
+        await (client as any).fetchMessages();
+
+        expect(onUserMessage).toHaveBeenCalledTimes(1);
+        expect(client.getA2AInbox().messages).toEqual([
+            expect.objectContaining({
+                id: 'a2a-local-key-1',
+                title: 'Inbox item',
+                text: 'hello from another agent',
+                readAt: null,
+            }),
+        ]);
+    });
+
+    it('fetchMessages stores A2A session text envelopes in inbox without routing a visible message', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        const onUserMessage = vi.fn();
+        client.onUserMessage(onUserMessage);
+        await clearInitialFetch();
+
+        const a2aSessionEnvelope = {
+            role: 'session',
+            content: {
+                id: 'env-1',
+                time: 1000,
+                role: 'agent',
+                turn: 'turn-1',
+                subagent: 'card-1',
+                ev: {
+                    t: 'text',
+                    text: 'hello from session envelope'
+                }
+            },
+            meta: {
+                sentFrom: 'cli',
+                origin: 'a2a'
+            }
+        };
+
+        mockAxiosGet.mockResolvedValueOnce({
+            data: {
+                messages: [
+                    {
+                        id: 'msg-session-a2a',
+                        seq: 2,
+                        content: {
+                            t: 'encrypted',
+                            c: encryptContent(session, a2aSessionEnvelope)
+                        },
+                        localId: null,
+                        createdAt: 2000,
+                        updatedAt: 2000
+                    }
+                ],
+                hasMore: false
+            }
+        });
+
+        await (client as any).fetchMessages();
+
+        expect(onUserMessage).not.toHaveBeenCalled();
+        expect(client.getA2AInbox().messages).toEqual([
+            expect.objectContaining({
+                id: 'env-1',
+                text: 'hello from session envelope',
+                readAt: null,
+            }),
+        ]);
+    });
+
+    it('deduplicates A2A session text envelopes seen from socket and HTTP fetch without emitting a user message', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        const onUserMessage = vi.fn();
+        client.onUserMessage(onUserMessage);
+        await clearInitialFetch();
+
+        const a2aSessionEnvelope = {
+            role: 'session',
+            content: {
+                id: 'same-envelope-id',
+                time: 1000,
+                role: 'agent',
+                turn: 'turn-1',
+                subagent: 'card-1',
+                ev: {
+                    t: 'text',
+                    text: 'dedupe me'
+                }
+            },
+            meta: {
+                sentFrom: 'cli',
+                origin: 'a2a'
+            }
+        };
+
+        (client as any).routeIncomingMessage(a2aSessionEnvelope);
+
+        mockAxiosGet.mockResolvedValueOnce({
+            data: {
+                messages: [
+                    {
+                        id: 'msg-session-a2a',
+                        seq: 2,
+                        content: {
+                            t: 'encrypted',
+                            c: encryptContent(session, a2aSessionEnvelope)
+                        },
+                        localId: null,
+                        createdAt: 2000,
+                        updatedAt: 2000
+                    }
+                ],
+                hasMore: false
+            }
+        });
+
+        await (client as any).fetchMessages();
+
+        expect(onUserMessage).not.toHaveBeenCalled();
+    });
+
+    it('records A2A inbox messages and read markers through the public API', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        await clearInitialFetch();
+
+        client.recordA2AMessage({
+            id: 'inbox-1',
+            text: 'original a2a text',
+            title: 'Inbox item',
+            createdAt: 1234,
+        });
+
+        expect(client.getA2AInbox().messages).toEqual([
+            expect.objectContaining({
+                id: 'inbox-1',
+                title: 'Inbox item',
+                text: 'original a2a text',
+                createdAt: 1234,
+                readAt: null,
+            }),
+        ]);
+
+        client.markA2AMessageRead('inbox-1');
+
+        expect(client.getA2AInbox().messages).toEqual([
+            expect.objectContaining({
+                id: 'inbox-1',
+                readAt: expect.any(Number),
+            }),
+        ]);
+    });
+
     it('fetchMessages uses incremental cursor and paginates while hasMore is true', async () => {
         const client = new ApiSessionClient('fake-token', session);
         const onUserMessage = vi.fn();
         client.onUserMessage(onUserMessage);
+        await clearInitialFetch();
 
         (client as any).lastSeq = 2;
 
@@ -638,6 +906,7 @@ describe('ApiSessionClient v3 messages API migration', () => {
 
     it('fetchMessages stops pagination when hasMore is true but seq cursor does not advance', async () => {
         const client = new ApiSessionClient('fake-token', session);
+        await clearInitialFetch();
         (client as any).lastSeq = 2;
 
         mockAxiosGet
@@ -662,6 +931,7 @@ describe('ApiSessionClient v3 messages API migration', () => {
         const onMessage = vi.fn();
         client.onUserMessage(onUserMessage);
         client.on('message', onMessage);
+        await clearInitialFetch();
 
         const userMessage = {
             role: 'user',
@@ -707,10 +977,11 @@ describe('ApiSessionClient v3 messages API migration', () => {
         expect(onMessage).toHaveBeenCalledWith(agentMessage);
     });
 
-    it('applies consecutive new-message updates directly (fast path)', () => {
+    it('applies consecutive new-message updates directly (fast path)', async () => {
         const client = new ApiSessionClient('fake-token', session);
         const onUserMessage = vi.fn();
         client.onUserMessage(onUserMessage);
+        await clearInitialFetch();
 
         (client as any).lastSeq = 1;
         const userMessage = {
@@ -728,6 +999,7 @@ describe('ApiSessionClient v3 messages API migration', () => {
 
     it('invalidates receive sync and fetches on seq gap', async () => {
         const client = new ApiSessionClient('fake-token', session);
+        await clearInitialFetch();
         (client as any).lastSeq = 1;
 
         mockAxiosGet.mockResolvedValueOnce({
@@ -750,6 +1022,7 @@ describe('ApiSessionClient v3 messages API migration', () => {
 
     it('invalidates receive sync on first message when lastSeq is 0', async () => {
         const client = new ApiSessionClient('fake-token', session);
+        await clearInitialFetch();
 
         mockAxiosGet.mockResolvedValueOnce({
             data: {
@@ -769,16 +1042,12 @@ describe('ApiSessionClient v3 messages API migration', () => {
         expect(mockAxiosGet.mock.calls[0][1].params.after_seq).toBe(0);
     });
 
-    it('invalidates receive sync for duplicate and stale seq values', async () => {
+    it('ignores duplicate and stale socket notifications without HTTP fetch', async () => {
         const client = new ApiSessionClient('fake-token', session);
+        await clearInitialFetch();
         (client as any).lastSeq = 5;
 
-        mockAxiosGet.mockResolvedValue({
-            data: {
-                messages: [],
-                hasMore: false
-            }
-        });
+        const getCallsBefore = mockAxiosGet.mock.calls.length;
 
         emitSocketEvent('update', createNewMessageUpdate(5, encryptContent(session, {
             role: 'user',
@@ -789,11 +1058,8 @@ describe('ApiSessionClient v3 messages API migration', () => {
             content: { type: 'text', text: 'stale' }
         })));
 
-        await waitForCheck(() => {
-            expect(mockAxiosGet).toHaveBeenCalledTimes(2);
-        });
-        expect(mockAxiosGet.mock.calls[0][1].params.after_seq).toBe(5);
-        expect(mockAxiosGet.mock.calls[1][1].params.after_seq).toBe(5);
+        await new Promise((r) => setTimeout(r, 50));
+        expect(mockAxiosGet.mock.calls.length).toBe(getCallsBefore);
     });
 
     it('updates lastSeq after successful outbox flush and never moves it backward', async () => {
@@ -844,6 +1110,7 @@ describe('ApiSessionClient v3 messages API migration', () => {
 
     it('triggers receive catch-up fetch on socket reconnect', async () => {
         new ApiSessionClient('fake-token', session);
+        await clearInitialFetch();
 
         mockAxiosGet.mockResolvedValueOnce({
             data: {
@@ -862,6 +1129,8 @@ describe('ApiSessionClient v3 messages API migration', () => {
 
     it('stops send and receive sync loops on close', async () => {
         const client = new ApiSessionClient('fake-token', session);
+        await clearInitialFetch();
+        mockAxiosPost.mockClear();
         await client.close();
 
         mockAxiosGet.mockResolvedValue({

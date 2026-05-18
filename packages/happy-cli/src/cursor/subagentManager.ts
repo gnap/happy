@@ -92,7 +92,7 @@ function parsedMessageToSessionEvent(msg: CursorParsedMessage): SessionEvent | n
     case 'tool_call_end':
       return { t: 'tool-call-end', call: msg.callId };
     case 'error':
-      return { t: 'text', text: `Error: ${msg.message}` };
+      return { t: 'service', text: `Error: ${msg.message}` };
     case 'session_init':
     case 'task_started':
     case 'task_complete':

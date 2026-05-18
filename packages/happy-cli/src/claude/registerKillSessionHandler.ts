@@ -13,7 +13,8 @@ interface KillSessionResponse {
 
 export function registerKillSessionHandler(
     rpcHandlerManager: RpcHandlerManager,
-    killThisHappy: () => Promise<void>
+    killThisHappy: () => Promise<void>,
+    onKillRequested?: () => void
 ) {
     rpcHandlerManager.registerHandler<KillSessionRequest, KillSessionResponse>('killSession', async () => {
         logger.debug('Kill session request received');
@@ -23,7 +24,10 @@ export function registerKillSessionHandler(
         // because cleanup ends with process.exit(0) before the ack could be sent.
         // The cleanup function calls flush()+close() before exit, so session-end and
         // any other queued messages are still delivered correctly.
-        setImmediate(() => void killThisHappy());
+        setImmediate(() => {
+            onKillRequested?.();
+            void killThisHappy();
+        });
 
         return {
             success: true,

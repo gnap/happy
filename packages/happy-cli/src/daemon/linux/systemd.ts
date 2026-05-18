@@ -13,14 +13,25 @@
 
 import { execSync, execFileSync } from 'child_process';
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import os from 'os';
 import { projectPath } from '@/projectPath';
+import { getHappyCliLaunchSpec } from '@/utils/spawnHappyCLI';
 
 export const SERVICE_NAME = 'happy-daemon';
 
 export function serviceFilePath(): string {
   return join(os.homedir(), '.config', 'systemd', 'user', `${SERVICE_NAME}.service`);
+}
+
+/**
+ * Single source of truth for every environment variable the daemon and the
+ * agent processes it spawns can see. Edit this file to add/override anything
+ * (PATH, ANTHROPIC_*, custom creds, runtime overrides, …) — no code change
+ * or unit rewrite required. Re-read with `systemctl --user restart happy-daemon`.
+ */
+export function envFilePath(): string {
+  return join(os.homedir(), '.config', 'happy', 'daemon.env');
 }
 
 export function isSystemdAvailable(): boolean {
@@ -60,19 +71,10 @@ export function getServiceActiveState(): 'active' | 'inactive' | 'failed' | 'unk
 }
 
 export function generateServiceContent(): string {
-  const home = os.homedir();
-  const nodePath = process.execPath;
-  const entrypoint = join(projectPath(), 'dist', 'index.mjs');
-  const happyHomeDir = process.env.HAPPY_HOME_DIR ?? join(home, '.happy');
-  const happyServerUrl = process.env.HAPPY_SERVER_URL ?? '';
-  const happyProjectRoot = process.env.HAPPY_PROJECT_ROOT ?? projectPath();
-
-  const envLines = [
-    `Environment=HOME=${home}`,
-    `Environment=HAPPY_HOME_DIR=${happyHomeDir}`,
-    `Environment=HAPPY_PROJECT_ROOT=${happyProjectRoot}`,
-    ...(happyServerUrl ? [`Environment=HAPPY_SERVER_URL=${happyServerUrl}`] : []),
-  ].join('\n');
+  const launchSpec = getHappyCliLaunchSpec('bun');
+  const execStart = [launchSpec.executable, ...launchSpec.argsPrefix, 'daemon', 'start-sync']
+    .map((part) => JSON.stringify(part))
+    .join(' ');
 
   return [
     '[Unit]',
@@ -82,11 +84,18 @@ export function generateServiceContent(): string {
     '',
     '[Service]',
     'Type=simple',
-    `ExecStart=${nodePath} --no-warnings --no-deprecation ${entrypoint} daemon start-sync`,
+    `ExecStart=${execStart}`,
     `WorkingDirectory=${projectPath()}`,
-    envLines,
+    // All daemon environment (PATH, HAPPY_*, ANTHROPIC_* and any user creds)
+    // is sourced from a single editable env file — see envFilePath(). The
+    // leading `-` tolerates a missing file so the service still starts before
+    // it's been populated. Update vars by editing that file and running:
+    //   systemctl --user restart happy-daemon
+    `EnvironmentFile=-${envFilePath()}`,
     'Restart=on-failure',
     'RestartSec=5s',
+    // Only signal the daemon main PID. `mixed` / `control-group` would SIGKILL every
+    // process in the service cgroup and defeat detached session spawns (daemon/run.ts).
     'KillMode=process',
     '',
     '[Install]',
@@ -95,10 +104,58 @@ export function generateServiceContent(): string {
   ].join('\n');
 }
 
+/**
+ * Seed content for the daemon env file, captured from the shell that runs
+ * `happy daemon install`. Only used on first install; existing env files are
+ * never overwritten so user edits (custom tokens, model overrides, etc.) are
+ * preserved across reinstalls.
+ *
+ * systemd's `--user` default PATH is just `/usr/local/bin:/usr/bin`, which
+ * misses homebrew, ~/.local/bin, ~/.cargo/bin, etc., so snapshotting the
+ * install-time PATH here matters. Other vars are convenience defaults the
+ * daemon code reads at startup.
+ */
+function generateDefaultEnvFile(): string {
+  const home = os.homedir();
+  const runtime = getHappyCliLaunchSpec('bun').runtime;
+  const lines = [
+    '# Single source of truth for happy-daemon environment.',
+    '# Seeded by `happy daemon install` from the invoking shell.',
+    '# Reload with: systemctl --user restart happy-daemon',
+    '',
+    `HOME=${home}`,
+    `HAPPY_HOME_DIR=${process.env.HAPPY_HOME_DIR ?? join(home, '.happy')}`,
+    `HAPPY_PROJECT_ROOT=${process.env.HAPPY_PROJECT_ROOT ?? projectPath()}`,
+    `HAPPY_CLI_RUNTIME=${runtime}`,
+  ];
+  if (process.env.HAPPY_SERVER_URL) {
+    lines.push(`HAPPY_SERVER_URL=${process.env.HAPPY_SERVER_URL}`);
+  }
+  if (process.env.PATH) {
+    lines.push(`PATH=${process.env.PATH}`);
+  }
+  lines.push(
+    '',
+    '# Add anything else your sessions need below, e.g.:',
+    '#   ANTHROPIC_AUTH_TOKEN=sk-...',
+    '#   ANTHROPIC_BASE_URL=https://...',
+  );
+  return lines.join('\n') + '\n';
+}
+
 export function installService(): void {
   const serviceDir = join(os.homedir(), '.config', 'systemd', 'user');
   mkdirSync(serviceDir, { recursive: true });
   writeFileSync(serviceFilePath(), generateServiceContent());
+
+  // Seed the env file only on first install. Never clobber user edits —
+  // they may contain secrets or model/provider overrides the user tuned.
+  const envFile = envFilePath();
+  if (!existsSync(envFile)) {
+    mkdirSync(dirname(envFile), { recursive: true });
+    writeFileSync(envFile, generateDefaultEnvFile(), { mode: 0o600 });
+  }
+
   execSync('systemctl --user daemon-reload', { stdio: 'pipe' });
   execSync(`systemctl --user enable ${SERVICE_NAME}`, { stdio: 'pipe' });
 }

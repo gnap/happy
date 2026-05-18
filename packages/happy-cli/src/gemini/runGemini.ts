@@ -9,16 +9,13 @@
 import { render } from 'ink';
 import React from 'react';
 import { randomUUID } from 'node:crypto';
-import os from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 
 import { ApiClient } from '@/api/api';
 import { logger } from '@/ui/logger';
 import { Credentials, readSettings, writeSessionPidFile, removeSessionPidFile } from '@/persistence';
 import { createSessionMetadata } from '@/utils/createSessionMetadata';
 import { initialMachineMetadata } from '@/daemon/run';
-import { configuration } from '@/configuration';
-import packageJson from '../../package.json';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
 import { projectPath } from '@/projectPath';
@@ -30,6 +27,7 @@ import { stopCaffeinate } from '@/utils/caffeinate';
 import { connectionState } from '@/utils/serverConnectionErrors';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
 import type { ApiSessionClient } from '@/api/apiSession';
+import type { UserMessage } from '@/api/types';
 
 import { createGeminiBackend } from '@/agent/factories/gemini';
 import type { AgentBackend, AgentMessage } from '@/agent';
@@ -39,7 +37,7 @@ import { GeminiReasoningProcessor } from '@/gemini/utils/reasoningProcessor';
 import { GeminiDiffProcessor } from '@/gemini/utils/diffProcessor';
 import type { GeminiMode, CodexMessagePayload } from '@/gemini/types';
 import type { PermissionMode } from '@/api/types';
-import { GEMINI_MODEL_ENV, DEFAULT_GEMINI_MODEL, CHANGE_TITLE_INSTRUCTION } from '@/gemini/constants';
+import { GEMINI_MODEL_ENV, CHANGE_TITLE_INSTRUCTION } from '@/gemini/constants';
 import {
   readGeminiLocalConfig,
   saveGeminiModelToConfig,
@@ -59,13 +57,14 @@ import { ConversationHistory } from '@/gemini/utils/conversationHistory';
 export async function runGemini(opts: {
   credentials: Credentials;
   startedBy?: 'daemon' | 'terminal';
+  resumeSessionTag?: string;
 }): Promise<void> {
   //
   // Define session
   //
 
   
-  const sessionTag = randomUUID();
+  const sessionTag = opts.resumeSessionTag?.trim() || randomUUID();
 
   // Set backend for offline warnings (before any API calls)
   connectionState.setBackend('Gemini');
@@ -197,7 +196,7 @@ export async function runGemini(opts: {
   const DAEMON_REPORT_INTERVAL_MS = 60_000;
   const reportToDaemon = () => {
     if (!response) return;
-    notifyDaemonSessionStarted(session.sessionId, { ...metadata, hostPid: process.pid }).then((result) => {
+    notifyDaemonSessionStarted(session.sessionId, { ...metadata, hostPid: process.pid, sessionTag }).then((result) => {
       if (result?.error) logger.debug(`[START] Daemon report failed:`, result.error);
     }).catch((err) => logger.debug('[START] Daemon report error:', err));
   };
@@ -216,7 +215,8 @@ export async function runGemini(opts: {
   let currentPermissionMode: PermissionMode | undefined = undefined;
   let currentModel: string | undefined = undefined;
 
-  session.onUserMessage((message) => {
+  let handleUserMessage: ((message: UserMessage) => void) | null = null;
+  handleUserMessage = (message) => {
     // Resolve permission mode (validate) - same as Codex
     let messagePermissionMode = currentPermissionMode;
     if (message.meta?.permissionMode) {
@@ -286,11 +286,17 @@ export async function runGemini(opts: {
       model: messageModel,
       originalUserMessage, // Store original message separately
     };
-    messageQueue.push(fullPrompt, mode);
+    const isA2A = (message.meta as { origin?: string } | undefined)?.origin === 'a2a';
+    if (isA2A) {
+      messageQueue.pushIsolated(fullPrompt, mode);
+    } else {
+      messageQueue.push(fullPrompt, mode);
+    }
     
     // Record user message in conversation history for context preservation
     conversationHistory.addUserMessage(originalUserMessage);
-  });
+  };
+  session.onUserMessage(handleUserMessage);
 
   let thinking = false;
   session.keepAlive(thinking, 'remote');
@@ -525,7 +531,10 @@ export async function runGemini(opts: {
   // Start Happy MCP server and create Gemini backend
   //
 
-  const happyServer = await startHappyServer(session);
+  const happyServer = await startHappyServer(session, {
+    useDaemonA2ARoute: opts.startedBy === 'daemon',
+    onA2aMessage: (message) => handleUserMessage?.(message),
+  });
   const bridgeCommand = join(projectPath(), 'bin', 'happy-mcp.mjs');
   const mcpServers = {
     happy: {
@@ -557,10 +566,6 @@ export async function runGemini(opts: {
   // Accumulate Gemini response text for sending complete message to mobile
   let accumulatedResponse = '';
   let isResponseInProgress = false;
-  let currentResponseMessageId: string | null = null; // Track the message ID for current response
-  let hadToolCallInTurn = false; // Track if any tool calls happened in this turn (for task_complete)
-  let pendingChangeTitle = false; // Track if we're waiting for change_title to complete
-  let changeTitleCompleted = false; // Track if change_title was completed in this turn
   let taskStartedSent = false; // Track if task_started was sent this turn (prevent duplicates)
 
   /**
@@ -646,7 +651,6 @@ export async function runGemini(opts: {
           session.keepAlive(thinking, 'remote');
           accumulatedResponse = '';
           isResponseInProgress = false;
-          currentResponseMessageId = null;
           
           // Show error in CLI UI - handle object errors properly
           let errorMessage = 'Unknown error';
@@ -681,9 +685,6 @@ export async function runGemini(opts: {
         break;
 
       case 'tool-call':
-        // Track that we had tool calls in this turn (for task_complete)
-        hadToolCallInTurn = true;
-        
         // Show tool call in UI like Codex does
         const toolArgs = msg.args ? JSON.stringify(msg.args).substring(0, 100) : '';
         const isInvestigationTool = msg.toolName === 'codebase_investigator' || 
@@ -705,14 +706,6 @@ export async function runGemini(opts: {
         break;
 
       case 'tool-result':
-        // Track change_title completion
-        if (msg.toolName === 'change_title' || 
-            msg.callId?.includes('change_title') ||
-            msg.toolName === 'happy__change_title') {
-          changeTitleCompleted = true;
-          logger.debug('[gemini] change_title completed');
-        }
-        
         // Show tool result in UI like Codex does
         // Check if result contains error information
         const isError = msg.result && typeof msg.result === 'object' && 'error' in msg.result;
@@ -828,7 +821,7 @@ export async function runGemini(opts: {
         // Handle patch operation begin (like Codex patch_apply_begin)
         const patchBeginMsg = msg as any;
         const patchCallId = patchBeginMsg.call_id || patchBeginMsg.callId || randomUUID();
-        const { call_id: patchCallIdVar, type: patchType, auto_approved, changes } = patchBeginMsg;
+        const { auto_approved, changes } = patchBeginMsg;
         
         // Add UI feedback for patch operation
         const changeCount = changes ? Object.keys(changes).length : 0;
@@ -852,7 +845,7 @@ export async function runGemini(opts: {
         // Handle patch operation end (like Codex patch_apply_end)
         const patchEndMsg = msg as any;
         const patchEndCallId = patchEndMsg.call_id || patchEndMsg.callId || randomUUID();
-        const { call_id: patchEndCallIdVar, type: patchEndType, stdout, stderr, success } = patchEndMsg;
+        const { stdout, stderr, success } = patchEndMsg;
         
         // Add UI feedback for completion
         if (success) {
@@ -1078,14 +1071,7 @@ export async function runGemini(opts: {
         // This ensures a new assistant message will be created (not updating previous one)
         accumulatedResponse = '';
         isResponseInProgress = false;
-        hadToolCallInTurn = false;
         taskStartedSent = false; // Reset so new turn can send task_started
-        
-        // Track if this prompt contains change_title instruction
-        // If so, don't send task_complete until change_title is completed
-        pendingChangeTitle = message.message.includes('change_title') || 
-                             message.message.includes('happy__change_title');
-        changeTitleCompleted = false;
         
         if (!geminiBackend || !acpSessionId) {
           throw new Error('Gemini backend or session not initialized');
@@ -1299,9 +1285,6 @@ export async function runGemini(opts: {
         });
         
         // Reset tracking flags
-        hadToolCallInTurn = false;
-        pendingChangeTitle = false;
-        changeTitleCompleted = false;
         taskStartedSent = false;
         
         thinking = false;
