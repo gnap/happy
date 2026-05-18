@@ -1,7 +1,29 @@
-import { io, Socket } from 'socket.io-client';
+import type { Socket } from 'socket.io-client';
 import { TokenStorage } from '@/auth/tokenStorage';
 import { Encryption } from './encryption/encryption';
 import { isRunningInTauri } from '@/utils/platform';
+import { withTauriWebSocketCtor } from './tauriWebSocketPolyfill';
+
+type IoFn = typeof import('socket.io-client').io;
+
+/**
+ * Lazily imports `socket.io-client`. On Linux/Tauri we install a Tauri-backed
+ * WebSocket polyfill before the import so that engine.io-client captures it as
+ * its `WebSocketCtor`. The polyfill is uninstalled immediately after; the
+ * captured reference inside engine.io-client persists for the app lifetime.
+ *
+ * Why bypass libsoup: WebKitGTK's native WebSocket exhibits intermittent
+ * stalls on multi-homed Linux hosts (e.g. WiFi + a second interface up). The
+ * Rust-side websocket plugin uses tungstenite on the host network stack and
+ * doesn't have this issue.
+ */
+let cachedIo: Promise<IoFn> | null = null;
+function getIo(): Promise<IoFn> {
+    if (!cachedIo) {
+        cachedIo = withTauriWebSocketCtor(() => import('socket.io-client').then((m) => m.io));
+    }
+    return cachedIo;
+}
 
 //
 // Constants (aligned with CLI/daemon reconnection behavior)
@@ -66,6 +88,8 @@ class ApiSocket {
     private lastError: Error | null = null;
     /** When true, do not reconnect (e.g. after 401) */
     private reconnectionDisabled = false;
+    /** Guards against multiple parallel async loaders racing inside connect(). */
+    private connectInFlight = false;
 
     //
     // Initialization
@@ -104,10 +128,35 @@ class ApiSocket {
         this.updateStatus('connecting');
         this.lastError = null;
 
-        this.socket = io(this.config.endpoint, {
+        // Another connect() is already awaiting the dynamic socket.io-client import;
+        // it will pick up the latest this.config when it resumes. Dedupe.
+        if (this.connectInFlight) return;
+        this.connectInFlight = true;
+        void this.#doConnect().finally(() => {
+            this.connectInFlight = false;
+        });
+    }
+
+    async #doConnect(): Promise<void> {
+        if (!this.config) return;
+        let io: IoFn;
+        try {
+            io = await getIo();
+        } catch (err) {
+            this.updateStatus('error', err instanceof Error ? err : new Error(String(err)));
+            return;
+        }
+
+        // While we awaited, the world may have moved on. Bail out if so.
+        if (!this.config) return;
+        if (this.socket) return;
+        if (this.currentStatus !== 'connecting') return;
+
+        const config = this.config;
+        this.socket = io(config.endpoint, {
             path: '/v1/updates',
             auth: {
-                token: this.config.token,
+                token: config.token,
                 clientType: 'user-scoped' as const
             },
             transports: ['websocket'],
@@ -306,12 +355,13 @@ class ApiSocket {
 
     /**
      * Called when the app goes to background.
-     * If not currently connected, tears down the socket entirely so socket.io's
-     * reconnection timers don't fire while the JS thread is suspended by iOS.
      * A live connected socket is left intact so the OS can keep it open.
+     * If we're already in an error/disconnected state, tear down the socket so
+     * socket.io's reconnection timers don't keep running in the background.
+     * If we're mid-connect, leave the in-flight attempt alone.
      */
     pauseReconnection() {
-        if (this.currentStatus !== 'connected') {
+        if (this.currentStatus === 'error' || this.currentStatus === 'disconnected') {
             this.disconnect();
         }
     }
@@ -348,7 +398,8 @@ class ApiSocket {
      * a fresh reconnect is forced.
      */
     private probeConnection(timeoutMs = 5000): Promise<boolean> {
-        if (!this.socket) return Promise.resolve(false);
+        const socket = this.socket;
+        if (!socket) return Promise.resolve(false);
         let settled = false;
         let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -369,7 +420,7 @@ class ApiSocket {
             }, timeoutMs);
 
             try {
-                this.socket.emit('ping', () => {
+                socket.emit('ping', () => {
                     finish(true);
                 });
             } catch {

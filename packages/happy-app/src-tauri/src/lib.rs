@@ -36,8 +36,15 @@ fn open_external_url(url: String) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+  #[cfg(target_os = "linux")]
+  {
+    // Work around WebKitGTK dmabuf/GBM rendering issues on some Wayland setups.
+    std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+  }
+
   tauri::Builder::default()
     .plugin(tauri_plugin_http::init())
+    .plugin(tauri_plugin_websocket::init())
     .invoke_handler(tauri::generate_handler![debug_log, open_external_url])
     .setup(|app| {
       if cfg!(debug_assertions) {

@@ -29,5 +29,8 @@
     "packageManager": "yarn@1.22.22",
     "devDependencies": {
         "patch-package": "^8.0.0"
+    },
+    "resolutions": {
+        "@tauri-apps/api": "2.10.1"
     }
 }
