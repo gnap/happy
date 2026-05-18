@@ -113,6 +113,7 @@ class Sync {
     private appState: AppStateStatus = AppState.currentState;
     private appStateSubscription: ReturnType<typeof AppState.addEventListener> | null = null;
     private networkStateSubscription: ReturnType<typeof Network.addNetworkStateListener> | null = null;
+    private currentVisibleSessionId: string | null = null;
     private lastDesktopSessionRefreshAt = 0;
     /** Last known network connectivity; null until first change event fires. */
     private lastNetworkConnected: boolean | null = null;
@@ -251,6 +252,23 @@ class Sync {
         this.sessionsSync.invalidate();
     }
 
+    #refreshVisibleSessionAfterDesktopProbe() {
+        const sessionId = this.currentVisibleSessionId;
+        if (!sessionId) {
+            return;
+        }
+
+        const now = Date.now();
+        if (now - this.lastDesktopSessionRefreshAt < Sync.DESKTOP_SESSION_REFRESH_COOLDOWN_MS) {
+            log.log('🖥️ Desktop visible session refresh skipped — cooldown active');
+            return;
+        }
+
+        this.lastDesktopSessionRefreshAt = now;
+        log.log(`🖥️ Desktop visible session refresh — invalidating messages for ${sessionId} after confirmed connection`);
+        this.onSessionVisible(sessionId);
+    }
+
     /**
      * Desktop (Tauri / browser) lifecycle management.
      *
@@ -326,6 +344,7 @@ class Sync {
                     void apiSocket.resumeReconnection().then((connected) => {
                         if (connected) {
                             this.#refreshSessionsAfterDesktopProbe();
+                            this.#refreshVisibleSessionAfterDesktopProbe();
                         }
                     });
                     recoverDesktopPendingWork();
@@ -418,6 +437,7 @@ class Sync {
 
 
     onSessionVisible = (sessionId: string) => {
+        this.currentVisibleSessionId = sessionId;
         this.getMessagesSync(sessionId).invalidate();
 
         // Also invalidate git status sync for this session
@@ -433,6 +453,12 @@ class Sync {
         const session = storage.getState().sessions[sessionId];
         if (session) {
             voiceHooks.onSessionFocus(sessionId, session.metadata || undefined);
+        }
+    }
+
+    onSessionHidden = (sessionId: string) => {
+        if (this.currentVisibleSessionId === sessionId) {
+            this.currentVisibleSessionId = null;
         }
     }
 

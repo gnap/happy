@@ -30,6 +30,7 @@ import { useDeviceType, useHeaderHeight, useIsLandscape, useIsTablet } from '@/u
 import { formatPathRelativeToHome, getSessionAvatarId, getSessionName, useSessionStatus } from '@/utils/sessionUtils';
 import { isVersionSupported, MINIMUM_CLI_VERSION } from '@/utils/versionUtils';
 import { Ionicons } from '@expo/vector-icons';
+import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
 import * as React from 'react';
 import { useMemo } from 'react';
@@ -267,16 +268,17 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         isMicActive: realtimeStatus === 'connected' || realtimeStatus === 'connecting'
     }), [handleMicrophonePress, realtimeStatus]);
 
-    // Trigger session visibility and initialize git status sync
-    React.useLayoutEffect(() => {
+    // Trigger session visibility when this screen is focused.
+    useFocusEffect(
+        React.useCallback(() => {
+            sync.onSessionVisible(sessionId);
+            gitStatusSync.getSync(sessionId);
 
-        // Trigger session sync
-        sync.onSessionVisible(sessionId);
-
-
-        // Initialize git status sync for this session
-        gitStatusSync.getSync(sessionId);
-    }, [sessionId, realtimeStatus]);
+            return () => {
+                sync.onSessionHidden(sessionId);
+            };
+        }, [sessionId])
+    );
 
     let content = (
         <>
