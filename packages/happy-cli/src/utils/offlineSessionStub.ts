@@ -1,55 +1,102 @@
 /**
- * Offline Session Stub Factory
+ * Offline Session Stub
  *
- * Creates a no-op session stub for offline mode that can be used across all backends
- * (Claude, Codex, Gemini, etc.). All session methods become no-ops until reconnection.
+ * A no-op `ApiSessionClient`-shaped object used when the CLI wrapper loses
+ * (or has not yet established) its WebSocket connection to the Happy server.
+ * All side-effecting methods become silent no-ops so the rest of the runner
+ * code doesn't need to guard every call site.
  *
- * This follows DRY principles by providing a single implementation for all backends,
- * satisfying REQ-8 from serverConnectionErrors.ts.
+ * Lifecycle:
+ *   1. `setupOfflineReconnection` creates the stub when `api.getOrCreateSession`
+ *      returns null (server unreachable at startup).
+ *   2. A background task retries the connection; on success it calls
+ *      `onSessionSwap(realSession)` in the runner, which replaces the stub.
  *
- * @module offlineSessionStub
+ * Note on the cast: `ApiSessionClient` is a concrete class with private
+ * members. TypeScript's structural check for class types requires those
+ * private members to be present, so we cannot avoid `as unknown as
+ * ApiSessionClient` without either extending `ApiSessionClient` (heavyweight)
+ * or extracting a shared interface (large refactor). The cast is intentional
+ * and safe because all public methods are explicitly implemented below.
  */
 
-import type { ApiSessionClient } from '@/api/apiSession';
+import { EventEmitter } from 'node:events';
+import type { ApiSessionClient, ACPMessageData, ACPProvider, OutputFormatData } from '@/api/apiSession';
+import type { AgentState, A2AInboxMessage, A2AInboxState, Metadata } from '@/api/types';
+import type { SessionEnvelope } from '@slopus/happy-wire';
+import type { RawJSONLines } from '@/claude/types';
+
+class OfflineSessionStub extends EventEmitter {
+    readonly sessionId: string;
+    readonly sessionEncryptionKey: Uint8Array = new Uint8Array(0);
+    readonly rpcHandlerManager = { registerHandler: () => {} };
+
+    constructor(sessionTag: string) {
+        super();
+        this.sessionId = `offline-${sessionTag}`;
+    }
+
+    // ── Outbound messages (no-op while offline) ──────────────────────────────
+
+    sendCodexMessage(_body: unknown): void {}
+    sendCursorMessage(_body: unknown): void {}
+    sendOutputFormatMessage(_data: OutputFormatData): void {}
+    sendAgentMessage(_provider: ACPProvider, _body: ACPMessageData): void {}
+    sendClaudeSessionMessage(_body: RawJSONLines): void {}
+    sendSessionProtocolMessage(_envelope: SessionEnvelope): void {}
+    sendSessionLifecycleEnvelope(_envelope: SessionEnvelope): void {}
+    sendSessionEvent(_event: unknown, _id?: string): void {}
+    sendSessionDeath(): void {}
+    keepAlive(_thinking: boolean, _mode: 'local' | 'remote'): void {}
+    sendUsageData(_usage: unknown, _model?: string): void {}
+    sendCursorQuotaReport(_payload: unknown): void {}
+    closeClaudeSessionTurn(_status?: unknown): void {}
+
+    // ── Lazy tool content (pass-through while offline) ────────────────────────
+
+    maybeLazyEncodeResult(_toolName: string, _callId: string, output: unknown): unknown {
+        return output;
+    }
+
+    // ── Metadata / state (ignored while offline) ─────────────────────────────
+
+    getMetadata(): Metadata | null { return null; }
+
+    updateMetadata(_handler: (metadata: Metadata) => Metadata): Promise<void> {
+        return Promise.resolve();
+    }
+
+    getAgentState(): AgentState | null { return null; }
+
+    updateAgentState(_handler: (state: AgentState) => AgentState): void {}
+
+    // ── A2A inbox (empty while offline) ──────────────────────────────────────
+
+    getA2AInbox(): A2AInboxState { return { messages: [] }; }
+    recordA2AMessage(_message: A2AInboxMessage): void {}
+    markA2AMessageRead(_id: string): void {}
+    markA2AMessagesRead(_ids: string[]): void {}
+
+    // ── Incoming message handler ──────────────────────────────────────────────
+
+    onUserMessage(_callback: (data: unknown) => void): void {}
+
+    // ── Connection state ──────────────────────────────────────────────────────
+
+    isSocketConnected(): boolean { return false; }
+
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    async flush(): Promise<void> {}
+    async close(): Promise<void> {}
+}
 
 /**
- * Creates a no-op session stub for offline mode.
+ * Create a no-op session stub for offline mode.
  *
- * The stub implements the ApiSessionClient interface with no-op methods,
- * allowing the application to continue running while offline. When reconnection
- * succeeds, the real session replaces this stub.
- *
- * @param sessionTag - Unique session tag (used to create offline session ID)
- * @returns A no-op ApiSessionClient stub
- *
- * @example
- * ```typescript
- * const offlineStub = createOfflineSessionStub(sessionTag);
- * let session: ApiSessionClient = offlineStub;
- *
- * // When reconnected:
- * session = api.sessionSyncClient(response);
- * ```
+ * @param sessionTag - The session tag (used to build an offline session ID).
+ * @returns An `ApiSessionClient` whose every method is a safe no-op.
  */
 export function createOfflineSessionStub(sessionTag: string): ApiSessionClient {
-    return {
-        sessionId: `offline-${sessionTag}`,
-        sendCodexMessage: () => {},
-        sendAgentMessage: () => {},
-        sendClaudeSessionMessage: () => {},
-        keepAlive: () => {},
-        sendSessionEvent: () => {},
-        sendSessionDeath: () => {},
-        updateLifecycleState: () => {},
-        requestControlTransfer: async () => {},
-        flush: async () => {},
-        close: async () => {},
-        updateMetadata: () => {},
-        updateAgentState: () => {},
-        onUserMessage: () => {},
-        isSocketConnected: () => false,
-        rpcHandlerManager: {
-            registerHandler: () => {}
-        }
-    } as unknown as ApiSessionClient;
+    return new OfflineSessionStub(sessionTag) as unknown as ApiSessionClient;
 }
