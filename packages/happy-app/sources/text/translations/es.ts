@@ -920,6 +920,9 @@ export const es: TranslationStructure = {
         keyCursorPlanLimit: 'Cursor plan (restante)',
         keyCursorOnDemandUsed: 'Cursor bajo demanda (usado)',
         keyCursorOnDemandLimit: 'Cursor bajo demanda (centavos)',
+        keyCursorPlanRemaining: 'Cursor plan (restante)',
+        keyCursorOnDemandCents: 'Cursor bajo demanda (centavos)',
+        keyCursorOnDemandRemaining: 'Cursor bajo demanda (restante)',
         keyUnknown: 'Otros',
     },
 

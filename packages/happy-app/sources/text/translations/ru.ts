@@ -942,6 +942,9 @@ export const ru: TranslationStructure = {
         keyCursorPlanLimit: 'Cursor план (осталось)',
         keyCursorOnDemandUsed: 'Cursor по запросу (использовано)',
         keyCursorOnDemandLimit: 'Cursor по запросу (центы)',
+        keyCursorPlanRemaining: 'Cursor план (осталось)',
+        keyCursorOnDemandCents: 'Cursor по запросу (центы)',
+        keyCursorOnDemandRemaining: 'Cursor по запросу (осталось)',
         keyUnknown: 'Другое',
     },
 

@@ -943,6 +943,9 @@ export const pl: TranslationStructure = {
         keyCursorPlanLimit: 'Cursor plan (pozostało)',
         keyCursorOnDemandUsed: 'Cursor na żądanie (użyto)',
         keyCursorOnDemandLimit: 'Cursor na żądanie (centy)',
+        keyCursorPlanRemaining: 'Cursor plan (pozostało)',
+        keyCursorOnDemandCents: 'Cursor na żądanie (centy)',
+        keyCursorOnDemandRemaining: 'Cursor na żądanie (pozostało)',
         keyUnknown: 'Inne',
     },
 

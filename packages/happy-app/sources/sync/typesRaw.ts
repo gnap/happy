@@ -114,6 +114,17 @@ const sessionStartEventSchema = z.object({
 const sessionTurnEndEventSchema = z.object({
     t: z.literal('turn-end'),
     status: z.enum(['completed', 'failed', 'cancelled']),
+    // Usage fields from Cursor/Claude may use either snake_case or camelCase; all optional to be lenient
+    usage: z.object({
+        input_tokens: z.number().optional(),
+        inputTokens: z.number().optional(),
+        output_tokens: z.number().optional(),
+        outputTokens: z.number().optional(),
+        cache_creation_input_tokens: z.number().optional(),
+        cacheCreationInputTokens: z.number().optional(),
+        cache_read_input_tokens: z.number().optional(),
+        cacheReadInputTokens: z.number().optional(),
+    }).optional(),
 });
 
 const sessionStopEventSchema = z.object({
@@ -598,6 +609,17 @@ function normalizeSessionEnvelope(
     }
 
     if (envelope.ev.t === 'turn-end') {
+        const rawUsage = envelope.ev.usage;
+        const inputTokens = rawUsage?.input_tokens ?? rawUsage?.inputTokens;
+        const outputTokens = rawUsage?.output_tokens ?? rawUsage?.outputTokens;
+        const normalizedUsage: UsageData | undefined = rawUsage && inputTokens !== undefined
+            ? {
+                input_tokens: inputTokens,
+                output_tokens: outputTokens ?? 0,
+                cache_creation_input_tokens: rawUsage.cache_creation_input_tokens ?? rawUsage.cacheCreationInputTokens,
+                cache_read_input_tokens: rawUsage.cache_read_input_tokens ?? rawUsage.cacheReadInputTokens,
+            }
+            : undefined;
         return {
             id: messageId,
             localId,
@@ -605,7 +627,8 @@ function normalizeSessionEnvelope(
             role: 'event',
             isSidechain: false,
             content: { type: 'ready' },
-            meta
+            meta,
+            ...(normalizedUsage ? { usage: normalizedUsage } : {}),
         } satisfies NormalizedMessage;
     }
 

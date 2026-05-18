@@ -919,6 +919,9 @@ export const ca: TranslationStructure = {
         keyCursorPlanLimit: 'Cursor pla (restant)',
         keyCursorOnDemandUsed: 'Cursor sota demanda (usat)',
         keyCursorOnDemandLimit: 'Cursor sota demanda (centaus)',
+        keyCursorPlanRemaining: 'Cursor pla (romanent)',
+        keyCursorOnDemandCents: 'Cursor sota demanda (cèntims)',
+        keyCursorOnDemandRemaining: 'Cursor sota demanda (romanent)',
         keyUnknown: 'Altres',
     },
 

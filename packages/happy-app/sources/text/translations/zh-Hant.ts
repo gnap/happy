@@ -920,6 +920,9 @@ export const zhHant: TranslationStructure = {
         keyCursorPlanLimit: 'Cursor 方案（剩餘）',
         keyCursorOnDemandUsed: 'Cursor 按量（已用）',
         keyCursorOnDemandLimit: 'Cursor 按量（分）',
+        keyCursorPlanRemaining: 'Cursor 方案（剩餘）',
+        keyCursorOnDemandCents: 'Cursor 按量（分）',
+        keyCursorOnDemandRemaining: 'Cursor 按量（剩餘）',
         keyUnknown: '其他',
     },
 

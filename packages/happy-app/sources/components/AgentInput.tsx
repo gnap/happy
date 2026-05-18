@@ -719,7 +719,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                 )}
 
                 {/* Connection status, context warning, and permission mode */}
-                {(props.connectionStatus || contextWarning || displayPermissionMode || props.modelMode) && (
+                {(props.connectionStatus || contextWarning || props.usageData?.contextSize || displayPermissionMode || props.modelMode) && (
                     <View style={{
                         flexDirection: 'row',
                         alignItems: 'center',
@@ -836,14 +836,21 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                     )}
                                 </>
                             )}
-                            {contextWarning && (
+                            {(contextWarning || props.usageData?.contextSize) && (
                                 <Text style={{
                                     fontSize: 11,
-                                    color: contextWarning.color,
+                                    color: contextWarning?.color ?? theme.colors.textSecondary,
                                     marginLeft: props.connectionStatus ? 8 : 0,
                                     ...Typography.default()
                                 }}>
-                                    {props.connectionStatus ? '• ' : ''}{contextWarning.text}
+                                    {!props.usageData?.contextSize && props.connectionStatus ? '• ' : ''}
+                                    {props.usageData?.contextSize
+                                        ? (props.usageData.contextSize >= 1000
+                                            ? `${Math.round(props.usageData.contextSize / 1000)}K`
+                                            : String(props.usageData.contextSize))
+                                        : ''}
+                                    {props.usageData?.contextSize && contextWarning ? ' • ' : ''}
+                                    {contextWarning?.text ?? ''}
                                 </Text>
                             )}
                         </View>

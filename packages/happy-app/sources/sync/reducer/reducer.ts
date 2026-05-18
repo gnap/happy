@@ -261,6 +261,10 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             // Mark as processed to prevent duplication but don't add to messages
             state.messageIds.set(msg.id, msg.id);
             hasReadyEvent = true;
+            // Cursor turn-end carries usage; update latestUsage so contextSize is available in App
+            if (msg.usage) {
+                processUsageData(state, msg.usage, msg.createdAt);
+            }
             continue;
         }
 

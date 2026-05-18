@@ -158,7 +158,9 @@ export class GitStatusSync {
             );
 
             storage.getState().applyGitStatus(sessionId, gitStatus);
-            projectManager.updateProjectGitStatus(projectKey, gitStatus);
+            if (session.metadata?.machineId) {
+                projectManager.updateProjectGitStatus(createProjectKey(session.metadata.machineId, cwd), gitStatus);
+            }
 
         } catch (error) {
             console.error('Error fetching git status for session', sessionId, ':', error);

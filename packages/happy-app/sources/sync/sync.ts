@@ -91,6 +91,7 @@ class Sync {
     private sessionQueueProcessing = new Set<string>();
     private _loggedMissingSessionForSid = new Set<string>();
     private sessionMessageLocks = new Map<string, AsyncLock>();
+    private sessionSendLocks = new Map<string, AsyncLock>();
     /** Limit concurrent message fetches to avoid network congestion (e.g. 150 sessions all requesting at once on reconnect). */
     private static readonly MAX_CONCURRENT_MESSAGE_FETCHES = 5;
     private messageFetchRunning = 0;
@@ -554,6 +555,15 @@ class Sync {
         return lock;
     }
 
+    private getSessionSendLock(sessionId: string): AsyncLock {
+        let lock = this.sessionSendLocks.get(sessionId);
+        if (!lock) {
+            lock = new AsyncLock();
+            this.sessionSendLocks.set(sessionId, lock);
+        }
+        return lock;
+    }
+
     private scheduleQueuedMessagesProcessing(sessionId: string) {
         if (this.sessionQueueProcessing.has(sessionId)) {
             return;
@@ -768,7 +778,6 @@ class Sync {
                 ...(displayText && { displayText }) // Add displayText if provided
             }
         };
-        const encryptedRawRecord = await encryption.encryptRawRecord(content);
 
         // Optimistically insert the user message immediately so the UI responds without waiting
         // for the server round-trip. We construct the NormalizedMessage directly instead of going
@@ -792,14 +801,20 @@ class Sync {
             this.applyMessages(sessionId, [optimisticMessage]);
         }
 
-        let pending = this.pendingOutbox.get(sessionId);
-        if (!pending) {
-            pending = [];
-            this.pendingOutbox.set(sessionId, pending);
-        }
-        pending.push({
-            localId,
-            content: encryptedRawRecord
+        // Serialize encryption + outbox-push per session so concurrent sendMessage calls
+        // cannot reorder messages (encryption is async; whichever finishes first would otherwise
+        // reach the outbox first, inverting the send order).
+        await this.getSessionSendLock(sessionId).inLock(async () => {
+            const encryptedRawRecord = await encryption.encryptRawRecord(content);
+            let pending = this.pendingOutbox.get(sessionId);
+            if (!pending) {
+                pending = [];
+                this.pendingOutbox.set(sessionId, pending);
+            }
+            pending.push({
+                localId,
+                content: encryptedRawRecord
+            });
         });
 
         this.getSendSync(sessionId).invalidate();

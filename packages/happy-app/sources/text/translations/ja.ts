@@ -952,6 +952,9 @@ export const ja: TranslationStructure = {
         keyCursorPlanLimit: 'Cursor プラン（残り）',
         keyCursorOnDemandUsed: 'Cursor 従量（使用済み）',
         keyCursorOnDemandLimit: 'Cursor 従量（セント）',
+        keyCursorPlanRemaining: 'Cursor プラン（残り）',
+        keyCursorOnDemandCents: 'Cursor 従量（セント）',
+        keyCursorOnDemandRemaining: 'Cursor 従量（残り）',
         keyUnknown: 'その他',
     },
 
