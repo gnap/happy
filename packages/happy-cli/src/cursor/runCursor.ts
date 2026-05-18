@@ -67,37 +67,59 @@ function toolResultForOutputFormat(result: unknown, isError: boolean): { content
   return { content: JSON.stringify(result ?? ''), is_error: isError };
 }
 
-function formatCursorUsageLog(params: {
-  sessionId: string;
-  turnId: string;
-  cursorChatId: string | null;
-  usage?: {
-    input_tokens?: number;
-    output_tokens?: number;
-    cache_read_input_tokens?: number;
-    cache_creation_input_tokens?: number;
-  };
-  costUsd?: number;
-  durationMs?: number;
-}): string {
-  const usage = params.usage;
-  const inputTokens = usage?.input_tokens;
-  const outputTokens = usage?.output_tokens;
-  const cacheReadInputTokens = usage?.cache_read_input_tokens;
-  const cacheCreationInputTokens = usage?.cache_creation_input_tokens;
-  const totalTokens = typeof inputTokens === 'number' && typeof outputTokens === 'number'
-    ? inputTokens + outputTokens
-    : undefined;
+type CursorUsageRecord = Record<string, unknown>;
 
-  return JSON.stringify({
-    sessionId: params.sessionId,
-    turnId: params.turnId,
-    cursorChatId: params.cursorChatId,
+function readUsageNumber(usage: CursorUsageRecord | undefined, keys: string[]): number | undefined {
+  if (!usage) return undefined;
+  for (const key of keys) {
+    const value = usage[key];
+    if (typeof value === 'number') return value;
+  }
+  return undefined;
+}
+
+function normalizeCursorUsage(usage?: CursorUsageRecord): {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
+  totalTokens?: number;
+  usage?: CursorUsageRecord;
+} {
+  const inputTokens = readUsageNumber(usage, ['input_tokens', 'inputTokens', 'prompt_tokens', 'promptTokens']);
+  const outputTokens = readUsageNumber(usage, ['output_tokens', 'outputTokens', 'completion_tokens', 'completionTokens']);
+  const cacheReadInputTokens = readUsageNumber(usage, ['cache_read_input_tokens', 'cacheReadInputTokens']);
+  const cacheCreationInputTokens = readUsageNumber(usage, ['cache_creation_input_tokens', 'cacheCreationInputTokens']);
+  const totalTokens = readUsageNumber(usage, ['total_tokens', 'totalTokens', 'tokens', 'tokenCount'])
+    ?? (typeof inputTokens === 'number' && typeof outputTokens === 'number'
+      ? inputTokens + outputTokens
+      : undefined);
+
+  return {
     inputTokens,
     outputTokens,
     cacheReadInputTokens,
     cacheCreationInputTokens,
     totalTokens,
+    usage,
+  };
+}
+
+function formatCursorUsageLog(params: {
+  sessionId: string;
+  turnId: string;
+  cursorChatId: string | null;
+  usage?: CursorUsageRecord;
+  costUsd?: number;
+  durationMs?: number;
+}): string {
+  const normalized = normalizeCursorUsage(params.usage);
+
+  return JSON.stringify({
+    sessionId: params.sessionId,
+    turnId: params.turnId,
+    cursorChatId: params.cursorChatId,
+    ...normalized,
     costUsd: params.costUsd,
     durationMs: params.durationMs,
   });
@@ -752,6 +774,9 @@ export async function runCursor(opts: {
   //
 
   let first = true;
+  let lastTaskCompleteUsage: CursorUsageRecord | undefined;
+  let lastTaskCompleteCostUsd: number | undefined;
+  let lastTaskCompleteDurationMs: number | undefined;
 
   // Send "It's ready!" once on startup so mobile can open this session (critical when reusing session after restart)
   emitReadyIfIdle();
@@ -837,6 +862,9 @@ export async function runCursor(opts: {
       const toolCallTimeoutHandles = new Map<string, ReturnType<typeof setTimeout>>();
       let turnCompletedNormally = false;
       let turnEndStatus: 'completed' | 'failed' | 'cancelled' = 'completed';
+      lastTaskCompleteUsage = undefined;
+      lastTaskCompleteCostUsd = undefined;
+      lastTaskCompleteDurationMs = undefined;
 
       const flushAccumulatedText = () => {
         if (accumulatedResponse.trim()) {
@@ -1056,6 +1084,9 @@ export async function runCursor(opts: {
               if (msg.sessionId) {
                 cursorChatId = msg.sessionId;
               }
+              lastTaskCompleteUsage = msg.usage;
+              lastTaskCompleteCostUsd = msg.costUsd;
+              lastTaskCompleteDurationMs = msg.durationMs;
               logger.debug(`[cursor] Turn usage ${formatCursorUsageLog({
                 sessionId: session.sessionId,
                 turnId,
@@ -1128,7 +1159,13 @@ export async function runCursor(opts: {
         const status: 'completed' | 'failed' | 'cancelled' =
           turnCompletedNormally ? 'completed' : (turnEndStatus === 'cancelled' ? 'cancelled' : 'failed');
         // Single turn-end signal: session lifecycle only. Sending codex + cursor task_complete as well caused turn summary to appear three times in the App.
-        session.sendSessionLifecycleEnvelope(createEnvelope('agent', { t: 'turn-end', status }, { turn: turnId }));
+        session.sendSessionLifecycleEnvelope(createEnvelope('agent', {
+          t: 'turn-end',
+          status,
+          ...(lastTaskCompleteUsage ? { usage: lastTaskCompleteUsage } : {}),
+          ...(lastTaskCompleteCostUsd !== undefined ? { costUsd: lastTaskCompleteCostUsd } : {}),
+          ...(lastTaskCompleteDurationMs !== undefined ? { durationMs: lastTaskCompleteDurationMs } : {}),
+        }, { turn: turnId }));
 
         // 1.5.0 App only stops timer via ephemeral activity (keepAlive), not message content; send before flush so it’s not delayed
         thinking = false;
