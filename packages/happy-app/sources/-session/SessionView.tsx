@@ -198,6 +198,12 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             getDefaultModelKey(flavor),
         ])
     ), [availableModels, session.modelMode, session.metadata?.currentModelCode, flavor]);
+
+    const currentModelContextTokens = React.useMemo(() => {
+        const code = session.metadata?.currentModelCode;
+        if (!code || !session.metadata?.models) return undefined;
+        return session.metadata.models.find(m => m.code === code)?.contextTokens;
+    }, [session.metadata?.currentModelCode, session.metadata?.models]);
     const sessionStatus = useSessionStatus(session);
     const sessionUsage = useSessionUsage(sessionId);
     const alwaysShowContextSize = useSetting('alwaysShowContextSize');
@@ -348,6 +354,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                 contextSize: session.latestUsage.contextSize
             } : undefined}
             alwaysShowContextSize={alwaysShowContextSize}
+            maxContextSize={currentModelContextTokens}
         />
     );
 

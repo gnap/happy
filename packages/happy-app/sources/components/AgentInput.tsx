@@ -65,6 +65,7 @@ interface AgentInputProps {
         contextSize: number;
     };
     alwaysShowContextSize?: boolean;
+    maxContextSize?: number;
     onFileViewerPress?: () => void;
     agentType?: 'claude' | 'codex' | 'cursor' | 'cursor-acp' | 'gemini';
     onAgentClick?: () => void;
@@ -79,7 +80,7 @@ interface AgentInputProps {
     onProfileClick?: () => void;
 }
 
-const MAX_CONTEXT_SIZE = 190000;
+const DEFAULT_MAX_CONTEXT_SIZE = 200000;
 
 const stylesheet = StyleSheet.create((theme, runtime) => ({
     container: {
@@ -281,8 +282,8 @@ const stylesheet = StyleSheet.create((theme, runtime) => ({
     },
 }));
 
-const getContextWarning = (contextSize: number, alwaysShow: boolean = false, theme: Theme) => {
-    const percentageUsed = (contextSize / MAX_CONTEXT_SIZE) * 100;
+const getContextWarning = (contextSize: number, maxContextSize: number, alwaysShow: boolean = false, theme: Theme) => {
+    const percentageUsed = (contextSize / maxContextSize) * 100;
     const percentageRemaining = Math.max(0, Math.min(100, 100 - percentageUsed));
 
     if (percentageRemaining <= 5) {
@@ -352,7 +353,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
 
     // Calculate context warning
     const contextWarning = props.usageData?.contextSize
-        ? getContextWarning(props.usageData.contextSize, props.alwaysShowContextSize ?? false, theme)
+        ? getContextWarning(props.usageData.contextSize, props.maxContextSize ?? DEFAULT_MAX_CONTEXT_SIZE, props.alwaysShowContextSize ?? false, theme)
         : null;
 
     const agentInputEnterToSend = useSetting('agentInputEnterToSend');
@@ -845,7 +846,9 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                 }}>
                                     {!props.usageData?.contextSize && props.connectionStatus ? '• ' : ''}
                                     {props.usageData?.contextSize
-                                        ? (props.usageData.contextSize >= 1000
+                                        ? (props.usageData.contextSize >= 1_000_000
+                                            ? `${(props.usageData.contextSize / 1_000_000).toFixed(1)}M`
+                                            : props.usageData.contextSize >= 1000
                                             ? `${Math.round(props.usageData.contextSize / 1000)}K`
                                             : String(props.usageData.contextSize))
                                         : ''}

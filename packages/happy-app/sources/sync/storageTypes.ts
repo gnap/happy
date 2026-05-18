@@ -9,6 +9,7 @@ export const MetadataSchema = z.object({
         code: z.string(),
         value: z.string(),
         description: z.string().nullish(),
+        contextTokens: z.number().optional(),
     })).optional(),
     currentModelCode: z.string().optional(),
     operatingModes: z.array(z.object({

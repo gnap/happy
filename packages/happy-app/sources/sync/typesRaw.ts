@@ -13,6 +13,9 @@ const usageDataSchema = z.object({
     cache_read_input_tokens: z.number().optional(),
     output_tokens: z.number(),
     service_tier: z.string().optional(),
+    // Pre-computed context window size (may be provided by CLI for Cursor sessions
+    // where input_tokens alone does not represent the full context window).
+    contextSize: z.number().optional(),
 });
 
 export type UsageData = z.infer<typeof usageDataSchema>;
@@ -124,6 +127,8 @@ const sessionTurnEndEventSchema = z.object({
         cacheCreationInputTokens: z.number().optional(),
         cache_read_input_tokens: z.number().optional(),
         cacheReadInputTokens: z.number().optional(),
+        // Pre-computed by CLI's normalizeCursorUsage; represents the full context window size
+        contextSize: z.number().optional(),
     }).optional(),
 });
 
@@ -618,6 +623,10 @@ function normalizeSessionEnvelope(
                 output_tokens: outputTokens ?? 0,
                 cache_creation_input_tokens: rawUsage.cache_creation_input_tokens ?? rawUsage.cacheCreationInputTokens,
                 cache_read_input_tokens: rawUsage.cache_read_input_tokens ?? rawUsage.cacheReadInputTokens,
+                // Pass through pre-computed contextSize from CLI if present so processUsageData
+                // can use it directly rather than recomputing from token fields that may be
+                // incomplete (e.g. cursor-agent only reports per-turn incremental tokens).
+                contextSize: rawUsage.contextSize,
             }
             : undefined;
         return {
