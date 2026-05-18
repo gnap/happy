@@ -2438,33 +2438,30 @@ class Sync {
                         role?: string;
                         content?: {
                             type?: string;
+                            // sendSessionLifecycleEnvelope wraps envelope in { type:'session', data: envelope }
                             data?: {
                                 type?: string;
                                 ev?: { t?: string };
-                            }
+                            };
+                            // sendSessionProtocolMessage sends envelope directly as content
+                            ev?: { t?: string };
                         }
                     } | null;
                     const contentType = rawContent?.content?.type;
                     const dataType = rawContent?.content?.data?.type;
-                    const sessionEventType = rawContent?.content?.data?.ev?.t;
-                    
-                    // Debug logging to trace lifecycle events
-                    if (dataType === 'task_complete' || dataType === 'turn_aborted' || dataType === 'task_started' || sessionEventType === 'turn-start' || sessionEventType === 'turn-end') {
-                        console.log(`🔄 [Sync] Lifecycle event detected: contentType=${contentType}, dataType=${dataType}, sessionEventType=${sessionEventType}`);
-                    }
-                    
+                    // Check both envelope shapes: lifecycle wrapper (data.ev.t) and direct protocol (ev.t)
+                    const sessionEventType =
+                        rawContent?.content?.data?.ev?.t ??
+                        rawContent?.content?.ev?.t;
+
                     const isTaskComplete = 
                         ((contentType === 'acp' || contentType === 'codex') && 
                             (dataType === 'task_complete' || dataType === 'turn_aborted')) ||
-                        (contentType === 'session' && sessionEventType === 'turn-end');
+                        sessionEventType === 'turn-end';
                     
                     const isTaskStarted = 
                         ((contentType === 'acp' || contentType === 'codex') && dataType === 'task_started') ||
-                        (contentType === 'session' && sessionEventType === 'turn-start');
-                    
-                    if (isTaskComplete || isTaskStarted) {
-                        console.log(`🔄 [Sync] Updating thinking state: isTaskComplete=${isTaskComplete}, isTaskStarted=${isTaskStarted}`);
-                    }
+                        sessionEventType === 'turn-start';
 
                     // Update session (use body.message.seq = session-internal seq, same as GET /v1/sessions; do not use updateData.seq which is global user seq)
                     const session = storage.getState().sessions[updateData.body.sid];
@@ -2473,9 +2470,11 @@ class Sync {
                             ...session,
                             updatedAt: updateData.createdAt,
                             seq: updateData.body.message.seq,
-                            // Update thinking state based on task lifecycle events
-                            ...(isTaskComplete ? { thinking: false } : {}),
-                            ...(isTaskStarted ? { thinking: true } : {})
+                            // Update thinking state based on task lifecycle events.
+                            // turn-end is a persistent message so this clears thinking even if
+                            // the ephemeral keepAlive(false) activity update was lost.
+                            ...(isTaskComplete ? { thinking: false, thinkingAt: 0 } : {}),
+                            ...(isTaskStarted ? { thinking: true, thinkingAt: updateData.createdAt } : {})
                         }])
                         if (isTaskComplete) {
                             storage.getState().finalizeRunningTools(updateData.body.sid);
