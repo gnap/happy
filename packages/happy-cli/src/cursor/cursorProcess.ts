@@ -513,6 +513,18 @@ function isCursorProviderErrorLine(line: string): boolean {
 export interface CursorModelInfo {
   code: string;
   value: string;
+  /** Approximate max context window in tokens, inferred from the model name. */
+  contextTokens?: number;
+}
+
+/**
+ * Rough heuristic: if the human-readable name contains "1M" the model has a 1M-token
+ * context window; otherwise default to 200K. cursor-agent itself does not expose
+ * per-model context limits, so this is the best we can do without a hard-coded table.
+ */
+function inferContextTokens(name: string): number {
+  if (/\b1\s*m\b/i.test(name)) return 1_000_000;
+  return 200_000;
 }
 
 export interface CursorModelsResult {
@@ -563,7 +575,7 @@ export function parseCursorModelsOutput(output: string): CursorModelsResult {
 
     const [, code, rawName, , marker] = match;
     const value = (rawName as string).trim();
-    models.push({ code, value });
+    models.push({ code, value, contextTokens: inferContextTokens(value) });
 
     if (marker === 'current') currentModelId = code as string;
     if (marker === 'default') defaultModelId = code as string;
