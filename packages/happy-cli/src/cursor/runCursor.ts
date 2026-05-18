@@ -84,16 +84,21 @@ function normalizeCursorUsage(usage?: CursorUsageRecord): {
   cacheReadInputTokens?: number;
   cacheCreationInputTokens?: number;
   totalTokens?: number;
+  contextSize?: number;
   usage?: CursorUsageRecord;
 } {
   const inputTokens = readUsageNumber(usage, ['input_tokens', 'inputTokens', 'prompt_tokens', 'promptTokens']);
   const outputTokens = readUsageNumber(usage, ['output_tokens', 'outputTokens', 'completion_tokens', 'completionTokens']);
-  const cacheReadInputTokens = readUsageNumber(usage, ['cache_read_input_tokens', 'cacheReadInputTokens']);
-  const cacheCreationInputTokens = readUsageNumber(usage, ['cache_creation_input_tokens', 'cacheCreationInputTokens']);
+  const cacheReadInputTokens = readUsageNumber(usage, ['cache_read_input_tokens', 'cacheReadInputTokens', 'cacheReadTokens']);
+  const cacheCreationInputTokens = readUsageNumber(usage, ['cache_creation_input_tokens', 'cacheCreationInputTokens', 'cacheWriteTokens']);
   const totalTokens = readUsageNumber(usage, ['total_tokens', 'totalTokens', 'tokens', 'tokenCount'])
     ?? (typeof inputTokens === 'number' && typeof outputTokens === 'number'
       ? inputTokens + outputTokens
       : undefined);
+  // Context size = all tokens consumed from the context window this turn.
+  // Cache reads dominate for long sessions; raw inputTokens alone is misleading.
+  const contextSize = (inputTokens ?? 0) + (cacheReadInputTokens ?? 0) + (cacheCreationInputTokens ?? 0)
+    || undefined;
 
   return {
     inputTokens,
@@ -101,6 +106,7 @@ function normalizeCursorUsage(usage?: CursorUsageRecord): {
     cacheReadInputTokens,
     cacheCreationInputTokens,
     totalTokens,
+    contextSize,
     usage,
   };
 }
@@ -1084,7 +1090,10 @@ export async function runCursor(opts: {
               if (msg.sessionId) {
                 cursorChatId = msg.sessionId;
               }
-              lastTaskCompleteUsage = msg.usage;
+              const { usage: _raw, ...normalizedFields } = normalizeCursorUsage(msg.usage);
+              lastTaskCompleteUsage = normalizedFields.contextSize !== undefined
+                ? { ...normalizedFields, ...msg.usage }
+                : msg.usage;
               lastTaskCompleteCostUsd = msg.costUsd;
               lastTaskCompleteDurationMs = msg.durationMs;
               logger.debug(`[cursor] Turn usage ${formatCursorUsageLog({
