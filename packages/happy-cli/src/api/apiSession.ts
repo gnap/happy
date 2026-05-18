@@ -1322,7 +1322,7 @@ export class ApiSessionClient extends EventEmitter {
         if (!this.socket.connected) {
             return;
         }
-        return new Promise((resolve) => {
+        await new Promise<void>((resolve) => {
             this.socket.emit('ping', () => {
                 resolve();
             });
@@ -1330,6 +1330,11 @@ export class ApiSessionClient extends EventEmitter {
                 resolve();
             }, 10000);
         });
+        // After flushing outbox, kick off one receive-sync so lastSeq is current before
+        // we go idle. This way the next user message's socket event will always hit the
+        // fast path (seq === lastSeq + 1) instead of falling back to an HTTP catch-up
+        // that could batch it with a second message sent in frustration.
+        this.receiveSync.invalidate();
     }
 
     private startFallbackPoll() {

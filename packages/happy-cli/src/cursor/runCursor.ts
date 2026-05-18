@@ -456,7 +456,7 @@ export async function runCursor(opts: {
       return;
     }
     logger.debug(`[cursor] User message queued (length: ${message.content.text.length})`);
-    messageQueue.push(message.content.text, mode);
+    messageQueue.pushIsolated(message.content.text, mode);
   };
 
   // Handle server unreachable - offline stub with hot reconnection
