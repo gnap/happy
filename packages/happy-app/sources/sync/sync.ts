@@ -2463,6 +2463,10 @@ class Sync {
                         ((contentType === 'acp' || contentType === 'codex') && dataType === 'task_started') ||
                         sessionEventType === 'turn-start';
 
+                    const isReadyNormalized = lastMessage?.role === 'event'
+                        && (lastMessage.content as { type?: string })?.type === 'ready';
+                    const shouldClearThinking = isTaskComplete || isReadyNormalized;
+
                     // Update session (use body.message.seq = session-internal seq, same as GET /v1/sessions; do not use updateData.seq which is global user seq)
                     const session = storage.getState().sessions[updateData.body.sid];
                     if (session) {
@@ -2471,12 +2475,12 @@ class Sync {
                             updatedAt: updateData.createdAt,
                             seq: updateData.body.message.seq,
                             // Update thinking state based on task lifecycle events.
-                            // turn-end is a persistent message so this clears thinking even if
+                            // turn-end/ready are persistent messages so this clears thinking even if
                             // the ephemeral keepAlive(false) activity update was lost.
-                            ...(isTaskComplete ? { thinking: false, thinkingAt: 0 } : {}),
+                            ...(shouldClearThinking ? { thinking: false, thinkingAt: 0 } : {}),
                             ...(isTaskStarted ? { thinking: true, thinkingAt: updateData.createdAt } : {})
                         }])
-                        if (isTaskComplete) {
+                        if (shouldClearThinking) {
                             storage.getState().finalizeRunningTools(updateData.body.sid);
                         }
                     } else {
@@ -2510,11 +2514,8 @@ class Sync {
                         }
                     }
                     // Refresh git status only when turn is done (ready), not on every mutable tool result
-                    if (lastMessage) {
-                        const isReadyEvent = lastMessage.role === 'event' && (lastMessage.content as { type?: string })?.type === 'ready';
-                        if (isReadyEvent || isTaskComplete) {
-                            gitStatusSync.invalidate(updateData.body.sid);
-                        }
+                    if (shouldClearThinking) {
+                        gitStatusSync.invalidate(updateData.body.sid);
                     }
                 }
             }
@@ -2942,7 +2943,16 @@ class Sync {
         }
         if (result.hasReadyEvent) {
             voiceHooks.onReady(sessionId);
+            // Covers fetchMessages / reconnect / focus refresh when socket turn-end was missed.
+            this.clearSessionThinking(sessionId);
         }
+    }
+
+    private clearSessionThinking(sessionId: string) {
+        const session = storage.getState().sessions[sessionId];
+        if (!session) return;
+        this.applySessions([{ ...session, thinking: false, thinkingAt: 0 }]);
+        storage.getState().finalizeRunningTools(sessionId);
     }
 
     private applySessions = (sessions: (Omit<Session, "presence"> & {

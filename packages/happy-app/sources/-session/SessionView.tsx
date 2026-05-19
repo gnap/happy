@@ -329,6 +329,10 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                     setMessage('');
                     clearDraft();
                     sync.sendMessage(sessionId, message);
+                    // Clear local model override after send: the CLI received meta.model and will
+                    // confirm its selection via metadata.currentModelCode. From this point the App
+                    // just follows the CLI rather than keeping a stale local preference.
+                    storage.getState().clearSessionModelMode(sessionId);
                     trackMessageSent();
                 }
             }}
