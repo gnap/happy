@@ -42,7 +42,7 @@ describe('A2A inbox helpers', () => {
 
     const readInbox = markA2AInboxMessagesRead(inbox, ['one', 'missing'], 4242);
     expect(getA2AUnreadCount(readInbox)).toBe(0);
-    expect(readInbox.messages[0]).toEqual(expect.objectContaining({ id: 'one', readAt: 4242 }));
+    expect(readInbox.messages).toEqual([]);
     expect(inbox).toEqual(snapshot);
   });
 
@@ -84,10 +84,10 @@ describe('A2A inbox helpers', () => {
       createdAt: 1000,
     });
     const readInbox = markA2AInboxMessageRead(inbox, 'one', 9000);
-    expect(readInbox.messages[0]).toEqual(expect.objectContaining({ id: 'one', readAt: 9000 }));
+    expect(readInbox.messages).toEqual([]);
   });
 
-  it('merges remote inbox updates without losing local read markers', () => {
+  it('merge can re-introduce a row that was dropped locally after mark-read prune', () => {
     const local = markA2AInboxMessageRead(
       upsertA2AInboxMessage(undefined, {
         id: 'one',
@@ -97,6 +97,7 @@ describe('A2A inbox helpers', () => {
       'one',
       9000,
     );
+    expect(local.messages).toEqual([]);
     const remote = upsertA2AInboxMessage(undefined, {
       id: 'one',
       text: 'first',
@@ -104,7 +105,7 @@ describe('A2A inbox helpers', () => {
     });
 
     const merged = mergeA2AInboxState(local, remote);
-    expect(merged.messages[0]).toEqual(expect.objectContaining({ id: 'one', readAt: 9000 }));
+    expect(merged.messages[0]).toEqual(expect.objectContaining({ id: 'one', readAt: null }));
   });
 
   it('peeks unread inbox work for turn scheduling', () => {

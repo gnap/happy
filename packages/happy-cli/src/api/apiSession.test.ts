@@ -31,6 +31,7 @@ const {
 
 vi.mock('node:fs', () => ({
     appendFileSync: vi.fn(),
+    existsSync: vi.fn(() => false),
     mkdirSync: vi.fn(),
     readFileSync: mockReadFileSync,
     writeFileSync: vi.fn(),
@@ -49,7 +50,8 @@ vi.mock('axios', () => ({
 
 vi.mock('@/configuration', () => ({
     configuration: {
-        serverUrl: 'https://server.test'
+        serverUrl: 'https://server.test',
+        happyHomeDir: '/tmp/happy-test-home',
     },
     serverHttpsAgent: {},
 }));
@@ -838,12 +840,7 @@ describe('ApiSessionClient v3 messages API migration', () => {
 
         client.markA2AMessageRead('inbox-1');
 
-        expect(client.getA2AInbox().messages).toEqual([
-            expect.objectContaining({
-                id: 'inbox-1',
-                readAt: expect.any(Number),
-            }),
-        ]);
+        expect(client.getA2AInbox().messages).toEqual([]);
     });
 
     it('fetchMessages uses incremental cursor and paginates while hasMore is true', async () => {

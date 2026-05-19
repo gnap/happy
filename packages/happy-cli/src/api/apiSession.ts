@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createTwoFilesPatch } from 'diff'
 import { io, Socket } from 'socket.io-client'
-import { AgentState, A2AInboxMessage, ClientToServerEvents, MessageMeta, Metadata, ServerToClientEvents, Session, Update, UserMessage, UserMessageSchema, Usage, buildSyncedSessionMetadata, sanitizeSessionMetadataForApp, shouldSyncSessionMetadata } from './types'
+import { AgentState, A2AInboxMessage, A2AInboxState, ClientToServerEvents, MessageMeta, Metadata, ServerToClientEvents, Session, Update, UserMessage, UserMessageSchema, Usage, buildSyncedSessionMetadata, sanitizeSessionMetadataForApp, shouldSyncSessionMetadata } from './types'
 import { decodeBase64, decrypt, encodeBase64, encrypt } from './encryption';
 import { backoff, delay } from '@/utils/time';
 import { configuration, serverHttpsAgent } from '@/configuration';
@@ -26,9 +26,13 @@ import { InvalidateSync } from '@/utils/sync';
 import axios from 'axios';
 import {
     cloneA2AInboxState,
-    mergeA2AInboxState,
+    extractLegacyInboxFromAgentState,
     markA2AInboxMessageRead,
     markA2AInboxMessagesRead,
+    pruneA2AInboxState,
+    loadLocalA2AInbox,
+    saveLocalA2AInbox,
+    toServerA2AInboxSnapshot,
     upsertA2AInboxMessage,
 } from '@/a2a/inbox';
 
@@ -220,7 +224,8 @@ export class ApiSessionClient extends EventEmitter {
     private metadataVersion: number;
     private agentState: AgentState | null;
     private agentStateVersion: number;
-    private a2aInbox: NonNullable<AgentState['a2aInbox']>;
+    /** Full inbox rows; persisted under ~/.happy/a2a-inbox-state/, not on the server. */
+    private a2aInbox: A2AInboxState;
     private socket: Socket<ServerToClientEvents, ClientToServerEvents>;
     private pendingMessages: UserMessage[] = [];
     private pendingMessageCallback: ((message: UserMessage) => void) | null = null;
@@ -236,6 +241,9 @@ export class ApiSessionClient extends EventEmitter {
     private socketConnectedPromise: Promise<void>;
     private socketConnectedResolve: (() => void) | undefined;
     private routedA2ASessionEnvelopeIds = new Set<string>();
+    private a2aInboxStateSyncTimer: ReturnType<typeof setTimeout> | null = null;
+    /** Replace legacy server blob (full messages) with unreadCount-only snapshot. */
+    private a2aInboxNeedsServerUnreadSync = false;
     /** Directory where full tool-call args are persisted across session restarts. */
     private get toolContentDir(): string {
         const base = this.metadata?.path ?? process.cwd();
@@ -403,7 +411,18 @@ export class ApiSessionClient extends EventEmitter {
         this.metadataVersion = session.metadataVersion;
         this.agentState = session.agentState;
         this.agentStateVersion = session.agentStateVersion;
-        this.a2aInbox = cloneA2AInboxState(session.agentState?.a2aInbox);
+        const legacyFromServer = extractLegacyInboxFromAgentState(session.agentState);
+        const localInbox = loadLocalA2AInbox(session.id);
+        if (localInbox.messages.length === 0 && legacyFromServer && legacyFromServer.messages.length > 0) {
+            this.a2aInbox = legacyFromServer;
+            saveLocalA2AInbox(session.id, this.a2aInbox);
+            this.a2aInboxNeedsServerUnreadSync = true;
+            logger.debug(
+                `[API] Migrated ${legacyFromServer.messages.length} legacy A2A inbox row(s) from server agentState to local storage`,
+            );
+        } else {
+            this.a2aInbox = localInbox;
+        }
         this.requestedMetadata = session.requestedMetadata ?? null;
         this.encryptionKey = session.encryptionKey;
         this.encryptionVariant = session.encryptionVariant;
@@ -478,6 +497,10 @@ export class ApiSessionClient extends EventEmitter {
                 });
             }
             this.receiveSync.invalidate();
+            if (this.a2aInboxNeedsServerUnreadSync) {
+                this.a2aInboxNeedsServerUnreadSync = false;
+                this.scheduleA2AInboxAgentStateSync({ immediate: true });
+            }
         })
 
         // Set up global RPC request handler
@@ -572,9 +595,7 @@ export class ApiSessionClient extends EventEmitter {
                     if (data.body.agentState && data.body.agentState.version > this.agentStateVersion) {
                         this.agentState = data.body.agentState.value ? decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.agentState.value)) : null;
                         this.agentStateVersion = data.body.agentState.version;
-                        if (this.agentState?.a2aInbox !== undefined) {
-                            this.a2aInbox = mergeA2AInboxState(this.a2aInbox, this.agentState.a2aInbox);
-                        }
+                        this.stripServerInboxFromAgentState();
                     }
                 } else if (data.body.t === 'update-machine') {
                     // Session clients shouldn't receive machine updates - log warning
@@ -769,7 +790,7 @@ export class ApiSessionClient extends EventEmitter {
         }
         return {
             ...this.agentState,
-            a2aInbox: cloneA2AInboxState(this.a2aInbox),
+            a2aInbox: toServerA2AInboxSnapshot(this.a2aInbox),
         };
     }
 
@@ -777,40 +798,62 @@ export class ApiSessionClient extends EventEmitter {
         return cloneA2AInboxState(this.a2aInbox);
     }
 
-    recordA2AMessage(message: A2AInboxMessage): void {
-        this.a2aInbox = upsertA2AInboxMessage(this.a2aInbox, message);
+    private stripServerInboxFromAgentState(): void {
+        if (!this.agentState) {
+            return;
+        }
         this.agentState = {
-            ...(this.agentState ?? {}),
-            a2aInbox: cloneA2AInboxState(this.a2aInbox),
+            ...this.agentState,
+            a2aInbox: toServerA2AInboxSnapshot(this.a2aInbox),
         };
+    }
+
+    private applyA2AInboxLocally(): void {
+        this.a2aInbox = pruneA2AInboxState(this.a2aInbox);
+        saveLocalA2AInbox(this.sessionId, this.a2aInbox);
+    }
+
+    private scheduleA2AInboxAgentStateSync(options?: { immediate?: boolean }): void {
+        this.applyA2AInboxLocally();
+        if (options?.immediate) {
+            if (this.a2aInboxStateSyncTimer !== null) {
+                clearTimeout(this.a2aInboxStateSyncTimer);
+                this.a2aInboxStateSyncTimer = null;
+            }
+            this.flushA2AInboxAgentStateSync();
+            return;
+        }
+        if (this.a2aInboxStateSyncTimer !== null) {
+            return;
+        }
+        this.a2aInboxStateSyncTimer = setTimeout(() => {
+            this.a2aInboxStateSyncTimer = null;
+            this.flushA2AInboxAgentStateSync();
+        }, 400);
+    }
+
+    private flushA2AInboxAgentStateSync(): void {
+        const snapshot = toServerA2AInboxSnapshot(this.a2aInbox);
+        logger.debug(`[API] Syncing A2A inbox to server: unreadCount=${snapshot.unreadCount}`);
         this.updateAgentState((currentState) => ({
             ...currentState,
-            a2aInbox: cloneA2AInboxState(this.a2aInbox),
+            a2aInbox: snapshot,
         }));
+    }
+
+    recordA2AMessage(message: A2AInboxMessage): void {
+        this.a2aInbox = upsertA2AInboxMessage(this.a2aInbox, message);
+        this.scheduleA2AInboxAgentStateSync();
     }
 
     markA2AMessageRead(id: string): void {
         this.a2aInbox = markA2AInboxMessageRead(this.a2aInbox, id);
-        this.agentState = {
-            ...(this.agentState ?? {}),
-            a2aInbox: cloneA2AInboxState(this.a2aInbox),
-        };
-        this.updateAgentState((currentState) => ({
-            ...currentState,
-            a2aInbox: cloneA2AInboxState(this.a2aInbox),
-        }));
+        this.scheduleA2AInboxAgentStateSync({ immediate: true });
     }
 
     markA2AMessagesRead(ids: string[]): void {
         this.a2aInbox = markA2AInboxMessagesRead(this.a2aInbox, ids);
-        this.agentState = {
-            ...(this.agentState ?? {}),
-            a2aInbox: cloneA2AInboxState(this.a2aInbox),
-        };
-        this.updateAgentState((currentState) => ({
-            ...currentState,
-            a2aInbox: cloneA2AInboxState(this.a2aInbox),
-        }));
+        this.scheduleA2AInboxAgentStateSync({ immediate: true });
     }
 
     /** For debugging: whether the real-time socket to the server is connected (vs HTTP fallback polling). */
@@ -1171,12 +1214,18 @@ export class ApiSessionClient extends EventEmitter {
         if (process.env.DEBUG) { // too verbose for production
             logger.debug(`[API] Sending keep alive message: ${thinking}`);
         }
-        this.socket.volatile.emit('session-alive', {
+        const payload = {
             sid: this.sessionId,
             time: Date.now(),
             thinking,
-            mode
-        });
+            mode,
+        };
+        // Clearing thinking must be reliable; volatile emits are often dropped under flaky WSS.
+        if (thinking === false) {
+            this.socket.emit('session-alive', payload);
+        } else {
+            this.socket.volatile.emit('session-alive', payload);
+        }
     }
 
     /**
@@ -1290,17 +1339,13 @@ export class ApiSessionClient extends EventEmitter {
                 if (answer.result === 'success') {
                     this.agentState = answer.agentState ? decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.agentState)) : null;
                     this.agentStateVersion = answer.version;
-                    if (this.agentState?.a2aInbox !== undefined) {
-                        this.a2aInbox = mergeA2AInboxState(this.a2aInbox, this.agentState.a2aInbox);
-                    }
+                    this.stripServerInboxFromAgentState();
                     logger.debug('Agent state updated', this.agentState);
                 } else if (answer.result === 'version-mismatch') {
                     if (answer.version > this.agentStateVersion) {
                         this.agentStateVersion = answer.version;
                         this.agentState = answer.agentState ? decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.agentState)) : null;
-                        if (this.agentState?.a2aInbox !== undefined) {
-                            this.a2aInbox = mergeA2AInboxState(this.a2aInbox, this.agentState.a2aInbox);
-                        }
+                        this.stripServerInboxFromAgentState();
                     }
                     throw new Error('Agent state version mismatch');
                 } else if (answer.result === 'error') {
@@ -1362,6 +1407,12 @@ export class ApiSessionClient extends EventEmitter {
     async close() {
         logger.debug('[API] socket.close() called');
         this.closing = true;
+        if (this.a2aInboxStateSyncTimer !== null) {
+            clearTimeout(this.a2aInboxStateSyncTimer);
+            this.a2aInboxStateSyncTimer = null;
+        }
+        this.applyA2AInboxLocally();
+        this.flushA2AInboxAgentStateSync();
         this.stopFallbackPoll();
         this.sendSync.stop();
         this.receiveSync.stop();

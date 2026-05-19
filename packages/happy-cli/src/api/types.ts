@@ -288,6 +288,11 @@ export type A2AInboxState = {
   messages: A2AInboxMessage[],
 };
 
+/** Synced to server via update-state; full message bodies stay on the CLI machine only. */
+export type A2AInboxServerState = {
+  unreadCount: number,
+};
+
 export type AppCompatibleSessionMetadata = Omit<
   Metadata,
   'happyLibDir' | 'happyToolsDir' | 'startedFromDaemon' | 'startedBy' | 'lifecycleState' | 'lifecycleStateSince' | 'archivedBy' | 'archiveReason' | 'sessionTag'
@@ -397,7 +402,7 @@ export type AgentState = {
   controlledByUser?: boolean | null | undefined
   /** Cursor chat ID for resuming cursor-agent conversation across restarts */
   cursorChatId?: string | null
-  a2aInbox?: A2AInboxState
+  a2aInbox?: A2AInboxServerState
   requests?: {
     [id: string]: {
       tool: string,

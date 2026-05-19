@@ -35,7 +35,14 @@ import { registerKillSessionHandler } from '@/claude/registerKillSessionHandler'
 import { stopCaffeinate } from '@/utils/caffeinate';
 import { connectionState } from '@/utils/serverConnectionErrors';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
-import { buildA2AInboxNotificationWithPreview, buildA2ATurnPrompt, getA2AUnreadCount, hasUnreadA2AInboxMessages, listA2AInboxMessages } from '@/a2a/inbox';
+import {
+  buildA2AInboxNotificationWithPreview,
+  buildA2ATurnPrompt,
+  getA2AUnreadCount,
+  hasUnreadA2AInboxMessages,
+  listA2AInboxMessages,
+  pruneA2AInboxSnapshots,
+} from '@/a2a/inbox';
 import { a2aInboxBackoffDelayMs, isA2AInboxBackoffActive, resolveA2AInboxBackoffSettings } from '@/a2a/inboxBackoff';
 import { buildA2ASubagentCardEnvelopes } from '@/a2a/subagentCard';
 import type { ApiSessionClient } from '@/api/apiSession';
@@ -182,6 +189,10 @@ function writeA2AInboxSnapshot(workspacePath: string, sessionId: string, turnId:
     messages: unreadMessages,
   };
   writeFileSync(filePath, JSON.stringify(snapshot, null, 2));
+  const removed = pruneA2AInboxSnapshots(dir, sessionId);
+  if (removed > 0) {
+    logger.debug(`[cursor] Pruned ${removed} old A2A inbox snapshot file(s) for session ${sessionId}`);
+  }
   return filePath;
 }
 
@@ -584,6 +595,17 @@ export async function runCursor(opts: {
   session.onUserMessage(handleUserMessage);
   step('sessionConnect');
   writeSessionPidFile(session.sessionId);
+  const workspaceInboxDir = join(workspacePath, '.happy', 'a2a-inbox');
+  const prunedWorkspaceSnapshots = pruneA2AInboxSnapshots(workspaceInboxDir, sessionId);
+  const daemonInboxDir = join(configuration.happyHomeDir, 'a2a-inbox');
+  const prunedDaemonSnapshots = existsSync(daemonInboxDir)
+    ? pruneA2AInboxSnapshots(daemonInboxDir, sessionId)
+    : 0;
+  if (prunedWorkspaceSnapshots + prunedDaemonSnapshots > 0) {
+    logger.debug(
+      `[cursor] Pruned ${prunedWorkspaceSnapshots + prunedDaemonSnapshots} A2A inbox snapshot file(s) on session start`,
+    );
+  }
   // Persist initial default mode so app reload can restore it
   syncModeToSessionMetadata('default', undefined);
 

@@ -42,6 +42,7 @@ import { UserProfile } from './friendTypes';
 import { resolveMessageModeMeta } from './messageMeta';
 import { loadMessageCache, saveMessageCache, clearMessageCache, clearAllMessageCaches, preloadSessionCacheDB, getCachedLastSeq } from './cache/messageCache';
 import { overrideSessionCacheDB, IndexedDBSessionCacheDB } from './cache/sessionCacheDB';
+import { getSessionThinkingPatchFromMessageContent } from './sessionThinkingLifecycle';
 
 type V3GetSessionMessagesResponse = {
     messages: ApiMessage[];
@@ -1754,6 +1755,18 @@ class Sync {
                         if (normalized) {
                             normalizedMessages.push(normalized);
                         }
+
+                        const thinkingPatch = getSessionThinkingPatchFromMessageContent(decrypted.content);
+                        if (thinkingPatch) {
+                            const currentSession = storage.getState().sessions[sessionId];
+                            if (currentSession && currentSession.thinking !== thinkingPatch.thinking) {
+                                this.applySessions([{
+                                    ...currentSession,
+                                    ...thinkingPatch,
+                                    thinkingAt: Date.now(),
+                                }]);
+                            }
+                        }
                     }
 
                     if (normalizedMessages.length > 0) {
@@ -1932,39 +1945,7 @@ class Sync {
                 if (decrypted) {
                     lastMessage = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
 
-                    // Check for task lifecycle events to update thinking state
-                    // This ensures UI updates even if volatile activity updates are lost
-                    const rawContent = decrypted.content as {
-                        role?: string;
-                        content?: {
-                            type?: string;
-                            data?: {
-                                type?: string;
-                                ev?: { t?: string };
-                            }
-                        }
-                    } | null;
-                    const contentType = rawContent?.content?.type;
-                    const dataType = rawContent?.content?.data?.type;
-                    const sessionEventType = rawContent?.content?.data?.ev?.t;
-                    
-                    // Debug logging to trace lifecycle events
-                    if (dataType === 'task_complete' || dataType === 'turn_aborted' || dataType === 'task_started' || sessionEventType === 'turn-start' || sessionEventType === 'turn-end') {
-                        console.log(`🔄 [Sync] Lifecycle event detected: contentType=${contentType}, dataType=${dataType}, sessionEventType=${sessionEventType}`);
-                    }
-                    
-                    const isTaskComplete = 
-                        ((contentType === 'acp' || contentType === 'codex') && 
-                            (dataType === 'task_complete' || dataType === 'turn_aborted')) ||
-                        (contentType === 'session' && sessionEventType === 'turn-end');
-                    
-                    const isTaskStarted = 
-                        ((contentType === 'acp' || contentType === 'codex') && dataType === 'task_started') ||
-                        (contentType === 'session' && sessionEventType === 'turn-start');
-                    
-                    if (isTaskComplete || isTaskStarted) {
-                        console.log(`🔄 [Sync] Updating thinking state: isTaskComplete=${isTaskComplete}, isTaskStarted=${isTaskStarted}`);
-                    }
+                    const thinkingPatch = getSessionThinkingPatchFromMessageContent(decrypted.content);
 
                     // Update session (use body.message.seq = session-internal seq, same as GET /v1/sessions; do not use updateData.seq which is global user seq)
                     const session = storage.getState().sessions[updateData.body.sid];
@@ -1973,9 +1954,7 @@ class Sync {
                             ...session,
                             updatedAt: updateData.createdAt,
                             seq: updateData.body.message.seq,
-                            // Update thinking state based on task lifecycle events
-                            ...(isTaskComplete ? { thinking: false } : {}),
-                            ...(isTaskStarted ? { thinking: true } : {})
+                            ...(thinkingPatch ?? {}),
                         }])
                     } else {
                         // Fetch sessions again if we don't have this session
@@ -2423,6 +2402,14 @@ class Sync {
         }
         if (result.hasReadyEvent) {
             voiceHooks.onReady(sessionId);
+            const session = storage.getState().sessions[sessionId];
+            if (session?.thinking) {
+                this.applySessions([{
+                    ...session,
+                    thinking: false,
+                    thinkingAt: Date.now(),
+                }]);
+            }
         }
     }
 
