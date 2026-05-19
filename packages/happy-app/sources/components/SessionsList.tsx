@@ -29,6 +29,7 @@ import { useHappyAction } from '@/hooks/useHappyAction';
 import { sessionDelete } from '@/sync/ops';
 import { HappyError } from '@/utils/errors';
 import { Modal } from '@/modal';
+import { SessionRowStatusIndicators } from './SessionRowStatusIndicators';
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -416,6 +417,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
                     ]} numberOfLines={1}>
                         {sessionName}
                     </Text>
+                    <SessionRowStatusIndicators session={session} />
                     {isFetching && (
                         <ActivityIndicator size="small" style={styles.fetchingIndicator} />
                     )}

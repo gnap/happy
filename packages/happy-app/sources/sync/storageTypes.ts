@@ -64,7 +64,11 @@ export const AgentStateSchema = z.object({
         mode: z.string().nullish(),
         allowedTools: z.array(z.string()).nullish(),
         decision: z.enum(['approved', 'approved_for_session', 'denied', 'abort']).nullish()
-    })).nullish()
+    })).nullish(),
+    /** A2A inbox snapshot synced from CLI (unread count only; message bodies stay on the machine). */
+    a2aInbox: z.object({
+        unreadCount: z.number(),
+    }).optional(),
 });
 
 export type AgentState = z.infer<typeof AgentStateSchema>;

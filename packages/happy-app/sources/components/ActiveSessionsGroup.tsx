@@ -22,6 +22,7 @@ import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { useIsTablet } from '@/utils/responsive';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { HappyError } from '@/utils/errors';
+import { SessionRowStatusIndicators } from './SessionRowStatusIndicators';
 
 const stylesheet = StyleSheet.create((theme, runtime) => ({
     container: {
@@ -435,30 +436,7 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
 
                         {/* No longer showing git status per item - it's in the header */}
 
-                        {/* Task status indicator */}
-                        {session.todos && session.todos.length > 0 && (() => {
-                            const totalTasks = session.todos.length;
-                            const completedTasks = session.todos.filter(t => t.status === 'completed').length;
-
-                            // Don't show if all tasks are completed
-                            if (completedTasks === totalTasks) {
-                                return null;
-                            }
-
-                            return (
-                                <View style={styles.taskStatusContainer}>
-                                    <Ionicons
-                                        name="bulb-outline"
-                                        size={10}
-                                        color={styles.taskStatusText.color}
-                                        style={{ marginRight: 2 }}
-                                    />
-                                    <Text style={styles.taskStatusText}>
-                                        {completedTasks}/{totalTasks}
-                                    </Text>
-                                </View>
-                            );
-                        })()}
+                        <SessionRowStatusIndicators session={session} />
                     </View>
                 </View>
             </View>
