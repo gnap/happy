@@ -16,6 +16,10 @@ import { log } from '@/log';
 export interface CachedSessionRow {
     sessionId: string;
     lastSeq: number;
+    /** Lowest seq currently stored (1 = all messages loaded, >1 = older messages exist) */
+    oldestSeq: number;
+    /** True when the server has messages with seq < oldestSeq */
+    hasOlderMessages: boolean;
     schemaVersion: number;
     cachedAt: number;
     reducerStateJson: string;
@@ -76,7 +80,7 @@ export class MemorySessionCacheDB implements ISessionCacheDB {
 // ---------------------------------------------------------------------------
 
 const IDB_NAME = 'happy_message_cache';
-const IDB_VERSION = 1;
+const IDB_VERSION = 2;
 const STORE_SESSION_CACHE = 'session_cache';
 const STORE_SESSION_MESSAGES = 'session_messages';
 
@@ -126,7 +130,15 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
         return new Promise((resolve, reject) => {
             const req = this.getStore().cache.get(sessionId);
             req.onsuccess = () => {
-                const row = req.result as { sessionId: string; lastSeq: number; schemaVersion: number; cachedAt: number; reducerState: string } | undefined;
+                const row = req.result as {
+                    sessionId: string;
+                    lastSeq: number;
+                    oldestSeq?: number;
+                    hasOlderMessages?: boolean;
+                    schemaVersion: number;
+                    cachedAt: number;
+                    reducerState: string;
+                } | undefined;
                 if (!row) {
                     resolve(null);
                     return;
@@ -134,6 +146,8 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
                 resolve({
                     sessionId: row.sessionId,
                     lastSeq: row.lastSeq,
+                    oldestSeq: row.oldestSeq ?? 0,
+                    hasOlderMessages: row.hasOlderMessages ?? false,
                     schemaVersion: row.schemaVersion,
                     cachedAt: row.cachedAt,
                     reducerStateJson: row.reducerState,
@@ -174,6 +188,8 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
             cache.put({
                 sessionId: row.sessionId,
                 lastSeq: row.lastSeq,
+                oldestSeq: row.oldestSeq,
+                hasOlderMessages: row.hasOlderMessages,
                 schemaVersion: row.schemaVersion,
                 cachedAt: row.cachedAt,
                 reducerState: row.reducerStateJson,
