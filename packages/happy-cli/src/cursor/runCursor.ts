@@ -36,6 +36,7 @@ import { stopCaffeinate } from '@/utils/caffeinate';
 import { connectionState } from '@/utils/serverConnectionErrors';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
 import { buildA2AInboxNotificationWithPreview, buildA2ATurnPrompt, getA2AUnreadCount, hasUnreadA2AInboxMessages, listA2AInboxMessages } from '@/a2a/inbox';
+import { a2aInboxBackoffDelayMs, isA2AInboxBackoffActive, resolveA2AInboxBackoffSettings } from '@/a2a/inboxBackoff';
 import { buildA2ASubagentCardEnvelopes } from '@/a2a/subagentCard';
 import type { ApiSessionClient } from '@/api/apiSession';
 import type { PermissionMode } from '@/api/types';
@@ -182,6 +183,32 @@ function writeA2AInboxSnapshot(workspacePath: string, sessionId: string, turnId:
   };
   writeFileSync(filePath, JSON.stringify(snapshot, null, 2));
   return filePath;
+}
+
+/** Emit inbox turn UI only after cursor-agent has started (session_init). */
+function emitA2AInboxTurnPresentation(options: {
+  session: ApiSessionClient;
+  turnId: string;
+  messageBuffer: MessageBuffer;
+}): void {
+  const { session, turnId, messageBuffer } = options;
+  const inbox = session.getA2AInbox();
+  const unreadCount = getA2AUnreadCount(inbox);
+  const summary = buildA2AInboxNotificationWithPreview(inbox);
+  const inboxTitle = unreadCount === 0
+    ? 'A2A inbox'
+    : unreadCount === 1
+      ? 'A2A inbox (1 unread)'
+      : `A2A inbox (${unreadCount} unread)`;
+  session.sendSessionLifecycleEnvelope(createEnvelope('agent', { t: 'turn-start' }, { turn: turnId }));
+  messageBuffer.addMessage('Thinking...', 'system');
+  for (const envelope of buildA2ASubagentCardEnvelopes(summary, {
+    title: inboxTitle,
+    description: summary,
+    turnId,
+  })) {
+    session.sendSessionProtocolMessage(envelope);
+  }
 }
 
 /**
@@ -410,6 +437,10 @@ export async function runCursor(opts: {
   let currentModel: string | undefined = undefined;
   let a2aTurnQueued = false;
   let a2aInboxTurnActive = false;
+  let a2aInboxBackoffStreak = 0;
+  let a2aInboxBackoffUntil = 0;
+  let a2aInboxBackoffTimer: ReturnType<typeof setTimeout> | null = null;
+  const a2aInboxBackoffSettings = resolveA2AInboxBackoffSettings();
   let scheduleA2ATurnIfNeeded: (mode: CursorMode) => void = () => {};
   const syncModeToSessionMetadata = (permissionMode: PermissionMode, model: string | undefined) => {
     const dangerouslySkipPermissions = permissionMode === 'force';
@@ -491,7 +522,39 @@ export async function runCursor(opts: {
     permissionMode: currentPermissionMode ?? 'default',
     model: currentModel,
   });
+  const scheduleA2AInboxRetryPeek = (delayMs: number) => {
+    if (a2aInboxBackoffTimer !== null) {
+      clearTimeout(a2aInboxBackoffTimer);
+      a2aInboxBackoffTimer = null;
+    }
+    if (delayMs <= 0) {
+      return;
+    }
+    a2aInboxBackoffTimer = setTimeout(() => {
+      a2aInboxBackoffTimer = null;
+      messageQueue.poke();
+    }, delayMs);
+  };
+  const clearA2AInboxBackoff = () => {
+    a2aInboxBackoffStreak = 0;
+    a2aInboxBackoffUntil = 0;
+    if (a2aInboxBackoffTimer !== null) {
+      clearTimeout(a2aInboxBackoffTimer);
+      a2aInboxBackoffTimer = null;
+    }
+  };
   scheduleA2ATurnIfNeeded = (mode: CursorMode) => {
+    if (currentTurnIdRef !== null || a2aInboxTurnActive) {
+      logger.debug('[cursor] Deferring A2A inbox turn until the active turn finishes');
+      return;
+    }
+    if (isA2AInboxBackoffActive(a2aInboxBackoffUntil)) {
+      logger.debug(
+        `[cursor] A2A inbox backoff active (streak ${a2aInboxBackoffStreak}, `
+        + `retry in ${a2aInboxBackoffUntil - Date.now()}ms)`,
+      );
+      return;
+    }
     const unreadMessages = listA2AInboxMessages(session.getA2AInbox(), { unreadOnly: true });
     const compactMessage = unreadMessages.find((message) => parseSpecialCommand(message.text).type === 'compact');
     if (compactMessage) {
@@ -873,6 +936,7 @@ export async function runCursor(opts: {
       let turnCompletedNormally = false;
       let turnEndStatus: 'completed' | 'failed' | 'cancelled' = 'completed';
       let turnToolCallCount = 0;
+      let inboxTurnPresentationSent = false;
       lastTaskCompleteUsage = undefined;
       lastTaskCompleteCostUsd = undefined;
       lastTaskCompleteDurationMs = undefined;
@@ -911,24 +975,12 @@ export async function runCursor(opts: {
           const inbox = session.getA2AInbox();
           const unreadCount = getA2AUnreadCount(inbox);
           const summary = buildA2AInboxNotificationWithPreview(inbox);
-          const inboxTitle = unreadCount === 0
-            ? 'A2A inbox'
-            : unreadCount === 1
-              ? 'A2A inbox (1 unread)'
-              : `A2A inbox (${unreadCount} unread)`;
-          for (const envelope of buildA2ASubagentCardEnvelopes(summary, {
-            title: inboxTitle,
-            description: summary,
-            turnId: createId(),
-          })) {
-            session.sendSessionProtocolMessage(envelope);
-          }
           prompt = buildA2ATurnPrompt(summary, inboxSnapshotPath, unreadCount);
+        } else {
+          // Send turn-start in wrapped shape (type: 'session', data) so store App lifecycle check sees contentType === 'session'
+          session.sendSessionLifecycleEnvelope(createEnvelope('agent', { t: 'turn-start' }, { turn: turnId }));
+          messageBuffer.addMessage('Thinking...', 'system');
         }
-
-        // Send turn-start in wrapped shape (type: 'session', data) so store App lifecycle check sees contentType === 'session'
-        session.sendSessionLifecycleEnvelope(createEnvelope('agent', { t: 'turn-start' }, { turn: turnId }));
-        messageBuffer.addMessage('Thinking...', 'system');
 
         // Spawn cursor-agent process (second+ turn uses --resume so cursor-agent continues same chat)
         const cursorModel = mode.model ?? process.env.CURSOR_MODEL ?? 'auto';
@@ -974,6 +1026,11 @@ export async function runCursor(opts: {
         function handleParsedMessage(msg: CursorParsedMessage) {
           switch (msg.type) {
             case 'session_init':
+              if (isA2AInboxTurn && !inboxTurnPresentationSent) {
+                inboxTurnPresentationSent = true;
+                emitA2AInboxTurnPresentation({ session, turnId, messageBuffer });
+                logger.debug('[cursor] A2A inbox turn presentation sent after cursor-agent session_init');
+              }
               if (msg.sessionId && msg.sessionId !== cursorChatId) {
                 cursorChatId = msg.sessionId;
                 logger.debug(`[cursor] Chat ID: ${cursorChatId}`);
@@ -1195,7 +1252,32 @@ export async function runCursor(opts: {
         if (isA2AInboxTurn) {
           a2aInboxTurnActive = false;
         }
+        const turnSucceeded = turnCompletedNormally && turnEndStatus !== 'cancelled';
+        if (isA2AInboxTurn) {
+          if (turnSucceeded) {
+            clearA2AInboxBackoff();
+            logger.debug('[cursor] A2A inbox turn succeeded; backoff reset');
+          } else if (turnEndStatus !== 'cancelled') {
+            a2aInboxBackoffStreak += 1;
+            const delayMs = a2aInboxBackoffDelayMs(
+              a2aInboxBackoffStreak,
+              a2aInboxBackoffSettings,
+            );
+            a2aInboxBackoffUntil = Date.now() + delayMs;
+            logger.debug(
+              `[cursor] A2A inbox turn failed; backing off ${delayMs}ms `
+              + `(streak ${a2aInboxBackoffStreak})`,
+            );
+            scheduleA2AInboxRetryPeek(delayMs);
+          }
+        } else if (!isCursorCompactTurn && turnSucceeded) {
+          clearA2AInboxBackoff();
+          logger.debug('[cursor] User turn succeeded; A2A inbox backoff reset');
+        }
         emitReadyIfIdle();
+        if (!isA2AInboxBackoffActive(a2aInboxBackoffUntil)) {
+          peekA2AInboxInLoop(currentCursorMode());
+        }
 
         logger.debug(`[cursor] Turn completed (queue: ${messageQueue.size()})`);
 
@@ -1208,6 +1290,10 @@ export async function runCursor(opts: {
   } finally {
     // Cleanup
     logger.debug('[cursor]: Final cleanup start');
+    if (a2aInboxBackoffTimer !== null) {
+      clearTimeout(a2aInboxBackoffTimer);
+      a2aInboxBackoffTimer = null;
+    }
     removeSessionPidFile();
 
     if (reconnectionHandle) {
