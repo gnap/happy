@@ -35,7 +35,15 @@ import { registerKillSessionHandler } from '@/claude/registerKillSessionHandler'
 import { stopCaffeinate } from '@/utils/caffeinate';
 import { connectionState } from '@/utils/serverConnectionErrors';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
-import { buildA2AInboxNotificationWithPreview, buildA2ATurnPrompt, getA2AUnreadCount, hasUnreadA2AInboxMessages, listA2AInboxMessages } from '@/a2a/inbox';
+import {
+  buildA2AInboxNotificationWithPreview,
+  buildA2ATurnPrompt,
+  getA2AUnreadCount,
+  hasUnreadA2AInboxMessages,
+  listA2AInboxMessages,
+  pruneA2AInboxSnapshots,
+} from '@/a2a/inbox';
+import { a2aInboxBackoffDelayMs, isA2AInboxBackoffActive, resolveA2AInboxBackoffSettings } from '@/a2a/inboxBackoff';
 import { buildA2ASubagentCardEnvelopes } from '@/a2a/subagentCard';
 import type { ApiSessionClient } from '@/api/apiSession';
 import type { PermissionMode } from '@/api/types';
@@ -78,29 +86,38 @@ function readUsageNumber(usage: CursorUsageRecord | undefined, keys: string[]): 
   return undefined;
 }
 
-function normalizeCursorUsage(usage?: CursorUsageRecord): {
+function normalizeCursorUsage(usage?: CursorUsageRecord, apiCallCount = 1): {
   inputTokens?: number;
   outputTokens?: number;
   cacheReadInputTokens?: number;
   cacheCreationInputTokens?: number;
   totalTokens?: number;
+  contextSize?: number;
   usage?: CursorUsageRecord;
 } {
   const inputTokens = readUsageNumber(usage, ['input_tokens', 'inputTokens', 'prompt_tokens', 'promptTokens']);
   const outputTokens = readUsageNumber(usage, ['output_tokens', 'outputTokens', 'completion_tokens', 'completionTokens']);
-  const cacheReadInputTokens = readUsageNumber(usage, ['cache_read_input_tokens', 'cacheReadInputTokens']);
-  const cacheCreationInputTokens = readUsageNumber(usage, ['cache_creation_input_tokens', 'cacheCreationInputTokens']);
+  const cacheReadInputTokens = readUsageNumber(usage, ['cache_read_input_tokens', 'cacheReadInputTokens', 'cacheReadTokens']);
+  const cacheCreationInputTokens = readUsageNumber(usage, ['cache_creation_input_tokens', 'cacheCreationInputTokens', 'cacheWriteTokens']);
   const totalTokens = readUsageNumber(usage, ['total_tokens', 'totalTokens', 'tokens', 'tokenCount'])
     ?? (typeof inputTokens === 'number' && typeof outputTokens === 'number'
       ? inputTokens + outputTokens
       : undefined);
-
+  // cursor-agent accumulates cacheReadTokens across all N API calls within a turn.
+  // Each call reads ≈ C_final from cache (small per-call growth), so:
+  //   accumulated_cacheRead ≈ N × C_final  →  C_final ≈ accumulated_cacheRead / N
+  // N = tool_call_count + 1 (each tool call is one round-trip; +1 for the final response).
+  const n = Math.max(apiCallCount, 1);
+  const contextSize = cacheReadInputTokens !== undefined
+    ? Math.round(cacheReadInputTokens / n)
+    : ((inputTokens ?? 0) + (cacheCreationInputTokens ?? 0)) || undefined;
   return {
     inputTokens,
     outputTokens,
     cacheReadInputTokens,
     cacheCreationInputTokens,
     totalTokens,
+    contextSize,
     usage,
   };
 }
@@ -110,10 +127,11 @@ function formatCursorUsageLog(params: {
   turnId: string;
   cursorChatId: string | null;
   usage?: CursorUsageRecord;
+  apiCallCount?: number;
   costUsd?: number;
   durationMs?: number;
 }): string {
-  const normalized = normalizeCursorUsage(params.usage);
+  const normalized = normalizeCursorUsage(params.usage, params.apiCallCount);
 
   return JSON.stringify({
     sessionId: params.sessionId,
@@ -171,7 +189,37 @@ function writeA2AInboxSnapshot(workspacePath: string, sessionId: string, turnId:
     messages: unreadMessages,
   };
   writeFileSync(filePath, JSON.stringify(snapshot, null, 2));
+  const removed = pruneA2AInboxSnapshots(dir, sessionId);
+  if (removed > 0) {
+    logger.debug(`[cursor] Pruned ${removed} old A2A inbox snapshot file(s) for session ${sessionId}`);
+  }
   return filePath;
+}
+
+/** Emit inbox turn UI only after cursor-agent has started (session_init). */
+function emitA2AInboxTurnPresentation(options: {
+  session: ApiSessionClient;
+  turnId: string;
+  messageBuffer: MessageBuffer;
+}): void {
+  const { session, turnId, messageBuffer } = options;
+  const inbox = session.getA2AInbox();
+  const unreadCount = getA2AUnreadCount(inbox);
+  const summary = buildA2AInboxNotificationWithPreview(inbox);
+  const inboxTitle = unreadCount === 0
+    ? 'A2A inbox'
+    : unreadCount === 1
+      ? 'A2A inbox (1 unread)'
+      : `A2A inbox (${unreadCount} unread)`;
+  session.sendSessionLifecycleEnvelope(createEnvelope('agent', { t: 'turn-start' }, { turn: turnId }));
+  messageBuffer.addMessage('Thinking...', 'system');
+  for (const envelope of buildA2ASubagentCardEnvelopes(summary, {
+    title: inboxTitle,
+    description: summary,
+    turnId,
+  })) {
+    session.sendSessionProtocolMessage(envelope);
+  }
 }
 
 /**
@@ -400,6 +448,10 @@ export async function runCursor(opts: {
   let currentModel: string | undefined = undefined;
   let a2aTurnQueued = false;
   let a2aInboxTurnActive = false;
+  let a2aInboxBackoffStreak = 0;
+  let a2aInboxBackoffUntil = 0;
+  let a2aInboxBackoffTimer: ReturnType<typeof setTimeout> | null = null;
+  const a2aInboxBackoffSettings = resolveA2AInboxBackoffSettings();
   let scheduleA2ATurnIfNeeded: (mode: CursorMode) => void = () => {};
   const syncModeToSessionMetadata = (permissionMode: PermissionMode, model: string | undefined) => {
     const dangerouslySkipPermissions = permissionMode === 'force';
@@ -481,7 +533,39 @@ export async function runCursor(opts: {
     permissionMode: currentPermissionMode ?? 'default',
     model: currentModel,
   });
+  const scheduleA2AInboxRetryPeek = (delayMs: number) => {
+    if (a2aInboxBackoffTimer !== null) {
+      clearTimeout(a2aInboxBackoffTimer);
+      a2aInboxBackoffTimer = null;
+    }
+    if (delayMs <= 0) {
+      return;
+    }
+    a2aInboxBackoffTimer = setTimeout(() => {
+      a2aInboxBackoffTimer = null;
+      messageQueue.poke();
+    }, delayMs);
+  };
+  const clearA2AInboxBackoff = () => {
+    a2aInboxBackoffStreak = 0;
+    a2aInboxBackoffUntil = 0;
+    if (a2aInboxBackoffTimer !== null) {
+      clearTimeout(a2aInboxBackoffTimer);
+      a2aInboxBackoffTimer = null;
+    }
+  };
   scheduleA2ATurnIfNeeded = (mode: CursorMode) => {
+    if (currentTurnIdRef !== null || a2aInboxTurnActive) {
+      logger.debug('[cursor] Deferring A2A inbox turn until the active turn finishes');
+      return;
+    }
+    if (isA2AInboxBackoffActive(a2aInboxBackoffUntil)) {
+      logger.debug(
+        `[cursor] A2A inbox backoff active (streak ${a2aInboxBackoffStreak}, `
+        + `retry in ${a2aInboxBackoffUntil - Date.now()}ms)`,
+      );
+      return;
+    }
     const unreadMessages = listA2AInboxMessages(session.getA2AInbox(), { unreadOnly: true });
     const compactMessage = unreadMessages.find((message) => parseSpecialCommand(message.text).type === 'compact');
     if (compactMessage) {
@@ -511,6 +595,17 @@ export async function runCursor(opts: {
   session.onUserMessage(handleUserMessage);
   step('sessionConnect');
   writeSessionPidFile(session.sessionId);
+  const workspaceInboxDir = join(workspacePath, '.happy', 'a2a-inbox');
+  const prunedWorkspaceSnapshots = pruneA2AInboxSnapshots(workspaceInboxDir, sessionId);
+  const daemonInboxDir = join(configuration.happyHomeDir, 'a2a-inbox');
+  const prunedDaemonSnapshots = existsSync(daemonInboxDir)
+    ? pruneA2AInboxSnapshots(daemonInboxDir, sessionId)
+    : 0;
+  if (prunedWorkspaceSnapshots + prunedDaemonSnapshots > 0) {
+    logger.debug(
+      `[cursor] Pruned ${prunedWorkspaceSnapshots + prunedDaemonSnapshots} A2A inbox snapshot file(s) on session start`,
+    );
+  }
   // Persist initial default mode so app reload can restore it
   syncModeToSessionMetadata('default', undefined);
 
@@ -862,6 +957,8 @@ export async function runCursor(opts: {
       const toolCallTimeoutHandles = new Map<string, ReturnType<typeof setTimeout>>();
       let turnCompletedNormally = false;
       let turnEndStatus: 'completed' | 'failed' | 'cancelled' = 'completed';
+      let turnToolCallCount = 0;
+      let inboxTurnPresentationSent = false;
       lastTaskCompleteUsage = undefined;
       lastTaskCompleteCostUsd = undefined;
       lastTaskCompleteDurationMs = undefined;
@@ -900,24 +997,12 @@ export async function runCursor(opts: {
           const inbox = session.getA2AInbox();
           const unreadCount = getA2AUnreadCount(inbox);
           const summary = buildA2AInboxNotificationWithPreview(inbox);
-          const inboxTitle = unreadCount === 0
-            ? 'A2A inbox'
-            : unreadCount === 1
-              ? 'A2A inbox (1 unread)'
-              : `A2A inbox (${unreadCount} unread)`;
-          for (const envelope of buildA2ASubagentCardEnvelopes(summary, {
-            title: inboxTitle,
-            description: summary,
-            turnId: createId(),
-          })) {
-            session.sendSessionProtocolMessage(envelope);
-          }
           prompt = buildA2ATurnPrompt(summary, inboxSnapshotPath, unreadCount);
+        } else {
+          // Send turn-start in wrapped shape (type: 'session', data) so store App lifecycle check sees contentType === 'session'
+          session.sendSessionLifecycleEnvelope(createEnvelope('agent', { t: 'turn-start' }, { turn: turnId }));
+          messageBuffer.addMessage('Thinking...', 'system');
         }
-
-        // Send turn-start in wrapped shape (type: 'session', data) so store App lifecycle check sees contentType === 'session'
-        session.sendSessionLifecycleEnvelope(createEnvelope('agent', { t: 'turn-start' }, { turn: turnId }));
-        messageBuffer.addMessage('Thinking...', 'system');
 
         // Spawn cursor-agent process (second+ turn uses --resume so cursor-agent continues same chat)
         const cursorModel = mode.model ?? process.env.CURSOR_MODEL ?? 'auto';
@@ -963,6 +1048,11 @@ export async function runCursor(opts: {
         function handleParsedMessage(msg: CursorParsedMessage) {
           switch (msg.type) {
             case 'session_init':
+              if (isA2AInboxTurn && !inboxTurnPresentationSent) {
+                inboxTurnPresentationSent = true;
+                emitA2AInboxTurnPresentation({ session, turnId, messageBuffer });
+                logger.debug('[cursor] A2A inbox turn presentation sent after cursor-agent session_init');
+              }
               if (msg.sessionId && msg.sessionId !== cursorChatId) {
                 cursorChatId = msg.sessionId;
                 logger.debug(`[cursor] Chat ID: ${cursorChatId}`);
@@ -1027,6 +1117,7 @@ export async function runCursor(opts: {
               logger.debug(`[cursor] Shell/tool started: ${msg.toolName} ${cmdPreview} (callId: ${msg.callId.slice(0, 8)}..., pending: ${codexIdByCallId.size + 1})`);
               messageBuffer.addMessage(`Executing: ${msg.toolName} ${toolArgs}`, 'tool');
               codexIdByCallId.set(msg.callId, msg.callId);
+              turnToolCallCount++;
               // Session protocol only; avoid sending codex/cursor tool-call so App does not show three summary cards (session + codex + cursor).
               const toolTitle = msg.description ?? deriveToolTitle(msg.toolName, msg.args);
               session.sendSessionProtocolMessage(createEnvelope('agent', {
@@ -1084,7 +1175,10 @@ export async function runCursor(opts: {
               if (msg.sessionId) {
                 cursorChatId = msg.sessionId;
               }
-              lastTaskCompleteUsage = msg.usage;
+              const { usage: _raw, ...normalizedFields } = normalizeCursorUsage(msg.usage, turnToolCallCount + 1);
+              lastTaskCompleteUsage = normalizedFields.contextSize !== undefined
+                ? { ...normalizedFields, ...msg.usage }
+                : msg.usage;
               lastTaskCompleteCostUsd = msg.costUsd;
               lastTaskCompleteDurationMs = msg.durationMs;
               logger.debug(`[cursor] Turn usage ${formatCursorUsageLog({
@@ -1092,6 +1186,7 @@ export async function runCursor(opts: {
                 turnId,
                 cursorChatId,
                 usage: msg.usage,
+                apiCallCount: turnToolCallCount + 1,
                 costUsd: msg.costUsd,
                 durationMs: msg.durationMs,
               })}`);
@@ -1179,7 +1274,32 @@ export async function runCursor(opts: {
         if (isA2AInboxTurn) {
           a2aInboxTurnActive = false;
         }
+        const turnSucceeded = turnCompletedNormally && turnEndStatus !== 'cancelled';
+        if (isA2AInboxTurn) {
+          if (turnSucceeded) {
+            clearA2AInboxBackoff();
+            logger.debug('[cursor] A2A inbox turn succeeded; backoff reset');
+          } else if (turnEndStatus !== 'cancelled') {
+            a2aInboxBackoffStreak += 1;
+            const delayMs = a2aInboxBackoffDelayMs(
+              a2aInboxBackoffStreak,
+              a2aInboxBackoffSettings,
+            );
+            a2aInboxBackoffUntil = Date.now() + delayMs;
+            logger.debug(
+              `[cursor] A2A inbox turn failed; backing off ${delayMs}ms `
+              + `(streak ${a2aInboxBackoffStreak})`,
+            );
+            scheduleA2AInboxRetryPeek(delayMs);
+          }
+        } else if (!isCursorCompactTurn && turnSucceeded) {
+          clearA2AInboxBackoff();
+          logger.debug('[cursor] User turn succeeded; A2A inbox backoff reset');
+        }
         emitReadyIfIdle();
+        if (!isA2AInboxBackoffActive(a2aInboxBackoffUntil)) {
+          peekA2AInboxInLoop(currentCursorMode());
+        }
 
         logger.debug(`[cursor] Turn completed (queue: ${messageQueue.size()})`);
 
@@ -1192,6 +1312,10 @@ export async function runCursor(opts: {
   } finally {
     // Cleanup
     logger.debug('[cursor]: Final cleanup start');
+    if (a2aInboxBackoffTimer !== null) {
+      clearTimeout(a2aInboxBackoffTimer);
+      a2aInboxBackoffTimer = null;
+    }
     removeSessionPidFile();
 
     if (reconnectionHandle) {

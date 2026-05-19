@@ -1,4 +1,15 @@
 import type { A2AInboxMessage, A2AInboxState } from '@/api/types';
+import { pruneA2AInboxState, resolveA2AInboxRetentionSettings } from './inboxRetention';
+
+export { pruneA2AInboxState, resolveA2AInboxRetentionSettings } from './inboxRetention';
+export { pruneA2AInboxSnapshots, resolveA2AInboxSnapshotRetention } from './inboxSnapshot';
+export { loadLocalA2AInbox, localA2AInboxPath, saveLocalA2AInbox } from './inboxPersistence';
+export {
+  extractLegacyInboxFromAgentState,
+  isFullA2AInboxState,
+  isServerA2AInboxSnapshot,
+  toServerA2AInboxSnapshot,
+} from './inboxServer';
 
 function cloneMessage(message: A2AInboxMessage): A2AInboxMessage {
   return { ...message };
@@ -21,7 +32,7 @@ export function upsertA2AInboxMessage(
       ...cloneMessage(message),
       readAt: message.readAt ?? null,
     });
-    return next;
+    return pruneA2AInboxState(next);
   }
 
   const existing = next.messages[existingIndex];
@@ -30,7 +41,7 @@ export function upsertA2AInboxMessage(
     ...message,
     readAt: existing.readAt != null ? existing.readAt : (message.readAt ?? null),
   };
-  return next;
+  return pruneA2AInboxState(next);
 }
 
 export function mergeA2AInboxState(
@@ -71,7 +82,8 @@ export function markA2AInboxMessageRead(
   }
 
   existing.readAt = existing.readAt ?? readAt;
-  return next;
+  const settings = resolveA2AInboxRetentionSettings();
+  return pruneA2AInboxState(next, settings.dropReadOnMark ? { removeAllRead: true } : undefined);
 }
 
 export function markA2AInboxMessagesRead(
@@ -86,7 +98,8 @@ export function markA2AInboxMessagesRead(
       message.readAt = message.readAt ?? readAt;
     }
   }
-  return next;
+  const settings = resolveA2AInboxRetentionSettings();
+  return pruneA2AInboxState(next, settings.dropReadOnMark ? { removeAllRead: true } : undefined);
 }
 
 export function getA2AUnreadCount(inbox: A2AInboxState | null | undefined): number {

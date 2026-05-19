@@ -45,6 +45,7 @@ import { resolveMessageModeMeta } from './messageMeta';
 import { loadMessageCache, saveMessageCache, clearMessageCache, clearAllMessageCaches, preloadSessionCacheDB, getCachedLastSeq } from './cache/messageCache';
 import { olderAfterSeq } from './cacheSegment';
 import { overrideSessionCacheDB, IndexedDBSessionCacheDB } from './cache/sessionCacheDB';
+import { getSessionThinkingPatchFromMessageContent } from './sessionThinkingLifecycle';
 
 type V3GetSessionMessagesResponse = {
     messages: ApiMessage[];
@@ -2144,6 +2145,18 @@ class Sync {
                         }
                     }
                     normalizedMessages.push(normalized);
+
+                    const thinkingPatch = getSessionThinkingPatchFromMessageContent(decrypted.content);
+                    if (thinkingPatch) {
+                        const pageSession = storage.getState().sessions[sessionId];
+                        if (pageSession && pageSession.thinking !== thinkingPatch.thinking) {
+                            this.applySessions([{
+                                ...pageSession,
+                                ...thinkingPatch,
+                                thinkingAt: thinkingPatch.thinking ? Date.now() : 0,
+                            }]);
+                        }
+                    }
                 }
 
                 if (normalizedMessages.length > 0) {
@@ -2432,40 +2445,10 @@ class Sync {
                         }
                     }
 
-                    // Check for task lifecycle events to update thinking state
-                    // This ensures UI updates even if volatile activity updates are lost
-                    const rawContent = decrypted.content as {
-                        role?: string;
-                        content?: {
-                            type?: string;
-                            // sendSessionLifecycleEnvelope wraps envelope in { type:'session', data: envelope }
-                            data?: {
-                                type?: string;
-                                ev?: { t?: string };
-                            };
-                            // sendSessionProtocolMessage sends envelope directly as content
-                            ev?: { t?: string };
-                        }
-                    } | null;
-                    const contentType = rawContent?.content?.type;
-                    const dataType = rawContent?.content?.data?.type;
-                    // Check both envelope shapes: lifecycle wrapper (data.ev.t) and direct protocol (ev.t)
-                    const sessionEventType =
-                        rawContent?.content?.data?.ev?.t ??
-                        rawContent?.content?.ev?.t;
-
-                    const isTaskComplete = 
-                        ((contentType === 'acp' || contentType === 'codex') && 
-                            (dataType === 'task_complete' || dataType === 'turn_aborted')) ||
-                        sessionEventType === 'turn-end';
-                    
-                    const isTaskStarted = 
-                        ((contentType === 'acp' || contentType === 'codex') && dataType === 'task_started') ||
-                        sessionEventType === 'turn-start';
-
+                    const thinkingPatch = getSessionThinkingPatchFromMessageContent(decrypted.content);
                     const isReadyNormalized = lastMessage?.role === 'event'
                         && (lastMessage.content as { type?: string })?.type === 'ready';
-                    const shouldClearThinking = isTaskComplete || isReadyNormalized;
+                    const shouldClearThinking = thinkingPatch?.thinking === false || isReadyNormalized;
 
                     // Update session (use body.message.seq = session-internal seq, same as GET /v1/sessions; do not use updateData.seq which is global user seq)
                     const session = storage.getState().sessions[updateData.body.sid];
@@ -2474,11 +2457,10 @@ class Sync {
                             ...session,
                             updatedAt: updateData.createdAt,
                             seq: updateData.body.message.seq,
-                            // Update thinking state based on task lifecycle events.
-                            // turn-end/ready are persistent messages so this clears thinking even if
-                            // the ephemeral keepAlive(false) activity update was lost.
+                            ...(thinkingPatch?.thinking === true
+                                ? { thinking: true, thinkingAt: updateData.createdAt }
+                                : {}),
                             ...(shouldClearThinking ? { thinking: false, thinkingAt: 0 } : {}),
-                            ...(isTaskStarted ? { thinking: true, thinkingAt: updateData.createdAt } : {})
                         }])
                         if (shouldClearThinking) {
                             storage.getState().finalizeRunningTools(updateData.body.sid);
