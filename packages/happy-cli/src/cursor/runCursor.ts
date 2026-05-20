@@ -571,6 +571,12 @@ export async function runCursor(opts: {
     scheduleA2ATurnIfNeeded(mode ?? currentCursorMode());
   };
   session.onUserMessage(handleUserMessage);
+  // Restore model selection from server metadata on resume (do not wipe on reconnect).
+  const serverModelCode = session.getMetadata()?.currentModelCode;
+  if (serverModelCode && serverModelCode !== 'default') {
+    currentModel = serverModelCode;
+    logger.debug(`[cursor] Restored model from session metadata: ${serverModelCode}`);
+  }
   step('sessionConnect');
   writeSessionPidFile(session.sessionId);
   const workspaceInboxDir = join(workspacePath, '.happy', 'a2a-inbox');
@@ -584,12 +590,12 @@ export async function runCursor(opts: {
       `[cursor] Pruned ${prunedWorkspaceSnapshots + prunedDaemonSnapshots} A2A inbox snapshot file(s) on session start`,
     );
   }
-  // Persist initial default mode so app reload can restore it
-  syncModeToSessionMetadata('default', undefined);
+  // Persist initial permission mode; keep restored model selection when resuming.
+  syncModeToSessionMetadata('default', currentModel);
 
-  // Refresh models from cursor-agent and update session metadata.
-  // If the stored currentModelCode is no longer in the list (model was renamed/removed),
-  // it resets to whatever cursor-agent currently considers the active model.
+  // Refresh model list from cursor-agent. Only touch currentModelCode when we have an
+  // explicit selection (in-memory from this turn, or already in metadata). Never fill
+  // undefined with cursor-agent default — that overwrote App's choice after each turn.
   const refreshModelsMetadata = () => {
     fetchCursorModels().then((result) => {
       if (!result || result.models.length === 0) {
@@ -599,16 +605,23 @@ export async function runCursor(opts: {
       logger.debug(`[cursor] refreshModelsMetadata: ${result.models.length} models, current=${result.currentModelId}`);
       session.updateMetadata((m) => {
         const validCodes = new Set(result.models.map((mo) => mo.code));
-        const stored = m.currentModelCode;
-        const isStoredValid = !stored || stored === 'default' || stored === 'auto' || validCodes.has(stored);
-        if (!isStoredValid) {
-          logger.debug(`[cursor] refreshModelsMetadata: stored model "${stored}" not in new list, resetting to "${result.currentModelId}"`);
-        }
-        return {
-          ...m,
+        const preferred = currentModel ?? m.currentModelCode;
+        const patch: { models: typeof result.models; currentModelCode?: string } = {
           models: result.models,
-          currentModelCode: isStoredValid ? (stored ?? result.currentModelId) : result.currentModelId,
         };
+        if (preferred !== undefined) {
+          const isValid =
+            preferred === 'default' || preferred === 'auto' || validCodes.has(preferred);
+          if (isValid) {
+            patch.currentModelCode = preferred;
+          } else {
+            logger.debug(
+              `[cursor] refreshModelsMetadata: model "${preferred}" not in list, resetting to "${result.currentModelId}"`,
+            );
+            patch.currentModelCode = result.currentModelId;
+          }
+        }
+        return { ...m, ...patch };
       }).catch((err) => logger.debug('[cursor] refreshModelsMetadata: failed to update metadata', err));
     }).catch((err) => logger.debug('[cursor] refreshModelsMetadata threw:', err));
   };

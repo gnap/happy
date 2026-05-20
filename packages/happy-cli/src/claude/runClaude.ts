@@ -30,7 +30,7 @@ import { claudeLocal } from '@/claude/claudeLocal';
 import { createSessionScanner } from '@/claude/utils/sessionScanner';
 import { Session } from './session';
 import { applySandboxPermissionPolicy, resolveInitialClaudePermissionMode } from './utils/permissionMode';
-import { normalizeClaudeModelForSdk } from './utils/model';
+import { claudeModelCodeForMetadata, normalizeClaudeModelForSdk } from './utils/model';
 
 /** JavaScript runtime to use for spawning Claude Code */
 export type JsRuntime = 'node' | 'bun'
@@ -435,6 +435,22 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             allowedTools: messageAllowedTools,
             disallowedTools: messageDisallowedTools
         };
+        const metaChanged =
+            message.meta?.permissionMode !== undefined
+            || (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'model'));
+        if (metaChanged) {
+            session.updateMetadata((m) => {
+                const patch: { currentOperatingModeCode?: string; currentModelCode?: string } = {};
+                if (message.meta?.permissionMode !== undefined) {
+                    patch.currentOperatingModeCode = messagePermissionMode || 'default';
+                }
+                if (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'model')) {
+                    patch.currentModelCode = claudeModelCodeForMetadata(message.meta.model);
+                }
+                return { ...m, ...patch };
+            }).catch((err) => logger.debug('[loop] Failed to persist permission/model to session metadata', err));
+        }
+
         const isA2A = (message.meta as { origin?: string } | undefined)?.origin === 'a2a';
         if (isA2A) {
             messageQueue.pushIsolated(message.content.text, enhancedMode);

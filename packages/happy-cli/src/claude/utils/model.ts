@@ -15,3 +15,10 @@ export function normalizeClaudeModelForSdk(model: string | null | undefined): st
     if (NON_API_CLAUDE_MODEL_CODES.has(trimmed)) return undefined;
     return trimmed;
 }
+
+/** App-facing model key for session.metadata.currentModelCode (not SDK --model). */
+export function claudeModelCodeForMetadata(model: string | null | undefined): string {
+    if (model === null || model === undefined) return 'default';
+    const trimmed = typeof model === 'string' ? model.trim() : '';
+    return trimmed || 'default';
+}
