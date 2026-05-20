@@ -1220,12 +1220,9 @@ export class ApiSessionClient extends EventEmitter {
             thinking,
             mode,
         };
-        // Clearing thinking must be reliable; volatile emits are often dropped under flaky WSS.
-        if (thinking === false) {
-            this.socket.emit('session-alive', payload);
-        } else {
-            this.socket.volatile.emit('session-alive', payload);
-        }
+        // Both directions must be reliable: volatile thinking=true is often dropped (App stuck idle),
+        // volatile thinking=false left sessions stuck "thinking" on flaky WSS.
+        this.socket.emit('session-alive', payload);
     }
 
     /**

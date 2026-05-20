@@ -155,7 +155,11 @@ describe('CursorProcess interactive command', () => {
       mocks.mockExistsSync.mockImplementation((candidate) => candidate === '/usr/bin/cursor-agent');
 
       const proc = new CursorProcess({ cwd: '/workspace' });
-      const runPromise = proc.runInteractiveCommand('/compress');
+      const runPromise = proc.runInteractiveCommand('/compress', {
+        completionMode: 'compress',
+        postCommandIdleMs: 60_000,
+        postCommandMaxMs: 0,
+      });
 
       child.stdout.emit('data', Buffer.from('Loading conversation...\n'));
       await vi.advanceTimersByTimeAsync(0);
@@ -165,14 +169,53 @@ describe('CursorProcess interactive command', () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(child.stdin.write).toHaveBeenNthCalledWith(1, '/compress\n');
 
+      child.stdout.emit('data', Buffer.from('Context compressed successfully.\nAdd a follow-up\n'));
       await vi.advanceTimersByTimeAsync(0);
-      await expect(runPromise).resolves.toBeUndefined();
-      expect(child.stdin.write).toHaveBeenCalledTimes(1);
-
-      child.stdin.write('/exit\n');
-      await vi.advanceTimersByTimeAsync(0);
+      await expect(runPromise).resolves.toEqual({ outcome: 'completed' });
+      expect(child.stdin.write).toHaveBeenCalledWith('/exit\n');
 
       expect(mocks.mockSpawn).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fails compress turn on post-command idle without completion signal', async () => {
+    vi.useFakeTimers();
+    try {
+      const child = new EventEmitter() as EventEmitter & {
+        stdin: { write: ReturnType<typeof vi.fn> };
+        stdout: EventEmitter;
+        stderr: EventEmitter;
+        kill: ReturnType<typeof vi.fn>;
+      };
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.stdin = { write: vi.fn(() => true) };
+      child.kill = vi.fn(() => {
+        queueMicrotask(() => child.emit('close', 0));
+        return true;
+      });
+
+      mocks.mockSpawn.mockReturnValue(child);
+      mocks.mockExistsSync.mockImplementation((candidate) => candidate === '/usr/bin/cursor-agent');
+
+      const proc = new CursorProcess({ cwd: '/workspace' });
+      const runPromise = proc.runInteractiveCommand('/compress', {
+        completionMode: 'compress',
+        postCommandIdleMs: 5_000,
+        postCommandMaxMs: 0,
+      });
+
+      child.stdout.emit('data', Buffer.from('Rendering latest messages\n'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(child.stdin.write).toHaveBeenCalledWith('/compress\n');
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(runPromise).resolves.toEqual({
+        outcome: 'timed_out',
+        detail: 'No compression completion signal after 5000ms idle',
+      });
     } finally {
       vi.useRealTimers();
     }

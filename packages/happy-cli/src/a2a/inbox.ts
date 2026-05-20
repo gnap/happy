@@ -128,6 +128,17 @@ export function buildA2AInboxNotification(unreadCount: number): string {
   return `A2A inbox${suffix}.`;
 }
 
+/** Task tool card title shown in the App (replaces CLI-emitted fake A2A cards). */
+export function buildA2AInboxTaskTitle(unreadCount: number): string {
+  if (unreadCount <= 0) {
+    return 'A2A inbox';
+  }
+  if (unreadCount === 1) {
+    return 'A2A inbox (1 unread)';
+  }
+  return `A2A inbox (${unreadCount} unread)`;
+}
+
 function normalizeInboxPreviewText(text: string): string {
   return text.replace(/\s+/g, ' ').trim().slice(0, 120);
 }
@@ -149,15 +160,29 @@ export function buildA2AInboxNotificationWithPreview(
 }
 
 export function buildA2ATurnPrompt(notification: string, snapshotPath?: string, unreadCount?: number): string {
-  const stacked = typeof unreadCount === 'number' && unreadCount > 1;
+  const count = typeof unreadCount === 'number' && unreadCount > 0 ? unreadCount : 1;
+  const stacked = count > 1;
+  const taskTitle = buildA2AInboxTaskTitle(count);
+  const inboxMcpSteps = [
+    'Call Happy MCP list_a2a_messages with unreadOnly=true.',
+    'For each unread id: read_a2a_message, then mark_a2a_message_read (or mark_a2a_messages_read in one batch).',
+    'Return only a concise combined summary for the main agent; do not paste full inbox bodies unless asked.',
+  ].join(' ');
+  const subagentPrompt = stacked
+    ? `There are ${count} unread A2A inbox messages. ${inboxMcpSteps}`
+    : `There is 1 unread A2A inbox message. ${inboxMcpSteps}`;
   return [
     notification,
-    snapshotPath ? `Snapshot: ${snapshotPath}` : null,
-    'This is an A2A inbox turn: you must list, read, and mark inbox messages with MCP in this turn before you finish.',
-    'Use list_a2a_messages(unreadOnly=true), read_a2a_message for each id you handle, then mark_a2a_messages_read for every consumed id — all in this turn.',
-    stacked
-      ? `There are ${unreadCount} unread inbox messages stacked; read and mark them all in this turn, then reply with one combined summary.`
-      : 'Read the unread inbox message in this turn, mark it read via MCP, then reply.',
-    'Inbox mark tools only work during this turn; do not leave unread messages for a later turn.',
+    snapshotPath ? `Snapshot (debug only, prefer MCP over file): ${snapshotPath}` : null,
+    'This is an A2A inbox turn. Do not read or mark inbox messages yourself in the main agent.',
+    'Delegate inbox work to cursor-agent built-in Task subagent(s), not Happy spawn_subagent.',
+    'Spawn one Task (or a small parallel batch) with model auto for cost control.',
+    `Set the Task description (card title) exactly to: ${taskTitle}`,
+    `Task prompt: ${subagentPrompt}`,
+    'Output discipline (main agent): before the Task tool call, send no user-visible text — no preamble, plan, status, or reasoning.',
+    'After the Task completes, your only user-visible reply is a short introduction of the Task result (one combined summary).',
+    'Do not mention inbox turns, MCP, Task delegation, or that you spawned a subagent; do not repeat the Task prompt or raw tool output.',
+    'Happy inbox MCP tools (list/read/mark) only work during this inbox turn; the Task must finish before you end the turn.',
+    'Do not leave unread inbox messages for a later turn.',
   ].filter((line): line is string => line !== null && line.length > 0).join(' ');
 }

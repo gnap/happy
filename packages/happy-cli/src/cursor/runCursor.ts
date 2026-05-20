@@ -37,6 +37,7 @@ import { connectionState } from '@/utils/serverConnectionErrors';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
 import {
   buildA2AInboxNotificationWithPreview,
+  buildA2AInboxTaskTitle,
   buildA2ATurnPrompt,
   getA2AUnreadCount,
   hasUnreadA2AInboxMessages,
@@ -44,7 +45,6 @@ import {
   pruneA2AInboxSnapshots,
 } from '@/a2a/inbox';
 import { a2aInboxBackoffDelayMs, isA2AInboxBackoffActive, resolveA2AInboxBackoffSettings } from '@/a2a/inboxBackoff';
-import { buildA2ASubagentCardEnvelopes } from '@/a2a/subagentCard';
 import type { ApiSessionClient } from '@/api/apiSession';
 import type { PermissionMode } from '@/api/types';
 import type { UserMessage } from '@/api/types';
@@ -194,32 +194,6 @@ function writeA2AInboxSnapshot(workspacePath: string, sessionId: string, turnId:
     logger.debug(`[cursor] Pruned ${removed} old A2A inbox snapshot file(s) for session ${sessionId}`);
   }
   return filePath;
-}
-
-/** Emit inbox turn UI only after cursor-agent has started (session_init). */
-function emitA2AInboxTurnPresentation(options: {
-  session: ApiSessionClient;
-  turnId: string;
-  messageBuffer: MessageBuffer;
-}): void {
-  const { session, turnId, messageBuffer } = options;
-  const inbox = session.getA2AInbox();
-  const unreadCount = getA2AUnreadCount(inbox);
-  const summary = buildA2AInboxNotificationWithPreview(inbox);
-  const inboxTitle = unreadCount === 0
-    ? 'A2A inbox'
-    : unreadCount === 1
-      ? 'A2A inbox (1 unread)'
-      : `A2A inbox (${unreadCount} unread)`;
-  session.sendSessionLifecycleEnvelope(createEnvelope('agent', { t: 'turn-start' }, { turn: turnId }));
-  messageBuffer.addMessage('Thinking...', 'system');
-  for (const envelope of buildA2ASubagentCardEnvelopes(summary, {
-    title: inboxTitle,
-    description: summary,
-    turnId,
-  })) {
-    session.sendSessionProtocolMessage(envelope);
-  }
 }
 
 /**
@@ -945,11 +919,9 @@ export async function runCursor(opts: {
       const turnId = createId();
       currentTurnIdRef = turnId;
 
-      // For A2A inbox turns we keep the prompt internal and emit the A2A card right as the turn starts.
+      // For A2A inbox turns we keep the prompt internal; the real Task tool card replaces CLI fake cards.
       if (!isA2AInboxTurn && !isCursorCompactTurn) {
         session.sendSessionProtocolMessage(createEnvelope('user', { t: 'text', text: userMessage }, { turn: turnId }));
-      } else if (isCursorCompactTurn) {
-        session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'service', text: 'Summarizing...' }, { turn: turnId }));
       }
       const messageParser = new CursorMessageParser();
       const codexIdByCallId = new Map<string, string>();
@@ -958,7 +930,7 @@ export async function runCursor(opts: {
       let turnCompletedNormally = false;
       let turnEndStatus: 'completed' | 'failed' | 'cancelled' = 'completed';
       let turnToolCallCount = 0;
-      let inboxTurnPresentationSent = false;
+      let inboxTurnUnreadCount = 0;
       lastTaskCompleteUsage = undefined;
       lastTaskCompleteCostUsd = undefined;
       lastTaskCompleteDurationMs = undefined;
@@ -996,12 +968,21 @@ export async function runCursor(opts: {
           const inboxSnapshotPath = writeA2AInboxSnapshot(workspacePath, sessionId, turnId, session.getA2AInbox());
           const inbox = session.getA2AInbox();
           const unreadCount = getA2AUnreadCount(inbox);
+          inboxTurnUnreadCount = unreadCount;
           const summary = buildA2AInboxNotificationWithPreview(inbox);
           prompt = buildA2ATurnPrompt(summary, inboxSnapshotPath, unreadCount);
-        } else {
-          // Send turn-start in wrapped shape (type: 'session', data) so store App lifecycle check sees contentType === 'session'
           session.sendSessionLifecycleEnvelope(createEnvelope('agent', { t: 'turn-start' }, { turn: turnId }));
-          messageBuffer.addMessage('Thinking...', 'system');
+          await session.flush();
+        } else {
+          // Durable lifecycle + flush so App shows thinking before a long headless or PTY /compress turn.
+          session.sendSessionLifecycleEnvelope(createEnvelope('agent', { t: 'turn-start' }, { turn: turnId }));
+          if (isCursorCompactTurn) {
+            session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'service', text: 'Summarizing...' }, { turn: turnId }));
+            messageBuffer.addMessage('Summarizing...', 'system');
+          } else {
+            messageBuffer.addMessage('Thinking...', 'system');
+          }
+          await session.flush();
         }
 
         // Spawn cursor-agent process (second+ turn uses --resume so cursor-agent continues same chat)
@@ -1048,11 +1029,6 @@ export async function runCursor(opts: {
         function handleParsedMessage(msg: CursorParsedMessage) {
           switch (msg.type) {
             case 'session_init':
-              if (isA2AInboxTurn && !inboxTurnPresentationSent) {
-                inboxTurnPresentationSent = true;
-                emitA2AInboxTurnPresentation({ session, turnId, messageBuffer });
-                logger.debug('[cursor] A2A inbox turn presentation sent after cursor-agent session_init');
-              }
               if (msg.sessionId && msg.sessionId !== cursorChatId) {
                 cursorChatId = msg.sessionId;
                 logger.debug(`[cursor] Chat ID: ${cursorChatId}`);
@@ -1119,7 +1095,10 @@ export async function runCursor(opts: {
               codexIdByCallId.set(msg.callId, msg.callId);
               turnToolCallCount++;
               // Session protocol only; avoid sending codex/cursor tool-call so App does not show three summary cards (session + codex + cursor).
-              const toolTitle = msg.description ?? deriveToolTitle(msg.toolName, msg.args);
+              let toolTitle = msg.description ?? deriveToolTitle(msg.toolName, msg.args);
+              if (isA2AInboxTurn && msg.toolName === 'Task') {
+                toolTitle = buildA2AInboxTaskTitle(inboxTurnUnreadCount);
+              }
               session.sendSessionProtocolMessage(createEnvelope('agent', {
                 t: 'tool-call-start',
                 call: msg.callId,
@@ -1210,11 +1189,22 @@ export async function runCursor(opts: {
 
         // Run the process (blocks until exit)
         if (isCursorCompactTurn) {
-          await cursorProc.runInteractiveCommand('/compress');
-          const summarySuccessMessage = 'Summary completed successfully.';
-          messageBuffer.addMessage(summarySuccessMessage, 'status');
-          session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'service', text: summarySuccessMessage }, { turn: turnId }));
-          turnCompletedNormally = true;
+          const compactResult = await cursorProc.runInteractiveCommand('/compress', { completionMode: 'compress' });
+          if (compactResult.outcome === 'completed') {
+            const summarySuccessMessage = 'Summary completed successfully.';
+            messageBuffer.addMessage(summarySuccessMessage, 'status');
+            session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'service', text: summarySuccessMessage }, { turn: turnId }));
+            turnCompletedNormally = true;
+          } else {
+            const compactDetail = compactResult.detail
+              ?? (compactResult.outcome === 'timed_out'
+                ? 'Compression timed out'
+                : 'Compression did not complete');
+            logger.debug(`[cursor] Compact turn ${compactResult.outcome}: ${compactDetail}`);
+            messageBuffer.addMessage(compactDetail, 'status');
+            session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'service', text: compactDetail }, { turn: turnId }));
+            turnEndStatus = 'failed';
+          }
         } else {
           await cursorProc.run(prompt);
         }

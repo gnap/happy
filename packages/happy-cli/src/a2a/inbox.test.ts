@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildA2AInboxNotification,
   buildA2AInboxNotificationWithPreview,
+  buildA2AInboxTaskTitle,
   buildA2ATurnPrompt,
   cloneA2AInboxState,
   getA2AUnreadCount,
@@ -52,6 +53,12 @@ describe('A2A inbox helpers', () => {
     expect(buildA2AInboxNotification(1)).not.toContain('list_a2a_messages');
   });
 
+  it('builds a Task card title with unread count', () => {
+    expect(buildA2AInboxTaskTitle(0)).toBe('A2A inbox');
+    expect(buildA2AInboxTaskTitle(1)).toBe('A2A inbox (1 unread)');
+    expect(buildA2AInboxTaskTitle(4)).toBe('A2A inbox (4 unread)');
+  });
+
   it('can include a compact inbox preview', () => {
     const inbox = upsertA2AInboxMessage(undefined, {
       id: 'one',
@@ -62,19 +69,28 @@ describe('A2A inbox helpers', () => {
     expect(buildA2AInboxNotificationWithPreview(inbox)).toContain('Reminder: first message');
   });
 
-  it('builds a hidden prompt that requires MCP inbox consumption in this turn', () => {
+  it('builds a hidden prompt that delegates inbox work to built-in Task with auto', () => {
     const prompt = buildA2ATurnPrompt(buildA2AInboxNotification(1));
     expect(prompt).toContain('A2A inbox (1 unread)');
+    expect(prompt).toContain('built-in Task');
+    expect(prompt).toContain('model auto');
+    expect(prompt).toContain('Task description (card title) exactly to: A2A inbox (1 unread)');
     expect(prompt).toContain('list_a2a_messages');
     expect(prompt).toContain('mark_a2a_messages_read');
-    expect(prompt).toContain('in this turn');
-    expect(prompt).toContain('do not leave unread messages for a later turn');
+    expect(prompt).toContain('Do not read or mark inbox messages yourself');
+    expect(prompt).toContain('not Happy spawn_subagent');
+    expect(prompt).toContain('before the Task tool call, send no user-visible text');
+    expect(prompt).toContain('only user-visible reply is a short introduction of the Task result');
+    expect(prompt).toContain('Do not mention inbox turns');
+    expect(prompt).toContain('Do not leave unread inbox messages for a later turn');
   });
 
   it('encourages one-turn batch handling when multiple messages are stacked', () => {
     const prompt = buildA2ATurnPrompt(buildA2AInboxNotification(4), '/tmp/inbox.json', 4);
-    expect(prompt).toContain('4 unread inbox messages stacked');
-    expect(prompt).toContain('one combined summary');
+    expect(prompt).toContain('4 unread A2A inbox messages');
+    expect(prompt).toContain('A2A inbox (4 unread)');
+    expect(prompt).toContain('short introduction of the Task result');
+    expect(prompt).toContain('Task prompt:');
   });
 
   it('marks a single message as read', () => {

@@ -1955,6 +1955,7 @@ class Sync {
                             updatedAt: updateData.createdAt,
                             seq: updateData.body.message.seq,
                             ...(thinkingPatch ?? {}),
+                            ...(thinkingPatch ? { thinkingAt: Date.now() } : {}),
                         }])
                     } else {
                         // Fetch sessions again if we don't have this session
