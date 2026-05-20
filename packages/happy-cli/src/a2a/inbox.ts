@@ -2,7 +2,11 @@ import type { A2AInboxMessage, A2AInboxState } from '@/api/types';
 import { pruneA2AInboxState, resolveA2AInboxRetentionSettings } from './inboxRetention';
 
 export { pruneA2AInboxState, resolveA2AInboxRetentionSettings } from './inboxRetention';
-export { pruneA2AInboxSnapshots, resolveA2AInboxSnapshotRetention } from './inboxSnapshot';
+export {
+  pruneA2AInboxSnapshots,
+  resolveA2AInboxSnapshotRetention,
+  writeA2AInboxSnapshot,
+} from './inboxSnapshot';
 export { loadLocalA2AInbox, localA2AInboxPath, saveLocalA2AInbox } from './inboxPersistence';
 export {
   extractLegacyInboxFromAgentState,
@@ -201,6 +205,32 @@ export function buildA2ATurnPrompt(notification: string, snapshotPath?: string, 
     'After the Task completes, your only user-visible reply is a short introduction of the Task result (one combined summary).',
     'Do not mention inbox turns, MCP, Task delegation, or that you spawned a subagent; do not repeat the Task prompt or raw tool output.',
     'Happy inbox MCP tools (list/read/mark) only work during this inbox turn; the Task must finish before you end the turn.',
+    'Do not leave unread inbox messages for a later turn.',
+  ].filter((line): line is string => line !== null && line.length > 0).join(' ');
+}
+
+/** Claude Code inbox turn: drain via Happy MCP tools in the main agent (no Task model slug). */
+export function buildA2ATurnPromptForClaude(
+  notification: string,
+  snapshotPath?: string,
+  unreadCount?: number,
+): string {
+  const count = typeof unreadCount === 'number' && unreadCount > 0 ? unreadCount : 1;
+  const stacked = count > 1;
+  const inboxMcpSteps = [
+    'Call mcp__happy__list_a2a_messages with unreadOnly=true.',
+    'For each unread id: mcp__happy__read_a2a_message, then mcp__happy__mark_a2a_message_read (or mcp__happy__mark_a2a_messages_read in one batch).',
+    'Reply with a concise combined summary for the user; do not paste full inbox bodies unless asked.',
+  ].join(' ');
+  const work = stacked
+    ? `There are ${count} unread A2A inbox messages. ${inboxMcpSteps}`
+    : `There is 1 unread A2A inbox message. ${inboxMcpSteps}`;
+  return [
+    notification,
+    snapshotPath ? `Snapshot (debug only, prefer MCP over file): ${snapshotPath}` : null,
+    'This is an A2A inbox turn.',
+    work,
+    'Happy inbox MCP tools (mcp__happy__list/read/mark_a2a_*) only work during this inbox turn.',
     'Do not leave unread inbox messages for a later turn.',
   ].filter((line): line is string => line !== null && line.length > 0).join(' ');
 }

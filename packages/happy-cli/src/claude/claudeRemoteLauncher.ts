@@ -321,7 +321,10 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         let pending: {
             message: string;
             mode: EnhancedMode;
+            meta?: unknown;
         } | null = null;
+        let wasInboxTurn = false;
+        let turnSucceeded = false;
 
         // Track session ID to detect when it actually changes
         // This prevents context loss when mode changes (permission mode, model, etc.)
@@ -351,6 +354,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             abortFuture = new Future<void>();
             let modeHash: string | null = null;
             let mode: EnhancedMode | null = null;
+            wasInboxTurn = false;
+            turnSucceeded = false;
             try {
                 const remoteResult = await claudeRemote({
                     sessionId: session.sessionId,
@@ -375,10 +380,36 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
 
                         // Check if mode has changed
                         if (msg) {
+                            const inboxHooks = session.a2aInboxTurn;
+                            const isInboxTurn = inboxHooks?.isInboxTurnMeta(msg.meta) ?? false;
+                            if (isInboxTurn) {
+                                inboxHooks?.setInboxTurnActive(true);
+                                const inboxPrompt = inboxHooks?.prepareInboxTurnPrompt();
+                                if (!inboxPrompt) {
+                                    inboxHooks?.setInboxTurnActive(false);
+                                    return null;
+                                }
+                                wasInboxTurn = true;
+                                if (session.claudeTurnActiveRef) {
+                                    session.claudeTurnActiveRef.current = true;
+                                }
+                                modeHash = msg.hash;
+                                mode = msg.mode;
+                                permissionHandler.handleModeChange(mode.permissionMode);
+                                logger.debug('[remote]: processing A2A inbox turn');
+                                return {
+                                    message: inboxPrompt,
+                                    mode: msg.mode,
+                                };
+                            }
+                            wasInboxTurn = false;
                             if ((modeHash && msg.hash !== modeHash) || msg.isolate) {
                                 logger.debug('[remote]: mode has changed, pending message');
-                                pending = msg;
+                                pending = { message: msg.message, mode: msg.mode, meta: msg.meta };
                                 return null;
+                            }
+                            if (session.claudeTurnActiveRef) {
+                                session.claudeTurnActiveRef.current = true;
                             }
                             modeHash = msg.hash;
                             mode = msg.mode;
@@ -410,6 +441,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         session.clearSessionId();
                     },
                     onReady: () => {
+                        turnSucceeded = true;
                         session.client.closeClaudeSessionTurn('completed');
                         if (!pending && session.queue.size() === 0) {
                             session.api.push().sendToAllDevices(
@@ -456,12 +488,21 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                 messageQueue.destroy();
                 logger.debug('[remote]: message queue flushed');
 
+                const turnCancelled = abortController?.signal.aborted ?? false;
                 // Reset abort controller and future
                 abortController = null;
                 abortFuture?.resolve(undefined);
                 abortFuture = null;
                 logger.debug('[remote]: launch done');
                 permissionHandler.reset();
+                session.a2aInboxTurn?.onTurnEnd({
+                    succeeded: turnSucceeded && !turnCancelled,
+                    cancelled: turnCancelled,
+                    wasInboxTurn,
+                });
+                if (session.claudeTurnActiveRef) {
+                    session.claudeTurnActiveRef.current = false;
+                }
                 modeHash = null;
                 mode = null;
             }

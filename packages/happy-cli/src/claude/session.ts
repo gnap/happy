@@ -4,6 +4,7 @@ import { EnhancedMode } from "./loop";
 import { logger } from "@/ui/logger";
 import type { JsRuntime } from "./runClaude";
 import type { SandboxConfig } from "@/persistence";
+import type { A2AInboxTurnHooks } from "@/a2a/inboxTurnController";
 
 export class Session {
     readonly path: string;
@@ -21,6 +22,11 @@ export class Session {
     readonly hookSettingsPath: string;
     /** JavaScript runtime to use for spawning Claude Code (default: 'node') */
     readonly jsRuntime: JsRuntime;
+
+    /** A2A inbox scheduling (set by runClaude). */
+    a2aInboxTurn?: A2AInboxTurnHooks;
+    /** Remote loop sets true while a Claude turn is in flight. */
+    claudeTurnActiveRef?: { current: boolean };
 
     sessionId: string | null;
     mode: 'local' | 'remote' = 'local';
