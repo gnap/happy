@@ -1171,6 +1171,7 @@ export async function startDaemon(): Promise<void> {
     if (prevState?.lastDirectoryBySessionId) Object.assign(lastDirectoryBySessionId, prevState.lastDirectoryBySessionId);
     if (prevState?.lastAgentBySessionId) Object.assign(lastAgentBySessionId, prevState.lastAgentBySessionId);
     if (prevState?.archivedSessionIds) Object.assign(archivedSessionIds, prevState.archivedSessionIds);
+    if (prevState?.lastSeqBySessionId) Object.assign(lastSeqBySessionId, prevState.lastSeqBySessionId);
     // Restore stopped sessions from previous daemon state (tombstone survives clean shutdown)
     const persistedStopped = prevState?.stoppedSessions;
     if (persistedStopped) {
@@ -1218,9 +1219,10 @@ export async function startDaemon(): Promise<void> {
         lastSessionTagBySessionId: { ...lastSessionTagBySessionId },
         lastDirectoryBySessionId: { ...lastDirectoryBySessionId },
         lastAgentBySessionId: { ...lastAgentBySessionId },
-        archivedSessionIds: { ...archivedSessionIds },
-        stoppedSessions: serializeStoppedSessions(),
-      });
+          archivedSessionIds: { ...archivedSessionIds },
+          lastSeqBySessionId: { ...lastSeqBySessionId },
+          stoppedSessions: serializeStoppedSessions(),
+        });
     };
     const fileState: DaemonLocallyPersistedState = {
       pid: process.pid,
@@ -1233,6 +1235,7 @@ export async function startDaemon(): Promise<void> {
       lastDirectoryBySessionId: { ...lastDirectoryBySessionId },
       lastAgentBySessionId: { ...lastAgentBySessionId },
       archivedSessionIds: { ...archivedSessionIds },
+      lastSeqBySessionId: { ...lastSeqBySessionId },
       stoppedSessions: serializeStoppedSessions(),
     };
     writeDaemonState(fileState);
@@ -1270,6 +1273,23 @@ export async function startDaemon(): Promise<void> {
 
     // Connect to server
     apiMachine.connect();
+
+    try {
+      const bootstrapSessions = await api.listChangedSessions(0);
+      let seeded = 0;
+      for (const { id, seq } of bootstrapSessions) {
+        if (!id || seq < 0) continue;
+        const prior = lastSeqBySessionId[id];
+        if (prior === undefined || seq > prior) {
+          lastSeqBySessionId[id] = seq;
+          seeded++;
+        }
+      }
+      logger.debug(`[DAEMON RUN] Bootstrapped lastSeq for ${seeded}/${bootstrapSessions.length} session(s) from server`);
+      persistNow();
+    } catch (err) {
+      logger.debug('[DAEMON RUN] Failed to bootstrap session seq baselines:', err);
+    }
 
     const RESPAWN_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes between respawn attempts per session
 
@@ -1335,7 +1355,7 @@ export async function startDaemon(): Promise<void> {
           }
 
           const agent = (lastAgentBySessionId[id] as 'cursor' | 'claude' | 'codex' | 'gemini' | 'acp-cursor') ?? 'cursor';
-          const resumeAfterSeq = prevSeq >= 0 ? prevSeq : undefined;
+          const resumeAfterSeq = prevSeq >= 0 ? prevSeq : (seq > 0 ? seq - 1 : undefined);
           logger.debug(
             `[DAEMON RUN] Auto-respawning session ${id} (${agent}) in ${directory} (seq ${prevSeq} → ${seq}, tag=${tag.slice(0, 8)}, resumeAfterSeq=${resumeAfterSeq ?? 'none'}, offlineWake=${daemonManagedStopped})`,
           );
@@ -1453,6 +1473,8 @@ export async function startDaemon(): Promise<void> {
           lastSessionTagBySessionId: { ...lastSessionTagBySessionId },
           lastDirectoryBySessionId: { ...lastDirectoryBySessionId },
           lastAgentBySessionId: { ...lastAgentBySessionId },
+          archivedSessionIds: { ...archivedSessionIds },
+          lastSeqBySessionId: { ...lastSeqBySessionId },
           stoppedSessions: serializeStoppedSessions(),
         };
         writeDaemonState(updatedState);

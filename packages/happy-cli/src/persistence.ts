@@ -305,6 +305,8 @@ export interface DaemonLocallyPersistedState {
   }>;
   /** Session IDs that have been explicitly archived and must never respawn. */
   archivedSessionIds?: Record<string, number>;
+  /** Server session ID -> last known message seq (daemon poll baseline for auto-respawn). */
+  lastSeqBySessionId?: Record<string, number>;
 }
 
 function writeFileAtomically(filePath: string, content: string): void {
