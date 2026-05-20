@@ -444,6 +444,16 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     onReady: () => {
                         turnSucceeded = true;
                         session.client.closeClaudeSessionTurn('completed');
+                        // Per-turn release (Cursor clears currentTurnIdRef before peekA2AInboxInLoop).
+                        // claudeTurnActiveRef stayed true across multi-turn claudeRemote() calls, which
+                        // blocked scheduleA2ATurnIfNeeded in onTurnEnd until process exit.
+                        if (session.claudeTurnActiveRef) {
+                            session.claudeTurnActiveRef.current = false;
+                        }
+                        if (wasInboxTurn) {
+                            session.a2aInboxTurn?.setInboxTurnActive(false);
+                        }
+                        session.a2aInboxTurn?.peekInbox();
                         if (!pending && session.queue.size() === 0) {
                             session.api.push().sendToAllDevices(
                                 'It\'s ready!',
@@ -496,14 +506,14 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                 abortFuture = null;
                 logger.debug('[remote]: launch done');
                 permissionHandler.reset();
+                if (session.claudeTurnActiveRef) {
+                    session.claudeTurnActiveRef.current = false;
+                }
                 session.a2aInboxTurn?.onTurnEnd({
                     succeeded: turnSucceeded && !turnCancelled,
                     cancelled: turnCancelled,
                     wasInboxTurn,
                 });
-                if (session.claudeTurnActiveRef) {
-                    session.claudeTurnActiveRef.current = false;
-                }
                 modeHash = null;
                 mode = null;
             }
