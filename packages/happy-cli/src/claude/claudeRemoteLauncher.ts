@@ -333,6 +333,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         // See: https://github.com/anthropics/happy-cli/issues/143
         let previousSessionId: string | null = null;
         while (!exitReason) {
+            session.a2aInboxTurn?.peekInbox();
             logger.debug('[remote]: launch');
             messageBuffer.addMessage('═'.repeat(40), 'status');
 

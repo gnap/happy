@@ -349,6 +349,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     });
     isA2AInboxTurnActiveFn = a2aInbox.isInboxTurnActive;
     pruneA2AInboxOnSessionStart('claude', workingDirectory, session.sessionId, options.startedBy === 'daemon');
+    a2aInbox.peekInbox();
 
     handleUserMessage = (message) => {
 
