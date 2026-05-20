@@ -13,7 +13,6 @@ import type { AgentState, Metadata, Session } from '@/api/types';
 import { configuration } from '@/configuration';
 import { createOfflineSessionStub } from '@/utils/offlineSessionStub';
 import { startOfflineReconnection } from '@/utils/serverConnectionErrors';
-import { parseResumeAfterSeqFromEnv } from '@/utils/resumeAfterSeq';
 
 /**
  * Options for setting up offline reconnection.
@@ -81,8 +80,7 @@ export interface SetupOfflineReconnectionResult {
  */
 export function setupOfflineReconnection(opts: SetupOfflineReconnectionOptions): SetupOfflineReconnectionResult {
     const { api, sessionTag, metadata, state, response, existingEncryptionKey, onSessionSwap } = opts;
-    const initialLastSeq = opts.initialLastSeq ?? parseResumeAfterSeqFromEnv();
-    const sessionClientOpts = initialLastSeq !== undefined ? { initialLastSeq } : undefined;
+    const sessionClientOpts = opts.initialLastSeq !== undefined ? { initialLastSeq: opts.initialLastSeq } : undefined;
 
     let session: ApiSessionClient;
     let reconnectionHandle: ReturnType<typeof startOfflineReconnection<ApiSessionClient>> | null = null;

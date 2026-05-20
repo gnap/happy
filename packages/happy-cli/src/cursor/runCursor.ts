@@ -35,7 +35,6 @@ import { registerKillSessionHandler } from '@/claude/registerKillSessionHandler'
 import { stopCaffeinate } from '@/utils/caffeinate';
 import { connectionState } from '@/utils/serverConnectionErrors';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
-import { parseResumeAfterSeqFromEnv, resolveInitialLastSeq } from '@/utils/resumeAfterSeq';
 import {
   buildA2AInboxNotificationWithPreview,
   buildA2AInboxTaskTitle,
@@ -491,10 +490,6 @@ export async function runCursor(opts: {
 
   // Handle server unreachable - offline stub with hot reconnection
   let session: ApiSessionClient;
-  const initialLastSeq = resolveInitialLastSeq({
-    resumeAfterSeq: opts.resumeAfterSeq,
-    envResumeAfterSeq: parseResumeAfterSeqFromEnv(),
-  });
   const { session: initialSession, reconnectionHandle } = setupOfflineReconnection({
     api,
     sessionTag,
@@ -502,7 +497,7 @@ export async function runCursor(opts: {
     state,
     response,
     existingEncryptionKey,
-    initialLastSeq,
+    initialLastSeq: opts.resumeAfterSeq,
     onSessionSwap: (newSession) => {
       session = newSession;
       newSession.onUserMessage(handleUserMessage);

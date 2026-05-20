@@ -58,6 +58,7 @@ export async function runGemini(opts: {
   credentials: Credentials;
   startedBy?: 'daemon' | 'terminal';
   resumeSessionTag?: string;
+  resumeAfterSeq?: number;
 }): Promise<void> {
   //
   // Define session
@@ -171,6 +172,7 @@ export async function runGemini(opts: {
     metadata,
     state,
     response,
+    initialLastSeq: opts.resumeAfterSeq,
     onSessionSwap: (newSession) => {
       // If we're processing a message, queue the swap for later
       // This prevents race conditions where session changes mid-processing

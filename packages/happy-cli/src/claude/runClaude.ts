@@ -80,6 +80,8 @@ export interface StartOptions {
     noSandbox?: boolean
     /** Explicit session tag to resume when daemon respawns this Claude process. */
     resumeSessionTag?: string
+    /** Pre-wake server seq from daemon poll (fetch messages with seq > this value). */
+    resumeAfterSeq?: number
     /** JavaScript runtime to use for spawning Claude Code (default: 'node') */
     jsRuntime?: JsRuntime
 }
@@ -239,7 +241,10 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     });
 
     // Create realtime session
-    const session = api.sessionSyncClient(response);
+    const sessionClientOpts = options.resumeAfterSeq !== undefined
+        ? { initialLastSeq: options.resumeAfterSeq }
+        : undefined;
+    const session = api.sessionSyncClient(response, true, sessionClientOpts);
     writeSessionPidFile(session.sessionId);
 
     let handleUserMessage: ((message: UserMessage) => void) | null = null;

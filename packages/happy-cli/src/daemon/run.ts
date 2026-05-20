@@ -6,6 +6,7 @@ import { ApiClient } from '@/api/api';
 import { TrackedSession } from './types';
 import { MachineMetadata, DaemonState, Metadata } from '@/api/types';
 import { SpawnSessionOptions, SpawnSessionResult } from '@/modules/common/registerCommonHandlers';
+import { appendResumeAfterSeqCliArgs } from '@/utils/resumeAfterSeq';
 import { logger } from '@/ui/logger';
 import { authAndSetupMachineIfNeeded } from '@/ui/auth';
 import { configuration } from '@/configuration';
@@ -252,9 +253,9 @@ export async function startDaemon(): Promise<void> {
     let sessionPollSince = Date.now();
     /** True after first poll completes; first poll only records seq baselines without spawning. */
     let initialPollDone = false;
-    /** Last known seq per session ID. Populated during polling. */
+    /** Last known seq per session ID (in-memory only; not written to daemon state file). */
     const lastSeqBySessionId: Record<string, number> = {};
-    /** Pre-wake seq per session (messages with seq > this should be fetched after CLI spawn). */
+    /** Pre-wake seq for restart-session in this daemon lifetime; passed to CLI via spawn args/env. */
     const resumeAfterSeqBySessionId: Record<string, number> = {};
     const persistSessionTagBeforeRemove = (session: TrackedSession) => {
       if (session.directory && session.sessionTag) lastSessionTagByDirectory[session.directory] = session.sessionTag;
@@ -550,10 +551,6 @@ export async function startDaemon(): Promise<void> {
 
         // Final merge: Profile vars first, then auth (auth takes precedence to protect authentication)
         let extraEnv = { ...profileEnv, ...authEnv };
-        if (typeof options.resumeAfterSeq === 'number' && options.resumeAfterSeq >= 0) {
-          extraEnv.HAPPY_RESUME_AFTER_SEQ = String(options.resumeAfterSeq);
-          logger.debug(`[DAEMON RUN] Passing HAPPY_RESUME_AFTER_SEQ=${options.resumeAfterSeq} to CLI`);
-        }
         logger.debug(`[DAEMON RUN] Final environment variable keys (before expansion) (${Object.keys(extraEnv).length}): ${Object.keys(extraEnv).join(', ')}`);
 
         // Expand ${VAR} references from daemon's process.env
@@ -641,6 +638,10 @@ export async function startDaemon(): Promise<void> {
           ];
           if (shouldPassResumeSessionTag && resumeSessionTag) {
             tmuxCommandArgs.push('--resume-session-tag', resumeSessionTag);
+          }
+          appendResumeAfterSeqCliArgs(tmuxCommandArgs, options.resumeAfterSeq);
+          if (typeof options.resumeAfterSeq === 'number' && options.resumeAfterSeq >= 0) {
+            logger.debug(`[DAEMON RUN] Passing --resume-after-seq ${options.resumeAfterSeq} to CLI (tmux)`);
           }
           const fullCommand = [launchSpec.executable, ...tmuxCommandArgs]
             .map((part) => JSON.stringify(part))
@@ -762,6 +763,10 @@ export async function startDaemon(): Promise<void> {
           ];
           if (shouldPassResumeSessionTag && resumeSessionTag) {
             args.push('--resume-session-tag', resumeSessionTag);
+          }
+          appendResumeAfterSeqCliArgs(args, options.resumeAfterSeq);
+          if (typeof options.resumeAfterSeq === 'number' && options.resumeAfterSeq >= 0) {
+            logger.debug(`[DAEMON RUN] Passing --resume-after-seq ${options.resumeAfterSeq} to CLI`);
           }
 
           const baseEnv = { ...process.env };
