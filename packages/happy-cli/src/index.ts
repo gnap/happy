@@ -28,6 +28,7 @@ import { stopDaemonSession } from './daemon/controlClient'
 import { handleAuthCommand } from './commands/auth'
 import { handleConnectCommand } from './commands/connect'
 import { handleSandboxCommand } from './commands/sandbox'
+import { parseResumeAfterSeqValue } from '@/utils/resumeAfterSeq'
 import { spawnHappyCLI } from './utils/spawnHappyCLI'
 import { claudeCliPath } from './claude/claudeLocal'
 import { execFileSync } from 'node:child_process'
@@ -144,19 +145,25 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
       // Parse startedBy argument
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
       let resumeSessionTag: string | undefined = undefined;
+      let resumeAfterSeq: number | undefined = undefined;
       const codexArgs = extractNoSandboxFlag(args.slice(1));
       for (let i = 0; i < codexArgs.args.length; i++) {
         if (codexArgs.args[i] === '--started-by') {
           startedBy = codexArgs.args[++i] as 'daemon' | 'terminal';
         } else if (codexArgs.args[i] === '--resume-session-tag' && codexArgs.args[i + 1]) {
           resumeSessionTag = codexArgs.args[++i];
+        } else if (codexArgs.args[i] === '--resume-after-seq' && codexArgs.args[i + 1]) {
+          const parsed = parseResumeAfterSeqValue(codexArgs.args[++i]);
+          if (parsed !== undefined) {
+            resumeAfterSeq = parsed;
+          }
         }
       }
       
       const {
         credentials
       } = await authAndSetupMachineIfNeeded();
-      await runCodex({credentials, startedBy, noSandbox: codexArgs.noSandbox, resumeSessionTag});
+      await runCodex({ credentials, startedBy, noSandbox: codexArgs.noSandbox, resumeSessionTag, resumeAfterSeq });
       // Do not force exit here; allow instrumentation to show lingering handles
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
@@ -176,6 +183,7 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
       let workspaceRoot: string | undefined = undefined;
       let resumeSession = false;
       let resumeSessionTag: string | undefined = undefined;
+      let resumeAfterSeq: number | undefined = undefined;
       for (let i = 1; i < args.length; i++) {
         if (args[i] === '--started-by') {
           startedBy = args[++i] as 'daemon' | 'terminal';
@@ -185,6 +193,11 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
           resumeSession = true;
         } else if (args[i] === '--resume-session-tag' && args[i + 1]) {
           resumeSessionTag = args[++i];
+        } else if (args[i] === '--resume-after-seq' && args[i + 1]) {
+          const parsed = parseResumeAfterSeqValue(args[++i]);
+          if (parsed !== undefined) {
+            resumeAfterSeq = parsed;
+          }
         }
       }
 
@@ -202,7 +215,7 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
         await new Promise(resolve => setTimeout(resolve, 200));
       }
 
-      await runCursor({ credentials, startedBy, workspaceRoot, resumeSession, resumeSessionTag, cliStartTime });
+      await runCursor({ credentials, startedBy, workspaceRoot, resumeSession, resumeSessionTag, resumeAfterSeq, cliStartTime });
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error');
       if (process.env.DEBUG) {
@@ -398,11 +411,17 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
       // Parse startedBy argument
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
       let resumeSessionTag: string | undefined = undefined;
+      let resumeAfterSeq: number | undefined = undefined;
       for (let i = 1; i < args.length; i++) {
         if (args[i] === '--started-by') {
           startedBy = args[++i] as 'daemon' | 'terminal';
         } else if (args[i] === '--resume-session-tag' && args[i + 1]) {
           resumeSessionTag = args[++i];
+        } else if (args[i] === '--resume-after-seq' && args[i + 1]) {
+          const parsed = parseResumeAfterSeqValue(args[++i]);
+          if (parsed !== undefined) {
+            resumeAfterSeq = parsed;
+          }
         }
       }
       
@@ -423,7 +442,7 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
         await new Promise(resolve => setTimeout(resolve, 200));
       }
 
-      await runGemini({credentials, startedBy, resumeSessionTag});
+      await runGemini({ credentials, startedBy, resumeSessionTag, resumeAfterSeq });
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
       if (process.env.DEBUG) {
@@ -439,6 +458,7 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
       let verbose = false;
       let resumeSessionTag: string | undefined = undefined;
+      let resumeAfterSeq: number | undefined = undefined;
       const acpArgs: string[] = [];
       let customCommandMode = false;
       for (let i = 1; i < args.length; i++) {
@@ -448,6 +468,13 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
         }
         if (!customCommandMode && args[i] === '--resume-session-tag' && args[i + 1]) {
           resumeSessionTag = args[++i];
+          continue;
+        }
+        if (!customCommandMode && args[i] === '--resume-after-seq' && args[i + 1]) {
+          const parsed = parseResumeAfterSeqValue(args[++i]);
+          if (parsed !== undefined) {
+            resumeAfterSeq = parsed;
+          }
           continue;
         }
         if (!customCommandMode && args[i] === '--happy-starting-mode') {
@@ -484,6 +511,7 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
         startedBy,
         verbose,
         resumeSessionTag,
+        resumeAfterSeq,
         agentName: resolved.agentName,
         command: resolved.command,
         args: resolved.args,
@@ -773,6 +801,7 @@ ${chalk.bold('To clean up runaway processes:')} Use ${chalk.cyan('happy doctor c
     let chromeOverride: boolean | undefined = undefined  // Track explicit --chrome or --no-chrome
     const unknownArgs: string[] = [] // Collect unknown args to pass through to claude
     let resumeSessionTag: string | undefined = undefined
+    let resumeAfterSeq: number | undefined = undefined
     const parsedSandboxFlag = extractNoSandboxFlag(args)
     options.noSandbox = parsedSandboxFlag.noSandbox
     args.length = 0
@@ -798,6 +827,11 @@ ${chalk.bold('To clean up runaway processes:')} Use ${chalk.cyan('happy doctor c
         options.startedBy = args[++i] as 'daemon' | 'terminal'
       } else if (arg === '--resume-session-tag' && args[i + 1]) {
         resumeSessionTag = args[++i]
+      } else if (arg === '--resume-after-seq' && args[i + 1]) {
+        const parsed = parseResumeAfterSeqValue(args[++i])
+        if (parsed !== undefined) {
+          resumeAfterSeq = parsed
+        }
       } else if (arg === '--js-runtime') {
         const runtime = args[++i]
         if (runtime !== 'node' && runtime !== 'bun') {
@@ -841,6 +875,7 @@ ${chalk.bold('To clean up runaway processes:')} Use ${chalk.cyan('happy doctor c
       }
     }
     options.resumeSessionTag = resumeSessionTag
+    options.resumeAfterSeq = resumeAfterSeq
 
     // Add unknown args to claudeArgs
     if (unknownArgs.length > 0) {

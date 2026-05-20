@@ -646,6 +646,19 @@ function normalizeSessionEnvelope(
             return null;
         }
 
+        // Cursor CLI surfaces errors as service envelopes; render like Claude/Codex session events.
+        if (envelope.ev.text.startsWith('Error:')) {
+            return {
+                id: messageId,
+                localId,
+                createdAt: messageCreatedAt,
+                role: 'event',
+                isSidechain: false,
+                content: { type: 'message', message: envelope.ev.text },
+                meta
+            } satisfies NormalizedMessage;
+        }
+
         return {
             id: messageId,
             localId,

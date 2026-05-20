@@ -103,7 +103,14 @@ function parseConversationStep(step: Record<string, unknown>, subagentId: string
     const tc = stc.taskToolCall as Record<string, unknown>;
     const args = tc.args as Record<string, unknown> | undefined ?? {};
     const desc = (args.description as string) || 'Task';
-    results.push({ type: 'tool_call_start', toolName: 'Task', args: { description: desc, prompt: args.prompt ?? '' }, callId: stepCallId, subagentId });
+    const model = typeof args.model === 'string' ? args.model : undefined;
+    results.push({
+      type: 'tool_call_start',
+      toolName: 'Task',
+      args: { description: desc, prompt: args.prompt ?? '', ...(model ? { model } : {}) },
+      callId: stepCallId,
+      subagentId,
+    });
     results.push({ type: 'tool_call_end', toolName: 'Task', result: null, callId: stepCallId, success: true, subagentId });
   }
   return results;
@@ -387,6 +394,7 @@ export class CursorMessageParser {
           const agentId = (taskArgs.agentId as string) || 'unknown';
           const description = (taskArgs.description as string) || '';
           const prompt = (taskArgs.prompt as string) || '';
+          const model = typeof taskArgs.model === 'string' ? taskArgs.model : undefined;
           const key = this.toolKey('Task', { agentId });
           if (msg.subtype === 'started') {
             // Use a single cuid2 as BOTH callId and subagentId so the reducer tracer can
@@ -396,7 +404,13 @@ export class CursorMessageParser {
             let q = this.taskSubagentIds.get(key);
             if (!q) { q = []; this.taskSubagentIds.set(key, q); }
             q.push(subagentId);
-            results.push({ type: 'tool_call_start', toolName: 'Task', args: { description, prompt }, callId: subagentId, description });
+            results.push({
+              type: 'tool_call_start',
+              toolName: 'Task',
+              args: { description, prompt, ...(model ? { model } : {}) },
+              callId: subagentId,
+              description,
+            });
           } else if (msg.subtype === 'completed') {
             const subagentId = this.taskSubagentIds.get(key)?.shift() ?? createId();
             const steps = ((tc.taskToolCall.result as Record<string, unknown> | undefined)?.success as Record<string, unknown> | undefined)?.conversationSteps;

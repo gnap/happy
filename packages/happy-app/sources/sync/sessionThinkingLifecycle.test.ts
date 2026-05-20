@@ -58,4 +58,17 @@ describe('getSessionThinkingPatchFromMessageContent', () => {
             }),
         ).toBeNull();
     });
+
+    it('sets thinking on flat session-protocol Summarizing service envelope', () => {
+        const patch = getSessionThinkingPatchFromMessageContent({
+            role: 'session',
+            content: {
+                id: 'env-2',
+                role: 'agent',
+                turn: 'turn-1',
+                ev: { t: 'service', text: 'Summarizing...' },
+            },
+        });
+        expect(patch).toEqual({ thinking: true });
+    });
 });

@@ -67,6 +67,7 @@ export async function runCodex(opts: {
     startedBy?: 'daemon' | 'terminal';
     noSandbox?: boolean;
     resumeSessionTag?: string;
+    resumeAfterSeq?: number;
 }): Promise<void> {
     // Use shared PermissionMode type for cross-agent compatibility
     type PermissionMode = import('@/api/types').PermissionMode;
@@ -133,6 +134,7 @@ export async function runCodex(opts: {
         metadata,
         state,
         response,
+        initialLastSeq: opts.resumeAfterSeq,
         onSessionSwap: (newSession) => {
             session = newSession;
             // Update permission handler with new session to avoid stale reference

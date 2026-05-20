@@ -18,18 +18,22 @@ import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { logger } from '@/ui/logger';
 import type { CursorStreamMessage } from './types';
+import {
+  defaultCompactPostCommandIdleMs,
+  defaultCompactPostCommandMaxMs,
+  isInteractiveCompressComplete,
+  isInteractiveCompressFailed,
+  isInteractiveInputReady,
+  type InteractiveCommandOutcome,
+  type InteractiveCommandResult,
+} from './interactiveCompletion';
+
+export type { InteractiveCommandOutcome, InteractiveCommandResult } from './interactiveCompletion';
 
 const CURSOR_AGENT_NAME = 'cursor-agent';
 const PTY_BASH_EXEC_COMMAND = 'exec "$0" "$@"';
-const INTERACTIVE_READY_PATTERNS = [
-  /Add a follow-up/i,
-  /Add a message/i,
-  /No active session\./i,
-  /Rendering latest messages/i,
-  /\bAuto-run\b/i,
-  /Use \/full-conversation to render everything/i,
-];
 const INTERACTIVE_INPUT_FALLBACK_MS = 15000;
+const INTERACTIVE_EXIT_COMMAND = '/exit\n';
 
 function shellEscapePosix(arg: string): string {
   return `'${arg.replace(/'/g, `'\\''`)}'`;
@@ -190,7 +194,7 @@ export class CursorProcess extends EventEmitter {
   /**
    * Spawn cursor-agent and send a prompt. Returns when the process exits.
    */
-  async run(prompt: string): Promise<void> {
+  async run(prompt: string): Promise<InteractiveCommandResult> {
     const cursorArgs = buildCursorArgs(this.options, false);
     cursorArgs.push('--', prompt);
     return this.spawnAndRun(cursorArgs, { interactive: false });
@@ -198,21 +202,41 @@ export class CursorProcess extends EventEmitter {
 
   /**
    * Spawn cursor-agent interactively and send a slash command such as /compress.
-   * Returns when the interactive session exits explicitly.
+   * Serial sessions should await this before dequeuing the next message.
    */
-  async runInteractiveCommand(command: string): Promise<void> {
+  async runInteractiveCommand(
+    command: string,
+    runOptions?: {
+      /** Use two-phase ready detection and timeouts tuned for /compress. */
+      completionMode?: 'generic' | 'compress';
+      postCommandIdleMs?: number;
+      postCommandMaxMs?: number;
+    },
+  ): Promise<InteractiveCommandResult> {
+    const completionMode = runOptions?.completionMode ?? 'generic';
     const cursorArgs = buildCursorArgs(this.options, true);
     return this.spawnAndRun(cursorArgs, {
       interactive: true,
       stdinInput: `${command}\n`,
-      resolveOnInteractiveReady: true,
+      completionMode,
+      postCommandIdleMs: runOptions?.postCommandIdleMs
+        ?? (completionMode === 'compress' ? defaultCompactPostCommandIdleMs() : undefined),
+      postCommandMaxMs: runOptions?.postCommandMaxMs
+        ?? (completionMode === 'compress' ? defaultCompactPostCommandMaxMs() : undefined),
     });
   }
 
   private spawnAndRun(
     cursorArgs: string[],
-    options: { interactive: boolean; stdinInput?: string; interactiveIdleMs?: number; resolveOnInteractiveReady?: boolean },
-  ): Promise<void> {
+    options: {
+      interactive: boolean;
+      stdinInput?: string;
+      interactiveIdleMs?: number;
+      completionMode?: 'generic' | 'compress';
+      postCommandIdleMs?: number;
+      postCommandMaxMs?: number;
+    },
+  ): Promise<InteractiveCommandResult> {
     const cursorAgentPath = resolveCursorAgentPath();
     logger.debug(`[cursor] Spawning: ${[cursorAgentPath, ...cursorArgs].join(' ').slice(0, 200)}...`);
 
@@ -233,23 +257,33 @@ export class CursorProcess extends EventEmitter {
       env: env as Record<string, string>,
     };
 
-    return new Promise<void>((resolve, reject) => {
+    return new Promise<InteractiveCommandResult>((resolve, reject) => {
       let settled = false;
       let subprocessError: Error | null = null;
       let interactiveIdleTimer: ReturnType<typeof setTimeout> | null = null;
       let interactiveInputTimer: ReturnType<typeof setTimeout> | null = null;
+      let postCommandMaxTimer: ReturnType<typeof setTimeout> | null = null;
       let interactiveInputSent = false;
       let interactiveCompletionSent = false;
+      let interactiveOutcome: InteractiveCommandOutcome = 'failed';
+      let interactiveDetail: string | undefined;
       let interactiveScreenBuffer = '';
-      const resolveOnce = (): void => {
+      const isCompressMode = options.completionMode === 'compress';
+      const resolveOnce = (result: InteractiveCommandResult): void => {
         if (settled) return;
         settled = true;
-        resolve();
+        resolve(result);
       };
       const rejectOnce = (error: Error): void => {
         if (settled) return;
         settled = true;
         reject(error);
+      };
+      const clearPostCommandMaxTimer = () => {
+        if (postCommandMaxTimer) {
+          clearTimeout(postCommandMaxTimer);
+          postCommandMaxTimer = null;
+        }
       };
       const clearInteractiveIdleTimer = () => {
         if (interactiveIdleTimer) {
@@ -267,35 +301,83 @@ export class CursorProcess extends EventEmitter {
         if (!options.interactive || !options.stdinInput || interactiveInputSent) return;
         interactiveInputSent = true;
         clearInteractiveInputTimer();
+        interactiveScreenBuffer = '';
         try {
           child.stdin?.write(options.stdinInput);
           logger.debug(`[cursor] Interactive command sent (${reason})`);
           armInteractiveIdleTimer();
+          armPostCommandMaxTimer();
         } catch (error) {
           logger.debug('[cursor] Failed to write interactive command:', error);
         }
       };
-      const maybeResolveInteractiveCompletion = (reason: string) => {
-        if (!options.interactive || !options.resolveOnInteractiveReady || interactiveCompletionSent) return;
-        if (!interactiveInputSent || !interactiveReady()) return;
-        interactiveCompletionSent = true;
-        clearInteractiveIdleTimer();
-        logger.debug(`[cursor] Interactive command completed (${reason})`);
-        resolveOnce();
+      const interactiveCommandComplete = (): boolean => {
+        if (!interactiveInputSent) {
+          return false;
+        }
+        if (isCompressMode) {
+          return isInteractiveCompressComplete(interactiveScreenBuffer);
+        }
+        return isInteractiveInputReady(interactiveScreenBuffer);
       };
-      const interactiveReady = (): boolean => INTERACTIVE_READY_PATTERNS.some((pattern) => pattern.test(interactiveScreenBuffer));
-      const maybeSendInteractiveInput = (reason: string) => {
-        if (!options.interactive) return;
-        if (!interactiveInputSent && options.stdinInput && interactiveReady()) {
-          sendInteractiveInput(reason);
-          interactiveScreenBuffer = '';
+      const finishInteractiveSuccess = (reason: string) => {
+        if (!options.interactive || interactiveCompletionSent) return;
+        if (!interactiveCommandComplete()) return;
+        interactiveCompletionSent = true;
+        interactiveOutcome = 'completed';
+        clearInteractiveIdleTimer();
+        clearPostCommandMaxTimer();
+        logger.debug(`[cursor] Interactive command completed (${reason})`);
+        try {
+          child.stdin?.write(INTERACTIVE_EXIT_COMMAND);
+        } catch {
+          /* best-effort exit so the serial turn can dequeue quickly */
+        }
+        resolveOnce({ outcome: 'completed' });
+      };
+      const finishInteractiveFailure = (outcome: InteractiveCommandOutcome, detail: string, reason: string) => {
+        if (interactiveCompletionSent) return;
+        interactiveCompletionSent = true;
+        interactiveOutcome = outcome;
+        interactiveDetail = detail;
+        clearInteractiveIdleTimer();
+        clearPostCommandMaxTimer();
+        logger.debug(`[cursor] Interactive command ${outcome} (${reason}): ${detail}`);
+        this.kill();
+        resolveOnce({ outcome, detail });
+      };
+      const maybeResolveInteractiveCompletion = (reason: string) => {
+        if (!options.interactive || interactiveCompletionSent) return;
+        if (isCompressMode && interactiveInputSent && isInteractiveCompressFailed(interactiveScreenBuffer)) {
+          finishInteractiveFailure('failed', 'Compression failed in cursor-agent TUI', reason);
           return;
         }
+        finishInteractiveSuccess(reason);
+      };
+      const maybeSendInteractiveInput = (reason: string) => {
+        if (!options.interactive) return;
+        if (!interactiveInputSent && options.stdinInput && isInteractiveInputReady(interactiveScreenBuffer)) {
+          sendInteractiveInput(reason);
+          return;
+        }
+      };
+      const armPostCommandMaxTimer = () => {
+        if (!isCompressMode || !options.postCommandMaxMs || options.postCommandMaxMs <= 0) return;
+        clearPostCommandMaxTimer();
+        postCommandMaxTimer = setTimeout(() => {
+          if (interactiveCompletionSent) return;
+          finishInteractiveFailure(
+            'timed_out',
+            `Compression exceeded ${options.postCommandMaxMs}ms`,
+            'post-command max',
+          );
+        }, options.postCommandMaxMs);
       };
 
       const onExit = (code: number | null) => {
         clearInteractiveIdleTimer();
         clearInteractiveInputTimer();
+        clearPostCommandMaxTimer();
         this.cleanup();
         if (this.buffer.trim()) {
           const lines = this.buffer.split('\n').map((l) => l.trim()).filter(Boolean);
@@ -309,11 +391,30 @@ export class CursorProcess extends EventEmitter {
         this.emit('exit', code);
         if (subprocessError) {
           rejectOnce(subprocessError);
-        } else {
-          if (!options.resolveOnInteractiveReady || !interactiveCompletionSent) {
-            resolveOnce();
-          }
+          return;
         }
+        if (interactiveCompletionSent) {
+          return;
+        }
+        if (options.interactive && interactiveInputSent) {
+          if (interactiveCommandComplete()) {
+            resolveOnce({ outcome: 'completed' });
+            return;
+          }
+          if (isCompressMode && isInteractiveCompressFailed(interactiveScreenBuffer)) {
+            resolveOnce({ outcome: 'failed', detail: interactiveDetail ?? 'Compression failed in cursor-agent TUI' });
+            return;
+          }
+          const detail = code !== 0 && code !== null
+            ? `cursor-agent exited with code ${code}`
+            : interactiveDetail ?? 'Interactive command ended before compression completed';
+          resolveOnce({
+            outcome: code !== 0 && code !== null ? 'failed' : interactiveOutcome,
+            detail,
+          });
+          return;
+        }
+        resolveOnce({ outcome: 'completed' });
       };
 
       const onAbort = (): void => {
@@ -359,12 +460,26 @@ export class CursorProcess extends EventEmitter {
       }
 
       const armInteractiveIdleTimer = () => {
-        if (!options.interactive || !options.interactiveIdleMs || options.interactiveIdleMs <= 0) return;
+        const idleMs = options.postCommandIdleMs ?? options.interactiveIdleMs;
+        if (!options.interactive || !interactiveInputSent || !idleMs || idleMs <= 0) return;
         clearInteractiveIdleTimer();
         interactiveIdleTimer = setTimeout(() => {
-          logger.debug(`[cursor] Interactive command idle for ${options.interactiveIdleMs}ms, stopping cursor-agent`);
+          if (interactiveCompletionSent) return;
+          if (interactiveCommandComplete()) {
+            finishInteractiveSuccess(`idle ${idleMs}ms with post-command ready`);
+            return;
+          }
+          if (isCompressMode) {
+            finishInteractiveFailure(
+              'timed_out',
+              `No compression completion signal after ${idleMs}ms idle`,
+              'post-command idle',
+            );
+            return;
+          }
+          logger.debug(`[cursor] Interactive command idle for ${idleMs}ms, stopping cursor-agent`);
           this.kill();
-        }, options.interactiveIdleMs);
+        }, idleMs);
       };
 
       child.stdout?.on('data', (data: Buffer) => {

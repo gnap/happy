@@ -529,6 +529,7 @@ export interface RunAcpOptions {
   verbose?: boolean;
   /** Explicit session tag to resume when daemon respawns this ACP process. */
   resumeSessionTag?: string;
+  resumeAfterSeq?: number;
   /** When set, use this backend instead of spawning AcpBackend from command/args. */
   backend?: import('@/agent/core').AgentBackend;
   /** Custom transport handler; used when backend is not provided. Defaults to DefaultTransport. */
@@ -597,6 +598,7 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     metadata,
     state,
     response,
+    initialLastSeq: opts.resumeAfterSeq,
     onSessionSwap: (newSession) => {
       session = newSession;
       if (permissionHandler) {

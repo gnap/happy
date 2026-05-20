@@ -1681,6 +1681,28 @@ describe('Zod Transform - WOLOG Content Normalization', () => {
             }
         });
 
+        it('normalizes service Error events to agent session events', () => {
+            const normalized = normalizeRawMessage('db-service-err', null, 1, {
+                ...base,
+                content: {
+                    type: 'session',
+                    data: {
+                        id: 'env-service-err',
+                        time: 1,
+                        role: 'agent',
+                        turn: 'turn-1',
+                        ev: { t: 'service', text: 'Error: rate limit exceeded' }
+                    }
+                }
+            });
+
+            expect(normalized).toMatchObject({
+                id: 'env-service-err',
+                role: 'event',
+                content: { type: 'message', message: 'Error: rate limit exceeded' }
+            });
+        });
+
         it('normalizes tool-call lifecycle events', () => {
             const start = normalizeRawMessage('db-3', null, 1, {
                 ...base,

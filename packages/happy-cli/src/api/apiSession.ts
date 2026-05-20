@@ -403,7 +403,12 @@ export class ApiSessionClient extends EventEmitter {
         return this.metadata;
     }
 
-    constructor(token: string, session: Session, private websocketOnly: boolean = true) {
+    constructor(
+        token: string,
+        session: Session,
+        private websocketOnly: boolean = true,
+        opts?: { initialLastSeq?: number },
+    ) {
         super()
         this.token = token;
         this.sessionId = session.id;
@@ -426,7 +431,12 @@ export class ApiSessionClient extends EventEmitter {
         this.requestedMetadata = session.requestedMetadata ?? null;
         this.encryptionKey = session.encryptionKey;
         this.encryptionVariant = session.encryptionVariant;
-        this.lastSeq = session.seq ?? 0;
+        this.lastSeq = opts?.initialLastSeq ?? session.seq ?? 0;
+        if (opts?.initialLastSeq !== undefined && opts.initialLastSeq !== session.seq) {
+            logger.debug(
+                `[API] Session ${session.id} initial lastSeq=${opts.initialLastSeq} (server session.seq=${session.seq ?? 0})`,
+            );
+        }
         this.sendSync = new InvalidateSync(() => this.flushOutbox());
         this.receiveSync = new InvalidateSync(() => this.fetchMessages());
         this.socketConnectedPromise = new Promise<void>((resolve) => {
@@ -1220,12 +1230,9 @@ export class ApiSessionClient extends EventEmitter {
             thinking,
             mode,
         };
-        // Clearing thinking must be reliable; volatile emits are often dropped under flaky WSS.
-        if (thinking === false) {
-            this.socket.emit('session-alive', payload);
-        } else {
-            this.socket.volatile.emit('session-alive', payload);
-        }
+        // Both directions must be reliable: volatile thinking=true is often dropped (App stuck idle),
+        // volatile thinking=false left sessions stuck "thinking" on flaky WSS.
+        this.socket.emit('session-alive', payload);
     }
 
     /**

@@ -6,6 +6,7 @@ import { ApiClient } from '@/api/api';
 import { TrackedSession } from './types';
 import { MachineMetadata, DaemonState, Metadata } from '@/api/types';
 import { SpawnSessionOptions, SpawnSessionResult } from '@/modules/common/registerCommonHandlers';
+import { appendResumeAfterSeqCliArgs } from '@/utils/resumeAfterSeq';
 import { logger } from '@/ui/logger';
 import { authAndSetupMachineIfNeeded } from '@/ui/auth';
 import { configuration } from '@/configuration';
@@ -252,8 +253,22 @@ export async function startDaemon(): Promise<void> {
     let sessionPollSince = Date.now();
     /** True after first poll completes; first poll only records seq baselines without spawning. */
     let initialPollDone = false;
-    /** Last known seq per session ID. Populated during polling. */
+    /** Last known seq per session ID (in-memory only; not written to daemon state file). */
     const lastSeqBySessionId: Record<string, number> = {};
+    /** Pre-wake seq for restart-session in this daemon lifetime; passed to CLI via spawn args/env. */
+    const resumeAfterSeqBySessionId: Record<string, number> = {};
+    let wakePollTimer: ReturnType<typeof setTimeout> | null = null;
+    let sessionPollInFlight = false;
+    /** Assigned after ApiClient is ready; triggers early session poll when a daemon-spawned PID exits. */
+    let scheduleSessionWakePoll: () => void = () => {};
+    const noteDaemonManagedLocalStop = (session: TrackedSession) => {
+      if (session.startedBy !== 'daemon' || !session.happySessionId) return;
+      const knownSeq = lastSeqBySessionId[session.happySessionId];
+      if (knownSeq !== undefined && knownSeq >= 0) {
+        resumeAfterSeqBySessionId[session.happySessionId] = knownSeq;
+      }
+      scheduleSessionWakePoll();
+    };
     const persistSessionTagBeforeRemove = (session: TrackedSession) => {
       if (session.directory && session.sessionTag) lastSessionTagByDirectory[session.directory] = session.sessionTag;
       if (session.happySessionId && session.sessionTag) lastSessionTagBySessionId[session.happySessionId] = session.sessionTag;
@@ -636,6 +651,10 @@ export async function startDaemon(): Promise<void> {
           if (shouldPassResumeSessionTag && resumeSessionTag) {
             tmuxCommandArgs.push('--resume-session-tag', resumeSessionTag);
           }
+          appendResumeAfterSeqCliArgs(tmuxCommandArgs, options.resumeAfterSeq);
+          if (typeof options.resumeAfterSeq === 'number' && options.resumeAfterSeq >= 0) {
+            logger.debug(`[DAEMON RUN] Passing --resume-after-seq ${options.resumeAfterSeq} to CLI (tmux)`);
+          }
           const fullCommand = [launchSpec.executable, ...tmuxCommandArgs]
             .map((part) => JSON.stringify(part))
             .join(' ');
@@ -756,6 +775,10 @@ export async function startDaemon(): Promise<void> {
           ];
           if (shouldPassResumeSessionTag && resumeSessionTag) {
             args.push('--resume-session-tag', resumeSessionTag);
+          }
+          appendResumeAfterSeqCliArgs(args, options.resumeAfterSeq);
+          if (typeof options.resumeAfterSeq === 'number' && options.resumeAfterSeq >= 0) {
+            logger.debug(`[DAEMON RUN] Passing --resume-after-seq ${options.resumeAfterSeq} to CLI`);
           }
 
           const baseEnv = { ...process.env };
@@ -955,6 +978,7 @@ export async function startDaemon(): Promise<void> {
           logger.debug(`[DAEMON RUN] Session ${session.happySessionId} (PID ${pid}) exited (reason: ${session.exitReason}), moving to stoppedSessions`);
           if (session.happySessionId) {
             stoppedSessions.set(session.happySessionId, { ...session, childProcess: undefined });
+            noteDaemonManagedLocalStop(session);
             persistNow();
           }
         }
@@ -1073,6 +1097,7 @@ export async function startDaemon(): Promise<void> {
         directory,
         agent,
         resumeSessionTag: sessionTag,
+        resumeAfterSeq: resumeAfterSeqBySessionId[sessionId],
       });
 
       if (result.type === 'success') {
@@ -1122,6 +1147,7 @@ export async function startDaemon(): Promise<void> {
             pushRecentlyExited(session);
             if (session.happySessionId) {
               stoppedSessions.set(session.happySessionId, { ...session, childProcess: undefined });
+              noteDaemonManagedLocalStop(session);
               persistNow();
             }
             pidToTrackedSession.delete(pid);
@@ -1145,6 +1171,7 @@ export async function startDaemon(): Promise<void> {
     if (prevState?.lastDirectoryBySessionId) Object.assign(lastDirectoryBySessionId, prevState.lastDirectoryBySessionId);
     if (prevState?.lastAgentBySessionId) Object.assign(lastAgentBySessionId, prevState.lastAgentBySessionId);
     if (prevState?.archivedSessionIds) Object.assign(archivedSessionIds, prevState.archivedSessionIds);
+    if (prevState?.lastSeqBySessionId) Object.assign(lastSeqBySessionId, prevState.lastSeqBySessionId);
     // Restore stopped sessions from previous daemon state (tombstone survives clean shutdown)
     const persistedStopped = prevState?.stoppedSessions;
     if (persistedStopped) {
@@ -1192,9 +1219,10 @@ export async function startDaemon(): Promise<void> {
         lastSessionTagBySessionId: { ...lastSessionTagBySessionId },
         lastDirectoryBySessionId: { ...lastDirectoryBySessionId },
         lastAgentBySessionId: { ...lastAgentBySessionId },
-        archivedSessionIds: { ...archivedSessionIds },
-        stoppedSessions: serializeStoppedSessions(),
-      });
+          archivedSessionIds: { ...archivedSessionIds },
+          lastSeqBySessionId: { ...lastSeqBySessionId },
+          stoppedSessions: serializeStoppedSessions(),
+        });
     };
     const fileState: DaemonLocallyPersistedState = {
       pid: process.pid,
@@ -1207,6 +1235,7 @@ export async function startDaemon(): Promise<void> {
       lastDirectoryBySessionId: { ...lastDirectoryBySessionId },
       lastAgentBySessionId: { ...lastAgentBySessionId },
       archivedSessionIds: { ...archivedSessionIds },
+      lastSeqBySessionId: { ...lastSeqBySessionId },
       stoppedSessions: serializeStoppedSessions(),
     };
     writeDaemonState(fileState);
@@ -1245,6 +1274,120 @@ export async function startDaemon(): Promise<void> {
     // Connect to server
     apiMachine.connect();
 
+    try {
+      const bootstrapSessions = await api.listChangedSessions(0);
+      let seeded = 0;
+      for (const { id, seq } of bootstrapSessions) {
+        if (!id || seq < 0) continue;
+        const prior = lastSeqBySessionId[id];
+        if (prior === undefined || seq > prior) {
+          lastSeqBySessionId[id] = seq;
+          seeded++;
+        }
+      }
+      logger.debug(`[DAEMON RUN] Bootstrapped lastSeq for ${seeded}/${bootstrapSessions.length} session(s) from server`);
+      persistNow();
+    } catch (err) {
+      logger.debug('[DAEMON RUN] Failed to bootstrap session seq baselines:', err);
+    }
+
+    const RESPAWN_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes between respawn attempts per session
+
+    /**
+     * Poll server for new messages and auto-respawn daemon-managed sessions whose local PID has exited.
+     * Wake eligibility is based on local stoppedSessions (daemon spawn), not server `active`.
+     * `resumeAfterSeq` distinguishes offline wake catch-up from a normal online session start.
+     */
+    const pollSessionsForAutoRespawn = async () => {
+      if (sessionPollInFlight) return;
+      sessionPollInFlight = true;
+      try {
+        const pollSince = sessionPollSince;
+        sessionPollSince = Date.now();
+
+        const changedSessions = await api.listChangedSessions(pollSince);
+        logger.debug(`[DAEMON RUN] Session poll: ${changedSessions.length} session(s) changed since last poll`);
+
+        const now = Date.now();
+        for (const { id, seq, active } of changedSessions) {
+          const prevSeq = lastSeqBySessionId[id] ?? -1;
+
+          if (seq > prevSeq) {
+            if (prevSeq >= 0) {
+              resumeAfterSeqBySessionId[id] = prevSeq;
+            }
+            lastSeqBySessionId[id] = seq;
+          }
+
+          if (!initialPollDone) continue;
+          if (seq <= prevSeq) continue;
+
+          const daemonManagedStopped = stoppedSessions.get(id)?.startedBy === 'daemon';
+          if (active && !daemonManagedStopped) {
+            logger.debug(`[DAEMON RUN] Auto-respawn skipped for ${id}: server active=true (local process still online or external session)`);
+            continue;
+          }
+          if (active && daemonManagedStopped) {
+            logger.debug(`[DAEMON RUN] Auto-respawn for ${id}: ignoring server active=true (local daemon-spawned PID exited)`);
+          }
+
+          if (archivedSessionIds[id]) {
+            logger.debug(`[DAEMON RUN] Auto-respawn skipped for archived session ${id}`);
+            continue;
+          }
+
+          const isRunning = Array.from(pidToTrackedSession.values()).some(s => s.happySessionId === id);
+          if (isRunning) continue;
+
+          const directory = lastDirectoryBySessionId[id];
+          if (!directory) continue;
+
+          const lastAttempt = lastSpawnAttemptBySessionId[id] ?? 0;
+          if (now - lastAttempt < RESPAWN_COOLDOWN_MS) {
+            logger.debug(`[DAEMON RUN] Auto-respawn cooldown active for session ${id} (last attempt ${Math.round((now - lastAttempt) / 1000)}s ago)`);
+            continue;
+          }
+
+          const tag = lastSessionTagBySessionId[id];
+          if (!tag) {
+            logger.debug(`[DAEMON RUN] Auto-respawn skipped for session ${id}: no session-specific tag is known`);
+            continue;
+          }
+
+          const agent = (lastAgentBySessionId[id] as 'cursor' | 'claude' | 'codex' | 'gemini' | 'acp-cursor') ?? 'cursor';
+          const resumeAfterSeq = prevSeq >= 0 ? prevSeq : (seq > 0 ? seq - 1 : undefined);
+          logger.debug(
+            `[DAEMON RUN] Auto-respawning session ${id} (${agent}) in ${directory} (seq ${prevSeq} → ${seq}, tag=${tag.slice(0, 8)}, resumeAfterSeq=${resumeAfterSeq ?? 'none'}, offlineWake=${daemonManagedStopped})`,
+          );
+
+          lastSpawnAttemptBySessionId[id] = now;
+          spawnSession({
+            directory,
+            agent,
+            resumeSessionTag: tag,
+            resumeAfterSeq,
+          }).catch((err: unknown) => {
+            logger.debug(`[DAEMON RUN] Auto-respawn failed for session ${id}:`, err);
+          });
+        }
+
+        initialPollDone = true;
+      } catch (err) {
+        logger.debug('[DAEMON RUN] Session poll error:', err);
+      } finally {
+        sessionPollInFlight = false;
+      }
+    };
+
+    scheduleSessionWakePoll = () => {
+      if (wakePollTimer) clearTimeout(wakePollTimer);
+      wakePollTimer = setTimeout(() => {
+        wakePollTimer = null;
+        void pollSessionsForAutoRespawn();
+      }, 2_000);
+      wakePollTimer.unref?.();
+    };
+
     // Every 60 seconds:
     // 1. Prune stale sessions
     // 2. Check if daemon needs update
@@ -1272,6 +1415,7 @@ export async function startDaemon(): Promise<void> {
           pushRecentlyExited(session);
           if (session.happySessionId) {
             stoppedSessions.set(session.happySessionId, { ...session, childProcess: undefined });
+            noteDaemonManagedLocalStop(session);
           }
           pidToTrackedSession.delete(pid);
         }
@@ -1329,6 +1473,8 @@ export async function startDaemon(): Promise<void> {
           lastSessionTagBySessionId: { ...lastSessionTagBySessionId },
           lastDirectoryBySessionId: { ...lastDirectoryBySessionId },
           lastAgentBySessionId: { ...lastAgentBySessionId },
+          archivedSessionIds: { ...archivedSessionIds },
+          lastSeqBySessionId: { ...lastSeqBySessionId },
           stoppedSessions: serializeStoppedSessions(),
         };
         writeDaemonState(updatedState);
@@ -1339,75 +1485,7 @@ export async function startDaemon(): Promise<void> {
         logger.debug('[DAEMON RUN] Failed to write heartbeat', error);
       }
 
-      // Poll server for sessions with new messages; auto-respawn stopped sessions.
-      try {
-        const RESPAWN_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes between respawn attempts per session
-        const pollSince = sessionPollSince;
-        sessionPollSince = Date.now();
-
-        const changedSessions = await api.listChangedSessions(pollSince);
-        logger.debug(`[DAEMON RUN] Session poll: ${changedSessions.length} session(s) changed since last heartbeat`);
-
-        const now = Date.now();
-        for (const { id, seq, active } of changedSessions) {
-          const prevSeq = lastSeqBySessionId[id] ?? -1;
-
-          // Always update seq so next cycle has fresh baseline
-          if (seq > prevSeq) lastSeqBySessionId[id] = seq;
-
-          // First poll: only record baselines, don't spawn (avoids respawning for already-seen messages)
-          if (!initialPollDone) continue;
-
-          // No seq increase since last poll
-          if (seq <= prevSeq) continue;
-
-          // Server still considers session active
-          if (active) continue;
-
-          if (archivedSessionIds[id]) {
-            logger.debug(`[DAEMON RUN] Auto-respawn skipped for archived session ${id}`);
-            continue;
-          }
-
-          // Session is already running locally
-          const isRunning = Array.from(pidToTrackedSession.values()).some(s => s.happySessionId === id);
-          if (isRunning) continue;
-
-          // No known directory → can't spawn
-          const directory = lastDirectoryBySessionId[id];
-          if (!directory) continue;
-
-          // Cooldown: avoid rapid re-spawn if session keeps crashing or timing out
-          const lastAttempt = lastSpawnAttemptBySessionId[id] ?? 0;
-          if (now - lastAttempt < RESPAWN_COOLDOWN_MS) {
-            logger.debug(`[DAEMON RUN] Auto-respawn cooldown active for session ${id} (last attempt ${Math.round((now - lastAttempt) / 1000)}s ago)`);
-            continue;
-          }
-
-          const tag = lastSessionTagBySessionId[id];
-          if (!tag) {
-            logger.debug(`[DAEMON RUN] Auto-respawn skipped for session ${id}: no session-specific tag is known`);
-            continue;
-          }
-          const agent = (lastAgentBySessionId[id] as 'cursor' | 'claude' | 'codex' | 'gemini' | 'acp-cursor') ?? 'cursor';
-          logger.debug(`[DAEMON RUN] Auto-respawning session ${id} (${agent}) in ${directory} (seq ${prevSeq} → ${seq}, tag=${tag?.slice(0, 8) ?? '?'})`);
-
-          lastSpawnAttemptBySessionId[id] = now;
-
-          // Fire-and-forget: don't block heartbeat on 60s webhook timeout
-          spawnSession({
-            directory,
-            agent,
-            resumeSessionTag: tag
-          }).catch((err: unknown) => {
-            logger.debug(`[DAEMON RUN] Auto-respawn failed for session ${id}:`, err);
-          });
-        }
-
-        initialPollDone = true;
-      } catch (err) {
-        logger.debug('[DAEMON RUN] Session poll error:', err);
-      }
+      await pollSessionsForAutoRespawn();
 
       heartbeatRunning = false;
     }, heartbeatIntervalMs); // Every 60 seconds in production

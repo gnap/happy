@@ -229,7 +229,12 @@ export class CursorBackend implements AgentBackend {
     try {
       if (specialCommand.type === 'compact') {
         logger.debug('[CursorBackend] /compact command detected - running interactive compression turn');
-        await cursorProc.runInteractiveCommand('/compress');
+        const compactResult = await cursorProc.runInteractiveCommand('/compress', { completionMode: 'compress' });
+        if (compactResult.outcome !== 'completed') {
+          const detail = compactResult.detail ?? 'Compression did not complete';
+          this.emit({ type: 'status', status: 'error', detail });
+          throw new Error(detail);
+        }
       } else {
         await cursorProc.run(prompt);
       }
