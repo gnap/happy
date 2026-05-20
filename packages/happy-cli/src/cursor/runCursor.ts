@@ -35,6 +35,7 @@ import { registerKillSessionHandler } from '@/claude/registerKillSessionHandler'
 import { stopCaffeinate } from '@/utils/caffeinate';
 import { connectionState } from '@/utils/serverConnectionErrors';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
+import { parseResumeAfterSeqFromEnv, resolveInitialLastSeq } from '@/utils/resumeAfterSeq';
 import {
   buildA2AInboxNotificationWithPreview,
   buildA2AInboxTaskTitle,
@@ -285,6 +286,8 @@ export async function runCursor(opts: {
   resumeSession?: boolean;
   /** Explicit session tag to resume when daemon respawns this cursor process. */
   resumeSessionTag?: string;
+  /** Pre-wake server seq (daemon wake); CLI fetches messages with seq > this value. */
+  resumeAfterSeq?: number;
   /** Set by index.ts: Date.now() at start of CLI async IIFE, so we can report "time to runCursor entry". */
   cliStartTime?: number;
 }): Promise<void> {
@@ -488,6 +491,10 @@ export async function runCursor(opts: {
 
   // Handle server unreachable - offline stub with hot reconnection
   let session: ApiSessionClient;
+  const initialLastSeq = resolveInitialLastSeq({
+    resumeAfterSeq: opts.resumeAfterSeq,
+    envResumeAfterSeq: parseResumeAfterSeqFromEnv(),
+  });
   const { session: initialSession, reconnectionHandle } = setupOfflineReconnection({
     api,
     sessionTag,
@@ -495,6 +502,7 @@ export async function runCursor(opts: {
     state,
     response,
     existingEncryptionKey,
+    initialLastSeq,
     onSessionSwap: (newSession) => {
       session = newSession;
       newSession.onUserMessage(handleUserMessage);

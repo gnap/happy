@@ -138,6 +138,11 @@ export interface SpawnSessionOptions {
     };
     /** Explicit session tag used when respawning/restarting cursor or ACP sessions. */
     resumeSessionTag?: string;
+    /**
+     * Server message seq the CLI has already applied. Daemon passes the pre-wake seq so the
+     * session client fetches messages with seq > resumeAfterSeq instead of starting at session.seq.
+     */
+    resumeAfterSeq?: number;
 }
 
 export type SpawnSessionResult =

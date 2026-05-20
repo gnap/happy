@@ -13,6 +13,7 @@ import type { AgentState, Metadata, Session } from '@/api/types';
 import { configuration } from '@/configuration';
 import { createOfflineSessionStub } from '@/utils/offlineSessionStub';
 import { startOfflineReconnection } from '@/utils/serverConnectionErrors';
+import { parseResumeAfterSeqFromEnv } from '@/utils/resumeAfterSeq';
 
 /**
  * Options for setting up offline reconnection.
@@ -30,6 +31,8 @@ export interface SetupOfflineReconnectionOptions {
     response: Session | null;
     /** Existing encryption key for session reuse (avoids key mismatch on reconnection) */
     existingEncryptionKey?: Uint8Array;
+    /** Override initial lastSeq (e.g. daemon pre-wake seq) so HTTP sync fetches unread messages. */
+    initialLastSeq?: number;
     /**
      * Callback invoked when session is swapped after reconnection.
      * Use this to update the session reference in the calling code.
@@ -78,6 +81,8 @@ export interface SetupOfflineReconnectionResult {
  */
 export function setupOfflineReconnection(opts: SetupOfflineReconnectionOptions): SetupOfflineReconnectionResult {
     const { api, sessionTag, metadata, state, response, existingEncryptionKey, onSessionSwap } = opts;
+    const initialLastSeq = opts.initialLastSeq ?? parseResumeAfterSeqFromEnv();
+    const sessionClientOpts = initialLastSeq !== undefined ? { initialLastSeq } : undefined;
 
     let session: ApiSessionClient;
     let reconnectionHandle: ReturnType<typeof startOfflineReconnection<ApiSessionClient>> | null = null;
@@ -93,7 +98,7 @@ export function setupOfflineReconnection(opts: SetupOfflineReconnectionOptions):
             onReconnected: async () => {
                 const resp = await api.getOrCreateSession({ tag: sessionTag, metadata, state, existingEncryptionKey });
                 if (!resp) throw new Error('Server unavailable');
-                const realSession = api.sessionSyncClient(resp);
+                const realSession = api.sessionSyncClient(resp, true, sessionClientOpts);
                 // Notify caller to swap the session reference
                 onSessionSwap(realSession);
                 return realSession;
@@ -106,7 +111,7 @@ export function setupOfflineReconnection(opts: SetupOfflineReconnectionOptions):
 
         return { session, reconnectionHandle, isOffline: true };
     } else {
-        session = api.sessionSyncClient(response);
+        session = api.sessionSyncClient(response, true, sessionClientOpts);
         return { session, reconnectionHandle: null, isOffline: false };
     }
 }

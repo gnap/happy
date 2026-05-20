@@ -176,6 +176,7 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
       let workspaceRoot: string | undefined = undefined;
       let resumeSession = false;
       let resumeSessionTag: string | undefined = undefined;
+      let resumeAfterSeq: number | undefined = undefined;
       for (let i = 1; i < args.length; i++) {
         if (args[i] === '--started-by') {
           startedBy = args[++i] as 'daemon' | 'terminal';
@@ -185,6 +186,11 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
           resumeSession = true;
         } else if (args[i] === '--resume-session-tag' && args[i + 1]) {
           resumeSessionTag = args[++i];
+        } else if (args[i] === '--resume-after-seq' && args[i + 1]) {
+          const parsed = Number.parseInt(args[++i], 10);
+          if (Number.isFinite(parsed) && parsed >= 0) {
+            resumeAfterSeq = parsed;
+          }
         }
       }
 
@@ -202,7 +208,7 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
         await new Promise(resolve => setTimeout(resolve, 200));
       }
 
-      await runCursor({ credentials, startedBy, workspaceRoot, resumeSession, resumeSessionTag, cliStartTime });
+      await runCursor({ credentials, startedBy, workspaceRoot, resumeSession, resumeSessionTag, resumeAfterSeq, cliStartTime });
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error');
       if (process.env.DEBUG) {

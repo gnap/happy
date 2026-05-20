@@ -281,8 +281,12 @@ export class ApiClient {
     }
   }
 
-  sessionSyncClient(session: Session, websocketOnly: boolean = true): ApiSessionClient {
-    return new ApiSessionClient(this.credential.token, session, websocketOnly);
+  sessionSyncClient(
+    session: Session,
+    websocketOnly: boolean = true,
+    opts?: { initialLastSeq?: number },
+  ): ApiSessionClient {
+    return new ApiSessionClient(this.credential.token, session, websocketOnly, opts);
   }
 
   machineSyncClient(machine: Machine, websocketOnly: boolean = false): ApiMachineClient {

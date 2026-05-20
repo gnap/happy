@@ -205,6 +205,11 @@ describe('ApiSessionClient v3 messages API migration', () => {
         vi.restoreAllMocks();
     });
 
+    it('honors initialLastSeq below server session.seq for daemon wake catch-up', () => {
+        const client = new ApiSessionClient('fake-token', { ...session, seq: 12 }, true, { initialLastSeq: 10 });
+        expect((client as any).lastSeq).toBe(10);
+    });
+
     it('registers core socket handlers and connects', () => {
         new ApiSessionClient('fake-token', session);
 

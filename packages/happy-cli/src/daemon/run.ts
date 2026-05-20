@@ -254,6 +254,8 @@ export async function startDaemon(): Promise<void> {
     let initialPollDone = false;
     /** Last known seq per session ID. Populated during polling. */
     const lastSeqBySessionId: Record<string, number> = {};
+    /** Pre-wake seq per session (messages with seq > this should be fetched after CLI spawn). */
+    const resumeAfterSeqBySessionId: Record<string, number> = {};
     const persistSessionTagBeforeRemove = (session: TrackedSession) => {
       if (session.directory && session.sessionTag) lastSessionTagByDirectory[session.directory] = session.sessionTag;
       if (session.happySessionId && session.sessionTag) lastSessionTagBySessionId[session.happySessionId] = session.sessionTag;
@@ -548,6 +550,10 @@ export async function startDaemon(): Promise<void> {
 
         // Final merge: Profile vars first, then auth (auth takes precedence to protect authentication)
         let extraEnv = { ...profileEnv, ...authEnv };
+        if (typeof options.resumeAfterSeq === 'number' && options.resumeAfterSeq >= 0) {
+          extraEnv.HAPPY_RESUME_AFTER_SEQ = String(options.resumeAfterSeq);
+          logger.debug(`[DAEMON RUN] Passing HAPPY_RESUME_AFTER_SEQ=${options.resumeAfterSeq} to CLI`);
+        }
         logger.debug(`[DAEMON RUN] Final environment variable keys (before expansion) (${Object.keys(extraEnv).length}): ${Object.keys(extraEnv).join(', ')}`);
 
         // Expand ${VAR} references from daemon's process.env
@@ -1073,6 +1079,7 @@ export async function startDaemon(): Promise<void> {
         directory,
         agent,
         resumeSessionTag: sessionTag,
+        resumeAfterSeq: resumeAfterSeqBySessionId[sessionId],
       });
 
       if (result.type === 'success') {
@@ -1353,7 +1360,12 @@ export async function startDaemon(): Promise<void> {
           const prevSeq = lastSeqBySessionId[id] ?? -1;
 
           // Always update seq so next cycle has fresh baseline
-          if (seq > prevSeq) lastSeqBySessionId[id] = seq;
+          if (seq > prevSeq) {
+            if (prevSeq >= 0) {
+              resumeAfterSeqBySessionId[id] = prevSeq;
+            }
+            lastSeqBySessionId[id] = seq;
+          }
 
           // First poll: only record baselines, don't spawn (avoids respawning for already-seen messages)
           if (!initialPollDone) continue;
@@ -1395,10 +1407,15 @@ export async function startDaemon(): Promise<void> {
           lastSpawnAttemptBySessionId[id] = now;
 
           // Fire-and-forget: don't block heartbeat on 60s webhook timeout
+          const resumeAfterSeq = prevSeq >= 0 ? prevSeq : undefined;
+          logger.debug(
+            `[DAEMON RUN] Auto-respawn resumeAfterSeq=${resumeAfterSeq ?? 'none'} (server seq ${prevSeq} → ${seq})`,
+          );
           spawnSession({
             directory,
             agent,
-            resumeSessionTag: tag
+            resumeSessionTag: tag,
+            resumeAfterSeq,
           }).catch((err: unknown) => {
             logger.debug(`[DAEMON RUN] Auto-respawn failed for session ${id}:`, err);
           });

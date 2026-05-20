@@ -403,7 +403,12 @@ export class ApiSessionClient extends EventEmitter {
         return this.metadata;
     }
 
-    constructor(token: string, session: Session, private websocketOnly: boolean = true) {
+    constructor(
+        token: string,
+        session: Session,
+        private websocketOnly: boolean = true,
+        opts?: { initialLastSeq?: number },
+    ) {
         super()
         this.token = token;
         this.sessionId = session.id;
@@ -426,7 +431,12 @@ export class ApiSessionClient extends EventEmitter {
         this.requestedMetadata = session.requestedMetadata ?? null;
         this.encryptionKey = session.encryptionKey;
         this.encryptionVariant = session.encryptionVariant;
-        this.lastSeq = session.seq ?? 0;
+        this.lastSeq = opts?.initialLastSeq ?? session.seq ?? 0;
+        if (opts?.initialLastSeq !== undefined && opts.initialLastSeq !== session.seq) {
+            logger.debug(
+                `[API] Session ${session.id} initial lastSeq=${opts.initialLastSeq} (server session.seq=${session.seq ?? 0})`,
+            );
+        }
         this.sendSync = new InvalidateSync(() => this.flushOutbox());
         this.receiveSync = new InvalidateSync(() => this.fetchMessages());
         this.socketConnectedPromise = new Promise<void>((resolve) => {
