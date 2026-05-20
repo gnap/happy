@@ -128,6 +128,23 @@ export function buildA2AInboxNotification(unreadCount: number): string {
   return `A2A inbox${suffix}.`;
 }
 
+/** Default Task model slug for A2A inbox drain (verified via cursor-agent Task tool). */
+export const DEFAULT_A2A_INBOX_TASK_MODEL = 'composer-2.5-fast';
+
+/** Override via CURSOR_A2A_INBOX_TASK_MODEL. */
+export function resolveA2AInboxTaskModel(): string {
+  const fromEnv = process.env.CURSOR_A2A_INBOX_TASK_MODEL?.trim();
+  return fromEnv || DEFAULT_A2A_INBOX_TASK_MODEL;
+}
+
+/** Task tool-call args for App display (model slug is always set for inbox turns). */
+export function buildA2AInboxTaskToolArgs(args: Record<string, unknown> | undefined): Record<string, unknown> {
+  return {
+    ...(args ?? {}),
+    model: resolveA2AInboxTaskModel(),
+  };
+}
+
 /** Task tool card title shown in the App (replaces CLI-emitted fake A2A cards). */
 export function buildA2AInboxTaskTitle(unreadCount: number): string {
   if (unreadCount <= 0) {
@@ -163,6 +180,7 @@ export function buildA2ATurnPrompt(notification: string, snapshotPath?: string, 
   const count = typeof unreadCount === 'number' && unreadCount > 0 ? unreadCount : 1;
   const stacked = count > 1;
   const taskTitle = buildA2AInboxTaskTitle(count);
+  const taskModel = resolveA2AInboxTaskModel();
   const inboxMcpSteps = [
     'Call Happy MCP list_a2a_messages with unreadOnly=true.',
     'For each unread id: read_a2a_message, then mark_a2a_message_read (or mark_a2a_messages_read in one batch).',
@@ -176,7 +194,7 @@ export function buildA2ATurnPrompt(notification: string, snapshotPath?: string, 
     snapshotPath ? `Snapshot (debug only, prefer MCP over file): ${snapshotPath}` : null,
     'This is an A2A inbox turn. Do not read or mark inbox messages yourself in the main agent.',
     'Delegate inbox work to cursor-agent built-in Task subagent(s), not Happy spawn_subagent.',
-    'Spawn one Task (or a small parallel batch) with model auto for cost control.',
+    `Spawn one Task (or a small parallel batch) with Task tool model exactly "${taskModel}" (required; not auto, not the session model).`,
     `Set the Task description (card title) exactly to: ${taskTitle}`,
     `Task prompt: ${subagentPrompt}`,
     'Output discipline (main agent): before the Task tool call, send no user-visible text — no preamble, plan, status, or reasoning.',

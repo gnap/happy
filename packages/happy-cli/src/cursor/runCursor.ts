@@ -38,6 +38,7 @@ import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
 import {
   buildA2AInboxNotificationWithPreview,
   buildA2AInboxTaskTitle,
+  buildA2AInboxTaskToolArgs,
   buildA2ATurnPrompt,
   getA2AUnreadCount,
   hasUnreadA2AInboxMessages,
@@ -1096,8 +1097,10 @@ export async function runCursor(opts: {
               turnToolCallCount++;
               // Session protocol only; avoid sending codex/cursor tool-call so App does not show three summary cards (session + codex + cursor).
               let toolTitle = msg.description ?? deriveToolTitle(msg.toolName, msg.args);
+              let toolCallArgs = msg.args;
               if (isA2AInboxTurn && msg.toolName === 'Task') {
                 toolTitle = buildA2AInboxTaskTitle(inboxTurnUnreadCount);
+                toolCallArgs = buildA2AInboxTaskToolArgs(msg.args);
               }
               session.sendSessionProtocolMessage(createEnvelope('agent', {
                 t: 'tool-call-start',
@@ -1105,7 +1108,7 @@ export async function runCursor(opts: {
                 name: msg.toolName,
                 title: toolTitle,
                 description: toolTitle,
-                args: msg.args,
+                args: toolCallArgs,
               }, { turn: turnId }));
               logger.debug(`[cursor] tool-call callId=${msg.callId.slice(0, 8)}... name=${msg.toolName}`);
               // Per-tool timeout (Codex-style: 0 = disabled). When > 0: stop App timer and show "running in background"; process keeps running.

@@ -3,7 +3,10 @@ import {
   buildA2AInboxNotification,
   buildA2AInboxNotificationWithPreview,
   buildA2AInboxTaskTitle,
+  buildA2AInboxTaskToolArgs,
   buildA2ATurnPrompt,
+  DEFAULT_A2A_INBOX_TASK_MODEL,
+  resolveA2AInboxTaskModel,
   cloneA2AInboxState,
   getA2AUnreadCount,
   hasUnreadA2AInboxMessages,
@@ -59,6 +62,26 @@ describe('A2A inbox helpers', () => {
     expect(buildA2AInboxTaskTitle(4)).toBe('A2A inbox (4 unread)');
   });
 
+  it('defaults inbox Task model to composer-2.5-fast with env override', () => {
+    expect(resolveA2AInboxTaskModel()).toBe(DEFAULT_A2A_INBOX_TASK_MODEL);
+    const prev = process.env.CURSOR_A2A_INBOX_TASK_MODEL;
+    process.env.CURSOR_A2A_INBOX_TASK_MODEL = 'composer-2.5-fast';
+    expect(resolveA2AInboxTaskModel()).toBe('composer-2.5-fast');
+    if (prev === undefined) {
+      delete process.env.CURSOR_A2A_INBOX_TASK_MODEL;
+    } else {
+      process.env.CURSOR_A2A_INBOX_TASK_MODEL = prev;
+    }
+  });
+
+  it('wraps inbox Task tool args with the resolved model slug', () => {
+    expect(buildA2AInboxTaskToolArgs({ description: 'A2A inbox (1 unread)', prompt: 'x' })).toEqual({
+      description: 'A2A inbox (1 unread)',
+      prompt: 'x',
+      model: 'composer-2.5-fast',
+    });
+  });
+
   it('can include a compact inbox preview', () => {
     const inbox = upsertA2AInboxMessage(undefined, {
       id: 'one',
@@ -73,7 +96,7 @@ describe('A2A inbox helpers', () => {
     const prompt = buildA2ATurnPrompt(buildA2AInboxNotification(1));
     expect(prompt).toContain('A2A inbox (1 unread)');
     expect(prompt).toContain('built-in Task');
-    expect(prompt).toContain('model auto');
+    expect(prompt).toContain('model exactly "composer-2.5-fast"');
     expect(prompt).toContain('Task description (card title) exactly to: A2A inbox (1 unread)');
     expect(prompt).toContain('list_a2a_messages');
     expect(prompt).toContain('mark_a2a_messages_read');
