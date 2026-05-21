@@ -90,8 +90,23 @@ function collectInheritedDaemonEnv(): Array<[string, string]> {
         .sort(([a], [b]) => a.localeCompare(b));
 }
 
-export async function install(): Promise<void> {
+export type MacDaemonInstallOptions = {
+    /** Install LaunchDaemon (system domain) so the daemon survives user logout. Requires root. */
+    persistAcrossLogout?: boolean;
+};
+
+export async function install(options?: MacDaemonInstallOptions): Promise<void> {
     try {
+        const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+        const wantsLogoutPersist = options?.persistAcrossLogout === true;
+        if (wantsLogoutPersist && !isRoot) {
+            logger.info(
+                'Logout-persistent daemon requires root; installing user LaunchAgent instead '
+                + '(daemon stops when you log out).',
+            );
+            logger.info('For logout survival run: sudo happy daemon install --persist-across-logout');
+        }
+
         const variant = resolveVariant();
         const label = resolvePlistLabel(variant);
         const plistFile = getPlistPath(label);
@@ -99,6 +114,7 @@ export async function install(): Promise<void> {
         const happyHomeDir = resolveHappyHomeDir(variant);
 
         logger.info(`Installing Happy CLI daemon (variant: ${variant}, label: ${label})`);
+        logger.info(`Domain: ${domain} (${isRoot ? 'survives logout' : 'stops on user logout'})`);
         logger.info(`HAPPY_HOME_DIR -> ${happyHomeDir}`);
 
         if (!existsSync(happyHomeDir)) {
@@ -190,6 +206,12 @@ export async function install(): Promise<void> {
 
         logger.info('Daemon installed and started successfully');
         logger.info(`Check logs at ${happyHomeDir}/daemon.log`);
+        if (!isRoot && !wantsLogoutPersist) {
+            logger.info(
+                'Note: user LaunchAgent stops when you log out. For logout survival run:\n'
+                + '  sudo happy daemon install --persist-across-logout',
+            );
+        }
     } catch (error) {
         logger.debug('Failed to install daemon:', error);
         throw error;

@@ -24,6 +24,7 @@ import {
 } from '@/claude/utils/sessionProtocolMapper';
 import { InvalidateSync } from '@/utils/sync';
 import axios from 'axios';
+import { resolveSessionLastSeq } from './sessionLastSeq';
 import {
     cloneA2AInboxState,
     extractLegacyInboxFromAgentState,
@@ -431,8 +432,13 @@ export class ApiSessionClient extends EventEmitter {
         this.requestedMetadata = session.requestedMetadata ?? null;
         this.encryptionKey = session.encryptionKey;
         this.encryptionVariant = session.encryptionVariant;
-        this.lastSeq = opts?.initialLastSeq ?? session.seq ?? 0;
-        if (opts?.initialLastSeq !== undefined && opts.initialLastSeq !== session.seq) {
+        this.lastSeq = resolveSessionLastSeq(session.seq, opts?.initialLastSeq);
+        if (opts?.initialLastSeq !== undefined && this.lastSeq !== opts.initialLastSeq) {
+            logger.debug(
+                `[API] Session ${session.id} resume cursor adjusted: requested=${opts.initialLastSeq}, `
+                + `effective=${this.lastSeq} (server session.seq=${session.seq ?? 0})`,
+            );
+        } else if (opts?.initialLastSeq !== undefined && opts.initialLastSeq !== session.seq) {
             logger.debug(
                 `[API] Session ${session.id} initial lastSeq=${opts.initialLastSeq} (server session.seq=${session.seq ?? 0})`,
             );

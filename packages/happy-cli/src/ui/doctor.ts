@@ -146,7 +146,13 @@ export async function runDoctorCommand(filter?: 'all' | 'daemon'): Promise<void>
     // Linux: show systemd service status
     if (process.platform === 'linux') {
         try {
-            const { isSystemdAvailable, isServiceInstalled, getServiceActiveState, SERVICE_NAME } = await import('@/daemon/linux/systemd')
+            const {
+                isSystemdAvailable,
+                isServiceInstalled,
+                getServiceActiveState,
+                isUserLingerEnabled,
+                SERVICE_NAME,
+            } = await import('@/daemon/linux/systemd')
             if (isSystemdAvailable()) {
                 if (isServiceInstalled()) {
                     const state = getServiceActiveState()
@@ -154,6 +160,11 @@ export async function runDoctorCommand(filter?: 'all' | 'daemon'): Promise<void>
                         state === 'failed' ? chalk.red(`❌ failed`) :
                         chalk.yellow(`⚠ ${state}`)
                     console.log(`  systemd service: ${stateLabel} (${chalk.gray(`systemctl --user status ${SERVICE_NAME}`)})`)
+                    const linger = isUserLingerEnabled()
+                    console.log(
+                        `  logout survival: ${linger ? chalk.green('✓ linger enabled') : chalk.yellow('⚠ linger off (stops on logout)')} `
+                        + chalk.gray('(happy daemon install enables linger)'),
+                    )
                 } else {
                     console.log(`  systemd service: ${chalk.gray('not installed')} (run ${chalk.cyan('happy daemon install')} to fix terminal-exit restarts)`)
                 }

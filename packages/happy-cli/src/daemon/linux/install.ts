@@ -1,6 +1,15 @@
 import chalk from 'chalk';
 import { existsSync } from 'node:fs';
-import { isSystemdAvailable, isServiceInstalled, installService, startService, serviceFilePath, envFilePath, SERVICE_NAME } from './systemd';
+import {
+  envFilePath,
+  installService,
+  isServiceInstalled,
+  isSystemdAvailable,
+  SERVICE_NAME,
+  serviceFilePath,
+  startService,
+  tryEnableUserLinger,
+} from './systemd';
 import { stopDaemon } from '@/daemon/controlClient';
 
 export async function install(): Promise<void> {
@@ -28,6 +37,21 @@ export async function install(): Promise<void> {
     console.log(chalk.green(`✓ Env file seeded at ${envFilePath()} (chmod 600)`));
   }
   console.log(chalk.green(`✓ Service enabled (will auto-start on login)`));
+
+  const linger = tryEnableUserLinger();
+  if (linger.ok) {
+    console.log(
+      chalk.green(
+        linger.alreadyEnabled
+          ? '✓ User linger already enabled (daemon survives logout)'
+          : '✓ Enabled user linger (daemon survives logout)',
+      ),
+    );
+  } else {
+    console.log(chalk.yellow(`  Could not enable linger (daemon stops on logout): ${linger.error}`));
+    console.log(chalk.gray('  Fallback: systemd user service still installed (starts on login).'));
+    console.log(chalk.gray('  To enable logout survival: loginctl enable-linger $USER'));
+  }
 
   await new Promise(resolve => setTimeout(resolve, 300));
 

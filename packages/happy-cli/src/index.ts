@@ -752,8 +752,9 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
       }
       process.exit(0)
     } else if (daemonSubcommand === 'install') {
+      const persistAcrossLogout = args.includes('--persist-across-logout');
       try {
-        await install()
+        await install({ persistAcrossLogout })
       } catch (error) {
         console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
         process.exit(1)
@@ -777,6 +778,12 @@ ${chalk.bold('Usage:')}
   happy daemon restart-session    Restart a hung/dead session (resumes same chat)
   happy daemon archive-session    Remove a stopped session from the list
   happy daemon send-a2a           Send an A2A user message to a session
+  happy daemon install            Install daemon (Linux: best-effort linger for logout survival)
+  happy daemon uninstall          Remove installed daemon service
+
+  happy daemon install --persist-across-logout
+                                  macOS: LaunchDaemon if sudo, else LaunchAgent + hint
+                                  Linux: same as install (linger is always best-effort)
 
   If you want to kill all happy related processes run 
   ${chalk.cyan('happy doctor clean')}

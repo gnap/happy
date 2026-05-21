@@ -1355,7 +1355,8 @@ export async function startDaemon(): Promise<void> {
           }
 
           const agent = (lastAgentBySessionId[id] as 'cursor' | 'claude' | 'codex' | 'gemini' | 'acp-cursor') ?? 'cursor';
-          const resumeAfterSeq = prevSeq >= 0 ? prevSeq : (seq > 0 ? seq - 1 : undefined);
+          // Avoid resumeAfterSeq=0 on first poll (prevSeq=-1, seq=1): tag-respawn often loads an older session.
+          const resumeAfterSeq = prevSeq >= 0 ? prevSeq : (seq > 1 ? seq - 1 : undefined);
           logger.debug(
             `[DAEMON RUN] Auto-respawning session ${id} (${agent}) in ${directory} (seq ${prevSeq} → ${seq}, tag=${tag.slice(0, 8)}, resumeAfterSeq=${resumeAfterSeq ?? 'none'}, offlineWake=${daemonManagedStopped})`,
           );

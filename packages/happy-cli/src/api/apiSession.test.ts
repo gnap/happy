@@ -210,6 +210,11 @@ describe('ApiSessionClient v3 messages API migration', () => {
         expect((client as any).lastSeq).toBe(10);
     });
 
+    it('ignores initialLastSeq=0 when server session already has history', () => {
+        const client = new ApiSessionClient('fake-token', { ...session, seq: 2613 }, true, { initialLastSeq: 0 });
+        expect((client as any).lastSeq).toBe(2613);
+    });
+
     it('registers core socket handlers and connects', () => {
         new ApiSessionClient('fake-token', session);
 
