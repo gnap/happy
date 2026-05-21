@@ -35,8 +35,20 @@ const VALID_PERMISSION_MODES: readonly PermissionMode[] = [
     'yolo',
 ] as const;
 
-function isPermissionMode(value: string | undefined): value is PermissionMode {
+export function isPermissionMode(value: string | undefined): value is PermissionMode {
     return !!value && VALID_PERMISSION_MODES.includes(value as PermissionMode);
+}
+
+/**
+ * Prefer persisted session operating mode (App yolo/bypass) over CLI defaults on resume/restart.
+ */
+export function resolveStoredSessionPermissionMode(
+    storedOperatingModeCode: string | undefined,
+    cliResolved: PermissionMode | undefined,
+    sandboxEnabled: boolean,
+): PermissionMode | undefined {
+    const fromStorage = isPermissionMode(storedOperatingModeCode) ? storedOperatingModeCode : undefined;
+    return applySandboxPermissionPolicy(fromStorage ?? cliResolved, sandboxEnabled);
 }
 
 /**

@@ -5,6 +5,7 @@ import { logger } from "@/ui/logger";
 import type { JsRuntime } from "./runClaude";
 import type { SandboxConfig } from "@/persistence";
 import type { A2AInboxTurnHooks } from "@/a2a/inboxTurnController";
+import type { PermissionMode } from "@/api/types";
 
 export class Session {
     readonly path: string;
@@ -27,6 +28,8 @@ export class Session {
     a2aInboxTurn?: A2AInboxTurnHooks;
     /** Remote loop sets true while a Claude turn is in flight. */
     claudeTurnActiveRef?: { current: boolean };
+    /** Sync App permission mode changes to the active PermissionHandler (remote mode). */
+    syncPermissionMode?: (mode: PermissionMode) => void;
 
     sessionId: string | null;
     mode: 'local' | 'remote' = 'local';

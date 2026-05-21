@@ -29,7 +29,7 @@ import { startOfflineReconnection, connectionState } from '@/utils/serverConnect
 import { claudeLocal } from '@/claude/claudeLocal';
 import { createSessionScanner } from '@/claude/utils/sessionScanner';
 import { Session } from './session';
-import { applySandboxPermissionPolicy, resolveInitialClaudePermissionMode } from './utils/permissionMode';
+import { applySandboxPermissionPolicy, resolveInitialClaudePermissionMode, resolveStoredSessionPermissionMode } from './utils/permissionMode';
 import { claudeModelCodeForMetadata, normalizeClaudeModelForSdk } from './utils/model';
 import { buildA2ATurnPromptForClaude } from '@/a2a/inbox';
 import {
@@ -123,7 +123,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     let machineId = settings?.machineId
     const sandboxConfig = options.noSandbox ? undefined : settings?.sandboxConfig;
     const sandboxEnabled = Boolean(sandboxConfig?.enabled);
-    const initialPermissionMode = applySandboxPermissionPolicy(
+    let initialPermissionMode = applySandboxPermissionPolicy(
         resolveInitialClaudePermissionMode(options.permissionMode, options.claudeArgs),
         sandboxEnabled,
     );
@@ -216,6 +216,18 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
 
     logger.debug(`Session created: ${response.id}`);
     writeClaudeSessionEncryptionKey(sessionTag, response.encryptionKey);
+    const restoredPermissionMode = resolveStoredSessionPermissionMode(
+        response.metadata?.currentOperatingModeCode,
+        initialPermissionMode,
+        sandboxEnabled,
+    );
+    if (restoredPermissionMode !== undefined) {
+        initialPermissionMode = restoredPermissionMode;
+        logger.debug(
+            `[START] Restored permission mode from session metadata `
+            + `(stored=${response.metadata?.currentOperatingModeCode ?? 'none'}, effective=${initialPermissionMode})`,
+        );
+    }
     const initialClaudeSessionId = response.metadata?.claudeSessionId ?? null;
     if (initialClaudeSessionId) {
         logger.debug(`[START] Restoring Claude session ID from metadata: ${initialClaudeSessionId}`);
@@ -359,6 +371,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             messagePermissionMode = applySandboxPermissionPolicy(message.meta.permissionMode, sandboxEnabled);
             currentPermissionMode = messagePermissionMode;
             logger.debug(`[loop] Permission mode updated from user message to: ${currentPermissionMode}`);
+            currentSession?.syncPermissionMode?.(currentPermissionMode || 'default');
         } else {
             logger.debug(`[loop] User message received with no permission mode override, using current: ${currentPermissionMode}`);
         }

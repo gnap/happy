@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { applySandboxPermissionPolicy, extractPermissionModeFromClaudeArgs, mapToClaudeMode, resolveInitialClaudePermissionMode } from './permissionMode';
+import { applySandboxPermissionPolicy, extractPermissionModeFromClaudeArgs, mapToClaudeMode, resolveInitialClaudePermissionMode, resolveStoredSessionPermissionMode } from './permissionMode';
 import type { PermissionMode } from '@/api/types';
 
 describe('mapToClaudeMode', () => {
@@ -77,6 +77,16 @@ describe('resolveInitialClaudePermissionMode', () => {
 
     it('falls back to option mode when claude args have no mode', () => {
         expect(resolveInitialClaudePermissionMode('bypassPermissions', ['--foo'])).toBe('bypassPermissions');
+    });
+});
+
+describe('resolveStoredSessionPermissionMode', () => {
+    it('prefers stored yolo over CLI default on resume', () => {
+        expect(resolveStoredSessionPermissionMode('yolo', 'default', false)).toBe('yolo');
+    });
+
+    it('falls back to CLI mode when stored value is missing', () => {
+        expect(resolveStoredSessionPermissionMode(undefined, 'bypassPermissions', false)).toBe('bypassPermissions');
     });
 });
 
