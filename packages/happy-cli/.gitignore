@@ -29,6 +29,9 @@ pnpm-lock.yaml
 .happy/
 .happy-dev/
 
+# Accidental workspace when ~ in path was not expanded (e.g. ~/Projects/foo)
+/~/
+
 **/*.log
 .release-notes-temp.md
 
