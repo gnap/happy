@@ -439,6 +439,27 @@ export async function runCursor(opts: {
       dangerouslySkipPermissions,
     })).catch((err) => logger.debug('[Cursor] Failed to sync mode to session metadata', err));
   };
+  const applyInMemorySessionModel = (modelCode: string | undefined, source: string) => {
+    const normalized =
+      modelCode === undefined || modelCode === 'default' || modelCode === 'auto'
+        ? undefined
+        : modelCode;
+    if (currentModel === normalized) {
+      return;
+    }
+    const previous = currentModel;
+    currentModel = normalized;
+    logger.debug(
+      `[cursor] currentModel updated (${source}): ${previous ?? 'unset'} -> ${normalized ?? 'default'}`,
+    );
+  };
+  const syncInMemoryModelFromSessionMetadata = (source: string) => {
+    const code = session.getMetadata()?.currentModelCode;
+    if (code === undefined) {
+      return;
+    }
+    applyInMemorySessionModel(code, source);
+  };
 
   const handleUserMessage = (message: UserMessage) => {
     let messagePermissionMode = currentPermissionMode;
@@ -457,7 +478,8 @@ export async function runCursor(opts: {
     let messageModel = currentModel;
     if (message.meta && Object.prototype.hasOwnProperty.call(message.meta, 'model')) {
       messageModel = message.meta.model ?? undefined;
-      currentModel = messageModel;
+      applyInMemorySessionModel(messageModel, 'user-message');
+      messageModel = currentModel;
       logger.debug(`[Cursor] Model: ${messageModel ?? 'default (reset)'}`);
     }
     const mode: CursorMode = {
@@ -490,6 +512,11 @@ export async function runCursor(opts: {
 
   // Handle server unreachable - offline stub with hot reconnection
   let session: ApiSessionClient;
+  const attachSessionMetadataListener = (s: ApiSessionClient) => {
+    s.on('metadata-updated', () => {
+      syncInMemoryModelFromSessionMetadata('metadata-updated');
+    });
+  };
   const { session: initialSession, reconnectionHandle } = setupOfflineReconnection({
     api,
     sessionTag,
@@ -501,12 +528,15 @@ export async function runCursor(opts: {
     onSessionSwap: (newSession) => {
       session = newSession;
       newSession.onUserMessage(handleUserMessage);
+      attachSessionMetadataListener(newSession);
       // Re-register run-specific RPC handlers so kill/abort work after reconnect (they are not on the new session by default).
       newSession.rpcHandlerManager.registerHandler('abort', handleAbort);
       registerKillSessionHandler(newSession.rpcHandlerManager, handleKillSession);
+      syncInMemoryModelFromSessionMetadata('session-reconnect');
     },
   });
   session = initialSession;
+  attachSessionMetadataListener(session);
   const currentCursorMode = (): CursorMode => ({
     permissionMode: currentPermissionMode ?? 'default',
     model: currentModel,
@@ -573,9 +603,11 @@ export async function runCursor(opts: {
   session.onUserMessage(handleUserMessage);
   // Restore model selection from server metadata on resume (do not wipe on reconnect).
   const serverModelCode = session.getMetadata()?.currentModelCode;
-  if (serverModelCode && serverModelCode !== 'default') {
-    currentModel = serverModelCode;
-    logger.debug(`[cursor] Restored model from session metadata: ${serverModelCode}`);
+  if (serverModelCode !== undefined) {
+    applyInMemorySessionModel(serverModelCode, 'session-resume');
+    if (currentModel) {
+      logger.debug(`[cursor] Restored model from session metadata: ${currentModel}`);
+    }
   }
   step('sessionConnect');
   writeSessionPidFile(session.sessionId);
@@ -1003,7 +1035,10 @@ export async function runCursor(opts: {
         }
 
         // Spawn cursor-agent process (second+ turn uses --resume so cursor-agent continues same chat)
-        const cursorModel = mode.model ?? process.env.CURSOR_MODEL ?? 'auto';
+        // A2A inbox turns use live currentModel (queue mode may be stale from schedule time).
+        const cursorModel = (isA2AInboxTurn ? currentModel : mode.model)
+          ?? process.env.CURSOR_MODEL
+          ?? 'auto';
         const resumeId = cursorChatId || undefined;
         if (resumeId) {
           logger.debug(`[cursor] Resuming chat: ${resumeId}`);
