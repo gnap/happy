@@ -151,4 +151,6 @@ export type CursorStreamMessage =
 export interface CursorMode {
     permissionMode: import('@/api/types').PermissionMode;
     model?: string;
+    /** When set, force cli-config.json maxMode for the next cursor-agent spawn. */
+    maxMode?: boolean;
 }
