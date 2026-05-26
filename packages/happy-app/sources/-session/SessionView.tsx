@@ -206,13 +206,22 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         return session.metadata?.currentMaxMode ?? false;
     }, [session.maxMode, session.metadata?.currentMaxMode]);
 
-    const currentModelContextTokens = React.useMemo(() => {
+    const sessionStatus = useSessionStatus(session);
+    const sessionUsage = useSessionUsage(sessionId);
+    const maxContextSize = React.useMemo(() => {
+        const fromUsage = sessionUsage?.contextWindowTokens ?? session.latestUsage?.contextWindowTokens;
+        if (fromUsage) {
+            return fromUsage;
+        }
         const code = session.metadata?.currentModelCode;
         if (!code || !session.metadata?.models) return undefined;
         return session.metadata.models.find(m => m.code === code)?.contextTokens;
-    }, [session.metadata?.currentModelCode, session.metadata?.models]);
-    const sessionStatus = useSessionStatus(session);
-    const sessionUsage = useSessionUsage(sessionId);
+    }, [
+        sessionUsage?.contextWindowTokens,
+        session.latestUsage?.contextWindowTokens,
+        session.metadata?.currentModelCode,
+        session.metadata?.models,
+    ]);
     const alwaysShowContextSize = useSetting('alwaysShowContextSize');
     const experiments = useSetting('experiments');
 
@@ -368,7 +377,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                 contextSize: session.latestUsage.contextSize
             } : undefined}
             alwaysShowContextSize={alwaysShowContextSize}
-            maxContextSize={currentModelContextTokens}
+            maxContextSize={maxContextSize}
         />
     );
 

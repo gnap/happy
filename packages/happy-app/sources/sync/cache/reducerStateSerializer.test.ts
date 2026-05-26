@@ -70,6 +70,7 @@ function makeFullReducerState(): ReducerState {
         cacheCreation: 10,
         cacheRead: 5,
         contextSize: 115,
+        contextWindowTokens: 272000,
         timestamp: 9000,
     };
 
@@ -176,6 +177,7 @@ describe('serializeReducerState / deserializeReducerState', () => {
 
         expect(restored.latestTodos?.todos[0].id).toBe('t1');
         expect(restored.latestUsage?.inputTokens).toBe(100);
+        expect(restored.latestUsage?.contextWindowTokens).toBe(272000);
     });
 
     it('preserves tool call state in messages', () => {

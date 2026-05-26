@@ -108,6 +108,7 @@ export interface Session {
         cacheCreation: number;
         cacheRead: number;
         contextSize: number;
+        contextWindowTokens?: number;
         timestamp: number;
     } | null;
 }

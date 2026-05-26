@@ -81,6 +81,7 @@ export interface PersistedReducerState {
         cacheCreation: number;
         cacheRead: number;
         contextSize: number;
+        contextWindowTokens?: number;
         timestamp: number;
     };
 }

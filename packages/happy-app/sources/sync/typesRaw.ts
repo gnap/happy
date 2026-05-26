@@ -16,6 +16,8 @@ const usageDataSchema = z.object({
     // Pre-computed context window size (may be provided by CLI for Cursor sessions
     // where input_tokens alone does not represent the full context window).
     contextSize: z.number().optional(),
+    // Max context window from cursor-agent init model name (turn-end denominator).
+    context_window_tokens: z.number().optional(),
 });
 
 export type UsageData = z.infer<typeof usageDataSchema>;
@@ -127,8 +129,12 @@ const sessionTurnEndEventSchema = z.object({
         cacheCreationInputTokens: z.number().optional(),
         cache_read_input_tokens: z.number().optional(),
         cacheReadInputTokens: z.number().optional(),
-        // Pre-computed by CLI's normalizeCursorUsage; represents the full context window size
+        // Pre-computed by CLI; numerator (used context size)
         contextSize: z.number().optional(),
+        context_size: z.number().optional(),
+        // Max context window parsed from init model display name (denominator)
+        context_window_tokens: z.number().optional(),
+        contextWindowTokens: z.number().optional(),
     }).optional(),
 });
 
@@ -617,16 +623,24 @@ function normalizeSessionEnvelope(
         const rawUsage = envelope.ev.usage;
         const inputTokens = rawUsage?.input_tokens ?? rawUsage?.inputTokens;
         const outputTokens = rawUsage?.output_tokens ?? rawUsage?.outputTokens;
-        const normalizedUsage: UsageData | undefined = rawUsage && inputTokens !== undefined
+        const contextSize = rawUsage?.contextSize ?? rawUsage?.context_size;
+        const contextWindowTokens = rawUsage?.context_window_tokens ?? rawUsage?.contextWindowTokens;
+        const hasUsage = rawUsage && (
+            inputTokens !== undefined
+            || contextSize !== undefined
+            || contextWindowTokens !== undefined
+        );
+        const normalizedUsage: UsageData | undefined = hasUsage
             ? {
-                input_tokens: inputTokens,
+                input_tokens: inputTokens ?? 0,
                 output_tokens: outputTokens ?? 0,
                 cache_creation_input_tokens: rawUsage.cache_creation_input_tokens ?? rawUsage.cacheCreationInputTokens,
                 cache_read_input_tokens: rawUsage.cache_read_input_tokens ?? rawUsage.cacheReadInputTokens,
                 // Pass through pre-computed contextSize from CLI if present so processUsageData
                 // can use it directly rather than recomputing from token fields that may be
                 // incomplete (e.g. cursor-agent only reports per-turn incremental tokens).
-                contextSize: rawUsage.contextSize,
+                contextSize,
+                context_window_tokens: contextWindowTokens,
             }
             : undefined;
         return {
