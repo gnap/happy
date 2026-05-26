@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { getSessionThinkingPatchFromMessageContent } from './sessionThinkingLifecycle';
+import {
+    getSessionThinkingPatchFromMessageContent,
+    isSessionTurnStartMessageContent,
+} from './sessionThinkingLifecycle';
 
 describe('getSessionThinkingPatchFromMessageContent', () => {
     it('clears thinking on cursor turn-end lifecycle envelope', () => {
@@ -70,5 +73,31 @@ describe('getSessionThinkingPatchFromMessageContent', () => {
             },
         });
         expect(patch).toEqual({ thinking: true });
+    });
+
+    it('sets thinking on tool-call-start when turn-start was missed', () => {
+        const patch = getSessionThinkingPatchFromMessageContent({
+            role: 'session',
+            content: {
+                type: 'session',
+                data: {
+                    id: 'env-tool',
+                    role: 'agent',
+                    ev: { t: 'tool-call-start', call: 'call-1', name: 'bash' },
+                },
+            },
+        });
+        expect(patch).toEqual({ thinking: true });
+    });
+
+    it('detects turn-start for ephemeral grace window', () => {
+        expect(isSessionTurnStartMessageContent({
+            role: 'session',
+            content: { type: 'session', data: { ev: { t: 'turn-start' } } },
+        })).toBe(true);
+        expect(isSessionTurnStartMessageContent({
+            role: 'session',
+            content: { type: 'session', data: { ev: { t: 'tool-call-start', call: 'c1' } } },
+        })).toBe(false);
     });
 });

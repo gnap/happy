@@ -45,7 +45,10 @@ import { resolveMessageModeMeta } from './messageMeta';
 import { loadMessageCache, saveMessageCache, clearMessageCache, clearAllMessageCaches, preloadSessionCacheDB, getCachedLastSeq } from './cache/messageCache';
 import { olderAfterSeq } from './cacheSegment';
 import { overrideSessionCacheDB, IndexedDBSessionCacheDB } from './cache/sessionCacheDB';
-import { getSessionThinkingPatchFromMessageContent } from './sessionThinkingLifecycle';
+import {
+    getSessionThinkingPatchFromMessageContent,
+    isSessionTurnStartMessageContent,
+} from './sessionThinkingLifecycle';
 
 type V3GetSessionMessagesResponse = {
     messages: ApiMessage[];
@@ -70,6 +73,8 @@ type OutboxMessage = {
 class Sync {
     private static readonly BACKGROUND_SEND_TIMEOUT_MS = 30_000;
     private static readonly DESKTOP_SESSION_REFRESH_COOLDOWN_MS = 15_000;
+    /** Ignore stale ephemeral thinking=false shortly after turn-start (debounced session-alive). */
+    private static readonly TURN_START_EPHEMERAL_GRACE_MS = 8_000;
     encryption!: Encryption;
     serverID!: string;
     anonID!: string;
@@ -117,6 +122,8 @@ class Sync {
     private networkStateSubscription: ReturnType<typeof Network.addNetworkStateListener> | null = null;
     private currentVisibleSessionId: string | null = null;
     private lastDesktopSessionRefreshAt = 0;
+    /** Per-session turn-start time; used to drop lagging session-alive thinking=false. */
+    private sessionTurnStartAt = new Map<string, number>();
     /** Last known network connectivity; null until first change event fires. */
     private lastNetworkConnected: boolean | null = null;
     /** Last known network type; used to detect interface switches (e.g. WiFi → Cellular). */
@@ -2146,17 +2153,7 @@ class Sync {
                     }
                     normalizedMessages.push(normalized);
 
-                    const thinkingPatch = getSessionThinkingPatchFromMessageContent(decrypted.content);
-                    if (thinkingPatch) {
-                        const pageSession = storage.getState().sessions[sessionId];
-                        if (pageSession && pageSession.thinking !== thinkingPatch.thinking) {
-                            this.applySessions([{
-                                ...pageSession,
-                                ...thinkingPatch,
-                                thinkingAt: thinkingPatch.thinking ? Date.now() : 0,
-                            }]);
-                        }
-                    }
+                    this.applySessionThinkingFromRawContent(sessionId, decrypted.content);
                 }
 
                 if (normalizedMessages.length > 0) {
@@ -2445,10 +2442,12 @@ class Sync {
                         }
                     }
 
-                    const thinkingPatch = getSessionThinkingPatchFromMessageContent(decrypted.content);
-                    const isReadyNormalized = lastMessage?.role === 'event'
-                        && (lastMessage.content as { type?: string })?.type === 'ready';
-                    const shouldClearThinking = thinkingPatch?.thinking === false || isReadyNormalized;
+                    const thinkingPatch = this.applySessionThinkingFromRawContent(
+                        updateData.body.sid,
+                        decrypted.content,
+                        updateData.createdAt,
+                    );
+                    const shouldClearThinking = thinkingPatch?.thinking === false;
 
                     // Update session (use body.message.seq = session-internal seq, same as GET /v1/sessions; do not use updateData.seq which is global user seq)
                     const session = storage.getState().sessions[updateData.body.sid];
@@ -2457,14 +2456,7 @@ class Sync {
                             ...session,
                             updatedAt: updateData.createdAt,
                             seq: updateData.body.message.seq,
-                            ...(thinkingPatch?.thinking === true
-                                ? { thinking: true, thinkingAt: updateData.createdAt }
-                                : {}),
-                            ...(shouldClearThinking ? { thinking: false, thinkingAt: 0 } : {}),
-                        }])
-                        if (shouldClearThinking) {
-                            storage.getState().finalizeRunningTools(updateData.body.sid);
-                        }
+                        }]);
                     } else {
                         // Fetch sessions again if we don't have this session
                         this.fetchSessions();
@@ -2853,15 +2845,27 @@ class Sync {
 
         const sessions: Session[] = [];
 
+        const now = Date.now();
         for (const [sessionId, update] of updates) {
             const session = storage.getState().sessions[sessionId];
             if (session) {
+                let thinking = update.thinking ?? false;
+                let thinkingAt = update.activeAt;
+                const turnStartAt = this.sessionTurnStartAt.get(sessionId);
+                if (
+                    thinking === false
+                    && turnStartAt !== undefined
+                    && now - turnStartAt < Sync.TURN_START_EPHEMERAL_GRACE_MS
+                ) {
+                    thinking = session.thinking;
+                    thinkingAt = session.thinkingAt;
+                }
                 sessions.push({
                     ...session,
                     active: update.active,
                     activeAt: update.activeAt,
-                    thinking: update.thinking ?? false,
-                    thinkingAt: update.activeAt // Always use activeAt for consistency
+                    thinking,
+                    thinkingAt,
                 });
             }
         }
@@ -2925,16 +2929,46 @@ class Sync {
         }
         if (result.hasReadyEvent) {
             voiceHooks.onReady(sessionId);
-            // Covers fetchMessages / reconnect / focus refresh when socket turn-end was missed.
-            this.clearSessionThinking(sessionId);
+            // Do not clear thinking here: ready replays after abort/reconnect must not
+            // override an active turn. turn-end / turn_aborted close thinking via durable messages.
         }
     }
 
-    private clearSessionThinking(sessionId: string) {
+    /**
+     * Apply durable lifecycle thinking patch and track turn-start for ephemeral grace window.
+     */
+    private applySessionThinkingFromRawContent(
+        sessionId: string,
+        rawContent: unknown,
+        thinkingAt?: number,
+    ): { thinking: boolean } | null {
+        if (isSessionTurnStartMessageContent(rawContent)) {
+            this.sessionTurnStartAt.set(sessionId, Date.now());
+        }
+
+        const thinkingPatch = getSessionThinkingPatchFromMessageContent(rawContent);
+        if (thinkingPatch?.thinking === false) {
+            this.sessionTurnStartAt.delete(sessionId);
+        }
+
+        if (!thinkingPatch) {
+            return null;
+        }
+
         const session = storage.getState().sessions[sessionId];
-        if (!session) return;
-        this.applySessions([{ ...session, thinking: false, thinkingAt: 0 }]);
-        storage.getState().finalizeRunningTools(sessionId);
+        if (session && session.thinking !== thinkingPatch.thinking) {
+            const at = thinkingAt ?? Date.now();
+            this.applySessions([{
+                ...session,
+                ...thinkingPatch,
+                thinkingAt: thinkingPatch.thinking ? at : 0,
+            }]);
+            if (thinkingPatch.thinking === false) {
+                storage.getState().finalizeRunningTools(sessionId);
+            }
+        }
+
+        return thinkingPatch;
     }
 
     private applySessions = (sessions: (Omit<Session, "presence"> & {

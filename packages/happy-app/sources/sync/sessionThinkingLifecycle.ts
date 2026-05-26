@@ -46,11 +46,14 @@ function isSummarizingServiceEvent(ev: SessionEv | null): boolean {
     return /\b(?:summariz|compress)/i.test(ev.text);
 }
 
-export function getSessionThinkingPatchFromMessageContent(
-    rawContent: unknown,
-): { thinking: boolean } | null {
+function readSessionLifecycleContext(rawContent: unknown): {
+    contentType?: string;
+    dataType?: string;
+    lifecycleEv: SessionEv | null;
+    sessionEventType?: string;
+} {
     if (!rawContent || typeof rawContent !== 'object') {
-        return null;
+        return { lifecycleEv: null };
     }
 
     const content = rawContent as {
@@ -67,14 +70,30 @@ export function getSessionThinkingPatchFromMessageContent(
         };
     };
 
-    const contentType = content.content?.type;
-    const dataType = content.content?.data?.type;
-
     const lifecycleEv = readNestedLifecycleEvent(content) ?? readFlatSessionEnvelopeEvent(content);
-    const sessionEventType =
-        lifecycleEv?.t ??
-        content.content?.data?.ev?.t ??
-        content.content?.ev?.t;
+    return {
+        contentType: content.content?.type,
+        dataType: content.content?.data?.type,
+        lifecycleEv,
+        sessionEventType:
+            lifecycleEv?.t ??
+            content.content?.data?.ev?.t ??
+            content.content?.ev?.t,
+    };
+}
+
+/** True when durable message is a session-protocol turn-start (used for ephemeral grace window). */
+export function isSessionTurnStartMessageContent(rawContent: unknown): boolean {
+    return readSessionLifecycleContext(rawContent).sessionEventType === 'turn-start';
+}
+
+export function getSessionThinkingPatchFromMessageContent(
+    rawContent: unknown,
+): { thinking: boolean } | null {
+    const { contentType, dataType, lifecycleEv, sessionEventType } = readSessionLifecycleContext(rawContent);
+    if (!contentType && !dataType && !sessionEventType) {
+        return null;
+    }
 
     const isTaskComplete =
         ((contentType === 'acp' || contentType === 'codex') &&
@@ -84,6 +103,7 @@ export function getSessionThinkingPatchFromMessageContent(
     const isTaskStarted =
         ((contentType === 'acp' || contentType === 'codex') && dataType === 'task_started') ||
         sessionEventType === 'turn-start' ||
+        sessionEventType === 'tool-call-start' ||
         isSummarizingServiceEvent(lifecycleEv);
 
     if (isTaskComplete) {
