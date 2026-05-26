@@ -44,4 +44,28 @@ describe('resolveMessageModeMeta', () => {
             model: null,
         });
     });
+
+    it('sends maxMode from local override or session metadata', () => {
+        expect(resolveMessageModeMeta({
+            permissionMode: 'default',
+            modelMode: null,
+            maxMode: true,
+            metadata: { currentMaxMode: false },
+        } as any)).toEqual({
+            permissionMode: 'default',
+            model: null,
+            maxMode: true,
+        });
+
+        expect(resolveMessageModeMeta({
+            permissionMode: 'default',
+            modelMode: null,
+            maxMode: undefined,
+            metadata: { currentMaxMode: true },
+        } as any)).toEqual({
+            permissionMode: 'default',
+            model: null,
+            maxMode: true,
+        });
+    });
 });

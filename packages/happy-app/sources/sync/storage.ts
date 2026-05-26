@@ -11,7 +11,7 @@ import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
 import { Profile } from "./profile";
 import { UserProfile, RelationshipUpdatedEvent } from "./friendTypes";
-import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes } from "./persistence";
+import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionMaxModes, saveSessionMaxModes } from "./persistence";
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 import type { CustomerInfo } from './revenueCat/types';
 import React from "react";
@@ -156,6 +156,8 @@ interface StorageState {
     updateSessionPermissionMode: (sessionId: string, mode: string) => void;
     updateSessionModelMode: (sessionId: string, mode: string) => void;
     clearSessionModelMode: (sessionId: string) => void;
+    updateSessionMaxMode: (sessionId: string, maxMode: boolean) => void;
+    clearSessionMaxMode: (sessionId: string) => void;
     // Artifact methods
     applyArtifacts: (artifacts: DecryptedArtifact[]) => void;
     addArtifact: (artifact: DecryptedArtifact) => void;
@@ -294,6 +296,7 @@ export const storage = create<StorageState>()((set, get) => {
     let sessionDrafts = loadSessionDrafts();
     let sessionPermissionModes = loadSessionPermissionModes();
     let sessionModelModes = loadSessionModelModes();
+    let sessionMaxModes = loadSessionMaxModes();
     return {
         settings,
         settingsVersion: version,
@@ -456,6 +459,7 @@ export const storage = create<StorageState>()((set, get) => {
             const savedDrafts = Object.keys(state.sessions).length === 0 ? sessionDrafts : {};
             const savedPermissionModes = loadSessionPermissionModes();
             const savedModelModes = loadSessionModelModes();
+            const savedMaxModes = loadSessionMaxModes();
 
             // Merge new sessions with existing ones
             const mergedSessions: Record<string, Session> = { ...state.sessions };
@@ -488,6 +492,17 @@ export const storage = create<StorageState>()((set, get) => {
                 // server-pushed metadata so a model change in the UI is not immediately overwritten.
                 // metadataModel (what the agent is currently running) is used only as a fallback.
                 const resolvedModelMode = existingModelMode ?? savedModelMode ?? (metadataModel && metadataModel !== '' ? metadataModel : undefined) ?? session.modelMode ?? undefined;
+                const existingMaxMode = state.sessions[session.id]?.maxMode;
+                const savedMaxMode = savedMaxModes[session.id];
+                const metadataMaxMode = session.metadata?.currentMaxMode;
+                const resolvedMaxMode =
+                    existingMaxMode !== undefined && existingMaxMode !== null
+                        ? existingMaxMode
+                        : savedMaxMode !== undefined
+                            ? savedMaxMode
+                            : metadataMaxMode !== undefined
+                                ? metadataMaxMode
+                                : session.maxMode ?? undefined;
                 // todos: derived by replay (reducer) when messages load; not synced to server. Preserve here so
                 // list fetches do not overwrite; replay will update session.todos when that session's messages load.
                 const existingTodos = state.sessions[session.id]?.todos;
@@ -499,6 +514,7 @@ export const storage = create<StorageState>()((set, get) => {
                     draft: existingDraft || savedDraft || session.draft || null,
                     permissionMode: resolvedPermissionMode,
                     modelMode: resolvedModelMode,
+                    maxMode: resolvedMaxMode,
                     todos: resolvedTodos
                 };
             });
@@ -1138,6 +1154,46 @@ export const storage = create<StorageState>()((set, get) => {
                 }
             };
         }),
+        updateSessionMaxMode: (sessionId: string, maxMode: boolean) => set((state) => {
+            const session = state.sessions[sessionId];
+            if (!session) return state;
+
+            const updatedSessions = {
+                ...state.sessions,
+                [sessionId]: {
+                    ...session,
+                    maxMode,
+                },
+            };
+            const allMaxModes: Record<string, boolean> = {};
+            Object.entries(updatedSessions).forEach(([id, sess]) => {
+                if (sess.maxMode !== undefined && sess.maxMode !== null) {
+                    allMaxModes[id] = sess.maxMode;
+                }
+            });
+            saveSessionMaxModes(allMaxModes);
+
+            return {
+                ...state,
+                sessions: updatedSessions,
+            };
+        }),
+        clearSessionMaxMode: (sessionId: string) => set((state) => {
+            const session = state.sessions[sessionId];
+            if (!session) return state;
+
+            const maxModes = loadSessionMaxModes();
+            delete maxModes[sessionId];
+            saveSessionMaxModes(maxModes);
+
+            return {
+                ...state,
+                sessions: {
+                    ...state.sessions,
+                    [sessionId]: { ...session, maxMode: undefined },
+                },
+            };
+        }),
         // Project management methods
         getProjects: () => projectManager.getProjects(),
         getProject: (projectId: string) => projectManager.getProject(projectId),
@@ -1248,6 +1304,9 @@ export const storage = create<StorageState>()((set, get) => {
             const modelModes = loadSessionModelModes();
             delete modelModes[sessionId];
             saveSessionModelModes(modelModes);
+            const maxModes = loadSessionMaxModes();
+            delete maxModes[sessionId];
+            saveSessionMaxModes(maxModes);
 
             // Rebuild sessionListViewData without the deleted session
             const sessionListViewData = buildSessionListViewData(remainingSessions);

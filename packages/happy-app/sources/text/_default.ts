@@ -421,6 +421,7 @@ export const en = {
         },
         model: {
             title: 'MODEL',
+            maxMode: 'Max',
             configureInCli: 'Configure models in CLI settings',
         },
         codexPermissionMode: {

@@ -295,6 +295,7 @@ function NewSessionWizard() {
     const lastUsedModelModeLocal = useLocalSetting('lastUsedModelMode');
     const lastUsedModelModeServer = useSetting('lastUsedModelMode');
     const lastUsedModelMode = lastUsedModelModeLocal ?? lastUsedModelModeServer;
+    const lastUsedMaxMode = useLocalSetting('lastUsedMaxMode');
     const experimentsEnabled = useSetting('experiments');
     const [profiles, setProfiles] = useSettingMutable('profiles');
     const lastUsedProfile = useSetting('lastUsedProfile');
@@ -380,6 +381,7 @@ function NewSessionWizard() {
             getDefaultModelKey(agentType),
         ]);
     });
+    const [maxMode, setMaxMode] = React.useState(() => lastUsedMaxMode);
 
     // Session details state
     const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(() => {
@@ -405,6 +407,11 @@ function NewSessionWizard() {
     const handleModelModeChange = React.useCallback((mode: ModelMode) => {
         setModelMode(mode);
         storage.getState().applyLocalSettings({ lastUsedModelMode: mode.key });
+    }, []);
+
+    const handleMaxModeChange = React.useCallback((enabled: boolean) => {
+        setMaxMode(enabled);
+        storage.getState().applyLocalSettings({ lastUsedMaxMode: enabled });
     }, []);
 
     //
@@ -1032,7 +1039,10 @@ function NewSessionWizard() {
                 lastUsedProfile: selectedProfileId,
                 lastUsedPermissionMode: permissionMode.key,
             });
-            storage.getState().applyLocalSettings({ lastUsedModelMode: modelMode?.key ?? null });
+            storage.getState().applyLocalSettings({
+                lastUsedModelMode: modelMode?.key ?? null,
+                lastUsedMaxMode: maxMode,
+            });
 
             // Get environment variables from selected profile
             let environmentVariables: Record<string, string> | undefined = undefined;
@@ -1043,11 +1053,12 @@ function NewSessionWizard() {
                 }
             }
             // Pass initial permission/model to CLI so ACP cursor starts with user-selected mode (not default)
-            if (agentType === 'cursor-acp') {
+            if (agentType === 'cursor-acp' || agentType === 'cursor') {
                 environmentVariables = {
                     ...environmentVariables,
                     HAPPY_CURSOR_INITIAL_PERMISSION_MODE: permissionMode.key,
                     ...(modelMode?.key ? { HAPPY_CURSOR_INITIAL_MODEL: modelMode.key } : {}),
+                    HAPPY_CURSOR_INITIAL_MAX_MODE: maxMode ? '1' : '0',
                 };
             }
 
@@ -1084,6 +1095,9 @@ function NewSessionWizard() {
                     if (modelMode) {
                         storage.getState().updateSessionModelMode(sessionId, modelMode.key);
                     }
+                    if (agentType === 'cursor' || agentType === 'cursor-acp') {
+                        storage.getState().updateSessionMaxMode(sessionId, maxMode);
+                    }
                     if (sessionPrompt.trim()) {
                         await sync.sendMessage(sessionId, sessionPrompt);
                     }
@@ -1114,7 +1128,7 @@ function NewSessionWizard() {
             Modal.alert(t('common.error'), errorMessage);
             setIsCreating(false);
         }
-    }, [selectedMachineId, selectedPath, sessionPrompt, sessionType, experimentsEnabled, agentType, selectedProfileId, permissionMode, modelMode, recentMachinePaths, profileMap, router]);
+    }, [selectedMachineId, selectedPath, sessionPrompt, sessionType, experimentsEnabled, agentType, selectedProfileId, permissionMode, modelMode, maxMode, recentMachinePaths, profileMap, router]);
 
     const screenWidth = useWindowDimensions().width;
 
@@ -1209,6 +1223,8 @@ function NewSessionWizard() {
                                 modelMode={modelMode}
                                 availableModels={availableModels}
                                 onModelModeChange={handleModelModeChange}
+                                maxMode={maxMode}
+                                onMaxModeChange={handleMaxModeChange}
                                 connectionStatus={connectionStatus}
                                 machineName={selectedMachine?.metadata?.displayName || selectedMachine?.metadata?.host}
                                 onMachineClick={handleMachineClick}
@@ -2040,6 +2056,8 @@ function NewSessionWizard() {
                             modelMode={modelMode}
                             availableModels={availableModels}
                             onModelModeChange={handleModelModeChange}
+                            maxMode={maxMode}
+                            onMaxModeChange={handleMaxModeChange}
                             connectionStatus={connectionStatus}
                             machineName={selectedMachine?.metadata?.displayName || selectedMachine?.metadata?.host}
                             onMachineClick={handleAgentInputMachineClick}

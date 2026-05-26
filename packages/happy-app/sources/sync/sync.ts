@@ -735,7 +735,7 @@ class Sync {
             return;
         }
 
-        const { permissionMode, model } = resolveMessageModeMeta(session);
+        const { permissionMode, model, maxMode } = resolveMessageModeMeta(session);
 
         // Reuse existing localId on retry so the same bubble is reused; generate fresh one otherwise.
         const localId = existingLocalId ?? randomUUID();
@@ -783,6 +783,7 @@ class Sync {
                 model,
                 fallbackModel,
                 appendSystemPrompt: systemPrompt,
+                ...(maxMode !== undefined ? { maxMode } : {}),
                 ...(displayText && { displayText }) // Add displayText if provided
             }
         };

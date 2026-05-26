@@ -199,6 +199,13 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         ])
     ), [availableModels, session.modelMode, session.metadata?.currentModelCode, flavor]);
 
+    const maxMode = React.useMemo(() => {
+        if (session.maxMode !== undefined && session.maxMode !== null) {
+            return session.maxMode;
+        }
+        return session.metadata?.currentMaxMode ?? false;
+    }, [session.maxMode, session.metadata?.currentMaxMode]);
+
     const currentModelContextTokens = React.useMemo(() => {
         const code = session.metadata?.currentModelCode;
         if (!code || !session.metadata?.models) return undefined;
@@ -231,6 +238,10 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
 
     const updateModelMode = React.useCallback((mode: ModelMode) => {
         storage.getState().updateSessionModelMode(sessionId, mode.key);
+    }, [sessionId]);
+
+    const updateMaxMode = React.useCallback((enabled: boolean) => {
+        storage.getState().updateSessionMaxMode(sessionId, enabled);
     }, [sessionId]);
 
     // Memoize header-dependent styles to prevent re-renders
@@ -317,6 +328,8 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             modelMode={modelMode}
             availableModels={availableModels}
             onModelModeChange={updateModelMode}
+            maxMode={maxMode}
+            onMaxModeChange={updateMaxMode}
             metadata={session.metadata}
             connectionStatus={{
                 text: sessionStatus.statusText,
@@ -333,6 +346,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                     // confirm its selection via metadata.currentModelCode. From this point the App
                     // just follows the CLI rather than keeping a stale local preference.
                     storage.getState().clearSessionModelMode(sessionId);
+                    storage.getState().clearSessionMaxMode(sessionId);
                     trackMessageSent();
                 }
             }}

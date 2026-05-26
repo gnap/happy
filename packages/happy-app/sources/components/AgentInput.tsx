@@ -13,6 +13,7 @@ import { useActiveWord } from './autocomplete/useActiveWord';
 import { useActiveSuggestions } from './autocomplete/useActiveSuggestions';
 import { AgentInputAutocomplete } from './AgentInputAutocomplete';
 import { FloatingOverlay } from './FloatingOverlay';
+import { Switch } from './Switch';
 import { TextInputState, MultiTextInputHandle } from './MultiTextInput';
 import { applySuggestion } from './autocomplete/applySuggestion';
 import { GitStatusBadge, useHasMeaningfulGitStatus } from './GitStatusBadge';
@@ -40,6 +41,8 @@ interface AgentInputProps {
     modelMode?: ModelMode | null;
     availableModels?: ModelMode[];
     onModelModeChange?: (mode: ModelMode) => void;
+    maxMode?: boolean;
+    onMaxModeChange?: (enabled: boolean) => void;
     metadata?: Metadata | null;
     onAbort?: () => void | Promise<void>;
     showAbortButton?: boolean;
@@ -633,16 +636,44 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
 
                                 {/* Model Section */}
                                 <View style={{ paddingVertical: 8 }}>
-                                    <Text style={{
-                                        fontSize: 12,
-                                        fontWeight: '600',
-                                        color: theme.colors.textSecondary,
+                                    <View style={{
+                                        flexDirection: 'row',
+                                        alignItems: 'center',
+                                        justifyContent: 'space-between',
                                         paddingHorizontal: 16,
                                         paddingBottom: 4,
-                                        ...Typography.default('semiBold')
                                     }}>
-                                        {t('agentInput.model.title')}
-                                    </Text>
+                                        <Text style={{
+                                            fontSize: 12,
+                                            fontWeight: '600',
+                                            color: theme.colors.textSecondary,
+                                            ...Typography.default('semiBold')
+                                        }}>
+                                            {t('agentInput.model.title')}
+                                        </Text>
+                                        {isCursor && props.onMaxModeChange && (
+                                            <View style={{
+                                                flexDirection: 'row',
+                                                alignItems: 'center',
+                                                gap: 8,
+                                            }}>
+                                                <Text style={{
+                                                    fontSize: 12,
+                                                    color: theme.colors.textSecondary,
+                                                    ...Typography.default()
+                                                }}>
+                                                    {t('agentInput.model.maxMode')}
+                                                </Text>
+                                                <Switch
+                                                    value={props.maxMode ?? false}
+                                                    onValueChange={(value) => {
+                                                        hapticsLight();
+                                                        props.onMaxModeChange?.(value);
+                                                    }}
+                                                />
+                                            </View>
+                                        )}
+                                    </View>
                                     {availableModels.length > 0 ? (
                                         availableModels.map((model) => {
                                             const isSelected = props.modelMode?.key === model.key;

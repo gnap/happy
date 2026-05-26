@@ -17,6 +17,7 @@ export const LocalSettingsSchema = z.object({
     lazyLoadToolContent: z.boolean().describe('Fetch full diff content on demand in detail view (requires CLI support)'),
     // Model preference is device-local: server sync must not overwrite the user's per-device choice
     lastUsedModelMode: z.string().nullable().describe('Last selected model mode for new sessions (device-local, not synced)'),
+    lastUsedMaxMode: z.boolean().describe('Last Cursor max mode toggle for new sessions (device-local, not synced)'),
 });
 
 //
@@ -41,6 +42,7 @@ export const localSettingsDefaults: LocalSettings = {
     acknowledgedCliVersions: {},
     lazyLoadToolContent: true,
     lastUsedModelMode: null,
+    lastUsedMaxMode: false,
 };
 Object.freeze(localSettingsDefaults);
 

@@ -7,8 +7,8 @@ function isSandboxEnabled(metadata: Session['metadata'] | null | undefined): boo
 }
 
 export function resolveMessageModeMeta(
-    session: Pick<Session, 'permissionMode' | 'modelMode' | 'metadata'>,
-): { permissionMode: PermissionModeKey; model: string | null } {
+    session: Pick<Session, 'permissionMode' | 'modelMode' | 'maxMode' | 'metadata'>,
+): { permissionMode: PermissionModeKey; model: string | null; maxMode?: boolean } {
     const sandboxEnabled = isSandboxEnabled(session.metadata);
     const permissionMode: PermissionModeKey =
         session.permissionMode && session.permissionMode !== 'default'
@@ -18,8 +18,14 @@ export function resolveMessageModeMeta(
     const modelMode = session.modelMode || 'default';
     const model = modelMode !== 'default' ? modelMode : null;
 
+    const maxMode =
+        session.maxMode !== undefined && session.maxMode !== null
+            ? session.maxMode
+            : session.metadata?.currentMaxMode;
+
     return {
         permissionMode,
         model,
+        ...(maxMode !== undefined ? { maxMode } : {}),
     };
 }

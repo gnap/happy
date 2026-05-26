@@ -206,6 +206,24 @@ export function saveSessionModelModes(modes: Record<string, string>) {
     mmkv.set('session-model-modes', JSON.stringify(modes));
 }
 
+/** Session id -> Cursor max mode toggle. Fallback when session.metadata.currentMaxMode is absent. */
+export function loadSessionMaxModes(): Record<string, boolean> {
+    const modes = mmkv.getString('session-max-modes');
+    if (modes) {
+        try {
+            return JSON.parse(modes);
+        } catch (e) {
+            console.error('Failed to parse session max modes', e);
+            return {};
+        }
+    }
+    return {};
+}
+
+export function saveSessionMaxModes(modes: Record<string, boolean>) {
+    mmkv.set('session-max-modes', JSON.stringify(modes));
+}
+
 export function loadProfile(): Profile {
     const profile = mmkv.getString('profile');
     if (profile) {
