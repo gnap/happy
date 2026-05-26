@@ -900,7 +900,7 @@ export async function runCursor(opts: {
 
   let currentTurnIdRef: string | null = null;
   const enableSubagentMcp = process.env.HAPPY_SUBAGENT_MCP === '1';
-  const happyServer = await startHappyServer(session, {
+  const happyServer = await startHappyServer(() => session, {
     useDaemonA2ARoute: opts.startedBy === 'daemon',
     isA2AInboxTurnActive: () => a2aInboxTurnActive,
     cursorContext: {
