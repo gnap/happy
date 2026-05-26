@@ -1164,4 +1164,87 @@ describe('ApiSessionClient v3 messages API migration', () => {
         expect(mockAxiosGet).not.toHaveBeenCalled();
         expect(mockAxiosPost).not.toHaveBeenCalled();
     });
+
+    it('prefers WS outbox flush after socket connect (official server, no ack)', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        await clearInitialFetch();
+        emitSocketEvent('connect');
+
+        client.sendCodexMessage({ type: 'ws-first' });
+        await waitForCheck(() => {
+            expect((client as any).pendingOutbox).toHaveLength(0);
+        });
+
+        expect(mockSocket.emit).toHaveBeenCalledWith('message', expect.objectContaining({
+            sid: session.id,
+            localId: expect.any(String),
+        }));
+        expect(mockAxiosPost).not.toHaveBeenCalled();
+        expect(client.getOutboundTransportMode()).toBe('ws');
+    });
+
+    it('falls back to HTTP for remainder when WS disconnects mid-batch', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        await clearInitialFetch();
+        emitSocketEvent('connect');
+
+        let emitCount = 0;
+        mockSocket.emit.mockImplementation(() => {
+            emitCount += 1;
+            if (emitCount >= 1) {
+                mockSocket.connected = false;
+                emitSocketEvent('disconnect', 'transport close');
+            }
+        });
+
+        client.sendCodexMessage({ type: 'first-via-ws' });
+        client.sendCodexMessage({ type: 'second-via-http' });
+        await waitForCheck(() => {
+            expect(mockAxiosPost).toHaveBeenCalledTimes(1);
+        });
+        expect(client.getOutboundTransportMode()).toBe('http');
+        expect((client as any).pendingOutbox).toHaveLength(0);
+
+        const httpBody = mockAxiosPost.mock.calls[0]?.[1] as { messages?: Array<{ localId: string }> };
+        expect(httpBody.messages).toHaveLength(1);
+        expect(httpBody.messages?.[0]?.localId).not.toBe(
+            mockSocket.emit.mock.calls[0]?.[1]?.localId,
+        );
+    });
+
+    it('switches back to WS outbound after reconnect when backoff expires', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        await clearInitialFetch();
+        emitSocketEvent('connect');
+        mockSocket.connected = false;
+        emitSocketEvent('disconnect', 'transport close');
+        expect(client.getOutboundTransportMode()).toBe('http');
+
+        mockSocket.connected = true;
+        (client as any).wsOutboundBackoffUntil = 0;
+        emitSocketEvent('connect');
+        expect(client.getOutboundTransportMode()).toBe('ws');
+
+        mockAxiosPost.mockClear();
+        client.sendCodexMessage({ type: 'ws-after-reconnect' });
+        await waitForCheck(() => {
+            expect((client as any).pendingOutbox).toHaveLength(0);
+        });
+        expect(mockSocket.emit).toHaveBeenCalledWith('message', expect.objectContaining({ sid: session.id }));
+        expect(mockAxiosPost).not.toHaveBeenCalled();
+    });
+
+    it('forces HTTP outbound while socket is disconnected', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        await clearInitialFetch();
+        emitSocketEvent('connect');
+        mockSocket.connected = false;
+        emitSocketEvent('disconnect', 'transport close');
+
+        client.sendCodexMessage({ type: 'while-offline' });
+        await waitForCheck(() => {
+            expect(mockAxiosPost).toHaveBeenCalledTimes(1);
+        });
+        expect(client.getOutboundTransportMode()).toBe('http');
+    });
 });

@@ -27,7 +27,14 @@ vi.mock('node:child_process', async (importOriginal) => {
   };
 });
 
-import { buildCursorArgs, buildCursorPtySpawn, CursorProcess, resolveCursorAgentPath } from './cursorProcess';
+import {
+  buildCursorArgs,
+  buildCursorPtySpawn,
+  CursorProcess,
+  formatCursorCliErrorLine,
+  isCursorCliErrorLine,
+  resolveCursorAgentPath,
+} from './cursorProcess';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -108,6 +115,17 @@ describe('buildCursorArgs', () => {
       '--trust',
       '--force',
     ]));
+  });
+});
+
+describe('cursor CLI error lines', () => {
+  it('detects unpaid invoice billing errors', () => {
+    const line = 'S: You have an unpaid invoice Your team has an unpaid invoice. Please contact your team administrator to pay your invoice and continue using Cursor.';
+    expect(isCursorCliErrorLine(line)).toBe(true);
+    const formatted = formatCursorCliErrorLine(line);
+    expect(formatted).toContain('unpaid invoice');
+    expect(formatted).toContain('pay your invoice');
+    expect(formatted.startsWith('S:')).toBe(false);
   });
 });
 

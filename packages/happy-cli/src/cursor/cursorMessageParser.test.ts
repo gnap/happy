@@ -37,4 +37,17 @@ describe('cursorMessageParser', () => {
       },
     ]);
   });
+
+  it('emits only error (not task_complete) for failed result messages', () => {
+    const result = parseCursorMessage({
+      type: 'result',
+      subtype: 'error_during_execution',
+      is_error: true,
+      result: 'You have an unpaid invoice.',
+    } as never);
+
+    expect(result).toEqual([
+      { type: 'error', message: 'You have an unpaid invoice.' },
+    ]);
+  });
 });

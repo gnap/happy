@@ -2,6 +2,18 @@ import { describe, expect, it } from 'vitest';
 import { getSessionThinkingPatchFromMessageContent } from './sessionThinkingLifecycle';
 
 describe('getSessionThinkingPatchFromMessageContent', () => {
+    it('clears thinking on cursor turn_aborted legacy message', () => {
+        expect(
+            getSessionThinkingPatchFromMessageContent({
+                role: 'agent',
+                content: {
+                    type: 'cursor',
+                    data: { type: 'turn_aborted', id: 'abort-1' },
+                },
+            }),
+        ).toEqual({ thinking: false });
+    });
+
     it('clears thinking on cursor turn-end lifecycle envelope', () => {
         const patch = getSessionThinkingPatchFromMessageContent({
             role: 'session',

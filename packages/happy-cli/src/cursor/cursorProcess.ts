@@ -589,12 +589,12 @@ export class CursorProcess extends EventEmitter {
       // Some provider errors or other messages are printed as plain text on stdout/stderr.
       // Convert obvious provider error lines into a synthetic result message so the parser
       // maps them into a session-level error event that will be sent to the App.
-      if (isCursorProviderErrorLine(trimmed)) {
+      if (isCursorCliErrorLine(trimmed)) {
         const synthetic: CursorStreamMessage = {
           type: 'result',
           subtype: 'error_during_execution',
           is_error: true,
-          result: trimmed.slice(0, 1000),
+          result: formatCursorCliErrorLine(trimmed),
         } as unknown as CursorStreamMessage;
         this.emit('message', synthetic);
         return;
@@ -623,6 +623,27 @@ function isShellNoise(line: string): boolean {
 
 function isCursorProviderErrorLine(line: string): boolean {
   return /provider error|we're having trouble connecting to the model provider|invalid model|unknown model|unsupported model|model .{0,60}not available|model .{0,60}not found/i.test(line);
+}
+
+/** Plain-text cursor-agent / TTY errors (billing, auth, provider) promoted to stream-json result errors. */
+export function isCursorCliErrorLine(line: string): boolean {
+  return isCursorProviderErrorLine(line)
+    || /unpaid invoice|pay your invoice|billing|subscription.*(expired|required|inactive)|account.*(suspended|disabled|locked)/i.test(line);
+}
+
+/** User-visible text for CLI errors (strip TUI noise, dedupe repeated sentences). */
+export function formatCursorCliErrorLine(line: string): string {
+  let text = line.replace(/^\s*S:\s*/i, '').replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').trim();
+  const normalized = text.replace(/\s+/g, ' ');
+  const half = Math.floor(normalized.length / 2);
+  if (half > 20) {
+    const first = normalized.slice(0, half).trim();
+    const second = normalized.slice(half).trim();
+    if (first === second) {
+      text = first;
+    }
+  }
+  return text.slice(0, 1000);
 }
 
 export interface CursorModelInfo {

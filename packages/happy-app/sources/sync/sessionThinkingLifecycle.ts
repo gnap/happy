@@ -73,7 +73,7 @@ export function getSessionThinkingPatchFromMessageContent(
     const sessionEventType = lifecycleEv?.t;
 
     const isTaskComplete =
-        ((contentType === 'acp' || contentType === 'codex') &&
+        ((contentType === 'acp' || contentType === 'codex' || contentType === 'cursor') &&
             (dataType === 'task_complete' || dataType === 'turn_aborted')) ||
         sessionEventType === 'turn-end';
 

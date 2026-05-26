@@ -144,7 +144,12 @@ function formatCursorUsageLog(params: {
   });
 }
 import { createId } from '@paralleldrive/cuid2';
-import { CursorProcess, fetchCursorModels } from './cursorProcess';
+import { CursorProcess, fetchCursorModels, formatCursorCliErrorLine } from './cursorProcess';
+import {
+  notifySessionTurnAbortedIdle,
+  notifyUserTurnAborted,
+  notifyUserTurnError,
+} from './turnUserNotifications';
 import { CursorMessageParser, type CursorParsedMessage } from './cursorMessageParser';
 import type { CursorStreamMessage, CursorMode } from './types';
 
@@ -727,15 +732,21 @@ export async function runCursor(opts: {
 
   async function handleAbort() {
     logger.debug('[Cursor] Abort requested');
-    // Cursor format disabled: only send session protocol (old App / pretend Claude)
-    // session.sendCursorMessage( {
-    //   type: 'turn_aborted',
-    //   id: randomUUID(),
-    // });
     try {
       abortController.abort();
       messageQueue.reset();
       a2aTurnQueued = false;
+      const activeTurnId = currentTurnIdRef;
+      if (activeTurnId) {
+        // Active turn: catch/finally will send turn-end; ensure thinking stops immediately.
+        thinking = false;
+        session.keepAlive(thinking, 'remote');
+      } else {
+        notifySessionTurnAbortedIdle(session);
+        thinking = false;
+        session.keepAlive(thinking, 'remote');
+        await session.flush();
+      }
     } catch (error) {
       logger.debug('[Cursor] Error during abort:', error);
     } finally {
@@ -1234,10 +1245,15 @@ export async function runCursor(opts: {
               codexIdByCallId.clear();
               break;
 
-            case 'error':
-              messageBuffer.addMessage(`Error: ${msg.message}`, 'status');
-              session.sendSessionEvent({ type: 'message', message: `Error: ${msg.message}` });
+            case 'error': {
+              const userErrorText = formatCursorCliErrorLine(msg.message);
+              turnEndStatus = 'failed';
+              cancelTextFlushTimer();
+              flushAccumulatedText();
+              messageBuffer.addMessage(`Error: ${userErrorText}`, 'status');
+              notifyUserTurnError(session, turnId, msg.message);
               break;
+            }
           }
         }
 
@@ -1269,8 +1285,8 @@ export async function runCursor(opts: {
         const isAbortError = error instanceof Error && error.name === 'AbortError';
         turnEndStatus = isAbortError ? 'cancelled' : 'failed';
         if (isAbortError) {
-          messageBuffer.addMessage('Aborted by user', 'status');
-          session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: 'Aborted by user' }, { turn: turnId }));
+          messageBuffer.addMessage('Turn stopped by user', 'status');
+          notifyUserTurnAborted(session, turnId);
         } else {
           const errorMsg = error instanceof Error ? error.message : 'Process error';
           logger.debug('[cursor] Error:', error);
@@ -1296,7 +1312,11 @@ export async function runCursor(opts: {
         // If the turn didn't complete normally (no result message received), it's either
         // cancelled (user abort) or failed (cursor-agent killed/crashed), never 'completed'.
         const status: 'completed' | 'failed' | 'cancelled' =
-          turnCompletedNormally ? 'completed' : (turnEndStatus === 'cancelled' ? 'cancelled' : 'failed');
+          turnEndStatus === 'cancelled'
+            ? 'cancelled'
+            : (turnEndStatus === 'failed' || !turnCompletedNormally)
+              ? 'failed'
+              : 'completed';
         // Single turn-end signal: session lifecycle only. Sending codex + cursor task_complete as well caused turn summary to appear three times in the App.
         session.sendSessionLifecycleEnvelope(createEnvelope('agent', {
           t: 'turn-end',
