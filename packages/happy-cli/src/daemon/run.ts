@@ -27,6 +27,15 @@ import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
 /** Time to wait for a spawned session to report via /session-started webhook before failing the spawn (Cursor cold start can exceed 30s). */
 const SESSION_WEBHOOK_TIMEOUT_MS = 60_000;
 
+/** Cursor CLI max-mode flag for daemon-spawned sessions. Default on; opt out with HAPPY_CURSOR_INITIAL_MAX_MODE=0|false. */
+function cursorCliMaxModeArg(extraEnv: Record<string, string | undefined>): '--max-mode' | '--no-max-mode' {
+  const initialMax = extraEnv.HAPPY_CURSOR_INITIAL_MAX_MODE?.trim();
+  if (initialMax === '0' || initialMax === 'false') {
+    return '--no-max-mode';
+  }
+  return '--max-mode';
+}
+
 function isRunningUnderSystemdService(): boolean {
   return typeof process.env.INVOCATION_ID === 'string' && process.env.INVOCATION_ID.length > 0;
 }
@@ -656,10 +665,7 @@ export async function startDaemon(): Promise<void> {
             logger.debug(`[DAEMON RUN] Passing --resume-after-seq ${options.resumeAfterSeq} to CLI (tmux)`);
           }
           if (options.agent === 'cursor') {
-            const initialMax = extraEnv.HAPPY_CURSOR_INITIAL_MAX_MODE?.trim();
-            tmuxCommandArgs.push(
-              initialMax === '1' || initialMax === 'true' ? '--max-mode' : '--no-max-mode',
-            );
+            tmuxCommandArgs.push(cursorCliMaxModeArg(extraEnv));
           }
           const fullCommand = [launchSpec.executable, ...tmuxCommandArgs]
             .map((part) => JSON.stringify(part))
@@ -787,10 +793,7 @@ export async function startDaemon(): Promise<void> {
             logger.debug(`[DAEMON RUN] Passing --resume-after-seq ${options.resumeAfterSeq} to CLI`);
           }
           if (options.agent === 'cursor') {
-            const initialMax = extraEnv.HAPPY_CURSOR_INITIAL_MAX_MODE?.trim();
-            args.push(
-              initialMax === '1' || initialMax === 'true' ? '--max-mode' : '--no-max-mode',
-            );
+            args.push(cursorCliMaxModeArg(extraEnv));
           }
 
           const baseEnv = { ...process.env };

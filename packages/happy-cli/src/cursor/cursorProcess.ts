@@ -671,9 +671,10 @@ function isCursorProviderErrorLine(line: string): boolean {
   return /provider error|we're having trouble connecting to the model provider|invalid model|unknown model|unsupported model|model .{0,60}not available|model .{0,60}not found/i.test(line);
 }
 
-/** Plain-text cursor-agent / TTY errors (billing, auth, provider) promoted to stream-json result errors. */
+/** Plain-text cursor-agent / TTY errors (billing, auth, provider, max mode) promoted to stream-json result errors. */
 export function isCursorCliErrorLine(line: string): boolean {
   return isCursorProviderErrorLine(line)
+    || /max mode required|requires max mode/i.test(line)
     || /unpaid invoice|pay your invoice|billing|subscription.*(expired|required|inactive)|account.*(suspended|disabled|locked)/i.test(line);
 }
 

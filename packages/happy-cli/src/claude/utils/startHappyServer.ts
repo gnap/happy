@@ -504,6 +504,13 @@ export async function startHappyServer(getSession: GetSessionClient, options?: S
     //
 
     const server = createServer(async (req, res) => {
+        const closeSocket = () => {
+            if (!req.socket.destroyed) {
+                req.socket.destroy();
+            }
+        };
+        res.once('finish', closeSocket);
+        res.once('close', closeSocket);
         try {
             await transport.handleRequest(req, res);
         } catch (error) {
@@ -513,6 +520,8 @@ export async function startHappyServer(getSession: GetSessionClient, options?: S
             }
         }
     });
+    server.keepAliveTimeout = 2_000;
+    server.headersTimeout = 5_000;
 
     const baseUrl = await new Promise<URL>((resolve) => {
         server.listen(0, "127.0.0.1", () => {

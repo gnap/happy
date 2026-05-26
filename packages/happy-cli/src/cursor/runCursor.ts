@@ -295,7 +295,7 @@ export async function runCursor(opts: {
   resumeSessionTag?: string;
   /** Pre-wake server seq (daemon wake); CLI fetches messages with seq > this value. */
   resumeAfterSeq?: number;
-  /** Force cursor-agent maxMode (cli-config.json) for headless turns. null/undefined = leave as-is. */
+  /** Force cursor-agent maxMode (cli-config.json) for headless turns. Defaults to true when unset. */
   maxMode?: boolean | null;
   /** Set by index.ts: Date.now() at start of CLI async IIFE, so we can report "time to runCursor entry". */
   cliStartTime?: number;
@@ -434,8 +434,7 @@ export async function runCursor(opts: {
   }));
   let currentPermissionMode: PermissionMode | undefined = undefined;
   let currentModel: string | undefined = undefined;
-  let currentMaxMode: boolean | undefined =
-    opts.maxMode !== null && opts.maxMode !== undefined ? opts.maxMode : undefined;
+  let currentMaxMode: boolean = opts.maxMode ?? true;
   let a2aTurnQueued = false;
   const inboxMcpScopeStack = new A2AInboxMcpScopeStack();
   let a2aInboxBackoffStreak = 0;
@@ -1050,6 +1049,12 @@ export async function runCursor(opts: {
       const toolCallTimeoutHandles = new Map<string, ReturnType<typeof setTimeout>>();
       let turnCompletedNormally = false;
       let turnEndStatus: 'completed' | 'failed' | 'cancelled' = 'completed';
+      /** Set when a user-visible service envelope was sent for this turn (CLI error, catch, compact failure). */
+      let turnUserErrorNotified = false;
+      const notifyTurnError = (errorText: string) => {
+        turnUserErrorNotified = true;
+        notifyUserTurnError(session, turnId, errorText);
+      };
       let turnToolCallCount = 0;
       let inboxTurnUnreadCount = 0;
       lastTaskCompleteUsage = undefined;
@@ -1132,7 +1137,7 @@ export async function runCursor(opts: {
           signal: abortController.signal,
           timeoutMs: processTimeoutMs,
           approveMcps: true, // load Happy MCP from .cursor/mcp.json without prompting
-          maxMode: mode.maxMode ?? opts.maxMode ?? null,
+          maxMode: mode.maxMode ?? opts.maxMode ?? true,
         });
         // Per-tool timeout: after this we send tool_call_end (running in background) so App stops timer; process keeps running.
         // 0 = disabled (Codex-style: no per-tool cutoff, only process timeout or natural tool_call_end).
@@ -1323,7 +1328,7 @@ export async function runCursor(opts: {
               // Drop partial assistant stream; error is delivered once via session envelope (service).
               accumulatedResponse = '';
               messageBuffer.addMessage(`Error: ${userErrorText}`, 'status');
-              notifyUserTurnError(session, turnId, msg.message);
+              notifyTurnError(msg.message);
               break;
             }
           }
@@ -1345,6 +1350,7 @@ export async function runCursor(opts: {
             logger.debug(`[cursor] Compact turn ${compactResult.outcome}: ${compactDetail}`);
             messageBuffer.addMessage(compactDetail, 'status');
             session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'service', text: compactDetail }, { turn: turnId }));
+            turnUserErrorNotified = true;
             turnEndStatus = 'failed';
           }
         } else {
@@ -1363,7 +1369,7 @@ export async function runCursor(opts: {
           const errorMsg = error instanceof Error ? error.message : 'Process error';
           logger.debug('[cursor] Error:', error);
           messageBuffer.addMessage(errorMsg, 'status');
-          notifyUserTurnError(session, turnId, errorMsg);
+          notifyTurnError(errorMsg);
         }
       } finally {
         cancelTextFlushTimer();
@@ -1389,6 +1395,9 @@ export async function runCursor(opts: {
             : (turnEndStatus === 'failed' || !turnCompletedNormally)
               ? 'failed'
               : 'completed';
+        if (status === 'failed' && !turnUserErrorNotified) {
+          notifyTurnError('The agent stopped before completing this turn.');
+        }
         // Single turn-end signal: session lifecycle only. Sending codex + cursor task_complete as well caused turn summary to appear three times in the App.
         session.sendSessionLifecycleEnvelope(createEnvelope('agent', {
           t: 'turn-end',
