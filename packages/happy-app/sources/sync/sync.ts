@@ -2948,15 +2948,23 @@ class Sync {
         }
 
         const thinkingPatch = getSessionThinkingPatchFromMessageContent(rawContent);
+        const session = storage.getState().sessions[sessionId];
+        const wasThinking = session?.thinking ?? false;
+
         if (thinkingPatch?.thinking === false) {
             this.sessionTurnStartAt.delete(sessionId);
+            // Keep local model/maxMode until this turn finishes (not on send), so UI does not
+            // snap back to stale metadata mid-turn. Only release on active thinking -> idle transition.
+            if (wasThinking) {
+                storage.getState().clearSessionModelMode(sessionId);
+                storage.getState().clearSessionMaxMode(sessionId);
+            }
         }
 
         if (!thinkingPatch) {
             return null;
         }
 
-        const session = storage.getState().sessions[sessionId];
         if (session && session.thinking !== thinkingPatch.thinking) {
             const at = thinkingAt ?? Date.now();
             this.applySessions([{
