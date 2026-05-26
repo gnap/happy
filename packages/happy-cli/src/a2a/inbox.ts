@@ -1,5 +1,6 @@
 import type { A2AInboxMessage, A2AInboxState } from '@/api/types';
 import { pruneA2AInboxState, resolveA2AInboxRetentionSettings } from './inboxRetention';
+import { isFullA2AInboxState, isServerA2AInboxSnapshot } from './inboxServer';
 
 export { pruneA2AInboxState, resolveA2AInboxRetentionSettings } from './inboxRetention';
 export {
@@ -113,6 +114,49 @@ export function getA2AUnreadCount(inbox: A2AInboxState | null | undefined): numb
 /** Peek whether the inbox still has messages the model has not consumed via MCP. */
 export function hasUnreadA2AInboxMessages(inbox: A2AInboxState | null | undefined): boolean {
   return getA2AUnreadCount(inbox) > 0;
+}
+
+/** True when an inbox turn may end successfully (all messages marked read / dropped). */
+export function isA2AInboxTurnConsumed(inbox: A2AInboxState | null | undefined): boolean {
+  return !hasUnreadA2AInboxMessages(inbox);
+}
+
+/** Read unreadCount from server agentState (snapshot or legacy full inbox). */
+export function getServerA2AUnreadCount(
+  agentState: { a2aInbox?: unknown } | null | undefined,
+): number | undefined {
+  const raw = agentState?.a2aInbox;
+  if (isServerA2AInboxSnapshot(raw)) {
+    return raw.unreadCount;
+  }
+  if (isFullA2AInboxState(raw)) {
+    return getA2AUnreadCount(raw);
+  }
+  return undefined;
+}
+
+/**
+ * Whether to enqueue an inbox turn.
+ * When server unreadCount is still 0 (sync debounce), allow fresh local rows;
+ * suppress only ghost rows whose trigger ids were already consumed.
+ */
+export function shouldScheduleA2AInboxTurn(
+  localInbox: A2AInboxState | null | undefined,
+  serverUnreadCount: number | undefined,
+  options?: { consumedTriggerIds?: ReadonlySet<string> },
+): boolean {
+  if (!hasUnreadA2AInboxMessages(localInbox)) {
+    return false;
+  }
+  if (serverUnreadCount !== 0) {
+    return true;
+  }
+  const unread = listA2AInboxMessages(localInbox, { unreadOnly: true });
+  const consumed = options?.consumedTriggerIds;
+  if (!consumed || consumed.size === 0) {
+    return unread.length > 0;
+  }
+  return unread.some((message) => !consumed.has(message.id));
 }
 
 export function listA2AInboxMessages(

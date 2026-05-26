@@ -73,6 +73,11 @@ class OfflineSessionStub extends EventEmitter {
     // ── A2A inbox (empty while offline) ──────────────────────────────────────
 
     getA2AInbox(): A2AInboxState { return { messages: [] }; }
+    getServerA2AUnreadCount(): number | undefined { return 0; }
+    shouldEnqueueA2AInboxTurn(): boolean { return false; }
+    noteA2ATriggersConsumed(_ids: string[]): void {}
+    reconcileLocalA2AInboxWithServerAgentState(): number { return 0; }
+    abandonLocalA2AInboxWhenServerDrained(): number { return 0; }
     recordA2AMessage(_message: A2AInboxMessage): void {}
     markA2AMessageRead(_id: string): void {}
     markA2AMessagesRead(_ids: string[]): void {}

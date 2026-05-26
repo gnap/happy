@@ -42,6 +42,7 @@ import {
   buildA2ATurnPrompt,
   getA2AUnreadCount,
   hasUnreadA2AInboxMessages,
+  isA2AInboxTurnConsumed,
   listA2AInboxMessages,
   pruneA2AInboxSnapshots,
 } from '@/a2a/inbox';
@@ -541,6 +542,14 @@ export async function runCursor(opts: {
     }
     const isA2ATrigger = (message.meta as { a2aTrigger?: boolean } | undefined)?.a2aTrigger === true;
     if (isA2ATrigger) {
+      const reconciled = session.reconcileLocalA2AInboxWithServerAgentState();
+      if (reconciled > 0) {
+        logger.debug(`[cursor] Reconciled ${reconciled} orphan local A2A unread before trigger poke`);
+      }
+      if (!session.shouldEnqueueA2AInboxTurn()) {
+        logger.debug('[cursor] A2A trigger ignored (no inbox work to schedule)');
+        return;
+      }
       logger.debug('[cursor] A2A message recorded in inbox; poking message loop');
       messageQueue.poke();
       return;
@@ -567,6 +576,7 @@ export async function runCursor(opts: {
     initialLastSeq: opts.resumeAfterSeq,
     onSessionSwap: (newSession) => {
       session = newSession;
+      logger.debug(`[cursor] Session runtime swapped for MCP/inbox: ${newSession.sessionId}`);
       newSession.onUserMessage(handleUserMessage);
       attachSessionMetadataListener(newSession);
       // Re-register run-specific RPC handlers so kill/abort work after reconnect (they are not on the new session by default).
@@ -615,6 +625,13 @@ export async function runCursor(opts: {
         `[cursor] A2A inbox backoff active (streak ${a2aInboxBackoffStreak}, `
         + `retry in ${a2aInboxBackoffUntil - Date.now()}ms)`,
       );
+      return;
+    }
+    const reconciled = session.reconcileLocalA2AInboxWithServerAgentState();
+    if (reconciled > 0) {
+      logger.debug(`[cursor] Reconciled ${reconciled} orphan local A2A unread (server unreadCount=0)`);
+    }
+    if (!session.shouldEnqueueA2AInboxTurn()) {
       return;
     }
     const unreadMessages = listA2AInboxMessages(session.getA2AInbox(), { unreadOnly: true });
@@ -995,10 +1012,14 @@ export async function runCursor(opts: {
       const { message: userMessage, mode, meta } = batch;
       const isA2AInboxTurn = !!(meta && typeof meta === 'object' && (meta as { a2aInboxTurn?: boolean }).a2aInboxTurn === true);
       const isCursorCompactTurn = !!(meta && typeof meta === 'object' && (meta as { cursorCompactTurn?: boolean }).cursorCompactTurn === true);
+      const inboxTurnIdsAtStart = isA2AInboxTurn
+        ? listA2AInboxMessages(session.getA2AInbox(), { unreadOnly: true }).map((message) => message.id)
+        : [];
       if (isA2AInboxTurn) {
         a2aTurnQueued = false;
-        if (!hasUnreadA2AInboxMessages(session.getA2AInbox())) {
-          logger.debug('[cursor] A2A inbox turn dequeued with no unread messages; skipping');
+        session.reconcileLocalA2AInboxWithServerAgentState();
+        if (!session.shouldEnqueueA2AInboxTurn()) {
+          logger.debug('[cursor] A2A inbox turn dequeued with no inbox work; skipping');
           continue;
         }
         inboxMcpScopeStack.push('inbox-turn');
@@ -1403,8 +1424,38 @@ export async function runCursor(opts: {
         const turnSucceeded = turnCompletedNormally && turnEndStatus !== 'cancelled';
         if (isA2AInboxTurn) {
           if (turnSucceeded) {
-            clearA2AInboxBackoff();
-            logger.debug('[cursor] A2A inbox turn succeeded; backoff reset');
+            const remainingUnread = getA2AUnreadCount(session.getA2AInbox());
+            if (isA2AInboxTurnConsumed(session.getA2AInbox())) {
+              session.noteA2ATriggersConsumed(inboxTurnIdsAtStart);
+              clearA2AInboxBackoff();
+              logger.debug('[cursor] A2A inbox turn succeeded; backoff reset');
+            } else {
+              a2aInboxBackoffStreak += 1;
+              const delayMs = a2aInboxBackoffDelayMs(
+                a2aInboxBackoffStreak,
+                a2aInboxBackoffSettings,
+              );
+              a2aInboxBackoffUntil = Date.now() + delayMs;
+              if (
+                session.getServerA2AUnreadCount() === 0
+                && a2aInboxBackoffStreak >= 4
+              ) {
+                const abandoned = session.abandonLocalA2AInboxWhenServerDrained();
+                if (abandoned > 0) {
+                  logger.debug(
+                    `[cursor] Abandoned ${abandoned} local A2A unread after repeated drain `
+                    + 'failures while server unreadCount=0',
+                  );
+                  clearA2AInboxBackoff();
+                }
+              } else {
+                logger.debug(
+                  `[cursor] A2A inbox turn finished but ${remainingUnread} unread message(s) remain; `
+                  + `backing off ${delayMs}ms (streak ${a2aInboxBackoffStreak})`,
+                );
+                scheduleA2AInboxRetryPeek(delayMs);
+              }
+            }
           } else if (turnEndStatus !== 'cancelled') {
             a2aInboxBackoffStreak += 1;
             const delayMs = a2aInboxBackoffDelayMs(
