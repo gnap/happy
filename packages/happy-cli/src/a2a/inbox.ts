@@ -246,9 +246,11 @@ export function buildA2ATurnPrompt(notification: string, snapshotPath?: string, 
     `Set the Task description (card title) exactly to: ${taskTitle}`,
     `Task prompt: ${subagentPrompt}`,
     'Output discipline (main agent): before the Task tool call, send no user-visible text — no preamble, plan, status, or reasoning.',
-    'After the Task completes, your only user-visible reply is a short introduction of the Task result (one combined summary).',
+    'After the Task completes, if any inbox message ids were not marked read, call mark_a2a_messages_read for them before your user-visible reply.',
+    'Your only user-visible reply is a short introduction of the Task result (one combined summary).',
     'Do not mention inbox turns, MCP, Task delegation, or that you spawned a subagent; do not repeat the Task prompt or raw tool output.',
-    'Happy inbox MCP tools (list/read/mark) only work during this inbox turn; the Task must finish before you end the turn.',
+    'Happy inbox MCP tools (list/read/mark) work during this inbox turn and inside the Task subagent while the Task tool is running.',
+    'If Happy MCP inbox tools fail in the Task, read the snapshot JSON file and return message ids; the main agent will mark them read after the Task.',
     'Do not leave unread inbox messages for a later turn.',
   ].filter((line): line is string => line !== null && line.length > 0).join(' ');
 }

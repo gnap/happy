@@ -109,6 +109,8 @@ describe('A2A inbox helpers', () => {
     expect(prompt).toContain('only user-visible reply is a short introduction of the Task result');
     expect(prompt).toContain('Do not mention inbox turns');
     expect(prompt).toContain('Do not leave unread inbox messages for a later turn');
+    expect(prompt).toContain('mark_a2a_messages_read for them');
+    expect(prompt).toContain('inside the Task subagent');
   });
 
   it('encourages one-turn batch handling when multiple messages are stacked', () => {
