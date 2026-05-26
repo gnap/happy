@@ -29,8 +29,14 @@ import { startOfflineReconnection, connectionState } from '@/utils/serverConnect
 import { claudeLocal } from '@/claude/claudeLocal';
 import { createSessionScanner } from '@/claude/utils/sessionScanner';
 import { Session } from './session';
-import { applySandboxPermissionPolicy, resolveInitialClaudePermissionMode } from './utils/permissionMode';
-import { normalizeClaudeModelForSdk } from './utils/model';
+import { applySandboxPermissionPolicy, resolveInitialClaudePermissionMode, resolveStoredSessionPermissionMode } from './utils/permissionMode';
+import { claudeModelCodeForMetadata, normalizeClaudeModelForSdk } from './utils/model';
+import { buildA2ATurnPromptForClaude } from '@/a2a/inbox';
+import {
+    createA2AInboxTurnController,
+    isA2ATriggerMessage,
+    pruneA2AInboxOnSessionStart,
+} from '@/a2a/inboxTurnController';
 
 /** JavaScript runtime to use for spawning Claude Code */
 export type JsRuntime = 'node' | 'bun'
@@ -117,7 +123,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     let machineId = settings?.machineId
     const sandboxConfig = options.noSandbox ? undefined : settings?.sandboxConfig;
     const sandboxEnabled = Boolean(sandboxConfig?.enabled);
-    const initialPermissionMode = applySandboxPermissionPolicy(
+    let initialPermissionMode = applySandboxPermissionPolicy(
         resolveInitialClaudePermissionMode(options.permissionMode, options.claudeArgs),
         sandboxEnabled,
     );
@@ -210,6 +216,18 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
 
     logger.debug(`Session created: ${response.id}`);
     writeClaudeSessionEncryptionKey(sessionTag, response.encryptionKey);
+    const restoredPermissionMode = resolveStoredSessionPermissionMode(
+        response.metadata?.currentOperatingModeCode,
+        initialPermissionMode,
+        sandboxEnabled,
+    );
+    if (restoredPermissionMode !== undefined) {
+        initialPermissionMode = restoredPermissionMode;
+        logger.debug(
+            `[START] Restored permission mode from session metadata `
+            + `(stored=${response.metadata?.currentOperatingModeCode ?? 'none'}, effective=${initialPermissionMode})`,
+        );
+    }
     const initialClaudeSessionId = response.metadata?.claudeSessionId ?? null;
     if (initialClaudeSessionId) {
         logger.debug(`[START] Restoring Claude session ID from metadata: ${initialClaudeSessionId}`);
@@ -248,11 +266,13 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     writeSessionPidFile(session.sessionId);
 
     let handleUserMessage: ((message: UserMessage) => void) | null = null;
+    let isA2AInboxTurnActiveFn: () => boolean = () => false;
 
     // Start Happy MCP server
     const happyServer = await startHappyServer(session, {
         useDaemonA2ARoute: options.startedBy === 'daemon',
         onA2aMessage: (message) => handleUserMessage?.(message),
+        isA2AInboxTurnActive: () => isA2AInboxTurnActiveFn(),
     });
     logger.debug(`[START] Happy MCP server started at ${happyServer.url}`);
 
@@ -318,6 +338,31 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     let currentAppendSystemPrompt: string | undefined = undefined; // Track current append system prompt
     let currentAllowedTools: string[] | undefined = undefined; // Track current allowed tools
     let currentDisallowedTools: string[] | undefined = undefined; // Track current disallowed tools
+    const claudeTurnActiveRef = { current: false };
+    const currentEnhancedMode = (): EnhancedMode => ({
+        permissionMode: currentPermissionMode || 'default',
+        model: currentModel,
+        fallbackModel: currentFallbackModel,
+        customSystemPrompt: currentCustomSystemPrompt,
+        appendSystemPrompt: currentAppendSystemPrompt,
+        allowedTools: currentAllowedTools,
+        disallowedTools: currentDisallowedTools,
+    });
+    const a2aInbox = createA2AInboxTurnController({
+        logTag: 'claude',
+        messageQueue,
+        session,
+        getMode: currentEnhancedMode,
+        isAgentTurnActive: () => claudeTurnActiveRef.current,
+        workspacePath: workingDirectory,
+        sessionId: session.sessionId,
+        buildTurnPrompt: buildA2ATurnPromptForClaude,
+        scheduleCompactTurn: (mode) => messageQueue.pushIsolateAndClear('', mode),
+    });
+    isA2AInboxTurnActiveFn = a2aInbox.isInboxTurnActive;
+    pruneA2AInboxOnSessionStart('claude', workingDirectory, session.sessionId, options.startedBy === 'daemon');
+    a2aInbox.peekInbox();
+
     handleUserMessage = (message) => {
 
         // Resolve permission mode from meta - pass through as-is, mapping happens at SDK boundary
@@ -326,6 +371,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             messagePermissionMode = applySandboxPermissionPolicy(message.meta.permissionMode, sandboxEnabled);
             currentPermissionMode = messagePermissionMode;
             logger.debug(`[loop] Permission mode updated from user message to: ${currentPermissionMode}`);
+            currentSession?.syncPermissionMode?.(currentPermissionMode || 'default');
         } else {
             logger.debug(`[loop] User message received with no permission mode override, using current: ${currentPermissionMode}`);
         }
@@ -435,12 +481,29 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             allowedTools: messageAllowedTools,
             disallowedTools: messageDisallowedTools
         };
-        const isA2A = (message.meta as { origin?: string } | undefined)?.origin === 'a2a';
-        if (isA2A) {
-            messageQueue.pushIsolated(message.content.text, enhancedMode);
-        } else {
-            messageQueue.push(message.content.text, enhancedMode);
+        const metaChanged =
+            message.meta?.permissionMode !== undefined
+            || (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'model'));
+        if (metaChanged) {
+            session.updateMetadata((m) => {
+                const patch: { currentOperatingModeCode?: string; currentModelCode?: string } = {};
+                if (message.meta?.permissionMode !== undefined) {
+                    patch.currentOperatingModeCode = messagePermissionMode || 'default';
+                }
+                if (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'model')) {
+                    patch.currentModelCode = claudeModelCodeForMetadata(message.meta.model);
+                }
+                return { ...m, ...patch };
+            }).catch((err) => logger.debug('[loop] Failed to persist permission/model to session metadata', err));
         }
+
+        if (isA2ATriggerMessage(message.meta)) {
+            logger.debug('[loop] A2A message recorded in inbox; poking message loop');
+            messageQueue.poke();
+            a2aInbox.peekInbox();
+            return;
+        }
+        messageQueue.push(message.content.text, enhancedMode);
         logger.debugLargeJson('User message pushed to queue:', message)
     };
     session.onUserMessage(handleUserMessage);
@@ -487,6 +550,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
 
             // Stop caffeinate
             stopCaffeinate();
+
+            a2aInbox.dispose();
 
             // Stop Happy MCP server
             happyServer.stop();
@@ -550,6 +615,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         onSessionReady: (sessionInstance) => {
             // Store reference for hook server callback
             currentSession = sessionInstance;
+            sessionInstance.a2aInboxTurn = a2aInbox;
+            sessionInstance.claudeTurnActiveRef = claudeTurnActiveRef;
         },
         mcpServers: {
             'happy': {

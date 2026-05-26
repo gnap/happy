@@ -442,6 +442,11 @@ export class CursorMessageParser {
         // Do NOT emit text_delta here: we always use --stream-partial-output so all text
         // was already delivered via streaming 'assistant' messages and accumulated in runCursor.
         // Emitting text_delta from result would cause the complete text to be sent a second time.
+        if (raw.is_error && raw.result) {
+          results.push({ type: 'error', message: typeof raw.result === 'string' ? raw.result : JSON.stringify(raw.result) });
+          break;
+        }
+
         results.push({
           type: 'task_complete',
           sessionId: raw.session_id as string | undefined,
@@ -449,10 +454,6 @@ export class CursorMessageParser {
           costUsd: raw.total_cost_usd as number | undefined,
           durationMs: raw.duration_ms as number | undefined,
         });
-
-        if (raw.is_error && raw.result) {
-          results.push({ type: 'error', message: typeof raw.result === 'string' ? raw.result : JSON.stringify(raw.result) });
-        }
         break;
       }
 

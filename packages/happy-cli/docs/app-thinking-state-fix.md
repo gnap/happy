@@ -75,8 +75,20 @@ if (session?.thinking) {
 }
 ```
 
+## CLI（Cursor，`runCursor.ts` / `turnUserNotifications.ts`）
+
+| 时机 | 发送 |
+|------|------|
+| Turn 开始 | `keepAlive(true)` + **`cursor` `task_started`**（无气泡）+ `turn-start` lifecycle + `flush` |
+| Turn 结束 | `turn-end` lifecycle + `keepAlive(false)` + `flush` |
+| Turn 结束后 | **不再** `emitReadyIfIdle()` / durable `ready`（避免 App 用 `ready` 关掉下一轮 thinking） |
+| 进程首次 idle | 仍 `emitReadyIfIdle()` 一次（推送「It's ready!」） |
+| 用户可见错误/中止 | **仅** session envelope `ev.t=service`（勿再 `sendSessionEvent` 双发） |
+
+`task_started` 需在 App `sessionThinkingLifecycle` 里识别 `content.type === 'cursor'`（与 codex 并列）。
+
 ## 验收
 
-1. Cursor 会话一轮结束后，thinking 应在 `turn-end` / `ready` 后消失（含仅 HTTP、无 WS 场景）。
-2. 新 turn 开始仍可显示 thinking。
+1. Cursor 会话一轮结束后，thinking 应在 `turn-end` / `keepAlive(false)` 后消失（含仅 HTTP、无 WS 场景）。
+2. 新 turn 开始应通过 `task_started` + `turn-start` + `keepAlive(true)` 及时显示 thinking。
 3. 普通用户/助手文本不误改 thinking。

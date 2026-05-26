@@ -5,6 +5,7 @@ import {
   buildA2AInboxTaskTitle,
   buildA2AInboxTaskToolArgs,
   buildA2ATurnPrompt,
+  buildA2ATurnPromptForClaude,
   DEFAULT_A2A_INBOX_TASK_MODEL,
   resolveA2AInboxTaskModel,
   cloneA2AInboxState,
@@ -114,6 +115,15 @@ describe('A2A inbox helpers', () => {
     expect(prompt).toContain('A2A inbox (4 unread)');
     expect(prompt).toContain('short introduction of the Task result');
     expect(prompt).toContain('Task prompt:');
+  });
+
+  it('builds Claude inbox prompt via Happy MCP without Task model slug', () => {
+    const prompt = buildA2ATurnPromptForClaude(buildA2AInboxNotification(2), '/tmp/inbox.json', 2);
+    expect(prompt).toContain('mcp__happy__list_a2a_messages');
+    expect(prompt).toContain('mcp__happy__mark_a2a_message_read');
+    expect(prompt).toContain('2 unread A2A inbox messages');
+    expect(prompt).not.toContain('composer-2.5');
+    expect(prompt).not.toContain('Task tool model');
   });
 
   it('marks a single message as read', () => {

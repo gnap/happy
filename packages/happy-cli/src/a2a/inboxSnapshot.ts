@@ -1,5 +1,6 @@
-import { existsSync, readdirSync, statSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { A2AInboxState } from '@/api/types';
 
 export const DEFAULT_A2A_INBOX_SNAPSHOT_KEEP_LATEST = 5;
 const DEFAULT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -55,4 +56,30 @@ export function pruneA2AInboxSnapshots(
   }
 
   return removed;
+}
+
+/** Write unread inbox rows to workspace/.happy/a2a-inbox for debugging; returns file path. */
+export function writeA2AInboxSnapshot(
+  workspacePath: string,
+  sessionId: string,
+  turnId: string,
+  inbox: A2AInboxState | null | undefined,
+): string {
+  const dir = join(workspacePath, '.happy', 'a2a-inbox');
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+  const filePath = join(dir, `${sessionId}-${turnId}.json`);
+  const unreadMessages = (inbox?.messages ?? [])
+    .filter((message) => message.readAt == null)
+    .slice(0, 100);
+  const snapshot = {
+    sessionId,
+    turnId,
+    unreadCount: unreadMessages.length,
+    messages: unreadMessages,
+  };
+  writeFileSync(filePath, JSON.stringify(snapshot, null, 2));
+  pruneA2AInboxSnapshots(dir, sessionId);
+  return filePath;
 }

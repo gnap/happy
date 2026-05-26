@@ -655,6 +655,9 @@ export async function startDaemon(): Promise<void> {
           if (typeof options.resumeAfterSeq === 'number' && options.resumeAfterSeq >= 0) {
             logger.debug(`[DAEMON RUN] Passing --resume-after-seq ${options.resumeAfterSeq} to CLI (tmux)`);
           }
+          if (options.agent === 'cursor') {
+            tmuxCommandArgs.push('--no-max-mode');
+          }
           const fullCommand = [launchSpec.executable, ...tmuxCommandArgs]
             .map((part) => JSON.stringify(part))
             .join(' ');
@@ -779,6 +782,10 @@ export async function startDaemon(): Promise<void> {
           appendResumeAfterSeqCliArgs(args, options.resumeAfterSeq);
           if (typeof options.resumeAfterSeq === 'number' && options.resumeAfterSeq >= 0) {
             logger.debug(`[DAEMON RUN] Passing --resume-after-seq ${options.resumeAfterSeq} to CLI`);
+          }
+          if (options.agent === 'cursor') {
+            // Daemon cursor sessions force max mode off (cli-config.json maxMode is ignored).
+            args.push('--no-max-mode');
           }
 
           const baseEnv = { ...process.env };
@@ -1355,7 +1362,8 @@ export async function startDaemon(): Promise<void> {
           }
 
           const agent = (lastAgentBySessionId[id] as 'cursor' | 'claude' | 'codex' | 'gemini' | 'acp-cursor') ?? 'cursor';
-          const resumeAfterSeq = prevSeq >= 0 ? prevSeq : (seq > 0 ? seq - 1 : undefined);
+          // Avoid resumeAfterSeq=0 on first poll (prevSeq=-1, seq=1): tag-respawn often loads an older session.
+          const resumeAfterSeq = prevSeq >= 0 ? prevSeq : (seq > 1 ? seq - 1 : undefined);
           logger.debug(
             `[DAEMON RUN] Auto-respawning session ${id} (${agent}) in ${directory} (seq ${prevSeq} → ${seq}, tag=${tag.slice(0, 8)}, resumeAfterSeq=${resumeAfterSeq ?? 'none'}, offlineWake=${daemonManagedStopped})`,
           );

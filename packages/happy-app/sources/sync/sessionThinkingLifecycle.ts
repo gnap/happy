@@ -96,12 +96,13 @@ export function getSessionThinkingPatchFromMessageContent(
     }
 
     const isTaskComplete =
-        ((contentType === 'acp' || contentType === 'codex') &&
+        ((contentType === 'acp' || contentType === 'codex' || contentType === 'cursor') &&
             (dataType === 'task_complete' || dataType === 'turn_aborted')) ||
         sessionEventType === 'turn-end';
 
     const isTaskStarted =
-        ((contentType === 'acp' || contentType === 'codex') && dataType === 'task_started') ||
+        ((contentType === 'acp' || contentType === 'codex' || contentType === 'cursor') &&
+            dataType === 'task_started') ||
         sessionEventType === 'turn-start' ||
         sessionEventType === 'tool-call-start' ||
         isSummarizingServiceEvent(lifecycleEv);

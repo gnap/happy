@@ -178,12 +178,13 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
     try {
       const { runCursor } = await import('@/cursor/runCursor');
 
-      // Parse cursor options: --started-by, --cwd, --resume/-r, --resume-session-tag
+      // Parse cursor options: --started-by, --cwd, --resume/-r, --resume-session-tag, --max-mode
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
       let workspaceRoot: string | undefined = undefined;
       let resumeSession = false;
       let resumeSessionTag: string | undefined = undefined;
       let resumeAfterSeq: number | undefined = undefined;
+      let maxMode: boolean | null = null;
       for (let i = 1; i < args.length; i++) {
         if (args[i] === '--started-by') {
           startedBy = args[++i] as 'daemon' | 'terminal';
@@ -198,6 +199,10 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
           if (parsed !== undefined) {
             resumeAfterSeq = parsed;
           }
+        } else if (args[i] === '--max-mode') {
+          maxMode = true;
+        } else if (args[i] === '--no-max-mode') {
+          maxMode = false;
         }
       }
 
@@ -215,7 +220,7 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
         await new Promise(resolve => setTimeout(resolve, 200));
       }
 
-      await runCursor({ credentials, startedBy, workspaceRoot, resumeSession, resumeSessionTag, resumeAfterSeq, cliStartTime });
+      await runCursor({ credentials, startedBy, workspaceRoot, resumeSession, resumeSessionTag, resumeAfterSeq, maxMode, cliStartTime });
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error');
       if (process.env.DEBUG) {
@@ -752,8 +757,9 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
       }
       process.exit(0)
     } else if (daemonSubcommand === 'install') {
+      const persistAcrossLogout = args.includes('--persist-across-logout');
       try {
-        await install()
+        await install({ persistAcrossLogout })
       } catch (error) {
         console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
         process.exit(1)
@@ -777,6 +783,12 @@ ${chalk.bold('Usage:')}
   happy daemon restart-session    Restart a hung/dead session (resumes same chat)
   happy daemon archive-session    Remove a stopped session from the list
   happy daemon send-a2a           Send an A2A user message to a session
+  happy daemon install            Install daemon (Linux: best-effort linger for logout survival)
+  happy daemon uninstall          Remove installed daemon service
+
+  happy daemon install --persist-across-logout
+                                  macOS: LaunchDaemon if sudo, else LaunchAgent + hint
+                                  Linux: same as install (linger is always best-effort)
 
   If you want to kill all happy related processes run 
   ${chalk.cyan('happy doctor clean')}

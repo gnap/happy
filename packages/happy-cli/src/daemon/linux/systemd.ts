@@ -4,6 +4,9 @@
  * Uses `systemctl --user` (no sudo required) to manage the daemon as a
  * persistent user service that survives terminal/session closes.
  *
+ * User logout still stops user systemd unless linger is enabled; install enables
+ * `loginctl enable-linger` so the daemon keeps running after logout.
+ *
  * Background: `detached: true` in Node.js calls setsid() which escapes the
  * process group, but on Linux with systemd the daemon remains in the parent's
  * cgroup (session-N.scope). When that session closes, systemd sends SIGTERM to
@@ -170,6 +173,46 @@ export function uninstallService(): void {
 
 export function startService(): void {
   execSync(`systemctl --user start ${SERVICE_NAME}`, { stdio: 'pipe' });
+}
+
+/** Whether user@.service stays up after logout (loginctl linger). */
+export function isUserLingerEnabled(): boolean {
+  try {
+    const out = execFileSync('loginctl', ['show-user', os.userInfo().username, '-p', 'Linger', '--value'], {
+      encoding: 'utf-8',
+      timeout: 3000,
+    }).trim();
+    return out === 'yes';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Keep user systemd (and happy-daemon) running after full logout.
+ * Usually does not require sudo when enabling linger for the current user.
+ */
+export function enableUserLinger(): void {
+  const user = os.userInfo().username;
+  execFileSync('loginctl', ['enable-linger', user], { stdio: 'pipe', timeout: 5000 });
+}
+
+export type UserLingerResult =
+  | { ok: true; alreadyEnabled: boolean }
+  | { ok: false; error: string };
+
+/** Best-effort linger enable; never throws (install falls back to login-only systemd). */
+export function tryEnableUserLinger(): UserLingerResult {
+  if (isUserLingerEnabled()) {
+    return { ok: true, alreadyEnabled: true };
+  }
+  try {
+    enableUserLinger();
+    return { ok: true, alreadyEnabled: false };
+  } catch (e: unknown) {
+    const error = e instanceof Error ? e.message : String(e);
+    return { ok: false, error };
+  }
 }
 
 export function stopService(): void {

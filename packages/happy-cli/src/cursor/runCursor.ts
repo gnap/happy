@@ -144,7 +144,13 @@ function formatCursorUsageLog(params: {
   });
 }
 import { createId } from '@paralleldrive/cuid2';
-import { CursorProcess, fetchCursorModels } from './cursorProcess';
+import { CursorProcess, fetchCursorModels, formatCursorCliErrorLine } from './cursorProcess';
+import {
+  notifyCursorTurnThinkingStarted,
+  notifySessionTurnAbortedIdle,
+  notifyUserTurnAborted,
+  notifyUserTurnError,
+} from './turnUserNotifications';
 import { CursorMessageParser, type CursorParsedMessage } from './cursorMessageParser';
 import type { CursorStreamMessage, CursorMode } from './types';
 
@@ -287,6 +293,8 @@ export async function runCursor(opts: {
   resumeSessionTag?: string;
   /** Pre-wake server seq (daemon wake); CLI fetches messages with seq > this value. */
   resumeAfterSeq?: number;
+  /** Force cursor-agent maxMode (cli-config.json) for headless turns. null/undefined = leave as-is. */
+  maxMode?: boolean | null;
   /** Set by index.ts: Date.now() at start of CLI async IIFE, so we can report "time to runCursor entry". */
   cliStartTime?: number;
 }): Promise<void> {
@@ -439,6 +447,27 @@ export async function runCursor(opts: {
       dangerouslySkipPermissions,
     })).catch((err) => logger.debug('[Cursor] Failed to sync mode to session metadata', err));
   };
+  const applyInMemorySessionModel = (modelCode: string | undefined, source: string) => {
+    const normalized =
+      modelCode === undefined || modelCode === 'default' || modelCode === 'auto'
+        ? undefined
+        : modelCode;
+    if (currentModel === normalized) {
+      return;
+    }
+    const previous = currentModel;
+    currentModel = normalized;
+    logger.debug(
+      `[cursor] currentModel updated (${source}): ${previous ?? 'unset'} -> ${normalized ?? 'default'}`,
+    );
+  };
+  const syncInMemoryModelFromSessionMetadata = (source: string) => {
+    const code = session.getMetadata()?.currentModelCode;
+    if (code === undefined) {
+      return;
+    }
+    applyInMemorySessionModel(code, source);
+  };
 
   const handleUserMessage = (message: UserMessage) => {
     let messagePermissionMode = currentPermissionMode;
@@ -457,7 +486,8 @@ export async function runCursor(opts: {
     let messageModel = currentModel;
     if (message.meta && Object.prototype.hasOwnProperty.call(message.meta, 'model')) {
       messageModel = message.meta.model ?? undefined;
-      currentModel = messageModel;
+      applyInMemorySessionModel(messageModel, 'user-message');
+      messageModel = currentModel;
       logger.debug(`[Cursor] Model: ${messageModel ?? 'default (reset)'}`);
     }
     const mode: CursorMode = {
@@ -490,6 +520,11 @@ export async function runCursor(opts: {
 
   // Handle server unreachable - offline stub with hot reconnection
   let session: ApiSessionClient;
+  const attachSessionMetadataListener = (s: ApiSessionClient) => {
+    s.on('metadata-updated', () => {
+      syncInMemoryModelFromSessionMetadata('metadata-updated');
+    });
+  };
   const { session: initialSession, reconnectionHandle } = setupOfflineReconnection({
     api,
     sessionTag,
@@ -501,12 +536,15 @@ export async function runCursor(opts: {
     onSessionSwap: (newSession) => {
       session = newSession;
       newSession.onUserMessage(handleUserMessage);
+      attachSessionMetadataListener(newSession);
       // Re-register run-specific RPC handlers so kill/abort work after reconnect (they are not on the new session by default).
       newSession.rpcHandlerManager.registerHandler('abort', handleAbort);
       registerKillSessionHandler(newSession.rpcHandlerManager, handleKillSession);
+      syncInMemoryModelFromSessionMetadata('session-reconnect');
     },
   });
   session = initialSession;
+  attachSessionMetadataListener(session);
   const currentCursorMode = (): CursorMode => ({
     permissionMode: currentPermissionMode ?? 'default',
     model: currentModel,
@@ -571,6 +609,14 @@ export async function runCursor(opts: {
     scheduleA2ATurnIfNeeded(mode ?? currentCursorMode());
   };
   session.onUserMessage(handleUserMessage);
+  // Restore model selection from server metadata on resume (do not wipe on reconnect).
+  const serverModelCode = session.getMetadata()?.currentModelCode;
+  if (serverModelCode !== undefined) {
+    applyInMemorySessionModel(serverModelCode, 'session-resume');
+    if (currentModel) {
+      logger.debug(`[cursor] Restored model from session metadata: ${currentModel}`);
+    }
+  }
   step('sessionConnect');
   writeSessionPidFile(session.sessionId);
   const workspaceInboxDir = join(workspacePath, '.happy', 'a2a-inbox');
@@ -584,12 +630,12 @@ export async function runCursor(opts: {
       `[cursor] Pruned ${prunedWorkspaceSnapshots + prunedDaemonSnapshots} A2A inbox snapshot file(s) on session start`,
     );
   }
-  // Persist initial default mode so app reload can restore it
-  syncModeToSessionMetadata('default', undefined);
+  // Persist initial permission mode; keep restored model selection when resuming.
+  syncModeToSessionMetadata('default', currentModel);
 
-  // Refresh models from cursor-agent and update session metadata.
-  // If the stored currentModelCode is no longer in the list (model was renamed/removed),
-  // it resets to whatever cursor-agent currently considers the active model.
+  // Refresh model list from cursor-agent. Only touch currentModelCode when we have an
+  // explicit selection (in-memory from this turn, or already in metadata). Never fill
+  // undefined with cursor-agent default — that overwrote App's choice after each turn.
   const refreshModelsMetadata = () => {
     fetchCursorModels().then((result) => {
       if (!result || result.models.length === 0) {
@@ -599,16 +645,23 @@ export async function runCursor(opts: {
       logger.debug(`[cursor] refreshModelsMetadata: ${result.models.length} models, current=${result.currentModelId}`);
       session.updateMetadata((m) => {
         const validCodes = new Set(result.models.map((mo) => mo.code));
-        const stored = m.currentModelCode;
-        const isStoredValid = !stored || stored === 'default' || stored === 'auto' || validCodes.has(stored);
-        if (!isStoredValid) {
-          logger.debug(`[cursor] refreshModelsMetadata: stored model "${stored}" not in new list, resetting to "${result.currentModelId}"`);
-        }
-        return {
-          ...m,
+        const preferred = currentModel ?? m.currentModelCode;
+        const patch: { models: typeof result.models; currentModelCode?: string } = {
           models: result.models,
-          currentModelCode: isStoredValid ? (stored ?? result.currentModelId) : result.currentModelId,
         };
+        if (preferred !== undefined) {
+          const isValid =
+            preferred === 'default' || preferred === 'auto' || validCodes.has(preferred);
+          if (isValid) {
+            patch.currentModelCode = preferred;
+          } else {
+            logger.debug(
+              `[cursor] refreshModelsMetadata: model "${preferred}" not in list, resetting to "${result.currentModelId}"`,
+            );
+            patch.currentModelCode = result.currentModelId;
+          }
+        }
+        return { ...m, ...patch };
       }).catch((err) => logger.debug('[cursor] refreshModelsMetadata: failed to update metadata', err));
     }).catch((err) => logger.debug('[cursor] refreshModelsMetadata threw:', err));
   };
@@ -682,15 +735,21 @@ export async function runCursor(opts: {
 
   async function handleAbort() {
     logger.debug('[Cursor] Abort requested');
-    // Cursor format disabled: only send session protocol (old App / pretend Claude)
-    // session.sendCursorMessage( {
-    //   type: 'turn_aborted',
-    //   id: randomUUID(),
-    // });
     try {
       abortController.abort();
       messageQueue.reset();
       a2aTurnQueued = false;
+      const activeTurnId = currentTurnIdRef;
+      if (activeTurnId) {
+        // Active turn: catch/finally will send turn-end; ensure thinking stops immediately.
+        thinking = false;
+        session.keepAlive(thinking, 'remote');
+      } else {
+        notifySessionTurnAbortedIdle(session);
+        thinking = false;
+        session.keepAlive(thinking, 'remote');
+        await session.flush();
+      }
     } catch (error) {
       logger.debug('[Cursor] Error during abort:', error);
     } finally {
@@ -967,6 +1026,8 @@ export async function runCursor(opts: {
       try {
         thinking = true;
         session.keepAlive(thinking, 'remote');
+        // Codex-style durable task_started (no UI bubble) so App turns thinking on promptly.
+        notifyCursorTurnThinkingStarted(session, turnId);
 
         if (isA2AInboxTurn) {
           const inboxSnapshotPath = writeA2AInboxSnapshot(workspacePath, sessionId, turnId, session.getA2AInbox());
@@ -990,7 +1051,10 @@ export async function runCursor(opts: {
         }
 
         // Spawn cursor-agent process (second+ turn uses --resume so cursor-agent continues same chat)
-        const cursorModel = mode.model ?? process.env.CURSOR_MODEL ?? 'auto';
+        // A2A inbox turns use live currentModel (queue mode may be stale from schedule time).
+        const cursorModel = (isA2AInboxTurn ? currentModel : mode.model)
+          ?? process.env.CURSOR_MODEL
+          ?? 'auto';
         const resumeId = cursorChatId || undefined;
         if (resumeId) {
           logger.debug(`[cursor] Resuming chat: ${resumeId}`);
@@ -1010,6 +1074,7 @@ export async function runCursor(opts: {
           signal: abortController.signal,
           timeoutMs: processTimeoutMs,
           approveMcps: true, // load Happy MCP from .cursor/mcp.json without prompting
+          maxMode: opts.maxMode ?? null,
         });
         // Per-tool timeout: after this we send tool_call_end (running in background) so App stops timer; process keeps running.
         // 0 = disabled (Codex-style: no per-tool cutoff, only process timeout or natural tool_call_end).
@@ -1186,10 +1251,16 @@ export async function runCursor(opts: {
               codexIdByCallId.clear();
               break;
 
-            case 'error':
-              messageBuffer.addMessage(`Error: ${msg.message}`, 'status');
-              session.sendSessionEvent({ type: 'message', message: `Error: ${msg.message}` });
+            case 'error': {
+              const userErrorText = formatCursorCliErrorLine(msg.message);
+              turnEndStatus = 'failed';
+              cancelTextFlushTimer();
+              // Drop partial assistant stream; error is delivered once via session envelope (service).
+              accumulatedResponse = '';
+              messageBuffer.addMessage(`Error: ${userErrorText}`, 'status');
+              notifyUserTurnError(session, turnId, msg.message);
               break;
+            }
           }
         }
 
@@ -1221,13 +1292,13 @@ export async function runCursor(opts: {
         const isAbortError = error instanceof Error && error.name === 'AbortError';
         turnEndStatus = isAbortError ? 'cancelled' : 'failed';
         if (isAbortError) {
-          messageBuffer.addMessage('Aborted by user', 'status');
-          session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: 'Aborted by user' }, { turn: turnId }));
+          messageBuffer.addMessage('Turn stopped by user', 'status');
+          notifyUserTurnAborted(session, turnId);
         } else {
           const errorMsg = error instanceof Error ? error.message : 'Process error';
           logger.debug('[cursor] Error:', error);
           messageBuffer.addMessage(errorMsg, 'status');
-          session.sendSessionEvent({ type: 'message', message: `Error: ${errorMsg}` });
+          notifyUserTurnError(session, turnId, errorMsg);
         }
       } finally {
         cancelTextFlushTimer();
@@ -1248,7 +1319,11 @@ export async function runCursor(opts: {
         // If the turn didn't complete normally (no result message received), it's either
         // cancelled (user abort) or failed (cursor-agent killed/crashed), never 'completed'.
         const status: 'completed' | 'failed' | 'cancelled' =
-          turnCompletedNormally ? 'completed' : (turnEndStatus === 'cancelled' ? 'cancelled' : 'failed');
+          turnEndStatus === 'cancelled'
+            ? 'cancelled'
+            : (turnEndStatus === 'failed' || !turnCompletedNormally)
+              ? 'failed'
+              : 'completed';
         // Single turn-end signal: session lifecycle only. Sending codex + cursor task_complete as well caused turn summary to appear three times in the App.
         session.sendSessionLifecycleEnvelope(createEnvelope('agent', {
           t: 'turn-end',
@@ -1292,7 +1367,8 @@ export async function runCursor(opts: {
           clearA2AInboxBackoff();
           logger.debug('[cursor] User turn succeeded; A2A inbox backoff reset');
         }
-        emitReadyIfIdle();
+        // Do not send durable ready after each turn: App maps ready → thinking off and gap
+        // fetch can replay stale ready after the next turn-start, leaving thinking stuck off.
         if (!isA2AInboxBackoffActive(a2aInboxBackoffUntil)) {
           peekA2AInboxInLoop(currentCursorMode());
         }

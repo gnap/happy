@@ -24,6 +24,7 @@ import {
 } from '@/claude/utils/sessionProtocolMapper';
 import { InvalidateSync } from '@/utils/sync';
 import axios from 'axios';
+import { resolveSessionLastSeq } from './sessionLastSeq';
 import {
     cloneA2AInboxState,
     extractLegacyInboxFromAgentState,
@@ -398,6 +399,18 @@ export class ApiSessionClient extends EventEmitter {
     private fallbackPollInterval: ReturnType<typeof setInterval> | null = null;
     /** Set in close() so disconnect/connect_error do not re-start fallback poll and leave the process hanging. */
     private closing = false;
+    /** Outbound transport: HTTP until first socket connect; WS preferred when connected and not in backoff. */
+    private outboundMode: 'ws' | 'http' = 'http';
+    private wsOutboundBackoffUntil = 0;
+    private wsOutboundFailureStreak = 0;
+    private wsUptimeStartedAt: number | null = null;
+    private wsUptimeAccumMs = 0;
+    private wsDowntimeAccumMs = 0;
+    private lastWsUptimeMarkMs = Date.now();
+    /** When set, fetchMessages stops once this seq is reached (socket seq-gap catch-up). */
+    private receiveCatchUpUntilSeq: number | null = null;
+    private receiveHealthInterval: ReturnType<typeof setInterval> | null = null;
+    private static readonly RECEIVE_HEALTH_INTERVAL_MS = 120_000;
 
     getMetadata(): Metadata | null {
         return this.metadata;
@@ -431,8 +444,13 @@ export class ApiSessionClient extends EventEmitter {
         this.requestedMetadata = session.requestedMetadata ?? null;
         this.encryptionKey = session.encryptionKey;
         this.encryptionVariant = session.encryptionVariant;
-        this.lastSeq = opts?.initialLastSeq ?? session.seq ?? 0;
-        if (opts?.initialLastSeq !== undefined && opts.initialLastSeq !== session.seq) {
+        this.lastSeq = resolveSessionLastSeq(session.seq, opts?.initialLastSeq);
+        if (opts?.initialLastSeq !== undefined && this.lastSeq !== opts.initialLastSeq) {
+            logger.debug(
+                `[API] Session ${session.id} resume cursor adjusted: requested=${opts.initialLastSeq}, `
+                + `effective=${this.lastSeq} (server session.seq=${session.seq ?? 0})`,
+            );
+        } else if (opts?.initialLastSeq !== undefined && opts.initialLastSeq !== session.seq) {
             logger.debug(
                 `[API] Session ${session.id} initial lastSeq=${opts.initialLastSeq} (server session.seq=${session.seq ?? 0})`,
             );
@@ -496,6 +514,8 @@ export class ApiSessionClient extends EventEmitter {
 
         this.socket.on('connect', () => {
             logger.debug('Socket connected successfully');
+            this.markWsConnected();
+            this.tryPreferWsOutbound('socket_connect');
             this.socketConnectedResolve?.();
             this.socketConnectedResolve = undefined;
             this.stopFallbackPoll();
@@ -507,6 +527,7 @@ export class ApiSessionClient extends EventEmitter {
                 });
             }
             this.receiveSync.invalidate();
+            this.startReceiveHealthPoll();
             if (this.a2aInboxNeedsServerUnreadSync) {
                 this.a2aInboxNeedsServerUnreadSync = false;
                 this.scheduleA2AInboxAgentStateSync({ immediate: true });
@@ -520,6 +541,8 @@ export class ApiSessionClient extends EventEmitter {
 
         this.socket.on('disconnect', (reason) => {
             logger.debug('[API] Socket disconnected:', reason);
+            this.markWsDisconnected();
+            this.forceHttpOutbound('socket_disconnect');
             this.rpcHandlerManager.onSocketDisconnect();
             if (!this.closing) this.startFallbackPoll();
         })
@@ -527,6 +550,8 @@ export class ApiSessionClient extends EventEmitter {
         this.socket.on('connect_error', (error) => {
             const msg = error?.message ?? String(error);
             logger.debug('[API] Socket connection error:', msg);
+            this.markWsDisconnected();
+            this.forceHttpOutbound('socket_connect_error');
             if (msg && msg.length < 200) {
                 logger.debug('[API] If running remotely (SSH/devcontainer), ensure outbound HTTPS/WSS to server is allowed. Using HTTP fallback for messages.');
             }
@@ -577,30 +602,36 @@ export class ApiSessionClient extends EventEmitter {
                         logger.debug('[API] new-message missing seq, will fetch via HTTP', {
                             lastSeq: this.lastSeq,
                         });
-                    } else if (messageSeq > this.lastSeq + 1) {
-                        logger.debug('[API] new-message seq gap, will fetch via HTTP', {
-                            messageSeq,
-                            lastSeq: this.lastSeq,
-                            expectedNext: this.lastSeq + 1,
-                        });
-                    } else if (!isEncrypted) {
-                        logger.debug('[API] new-message not encrypted, will fetch via HTTP', {
-                            messageSeq,
-                            lastSeq: this.lastSeq,
-                        });
+                        this.receiveSync.invalidate();
                     } else {
-                        logger.debug('[API] new-message needs HTTP catch-up', {
-                            messageSeq,
-                            lastSeq: this.lastSeq,
-                        });
+                        if (messageSeq > this.lastSeq + 1) {
+                            logger.debug('[API] new-message seq gap, will fetch via HTTP', {
+                                messageSeq,
+                                lastSeq: this.lastSeq,
+                                expectedNext: this.lastSeq + 1,
+                                gap: messageSeq - this.lastSeq,
+                            });
+                        } else if (!isEncrypted) {
+                            logger.debug('[API] new-message not encrypted, will fetch via HTTP', {
+                                messageSeq,
+                                lastSeq: this.lastSeq,
+                            });
+                        } else {
+                            logger.debug('[API] new-message needs HTTP catch-up', {
+                                messageSeq,
+                                lastSeq: this.lastSeq,
+                            });
+                        }
+                        // Steady-state: advance local lastSeq via fetchMessages, stop at this notification.
+                        this.requestReceiveCatchUp(messageSeq);
                     }
-                    this.receiveSync.invalidate();
                     return;
                 } else if (data.body.t === 'update-session') {
                     if (data.body.metadata && data.body.metadata.version > this.metadataVersion) {
                         const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.metadata.value));
                         this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
                         this.metadataVersion = data.body.metadata.version;
+                        this.emit('metadata-updated', this.metadata);
                     }
                     if (data.body.agentState && data.body.agentState.version > this.agentStateVersion) {
                         this.agentState = data.body.agentState.value ? decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.agentState.value)) : null;
@@ -871,67 +902,216 @@ export class ApiSessionClient extends EventEmitter {
         return this.socket?.connected === true;
     }
 
+    /** Rolling WS uptime ratio since session client construction (0–1). */
+    getWsUptimeRatio(): number {
+        this.accumulateWsUptimeSample();
+        const total = this.wsUptimeAccumMs + this.wsDowntimeAccumMs;
+        if (total <= 0) {
+            return this.socket.connected ? 1 : 0;
+        }
+        return this.wsUptimeAccumMs / total;
+    }
+
+    getOutboundTransportMode(): 'ws' | 'http' {
+        return this.outboundMode;
+    }
+
+    private accumulateWsUptimeSample() {
+        const now = Date.now();
+        const delta = now - this.lastWsUptimeMarkMs;
+        if (delta <= 0) {
+            return;
+        }
+        if (this.socket.connected) {
+            this.wsUptimeAccumMs += delta;
+        } else {
+            this.wsDowntimeAccumMs += delta;
+        }
+        this.lastWsUptimeMarkMs = now;
+    }
+
+    private markWsConnected() {
+        this.accumulateWsUptimeSample();
+        this.wsUptimeStartedAt = Date.now();
+    }
+
+    private markWsDisconnected() {
+        this.accumulateWsUptimeSample();
+        this.wsUptimeStartedAt = null;
+    }
+
+    private tryPreferWsOutbound(reason: string) {
+        if (Date.now() < this.wsOutboundBackoffUntil) {
+            logger.debug('[API] outbound: staying on HTTP (WS backoff)', {
+                reason,
+                backoffMsRemaining: this.wsOutboundBackoffUntil - Date.now(),
+                wsUptimeRatio: this.getWsUptimeRatio(),
+            });
+            return;
+        }
+        this.outboundMode = 'ws';
+        this.wsOutboundFailureStreak = 0;
+        logger.debug('[API] outbound: WS preferred', {
+            reason,
+            wsUptimeRatio: this.getWsUptimeRatio(),
+        });
+    }
+
+    private forceHttpOutbound(reason: string) {
+        this.outboundMode = 'http';
+        logger.debug('[API] outbound: forced HTTP', { reason, wsUptimeRatio: this.getWsUptimeRatio() });
+    }
+
+    private switchToHttpOutboundAfterWsFailure(reason: string, error?: unknown) {
+        this.outboundMode = 'http';
+        this.wsOutboundFailureStreak += 1;
+        const backoffMs = Math.min(
+            60_000,
+            ApiSessionClient.WS_OUTBOUND_BACKOFF_BASE_MS * Math.pow(2, this.wsOutboundFailureStreak - 1),
+        );
+        this.wsOutboundBackoffUntil = Date.now() + backoffMs;
+        logger.debug('[API] outbound: WS send failed, using HTTP with backoff', {
+            reason,
+            backoffMs,
+            error: error instanceof Error ? error.message : error,
+            wsUptimeRatio: this.getWsUptimeRatio(),
+        });
+    }
+
+    private shouldFlushOutboxViaWs(): boolean {
+        return this.outboundMode === 'ws'
+            && this.socket.connected
+            && Date.now() >= this.wsOutboundBackoffUntil;
+    }
+
+    private requestReceiveCatchUp(targetSeq: number) {
+        this.receiveCatchUpUntilSeq = this.receiveCatchUpUntilSeq === null
+            ? targetSeq
+            : Math.max(this.receiveCatchUpUntilSeq, targetSeq);
+        this.receiveSync.invalidate();
+    }
+
+    private startReceiveHealthPoll() {
+        if (this.receiveHealthInterval !== null || this.closing) {
+            return;
+        }
+        this.receiveHealthInterval = setInterval(() => {
+            if (!this.socket.connected || this.closing) {
+                return;
+            }
+            this.receiveSync.invalidate();
+        }, ApiSessionClient.RECEIVE_HEALTH_INTERVAL_MS);
+    }
+
+    private stopReceiveHealthPoll() {
+        if (this.receiveHealthInterval !== null) {
+            clearInterval(this.receiveHealthInterval);
+            this.receiveHealthInterval = null;
+        }
+    }
+
     private async fetchMessages() {
+        const untilSeq = this.receiveCatchUpUntilSeq;
+        const startLastSeq = this.lastSeq;
         let afterSeq = this.lastSeq;
-        while (true) {
-            const response = await axios.get<V3GetSessionMessagesResponse>(
-                `${configuration.serverUrl}/v3/sessions/${encodeURIComponent(this.sessionId)}/messages`,
-                {
-                    params: {
-                        after_seq: afterSeq,
-                        limit: 100
-                    },
-                    headers: this.authHeaders(),
-                    timeout: 60000,
-                    httpsAgent: serverHttpsAgent,
-                }
-            );
+        let pages = 0;
+        logger.debug('[API] fetchMessages start', {
+            sessionId: this.sessionId,
+            afterSeq,
+            untilSeq,
+            lastSeq: this.lastSeq,
+        });
+        try {
+            while (true) {
+                pages += 1;
+                const response = await axios.get<V3GetSessionMessagesResponse>(
+                    `${configuration.serverUrl}/v3/sessions/${encodeURIComponent(this.sessionId)}/messages`,
+                    {
+                        params: {
+                            after_seq: afterSeq,
+                            limit: 100
+                        },
+                        headers: this.authHeaders(),
+                        timeout: 60000,
+                        httpsAgent: serverHttpsAgent,
+                    }
+                );
 
-            const messages = Array.isArray(response.data.messages) ? response.data.messages : [];
-            let maxSeq = afterSeq;
+                const messages = Array.isArray(response.data.messages) ? response.data.messages : [];
+                let maxSeq = afterSeq;
 
-            for (const message of messages) {
-                if (message.seq > maxSeq) {
-                    maxSeq = message.seq;
-                }
+                for (const message of messages) {
+                    if (message.seq > maxSeq) {
+                        maxSeq = message.seq;
+                    }
 
-                if (message.content?.t !== 'encrypted') {
-                    continue;
-                }
-
-                try {
-                    const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(message.content.c));
-                    if (body == null || typeof body !== 'object') {
-                        logger.debug('[API] Fetched message decrypted to null or non-object (encryption key mismatch or bad payload)', {
-                            sessionId: this.sessionId,
-                            seq: message.seq,
-                            bodyType: body === null ? 'null' : typeof body,
-                        });
+                    if (message.content?.t !== 'encrypted') {
                         continue;
                     }
-                    this.routeIncomingMessage(body);
-                } catch (error) {
-                    logger.debug('[API] Failed to decrypt fetched message', {
+
+                    try {
+                        const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(message.content.c));
+                        if (body == null || typeof body !== 'object') {
+                            logger.debug('[API] Fetched message decrypted to null or non-object (encryption key mismatch or bad payload)', {
+                                sessionId: this.sessionId,
+                                seq: message.seq,
+                                bodyType: body === null ? 'null' : typeof body,
+                            });
+                            continue;
+                        }
+                        this.routeIncomingMessage(body);
+                    } catch (error) {
+                        logger.debug('[API] Failed to decrypt fetched message', {
+                            sessionId: this.sessionId,
+                            seq: message.seq,
+                            error
+                        });
+                    }
+                }
+
+                this.lastSeq = Math.max(this.lastSeq, maxSeq);
+                const hasMore = !!response.data.hasMore;
+                if (hasMore && maxSeq === afterSeq) {
+                    logger.debug('[API] fetchMessages pagination stalled, stopping to avoid infinite loop', {
                         sessionId: this.sessionId,
-                        seq: message.seq,
-                        error
+                        afterSeq
                     });
+                    break;
+                }
+                afterSeq = maxSeq;
+                if (untilSeq !== null && maxSeq >= untilSeq) {
+                    this.receiveCatchUpUntilSeq = null;
+                    break;
+                }
+                if (!hasMore) {
+                    break;
                 }
             }
-
-            this.lastSeq = Math.max(this.lastSeq, maxSeq);
-            const hasMore = !!response.data.hasMore;
-            if (hasMore && maxSeq === afterSeq) {
-                logger.debug('[API] fetchMessages pagination stalled, stopping to avoid infinite loop', {
+        } catch (error) {
+            logger.debug('[API] fetchMessages failed', {
+                sessionId: this.sessionId,
+                afterSeq,
+                untilSeq,
+                pages,
+                error: error instanceof Error ? error.message : error,
+            });
+            throw error;
+        } finally {
+            const catchUpTarget = untilSeq;
+            if (catchUpTarget !== null && this.lastSeq < catchUpTarget) {
+                logger.debug('[API] fetchMessages stopped before catch-up target (will retry on next sync)', {
                     sessionId: this.sessionId,
-                    afterSeq
+                    lastSeq: this.lastSeq,
+                    untilSeq: catchUpTarget,
                 });
-                break;
             }
-            afterSeq = maxSeq;
-            if (!hasMore) {
-                break;
-            }
+            logger.debug('[API] fetchMessages done', {
+                sessionId: this.sessionId,
+                pages,
+                startLastSeq,
+                endLastSeq: this.lastSeq,
+                untilSeq: this.receiveCatchUpUntilSeq,
+            });
         }
     }
 
@@ -940,66 +1120,117 @@ export class ApiSessionClient extends EventEmitter {
     private static readonly FLUSH_RETRY_STATUSES = [404, 502, 503, 504];
     private static readonly FLUSH_RETRY_MAX = 3;
     private static readonly FLUSH_RETRY_BASE_MS = 1000;
+    private static readonly WS_OUTBOUND_BACKOFF_BASE_MS = 2000;
 
+    /**
+     * Drain outbox head-of-line: one transport per chunk, never WS+HTTP in parallel.
+     * WS success skips HTTP for that chunk; WS failure continues with HTTP on the current queue head only.
+     */
     private async flushOutbox() {
         if (this.pendingOutbox.length === 0) {
             return;
         }
 
-        let flushed = 0;
         const total = this.pendingOutbox.length;
 
         while (this.pendingOutbox.length > 0) {
             const chunk = this.pendingOutbox.slice(0, ApiSessionClient.MAX_BATCH_SIZE);
-            for (let attempt = 0; attempt <= ApiSessionClient.FLUSH_RETRY_MAX; attempt++) {
+            if (this.shouldFlushOutboxViaWs()) {
                 try {
-                    if (attempt > 0) {
-                        const delayMs = ApiSessionClient.FLUSH_RETRY_BASE_MS * Math.pow(2, attempt - 1);
-                        logger.debug(`[API] flushOutbox retry ${attempt}/${ApiSessionClient.FLUSH_RETRY_MAX} after ${delayMs}ms`);
-                        await new Promise((r) => setTimeout(r, delayMs));
+                    await this.flushOutboxViaWs(chunk);
+                    continue;
+                } catch (error) {
+                    this.switchToHttpOutboundAfterWsFailure('ws_flush_failed', error);
+                    if (this.pendingOutbox.length === 0) {
+                        continue;
                     }
-                    const response = await axios.post<V3PostSessionMessagesResponse>(
-                        `${configuration.serverUrl}/v3/sessions/${encodeURIComponent(this.sessionId)}/messages`,
-                        {
-                            messages: chunk
-                        },
-                        {
-                            headers: this.authHeaders(),
-                            timeout: 120000, // 2 min so slow server or large cursor reply can complete; timeout is retried
-                            httpsAgent: serverHttpsAgent,
-                        }
-                    );
-
-                    this.pendingOutbox.splice(0, chunk.length);
-                    flushed += chunk.length;
-
-                    const messages = Array.isArray(response.data.messages) ? response.data.messages : [];
-                    const maxSeq = messages.reduce((acc, message) => (
-                        message.seq > acc ? message.seq : acc
-                    ), this.lastSeq);
-                    this.lastSeq = maxSeq;
-                    logger.debug(`[API] flushOutbox: sent ${chunk.length} message(s) to server (replies visible in app)`);
-                    break;
-                } catch (error: unknown) {
-                    const status = axios.isAxiosError(error) ? error.response?.status : undefined;
-                    const isTimeout = axios.isAxiosError(error) && error.code === 'ECONNABORTED';
-                    const isNetworkReset = axios.isAxiosError(error) && error.code === 'ECONNRESET';
-                    const isRetryableStatus = status !== undefined && ApiSessionClient.FLUSH_RETRY_STATUSES.includes(status);
-                    const isRetryable = isRetryableStatus || (isTimeout && attempt < ApiSessionClient.FLUSH_RETRY_MAX) || isNetworkReset;
-                    if (!isRetryable || attempt === ApiSessionClient.FLUSH_RETRY_MAX) {
-                        const data = axios.isAxiosError(error) ? error.response?.data : undefined;
-                        logger.debug('[API] flushOutbox failed', { sessionId: this.sessionId, batchLength: chunk.length, flushed, total, status, isTimeout, data, error });
-                        // Messages remain in pendingOutbox and will be retried by the outer backoff loop
-                        logger.warn(`[API] Failed to send ${chunk.length} reply message(s) to server (will retry). Check network and server.`, { status, isTimeout, sessionId: this.sessionId });
-                        throw error;
-                    }
-                    logger.debug('[API] flushOutbox retryable error (will retry)', { status, isTimeout, attempt: attempt + 1, maxRetries: ApiSessionClient.FLUSH_RETRY_MAX });
                 }
             }
+            const httpChunk = this.pendingOutbox.slice(0, ApiSessionClient.MAX_BATCH_SIZE);
+            if (httpChunk.length === 0) {
+                continue;
+            }
+            await this.flushOutboxViaHttp(httpChunk);
         }
 
         if (total > ApiSessionClient.MAX_BATCH_SIZE) {
             logger.debug(`[API] flushOutbox chunked: ${total} messages in ${Math.ceil(total / ApiSessionClient.MAX_BATCH_SIZE)} batches`);
+        }
+    }
+
+    private async flushOutboxViaWs(chunk: Array<{ content: string; localId: string }>) {
+        let sent = 0;
+        try {
+            for (const message of chunk) {
+                if (!this.socket.connected) {
+                    throw new Error('ws_disconnected_mid_flush');
+                }
+                this.socket.emit('message', {
+                    sid: this.sessionId,
+                    message: message.content,
+                    localId: message.localId,
+                });
+                sent += 1;
+            }
+        } finally {
+            if (sent > 0) {
+                this.pendingOutbox.splice(0, sent);
+                logger.debug(`[API] flushOutbox via WS (optimistic): sent ${sent} message(s) to server (replies visible in app)`);
+                // WS send has no seq ack — pull receive cursor forward via HTTP (health poll is backup).
+                this.receiveSync.invalidate();
+            }
+        }
+        if (sent < chunk.length) {
+            throw new Error('ws_disconnected_mid_flush');
+        }
+    }
+
+    private async flushOutboxViaHttp(chunk: Array<{ content: string; localId: string }>) {
+        let flushed = 0;
+        const total = this.pendingOutbox.length;
+        for (let attempt = 0; attempt <= ApiSessionClient.FLUSH_RETRY_MAX; attempt++) {
+            try {
+                if (attempt > 0) {
+                    const delayMs = ApiSessionClient.FLUSH_RETRY_BASE_MS * Math.pow(2, attempt - 1);
+                    logger.debug(`[API] flushOutbox HTTP retry ${attempt}/${ApiSessionClient.FLUSH_RETRY_MAX} after ${delayMs}ms`);
+                    await new Promise((r) => setTimeout(r, delayMs));
+                }
+                const response = await axios.post<V3PostSessionMessagesResponse>(
+                    `${configuration.serverUrl}/v3/sessions/${encodeURIComponent(this.sessionId)}/messages`,
+                    {
+                        messages: chunk
+                    },
+                    {
+                        headers: this.authHeaders(),
+                        timeout: 120000, // 2 min so slow server or large cursor reply can complete; timeout is retried
+                        httpsAgent: serverHttpsAgent,
+                    }
+                );
+
+                this.pendingOutbox.splice(0, chunk.length);
+                flushed += chunk.length;
+
+                const messages = Array.isArray(response.data.messages) ? response.data.messages : [];
+                const maxSeq = messages.reduce((acc, message) => (
+                    message.seq > acc ? message.seq : acc
+                ), this.lastSeq);
+                this.lastSeq = maxSeq;
+                logger.debug(`[API] flushOutbox via HTTP: sent ${chunk.length} message(s) to server (replies visible in app)`);
+                return;
+            } catch (error: unknown) {
+                const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+                const isTimeout = axios.isAxiosError(error) && error.code === 'ECONNABORTED';
+                const isNetworkReset = axios.isAxiosError(error) && error.code === 'ECONNRESET';
+                const isRetryableStatus = status !== undefined && ApiSessionClient.FLUSH_RETRY_STATUSES.includes(status);
+                const isRetryable = isRetryableStatus || (isTimeout && attempt < ApiSessionClient.FLUSH_RETRY_MAX) || isNetworkReset;
+                if (!isRetryable || attempt === ApiSessionClient.FLUSH_RETRY_MAX) {
+                    const data = axios.isAxiosError(error) ? error.response?.data : undefined;
+                    logger.debug('[API] flushOutbox HTTP failed', { sessionId: this.sessionId, batchLength: chunk.length, flushed, total, status, isTimeout, data, error });
+                    logger.warn(`[API] Failed to send ${chunk.length} reply message(s) to server (will retry). Check network and server.`, { status, isTimeout, sessionId: this.sessionId });
+                    throw error;
+                }
+                logger.debug('[API] flushOutbox HTTP retryable error (will retry)', { status, isTimeout, attempt: attempt + 1, maxRetries: ApiSessionClient.FLUSH_RETRY_MAX });
+            }
         }
     }
 
@@ -1319,11 +1550,13 @@ export class ApiSessionClient extends EventEmitter {
                     const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
                     this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
                     this.metadataVersion = answer.version;
+                    this.emit('metadata-updated', this.metadata);
                 } else if (answer.result === 'version-mismatch') {
                     if (answer.version > this.metadataVersion) {
                         this.metadataVersion = answer.version;
                         const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
                         this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
+                        this.emit('metadata-updated', this.metadata);
                     }
                     throw new Error('Metadata version mismatch');
                 } else if (answer.result === 'error') {
@@ -1421,6 +1654,7 @@ export class ApiSessionClient extends EventEmitter {
         this.applyA2AInboxLocally();
         this.flushA2AInboxAgentStateSync();
         this.stopFallbackPoll();
+        this.stopReceiveHealthPoll();
         this.sendSync.stop();
         this.receiveSync.stop();
         this.socket.close();

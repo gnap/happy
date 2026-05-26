@@ -27,6 +27,10 @@ import {
   type InteractiveCommandOutcome,
   type InteractiveCommandResult,
 } from './interactiveCompletion';
+import {
+  acquireCursorMaxModeGuard,
+  isCursorStreamInitMessage,
+} from './cursorMaxMode';
 
 export type { InteractiveCommandOutcome, InteractiveCommandResult } from './interactiveCompletion';
 
@@ -169,6 +173,11 @@ export interface CursorProcessOptions {
   signal?: AbortSignal;
   /** If true, pass --approve-mcps and --workspace so cursor-agent loads MCPs from .cursor/mcp.json */
   approveMcps?: boolean;
+  /**
+   * Force maxMode in ~/.cursor/cli-config.json before spawn (cross-process file lock,
+   * released after the first stream-json `system` event). null/undefined = leave as-is.
+   */
+  maxMode?: boolean | null;
 }
 
 export interface CursorProcessEvents {
@@ -186,6 +195,8 @@ export class CursorProcess extends EventEmitter {
   private buffer = '';
   private killed = false;
   private timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  /** Release max-mode file lock after cursor-agent emits stream-json system init. */
+  private pendingMaxModeGuardRelease: (() => Promise<void>) | null = null;
 
   constructor(private readonly options: CursorProcessOptions) {
     super();
@@ -226,7 +237,7 @@ export class CursorProcess extends EventEmitter {
     });
   }
 
-  private spawnAndRun(
+  private async spawnAndRun(
     cursorArgs: string[],
     options: {
       interactive: boolean;
@@ -237,6 +248,25 @@ export class CursorProcess extends EventEmitter {
       postCommandMaxMs?: number;
     },
   ): Promise<InteractiveCommandResult> {
+    const maxModeOverride = options.interactive ? null : (this.options.maxMode ?? null);
+    if (maxModeOverride !== null) {
+      try {
+        const guard = await acquireCursorMaxModeGuard(maxModeOverride);
+        this.pendingMaxModeGuardRelease = () => guard.release();
+        logger.debug(`[cursor] maxMode guard: set to ${maxModeOverride} before spawn`);
+      } catch (error) {
+        logger.debug('[cursor] maxMode guard failed (continuing without lock):', error);
+      }
+    }
+
+    const releaseMaxModeGuard = async (): Promise<void> => {
+      const release = this.pendingMaxModeGuardRelease;
+      this.pendingMaxModeGuardRelease = null;
+      if (release) {
+        await release();
+      }
+    };
+
     const cursorAgentPath = resolveCursorAgentPath();
     logger.debug(`[cursor] Spawning: ${[cursorAgentPath, ...cursorArgs].join(' ').slice(0, 200)}...`);
 
@@ -375,6 +405,7 @@ export class CursorProcess extends EventEmitter {
       };
 
       const onExit = (code: number | null) => {
+        void releaseMaxModeGuard();
         clearInteractiveIdleTimer();
         clearInteractiveInputTimer();
         clearPostCommandMaxTimer();
@@ -418,6 +449,7 @@ export class CursorProcess extends EventEmitter {
       };
 
       const onAbort = (): void => {
+        void releaseMaxModeGuard();
         this.kill();
         reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
       };
@@ -517,13 +549,25 @@ export class CursorProcess extends EventEmitter {
         onExit(code);
       });
       child.on('error', (err) => {
+        void releaseMaxModeGuard();
         clearInteractiveIdleTimer();
         clearInteractiveInputTimer();
         this.cleanup();
         this.emit('error', err);
         reject(err);
       });
+    }).finally(() => {
+      void releaseMaxModeGuard();
     });
+  }
+
+  private maybeReleaseMaxModeGuardForStreamMessage(msg: CursorStreamMessage): void {
+    if (!this.pendingMaxModeGuardRelease || !isCursorStreamInitMessage(msg)) {
+      return;
+    }
+    const release = this.pendingMaxModeGuardRelease;
+    this.pendingMaxModeGuardRelease = null;
+    void release();
   }
 
   /**
@@ -573,12 +617,14 @@ export class CursorProcess extends EventEmitter {
 
     try {
       const msg = JSON.parse(trimmed) as CursorStreamMessage;
+      this.maybeReleaseMaxModeGuardForStreamMessage(msg);
       this.emit('message', msg);
     } catch {
       const jsonStart = trimmed.indexOf('{');
       if (jsonStart >= 0) {
         try {
           const msg = JSON.parse(trimmed.slice(jsonStart)) as CursorStreamMessage;
+          this.maybeReleaseMaxModeGuardForStreamMessage(msg);
           this.emit('message', msg);
           return;
         } catch {
@@ -589,12 +635,12 @@ export class CursorProcess extends EventEmitter {
       // Some provider errors or other messages are printed as plain text on stdout/stderr.
       // Convert obvious provider error lines into a synthetic result message so the parser
       // maps them into a session-level error event that will be sent to the App.
-      if (isCursorProviderErrorLine(trimmed)) {
+      if (isCursorCliErrorLine(trimmed)) {
         const synthetic: CursorStreamMessage = {
           type: 'result',
           subtype: 'error_during_execution',
           is_error: true,
-          result: trimmed.slice(0, 1000),
+          result: formatCursorCliErrorLine(trimmed),
         } as unknown as CursorStreamMessage;
         this.emit('message', synthetic);
         return;
@@ -623,6 +669,27 @@ function isShellNoise(line: string): boolean {
 
 function isCursorProviderErrorLine(line: string): boolean {
   return /provider error|we're having trouble connecting to the model provider|invalid model|unknown model|unsupported model|model .{0,60}not available|model .{0,60}not found/i.test(line);
+}
+
+/** Plain-text cursor-agent / TTY errors (billing, auth, provider) promoted to stream-json result errors. */
+export function isCursorCliErrorLine(line: string): boolean {
+  return isCursorProviderErrorLine(line)
+    || /unpaid invoice|pay your invoice|billing|subscription.*(expired|required|inactive)|account.*(suspended|disabled|locked)/i.test(line);
+}
+
+/** User-visible text for CLI errors (strip TUI noise, dedupe repeated sentences). */
+export function formatCursorCliErrorLine(line: string): string {
+  let text = line.replace(/^\s*S:\s*/i, '').replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').trim();
+  const normalized = text.replace(/\s+/g, ' ');
+  const half = Math.floor(normalized.length / 2);
+  if (half > 20) {
+    const first = normalized.slice(0, half).trim();
+    const second = normalized.slice(half).trim();
+    if (first === second) {
+      text = first;
+    }
+  }
+  return text.slice(0, 1000);
 }
 
 export interface CursorModelInfo {

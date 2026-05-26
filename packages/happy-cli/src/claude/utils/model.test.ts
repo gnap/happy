@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeClaudeModelForSdk } from './model';
+import { claudeModelCodeForMetadata, normalizeClaudeModelForSdk } from './model';
 
 describe('normalizeClaudeModelForSdk', () => {
     it('drops UI-only model selectors', () => {
@@ -18,5 +18,15 @@ describe('normalizeClaudeModelForSdk', () => {
         expect(normalizeClaudeModelForSdk(null)).toBeUndefined();
         expect(normalizeClaudeModelForSdk('')).toBeUndefined();
         expect(normalizeClaudeModelForSdk('   ')).toBeUndefined();
+    });
+});
+
+describe('claudeModelCodeForMetadata', () => {
+    it('maps UI keys and resets to default', () => {
+        expect(claudeModelCodeForMetadata('sonnet')).toBe('sonnet');
+        expect(claudeModelCodeForMetadata('adaptiveUsage')).toBe('adaptiveUsage');
+        expect(claudeModelCodeForMetadata(null)).toBe('default');
+        expect(claudeModelCodeForMetadata('')).toBe('default');
+        expect(claudeModelCodeForMetadata('   ')).toBe('default');
     });
 });
