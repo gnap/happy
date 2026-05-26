@@ -700,14 +700,29 @@ export interface CursorModelInfo {
   contextTokens?: number;
 }
 
+/** Default context window when init/model display name has no parseable K/M hint. */
+export const DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000;
+
 /**
- * Rough heuristic: if the human-readable name contains "1M" the model has a 1M-token
- * context window; otherwise default to 200K. cursor-agent itself does not expose
- * per-model context limits, so this is the best we can do without a hard-coded table.
+ * Parse max context window from cursor-agent init `model` or `cursor-agent models` display name.
+ * Supports "1M", "272K", etc.; falls back to {@link DEFAULT_CONTEXT_WINDOW_TOKENS}.
  */
+export function parseContextWindowFromDisplayName(name: string | undefined): number {
+  if (!name?.trim()) {
+    return DEFAULT_CONTEXT_WINDOW_TOKENS;
+  }
+  if (/\b1\s*m\b/i.test(name)) {
+    return 1_000_000;
+  }
+  const kMatch = name.match(/\b(\d+)\s*k\b/i);
+  if (kMatch) {
+    return Number.parseInt(kMatch[1], 10) * 1000;
+  }
+  return DEFAULT_CONTEXT_WINDOW_TOKENS;
+}
+
 function inferContextTokens(name: string): number {
-  if (/\b1\s*m\b/i.test(name)) return 1_000_000;
-  return 200_000;
+  return parseContextWindowFromDisplayName(name);
 }
 
 export interface CursorModelsResult {

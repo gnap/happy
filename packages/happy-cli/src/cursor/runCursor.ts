@@ -145,8 +145,29 @@ function formatCursorUsageLog(params: {
     durationMs: params.durationMs,
   });
 }
+
+/** Turn-end usage payload: snake_case keys aligned with cursor-agent (`input_tokens`, etc.). */
+function buildTurnEndUsagePayload(
+  rawUsage: CursorUsageRecord | undefined,
+  contextWindowTokens: number,
+  apiCallCount: number,
+): CursorUsageRecord {
+  const usage: CursorUsageRecord = rawUsage ? { ...rawUsage } : {};
+  const { contextSize } = normalizeCursorUsage(rawUsage, apiCallCount);
+  if (contextSize !== undefined) {
+    usage.context_size = contextSize;
+  }
+  usage.context_window_tokens = contextWindowTokens;
+  return usage;
+}
 import { createId } from '@paralleldrive/cuid2';
-import { CursorProcess, fetchCursorModels, formatCursorCliErrorLine } from './cursorProcess';
+import {
+  CursorProcess,
+  DEFAULT_CONTEXT_WINDOW_TOKENS,
+  fetchCursorModels,
+  formatCursorCliErrorLine,
+  parseContextWindowFromDisplayName,
+} from './cursorProcess';
 import {
   notifyCursorTurnThinkingStarted,
   notifySessionTurnAbortedIdle,
@@ -1057,6 +1078,7 @@ export async function runCursor(opts: {
       };
       let turnToolCallCount = 0;
       let inboxTurnUnreadCount = 0;
+      let turnContextWindowTokens = DEFAULT_CONTEXT_WINDOW_TOKENS;
       lastTaskCompleteUsage = undefined;
       lastTaskCompleteCostUsd = undefined;
       lastTaskCompleteDurationMs = undefined;
@@ -1165,6 +1187,10 @@ export async function runCursor(opts: {
                 cursorChatId = msg.sessionId;
                 logger.debug(`[cursor] Chat ID: ${cursorChatId}`);
                 session.updateAgentState((s) => ({ ...s, cursorChatId }));
+              }
+              if (msg.model) {
+                turnContextWindowTokens = parseContextWindowFromDisplayName(msg.model);
+                logger.debug(`[cursor] Turn context window from init model ${JSON.stringify(msg.model)}: ${turnContextWindowTokens}`);
               }
               break;
 
@@ -1295,10 +1321,7 @@ export async function runCursor(opts: {
               if (msg.sessionId) {
                 cursorChatId = msg.sessionId;
               }
-              const { usage: _raw, ...normalizedFields } = normalizeCursorUsage(msg.usage, turnToolCallCount + 1);
-              lastTaskCompleteUsage = normalizedFields.contextSize !== undefined
-                ? { ...normalizedFields, ...msg.usage }
-                : msg.usage;
+              lastTaskCompleteUsage = msg.usage;
               lastTaskCompleteCostUsd = msg.costUsd;
               lastTaskCompleteDurationMs = msg.durationMs;
               logger.debug(`[cursor] Turn usage ${formatCursorUsageLog({
@@ -1402,7 +1425,11 @@ export async function runCursor(opts: {
         session.sendSessionLifecycleEnvelope(createEnvelope('agent', {
           t: 'turn-end',
           status,
-          ...(lastTaskCompleteUsage ? { usage: lastTaskCompleteUsage } : {}),
+          usage: buildTurnEndUsagePayload(
+            lastTaskCompleteUsage,
+            turnContextWindowTokens,
+            turnToolCallCount + 1,
+          ),
           ...(lastTaskCompleteCostUsd !== undefined ? { costUsd: lastTaskCompleteCostUsd } : {}),
           ...(lastTaskCompleteDurationMs !== undefined ? { durationMs: lastTaskCompleteDurationMs } : {}),
         }, { turn: turnId }));

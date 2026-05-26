@@ -31,8 +31,10 @@ import {
   buildCursorArgs,
   buildCursorPtySpawn,
   CursorProcess,
+  DEFAULT_CONTEXT_WINDOW_TOKENS,
   formatCursorCliErrorLine,
   isCursorCliErrorLine,
+  parseContextWindowFromDisplayName,
   resolveCursorAgentPath,
 } from './cursorProcess';
 
@@ -246,5 +248,17 @@ describe('CursorProcess interactive command', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('parseContextWindowFromDisplayName', () => {
+  it('defaults to 200K when name is empty or unparseable', () => {
+    expect(parseContextWindowFromDisplayName(undefined)).toBe(DEFAULT_CONTEXT_WINDOW_TOKENS);
+    expect(parseContextWindowFromDisplayName('GPT-5.5 Fast')).toBe(200_000);
+  });
+
+  it('parses 1M and K hints from init model display names', () => {
+    expect(parseContextWindowFromDisplayName('GPT-5.5 1M High')).toBe(1_000_000);
+    expect(parseContextWindowFromDisplayName('GPT-5.5 272K Medium')).toBe(272_000);
   });
 });
