@@ -83,7 +83,7 @@ if (session?.thinking) {
 | Turn 结束 | `turn-end` lifecycle + `keepAlive(false)` + `flush` |
 | Turn 结束后 | **不再** `emitReadyIfIdle()` / durable `ready`（避免 App 用 `ready` 关掉下一轮 thinking） |
 | 进程首次 idle | 仍 `emitReadyIfIdle()` 一次（推送「It's ready!」） |
-| 用户可见错误/中止 | **仅** session envelope `ev.t=service`（勿再 `sendSessionEvent` 双发） |
+| 用户可见错误/中止 | **`sendSessionEvent({ type: 'message' })`**（Claude 同款 agent-event；勿再用 `service` 承载错误，避免 App 按 `Error:` 猜类型）+ `turn_aborted` 生命周期 |
 
 `task_started` 需在 App `sessionThinkingLifecycle` 里识别 `content.type === 'cursor'`（与 codex 并列）。
 
