@@ -293,6 +293,8 @@ export async function runCursor(opts: {
   resumeSessionTag?: string;
   /** Pre-wake server seq (daemon wake); CLI fetches messages with seq > this value. */
   resumeAfterSeq?: number;
+  /** Force cursor-agent maxMode (cli-config.json) for headless turns. null/undefined = leave as-is. */
+  maxMode?: boolean | null;
   /** Set by index.ts: Date.now() at start of CLI async IIFE, so we can report "time to runCursor entry". */
   cliStartTime?: number;
 }): Promise<void> {
@@ -1072,6 +1074,7 @@ export async function runCursor(opts: {
           signal: abortController.signal,
           timeoutMs: processTimeoutMs,
           approveMcps: true, // load Happy MCP from .cursor/mcp.json without prompting
+          maxMode: opts.maxMode ?? null,
         });
         // Per-tool timeout: after this we send tool_call_end (running in background) so App stops timer; process keeps running.
         // 0 = disabled (Codex-style: no per-tool cutoff, only process timeout or natural tool_call_end).
@@ -1252,7 +1255,8 @@ export async function runCursor(opts: {
               const userErrorText = formatCursorCliErrorLine(msg.message);
               turnEndStatus = 'failed';
               cancelTextFlushTimer();
-              flushAccumulatedText();
+              // Drop partial assistant stream; error is delivered once via session envelope (service).
+              accumulatedResponse = '';
               messageBuffer.addMessage(`Error: ${userErrorText}`, 'status');
               notifyUserTurnError(session, turnId, msg.message);
               break;
@@ -1294,7 +1298,7 @@ export async function runCursor(opts: {
           const errorMsg = error instanceof Error ? error.message : 'Process error';
           logger.debug('[cursor] Error:', error);
           messageBuffer.addMessage(errorMsg, 'status');
-          session.sendSessionEvent({ type: 'message', message: `Error: ${errorMsg}` });
+          notifyUserTurnError(session, turnId, errorMsg);
         }
       } finally {
         cancelTextFlushTimer();

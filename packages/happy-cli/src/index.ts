@@ -178,12 +178,13 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
     try {
       const { runCursor } = await import('@/cursor/runCursor');
 
-      // Parse cursor options: --started-by, --cwd, --resume/-r, --resume-session-tag
+      // Parse cursor options: --started-by, --cwd, --resume/-r, --resume-session-tag, --max-mode
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
       let workspaceRoot: string | undefined = undefined;
       let resumeSession = false;
       let resumeSessionTag: string | undefined = undefined;
       let resumeAfterSeq: number | undefined = undefined;
+      let maxMode: boolean | null = null;
       for (let i = 1; i < args.length; i++) {
         if (args[i] === '--started-by') {
           startedBy = args[++i] as 'daemon' | 'terminal';
@@ -198,6 +199,10 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
           if (parsed !== undefined) {
             resumeAfterSeq = parsed;
           }
+        } else if (args[i] === '--max-mode') {
+          maxMode = true;
+        } else if (args[i] === '--no-max-mode') {
+          maxMode = false;
         }
       }
 
@@ -215,7 +220,7 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
         await new Promise(resolve => setTimeout(resolve, 200));
       }
 
-      await runCursor({ credentials, startedBy, workspaceRoot, resumeSession, resumeSessionTag, resumeAfterSeq, cliStartTime });
+      await runCursor({ credentials, startedBy, workspaceRoot, resumeSession, resumeSessionTag, resumeAfterSeq, maxMode, cliStartTime });
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error');
       if (process.env.DEBUG) {

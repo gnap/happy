@@ -8,7 +8,7 @@ import {
 } from './turnUserNotifications';
 
 describe('turnUserNotifications', () => {
-  it('notifyUserTurnAborted sends protocol text, event, and cursor turn_aborted', () => {
+  it('notifyUserTurnAborted sends service envelope and cursor turn_aborted only', () => {
     const session = {
       sendSessionProtocolMessage: vi.fn(),
       sendSessionEvent: vi.fn(),
@@ -18,16 +18,20 @@ describe('turnUserNotifications', () => {
     notifyUserTurnAborted(session as never, 'turn-1');
 
     expect(session.sendSessionProtocolMessage).toHaveBeenCalledTimes(1);
-    expect(session.sendSessionEvent).toHaveBeenCalledWith({
-      type: 'message',
-      message: TURN_ABORTED_USER_MESSAGE,
-    });
+    expect(session.sendSessionProtocolMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        role: 'agent',
+        turn: 'turn-1',
+        ev: { t: 'service', text: TURN_ABORTED_USER_MESSAGE },
+      }),
+    );
+    expect(session.sendSessionEvent).not.toHaveBeenCalled();
     expect(session.sendCursorMessage).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'turn_aborted', id: expect.any(String) }),
     );
   });
 
-  it('notifyUserTurnError formats CLI errors for the user', () => {
+  it('notifyUserTurnError sends service envelope only (no legacy event)', () => {
     const session = {
       sendSessionProtocolMessage: vi.fn(),
       sendSessionEvent: vi.fn(),
@@ -36,10 +40,14 @@ describe('turnUserNotifications', () => {
 
     notifyUserTurnError(session as never, 'turn-2', 'S: provider error: timeout');
 
-    expect(session.sendSessionEvent).toHaveBeenCalledWith({
-      type: 'message',
-      message: 'provider error: timeout',
-    });
+    expect(session.sendSessionEvent).not.toHaveBeenCalled();
+    expect(session.sendSessionProtocolMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        role: 'agent',
+        turn: 'turn-2',
+        ev: { t: 'service', text: 'provider error: timeout' },
+      }),
+    );
   });
 
   it('notifyCursorTurnThinkingStarted sends cursor task_started', () => {

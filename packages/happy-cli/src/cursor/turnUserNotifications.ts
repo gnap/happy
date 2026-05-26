@@ -7,20 +7,21 @@ import { formatCursorCliErrorLine } from './cursorProcess';
 export const TURN_ABORTED_USER_MESSAGE = 'Turn stopped by user.';
 
 /**
- * Deliver a user-visible abort notice for the active turn (session protocol + legacy event + cursor lifecycle).
+ * Deliver a user-visible abort notice for the active turn (session envelope + cursor lifecycle).
+ * Do not dual-send legacy agent events — App renders those as duplicate status lines alongside envelope text.
  */
 export function notifyUserTurnAborted(
   session: ApiSessionClient,
   turnId: string,
   message: string = TURN_ABORTED_USER_MESSAGE,
 ): void {
-  session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: message }, { turn: turnId }));
-  session.sendSessionEvent({ type: 'message', message });
+  session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'service', text: message }, { turn: turnId }));
   session.sendCursorMessage({ type: 'turn_aborted', id: randomUUID() });
 }
 
 /**
  * Deliver a user-visible error for the active turn (CLI/provider failures, billing, etc.).
+ * Session envelope only; avoid sendSessionEvent so errors are not shown twice (event + assistant text).
  */
 export function notifyUserTurnError(
   session: ApiSessionClient,
@@ -28,8 +29,7 @@ export function notifyUserTurnError(
   errorText: string,
 ): void {
   const message = formatCursorCliErrorLine(errorText);
-  session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'text', text: message }, { turn: turnId }));
-  session.sendSessionEvent({ type: 'message', message });
+  session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'service', text: message }, { turn: turnId }));
 }
 
 /**

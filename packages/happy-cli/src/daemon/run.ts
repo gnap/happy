@@ -655,6 +655,9 @@ export async function startDaemon(): Promise<void> {
           if (typeof options.resumeAfterSeq === 'number' && options.resumeAfterSeq >= 0) {
             logger.debug(`[DAEMON RUN] Passing --resume-after-seq ${options.resumeAfterSeq} to CLI (tmux)`);
           }
+          if (options.agent === 'cursor') {
+            tmuxCommandArgs.push('--no-max-mode');
+          }
           const fullCommand = [launchSpec.executable, ...tmuxCommandArgs]
             .map((part) => JSON.stringify(part))
             .join(' ');
@@ -779,6 +782,10 @@ export async function startDaemon(): Promise<void> {
           appendResumeAfterSeqCliArgs(args, options.resumeAfterSeq);
           if (typeof options.resumeAfterSeq === 'number' && options.resumeAfterSeq >= 0) {
             logger.debug(`[DAEMON RUN] Passing --resume-after-seq ${options.resumeAfterSeq} to CLI`);
+          }
+          if (options.agent === 'cursor') {
+            // Daemon cursor sessions force max mode off (cli-config.json maxMode is ignored).
+            args.push('--no-max-mode');
           }
 
           const baseEnv = { ...process.env };
