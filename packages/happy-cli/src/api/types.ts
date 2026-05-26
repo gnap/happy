@@ -178,6 +178,7 @@ export const MessageMetaSchema = z.object({
   cursorCompactTurn: z.boolean().optional(), // Internal scheduler: run one interactive cursor-agent /compress turn
   permissionMode: z.enum(['default', 'acceptEdits', 'bypassPermissions', 'plan', 'read-only', 'safe-yolo', 'yolo', 'ask', 'force']).optional(), // Permission mode for this message
   model: z.string().nullable().optional(), // Model name for this message (null = reset)
+  maxMode: z.boolean().optional(), // Cursor max mode for this message (cli-config.json snapshot at spawn)
   fallbackModel: z.string().nullable().optional(), // Fallback model for this message (null = reset)
   customSystemPrompt: z.string().nullable().optional(), // Custom system prompt for this message (null = reset)
   appendSystemPrompt: z.string().nullable().optional(), // Append to system prompt for this message (null = reset)
@@ -240,6 +241,8 @@ export type Metadata = {
   // `code` = protocol value ID, `value` = human label
   models?: Array<{ code: string; value: string; description?: string | null }>,
   currentModelCode?: string,
+  /** Cursor max mode (cli-config.json); synced from App message meta or CLI flags. */
+  currentMaxMode?: boolean,
   operatingModes?: Array<{ code: string; value: string; description?: string | null }>,
   currentOperatingModeCode?: string,
   thoughtLevels?: Array<{ code: string; value: string; description?: string | null }>,
@@ -323,6 +326,7 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
   const {
     models,
     currentModelCode,
+    currentMaxMode,
     operatingModes,
     currentOperatingModeCode,
     thoughtLevels,
@@ -348,6 +352,7 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
   return {
     ...(models !== undefined ? { models } : {}),
     ...(currentModelCode !== undefined ? { currentModelCode } : {}),
+    ...(currentMaxMode !== undefined ? { currentMaxMode } : {}),
     ...(operatingModes !== undefined ? { operatingModes } : {}),
     ...(currentOperatingModeCode !== undefined ? { currentOperatingModeCode } : {}),
     ...(thoughtLevels !== undefined ? { thoughtLevels } : {}),

@@ -428,9 +428,12 @@ export async function runCursor(opts: {
   const messageQueue = new MessageQueue2<CursorMode>((mode) => hashObject({
     permissionMode: mode.permissionMode,
     model: mode.model ?? null,
+    maxMode: mode.maxMode ?? null,
   }));
   let currentPermissionMode: PermissionMode | undefined = undefined;
   let currentModel: string | undefined = undefined;
+  let currentMaxMode: boolean | undefined =
+    opts.maxMode !== null && opts.maxMode !== undefined ? opts.maxMode : undefined;
   let a2aTurnQueued = false;
   let a2aInboxTurnActive = false;
   let a2aInboxBackoffStreak = 0;
@@ -438,12 +441,17 @@ export async function runCursor(opts: {
   let a2aInboxBackoffTimer: ReturnType<typeof setTimeout> | null = null;
   const a2aInboxBackoffSettings = resolveA2AInboxBackoffSettings();
   let scheduleA2ATurnIfNeeded: (mode: CursorMode) => void = () => {};
-  const syncModeToSessionMetadata = (permissionMode: PermissionMode, model: string | undefined) => {
+  const syncModeToSessionMetadata = (
+    permissionMode: PermissionMode,
+    model: string | undefined,
+    maxMode?: boolean,
+  ) => {
     const dangerouslySkipPermissions = permissionMode === 'force';
     session.updateMetadata((m) => ({
       ...m,
       currentOperatingModeCode: permissionMode,
       currentModelCode: model ?? undefined,
+      ...(maxMode !== undefined ? { currentMaxMode: maxMode } : {}),
       dangerouslySkipPermissions,
     })).catch((err) => logger.debug('[Cursor] Failed to sync mode to session metadata', err));
   };
@@ -468,6 +476,14 @@ export async function runCursor(opts: {
     }
     applyInMemorySessionModel(code, source);
   };
+  const syncInMemoryMaxModeFromSessionMetadata = (source: string) => {
+    const value = session.getMetadata()?.currentMaxMode;
+    if (value === undefined || currentMaxMode === value) {
+      return;
+    }
+    currentMaxMode = value;
+    logger.debug(`[cursor] currentMaxMode updated (${source}): ${value}`);
+  };
 
   const handleUserMessage = (message: UserMessage) => {
     let messagePermissionMode = currentPermissionMode;
@@ -490,17 +506,31 @@ export async function runCursor(opts: {
       messageModel = currentModel;
       logger.debug(`[Cursor] Model: ${messageModel ?? 'default (reset)'}`);
     }
+    if (message.meta?.maxMode !== undefined) {
+      currentMaxMode = message.meta.maxMode;
+      logger.debug(`[Cursor] Max mode: ${currentMaxMode}`);
+    }
     const mode: CursorMode = {
       permissionMode: messagePermissionMode || 'default',
       model: messageModel,
+      ...(currentMaxMode !== undefined ? { maxMode: currentMaxMode } : {}),
     };
-    // Persist permission/model and dangerouslySkipPermissions to session metadata so App can read them on next fetch (align with Claude: force = skip permissions)
-    const metaChanged = message.meta?.permissionMode !== undefined || (message.meta && Object.prototype.hasOwnProperty.call(message.meta, 'model'));
+    // Persist permission/model/maxMode and dangerouslySkipPermissions to session metadata so App can read them on next fetch (align with Claude: force = skip permissions)
+    const metaChanged =
+      message.meta?.permissionMode !== undefined
+      || (message.meta && Object.prototype.hasOwnProperty.call(message.meta, 'model'))
+      || message.meta?.maxMode !== undefined;
     if (metaChanged) {
       const effectivePermission = messagePermissionMode || 'default';
       const effectiveModel = messageModel ?? 'default';
       const dangerouslySkipPermissions = effectivePermission === 'force';
-      session.updateMetadata((m) => ({ ...m, currentOperatingModeCode: effectivePermission, currentModelCode: effectiveModel, dangerouslySkipPermissions })).catch((err) => logger.debug('[Cursor] Failed to persist permission/model to session metadata', err));
+      session.updateMetadata((m) => ({
+        ...m,
+        currentOperatingModeCode: effectivePermission,
+        currentModelCode: effectiveModel,
+        ...(currentMaxMode !== undefined ? { currentMaxMode: currentMaxMode } : {}),
+        dangerouslySkipPermissions,
+      })).catch((err) => logger.debug('[Cursor] Failed to persist permission/model/maxMode to session metadata', err));
     }
     const specialCommand = parseSpecialCommand(message.content.text);
     if (specialCommand.type === 'compact') {
@@ -523,6 +553,7 @@ export async function runCursor(opts: {
   const attachSessionMetadataListener = (s: ApiSessionClient) => {
     s.on('metadata-updated', () => {
       syncInMemoryModelFromSessionMetadata('metadata-updated');
+      syncInMemoryMaxModeFromSessionMetadata('metadata-updated');
     });
   };
   const { session: initialSession, reconnectionHandle } = setupOfflineReconnection({
@@ -541,13 +572,16 @@ export async function runCursor(opts: {
       newSession.rpcHandlerManager.registerHandler('abort', handleAbort);
       registerKillSessionHandler(newSession.rpcHandlerManager, handleKillSession);
       syncInMemoryModelFromSessionMetadata('session-reconnect');
+      syncInMemoryMaxModeFromSessionMetadata('session-reconnect');
     },
   });
   session = initialSession;
   attachSessionMetadataListener(session);
+  syncInMemoryMaxModeFromSessionMetadata('session-start');
   const currentCursorMode = (): CursorMode => ({
     permissionMode: currentPermissionMode ?? 'default',
     model: currentModel,
+    ...(currentMaxMode !== undefined ? { maxMode: currentMaxMode } : {}),
   });
   const scheduleA2AInboxRetryPeek = (delayMs: number) => {
     if (a2aInboxBackoffTimer !== null) {
@@ -1074,7 +1108,7 @@ export async function runCursor(opts: {
           signal: abortController.signal,
           timeoutMs: processTimeoutMs,
           approveMcps: true, // load Happy MCP from .cursor/mcp.json without prompting
-          maxMode: opts.maxMode ?? null,
+          maxMode: mode.maxMode ?? opts.maxMode ?? null,
         });
         // Per-tool timeout: after this we send tool_call_end (running in background) so App stops timer; process keeps running.
         // 0 = disabled (Codex-style: no per-tool cutoff, only process timeout or natural tool_call_end).
