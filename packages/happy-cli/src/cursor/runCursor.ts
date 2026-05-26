@@ -46,6 +46,7 @@ import {
   pruneA2AInboxSnapshots,
 } from '@/a2a/inbox';
 import { a2aInboxBackoffDelayMs, isA2AInboxBackoffActive, resolveA2AInboxBackoffSettings } from '@/a2a/inboxBackoff';
+import { A2AInboxMcpScopeStack } from '@/a2a/inboxMcpScopeStack';
 import type { ApiSessionClient } from '@/api/apiSession';
 import type { PermissionMode } from '@/api/types';
 import type { UserMessage } from '@/api/types';
@@ -435,7 +436,7 @@ export async function runCursor(opts: {
   let currentMaxMode: boolean | undefined =
     opts.maxMode !== null && opts.maxMode !== undefined ? opts.maxMode : undefined;
   let a2aTurnQueued = false;
-  let a2aInboxTurnActive = false;
+  const inboxMcpScopeStack = new A2AInboxMcpScopeStack();
   let a2aInboxBackoffStreak = 0;
   let a2aInboxBackoffUntil = 0;
   let a2aInboxBackoffTimer: ReturnType<typeof setTimeout> | null = null;
@@ -605,7 +606,7 @@ export async function runCursor(opts: {
     }
   };
   scheduleA2ATurnIfNeeded = (mode: CursorMode) => {
-    if (currentTurnIdRef !== null || a2aInboxTurnActive) {
+    if (currentTurnIdRef !== null || inboxMcpScopeStack.hasScope('inbox-turn')) {
       logger.debug('[cursor] Deferring A2A inbox turn until the active turn finishes');
       return;
     }
@@ -902,7 +903,8 @@ export async function runCursor(opts: {
   const enableSubagentMcp = process.env.HAPPY_SUBAGENT_MCP === '1';
   const happyServer = await startHappyServer(() => session, {
     useDaemonA2ARoute: opts.startedBy === 'daemon',
-    isA2AInboxTurnActive: () => a2aInboxTurnActive,
+    isA2AInboxTurnActive: () => inboxMcpScopeStack.isAllowed(),
+    describeInboxMcpScope: () => inboxMcpScopeStack.describe(),
     cursorContext: {
       getCurrentTurnId: () => currentTurnIdRef,
       sendSessionEnvelope: (envelope) => session.sendSessionProtocolMessage(envelope),
@@ -999,7 +1001,8 @@ export async function runCursor(opts: {
           logger.debug('[cursor] A2A inbox turn dequeued with no unread messages; skipping');
           continue;
         }
-        a2aInboxTurnActive = true;
+        inboxMcpScopeStack.push('inbox-turn');
+        logger.debug(`[cursor] A2A inbox MCP scope push: inbox-turn (stack=${inboxMcpScopeStack.describe()})`);
       }
       if (isCursorCompactTurn) {
         messageBuffer.addMessage('Summarizing...', 'system');
@@ -1201,6 +1204,8 @@ export async function runCursor(opts: {
               let toolTitle = msg.description ?? deriveToolTitle(msg.toolName, msg.args);
               let toolCallArgs = msg.args;
               if (isA2AInboxTurn && msg.toolName === 'Task') {
+                inboxMcpScopeStack.push('inbox-task');
+                logger.debug(`[cursor] A2A inbox MCP scope push: inbox-task (stack=${inboxMcpScopeStack.describe()})`);
                 toolTitle = buildA2AInboxTaskTitle(inboxTurnUnreadCount);
                 toolCallArgs = buildA2AInboxTaskToolArgs(msg.args);
               }
@@ -1232,6 +1237,11 @@ export async function runCursor(opts: {
               if (msg.subagentId) {
                 session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId }, { turn: turnId, subagent: msg.subagentId }));
                 break;
+              }
+              if (isA2AInboxTurn && msg.toolName === 'Task') {
+                if (inboxMcpScopeStack.pop('inbox-task')) {
+                  logger.debug(`[cursor] A2A inbox MCP scope pop: inbox-task (stack=${inboxMcpScopeStack.describe()})`);
+                }
               }
               const existingHandle = toolCallTimeoutHandles.get(msg.callId);
               if (existingHandle) {
@@ -1377,7 +1387,18 @@ export async function runCursor(opts: {
         messageParser.clear();
         currentTurnIdRef = null;
         if (isA2AInboxTurn) {
-          a2aInboxTurnActive = false;
+          const staleTasks = inboxMcpScopeStack.popAll('inbox-task');
+          if (staleTasks > 0) {
+            logger.debug(
+              `[cursor] A2A inbox turn end: cleared ${staleTasks} stale inbox-task MCP scope(s) `
+              + `(stack=${inboxMcpScopeStack.describe()})`,
+            );
+          }
+          if (inboxMcpScopeStack.pop('inbox-turn')) {
+            logger.debug(`[cursor] A2A inbox MCP scope pop: inbox-turn (stack=${inboxMcpScopeStack.describe()})`);
+          } else {
+            logger.debug('[cursor] A2A inbox turn end: inbox-turn scope was not on MCP stack');
+          }
         }
         const turnSucceeded = turnCompletedNormally && turnEndStatus !== 'cancelled';
         if (isA2AInboxTurn) {

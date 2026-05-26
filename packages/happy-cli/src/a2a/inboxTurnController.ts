@@ -5,6 +5,7 @@ import {
   buildA2AInboxNotificationWithPreview,
   getA2AUnreadCount,
   hasUnreadA2AInboxMessages,
+  isA2AInboxTurnConsumed,
   listA2AInboxMessages,
   pruneA2AInboxSnapshots,
   writeA2AInboxSnapshot,
@@ -13,6 +14,7 @@ import { a2aInboxBackoffDelayMs, isA2AInboxBackoffActive, resolveA2AInboxBackoff
 import { configuration } from '@/configuration';
 import { parseSpecialCommand } from '@/parsers/specialCommands';
 import { logger } from '@/ui/logger';
+import { A2AInboxMcpScopeStack } from '@/a2a/inboxMcpScopeStack';
 import type { MessageQueue2 } from '@/utils/MessageQueue2';
 
 export const A2A_INBOX_TURN_META = { a2aInboxTurn: true } as const;
@@ -28,6 +30,8 @@ export type A2AInboxTurnHooks = {
   isInboxTurnMeta: (meta: unknown) => boolean;
   setInboxTurnActive: (active: boolean) => void;
   isInboxTurnActive: () => boolean;
+  isInboxMcpAllowed: () => boolean;
+  describeInboxMcpScope: () => string;
   /** Build internal prompt for an inbox turn; null means skip (no unread rows). */
   prepareInboxTurnPrompt: () => string | null;
   onTurnEnd: (result: { succeeded: boolean; cancelled: boolean; wasInboxTurn: boolean }) => void;
@@ -60,7 +64,7 @@ export function createA2AInboxTurnController<TMode>(options: {
   } = options;
 
   let a2aTurnQueued = false;
-  let a2aInboxTurnActive = false;
+  const inboxMcpScopeStack = new A2AInboxMcpScopeStack();
   let a2aInboxBackoffStreak = 0;
   let a2aInboxBackoffUntil = 0;
   let a2aInboxBackoffTimer: ReturnType<typeof setTimeout> | null = null;
@@ -90,7 +94,7 @@ export function createA2AInboxTurnController<TMode>(options: {
   };
 
   const scheduleA2ATurnIfNeeded = () => {
-    if (isAgentTurnActive() || a2aInboxTurnActive) {
+    if (isAgentTurnActive() || inboxMcpScopeStack.hasScope('inbox-turn')) {
       logger.debug(`[${logTag}] Deferring A2A inbox turn until the active turn finishes`);
       return;
     }
@@ -128,9 +132,21 @@ export function createA2AInboxTurnController<TMode>(options: {
   return {
     isInboxTurnMeta: isA2AInboxTurnMeta,
     setInboxTurnActive: (active: boolean) => {
-      a2aInboxTurnActive = active;
+      if (active) {
+        inboxMcpScopeStack.push('inbox-turn');
+      } else {
+        const remaining = inboxMcpScopeStack.popAll('inbox-task');
+        if (remaining > 0) {
+          logger.debug(`[${logTag}] A2A inbox turn end: cleared ${remaining} stale inbox-task MCP scope(s)`);
+        }
+        if (!inboxMcpScopeStack.pop('inbox-turn')) {
+          logger.debug(`[${logTag}] A2A inbox turn end: inbox-turn scope was not on MCP stack`);
+        }
+      }
     },
-    isInboxTurnActive: () => a2aInboxTurnActive,
+    isInboxTurnActive: () => inboxMcpScopeStack.hasScope('inbox-turn'),
+    isInboxMcpAllowed: () => inboxMcpScopeStack.isAllowed(),
+    describeInboxMcpScope: () => inboxMcpScopeStack.describe(),
     prepareInboxTurnPrompt: () => {
       a2aTurnQueued = false;
       if (!hasUnreadA2AInboxMessages(session.getA2AInbox())) {
@@ -146,7 +162,6 @@ export function createA2AInboxTurnController<TMode>(options: {
     },
     onTurnEnd: ({ succeeded, cancelled, wasInboxTurn }) => {
       if (wasInboxTurn) {
-        a2aInboxTurnActive = false;
         if (succeeded) {
           clearA2AInboxBackoff();
           logger.debug(`[${logTag}] A2A inbox turn succeeded; backoff reset`);

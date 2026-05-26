@@ -267,12 +267,14 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
 
     let handleUserMessage: ((message: UserMessage) => void) | null = null;
     let isA2AInboxTurnActiveFn: () => boolean = () => false;
+    let describeInboxMcpScopeFn: () => string = () => 'empty';
 
     // Start Happy MCP server
-    const happyServer = await startHappyServer(session, {
+    const happyServer = await startHappyServer(() => session, {
         useDaemonA2ARoute: options.startedBy === 'daemon',
         onA2aMessage: (message) => handleUserMessage?.(message),
         isA2AInboxTurnActive: () => isA2AInboxTurnActiveFn(),
+        describeInboxMcpScope: () => describeInboxMcpScopeFn(),
     });
     logger.debug(`[START] Happy MCP server started at ${happyServer.url}`);
 
@@ -359,7 +361,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         buildTurnPrompt: buildA2ATurnPromptForClaude,
         scheduleCompactTurn: (mode) => messageQueue.pushIsolateAndClear('', mode),
     });
-    isA2AInboxTurnActiveFn = a2aInbox.isInboxTurnActive;
+    isA2AInboxTurnActiveFn = a2aInbox.isInboxMcpAllowed;
+    describeInboxMcpScopeFn = a2aInbox.describeInboxMcpScope;
     pruneA2AInboxOnSessionStart('claude', workingDirectory, session.sessionId, options.startedBy === 'daemon');
     a2aInbox.peekInbox();
 

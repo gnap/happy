@@ -38,6 +38,8 @@ export interface StartHappyServerOptions {
     useDaemonA2ARoute?: boolean;
     /** When false, inbox mark MCP tools reject (consume+mark must happen in the active A2A turn). */
     isA2AInboxTurnActive?: () => boolean;
+    /** Optional debug snapshot when inbox MCP is blocked (e.g. scope stack describe()). */
+    describeInboxMcpScope?: () => string;
 }
 
 /** Resolves the live session client (e.g. after offline→online swap). MCP must not capture a one-shot reference. */
