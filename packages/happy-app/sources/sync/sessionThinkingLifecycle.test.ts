@@ -41,6 +41,17 @@ describe('getSessionThinkingPatchFromMessageContent', () => {
         expect(patch).toEqual({ thinking: true });
     });
 
+    it('sets thinking on cursor task_started', () => {
+        const patch = getSessionThinkingPatchFromMessageContent({
+            role: 'agent',
+            content: {
+                type: 'cursor',
+                data: { type: 'task_started', id: 'turn-1' },
+            },
+        });
+        expect(patch).toEqual({ thinking: true });
+    });
+
     it('clears thinking on codex task_complete', () => {
         const patch = getSessionThinkingPatchFromMessageContent({
             role: 'agent',

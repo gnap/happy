@@ -38,3 +38,11 @@ export function notifyUserTurnError(
 export function notifySessionTurnAbortedIdle(session: ApiSessionClient): void {
   session.sendCursorMessage({ type: 'turn_aborted', id: randomUUID() });
 }
+
+/**
+ * Durable thinking-on signal (Codex-style task_started). No chat bubble; App uses this for
+ * session.thinking before assistant text arrives. Complements ephemeral keepAlive + turn-start.
+ */
+export function notifyCursorTurnThinkingStarted(session: ApiSessionClient, turnId: string): void {
+  session.sendCursorMessage({ type: 'task_started', id: turnId });
+}

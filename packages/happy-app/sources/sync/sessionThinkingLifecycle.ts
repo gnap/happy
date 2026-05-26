@@ -78,7 +78,8 @@ export function getSessionThinkingPatchFromMessageContent(
         sessionEventType === 'turn-end';
 
     const isTaskStarted =
-        ((contentType === 'acp' || contentType === 'codex') && dataType === 'task_started') ||
+        ((contentType === 'acp' || contentType === 'codex' || contentType === 'cursor') &&
+            dataType === 'task_started') ||
         sessionEventType === 'turn-start' ||
         isSummarizingServiceEvent(lifecycleEv);
 

@@ -407,6 +407,10 @@ export class ApiSessionClient extends EventEmitter {
     private wsUptimeAccumMs = 0;
     private wsDowntimeAccumMs = 0;
     private lastWsUptimeMarkMs = Date.now();
+    /** When set, fetchMessages stops once this seq is reached (socket seq-gap catch-up). */
+    private receiveCatchUpUntilSeq: number | null = null;
+    private receiveHealthInterval: ReturnType<typeof setInterval> | null = null;
+    private static readonly RECEIVE_HEALTH_INTERVAL_MS = 120_000;
 
     getMetadata(): Metadata | null {
         return this.metadata;
@@ -523,6 +527,7 @@ export class ApiSessionClient extends EventEmitter {
                 });
             }
             this.receiveSync.invalidate();
+            this.startReceiveHealthPoll();
             if (this.a2aInboxNeedsServerUnreadSync) {
                 this.a2aInboxNeedsServerUnreadSync = false;
                 this.scheduleA2AInboxAgentStateSync({ immediate: true });
@@ -597,24 +602,29 @@ export class ApiSessionClient extends EventEmitter {
                         logger.debug('[API] new-message missing seq, will fetch via HTTP', {
                             lastSeq: this.lastSeq,
                         });
-                    } else if (messageSeq > this.lastSeq + 1) {
-                        logger.debug('[API] new-message seq gap, will fetch via HTTP', {
-                            messageSeq,
-                            lastSeq: this.lastSeq,
-                            expectedNext: this.lastSeq + 1,
-                        });
-                    } else if (!isEncrypted) {
-                        logger.debug('[API] new-message not encrypted, will fetch via HTTP', {
-                            messageSeq,
-                            lastSeq: this.lastSeq,
-                        });
+                        this.receiveSync.invalidate();
                     } else {
-                        logger.debug('[API] new-message needs HTTP catch-up', {
-                            messageSeq,
-                            lastSeq: this.lastSeq,
-                        });
+                        if (messageSeq > this.lastSeq + 1) {
+                            logger.debug('[API] new-message seq gap, will fetch via HTTP', {
+                                messageSeq,
+                                lastSeq: this.lastSeq,
+                                expectedNext: this.lastSeq + 1,
+                                gap: messageSeq - this.lastSeq,
+                            });
+                        } else if (!isEncrypted) {
+                            logger.debug('[API] new-message not encrypted, will fetch via HTTP', {
+                                messageSeq,
+                                lastSeq: this.lastSeq,
+                            });
+                        } else {
+                            logger.debug('[API] new-message needs HTTP catch-up', {
+                                messageSeq,
+                                lastSeq: this.lastSeq,
+                            });
+                        }
+                        // Steady-state: advance local lastSeq via fetchMessages, stop at this notification.
+                        this.requestReceiveCatchUp(messageSeq);
                     }
-                    this.receiveSync.invalidate();
                     return;
                 } else if (data.body.t === 'update-session') {
                     if (data.body.metadata && data.body.metadata.version > this.metadataVersion) {
@@ -974,67 +984,134 @@ export class ApiSessionClient extends EventEmitter {
             && Date.now() >= this.wsOutboundBackoffUntil;
     }
 
+    private requestReceiveCatchUp(targetSeq: number) {
+        this.receiveCatchUpUntilSeq = this.receiveCatchUpUntilSeq === null
+            ? targetSeq
+            : Math.max(this.receiveCatchUpUntilSeq, targetSeq);
+        this.receiveSync.invalidate();
+    }
+
+    private startReceiveHealthPoll() {
+        if (this.receiveHealthInterval !== null || this.closing) {
+            return;
+        }
+        this.receiveHealthInterval = setInterval(() => {
+            if (!this.socket.connected || this.closing) {
+                return;
+            }
+            this.receiveSync.invalidate();
+        }, ApiSessionClient.RECEIVE_HEALTH_INTERVAL_MS);
+    }
+
+    private stopReceiveHealthPoll() {
+        if (this.receiveHealthInterval !== null) {
+            clearInterval(this.receiveHealthInterval);
+            this.receiveHealthInterval = null;
+        }
+    }
+
     private async fetchMessages() {
+        const untilSeq = this.receiveCatchUpUntilSeq;
+        const startLastSeq = this.lastSeq;
         let afterSeq = this.lastSeq;
-        while (true) {
-            const response = await axios.get<V3GetSessionMessagesResponse>(
-                `${configuration.serverUrl}/v3/sessions/${encodeURIComponent(this.sessionId)}/messages`,
-                {
-                    params: {
-                        after_seq: afterSeq,
-                        limit: 100
-                    },
-                    headers: this.authHeaders(),
-                    timeout: 60000,
-                    httpsAgent: serverHttpsAgent,
-                }
-            );
+        let pages = 0;
+        logger.debug('[API] fetchMessages start', {
+            sessionId: this.sessionId,
+            afterSeq,
+            untilSeq,
+            lastSeq: this.lastSeq,
+        });
+        try {
+            while (true) {
+                pages += 1;
+                const response = await axios.get<V3GetSessionMessagesResponse>(
+                    `${configuration.serverUrl}/v3/sessions/${encodeURIComponent(this.sessionId)}/messages`,
+                    {
+                        params: {
+                            after_seq: afterSeq,
+                            limit: 100
+                        },
+                        headers: this.authHeaders(),
+                        timeout: 60000,
+                        httpsAgent: serverHttpsAgent,
+                    }
+                );
 
-            const messages = Array.isArray(response.data.messages) ? response.data.messages : [];
-            let maxSeq = afterSeq;
+                const messages = Array.isArray(response.data.messages) ? response.data.messages : [];
+                let maxSeq = afterSeq;
 
-            for (const message of messages) {
-                if (message.seq > maxSeq) {
-                    maxSeq = message.seq;
-                }
+                for (const message of messages) {
+                    if (message.seq > maxSeq) {
+                        maxSeq = message.seq;
+                    }
 
-                if (message.content?.t !== 'encrypted') {
-                    continue;
-                }
-
-                try {
-                    const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(message.content.c));
-                    if (body == null || typeof body !== 'object') {
-                        logger.debug('[API] Fetched message decrypted to null or non-object (encryption key mismatch or bad payload)', {
-                            sessionId: this.sessionId,
-                            seq: message.seq,
-                            bodyType: body === null ? 'null' : typeof body,
-                        });
+                    if (message.content?.t !== 'encrypted') {
                         continue;
                     }
-                    this.routeIncomingMessage(body);
-                } catch (error) {
-                    logger.debug('[API] Failed to decrypt fetched message', {
+
+                    try {
+                        const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(message.content.c));
+                        if (body == null || typeof body !== 'object') {
+                            logger.debug('[API] Fetched message decrypted to null or non-object (encryption key mismatch or bad payload)', {
+                                sessionId: this.sessionId,
+                                seq: message.seq,
+                                bodyType: body === null ? 'null' : typeof body,
+                            });
+                            continue;
+                        }
+                        this.routeIncomingMessage(body);
+                    } catch (error) {
+                        logger.debug('[API] Failed to decrypt fetched message', {
+                            sessionId: this.sessionId,
+                            seq: message.seq,
+                            error
+                        });
+                    }
+                }
+
+                this.lastSeq = Math.max(this.lastSeq, maxSeq);
+                const hasMore = !!response.data.hasMore;
+                if (hasMore && maxSeq === afterSeq) {
+                    logger.debug('[API] fetchMessages pagination stalled, stopping to avoid infinite loop', {
                         sessionId: this.sessionId,
-                        seq: message.seq,
-                        error
+                        afterSeq
                     });
+                    break;
+                }
+                afterSeq = maxSeq;
+                if (untilSeq !== null && maxSeq >= untilSeq) {
+                    this.receiveCatchUpUntilSeq = null;
+                    break;
+                }
+                if (!hasMore) {
+                    break;
                 }
             }
-
-            this.lastSeq = Math.max(this.lastSeq, maxSeq);
-            const hasMore = !!response.data.hasMore;
-            if (hasMore && maxSeq === afterSeq) {
-                logger.debug('[API] fetchMessages pagination stalled, stopping to avoid infinite loop', {
+        } catch (error) {
+            logger.debug('[API] fetchMessages failed', {
+                sessionId: this.sessionId,
+                afterSeq,
+                untilSeq,
+                pages,
+                error: error instanceof Error ? error.message : error,
+            });
+            throw error;
+        } finally {
+            const catchUpTarget = untilSeq;
+            if (catchUpTarget !== null && this.lastSeq < catchUpTarget) {
+                logger.debug('[API] fetchMessages stopped before catch-up target (will retry on next sync)', {
                     sessionId: this.sessionId,
-                    afterSeq
+                    lastSeq: this.lastSeq,
+                    untilSeq: catchUpTarget,
                 });
-                break;
             }
-            afterSeq = maxSeq;
-            if (!hasMore) {
-                break;
-            }
+            logger.debug('[API] fetchMessages done', {
+                sessionId: this.sessionId,
+                pages,
+                startLastSeq,
+                endLastSeq: this.lastSeq,
+                untilSeq: this.receiveCatchUpUntilSeq,
+            });
         }
     }
 
@@ -1099,6 +1176,7 @@ export class ApiSessionClient extends EventEmitter {
             if (sent > 0) {
                 this.pendingOutbox.splice(0, sent);
                 logger.debug(`[API] flushOutbox via WS (optimistic): sent ${sent} message(s) to server (replies visible in app)`);
+                // WS send has no seq ack — pull receive cursor forward via HTTP (health poll is backup).
                 this.receiveSync.invalidate();
             }
         }
@@ -1576,6 +1654,7 @@ export class ApiSessionClient extends EventEmitter {
         this.applyA2AInboxLocally();
         this.flushA2AInboxAgentStateSync();
         this.stopFallbackPoll();
+        this.stopReceiveHealthPoll();
         this.sendSync.stop();
         this.receiveSync.stop();
         this.socket.close();

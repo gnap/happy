@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  notifyCursorTurnThinkingStarted,
   notifySessionTurnAbortedIdle,
   notifyUserTurnAborted,
   notifyUserTurnError,
@@ -38,6 +39,17 @@ describe('turnUserNotifications', () => {
     expect(session.sendSessionEvent).toHaveBeenCalledWith({
       type: 'message',
       message: 'provider error: timeout',
+    });
+  });
+
+  it('notifyCursorTurnThinkingStarted sends cursor task_started', () => {
+    const session = { sendCursorMessage: vi.fn() };
+
+    notifyCursorTurnThinkingStarted(session as never, 'turn-3');
+
+    expect(session.sendCursorMessage).toHaveBeenCalledWith({
+      type: 'task_started',
+      id: 'turn-3',
     });
   });
 

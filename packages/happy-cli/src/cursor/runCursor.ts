@@ -146,6 +146,7 @@ function formatCursorUsageLog(params: {
 import { createId } from '@paralleldrive/cuid2';
 import { CursorProcess, fetchCursorModels, formatCursorCliErrorLine } from './cursorProcess';
 import {
+  notifyCursorTurnThinkingStarted,
   notifySessionTurnAbortedIdle,
   notifyUserTurnAborted,
   notifyUserTurnError,
@@ -1023,6 +1024,8 @@ export async function runCursor(opts: {
       try {
         thinking = true;
         session.keepAlive(thinking, 'remote');
+        // Codex-style durable task_started (no UI bubble) so App turns thinking on promptly.
+        notifyCursorTurnThinkingStarted(session, turnId);
 
         if (isA2AInboxTurn) {
           const inboxSnapshotPath = writeA2AInboxSnapshot(workspacePath, sessionId, turnId, session.getA2AInbox());
@@ -1360,7 +1363,8 @@ export async function runCursor(opts: {
           clearA2AInboxBackoff();
           logger.debug('[cursor] User turn succeeded; A2A inbox backoff reset');
         }
-        emitReadyIfIdle();
+        // Do not send durable ready after each turn: App maps ready → thinking off and gap
+        // fetch can replay stale ready after the next turn-start, leaving thinking stuck off.
         if (!isA2AInboxBackoffActive(a2aInboxBackoffUntil)) {
           peekA2AInboxInLoop(currentCursorMode());
         }
