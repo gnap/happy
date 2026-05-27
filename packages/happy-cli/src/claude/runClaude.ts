@@ -341,9 +341,19 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     let currentAppendSystemPrompt: string | undefined = undefined; // Track current append system prompt
     let currentAllowedTools: string[] | undefined = undefined; // Track current allowed tools
     let currentDisallowedTools: string[] | undefined = undefined; // Track current disallowed tools
-    let currentClaudeEnvVars: Record<string, string> | undefined = options.claudeEnvVars
-        ? { ...options.claudeEnvVars }
-        : undefined;
+    const daemonClaudeEnvVars: Record<string, string> = (() => {
+        const explicit = options.claudeEnvVars;
+        if (explicit && Object.keys(explicit).length > 0) return { ...explicit };
+        // Fallback: capture profile-managed keys from process.env at startup
+        const fromEnv: Record<string, string> = {};
+        for (const [key, value] of Object.entries(process.env)) {
+            if (value !== undefined && (key.startsWith('ANTHROPIC_') || key.startsWith('CLAUDE_CODE_'))) {
+                fromEnv[key] = value;
+            }
+        }
+        return fromEnv;
+    })();
+    let currentClaudeEnvVars: Record<string, string> = { ...daemonClaudeEnvVars };
     const claudeTurnActiveRef = { current: false };
     const currentEnhancedMode = (): EnhancedMode => ({
         permissionMode: currentPermissionMode || 'default',
@@ -443,17 +453,34 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             logger.debug(`[loop] User message received with no disallowed tools override, using current: ${currentDisallowedTools ? currentDisallowedTools.join(', ') : 'none'}`);
         }
 
-        if (message.meta?.environmentVariables && Object.keys(message.meta.environmentVariables).length > 0) {
-            applyProfileEnvToProcess(message.meta.environmentVariables);
-            currentClaudeEnvVars = mergeProfileIntoEnv(
-                currentClaudeEnvVars ?? {},
-                message.meta.environmentVariables,
-                process.env,
-            );
+        if (message.meta?.hasOwnProperty('environmentVariables')) {
+            const profileEnv = message.meta.environmentVariables ?? {};
+            if (Object.keys(profileEnv).length > 0) {
+                applyProfileEnvToProcess(profileEnv);
+                currentClaudeEnvVars = mergeProfileIntoEnv(
+                    currentClaudeEnvVars,
+                    profileEnv,
+                    process.env,
+                );
+                logger.debug(`[loop] Profile environment updated from user message: ${Object.keys(profileEnv).join(', ')}`);
+            } else {
+                applyProfileEnvToProcess({});
+                currentClaudeEnvVars = mergeProfileIntoEnv({}, daemonClaudeEnvVars, process.env);
+                logger.debug('[loop] Profile environment cleared from user message (empty env vars)');
+            }
             if (currentSession) {
                 currentSession.claudeEnvVars = currentClaudeEnvVars;
+                currentSession.claudeEnvVarsGeneration++;
             }
-            logger.debug(`[loop] Profile environment updated from user message: ${Object.keys(message.meta.environmentVariables).join(', ')}`);
+        } else {
+            // Reset to daemon-spawn-time env when message does not carry profile env
+            applyProfileEnvToProcess(daemonClaudeEnvVars);
+            currentClaudeEnvVars = { ...daemonClaudeEnvVars };
+            if (currentSession) {
+                currentSession.claudeEnvVars = currentClaudeEnvVars;
+                currentSession.claudeEnvVarsGeneration++;
+            }
+            logger.debug(`[loop] Profile environment reset to daemon defaults: ${Object.keys(daemonClaudeEnvVars).join(', ') || '(none)'}`);
         }
 
         // Check for special commands before processing

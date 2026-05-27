@@ -432,6 +432,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     },
                     onThinkingChange: session.onThinkingChange,
                     claudeEnvVars: session.claudeEnvVars,
+                    claudeEnvVarsGeneration: session.claudeEnvVarsGeneration,
+                    getClaudeEnvVarsGeneration: () => session.claudeEnvVarsGeneration,
                     claudeArgs: session.claudeArgs,
                     onMessage,
                     onCompletionEvent: (message: string) => {
@@ -441,6 +443,10 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     onSessionReset: () => {
                         logger.debug('[remote]: Session reset');
                         session.clearSessionId();
+                    },
+                    onEnvChanged: (msg: { message: string; mode: EnhancedMode }) => {
+                        logger.debug('[remote]: Env changed, re-queuing message as pending');
+                        pending = msg;
                     },
                     onReady: () => {
                         turnSucceeded = true;
