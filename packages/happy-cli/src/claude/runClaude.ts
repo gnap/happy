@@ -37,6 +37,7 @@ import {
     isA2ATriggerMessage,
     pruneA2AInboxOnSessionStart,
 } from '@/a2a/inboxTurnController';
+import { applyProfileEnvToProcess, mergeProfileIntoEnv } from '@/utils/profileEnv';
 
 /** JavaScript runtime to use for spawning Claude Code */
 export type JsRuntime = 'node' | 'bun'
@@ -340,6 +341,9 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     let currentAppendSystemPrompt: string | undefined = undefined; // Track current append system prompt
     let currentAllowedTools: string[] | undefined = undefined; // Track current allowed tools
     let currentDisallowedTools: string[] | undefined = undefined; // Track current disallowed tools
+    let currentClaudeEnvVars: Record<string, string> | undefined = options.claudeEnvVars
+        ? { ...options.claudeEnvVars }
+        : undefined;
     const claudeTurnActiveRef = { current: false };
     const currentEnhancedMode = (): EnhancedMode => ({
         permissionMode: currentPermissionMode || 'default',
@@ -437,6 +441,19 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             logger.debug(`[loop] Disallowed tools updated from user message: ${messageDisallowedTools ? messageDisallowedTools.join(', ') : 'reset to none'}`);
         } else {
             logger.debug(`[loop] User message received with no disallowed tools override, using current: ${currentDisallowedTools ? currentDisallowedTools.join(', ') : 'none'}`);
+        }
+
+        if (message.meta?.environmentVariables && Object.keys(message.meta.environmentVariables).length > 0) {
+            applyProfileEnvToProcess(message.meta.environmentVariables);
+            currentClaudeEnvVars = mergeProfileIntoEnv(
+                currentClaudeEnvVars ?? {},
+                message.meta.environmentVariables,
+                process.env,
+            );
+            if (currentSession) {
+                currentSession.claudeEnvVars = currentClaudeEnvVars;
+            }
+            logger.debug(`[loop] Profile environment updated from user message: ${Object.keys(message.meta.environmentVariables).join(', ')}`);
         }
 
         // Check for special commands before processing
@@ -628,7 +645,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             }
         },
         session,
-        claudeEnvVars: options.claudeEnvVars,
+        claudeEnvVars: currentClaudeEnvVars,
         claudeArgs: options.claudeArgs,
         sandboxConfig,
         hookSettingsPath,

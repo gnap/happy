@@ -23,6 +23,7 @@ import { join } from 'path';
 import { projectPath } from '@/projectPath';
 import { getTmuxUtilities, isTmuxAvailable, parseTmuxSessionIdentifier, formatTmuxSessionIdentifier } from '@/utils/tmux';
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
+import { stripProfileManagedEnv } from '@/utils/profileEnv';
 
 /** Time to wait for a spawned session to report via /session-started webhook before failing the spawn (Cursor cold start can exceed 30s). */
 const SESSION_WEBHOOK_TIMEOUT_MS = 60_000;
@@ -677,17 +678,14 @@ export async function startDaemon(): Promise<void> {
           // 2. Regular spawn uses env: { ...process.env, ...extraEnv }
           // 3. tmux needs explicit environment via -e flags to ensure all variables are available
           const windowName = `happy-${Date.now()}-${agent.replace(/\s+/g, '-')}`;
-          const tmuxEnv: Record<string, string> = {};
-
-          // Add all daemon environment variables (filtering out undefined)
-          for (const [key, value] of Object.entries(process.env)) {
-            if (value !== undefined) {
-              tmuxEnv[key] = value;
-            }
-          }
-
-          // Add extra environment variables (these should already be filtered)
-          Object.assign(tmuxEnv, extraEnv);
+          const hasGuiProfileEnvForTmux =
+            !!options.environmentVariables && Object.keys(options.environmentVariables).length > 0;
+          const tmuxBaseEnv = hasGuiProfileEnvForTmux
+            ? stripProfileManagedEnv(process.env)
+            : Object.fromEntries(
+              Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+            );
+          const tmuxEnv: Record<string, string> = { ...tmuxBaseEnv, ...extraEnv };
 
           const tmuxResult = await tmux.spawnInTmux([fullCommand], {
             sessionName: tmuxSessionName,
@@ -796,15 +794,16 @@ export async function startDaemon(): Promise<void> {
             args.push(cursorCliMaxModeArg(extraEnv));
           }
 
-          const baseEnv = { ...process.env };
+          const hasGuiProfileEnv =
+            !!options.environmentVariables && Object.keys(options.environmentVariables).length > 0;
+          const spawnEnv = hasGuiProfileEnv
+            ? { ...stripProfileManagedEnv(process.env), ...extraEnv }
+            : { ...process.env, ...extraEnv };
           const happyProcess = spawnHappyCLI(args, {
             cwd: directory,
             detached: true,  // Sessions stay alive when daemon stops
             stdio: ['ignore', 'pipe', 'pipe'],  // Capture stdout/stderr for debugging
-            env: {
-              ...baseEnv,
-              ...extraEnv
-            }
+            env: spawnEnv,
           });
 
           // Log output for debugging

@@ -13,7 +13,7 @@ export class Session {
     readonly api: ApiClient;
     readonly client: ApiSessionClient;
     readonly queue: MessageQueue2<EnhancedMode>;
-    readonly claudeEnvVars?: Record<string, string>;
+    claudeEnvVars?: Record<string, string>;
     claudeArgs?: string[];  // Made mutable to allow filtering
     readonly mcpServers: Record<string, any>;
     readonly allowedTools?: string[];
