@@ -18,6 +18,7 @@ import os from 'node:os';
 import { join, resolve } from 'node:path';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { configuration } from '@/configuration';
+import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
 
 import { ApiClient } from '@/api/api';
 import { logger } from '@/ui/logger';
@@ -455,6 +456,7 @@ export async function runCursor(opts: {
   let currentModel: string | undefined = undefined;
   let currentMaxMode: boolean | undefined =
     opts.maxMode !== null && opts.maxMode !== undefined ? opts.maxMode : undefined;
+  let currentProfileEnv: Record<string, string> | undefined = undefined;
   let a2aTurnQueued = false;
   let a2aInboxTurnActive = false;
   let a2aInboxBackoffStreak = 0;
@@ -530,6 +532,10 @@ export async function runCursor(opts: {
     if (message.meta?.maxMode !== undefined) {
       currentMaxMode = message.meta.maxMode;
       logger.debug(`[Cursor] Max mode: ${currentMaxMode}`);
+    }
+    if (message.meta?.environmentVariables && Object.keys(message.meta.environmentVariables).length > 0) {
+      currentProfileEnv = expandEnvironmentVariables(message.meta.environmentVariables, process.env);
+      logger.debug(`[Cursor] Env profile keys: ${Object.keys(currentProfileEnv).join(', ')}`);
     }
     const mode: CursorMode = {
       permissionMode: messagePermissionMode || 'default',
@@ -1125,6 +1131,7 @@ export async function runCursor(opts: {
           cwd: workspacePath,
           resumeChatId: resumeId,
           model: cursorModel,
+          env: currentProfileEnv,
           executionMode: mode.permissionMode === 'plan' ? 'plan' : mode.permissionMode === 'ask' ? 'ask' : undefined,
           force: mode.permissionMode === 'force',
           signal: abortController.signal,

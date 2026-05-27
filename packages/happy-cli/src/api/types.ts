@@ -179,6 +179,7 @@ export const MessageMetaSchema = z.object({
   permissionMode: z.enum(['default', 'acceptEdits', 'bypassPermissions', 'plan', 'read-only', 'safe-yolo', 'yolo', 'ask', 'force']).optional(), // Permission mode for this message
   model: z.string().nullable().optional(), // Model name for this message (null = reset)
   maxMode: z.boolean().optional(), // Cursor max mode for this message (cli-config.json snapshot at spawn)
+  environmentVariables: z.record(z.string(), z.string()).optional(), // Env profile vars for this message (${VAR} expanded at spawn)
   fallbackModel: z.string().nullable().optional(), // Fallback model for this message (null = reset)
   customSystemPrompt: z.string().nullable().optional(), // Custom system prompt for this message (null = reset)
   appendSystemPrompt: z.string().nullable().optional(), // Append to system prompt for this message (null = reset)

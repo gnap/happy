@@ -41,7 +41,7 @@ import { getFriendsList, getUserProfile } from './apiFriends';
 import { fetchFeed } from './apiFeed';
 import { FeedItem } from './feedTypes';
 import { UserProfile } from './friendTypes';
-import { resolveMessageModeMeta } from './messageMeta';
+import { resolveMessageModeMeta, resolveMessageProfileEnv } from './messageMeta';
 import { loadMessageCache, saveMessageCache, clearMessageCache, clearAllMessageCaches, preloadSessionCacheDB, getCachedLastSeq } from './cache/messageCache';
 import { olderAfterSeq } from './cacheSegment';
 import { overrideSessionCacheDB, IndexedDBSessionCacheDB } from './cache/sessionCacheDB';
@@ -736,6 +736,8 @@ class Sync {
         }
 
         const { permissionMode, model, maxMode } = resolveMessageModeMeta(session);
+        const settings = storage.getState().settings;
+        const environmentVariables = resolveMessageProfileEnv(session, settings.profiles ?? []);
 
         // Reuse existing localId on retry so the same bubble is reused; generate fresh one otherwise.
         const localId = existingLocalId ?? randomUUID();
@@ -784,6 +786,7 @@ class Sync {
                 fallbackModel,
                 appendSystemPrompt: systemPrompt,
                 ...(maxMode !== undefined ? { maxMode } : {}),
+                ...(environmentVariables ? { environmentVariables } : {}),
                 ...(displayText && { displayText }) // Add displayText if provided
             }
         };
@@ -2958,6 +2961,7 @@ class Sync {
             if (wasThinking) {
                 storage.getState().clearSessionModelMode(sessionId);
                 storage.getState().clearSessionMaxMode(sessionId);
+                // profileId is session-scoped (MMKV), not per-turn — keep until user changes profile
             }
         }
 

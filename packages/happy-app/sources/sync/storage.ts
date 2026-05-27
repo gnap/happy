@@ -11,7 +11,7 @@ import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
 import { Profile } from "./profile";
 import { UserProfile, RelationshipUpdatedEvent } from "./friendTypes";
-import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionMaxModes, saveSessionMaxModes } from "./persistence";
+import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionMaxModes, saveSessionMaxModes, loadSessionProfileIds, saveSessionProfileIds } from "./persistence";
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 import type { CustomerInfo } from './revenueCat/types';
 import React from "react";
@@ -158,6 +158,8 @@ interface StorageState {
     clearSessionModelMode: (sessionId: string) => void;
     updateSessionMaxMode: (sessionId: string, maxMode: boolean) => void;
     clearSessionMaxMode: (sessionId: string) => void;
+    updateSessionProfileId: (sessionId: string, profileId: string) => void;
+    clearSessionProfileId: (sessionId: string) => void;
     // Artifact methods
     applyArtifacts: (artifacts: DecryptedArtifact[]) => void;
     addArtifact: (artifact: DecryptedArtifact) => void;
@@ -460,6 +462,7 @@ export const storage = create<StorageState>()((set, get) => {
             const savedPermissionModes = loadSessionPermissionModes();
             const savedModelModes = loadSessionModelModes();
             const savedMaxModes = loadSessionMaxModes();
+            const savedProfileIds = loadSessionProfileIds();
 
             // Merge new sessions with existing ones
             const mergedSessions: Record<string, Session> = { ...state.sessions };
@@ -503,6 +506,9 @@ export const storage = create<StorageState>()((set, get) => {
                             : metadataMaxMode !== undefined
                                 ? metadataMaxMode
                                 : session.maxMode ?? undefined;
+                const existingProfileId = state.sessions[session.id]?.profileId;
+                const savedProfileId = savedProfileIds[session.id];
+                const resolvedProfileId = existingProfileId ?? savedProfileId ?? session.profileId ?? undefined;
                 // todos: derived by replay (reducer) when messages load; not synced to server. Preserve here so
                 // list fetches do not overwrite; replay will update session.todos when that session's messages load.
                 const existingTodos = state.sessions[session.id]?.todos;
@@ -515,6 +521,7 @@ export const storage = create<StorageState>()((set, get) => {
                     permissionMode: resolvedPermissionMode,
                     modelMode: resolvedModelMode,
                     maxMode: resolvedMaxMode,
+                    profileId: resolvedProfileId,
                     todos: resolvedTodos
                 };
             });
@@ -1194,6 +1201,46 @@ export const storage = create<StorageState>()((set, get) => {
                 },
             };
         }),
+        updateSessionProfileId: (sessionId: string, profileId: string) => set((state) => {
+            const session = state.sessions[sessionId];
+            if (!session) return state;
+
+            const updatedSessions = {
+                ...state.sessions,
+                [sessionId]: {
+                    ...session,
+                    profileId,
+                },
+            };
+            const allProfileIds: Record<string, string> = {};
+            Object.entries(updatedSessions).forEach(([id, sess]) => {
+                if (sess.profileId) {
+                    allProfileIds[id] = sess.profileId;
+                }
+            });
+            saveSessionProfileIds(allProfileIds);
+
+            return {
+                ...state,
+                sessions: updatedSessions,
+            };
+        }),
+        clearSessionProfileId: (sessionId: string) => set((state) => {
+            const session = state.sessions[sessionId];
+            if (!session) return state;
+
+            const profileIds = loadSessionProfileIds();
+            delete profileIds[sessionId];
+            saveSessionProfileIds(profileIds);
+
+            return {
+                ...state,
+                sessions: {
+                    ...state.sessions,
+                    [sessionId]: { ...session, profileId: undefined },
+                },
+            };
+        }),
         // Project management methods
         getProjects: () => projectManager.getProjects(),
         getProject: (projectId: string) => projectManager.getProject(projectId),
@@ -1307,6 +1354,9 @@ export const storage = create<StorageState>()((set, get) => {
             const maxModes = loadSessionMaxModes();
             delete maxModes[sessionId];
             saveSessionMaxModes(maxModes);
+            const profileIds = loadSessionProfileIds();
+            delete profileIds[sessionId];
+            saveSessionProfileIds(profileIds);
 
             // Rebuild sessionListViewData without the deleted session
             const sessionListViewData = buildSessionListViewData(remainingSessions);

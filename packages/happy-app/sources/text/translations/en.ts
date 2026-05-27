@@ -440,6 +440,11 @@ export const en: TranslationStructure = {
             maxMode: 'Max',
             configureInCli: 'Configure models in CLI settings',
         },
+        profile: {
+            title: 'ENV PROFILE',
+            none: 'No Profile',
+            manage: 'Manage profiles…',
+        },
         codexPermissionMode: {
             title: 'CODEX PERMISSION MODE',
             default: 'CLI Settings',

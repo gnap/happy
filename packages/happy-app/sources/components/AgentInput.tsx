@@ -24,7 +24,8 @@ import { Theme } from '@/theme';
 import { t } from '@/text';
 import { Metadata } from '@/sync/storageTypes';
 import { AIBackendProfile, getProfileEnvironmentVariables, validateProfileForAgent } from '@/sync/settings';
-import { getBuiltInProfile } from '@/sync/profileUtils';
+import { getBuiltInProfile, getProfilesForAgent } from '@/sync/profileUtils';
+import { useRouter } from 'expo-router';
 
 interface AgentInputProps {
     value: string;
@@ -80,7 +81,7 @@ interface AgentInputProps {
     isSending?: boolean;
     minHeight?: number;
     profileId?: string | null;
-    onProfileClick?: () => void;
+    onProfileChange?: (profileId: string | null) => void;
 }
 
 const DEFAULT_MAX_CONTEXT_SIZE = 200000;
@@ -343,16 +344,21 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         return label;
     }, [isSandboxEnabled]);
 
-    // Profile data
-    const profiles = useSetting('profiles');
+    const router = useRouter();
+    const customProfiles = useSetting('profiles');
+    const availableProfiles = React.useMemo(
+        () => getProfilesForAgent(customProfiles, props.agentType),
+        [customProfiles, props.agentType],
+    );
     const currentProfile = React.useMemo(() => {
         if (!props.profileId) return null;
-        // Check custom profiles first
-        const customProfile = profiles.find(p => p.id === props.profileId);
+        const customProfile = customProfiles.find(p => p.id === props.profileId);
         if (customProfile) return customProfile;
-        // Check built-in profiles
         return getBuiltInProfile(props.profileId);
-    }, [profiles, props.profileId]);
+    }, [customProfiles, props.profileId]);
+    const showProfileControls = !!props.onProfileChange && availableProfiles.length > 0;
+    const hasActiveProfile = !!props.profileId && !!currentProfile;
+    const [showProfileOverlay, setShowProfileOverlay] = React.useState(false);
 
     // Calculate context warning
     const contextWarning = props.usageData?.contextSize
@@ -434,6 +440,11 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     const handleSettingsPress = React.useCallback(() => {
         hapticsLight();
         setShowSettings(prev => !prev);
+    }, []);
+
+    const openProfilePicker = React.useCallback(() => {
+        hapticsLight();
+        setShowProfileOverlay(true);
     }, []);
 
     // Handle settings selection
@@ -745,6 +756,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                         </Text>
                                     )}
                                 </View>
+
                             </FloatingOverlay>
                         </View>
                     </>
@@ -924,6 +936,135 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                     </View>
                 )}
 
+                {/* Env profile picker (opened from bottom chip only) */}
+                {showProfileOverlay && showProfileControls && (
+                    <>
+                        <TouchableWithoutFeedback onPress={() => setShowProfileOverlay(false)}>
+                            <View style={styles.overlayBackdrop} />
+                        </TouchableWithoutFeedback>
+                        <View style={[
+                            styles.settingsOverlay,
+                            { paddingHorizontal: screenWidth > 700 ? 0 : 8 },
+                        ]}>
+                            <FloatingOverlay maxHeight={360} keyboardShouldPersistTaps="always">
+                                <View style={styles.overlaySection}>
+                                    <Text style={styles.overlaySectionTitle}>
+                                        {t('agentInput.profile.title')}
+                                    </Text>
+                                    <Pressable
+                                        onPress={() => {
+                                            hapticsLight();
+                                            props.onProfileChange?.(null);
+                                            setShowProfileOverlay(false);
+                                        }}
+                                        style={({ pressed }) => ({
+                                            flexDirection: 'row',
+                                            alignItems: 'center',
+                                            paddingHorizontal: 16,
+                                            paddingVertical: 8,
+                                            backgroundColor: pressed ? theme.colors.surfacePressed : 'transparent',
+                                        })}
+                                    >
+                                        <View style={{
+                                            width: 16,
+                                            height: 16,
+                                            borderRadius: 8,
+                                            borderWidth: 2,
+                                            borderColor: !props.profileId ? theme.colors.radio.active : theme.colors.radio.inactive,
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            marginRight: 12,
+                                        }}>
+                                            {!props.profileId && (
+                                                <View style={{
+                                                    width: 6,
+                                                    height: 6,
+                                                    borderRadius: 3,
+                                                    backgroundColor: theme.colors.radio.dot,
+                                                }} />
+                                            )}
+                                        </View>
+                                        <Text style={{
+                                            fontSize: 14,
+                                            color: !props.profileId ? theme.colors.radio.active : theme.colors.text,
+                                            ...Typography.default(),
+                                        }}>
+                                            {t('agentInput.profile.none')}
+                                        </Text>
+                                    </Pressable>
+                                    {availableProfiles.map((profile) => {
+                                        const isSelected = props.profileId === profile.id;
+                                        return (
+                                            <Pressable
+                                                key={profile.id}
+                                                onPress={() => {
+                                                    hapticsLight();
+                                                    props.onProfileChange?.(profile.id);
+                                                    setShowProfileOverlay(false);
+                                                }}
+                                                style={({ pressed }) => ({
+                                                    flexDirection: 'row',
+                                                    alignItems: 'center',
+                                                    paddingHorizontal: 16,
+                                                    paddingVertical: 8,
+                                                    backgroundColor: pressed ? theme.colors.surfacePressed : 'transparent',
+                                                })}
+                                            >
+                                                <View style={{
+                                                    width: 16,
+                                                    height: 16,
+                                                    borderRadius: 8,
+                                                    borderWidth: 2,
+                                                    borderColor: isSelected ? theme.colors.radio.active : theme.colors.radio.inactive,
+                                                    alignItems: 'center',
+                                                    justifyContent: 'center',
+                                                    marginRight: 12,
+                                                }}>
+                                                    {isSelected && (
+                                                        <View style={{
+                                                            width: 6,
+                                                            height: 6,
+                                                            borderRadius: 3,
+                                                            backgroundColor: theme.colors.radio.dot,
+                                                        }} />
+                                                    )}
+                                                </View>
+                                                <Text style={{
+                                                    fontSize: 14,
+                                                    color: isSelected ? theme.colors.radio.active : theme.colors.text,
+                                                    ...Typography.default(),
+                                                }}>
+                                                    {profile.name}
+                                                </Text>
+                                            </Pressable>
+                                        );
+                                    })}
+                                    <Pressable
+                                        onPress={() => {
+                                            hapticsLight();
+                                            setShowProfileOverlay(false);
+                                            router.push('/settings/profiles');
+                                        }}
+                                        style={({ pressed }) => ({
+                                            paddingHorizontal: 16,
+                                            paddingVertical: 10,
+                                            opacity: pressed ? 0.7 : 1,
+                                        })}
+                                    >
+                                        <Text style={{
+                                            fontSize: 13,
+                                            color: theme.colors.textLink,
+                                            ...Typography.default(),
+                                        }}>
+                                            {t('agentInput.profile.manage')}
+                                        </Text>
+                                    </Pressable>
+                                </View>
+                            </FloatingOverlay>
+                        </View>
+                    </>
+                )}
+
                 {/* Box 1: Context Information (Machine + Path) - Only show if either exists */}
                 {(props.machineName !== undefined || props.currentPath) && (
                     <View style={{
@@ -1053,13 +1194,9 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                     </Pressable>
                                 )}
 
-                                {/* Profile selector button - FIRST */}
-                                {props.profileId && props.onProfileClick && (
+                                {showProfileControls && (
                                     <Pressable
-                                        onPress={() => {
-                                            hapticsLight();
-                                            props.onProfileClick?.();
-                                        }}
+                                        onPress={openProfilePicker}
                                         hitSlop={{ top: 5, bottom: 10, left: 0, right: 0 }}
                                         style={(p) => ({
                                             flexDirection: 'row',
@@ -1076,15 +1213,19 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                         <Ionicons
                                             name="person-outline"
                                             size={14}
-                                            color={theme.colors.button.secondary.tint}
+                                            color={hasActiveProfile
+                                                ? theme.colors.button.secondary.tint
+                                                : theme.colors.textSecondary}
                                         />
                                         <Text style={{
                                             fontSize: 13,
-                                            color: theme.colors.button.secondary.tint,
+                                            color: hasActiveProfile
+                                                ? theme.colors.button.secondary.tint
+                                                : theme.colors.textSecondary,
                                             fontWeight: '600',
                                             ...Typography.default('semiBold'),
                                         }}>
-                                            {currentProfile?.name || 'Select Profile'}
+                                            {hasActiveProfile ? currentProfile!.name : t('agentInput.profile.none')}
                                         </Text>
                                     </Pressable>
                                 )}

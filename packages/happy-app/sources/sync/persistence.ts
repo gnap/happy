@@ -224,6 +224,24 @@ export function saveSessionMaxModes(modes: Record<string, boolean>) {
     mmkv.set('session-max-modes', JSON.stringify(modes));
 }
 
+/** Session id -> env profile id. Applied on spawn and sent with each user message (like modelMode). */
+export function loadSessionProfileIds(): Record<string, string> {
+    const raw = mmkv.getString('session-profile-ids');
+    if (raw) {
+        try {
+            return JSON.parse(raw);
+        } catch (e) {
+            console.error('Failed to parse session profile ids', e);
+            return {};
+        }
+    }
+    return {};
+}
+
+export function saveSessionProfileIds(ids: Record<string, string>) {
+    mmkv.set('session-profile-ids', JSON.stringify(ids));
+}
+
 export function loadProfile(): Profile {
     const profile = mmkv.getString('profile');
     if (profile) {

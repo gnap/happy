@@ -679,52 +679,14 @@ function NewSessionWizard() {
     // Validation
     const canCreate = React.useMemo(() => {
         return (
-            selectedProfileId !== null &&
             selectedMachineId !== null &&
             selectedPath.trim() !== ''
         );
-    }, [selectedProfileId, selectedMachineId, selectedPath]);
+    }, [selectedMachineId, selectedPath]);
 
-    const selectProfile = React.useCallback((profileId: string) => {
+    const selectProfile = React.useCallback((profileId: string | null) => {
         setSelectedProfileId(profileId);
-        // Check both custom profiles and built-in profiles
-        const profile = profileMap.get(profileId) || getBuiltInProfile(profileId);
-        if (profile) {
-            // Auto-select agent based on profile's EXCLUSIVE compatibility
-            // Only switch if profile supports exactly one CLI - scales automatically with new agents
-            const supportedCLIs = (Object.entries(profile.compatibility) as [string, boolean][])
-                .filter(([, supported]) => supported)
-                .map(([agent]) => agent);
-
-            if (supportedCLIs.length === 1) {
-                const requiredAgent = supportedCLIs[0] as 'claude' | 'codex' | 'cursor' | 'gemini';
-                // Check if this agent is available and allowed
-                const isAvailable = cliAvailability[requiredAgent] !== false;
-                const isAllowed = requiredAgent !== 'gemini' || experimentsEnabled;
-
-                if (isAvailable && isAllowed) {
-                    setAgentType(requiredAgent);
-                }
-                // If the required CLI is unavailable or not allowed, keep current agent (profile will show as unavailable)
-            }
-            // If supportedCLIs.length > 1, profile supports multiple CLIs - don't force agent switch
-
-            // Set session type from profile's default
-            if (profile.defaultSessionType) {
-                setSessionType(profile.defaultSessionType);
-            }
-            // Set permission mode from profile's default
-            if (profile.defaultPermissionMode) {
-                const profileMode = resolveCurrentOption(availableModes, [
-                    profile.defaultPermissionMode,
-                    getDefaultPermissionModeKey(agentType),
-                ]);
-                if (profileMode) {
-                    setPermissionMode(profileMode);
-                }
-            }
-        }
-    }, [profileMap, cliAvailability.claude, cliAvailability.codex, cliAvailability.cursor, cliAvailability.gemini, experimentsEnabled, availableModes, agentType]);
+    }, []);
 
     // Ensure permission mode is valid for current agent, falling back when needed.
     React.useEffect(() => {
@@ -1098,6 +1060,9 @@ function NewSessionWizard() {
                     if (agentType === 'cursor' || agentType === 'cursor-acp') {
                         storage.getState().updateSessionMaxMode(sessionId, maxMode);
                     }
+                    if (selectedProfileId) {
+                        storage.getState().updateSessionProfileId(sessionId, selectedProfileId);
+                    }
                     if (sessionPrompt.trim()) {
                         await sync.sendMessage(sessionId, sessionPrompt);
                     }
@@ -1230,6 +1195,8 @@ function NewSessionWizard() {
                                 onMachineClick={handleMachineClick}
                                 currentPath={selectedPath}
                                 onPathClick={handlePathClick}
+                                profileId={selectedProfileId}
+                                onProfileChange={selectProfile}
                             />
                         </View>
                     </View>
@@ -2064,7 +2031,7 @@ function NewSessionWizard() {
                             currentPath={selectedPath}
                             onPathClick={handleAgentInputPathClick}
                             profileId={selectedProfileId}
-                            onProfileClick={handleAgentInputProfileClick}
+                            onProfileChange={selectProfile}
                         />
                     </View>
                 </View>

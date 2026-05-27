@@ -1,4 +1,4 @@
-import { AIBackendProfile } from './settings';
+import { AIBackendProfile, validateProfileForAgent } from './settings';
 
 /**
  * Documentation and expected values for built-in profiles.
@@ -375,3 +375,19 @@ export const DEFAULT_PROFILES = [
         isBuiltIn: true,
     }
 ];
+
+export function getAllEnvProfiles(customProfiles: AIBackendProfile[]): AIBackendProfile[] {
+    const builtInProfiles = DEFAULT_PROFILES.map((bp) => getBuiltInProfile(bp.id)).filter((p): p is AIBackendProfile => p != null);
+    return [...customProfiles, ...builtInProfiles];
+}
+
+export function getProfilesForAgent(
+    customProfiles: AIBackendProfile[],
+    agent: 'claude' | 'codex' | 'cursor' | 'cursor-acp' | 'gemini' | undefined,
+): AIBackendProfile[] {
+    const all = getAllEnvProfiles(customProfiles);
+    if (!agent) {
+        return all;
+    }
+    return all.filter((profile) => validateProfileForAgent(profile, agent));
+}

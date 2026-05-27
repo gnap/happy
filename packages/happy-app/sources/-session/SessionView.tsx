@@ -253,6 +253,24 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         storage.getState().updateSessionMaxMode(sessionId, enabled);
     }, [sessionId]);
 
+    const sessionProfileId = session.profileId ?? null;
+    const updateProfileId = React.useCallback((profileId: string | null) => {
+        if (profileId) {
+            storage.getState().updateSessionProfileId(sessionId, profileId);
+        } else {
+            storage.getState().clearSessionProfileId(sessionId);
+        }
+        sync.applySettings({ lastUsedProfile: profileId });
+    }, [sessionId]);
+
+    const agentTypeForProfile = React.useMemo((): 'claude' | 'codex' | 'cursor' | 'cursor-acp' | 'gemini' | undefined => {
+        if (flavor === 'codex') return 'codex';
+        if (flavor === 'gemini') return 'gemini';
+        if (flavor === 'cursor' || flavor === 'cursor-acp') return flavor;
+        if (flavor === 'claude') return 'claude';
+        return undefined;
+    }, [flavor]);
+
     // Memoize header-dependent styles to prevent re-renders
     const headerDependentStyles = React.useMemo(() => ({
         contentContainer: {
@@ -339,6 +357,9 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             onModelModeChange={updateModelMode}
             maxMode={maxMode}
             onMaxModeChange={updateMaxMode}
+            agentType={agentTypeForProfile}
+            profileId={sessionProfileId}
+            onProfileChange={updateProfileId}
             metadata={session.metadata}
             connectionStatus={{
                 text: sessionStatus.statusText,
@@ -351,7 +372,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                     setMessage('');
                     clearDraft();
                     sync.sendMessage(sessionId, message);
-                    // Model/maxMode overrides are released on turn-end (see Sync.applySessionThinkingFromRawContent).
+                    // Model/maxMode overrides are released on turn-end; profileId persists for the session.
                     trackMessageSent();
                 }
             }}

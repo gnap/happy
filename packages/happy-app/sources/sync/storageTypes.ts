@@ -99,6 +99,7 @@ export interface Session {
     permissionMode?: string | null; // Local permission mode key, not synced to server
     modelMode?: string | null; // Local model key, not synced to server
     maxMode?: boolean | null; // Local Cursor max mode override, not synced to server
+    profileId?: string | null; // Local env profile id (spawn + per-message override), not synced to server
     // IMPORTANT: latestUsage is extracted from reducerState.latestUsage after message processing.
     // We store it directly on Session to ensure it's available immediately on load.
     // Do NOT store reducerState itself on Session - it's mutable and should only exist in SessionMessages.
