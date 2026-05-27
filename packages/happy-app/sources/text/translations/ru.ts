@@ -432,7 +432,13 @@ export const ru: TranslationStructure = {
         },
         model: {
             title: 'МОДЕЛЬ',
+            maxMode: 'Max',
             configureInCli: 'Настройте модели в настройках CLI',
+        },
+        profile: {
+            title: 'ПРОФИЛЬ СРЕДЫ',
+            none: 'Без Профиля',
+            manage: 'Управление профилями…',
         },
         codexPermissionMode: {
             title: 'РЕЖИМ РАЗРЕШЕНИЙ CODEX',

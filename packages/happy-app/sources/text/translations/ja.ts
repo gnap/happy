@@ -454,7 +454,13 @@ export const ja: TranslationStructure = {
         },
         model: {
             title: 'モデル',
+            maxMode: 'Max',
             configureInCli: 'CLIの設定でモデルを構成',
+        },
+        profile: {
+            title: '環境プロファイル',
+            none: 'プロファイルなし',
+            manage: 'プロファイルを管理…',
         },
         codexPermissionMode: {
             title: 'CODEX権限モード',

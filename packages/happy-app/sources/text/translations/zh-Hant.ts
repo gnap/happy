@@ -423,7 +423,13 @@ export const zhHant: TranslationStructure = {
         },
         model: {
             title: '模型',
+            maxMode: 'Max',
             configureInCli: '在 CLI 設定中配置模型',
+        },
+        profile: {
+            title: '環境設定檔',
+            none: '無設定檔',
+            manage: '管理設定檔…',
         },
         codexPermissionMode: {
             title: 'CODEX 權限模式',

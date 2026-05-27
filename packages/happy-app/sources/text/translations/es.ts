@@ -422,7 +422,13 @@ export const es: TranslationStructure = {
         },
         model: {
             title: 'MODELO',
+            maxMode: 'Max',
             configureInCli: 'Configurar modelos en la configuración del CLI',
+        },
+        profile: {
+            title: 'PERFIL DE ENTORNO',
+            none: 'Sin Perfil',
+            manage: 'Gestionar perfiles…',
         },
         codexPermissionMode: {
             title: 'MODO DE PERMISOS CODEX',

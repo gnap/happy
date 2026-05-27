@@ -451,7 +451,13 @@ export const it: TranslationStructure = {
         },
         model: {
             title: 'MODELLO',
+            maxMode: 'Max',
             configureInCli: 'Configura i modelli nelle impostazioni CLI',
+        },
+        profile: {
+            title: 'PROFILO AMBIENTE',
+            none: 'Nessun profilo',
+            manage: 'Gestisci profili…',
         },
         codexPermissionMode: {
             title: 'MODALITÀ PERMESSI CODEX',
