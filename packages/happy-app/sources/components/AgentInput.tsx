@@ -1217,16 +1217,16 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                                 ? theme.colors.button.secondary.tint
                                                 : theme.colors.textSecondary}
                                         />
-                                        <Text style={{
-                                            fontSize: 13,
-                                            color: hasActiveProfile
-                                                ? theme.colors.button.secondary.tint
-                                                : theme.colors.textSecondary,
-                                            fontWeight: '600',
-                                            ...Typography.default('semiBold'),
-                                        }}>
-                                            {hasActiveProfile ? currentProfile!.name : t('agentInput.profile.none')}
-                                        </Text>
+                                        {hasActiveProfile && (
+                                            <Text style={{
+                                                fontSize: 13,
+                                                color: theme.colors.button.secondary.tint,
+                                                fontWeight: '600',
+                                                ...Typography.default('semiBold'),
+                                            }}>
+                                                {currentProfile!.name}
+                                            </Text>
+                                        )}
                                     </Pressable>
                                 )}
 
