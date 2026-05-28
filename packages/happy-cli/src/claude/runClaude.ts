@@ -9,7 +9,7 @@ import { loop } from '@/claude/loop';
 import { AgentState, Metadata } from '@/api/types';
 import type { UserMessage } from '@/api/types';
 import packageJson from '../../package.json';
-import { Credentials, readSettings, writeSessionPidFile, removeSessionPidFile } from '@/persistence';
+import { Credentials, readSettings, getProfileEnvironmentVariables, writeSessionPidFile, removeSessionPidFile } from '@/persistence';
 import { EnhancedMode, PermissionMode } from './loop';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
@@ -266,7 +266,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     const session = api.sessionSyncClient(response, true, sessionClientOpts);
     writeSessionPidFile(session.sessionId);
 
-    let handleUserMessage: ((message: UserMessage) => void) | null = null;
+    let handleUserMessage: ((message: UserMessage) => Promise<void>) | null = null;
     let isA2AInboxTurnActiveFn: () => boolean = () => false;
     let describeInboxMcpScopeFn: () => string = () => 'empty';
 
@@ -341,6 +341,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     let currentAppendSystemPrompt: string | undefined = undefined; // Track current append system prompt
     let currentAllowedTools: string[] | undefined = undefined; // Track current allowed tools
     let currentDisallowedTools: string[] | undefined = undefined; // Track current disallowed tools
+    let currentProfileId: string | null | undefined = undefined; // Track current env profile id for change detection
     const daemonClaudeEnvVars: Record<string, string> = (() => {
         const explicit = options.claudeEnvVars;
         if (explicit && Object.keys(explicit).length > 0) return { ...explicit };
@@ -380,7 +381,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     pruneA2AInboxOnSessionStart('claude', workingDirectory, session.sessionId, options.startedBy === 'daemon');
     a2aInbox.peekInbox();
 
-    handleUserMessage = (message) => {
+    handleUserMessage = async (message) => {
 
         // Resolve permission mode from meta - pass through as-is, mapping happens at SDK boundary
         let messagePermissionMode: PermissionMode | undefined = currentPermissionMode;
@@ -453,34 +454,39 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             logger.debug(`[loop] User message received with no disallowed tools override, using current: ${currentDisallowedTools ? currentDisallowedTools.join(', ') : 'none'}`);
         }
 
-        if (message.meta?.hasOwnProperty('environmentVariables')) {
-            const profileEnv = message.meta.environmentVariables ?? {};
-            if (Object.keys(profileEnv).length > 0) {
-                applyProfileEnvToProcess(profileEnv);
-                currentClaudeEnvVars = mergeProfileIntoEnv(
-                    currentClaudeEnvVars,
-                    profileEnv,
-                    process.env,
-                );
-                logger.debug(`[loop] Profile environment updated from user message: ${Object.keys(profileEnv).join(', ')}`);
-            } else {
-                applyProfileEnvToProcess({});
-                currentClaudeEnvVars = mergeProfileIntoEnv({}, daemonClaudeEnvVars, process.env);
-                logger.debug('[loop] Profile environment cleared from user message (empty env vars)');
+        // Profile env: only apply when profileId changes (detected via currentProfileId).
+        // When changed, use pre-resolved environmentVariables from the App meta directly.
+        // Fall back to local settings lookup if environmentVariables is absent (backward compat).
+        const messageProfileId = message.meta?.profileId ?? undefined;
+        if (messageProfileId !== currentProfileId) {
+            currentProfileId = messageProfileId;
+            if (messageProfileId) {
+                const profileEnv = message.meta?.environmentVariables;
+                if (profileEnv && Object.keys(profileEnv).length > 0) {
+                    applyProfileEnvToProcess(profileEnv);
+                    currentClaudeEnvVars = mergeProfileIntoEnv(currentClaudeEnvVars, profileEnv, process.env);
+                    logger.debug(`[loop] Profile env applied from meta: ${messageProfileId} (${Object.keys(profileEnv).join(', ')})`);
+                } else {
+                    // Fallback: resolve from local settings (backward compat or App didn't send env vars)
+                    try {
+                        const settings = await readSettings();
+                        const profile = settings.profiles.find(p => p.id === messageProfileId);
+                        if (profile) {
+                            const localEnv = getProfileEnvironmentVariables(profile);
+                            applyProfileEnvToProcess(localEnv);
+                            currentClaudeEnvVars = mergeProfileIntoEnv(currentClaudeEnvVars, localEnv, process.env);
+                            logger.debug(`[loop] Profile env resolved from local settings: ${messageProfileId} (${Object.keys(localEnv).join(', ')})`);
+                        }
+                    } catch (error) {
+                        logger.debug('[loop] Failed to resolve profile env from local settings:', error);
+                    }
+                }
+                if (currentSession) {
+                    currentSession.claudeEnvVars = currentClaudeEnvVars;
+                    currentSession.claudeEnvVarsGeneration++;
+                }
             }
-            if (currentSession) {
-                currentSession.claudeEnvVars = currentClaudeEnvVars;
-                currentSession.claudeEnvVarsGeneration++;
-            }
-        } else {
-            // Reset to daemon-spawn-time env when message does not carry profile env
-            applyProfileEnvToProcess(daemonClaudeEnvVars);
-            currentClaudeEnvVars = { ...daemonClaudeEnvVars };
-            if (currentSession) {
-                currentSession.claudeEnvVars = currentClaudeEnvVars;
-                currentSession.claudeEnvVarsGeneration++;
-            }
-            logger.debug(`[loop] Profile environment reset to daemon defaults: ${Object.keys(daemonClaudeEnvVars).join(', ') || '(none)'}`);
+            // profileId null = no profile selected → leave env as-is (daemon baseline).
         }
 
         // Check for special commands before processing

@@ -184,7 +184,8 @@ export const MessageMetaSchema = z.object({
   appendSystemPrompt: z.string().nullable().optional(), // Append to system prompt for this message (null = reset)
   allowedTools: z.array(z.string()).nullable().optional(), // Allowed tools for this message (null = reset)
   disallowedTools: z.array(z.string()).nullable().optional(), // Disallowed tools for this message (null = reset)
-  environmentVariables: z.record(z.string(), z.string()).optional(), // AI backend profile env for this turn
+  profileId: z.string().nullable().optional(), // Env profile id (null = clear). Daemon tracks this to detect changes.
+  environmentVariables: z.record(z.string(), z.string()).optional(), // Resolved env vars, applied only when profileId changes
 })
 
 export type MessageMeta = z.infer<typeof MessageMetaSchema>
