@@ -1282,6 +1282,7 @@ export async function startDaemon(): Promise<void> {
     apiMachine.setRPCHandlers({
       spawnSession,
       stopSession,
+      archiveSession,
       requestShutdown: () => requestShutdown('happy-app')
     });
 
