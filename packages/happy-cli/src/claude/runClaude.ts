@@ -485,8 +485,16 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                     currentSession.claudeEnvVars = currentClaudeEnvVars;
                     currentSession.claudeEnvVarsGeneration++;
                 }
+            } else {
+                // profileId changed to null/none → reset to daemon-spawn-time baseline
+                applyProfileEnvToProcess(daemonClaudeEnvVars);
+                currentClaudeEnvVars = { ...daemonClaudeEnvVars };
+                if (currentSession) {
+                    currentSession.claudeEnvVars = currentClaudeEnvVars;
+                    currentSession.claudeEnvVarsGeneration++;
+                }
+                logger.debug(`[loop] Profile cleared (profileId: null) → reset to daemon baseline: ${Object.keys(daemonClaudeEnvVars).join(', ') || '(none)'}`);
             }
-            // profileId null = no profile selected → leave env as-is (daemon baseline).
         }
 
         // Check for special commands before processing
