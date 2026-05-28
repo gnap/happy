@@ -786,6 +786,7 @@ class Sync {
                 fallbackModel,
                 appendSystemPrompt: systemPrompt,
                 ...(maxMode !== undefined ? { maxMode } : {}),
+                profileId: session.profileId ?? null,
                 ...(environmentVariables ? { environmentVariables } : {}),
                 ...(displayText && { displayText }) // Add displayText if provided
             }

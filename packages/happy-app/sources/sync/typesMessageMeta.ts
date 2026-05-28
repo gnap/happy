@@ -7,7 +7,8 @@ export const MessageMetaSchema = z.object({
     permissionMode: z.string().optional(), // Permission mode key for this message
     model: z.string().nullable().optional(), // Model name for this message (null = reset)
     maxMode: z.boolean().optional(), // Cursor max mode for this message
-    environmentVariables: z.record(z.string(), z.string()).optional(), // Env profile vars for this message (${VAR} expanded on daemon)
+    profileId: z.string().nullable().optional(), // Env profile id (null = clear). CLI tracks this to detect changes.
+    environmentVariables: z.record(z.string(), z.string()).optional(), // Resolved env vars, applied by CLI when profileId changes
     fallbackModel: z.string().nullable().optional(), // Fallback model for this message (null = reset)
     customSystemPrompt: z.string().nullable().optional(), // Custom system prompt for this message (null = reset)
     appendSystemPrompt: z.string().nullable().optional(), // Append to system prompt for this message (null = reset)
