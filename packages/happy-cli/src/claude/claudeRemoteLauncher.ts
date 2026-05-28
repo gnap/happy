@@ -15,6 +15,7 @@ import { EnhancedMode } from "./loop";
 import { RawJSONLines } from "@/claude/types";
 import { OutgoingMessageQueue } from "./utils/OutgoingMessageQueue";
 import { getToolName } from "./utils/getToolName";
+import { createEnvelope } from "@slopus/happy-wire";
 
 interface PermissionsField {
     date: number;
@@ -379,6 +380,13 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         }
 
                         let msg = await session.queue.waitForMessagesAndGetAsString(controller.signal);
+
+                        // Echo user message as session envelope for cross-app dedup (like Cursor does)
+                        if (msg?.message) {
+                            session.client.sendSessionProtocolMessage(
+                                createEnvelope('user', { t: 'text', text: msg.message })
+                            );
+                        }
 
                         // Check if mode has changed
                         if (msg) {
