@@ -475,8 +475,8 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                 continue;
             }
 
+            // Thinking blocks are suppressed (not useful to surface, wastes bandwidth)
             if (block.type === 'thinking' && typeof block.thinking === 'string') {
-                envelopes.push(createEnvelope('agent', { t: 'text', text: block.thinking, thinking: true }, { turn: turnId, subagent }));
                 continue;
             }
 
