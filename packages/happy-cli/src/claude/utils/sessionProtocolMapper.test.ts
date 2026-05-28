@@ -25,6 +25,26 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         expect(result.envelopes[0].ev).toEqual({ t: 'text', text: 'hello from user' });
     });
 
+    it('maps user array content to a user text envelope', () => {
+        const result = mapClaudeLogMessageToSessionEnvelopes({
+            type: 'user',
+            uuid: 'u-array',
+            message: {
+                role: 'user',
+                content: [
+                    { type: 'text', text: 'hello' },
+                    { type: 'text', text: 'world' },
+                ],
+            },
+            timestamp: '2025-01-01T00:00:00.000Z',
+        } as any, { currentTurnId: 'prev-turn' });
+
+        expect(result.envelopes.length).toBeGreaterThanOrEqual(2);
+        const userEnvelope = result.envelopes.find(e => e.role === 'user');
+        expect(userEnvelope).toBeDefined();
+        expect(userEnvelope!.ev).toEqual({ t: 'text', text: 'hello\nworld' });
+    });
+
     it('starts a turn and maps assistant text blocks', () => {
         const result = mapClaudeLogMessageToSessionEnvelopes({
             type: 'assistant',

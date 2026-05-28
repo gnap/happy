@@ -549,35 +549,54 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
             };
         }
 
-        const turnId = ensureTurn(state, envelopes);
-        if (message.isSidechain) {
-            maybeEmitSubagentStart(state, turnId, subagent, envelopes);
-        }
-        for (const block of blocks) {
-            if (block.type === 'tool_result' && typeof block.tool_use_id === 'string' && block.tool_use_id.length > 0) {
-                const sessionSubagentForToolResult = getSessionSubagentIdForProviderSubagent(state, block.tool_use_id);
-                if (!message.isSidechain) {
-                    if (getHiddenParentToolCalls(state).has(block.tool_use_id)) {
+        const hasToolResults = blocks.some(b => b.type === 'tool_result' && typeof b.tool_use_id === 'string' && b.tool_use_id.length > 0);
+        if (hasToolResults || message.isSidechain) {
+            // Tool-call lifecycle or sidechain: process blocks as agent envelopes
+            const turnId = ensureTurn(state, envelopes);
+            if (message.isSidechain) {
+                maybeEmitSubagentStart(state, turnId, subagent, envelopes);
+            }
+            for (const block of blocks) {
+                if (block.type === 'tool_result' && typeof block.tool_use_id === 'string' && block.tool_use_id.length > 0) {
+                    const sessionSubagentForToolResult = getSessionSubagentIdForProviderSubagent(state, block.tool_use_id);
+                    if (!message.isSidechain) {
+                        if (getHiddenParentToolCalls(state).has(block.tool_use_id)) {
+                            if (sessionSubagentForToolResult) {
+                                maybeEmitSubagentStop(state, turnId, sessionSubagentForToolResult, envelopes);
+                            }
+                            getHiddenParentToolCalls(state).delete(block.tool_use_id);
+                            continue;
+                        }
                         if (sessionSubagentForToolResult) {
                             maybeEmitSubagentStop(state, turnId, sessionSubagentForToolResult, envelopes);
                         }
-                        getHiddenParentToolCalls(state).delete(block.tool_use_id);
-                        continue;
                     }
-                    if (sessionSubagentForToolResult) {
-                        maybeEmitSubagentStop(state, turnId, sessionSubagentForToolResult, envelopes);
-                    }
+                    envelopes.push(createEnvelope('agent', {
+                        t: 'tool-call-end',
+                        call: block.tool_use_id,
+                    }, { turn: turnId, subagent }));
+                    continue;
                 }
-                envelopes.push(createEnvelope('agent', {
-                    t: 'tool-call-end',
-                    call: block.tool_use_id,
-                }, { turn: turnId, subagent }));
-                continue;
+
+                if (block.type === 'text' && typeof block.text === 'string' && block.text.trim().length > 0) {
+                    envelopes.push(createEnvelope('agent', { t: 'text', text: block.text }, { turn: turnId, subagent }));
+                }
             }
 
-            if (block.type === 'text' && typeof block.text === 'string' && block.text.trim().length > 0) {
-                envelopes.push(createEnvelope('agent', { t: 'text', text: block.text }, { turn: turnId, subagent }));
-            }
+            return {
+                currentTurnId: state.currentTurnId,
+                envelopes,
+            };
+        }
+
+        // Plain user message with array content (no tool results): echo as user envelope
+        closeTurn(state, 'completed', envelopes);
+        const userText = blocks
+            .filter((b): b is { type: 'text'; text: string } => b.type === 'text' && typeof b.text === 'string')
+            .map(b => b.text)
+            .join('\n');
+        if (userText.length > 0) {
+            envelopes.push(createEnvelope('user', { t: 'text', text: userText }));
         }
 
         return {
