@@ -473,14 +473,14 @@ export async function sessionRipgrep(
 }
 
 /**
- * Kill the session process immediately
+ * Kill the session process immediately via daemon RPC.
  */
-export async function sessionKill(sessionId: string): Promise<SessionKillResponse> {
+export async function sessionKill(sessionId: string, machineId: string): Promise<SessionKillResponse> {
     try {
-        const response = await apiSocket.sessionRPC<SessionKillResponse, {}>(
-            sessionId,
+        const response = await apiSocket.machineRPC<SessionKillResponse, { sessionId: string }>(
+            machineId,
             'killSession',
-            {}
+            { sessionId }
         );
         return response;
     } catch (error) {

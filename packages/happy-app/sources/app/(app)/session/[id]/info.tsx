@@ -191,7 +191,7 @@ function SessionInfoContent({ session }: { session: Session }) {
 
     // Use HappyAction for archiving - it handles errors automatically
     const [archivingSession, performArchive] = useHappyAction(async () => {
-        const result = await sessionKill(session.id);
+        const result = await sessionKill(session.id, session.metadata?.machineId!);
         if (!result.success) {
             throw new HappyError(result.message || t('sessionInfo.failedToArchiveSession'), false);
         }
