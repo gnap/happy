@@ -6,7 +6,7 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:8081",
-    "beforeDevCommand": "yarn start",
+    "beforeDevCommand": "EXPO_PUBLIC_ENABLE_SESSION_PROTOCOL_SEND=1 yarn start",
     "beforeBuildCommand": "EXPO_PUBLIC_ENABLE_SESSION_PROTOCOL_SEND=1 yarn expo export --platform web --output-dir dist --clear && node scripts/patch-web-dist.js"
   },
   "app": {
