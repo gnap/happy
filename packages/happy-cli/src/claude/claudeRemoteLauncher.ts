@@ -407,6 +407,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 mode = msg.mode;
                                 permissionHandler.handleModeChange(mode.permissionMode);
                                 logger.debug('[remote]: processing A2A inbox turn');
+                                // Signal thinking immediately on message receipt, before SDK is invoked
+                                session.onThinkingChange(true);
                                 return {
                                     message: inboxPrompt,
                                     mode: msg.mode,
@@ -424,6 +426,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             modeHash = msg.hash;
                             mode = msg.mode;
                             permissionHandler.handleModeChange(mode.permissionMode);
+                            // Signal thinking immediately on message receipt, before SDK is invoked
+                            session.onThinkingChange(true);
                             return {
                                 message: msg.message,
                                 mode: msg.mode

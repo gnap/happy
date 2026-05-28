@@ -184,9 +184,6 @@ export async function claudeRemote(opts: {
 
             // Handle special system messages
             if (message.type === 'system' && message.subtype === 'init') {
-                // Start thinking when session initializes
-                updateThinking(true);
-
                 const systemInit = message as SDKSystemMessage;
 
                 // Session id is still in memory, wait until session file is written to disk
