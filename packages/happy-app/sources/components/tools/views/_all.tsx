@@ -8,6 +8,7 @@ import { TodoView } from './TodoView';
 import { ExitPlanToolView } from './ExitPlanToolView';
 import { MultiEditView } from './MultiEditView';
 import { TaskView } from './TaskView';
+import { TaskTrackerView } from './TaskTrackerView';
 import { BashViewFull } from './BashViewFull';
 import { EditViewFull } from './EditViewFull';
 import { MultiEditViewFull } from './MultiEditViewFull';
@@ -54,6 +55,9 @@ export const toolViewRegistry: Record<string, ToolViewComponent> = {
     exit_plan_mode: ExitPlanToolView,
     MultiEdit: MultiEditView,
     Task: TaskView,
+    Agent: TaskView,
+    TaskCreate: TaskTrackerView,
+    TaskUpdate: TaskTrackerView,
     AskUserQuestion: AskUserQuestionView,
     // Gemini tools (lowercase)
     edit: GeminiEditView,
@@ -73,6 +77,7 @@ export const toolFullViewRegistry: Record<string, ToolViewComponent> = {
     edit: GeminiEditView,
     execute: GeminiExecuteView,
     Task: TaskView, // Task output is in children (sidechain agent-text), not tool.result
+    Agent: TaskView,
 };
 
 // Helper function to get the appropriate view component for a tool

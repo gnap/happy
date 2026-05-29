@@ -162,6 +162,7 @@ const sessionEnvelopeSchema = z.object({
     subagent: z.string().refine((value) => isCuid(value), {
         message: 'subagent must be a cuid2 value',
     }).optional(),
+    taskCall: z.string().optional(),
     ev: sessionEventSchema,
 }).superRefine((envelope, ctx) => {
     if (envelope.ev.t === 'service' && envelope.role !== 'agent') {
@@ -606,7 +607,7 @@ function normalizeSessionEnvelope(
 
     const messageId = envelope.id;
     const messageCreatedAt = envelope.time;
-    const parentUUID = envelope.subagent ?? null;
+    const parentUUID = envelope.taskCall ?? envelope.subagent ?? null;
     const isSidechain = parentUUID !== null;
     const contentUUID = envelope.id;
 

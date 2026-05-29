@@ -32,7 +32,7 @@ export const knownTools = {
         minimal: (opts: { metadata: Metadata | null, tool: ToolCall, messages?: Message[] }) => {
             const messages = opts.messages || [];
             for (let m of messages) {
-                if (m.kind === 'tool-call' && 
+                if (m.kind === 'tool-call' &&
                     (m.tool.state === 'running' || m.tool.state === 'completed' || m.tool.state === 'error')) {
                     return false;
                 }
@@ -46,6 +46,58 @@ export const knownTools = {
             prompt: z.string().describe('The task for the agent to perform'),
             subagent_type: z.string().optional().describe('The type of specialized agent to use')
         }).partial().passthrough()
+    },
+    'Agent': {
+        title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            if (opts.tool.input && opts.tool.input.description && typeof opts.tool.input.description === 'string') {
+                return opts.tool.input.description;
+            }
+            return t('tools.names.task');
+        },
+        icon: ICON_TASK,
+        isMutable: true,
+        minimal: (opts: { metadata: Metadata | null, tool: ToolCall, messages?: Message[] }) => {
+            const messages = opts.messages || [];
+            for (let m of messages) {
+                if (m.kind === 'tool-call' &&
+                    (m.tool.state === 'running' || m.tool.state === 'completed' || m.tool.state === 'error')) {
+                    return false;
+                }
+                if (m.kind === 'agent-text' && m.text) {
+                    return false;
+                }
+            }
+            return true;
+        },
+        input: z.object({
+            description: z.string().optional().describe('Short description of what the agent should do'),
+            prompt: z.string().describe('The task for the agent to perform'),
+            subagent_type: z.string().optional().describe('The type of specialized agent to use')
+        }).partial().passthrough()
+    },
+    'TaskCreate': {
+        title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const input = opts.tool.input as Record<string, unknown> | undefined;
+            if (input?.subject && typeof input.subject === 'string') return input.subject;
+            return t('tools.names.task');
+        },
+        icon: ICON_TODO,
+        noStatus: true,
+        minimal: true,
+        input: z.object({}).partial().passthrough(),
+    },
+    'TaskUpdate': {
+        title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const input = opts.tool.input as Record<string, unknown> | undefined;
+            const taskId = input?.taskId;
+            const status = input?.status;
+            if (taskId && status) return `${t('tools.names.task')} #${taskId}: ${status}`;
+            return t('tools.names.task');
+        },
+        icon: ICON_TODO,
+        noStatus: true,
+        minimal: true,
+        input: z.object({}).partial().passthrough(),
     },
     'Bash': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {

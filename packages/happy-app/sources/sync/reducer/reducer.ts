@@ -164,6 +164,14 @@ export type ReducerState = {
         }>;
         timestamp: number;
     };
+    latestTasks?: {
+        tasks: Array<{
+            id: string;
+            content: string;
+            status: 'pending' | 'in_progress' | 'completed';
+        }>;
+        timestamp: number;
+    };
     latestUsage?: {
         inputTokens: number;
         outputTokens: number;
@@ -200,6 +208,11 @@ export type ReducerResult = {
         status: 'pending' | 'in_progress' | 'completed';
         priority: 'high' | 'medium' | 'low';
         id: string;
+    }>;
+    tasks?: Array<{
+        id: string;
+        content: string;
+        status: 'pending' | 'in_progress' | 'completed';
     }>;
     usage?: {
         inputTokens: number;
@@ -278,10 +291,14 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
 
         // Handle context reset events - reset state and let the message be shown
         if (msg.role === 'event' && msg.content.type === 'message' && msg.content.message === 'Context was reset') {
-            // Reset todos to empty array and reset usage to zero
+            // Reset todos/tasks to empty array and reset usage to zero
             state.latestTodos = {
                 todos: [],
-                timestamp: msg.createdAt  // Use message timestamp, not current time
+                timestamp: msg.createdAt
+            };
+            state.latestTasks = {
+                tasks: [],
+                timestamp: msg.createdAt
             };
             state.latestUsage = {
                 inputTokens: 0,
@@ -761,13 +778,17 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
 
                             // Track TodoWrite tool inputs when updating existing messages
                             if (message.tool.name === 'TodoWrite' && message.tool.state === 'running' && message.tool.input?.todos) {
-                                // Only update if this is newer than existing todos
                                 if (!state.latestTodos || message.tool.createdAt > state.latestTodos.timestamp) {
                                     state.latestTodos = {
                                         todos: message.tool.input.todos,
                                         timestamp: message.tool.createdAt
                                     };
                                 }
+                            }
+
+                            // Track TaskCreate/TaskUpdate for task list
+                            if ((message.tool.name === 'TaskCreate' || message.tool.name === 'TaskUpdate') && message.tool.state === 'running') {
+                                trackTaskFromToolInput(state, message.tool.name, message.tool.input, message.tool.createdAt);
                             }
                         }
                     } else {
@@ -832,13 +853,17 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
 
                         // Track TodoWrite tool inputs
                         if (toolCall.name === 'TodoWrite' && toolCall.state === 'running' && toolCall.input?.todos) {
-                            // Only update if this is newer than existing todos
                             if (!state.latestTodos || toolCall.createdAt > state.latestTodos.timestamp) {
                                 state.latestTodos = {
                                     todos: toolCall.input.todos,
                                     timestamp: toolCall.createdAt
                                 };
                             }
+                        }
+
+                        // Track TaskCreate/TaskUpdate for task list
+                        if ((toolCall.name === 'TaskCreate' || toolCall.name === 'TaskUpdate') && toolCall.state === 'running') {
+                            trackTaskFromToolInput(state, toolCall.name, toolCall.input, toolCall.createdAt);
                         }
                     }
                 }
@@ -881,6 +906,29 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                                 todos: c.content.newTodos,
                                 timestamp: msg.createdAt
                             };
+                        }
+                    }
+
+                    // TaskCreate result: parse task ID and subject from result text
+                    if (message.tool.name === 'TaskCreate' && !c.is_error && typeof c.content === 'string') {
+                        const m = c.content.match(/^Task #(\d+) created successfully:\s*(.+)/);
+                        if (m) {
+                            const taskId = m[1];
+                            const subject = m[2];
+                            if (!state.latestTasks || msg.createdAt > state.latestTasks.timestamp) {
+                                const existing = state.latestTasks?.tasks ?? [];
+                                const idx = existing.findIndex(t => t.id === taskId);
+                                if (idx >= 0) {
+                                    const updated = [...existing];
+                                    updated[idx] = { ...updated[idx], content: subject };
+                                    state.latestTasks = { tasks: updated, timestamp: msg.createdAt };
+                                } else {
+                                    state.latestTasks = {
+                                        tasks: [...existing, { id: taskId, content: subject, status: 'pending' }],
+                                        timestamp: msg.createdAt,
+                                    };
+                                }
+                            }
                         }
                     }
 
@@ -1100,10 +1148,12 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
         // Update the sidechain in state
         state.sidechains.set(msg.sidechainId, existingSidechain);
 
-        // Find the Task tool message that owns this sidechain and mark it as changed
+        // Find the Task tool message that owns this sidechain and mark it as changed.
+        // Also update its createdAt so the card moves to the bottom of the message list.
         // msg.sidechainId is the realID of the Task message
         for (const [internalId, message] of state.messages) {
             if (message.realID === msg.sidechainId && message.tool) {
+                message.createdAt = Math.max(message.createdAt, msg.createdAt);
                 changed.add(internalId);
                 break;
             }
@@ -1158,6 +1208,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
         messages: newMessages,
         changed,
         todos: state.latestTodos?.todos,
+        tasks: state.latestTasks?.tasks,
         usage: state.latestUsage ? {
             inputTokens: state.latestUsage.inputTokens,
             outputTokens: state.latestUsage.outputTokens,
@@ -1176,6 +1227,33 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
 
 function allocateId() {
     return Math.random().toString(36).substring(2, 15);
+}
+
+function trackTaskFromToolInput(
+    state: ReducerState,
+    toolName: string,
+    input: Record<string, unknown>,
+    createdAt: number,
+) {
+    const taskId = typeof input.taskId === 'string' ? input.taskId
+        : typeof input.id === 'string' ? input.id
+        : '';
+    if (!taskId) return;
+
+    const status = typeof input.status === 'string'
+        && ['pending', 'in_progress', 'completed'].includes(input.status as string)
+        ? input.status as 'pending' | 'in_progress' | 'completed'
+        : toolName === 'TaskCreate' ? 'pending' : 'in_progress';
+
+    if (!state.latestTasks || createdAt > state.latestTasks.timestamp) {
+        const existing = state.latestTasks?.tasks ?? [];
+        const idx = existing.findIndex(t => t.id === taskId);
+        if (idx >= 0) {
+            const updated = [...existing];
+            updated[idx] = { ...updated[idx], status };
+            state.latestTasks = { tasks: updated, timestamp: createdAt };
+        }
+    }
 }
 
 function processUsageData(state: ReducerState, usage: UsageData, timestamp: number) {

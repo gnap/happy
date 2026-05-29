@@ -105,112 +105,50 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         expect(result.envelopes[1].ev).toEqual({ t: 'text', text: 'sidechain text' });
     });
 
-    it('buffers subagent messages until parent Task registration is known', () => {
-        const state = { currentTurnId: null };
+    it('hides Task/TaskOutput/TaskStop, shows TaskCreate/TaskUpdate/Agent as cards', () => {
+        const state = { currentTurnId: 'turn-active' };
 
-        const buffered = mapClaudeLogMessageToSessionEnvelopes({
-            type: 'assistant',
-            uuid: 'a-side-buffered-1',
-            parent_tool_use_id: 'task-buffer-1',
-            message: {
-                role: 'assistant',
-                content: [{ type: 'text', text: 'buffer me' }],
-            },
-        } as any, state);
-        expect(buffered.envelopes).toHaveLength(0);
+        // These should be hidden
+        for (const name of ['Task']) {
+            const result = mapClaudeLogMessageToSessionEnvelopes({
+                type: 'assistant',
+                uuid: `a-${name}`,
+                message: {
+                    role: 'assistant',
+                    content: [{
+                        type: 'tool_use',
+                        id: `call-${name}`,
+                        name,
+                        input: { prompt: 'test', description: 'Test' },
+                    }],
+                },
+            } as any, state);
+            expect(result.envelopes.filter(e => e.ev.t === 'tool-call-start')).toHaveLength(0);
+        }
 
-        const parent = mapClaudeLogMessageToSessionEnvelopes({
-            type: 'assistant',
-            uuid: 'a-parent-buffered-1',
-            message: {
-                role: 'assistant',
-                content: [{
-                    type: 'tool_use',
-                    id: 'task-buffer-1',
-                    name: 'Task',
-                    input: { prompt: 'run side task' },
-                }],
-            },
-        } as any, state);
-
-        expect(parent.envelopes.some((envelope) => {
-            return envelope.ev.t === 'tool-call-start'
-                && envelope.ev.call === 'task-buffer-1';
-        })).toBe(false);
-        const bufferedText = parent.envelopes.find((envelope) => {
-            return envelope.ev.t === 'text'
-                && envelope.ev.text === 'buffer me';
-        });
-        expect(bufferedText?.subagent).toBeDefined();
-        expect(isCuid(bufferedText!.subagent!)).toBe(true);
-        expect(bufferedText?.subagent).not.toBe('task-buffer-1');
+        // These should emit tool-call-start (visible cards)
+        for (const name of ['TaskCreate', 'TaskUpdate', 'TaskOutput', 'TaskStop', 'Agent']) {
+            const result = mapClaudeLogMessageToSessionEnvelopes({
+                type: 'assistant',
+                uuid: `a-${name}`,
+                message: {
+                    role: 'assistant',
+                    content: [{
+                        type: 'tool_use',
+                        id: `call-${name}`,
+                        name,
+                        input: name === 'TaskCreate' ? { subject: 'Test', description: 'Test task' }
+                             : name === 'TaskUpdate' ? { taskId: '1', status: 'in_progress' }
+                             : name === 'Agent' ? { prompt: 'do work', description: 'Work' }
+                             : { task_id: 'bg123' },
+                    }],
+                },
+            } as any, state);
+            expect(result.envelopes.filter(e => e.ev.t === 'tool-call-start')).toHaveLength(1);
+        }
     });
 
-    it('creates and tags subagent chain from Task prompt when parent_tool_use_id is absent', () => {
-        const state = { currentTurnId: null };
-        const prompt = 'Search for TypeScript 5.6 features';
-
-        const taskToolUse = mapClaudeLogMessageToSessionEnvelopes({
-            type: 'assistant',
-            uuid: 'task-parent-assistant',
-            message: {
-                role: 'assistant',
-                content: [{
-                    type: 'tool_use',
-                    id: 'task-call-1',
-                    name: 'Task',
-                    input: {
-                        prompt,
-                        description: 'Search TypeScript docs',
-                    },
-                }],
-            },
-        } as any, state);
-
-        expect(taskToolUse.envelopes.some((envelope) => {
-            return envelope.ev.t === 'tool-call-start'
-                && envelope.ev.call === 'task-call-1';
-        })).toBe(false);
-
-        const sidechainRoot = mapClaudeLogMessageToSessionEnvelopes({
-            type: 'user',
-            uuid: 'sidechain-root',
-            isSidechain: true,
-            parentUuid: null,
-            message: {
-                role: 'user',
-                content: prompt,
-            },
-        } as any, state);
-
-        expect(sidechainRoot.envelopes).toHaveLength(2);
-        const mappedSubagent = sidechainRoot.envelopes[0].subagent;
-        expect(mappedSubagent).toBeDefined();
-        expect(isCuid(mappedSubagent!)).toBe(true);
-        expect(mappedSubagent).not.toBe('task-call-1');
-        expect(sidechainRoot.envelopes[0].role).toBe('agent');
-        expect(sidechainRoot.envelopes[0].subagent).toBe(mappedSubagent);
-        expect(sidechainRoot.envelopes[0].ev).toEqual({ t: 'start', title: 'Search TypeScript docs' });
-        expect(sidechainRoot.envelopes[1].subagent).toBe(mappedSubagent);
-        expect(sidechainRoot.envelopes[1].ev).toEqual({ t: 'text', text: prompt });
-
-        const sidechainChild = mapClaudeLogMessageToSessionEnvelopes({
-            type: 'assistant',
-            uuid: 'sidechain-child',
-            isSidechain: true,
-            parentUuid: 'sidechain-root',
-            message: {
-                role: 'assistant',
-                content: [{ type: 'text', text: 'Subagent result' }],
-            },
-        } as any, state);
-
-        expect(sidechainChild.envelopes).toHaveLength(1);
-        expect(sidechainChild.envelopes[0].subagent).toBe(mappedSubagent);
-        expect(sidechainChild.envelopes[0].ev).toEqual({ t: 'text', text: 'Subagent result' });
-    });
-
-    it('infers subagent for non-SDK sidechain fixture logs', () => {
+    it('hides Task tool_use in fixture logs', () => {
         const fixturePath = join(__dirname, '__fixtures__', 'task_non_sdk.jsonl');
         const rows = readFileSync(fixturePath, 'utf8')
             .trim()
@@ -223,19 +161,11 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
             return mapClaudeLogMessageToSessionEnvelopes(row as any, state).envelopes;
         });
 
-        const subagentRoot = envelopes.find((envelope) => {
-            return envelope.ev.t === 'text'
-                && envelope.ev.text.startsWith('Search the web for information about TypeScript 5.6');
+        // Task tool_use should NOT appear as tool-call-start
+        const taskCalls = envelopes.filter((envelope) => {
+            return envelope.ev.t === 'tool-call-start' && envelope.ev.name === 'Task';
         });
-        expect(subagentRoot?.subagent).toBeDefined();
-        expect(isCuid(subagentRoot!.subagent!)).toBe(true);
-        expect(subagentRoot?.subagent).not.toBe('toolu_01EmKA8FJ7B2Ah9seGxK1Wct');
-
-        const subagentChild = envelopes.find((envelope) => {
-            return envelope.ev.t === 'text'
-                && envelope.ev.text.includes("I'll search for information about TypeScript 5.6");
-        });
-        expect(subagentChild?.subagent).toBe(subagentRoot?.subagent);
+        expect(taskCalls).toHaveLength(0);
     });
 
     it('emits stop for completed subagent when parent Task tool returns', () => {
@@ -243,7 +173,7 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         const state = {
             currentTurnId: 'turn-1',
             providerSubagentToSessionSubagent: new Map<string, string>([['task-2', mappedSubagent]]),
-            hiddenParentToolCalls: new Set<string>(['task-2']),
+            hiddenParentToolCalls: new Set<string>(),
         };
 
         const started = mapClaudeLogMessageToSessionEnvelopes({
@@ -281,7 +211,7 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         expect(stopped.envelopes.some((envelope) => {
             return envelope.ev.t === 'tool-call-end'
                 && envelope.ev.call === 'task-2';
-        })).toBe(false);
+        })).toBe(true);
     });
 
     it('does not emit envelopes for summary messages', () => {
