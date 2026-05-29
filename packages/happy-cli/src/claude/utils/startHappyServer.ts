@@ -238,12 +238,17 @@ export async function startHappyServer(getSession: GetSessionClient, options?: S
     }, async (args) => {
         const blocked = requireA2AInboxTurn('Mark inbox message read');
         if (blocked) return blocked;
+        const readAt = Date.now();
         getSession().markA2AMessageRead(args.id);
-        const message = getSession().getA2AInbox().messages.find((item) => item.id === args.id);
+        // markA2AInboxMessageRead also prunes already-read rows, so the message
+        // is gone from getA2AInbox() by the time we return. Report the timestamp
+        // we used for the mark instead of looking it back up, otherwise the agent
+        // sees `readAt: null` and assumes the mark failed (causing retries).
         return {
             content: [{ type: 'text', text: JSON.stringify({
                 id: args.id,
-                readAt: message?.readAt ?? null,
+                readAt,
+                marked: true,
             }, null, 2) }],
             isError: false,
         };
@@ -258,13 +263,15 @@ export async function startHappyServer(getSession: GetSessionClient, options?: S
     }, async (args) => {
         const blocked = requireA2AInboxTurn('Mark inbox messages read');
         if (blocked) return blocked;
+        const readAt = Date.now();
         getSession().markA2AMessagesRead(args.ids);
-        const inbox = getSession().getA2AInbox();
-        const updated = inbox.messages.filter((item) => args.ids.includes(item.id));
+        // Same pruning caveat as mark_a2a_message_read: the just-marked rows are
+        // dropped from the inbox, so report the timestamp directly.
         return {
             content: [{ type: 'text', text: JSON.stringify({
                 ids: args.ids,
-                updated,
+                readAt,
+                marked: args.ids.length,
             }, null, 2) }],
             isError: false,
         };

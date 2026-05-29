@@ -949,7 +949,12 @@ export class ApiSessionClient extends EventEmitter {
 
     private flushA2AInboxAgentStateSync(): void {
         const snapshot = toServerA2AInboxSnapshot(this.a2aInbox);
-        logger.debug(`[API] Syncing A2A inbox to server: unreadCount=${snapshot.unreadCount}`);
+        const localCount = this.a2aInbox.messages.length;
+        const localUnread = this.a2aInbox.messages.filter((m) => !m.readAt).length;
+        logger.debug(
+            `[API] Syncing A2A inbox to server: unreadCount=${snapshot.unreadCount} `
+            + `(local messages=${localCount}, unread=${localUnread}, ids=${this.a2aInbox.messages.map((m) => `${m.id.slice(-12)}:${m.readAt ? 'R' : 'U'}`).join(',')})`,
+        );
         this.updateAgentState((currentState) => ({
             ...currentState,
             a2aInbox: snapshot,
