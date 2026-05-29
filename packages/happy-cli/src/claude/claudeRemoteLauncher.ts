@@ -16,7 +16,6 @@ import { RawJSONLines } from "@/claude/types";
 import { OutgoingMessageQueue } from "./utils/OutgoingMessageQueue";
 import { getToolName } from "./utils/getToolName";
 import { buildClaudeTurnUsagePayload } from "./utils/claudeTurnUsage";
-import { createEnvelope } from "@slopus/happy-wire";
 
 interface PermissionsField {
     date: number;
@@ -382,12 +381,14 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
 
                         let msg = await session.queue.waitForMessagesAndGetAsString(controller.signal);
 
-                        // Echo user message as session envelope for cross-app dedup (like Cursor does)
-                        if (msg?.message) {
-                            session.client.sendSessionProtocolMessage(
-                                createEnvelope('user', { t: 'text', text: msg.message })
-                            );
-                        }
+                        // Note: we used to echo user messages back as session envelopes here
+                        // for "cross-app dedup" (commit f4206dc). That premise was wrong —
+                        // the Claude SDK does feed the user message back through its stream as
+                        // a type:'user' log entry, which sessionProtocolMapper turns into a
+                        // user envelope. Echoing here as well produced two `role:'user'` rows
+                        // in the App for every prompt (especially visible on /compact, where
+                        // App's optimistic copy + the CLI echo + mapper echo could surface as
+                        // duplicate user messages). Mapper handles it; launcher should not.
 
                         // Check if mode has changed
                         if (msg) {
