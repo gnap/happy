@@ -33,7 +33,7 @@ import { log } from '@/log';
  */
 export function isCacheEnabled(session: Session | null | undefined): boolean {
     const flavor = session?.metadata?.flavor;
-    return flavor === 'cursor' || flavor === 'acp-cursor';
+    return flavor === 'cursor' || flavor === 'acp-cursor' || flavor === 'claude';
 }
 
 // ---------------------------------------------------------------------------

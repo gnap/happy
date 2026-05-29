@@ -241,16 +241,12 @@ function SessionInfoContent({ session }: { session: Session }) {
 
     const [cachedLastSeq, setCachedLastSeq] = useState<number | null>(null);
     useEffect(() => {
-        if (session?.metadata?.flavor !== 'cursor' && session?.metadata?.flavor !== 'acp-cursor') {
-            setCachedLastSeq(null);
-            return;
-        }
         getCachedLastSeq(session.id).then(setCachedLastSeq);
         const unsubscribe = subscribeToCachedLastSeq((sessionId, lastSeq) => {
             if (sessionId === session.id) setCachedLastSeq(lastSeq);
         });
         return unsubscribe;
-    }, [session?.id, session?.metadata?.flavor]);
+    }, [session?.id]);
 
     const [rebuildingCache, performRebuildCache] = useHappyAction(async () => {
         await sync.rebuildMessageCache(session.id);
@@ -380,12 +376,10 @@ function SessionInfoContent({ session }: { session: Session }) {
                             showChevron={false}
                             showDivider={false}
                         />
-                        {(session.metadata?.flavor === 'cursor' || session.metadata?.flavor === 'acp-cursor') && (
-                            <CacheProgressBar
-                                totalSeq={session.seq}
-                                cachedBitmap={cachedBitmap}
-                            />
-                        )}
+                        <CacheProgressBar
+                            totalSeq={session.seq}
+                            cachedBitmap={cachedBitmap}
+                        />
                     </View>
                 </ItemGroup>
 
@@ -415,14 +409,12 @@ function SessionInfoContent({ session }: { session: Session }) {
                             onPress={handleDeleteSession}
                         />
                     )}
-                    {(session.metadata?.flavor === 'cursor' || session.metadata?.flavor === 'acp-cursor') && (
-                        <Item
-                            title={t('sessionInfo.rebuildMessageCache')}
-                            subtitle={t('sessionInfo.rebuildMessageCacheSubtitle')}
-                            icon={<Ionicons name="refresh-outline" size={29} color="#FF9500" />}
-                            onPress={handleRebuildMessageCache}
-                        />
-                    )}
+                    <Item
+                        title={t('sessionInfo.rebuildMessageCache')}
+                        subtitle={t('sessionInfo.rebuildMessageCacheSubtitle')}
+                        icon={<Ionicons name="refresh-outline" size={29} color="#FF9500" />}
+                        onPress={handleRebuildMessageCache}
+                    />
                 </ItemGroup>
 
                 {/* Metadata */}
