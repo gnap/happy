@@ -1112,12 +1112,18 @@ export async function startDaemon(): Promise<void> {
       // respawned process is auth-ready before any A2A inbox turn fires. (Without this,
       // the child boots with daemon-baseline env and inbox turns 401 until the next
       // human user message arrives carrying meta.environmentVariables.)
+      //
+      // resumeAfterSeq is intentionally omitted here: restart-session is a user-initiated
+      // "wipe and pick up from now" action. Passing the stale daemon-tracked seq would
+      // make the child fetch every user message that arrived since the last poll and
+      // re-execute them, which surfaces as the App replaying historical messages on
+      // restart. The offline-wake auto-respawn path still passes resumeAfterSeq because
+      // that flow is meant to catch up missed messages while the PID was dead.
       const recoveredProfile = await fetchSessionProfileMeta(sessionId);
       const result = await spawnSession({
         directory,
         agent,
         resumeSessionTag: sessionTag,
-        resumeAfterSeq: resumeAfterSeqBySessionId[sessionId],
         environmentVariables: recoveredProfile?.environmentVariables ?? undefined,
       });
 

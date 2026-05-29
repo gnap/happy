@@ -229,6 +229,11 @@ export async function claudeRemote(opts: {
                 }
                 currentGeneration = latestGeneration;
                 mode = next.mode;
+                // Mark thinking back on before pushing the next prompt into the SDK queue.
+                // Without this, only the first turn flips thinking=true; subsequent turns in
+                // the same claudeRemote() loop reuse the SDK's already-running query and the
+                // App's thinking timer stays off until the process restarts.
+                updateThinking(true);
                 messages.push({ type: 'user', message: { role: 'user', content: next.message } });
             }
 

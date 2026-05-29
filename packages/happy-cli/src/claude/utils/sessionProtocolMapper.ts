@@ -407,6 +407,17 @@ function toolTitle(name: string, input: unknown): string {
         if (typeof description === 'string' && description.trim().length > 0) {
             return description.length > 80 ? `${description.slice(0, 77)}...` : description;
         }
+        // Models sometimes skip the optional `description` (sonnet does this often for Bash);
+        // fall back to a short echo of the primary input so the App card has something
+        // descriptive instead of the generic "Bash call".
+        const fallbackKeys = ['command', 'cmd', 'query', 'pattern', 'file_path', 'path', 'url'];
+        for (const key of fallbackKeys) {
+            const value = (input as Record<string, unknown>)[key];
+            if (typeof value === 'string' && value.trim().length > 0) {
+                const trimmed = value.trim().replace(/\s+/g, ' ');
+                return trimmed.length > 80 ? `${trimmed.slice(0, 77)}...` : trimmed;
+            }
+        }
     }
     return `${name} call`;
 }
