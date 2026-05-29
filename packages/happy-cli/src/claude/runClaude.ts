@@ -276,6 +276,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         onA2aMessage: (message) => handleUserMessage?.(message),
         isA2AInboxTurnActive: () => isA2AInboxTurnActiveFn(),
         describeInboxMcpScope: () => describeInboxMcpScopeFn(),
+        workspacePath: workingDirectory,
     });
     logger.debug(`[START] Happy MCP server started at ${happyServer.url}`);
 
@@ -455,46 +456,53 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         }
 
         // Profile env: only apply when profileId changes (detected via currentProfileId).
+        // Missing meta.profileId means "no override, keep current"; explicit null means "clear".
         // When changed, use pre-resolved environmentVariables from the App meta directly.
         // Fall back to local settings lookup if environmentVariables is absent (backward compat).
-        const messageProfileId = message.meta?.profileId ?? undefined;
-        if (messageProfileId !== currentProfileId) {
-            currentProfileId = messageProfileId;
-            if (messageProfileId) {
-                const profileEnv = message.meta?.environmentVariables;
-                if (profileEnv && Object.keys(profileEnv).length > 0) {
-                    applyProfileEnvToProcess(profileEnv);
-                    currentClaudeEnvVars = mergeProfileIntoEnv(currentClaudeEnvVars, profileEnv, process.env);
-                    logger.debug(`[loop] Profile env applied from meta: ${messageProfileId} (${Object.keys(profileEnv).join(', ')})`);
-                } else {
-                    // Fallback: resolve from local settings (backward compat or App didn't send env vars)
-                    try {
-                        const settings = await readSettings();
-                        const profile = settings.profiles.find(p => p.id === messageProfileId);
-                        if (profile) {
-                            const localEnv = getProfileEnvironmentVariables(profile);
-                            applyProfileEnvToProcess(localEnv);
-                            currentClaudeEnvVars = mergeProfileIntoEnv(currentClaudeEnvVars, localEnv, process.env);
-                            logger.debug(`[loop] Profile env resolved from local settings: ${messageProfileId} (${Object.keys(localEnv).join(', ')})`);
+        const profileIdProvided =
+            message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'profileId');
+        if (profileIdProvided) {
+            const messageProfileId = message.meta!.profileId ?? null;
+            if (messageProfileId !== currentProfileId) {
+                currentProfileId = messageProfileId;
+                if (messageProfileId) {
+                    const profileEnv = message.meta?.environmentVariables;
+                    if (profileEnv && Object.keys(profileEnv).length > 0) {
+                        applyProfileEnvToProcess(profileEnv);
+                        currentClaudeEnvVars = mergeProfileIntoEnv(currentClaudeEnvVars, profileEnv, process.env);
+                        logger.debug(`[loop] Profile env applied from meta: ${messageProfileId} (${Object.keys(profileEnv).join(', ')})`);
+                    } else {
+                        // Fallback: resolve from local settings (backward compat or App didn't send env vars)
+                        try {
+                            const settings = await readSettings();
+                            const profile = settings.profiles.find(p => p.id === messageProfileId);
+                            if (profile) {
+                                const localEnv = getProfileEnvironmentVariables(profile);
+                                applyProfileEnvToProcess(localEnv);
+                                currentClaudeEnvVars = mergeProfileIntoEnv(currentClaudeEnvVars, localEnv, process.env);
+                                logger.debug(`[loop] Profile env resolved from local settings: ${messageProfileId} (${Object.keys(localEnv).join(', ')})`);
+                            }
+                        } catch (error) {
+                            logger.debug('[loop] Failed to resolve profile env from local settings:', error);
                         }
-                    } catch (error) {
-                        logger.debug('[loop] Failed to resolve profile env from local settings:', error);
                     }
+                    if (currentSession) {
+                        currentSession.claudeEnvVars = currentClaudeEnvVars;
+                        currentSession.claudeEnvVarsGeneration++;
+                    }
+                } else {
+                    // profileId explicitly null → reset to daemon-spawn-time baseline
+                    applyProfileEnvToProcess(daemonClaudeEnvVars);
+                    currentClaudeEnvVars = { ...daemonClaudeEnvVars };
+                    if (currentSession) {
+                        currentSession.claudeEnvVars = currentClaudeEnvVars;
+                        currentSession.claudeEnvVarsGeneration++;
+                    }
+                    logger.debug(`[loop] Profile cleared (profileId: null) → reset to daemon baseline: ${Object.keys(daemonClaudeEnvVars).join(', ') || '(none)'}`);
                 }
-                if (currentSession) {
-                    currentSession.claudeEnvVars = currentClaudeEnvVars;
-                    currentSession.claudeEnvVarsGeneration++;
-                }
-            } else {
-                // profileId changed to null/none → reset to daemon-spawn-time baseline
-                applyProfileEnvToProcess(daemonClaudeEnvVars);
-                currentClaudeEnvVars = { ...daemonClaudeEnvVars };
-                if (currentSession) {
-                    currentSession.claudeEnvVars = currentClaudeEnvVars;
-                    currentSession.claudeEnvVarsGeneration++;
-                }
-                logger.debug(`[loop] Profile cleared (profileId: null) → reset to daemon baseline: ${Object.keys(daemonClaudeEnvVars).join(', ') || '(none)'}`);
             }
+        } else {
+            logger.debug(`[loop] User message received with no profileId override, using current: ${currentProfileId ?? '(none)'}`);
         }
 
         // Check for special commands before processing

@@ -232,6 +232,7 @@ export function buildA2ATurnPrompt(notification: string, snapshotPath?: string, 
   const inboxMcpSteps = [
     'Call Happy MCP list_a2a_messages with unreadOnly=true.',
     'For each unread id: read_a2a_message, then mark_a2a_message_read (or mark_a2a_messages_read in one batch).',
+    'Each returned message includes a truncated text preview and a bodyFile absolute path; only when textTruncated is true and you need the full content, read bodyFile with the file tool.',
     'Return only a concise combined summary for the main agent; do not paste full inbox bodies unless asked.',
   ].join(' ');
   const subagentPrompt = stacked
@@ -266,6 +267,7 @@ export function buildA2ATurnPromptForClaude(
   const inboxMcpSteps = [
     'Call mcp__happy__list_a2a_messages with unreadOnly=true.',
     'For each unread id: mcp__happy__read_a2a_message, then mcp__happy__mark_a2a_message_read (or mcp__happy__mark_a2a_messages_read in one batch).',
+    'Each returned message includes a truncated text preview and a bodyFile absolute path; only when textTruncated is true and you need the full content, Read bodyFile with the agent file tool.',
     'Reply with a concise combined summary for the user; do not paste full inbox bodies unless asked.',
   ].join(' ');
   const work = stacked

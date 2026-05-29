@@ -382,12 +382,21 @@ function closeTurn(
     state: ClaudeSessionProtocolState,
     status: SessionTurnEndStatus,
     envelopes: SessionEnvelope[],
+    extras?: Record<string, unknown>,
 ): void {
     if (!state.currentTurnId) {
         return;
     }
 
-    envelopes.push(createEnvelope('agent', { t: 'turn-end', status }, { turn: state.currentTurnId }));
+    const ev: Record<string, unknown> = { t: 'turn-end', status };
+    if (extras) {
+        for (const [key, value] of Object.entries(extras)) {
+            if (value !== undefined) {
+                ev[key] = value;
+            }
+        }
+    }
+    envelopes.push(createEnvelope('agent', ev as { t: 'turn-end'; status: SessionTurnEndStatus }, { turn: state.currentTurnId }));
     state.currentTurnId = null;
     clearSubagentTracking(state);
 }
@@ -415,9 +424,10 @@ function toToolArgs(input: unknown): Record<string, unknown> {
 export function closeClaudeTurnWithStatus(
     state: ClaudeSessionProtocolState,
     status: SessionTurnEndStatus,
+    extras?: Record<string, unknown>,
 ): ClaudeMapperResult {
     const envelopes: SessionEnvelope[] = [];
-    closeTurn(state, status, envelopes);
+    closeTurn(state, status, envelopes, extras);
     return {
         currentTurnId: state.currentTurnId,
         envelopes,

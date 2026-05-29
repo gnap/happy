@@ -15,6 +15,7 @@ import { EnhancedMode } from "./loop";
 import { RawJSONLines } from "@/claude/types";
 import { OutgoingMessageQueue } from "./utils/OutgoingMessageQueue";
 import { getToolName } from "./utils/getToolName";
+import { buildClaudeTurnUsagePayload } from "./utils/claudeTurnUsage";
 import { createEnvelope } from "@slopus/happy-wire";
 
 interface PermissionsField {
@@ -460,9 +461,14 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         logger.debug('[remote]: Env changed, re-queuing message as pending');
                         pending = msg;
                     },
-                    onReady: () => {
+                    onReady: (result) => {
                         turnSucceeded = true;
-                        session.client.closeClaudeSessionTurn('completed');
+                        const usage = buildClaudeTurnUsagePayload(result);
+                        const extras: Record<string, unknown> = {};
+                        if (usage) extras.usage = usage;
+                        if (typeof result.total_cost_usd === 'number') extras.costUsd = result.total_cost_usd;
+                        if (typeof result.duration_ms === 'number') extras.durationMs = result.duration_ms;
+                        session.client.closeClaudeSessionTurn('completed', extras);
                         // Per-turn release (Cursor clears currentTurnIdRef before peekA2AInboxInLoop).
                         // claudeTurnActiveRef stayed true across multi-turn claudeRemote() calls, which
                         // blocked scheduleA2ATurnIfNeeded in onTurnEnd until process exit.
@@ -471,6 +477,18 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         }
                         if (wasInboxTurn) {
                             session.a2aInboxTurn?.setInboxTurnActive(false);
+                            // claudeRemote()'s for-await loop keeps iterating across turns, so the
+                            // launcher's finally-block onTurnEnd never runs between back-to-back
+                            // inbox turns. Settle the inbox turn here so backoff can arm and
+                            // unconsumed inbox messages don't tight-loop.
+                            session.a2aInboxTurn?.onTurnEnd({
+                                succeeded: true,
+                                cancelled: false,
+                                wasInboxTurn: true,
+                            });
+                            // Already accounted for; prevent the finally block from double-firing.
+                            wasInboxTurn = false;
+                            turnSucceeded = false;
                         }
                         session.a2aInboxTurn?.peekInbox();
                         if (!pending && session.queue.size() === 0) {
@@ -527,6 +545,13 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                 permissionHandler.reset();
                 if (session.claudeTurnActiveRef) {
                     session.claudeTurnActiveRef.current = false;
+                }
+                // onReady pops inbox-turn MCP scope on the happy path. When claudeRemote()
+                // returns without ever delivering a result (env-changed re-spawn, abort,
+                // unexpected exit), the scope leaks and every future peekInbox() sees
+                // hasScope('inbox-turn') === true and defers forever, deadlocking the inbox.
+                if (wasInboxTurn && session.a2aInboxTurn?.isInboxTurnActive()) {
+                    session.a2aInboxTurn.setInboxTurnActive(false);
                 }
                 session.a2aInboxTurn?.onTurnEnd({
                     succeeded: turnSucceeded && !turnCancelled,

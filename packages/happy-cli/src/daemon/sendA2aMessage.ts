@@ -17,7 +17,7 @@ function getSessionKeyPrefix(agent?: string): 'cursor' | 'claude' | null {
   return null;
 }
 
-async function readSessionKey(sessionId: string): Promise<Uint8Array | null> {
+export async function readDaemonSessionKey(sessionId: string): Promise<Uint8Array | null> {
   const state = await readDaemonState();
   const agent = state?.lastAgentBySessionId?.[sessionId];
   const knownPrefix = getSessionKeyPrefix(agent);
@@ -47,6 +47,9 @@ async function readSessionKey(sessionId: string): Promise<Uint8Array | null> {
 
   return null;
 }
+
+const readSessionKey = readDaemonSessionKey;
+
 
 function normalizeA2AText(text: string, maxLength: number = 120): string {
   return text.replace(/\s+/g, ' ').trim().slice(0, maxLength);

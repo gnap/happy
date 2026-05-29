@@ -555,6 +555,7 @@ export async function runCodex(opts: {
     const happyServer = await startHappyServer(() => session, {
         useDaemonA2ARoute: opts.startedBy === 'daemon',
         onA2aMessage: (message) => handleUserMessage?.(message),
+        workspacePath: process.cwd(),
     });
     const bridgeCommand = join(projectPath(), 'bin', 'happy-mcp.mjs');
     const mcpServers = {

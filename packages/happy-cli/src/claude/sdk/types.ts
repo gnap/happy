@@ -65,6 +65,20 @@ export interface SDKResultMessage extends SDKMessage {
         cache_read_input_tokens?: number
         cache_creation_input_tokens?: number
     }
+    /**
+     * Per-model usage rollup that Claude Code adds to the result message.
+     * Carries the authoritative contextWindow + maxOutputTokens for the model that ran the turn.
+     */
+    modelUsage?: Record<string, {
+        inputTokens?: number
+        outputTokens?: number
+        cacheReadInputTokens?: number
+        cacheCreationInputTokens?: number
+        webSearchRequests?: number
+        costUSD?: number
+        contextWindow?: number
+        maxOutputTokens?: number
+    }>
     total_cost_usd: number
     duration_ms: number
     duration_api_ms: number

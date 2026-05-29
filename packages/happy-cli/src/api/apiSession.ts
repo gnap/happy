@@ -1372,11 +1372,18 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
-    closeClaudeSessionTurn(status: SessionTurnEndStatus = 'completed') {
-        const mapped = closeClaudeTurnWithStatus(this.claudeSessionProtocolState, status);
+    closeClaudeSessionTurn(status: SessionTurnEndStatus = 'completed', extras?: Record<string, unknown>) {
+        const mapped = closeClaudeTurnWithStatus(this.claudeSessionProtocolState, status, extras);
         this.claudeSessionProtocolState.currentTurnId = mapped.currentTurnId;
         for (const envelope of mapped.envelopes) {
-            this.sendSessionProtocolMessage(envelope);
+            // Use the lifecycle path for turn-end so the App stops the thinking timer
+            // (same shape Cursor uses; otherwise the timer can stick on after a long turn).
+            const isTurnEnd = (envelope.ev as { t?: string }).t === 'turn-end';
+            if (isTurnEnd) {
+                this.sendSessionLifecycleEnvelope(envelope);
+            } else {
+                this.sendSessionProtocolMessage(envelope);
+            }
         }
     }
 

@@ -24,6 +24,7 @@ import { projectPath } from '@/projectPath';
 import { getTmuxUtilities, isTmuxAvailable, parseTmuxSessionIdentifier, formatTmuxSessionIdentifier } from '@/utils/tmux';
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
 import { stripProfileManagedEnv } from '@/utils/profileEnv';
+import { fetchSessionProfileMeta } from './fetchSessionProfileMeta';
 
 /** Time to wait for a spawned session to report via /session-started webhook before failing the spawn (Cursor cold start can exceed 30s). */
 const SESSION_WEBHOOK_TIMEOUT_MS = 60_000;
@@ -1107,11 +1108,17 @@ export async function startDaemon(): Promise<void> {
       }
 
       // Spawn new process, reconnecting to the same server session via explicit CLI arg.
+      // Recover the App's last profile + env from the most recent user message so the
+      // respawned process is auth-ready before any A2A inbox turn fires. (Without this,
+      // the child boots with daemon-baseline env and inbox turns 401 until the next
+      // human user message arrives carrying meta.environmentVariables.)
+      const recoveredProfile = await fetchSessionProfileMeta(sessionId);
       const result = await spawnSession({
         directory,
         agent,
         resumeSessionTag: sessionTag,
         resumeAfterSeq: resumeAfterSeqBySessionId[sessionId],
+        environmentVariables: recoveredProfile?.environmentVariables ?? undefined,
       });
 
       if (result.type === 'success') {

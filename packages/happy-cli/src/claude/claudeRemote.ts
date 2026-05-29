@@ -1,5 +1,5 @@
 import { EnhancedMode } from "./loop";
-import { query, type QueryOptions, type SDKMessage, type SDKSystemMessage, AbortError, SDKUserMessage } from '@/claude/sdk'
+import { query, type QueryOptions, type SDKMessage, type SDKSystemMessage, AbortError, SDKUserMessage, type SDKResultMessage } from '@/claude/sdk'
 import { mapToClaudeMode } from "./utils/permissionMode";
 import { claudeCheckSession } from "./utils/claudeCheckSession";
 import { join, resolve } from 'node:path';
@@ -36,7 +36,7 @@ export async function claudeRemote(opts: {
 
     // Dynamic parameters
     nextMessage: () => Promise<{ message: string, mode: EnhancedMode } | null>,
-    onReady: () => void,
+    onReady: (result: SDKResultMessage) => void,
     isAborted: (toolCallId: string) => boolean,
 
     // Callbacks
@@ -212,7 +212,7 @@ export async function claudeRemote(opts: {
                 }
 
                 // Send ready event
-                opts.onReady();
+                opts.onReady(message as SDKResultMessage);
 
                 // Push next message — but first check if profile env changed since we started
                 const next = await opts.nextMessage();

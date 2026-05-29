@@ -19,6 +19,9 @@ import type { MessageQueue2 } from '@/utils/MessageQueue2';
 
 export const A2A_INBOX_TURN_META = { a2aInboxTurn: true } as const;
 
+/** Re-check interval after a backoff timer fires while the main agent is still busy. */
+const A2A_INBOX_RETRY_REARM_MS = 5_000;
+
 export function isA2AInboxTurnMeta(meta: unknown): boolean {
   if (!meta || typeof meta !== 'object') {
     return false;
@@ -78,10 +81,20 @@ export function createA2AInboxTurnController<TMode>(options: {
     if (delayMs <= 0) {
       return;
     }
-    a2aInboxBackoffTimer = setTimeout(() => {
+    // When the timer fires, the main agent may still be mid-turn (no waiter to wake,
+    // and `onReady → peekInbox` only re-evaluates when the agent's result arrives —
+    // which can be deferred indefinitely by SDK retries). Try scheduling directly so
+    // the deferral is logged, and re-arm a short tick if the agent is still busy so
+    // we don't silently drop the inbox turn.
+    const tickRetry = () => {
       a2aInboxBackoffTimer = null;
-      messageQueue.poke();
-    }, delayMs);
+      if (isAgentTurnActive() || inboxMcpScopeStack.hasScope('inbox-turn')) {
+        a2aInboxBackoffTimer = setTimeout(tickRetry, A2A_INBOX_RETRY_REARM_MS);
+        return;
+      }
+      scheduleA2ATurnIfNeeded();
+    };
+    a2aInboxBackoffTimer = setTimeout(tickRetry, delayMs);
   };
 
   const clearA2AInboxBackoff = () => {
