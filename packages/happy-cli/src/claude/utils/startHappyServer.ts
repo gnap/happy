@@ -107,11 +107,6 @@ export async function startHappyServer(getSession: GetSessionClient, options?: S
     }, {
         taskStore,
         taskMessageQueue,
-        capabilities: {
-            tasks: {
-                requests: { tools: { call: {} } },
-            },
-        },
     });
 
     mcp.registerTool('change_title', {

@@ -95,6 +95,7 @@ export const sessionEnvelopeSchema = z
         message: 'subagent must be a cuid2 value',
       })
       .optional(),
+    taskCall: z.string().optional(),
     ev: sessionEventSchema,
   })
   .superRefine((envelope, ctx) => {
@@ -121,6 +122,7 @@ export type CreateEnvelopeOptions = {
   time?: number;
   turn?: string;
   subagent?: string;
+  taskCall?: string;
 };
 
 export function createEnvelope(role: SessionRole, ev: SessionEvent, opts: CreateEnvelopeOptions = {}): SessionEnvelope {
@@ -130,6 +132,7 @@ export function createEnvelope(role: SessionRole, ev: SessionEvent, opts: Create
     role,
     ...(opts.turn ? { turn: opts.turn } : {}),
     ...(opts.subagent ? { subagent: opts.subagent } : {}),
+    ...(opts.taskCall ? { taskCall: opts.taskCall } : {}),
     ev,
   });
 }
