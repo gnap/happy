@@ -243,20 +243,20 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     reportToDaemon();
     setInterval(reportToDaemon, 60_000);
 
-    // Extract SDK metadata in background and update session when ready
-    extractSDKMetadataAsync(async (sdkMetadata) => {
+    // Extract SDK metadata in background and update session when ready.
+    // The callback fires asynchronously after extractSDKMetadata completes, so `session`
+    // (declared below) is already initialized by the time this runs.
+    extractSDKMetadataAsync((sdkMetadata) => {
         logger.debug('[start] SDK metadata extracted, updating session:', sdkMetadata);
-        try {
-            // Update session metadata with tools and slash commands
-            api.sessionSyncClient(response).updateMetadata((currentMetadata) => ({
-                ...currentMetadata,
-                tools: sdkMetadata.tools,
-                slashCommands: sdkMetadata.slashCommands
-            }));
+        session.updateMetadata((currentMetadata) => ({
+            ...currentMetadata,
+            tools: sdkMetadata.tools,
+            slashCommands: sdkMetadata.slashCommands
+        })).then(() => {
             logger.debug('[start] Session metadata updated with SDK capabilities');
-        } catch (error) {
-            logger.debug('[start] Failed to update session metadata:', error);
-        }
+        }).catch((err: unknown) => {
+            logger.debug('[start] Failed to update session metadata:', err);
+        });
     });
 
     // Create realtime session
