@@ -50,6 +50,14 @@ export const SessionRowStatusIndicators = React.memo(({ session }: { session: Se
                     <Text style={styles.badgeText}>{todoLabel}</Text>
                 </View>
             ) : null}
+            {session.tasks && session.tasks.length > 0 ? (
+                <View style={styles.badge}>
+                    <Ionicons name="checkmark-circle-outline" size={10} color={styles.badgeText.color} />
+                    <Text style={styles.badgeText}>
+                        {session.tasks.filter(t => t.status === 'completed').length}/{session.tasks.length}
+                    </Text>
+                </View>
+            ) : null}
             {a2aUnread > 0 ? (
                 <View style={styles.badge}>
                     <Ionicons name="mail-unread-outline" size={10} color={styles.badgeText.color} />

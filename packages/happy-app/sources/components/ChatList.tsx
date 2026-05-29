@@ -5,7 +5,9 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useHeaderHeight } from '@/utils/responsive';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MessageView } from './MessageView';
+import { TaskListView } from './TaskListView';
 import { Metadata, Session } from '@/sync/storageTypes';
+import { layout } from './layout';
 import { ChatFooter } from './ChatFooter';
 import { Message } from '@/sync/typesMessage';
 import { sync } from '@/sync/sync';
@@ -21,6 +23,7 @@ export const ChatList = React.memo((props: { session: Session }) => {
             hasOlderMessages={hasOlderMessages}
             isLoadingOlder={isLoadingOlder}
             isFetching={isFetching}
+            tasks={props.session.tasks}
         />
     )
 });
@@ -65,6 +68,7 @@ const ChatListInternal = React.memo((props: {
     hasOlderMessages: boolean,
     isLoadingOlder: boolean,
     isFetching: boolean,
+    tasks: Session['tasks'],
 }) => {
     const flatListRef = useRef<FlatList>(null);
     // Track whether the user is near the visual bottom (newest messages).
@@ -72,10 +76,99 @@ const ChatListInternal = React.memo((props: {
     const isNearBottomRef = useRef(true);
     const prevMessagesLengthRef = useRef(props.messages.length);
 
+    // Collapse TaskCreate → [intermediate work] → TaskUpdate into a task-cluster item
+    const messagesWithTasks = useMemo(() => {
+        const taskNames = new Set(['TaskCreate', 'TaskUpdate']);
+        const result: any[] = [];
+        let i = 0;
+        while (i < props.messages.length) {
+            const msg = props.messages[i] as any;
+            const isTaskMsg = msg.kind === 'tool-call' && taskNames.has(msg.tool?.name);
+            if (isTaskMsg) {
+                // Find all task messages and the messages between them
+                const clusterMsgs: any[] = [];
+                const collapsedMsgs: any[] = [];
+                let foundTaskUpdate = false;
+                while (i < props.messages.length) {
+                    const m = props.messages[i] as any;
+                    if (m.kind === 'tool-call' && m.tool?.name === 'TaskCreate' && clusterMsgs.length === 0) {
+                        clusterMsgs.push(m);
+                        i++;
+                    } else if (m.kind === 'tool-call' && taskNames.has(m.tool?.name)) {
+                        clusterMsgs.push(m);
+                        if (m.tool?.name === 'TaskUpdate') foundTaskUpdate = true;
+                        i++;
+                    } else if (!foundTaskUpdate) {
+                        // Intermediate messages between TaskCreate and TaskUpdate — collapse them
+                        collapsedMsgs.push(m);
+                        i++;
+                    } else {
+                        break;
+                    }
+                }
+                // Extract task items from cluster messages
+                const taskMap = new Map<string, { id: string; content: string; status: string }>();
+                for (const cm of clusterMsgs) {
+                    const tool = cm.tool;
+                    const name = tool?.name;
+                    const input = tool?.input || {};
+                    if (name === 'TaskCreate') {
+                        const content = input.description || input.subject || input.activeForm || '';
+                        if (content) {
+                            const key = content;
+                            if (!taskMap.has(key)) {
+                                taskMap.set(key, { id: content, content, status: 'pending' });
+                            }
+                        }
+                    } else if (name === 'TaskUpdate') {
+                        const tid = input.taskId || input.id || '';
+                        if (tid) {
+                            for (const [key, entry] of taskMap) {
+                                if (entry.id === key && key !== tid) {
+                                    taskMap.delete(key);
+                                    entry.id = tid;
+                                    taskMap.set(tid, entry);
+                                    break;
+                                }
+                            }
+                            const existing = taskMap.get(tid);
+                            if (existing) {
+                                existing.status = input.status || existing.status;
+                            }
+                        }
+                    }
+                }
+                const tasks = Array.from(taskMap.values());
+                result.push({
+                    id: clusterMsgs[0].id,
+                    kind: 'task-cluster',
+                    tasks: tasks.length > 0 ? tasks : undefined,
+                    collapsedCount: collapsedMsgs.length,
+                    createdAt: clusterMsgs[0].createdAt,
+                });
+            } else {
+                result.push(msg);
+                i++;
+            }
+        }
+        return result;
+    }, [props.messages]);
+
     const keyExtractor = useCallback((item: any) => item.id, []);
-    const renderItem = useCallback(({ item }: { item: any }) => (
-        <MessageView message={item} metadata={props.metadata} sessionId={props.sessionId} />
-    ), [props.metadata, props.sessionId]);
+    const renderItem = useCallback(({ item }: { item: any }) => {
+        if (item.kind === 'task-cluster') {
+            return (
+                <View style={{ flexDirection: 'row', justifyContent: 'center' }}>
+                    <View style={{ flexDirection: 'column', flexGrow: 1, flexBasis: 0, maxWidth: layout.maxWidth }}>
+                        <View style={{ marginHorizontal: 8, marginBottom: 12 }}>
+                            <TaskListView tasks={item.tasks} collapsedCount={item.collapsedCount} />
+                        </View>
+                    </View>
+                </View>
+            );
+        }
+        return <MessageView message={item} metadata={props.metadata} sessionId={props.sessionId} />;
+    }, [props.metadata, props.sessionId]);
 
     const handleEndReached = useCallback(() => {
         if (props.hasOlderMessages && !props.isLoadingOlder) {
@@ -95,7 +188,7 @@ const ChatListInternal = React.memo((props: {
         if (curr > prev && isNearBottomRef.current) {
             flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
         }
-    }, [props.messages]);
+    }, [messagesWithTasks]);
 
     // In an inverted FlatList:
     //   ListHeaderComponent → visual bottom (below newest message, above input)
@@ -118,7 +211,7 @@ const ChatListInternal = React.memo((props: {
     return (
         <FlatList
             ref={flatListRef}
-            data={props.messages}
+            data={messagesWithTasks}
             inverted={true}
             keyExtractor={keyExtractor}
             maintainVisibleContentPosition={{

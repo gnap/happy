@@ -19,6 +19,13 @@ export const MessageView = (props: {
   sessionId: string;
   getMessageById?: (id: string) => Message | null;
 }) => {
+  // Hide TaskCreate/TaskUpdate messages — they render as task-cluster items instead
+  if (props.message.kind === 'tool-call') {
+    const name = (props.message as any).tool?.name;
+    if (name === 'TaskCreate' || name === 'TaskUpdate') {
+      return null;
+    }
+  }
   return (
     <View style={styles.messageContainer} renderToHardwareTextureAndroid={true}>
       <View style={styles.messageContent}>
