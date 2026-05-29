@@ -74,6 +74,14 @@ export interface PersistedReducerState {
         }>;
         timestamp: number;
     };
+    latestTasks?: {
+        tasks: Array<{
+            id: string;
+            content: string;
+            status: 'pending' | 'in_progress' | 'completed';
+        }>;
+        timestamp: number;
+    };
     latestUsage?: {
         inputTokens: number;
         outputTokens: number;
@@ -114,6 +122,7 @@ export function serializeReducerState(state: ReducerState): PersistedReducerStat
         sidechains: Array.from(state.sidechains.entries()),
         tracerState: serializeTracerState(state.tracerState),
         latestTodos: state.latestTodos,
+        latestTasks: state.latestTasks,
         latestUsage: state.latestUsage,
     };
 }
@@ -149,6 +158,7 @@ export function deserializeReducerState(persisted: PersistedReducerState): Reduc
         sidechains: new Map(persisted.sidechains),
         tracerState: deserializeTracerState(persisted.tracerState),
         latestTodos: persisted.latestTodos,
+        latestTasks: persisted.latestTasks,
         latestUsage: persisted.latestUsage,
     };
 }

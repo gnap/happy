@@ -142,14 +142,17 @@ function ensureBgTaskIdToCallId(state: ClaudeSessionProtocolState): Map<string, 
 }
 
 function extractBackgroundTaskId(block: Record<string, unknown>, message: RawJSONLines): string | undefined {
+    // Try toolUseResult first (JSONL format)
     const tur = message.toolUseResult as Record<string, unknown> | undefined;
     if (tur?.backgroundTaskId && typeof tur.backgroundTaskId === 'string') {
         return tur.backgroundTaskId;
     }
+    // Try tool_use_result (raw stream format)
     const tur2 = (message as Record<string, unknown>).tool_use_result as Record<string, unknown> | undefined;
     if (tur2?.backgroundTaskId && typeof tur2.backgroundTaskId === 'string') {
         return tur2.backgroundTaskId;
     }
+    // Fallback: parse from content string "Command running in background with ID: xxx"
     const content = block.content;
     if (typeof content === 'string') {
         const m = content.match(/background with ID:\s*(\w+)/);
@@ -417,21 +420,12 @@ function closeTurn(
     state: ClaudeSessionProtocolState,
     status: SessionTurnEndStatus,
     envelopes: SessionEnvelope[],
-    extras?: Record<string, unknown>,
 ): void {
     if (!state.currentTurnId) {
         return;
     }
 
-    const ev: Record<string, unknown> = { t: 'turn-end', status };
-    if (extras) {
-        for (const [key, value] of Object.entries(extras)) {
-            if (value !== undefined) {
-                ev[key] = value;
-            }
-        }
-    }
-    envelopes.push(createEnvelope('agent', ev as { t: 'turn-end'; status: SessionTurnEndStatus }, { turn: state.currentTurnId }));
+    envelopes.push(createEnvelope('agent', { t: 'turn-end', status }, { turn: state.currentTurnId }));
     state.currentTurnId = null;
     clearSubagentTracking(state);
 }
@@ -441,17 +435,6 @@ function toolTitle(name: string, input: unknown): string {
         const description = (input as { description?: unknown }).description;
         if (typeof description === 'string' && description.trim().length > 0) {
             return description.length > 80 ? `${description.slice(0, 77)}...` : description;
-        }
-        // Models sometimes skip the optional `description` (sonnet does this often for Bash);
-        // fall back to a short echo of the primary input so the App card has something
-        // descriptive instead of the generic "Bash call".
-        const fallbackKeys = ['command', 'cmd', 'query', 'pattern', 'file_path', 'path', 'url'];
-        for (const key of fallbackKeys) {
-            const value = (input as Record<string, unknown>)[key];
-            if (typeof value === 'string' && value.trim().length > 0) {
-                const trimmed = value.trim().replace(/\s+/g, ' ');
-                return trimmed.length > 80 ? `${trimmed.slice(0, 77)}...` : trimmed;
-            }
         }
     }
     return `${name} call`;
@@ -470,10 +453,9 @@ function toToolArgs(input: unknown): Record<string, unknown> {
 export function closeClaudeTurnWithStatus(
     state: ClaudeSessionProtocolState,
     status: SessionTurnEndStatus,
-    extras?: Record<string, unknown>,
 ): ClaudeMapperResult {
     const envelopes: SessionEnvelope[] = [];
-    closeTurn(state, status, envelopes, extras);
+    closeTurn(state, status, envelopes);
     return {
         currentTurnId: state.currentTurnId,
         envelopes,
@@ -495,9 +477,6 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
     const providerSubagent = resolveProviderSubagent(message, state);
     const subagent = providerSubagent
         ? getSessionSubagentIdForProviderSubagent(state, providerSubagent)
-        : undefined;
-    const taskCallId = subagent
-        ? getTaskCallBySubagent(state).get(subagent)
         : undefined;
     rememberSubagentForMessage(message, state, providerSubagent);
 
@@ -525,17 +504,18 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
 
     if (message.type === 'assistant') {
         const turnId = ensureTurn(state, envelopes);
+        const taskCallId = subagent ? getTaskCallBySubagent(state).get(subagent) : undefined;
         maybeEmitSubagentStart(state, turnId, subagent, envelopes);
         const blocks = Array.isArray(message.message?.content) ? message.message.content : [];
 
         for (const block of blocks) {
             if (block.type === 'text' && typeof block.text === 'string') {
-                envelopes.push(createEnvelope('agent', { t: 'text', text: block.text }, { turn: turnId, subagent, taskCall: taskCallId }));
+                envelopes.push(createEnvelope('agent', { t: 'text', text: block.text }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
                 continue;
             }
 
-            // Thinking blocks are suppressed (not useful to surface, wastes bandwidth)
             if (block.type === 'thinking' && typeof block.thinking === 'string') {
+                envelopes.push(createEnvelope('agent', { t: 'text', text: block.thinking, thinking: true }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
                 continue;
             }
 
@@ -545,8 +525,6 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                 const args = toToolArgs(block.input);
                 const title = toolTitle(name, block.input);
                 const sessionSubagentForCall = ensureSessionSubagentIdForProviderSubagent(state, call);
-                // Task/TaskOutput/TaskStop: internal subagent lifecycle tools, hidden from the UI
-                // TaskCreate/TaskUpdate: task management tools, rendered as cards
                 if (name === 'Task') {
                     getHiddenParentToolCalls(state).add(call);
                     continue;
@@ -586,7 +564,7 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                     title,
                     description: title,
                     args,
-                }, { turn: turnId, subagent, taskCall: taskCallId }));
+                }, { turn: turnId, subagent }));
                 const buffered = consumeBufferedSubagentMessages(state, call);
                 for (const bufferedMessage of buffered) {
                     const replay = mapClaudeLogMessageToSessionEnvelopesInternal(bufferedMessage, state);
@@ -602,11 +580,12 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
     }
 
     if (message.type === 'user') {
+        const taskCallId = subagent ? getTaskCallBySubagent(state).get(subagent) : undefined;
         if (typeof message.message.content === 'string') {
             if (message.isSidechain) {
                 const turnId = ensureTurn(state, envelopes);
                 maybeEmitSubagentStart(state, turnId, subagent, envelopes);
-                envelopes.push(createEnvelope('agent', { t: 'text', text: message.message.content }, { turn: turnId, subagent, taskCall: taskCallId }));
+                envelopes.push(createEnvelope('agent', { t: 'text', text: message.message.content }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
             } else {
                 closeTurn(state, 'completed', envelopes);
                 envelopes.push(createEnvelope('user', { t: 'text', text: message.message.content }));
@@ -626,59 +605,40 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
             };
         }
 
-        const hasToolResults = blocks.some(b => b.type === 'tool_result' && typeof b.tool_use_id === 'string' && b.tool_use_id.length > 0);
-        if (hasToolResults || message.isSidechain) {
-            // Tool-call lifecycle or sidechain: process blocks as agent envelopes
-            const turnId = ensureTurn(state, envelopes);
-            if (message.isSidechain) {
-                maybeEmitSubagentStart(state, turnId, subagent, envelopes);
-            }
-            // Record bgTaskId → callId mapping for Bash run_in_background
-            for (const block of blocks) {
-                if (block.type === 'tool_result' && typeof block.tool_use_id === 'string' && block.tool_use_id.length > 0) {
-                    const bgTaskId = extractBackgroundTaskId(block, message);
-                    if (bgTaskId) {
-                        ensureBgTaskIdToCallId(state).set(bgTaskId, block.tool_use_id);
-                    }
-                    const sessionSubagentForToolResult = getSessionSubagentIdForProviderSubagent(state, block.tool_use_id);
-                    if (!message.isSidechain) {
-                        if (getHiddenParentToolCalls(state).has(block.tool_use_id)) {
-                            if (sessionSubagentForToolResult) {
-                                maybeEmitSubagentStop(state, turnId, sessionSubagentForToolResult, envelopes);
-                            }
-                            getHiddenParentToolCalls(state).delete(block.tool_use_id);
-                            continue;
-                        }
+        const turnId = ensureTurn(state, envelopes);
+        if (message.isSidechain) {
+            maybeEmitSubagentStart(state, turnId, subagent, envelopes);
+        }
+        // Record bgTaskId → callId mapping for Bash run_in_background
+        for (const block of blocks) {
+            if (block.type === 'tool_result' && typeof block.tool_use_id === 'string' && block.tool_use_id.length > 0) {
+                const bgTaskId = extractBackgroundTaskId(block, message);
+                if (bgTaskId) {
+                    ensureBgTaskIdToCallId(state).set(bgTaskId, block.tool_use_id);
+                }
+                const sessionSubagentForToolResult = getSessionSubagentIdForProviderSubagent(state, block.tool_use_id);
+                if (!message.isSidechain) {
+                    if (getHiddenParentToolCalls(state).has(block.tool_use_id)) {
                         if (sessionSubagentForToolResult) {
                             maybeEmitSubagentStop(state, turnId, sessionSubagentForToolResult, envelopes);
                         }
+                        getHiddenParentToolCalls(state).delete(block.tool_use_id);
+                        continue;
                     }
-                    envelopes.push(createEnvelope('agent', {
-                        t: 'tool-call-end',
-                        call: block.tool_use_id,
-                    }, { turn: turnId, subagent, taskCall: taskCallId }));
-                    continue;
+                    if (sessionSubagentForToolResult) {
+                        maybeEmitSubagentStop(state, turnId, sessionSubagentForToolResult, envelopes);
+                    }
                 }
-
-                if (block.type === 'text' && typeof block.text === 'string' && block.text.trim().length > 0) {
-                    envelopes.push(createEnvelope('agent', { t: 'text', text: block.text }, { turn: turnId, subagent, taskCall: taskCallId }));
-                }
+                envelopes.push(createEnvelope('agent', {
+                    t: 'tool-call-end',
+                    call: block.tool_use_id,
+                }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
+                continue;
             }
 
-            return {
-                currentTurnId: state.currentTurnId,
-                envelopes,
-            };
-        }
-
-        // Plain user message with array content (no tool results): echo as user envelope
-        closeTurn(state, 'completed', envelopes);
-        const userText = blocks
-            .filter((b): b is { type: 'text'; text: string } => b.type === 'text' && typeof b.text === 'string')
-            .map(b => b.text)
-            .join('\n');
-        if (userText.length > 0) {
-            envelopes.push(createEnvelope('user', { t: 'text', text: userText }));
+            if (block.type === 'text' && typeof block.text === 'string' && block.text.trim().length > 0) {
+                envelopes.push(createEnvelope('agent', { t: 'text', text: block.text }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
+            }
         }
 
         return {

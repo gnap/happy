@@ -25,26 +25,6 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         expect(result.envelopes[0].ev).toEqual({ t: 'text', text: 'hello from user' });
     });
 
-    it('maps user array content to a user text envelope', () => {
-        const result = mapClaudeLogMessageToSessionEnvelopes({
-            type: 'user',
-            uuid: 'u-array',
-            message: {
-                role: 'user',
-                content: [
-                    { type: 'text', text: 'hello' },
-                    { type: 'text', text: 'world' },
-                ],
-            },
-            timestamp: '2025-01-01T00:00:00.000Z',
-        } as any, { currentTurnId: 'prev-turn' });
-
-        expect(result.envelopes.length).toBeGreaterThanOrEqual(2);
-        const userEnvelope = result.envelopes.find(e => e.role === 'user');
-        expect(userEnvelope).toBeDefined();
-        expect(userEnvelope!.ev).toEqual({ t: 'text', text: 'hello\nworld' });
-    });
-
     it('starts a turn and maps assistant text blocks', () => {
         const result = mapClaudeLogMessageToSessionEnvelopes({
             type: 'assistant',
@@ -60,9 +40,10 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         } as any, { currentTurnId: null });
 
         expect(result.currentTurnId).not.toBeNull();
-        expect(result.envelopes).toHaveLength(2);
+        expect(result.envelopes).toHaveLength(3);
         expect(result.envelopes[0].ev.t).toBe('turn-start');
         expect(result.envelopes[1].ev).toEqual({ t: 'text', text: 'working...' });
+        expect(result.envelopes[2].ev).toEqual({ t: 'text', text: 'internal', thinking: true });
     });
 
     it('maps tool use and tool result blocks to tool-call lifecycle', () => {
@@ -124,7 +105,7 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         expect(result.envelopes[1].ev).toEqual({ t: 'text', text: 'sidechain text' });
     });
 
-    it('hides Task/TaskOutput/TaskStop/Agent, shows TaskCreate/TaskUpdate as cards', () => {
+    it('hides Task/TaskOutput/TaskStop, shows TaskCreate/TaskUpdate/Agent as cards', () => {
         const state = { currentTurnId: 'turn-active' };
 
         // These should be hidden
@@ -192,6 +173,7 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         const state = {
             currentTurnId: 'turn-1',
             providerSubagentToSessionSubagent: new Map<string, string>([['task-2', mappedSubagent]]),
+            hiddenParentToolCalls: new Set<string>(),
         };
 
         const started = mapClaudeLogMessageToSessionEnvelopes({
@@ -241,32 +223,6 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
 
         expect(result.currentTurnId).toBe('turn-1');
         expect(result.envelopes).toHaveLength(0);
-    });
-
-    it('includes taskCall on subagent text envelopes linking to parent Task tool call', () => {
-        const taskCallId = 'toolu_task123';
-        const mappedSubagent = createId();
-        const state = {
-            currentTurnId: 'turn-1',
-            providerSubagentToSessionSubagent: new Map<string, string>([[taskCallId, mappedSubagent]]),
-            taskCallBySubagent: new Map<string, string>([[mappedSubagent, taskCallId]]),
-        };
-
-        const result = mapClaudeLogMessageToSessionEnvelopes({
-            type: 'assistant',
-            uuid: 'a-subagent-text',
-            parent_tool_use_id: taskCallId,
-            message: {
-                role: 'assistant',
-                content: [{ type: 'text', text: 'subagent output' }],
-            },
-        } as any, state);
-
-        // The text envelope should carry both subagent cuid AND taskCall (the parent Task tool call ID)
-        const textEnv = result.envelopes.find(e => e.ev.t === 'text');
-        expect(textEnv).toBeDefined();
-        expect(textEnv!.subagent).toBe(mappedSubagent);
-        expect(textEnv!.taskCall).toBe(taskCallId);
     });
 });
 
