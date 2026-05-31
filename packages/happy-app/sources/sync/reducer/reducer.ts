@@ -145,6 +145,7 @@ type StoredPermission = {
 export type ReducerState = {
     toolIdToMessageId: Map<string, string>; // toolId/permissionId -> messageId (since they're the same now)
     sidechainToolIdToMessageId: Map<string, string>; // toolId -> sidechain messageId (for dual tracking)
+    sidechainBufferedResults: Map<string, { is_error: boolean; content: unknown; createdAt: number; permissions?: unknown }>; // tool_use_id -> buffered result (tool-result arrived before tool-call-start)
     permissions: Map<string, StoredPermission>; // Store permission details by ID for quick lookup
     localIds: Map<string, string>;
     messageIds: Map<string, string>; // originalId -> internalId
@@ -187,6 +188,7 @@ export function createReducer(): ReducerState {
     return {
         toolIdToMessageId: new Map(),
         sidechainToolIdToMessageId: new Map(),
+        sidechainBufferedResults: new Map(),
         permissions: new Map(),
         messages: new Map(),
         localIds: new Map(),
@@ -1063,12 +1065,44 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
 
                     // Map sidechain tool separately to avoid overwriting permission mapping
                     state.sidechainToolIdToMessageId.set(c.id, mid);
+
+                    // Replay buffered tool-result that arrived before this tool-call-start
+                    const bufferedResult = state.sidechainBufferedResults.get(c.id);
+                    if (bufferedResult) {
+                        state.sidechainBufferedResults.delete(c.id);
+                        toolCall.state = bufferedResult.is_error ? 'error' : 'completed';
+                        toolCall.result = bufferedResult.content;
+                        toolCall.completedAt = bufferedResult.createdAt;
+                        if (bufferedResult.permissions) {
+                            const perms = bufferedResult.permissions as any;
+                            toolCall.permission = {
+                                id: c.id,
+                                status: perms.result === 'approved' ? 'approved' : 'denied',
+                                date: perms.date,
+                                mode: perms.mode,
+                                allowedTools: perms.allowedTools,
+                                decision: perms.decision,
+                            };
+                        }
+                        changed.add(mid);
+                    }
                 } else if (c.type === 'tool-result') {
                     // Process tool result in sidechain - update BOTH messages
 
                     // Update the sidechain tool message
                     let sidechainMessageId = state.sidechainToolIdToMessageId.get(c.tool_use_id);
-                    if (sidechainMessageId) {
+                    if (!sidechainMessageId) {
+                        // Tool-call-start hasn't arrived yet (out-of-order delivery).
+                        // Buffer the result and replay it when the tool-call-start is processed.
+                        state.sidechainBufferedResults.set(c.tool_use_id, {
+                            is_error: c.is_error,
+                            content: c.content,
+                            createdAt: msg.createdAt,
+                            permissions: c.permissions,
+                        });
+                        continue;
+                    }
+                    {
                         let sidechainMessage = state.messages.get(sidechainMessageId);
                         if (sidechainMessage && sidechainMessage.tool && sidechainMessage.tool.state === 'running') {
                             sidechainMessage.tool.state = c.is_error ? 'error' : 'completed';
@@ -1100,6 +1134,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                                     };
                                 }
                             }
+                            changed.add(sidechainMessageId);
                         }
                     }
 

@@ -152,6 +152,7 @@ export function deserializeReducerState(persisted: PersistedReducerState): Reduc
     return {
         toolIdToMessageId: new Map(persisted.toolIdToMessageId),
         sidechainToolIdToMessageId: new Map(persisted.sidechainToolIdToMessageId),
+        sidechainBufferedResults: new Map(), // transient — never persisted
         permissions: new Map(persisted.permissions),
         localIds: new Map(persisted.localIds),
         messageIds: new Map(persisted.messageIds),
