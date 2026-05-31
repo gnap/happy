@@ -1,5 +1,5 @@
-import React from 'react';
-import { View } from 'react-native';
+import React, { useRef, useEffect } from 'react';
+import { View, Animated } from 'react-native';
 import { Text } from '@/components/StyledText';
 import { Typography } from '@/constants/Typography';
 import { StyleSheet } from 'react-native-unistyles';
@@ -13,31 +13,80 @@ export interface TaskItem {
     collapsedCount?: number;
 }
 
-const STATUS_CONFIG: Record<TaskStatus, { icon: string; color: string; textDecoration?: 'line-through' }> = {
-    completed: { icon: '☑', color: '#34C759', textDecoration: 'line-through' },
-    in_progress: { icon: '○', color: '#007AFF' },
-    pending: { icon: '○', color: '#666' },
-};
-
-const STATUS_LABEL: Record<TaskStatus, string> = {
-    completed: 'completed',
-    in_progress: 'in progress',
-    pending: 'pending',
-};
-
 const LINE_COLOR = '#e0e0e0';
+
+const DOT_COLORS: Record<TaskStatus, string> = {
+    completed: '#34C759',
+    in_progress: '#FFCC00',
+    pending: '#999',
+};
+
+function childLabel(task: TaskItem): string {
+    const count = task.collapsedCount ?? 0;
+    const calls = count > 0 ? ` (${count} tool ${count === 1 ? 'call' : 'calls'})` : '';
+    switch (task.status) {
+        case 'completed':
+            return `completed${calls}`;
+        case 'in_progress':
+            return count > 0 ? `running${calls}...` : 'running...';
+        default:
+            return 'waiting...';
+    }
+}
+
+function TaskDot({ status }: { status: TaskStatus }) {
+    const anim = useRef(new Animated.Value(status === 'in_progress' ? 1 : 1)).current;
+
+    useEffect(() => {
+        if (status === 'in_progress') {
+            const pulse = Animated.loop(
+                Animated.sequence([
+                    Animated.timing(anim, { toValue: 0.3, duration: 800, useNativeDriver: true }),
+                    Animated.timing(anim, { toValue: 1, duration: 800, useNativeDriver: true }),
+                ])
+            );
+            pulse.start();
+            return () => pulse.stop();
+        } else {
+            anim.setValue(1);
+        }
+    }, [status, anim]);
+
+    return (
+        <View style={twodot.wrap}>
+            <Animated.View
+                style={[
+                    twodot.dot,
+                    { backgroundColor: DOT_COLORS[status], opacity: anim },
+                ]}
+            />
+        </View>
+    );
+}
+
+const twodot = StyleSheet.create({
+    wrap: {
+        width: 20,
+        alignItems: 'center',
+        justifyContent: 'center',
+        paddingTop: 4,
+    },
+    dot: {
+        width: 10,
+        height: 10,
+        borderRadius: 5,
+    },
+});
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
         paddingVertical: 8,
         paddingHorizontal: 12,
     },
-    // Top-level task node
     taskRow: {
         flexDirection: 'row',
         minHeight: 28,
     },
-    // Child status node (below each task)
     childRow: {
         flexDirection: 'row',
         minHeight: 22,
@@ -46,29 +95,18 @@ const stylesheet = StyleSheet.create((theme) => ({
         width: 20,
         alignItems: 'center',
     },
-    lineContainer: {
+    lineBox: {
         flex: 1,
         width: 2,
         backgroundColor: LINE_COLOR,
-    },
-    dot: {
-        width: 20,
-        alignItems: 'center',
-        justifyContent: 'center',
-        paddingTop: 2,
-    },
-    dotText: {
-        fontSize: 12,
-        lineHeight: 16,
     },
     contentCol: {
         flex: 1,
         paddingLeft: 6,
         paddingTop: 3,
     },
-    contentText: {
+    taskText: {
         fontSize: 13,
-        color: theme.colors.text,
         ...Typography.default(),
     },
     childText: {
@@ -89,33 +127,24 @@ export const TaskListView = React.memo(({ tasks }: { tasks?: TaskItem[] }) => {
         <View style={styles.container}>
             {tasks.map((task, index) => {
                 const isLast = index === tasks.length - 1;
-                const cfg = STATUS_CONFIG[task.status] ?? STATUS_CONFIG.pending;
-                const statusLabel = STATUS_LABEL[task.status] ?? 'pending';
-                const hasChild = task.collapsedCount !== undefined && task.collapsedCount > 0;
-
-                // Child node text mimics TUI: "completed (N tool calls)" or just "completed"
-                const childText = hasChild
-                    ? `${statusLabel} (${task.collapsedCount} tool ${task.collapsedCount === 1 ? 'call' : 'calls'})`
-                    : statusLabel;
+                const dotColor = DOT_COLORS[task.status] ?? DOT_COLORS.pending;
 
                 return (
                     <React.Fragment key={task.id}>
-                        {/* Top-level: task title with colored status */}
+                        {/* Top-level: task title */}
                         <View style={styles.taskRow}>
                             <View style={styles.timelineCol}>
-                                <View style={styles.dot}>
-                                    <Text style={[styles.dotText, { color: cfg.color }]}>
-                                        {cfg.icon}
-                                    </Text>
-                                </View>
-                                <View style={styles.lineContainer} />
+                                <TaskDot status={task.status} />
+                                <View style={styles.lineBox} />
                             </View>
                             <View style={styles.contentCol}>
                                 <Text
                                     style={[
-                                        styles.contentText,
-                                        { color: cfg.color },
-                                        ...(cfg.textDecoration ? [{ textDecorationLine: cfg.textDecoration as 'line-through' }] : []),
+                                        styles.taskText,
+                                        { color: dotColor },
+                                        ...(task.status === 'completed'
+                                            ? [{ textDecorationLine: 'line-through' as const }]
+                                            : []),
                                     ]}
                                     numberOfLines={2}
                                 >
@@ -123,14 +152,14 @@ export const TaskListView = React.memo(({ tasks }: { tasks?: TaskItem[] }) => {
                                 </Text>
                             </View>
                         </View>
-                        {/* Child: execution status + collapsed tool info */}
+                        {/* Child: execution status */}
                         <View style={styles.childRow}>
                             <View style={styles.timelineCol}>
-                                {!isLast && <View style={styles.lineContainer} />}
+                                {!isLast && <View style={styles.lineBox} />}
                             </View>
                             <View style={styles.contentCol}>
                                 <Text style={styles.childText} numberOfLines={1}>
-                                    {childText}
+                                    {childLabel(task)}
                                 </Text>
                             </View>
                         </View>
