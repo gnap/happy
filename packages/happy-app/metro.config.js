@@ -72,6 +72,7 @@ config.server.rewriteRequestUrl = (url) => {
 // outside the project tree entirely, preventing FallbackWatcher crashes.
 config.resolver.blockList = [/src-tauri[/\\]target[/\\].*/];
 
+
 // Add support for .wasm files (required by Skia for all platforms)
 // Source: https://shopify.github.io/react-native-skia/docs/getting-started/installation/
 config.resolver.assetExts.push('wasm');

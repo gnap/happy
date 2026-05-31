@@ -1,29 +1,10 @@
 import type { Socket } from 'socket.io-client';
+import { io } from 'socket.io-client';
 import { TokenStorage } from '@/auth/tokenStorage';
 import { Encryption } from './encryption/encryption';
 import { isRunningInTauri } from '@/utils/platform';
-import { withTauriWebSocketCtor } from './tauriWebSocketPolyfill';
 
-type IoFn = typeof import('socket.io-client').io;
-
-/**
- * Lazily imports `socket.io-client`. On Linux/Tauri we install a Tauri-backed
- * WebSocket polyfill before the import so that engine.io-client captures it as
- * its `WebSocketCtor`. The polyfill is uninstalled immediately after; the
- * captured reference inside engine.io-client persists for the app lifetime.
- *
- * Why bypass libsoup: WebKitGTK's native WebSocket exhibits intermittent
- * stalls on multi-homed Linux hosts (e.g. WiFi + a second interface up). The
- * Rust-side websocket plugin uses tungstenite on the host network stack and
- * doesn't have this issue.
- */
-let cachedIo: Promise<IoFn> | null = null;
-function getIo(): Promise<IoFn> {
-    if (!cachedIo) {
-        cachedIo = withTauriWebSocketCtor(() => import('socket.io-client').then((m) => m.io));
-    }
-    return cachedIo;
-}
+type IoFn = typeof io;
 
 //
 // Constants (aligned with CLI/daemon reconnection behavior)
@@ -139,13 +120,6 @@ class ApiSocket {
 
     async #doConnect(): Promise<void> {
         if (!this.config) return;
-        let io: IoFn;
-        try {
-            io = await getIo();
-        } catch (err) {
-            this.updateStatus('error', err instanceof Error ? err : new Error(String(err)));
-            return;
-        }
 
         // While we awaited, the world may have moved on. Bail out if so.
         if (!this.config) return;
@@ -467,6 +441,7 @@ class ApiSocket {
 
     private setupEventHandlers() {
         if (!this.socket) return;
+
 
         // Connection events
         this.socket.on('connect', () => {
