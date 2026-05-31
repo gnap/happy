@@ -102,11 +102,10 @@ const ChatListInternal = React.memo((props: {
                         const input = m.tool?.input || {};
                         const tid = input.taskId || input.id || '';
                         const idx = parseInt(tid, 10) - 1;
-                        console.log('[task-cluster] TaskUpdate input=', JSON.stringify(input), 'tid=', tid, 'idx=', idx, 'status=', input.status);
                         if (!isNaN(idx) && idx >= 0 && idx < taskItems.length) {
                             taskItems[idx].status = input.status || taskItems[idx].status;
+                            currentTaskIdx = idx;
                         }
-                        currentTaskIdx = idx >= 0 && idx < taskItems.length ? idx : currentTaskIdx;
                         i++;
                     } else if (m.kind === 'tool-call' || m.kind === 'agent-text') {
                         // Intermediate tool calls / text — count towards current task
@@ -120,7 +119,6 @@ const ChatListInternal = React.memo((props: {
                     }
                 }
                 if (taskItems.length > 0) {
-                    console.log('[task-cluster] emitting cluster with tasks=', JSON.stringify(taskItems));
                     result.push({
                         id: clusterStartId,
                         kind: 'task-cluster',
