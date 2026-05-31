@@ -146,6 +146,7 @@ export type ReducerState = {
     toolIdToMessageId: Map<string, string>; // toolId/permissionId -> messageId (since they're the same now)
     sidechainToolIdToMessageId: Map<string, string>; // toolId -> sidechain messageId (for dual tracking)
     sidechainBufferedResults: Map<string, { is_error: boolean; content: unknown; createdAt: number; permissions?: unknown }>; // tool_use_id -> buffered result (tool-result arrived before tool-call-start)
+    bufferedResults: Map<string, { is_error: boolean; content: unknown; createdAt: number; permissions?: unknown }>; // same for main-chain
     permissions: Map<string, StoredPermission>; // Store permission details by ID for quick lookup
     localIds: Map<string, string>;
     messageIds: Map<string, string>; // originalId -> internalId
@@ -189,6 +190,7 @@ export function createReducer(): ReducerState {
         toolIdToMessageId: new Map(),
         sidechainToolIdToMessageId: new Map(),
         sidechainBufferedResults: new Map(),
+        bufferedResults: new Map(),
         permissions: new Map(),
         messages: new Map(),
         localIds: new Map(),
@@ -853,6 +855,15 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         state.toolIdToMessageId.set(c.id, mid);
                         changed.add(mid);
 
+                        // Replay buffered tool-result that arrived before this tool-call-start
+                        const bufferedResult = state.bufferedResults.get(c.id);
+                        if (bufferedResult) {
+                            state.bufferedResults.delete(c.id);
+                            toolCall.state = bufferedResult.is_error ? 'error' : 'completed';
+                            toolCall.result = bufferedResult.content;
+                            toolCall.completedAt = bufferedResult.createdAt;
+                        }
+
                         // Track TodoWrite tool inputs
                         if (toolCall.name === 'TodoWrite' && toolCall.state === 'running' && toolCall.input?.todos) {
                             if (!state.latestTodos || toolCall.createdAt > state.latestTodos.timestamp) {
@@ -884,6 +895,12 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     // Find the message containing this tool
                     let messageId = state.toolIdToMessageId.get(c.tool_use_id);
                     if (!messageId) {
+                        // Tool-call-start hasn't arrived yet — buffer and replay when it does
+                        state.bufferedResults.set(c.tool_use_id, {
+                            is_error: c.is_error,
+                            content: c.content,
+                            createdAt: msg.createdAt,
+                        });
                         continue;
                     }
 
