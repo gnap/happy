@@ -264,19 +264,9 @@ export function traceMessages(state: TracerState, messages: NormalizedMessage[])
                     results.push(...orphanResults);
                 }
             } else {
-                // For non-UUID parent references (e.g. subagent ids), treat as standalone
-                // when no parent mapping exists. CLI mapper is expected to resolve/sequence
-                // subagent ownership, so app should not permanently orphan these messages.
-                if (!isUuidLike(parentUuid)) {
-                    state.processedIds.add(message.id);
-                    const tracedMessage: TracedMessage = {
-                        ...message
-                    };
-                    results.push(tracedMessage);
-                    continue;
-                }
-
-                // Parent not yet processed - buffer this message as an orphan
+                // Parent not yet processed — buffer as orphan regardless of UUID shape.
+                // Sidechain children (Claude taskCall or Cursor subagent) must wait for
+                // their parent tool card even if they arrive first due to network reorder.
                 const orphans = state.orphanMessages.get(parentUuid) || [];
                 orphans.push(message);
                 state.orphanMessages.set(parentUuid, orphans);
