@@ -76,8 +76,8 @@ const ChatListInternal = React.memo((props: {
     const isNearBottomRef = useRef(true);
     const prevMessagesLengthRef = useRef(props.messages.length);
 
-    // TaskCreate/TaskUpdate cards are rendered individually via TaskTrackerView
-    // (rich colored status). Only intermediate tool calls are collapsed.
+    // Collapse TaskCreate → [work] → TaskUpdate batches into a single timeline card.
+    // Each task gets a top-level node (title) + one child node (execution status).
     const messagesWithTasks = useMemo(() => {
         const taskNames = new Set(['TaskCreate', 'TaskUpdate']);
         const result: any[] = [];
@@ -86,35 +86,44 @@ const ChatListInternal = React.memo((props: {
             const msg = props.messages[i] as any;
             const isTaskCreate = msg.kind === 'tool-call' && msg.tool?.name === 'TaskCreate';
             if (isTaskCreate) {
-                // Enter task mode — collect intermediate tool calls for collapse,
-                // while letting TaskCreate/TaskUpdate pass through as individual cards.
-                const collapsedMsgs: any[] = [];
+                const taskItems: { id: string; content: string; status: string; collapsedCount: number }[] = [];
+                let currentTaskIdx = -1;
+                let clusterStartId = msg.id;
+                let clusterStartTime = msg.createdAt;
                 while (i < props.messages.length) {
                     const m = props.messages[i] as any;
-                    if (m.kind === 'tool-call' && taskNames.has(m.tool?.name)) {
-                        // TaskCreate/TaskUpdate — pass through individually
-                        result.push(m);
+                    if (m.kind === 'tool-call' && m.tool?.name === 'TaskCreate') {
+                        const input = m.tool?.input || {};
+                        const content = input.description || input.subject || input.activeForm || '';
+                        taskItems.push({ id: String(taskItems.length + 1), content, status: 'pending', collapsedCount: 0 });
+                        currentTaskIdx = taskItems.length - 1;
+                        i++;
+                    } else if (m.kind === 'tool-call' && m.tool?.name === 'TaskUpdate') {
+                        const input = m.tool?.input || {};
+                        const tid = input.taskId || input.id || '';
+                        const idx = parseInt(tid, 10) - 1;
+                        if (!isNaN(idx) && idx >= 0 && idx < taskItems.length) {
+                            taskItems[idx].status = input.status || taskItems[idx].status;
+                            currentTaskIdx = idx;
+                        }
                         i++;
                     } else if (m.kind === 'tool-call' || m.kind === 'agent-text') {
-                        // Intermediate tool call or text — collapse
-                        collapsedMsgs.push(m);
+                        // Intermediate tool calls / text — count towards current task
+                        if (m.kind === 'tool-call' && currentTaskIdx >= 0 && currentTaskIdx < taskItems.length) {
+                            taskItems[currentTaskIdx].collapsedCount++;
+                        }
                         i++;
                     } else {
                         // User message, event, or other — exit task mode
                         break;
                     }
                 }
-                // Emit collapse card for intermediate tool calls (not task msgs themselves)
-                const collapsedToolCount = collapsedMsgs.filter(
-                    (m: any) => m.kind === 'tool-call'
-                ).length;
-                if (collapsedToolCount > 0) {
+                if (taskItems.length > 0) {
                     result.push({
-                        id: collapsedMsgs[0]?.id ?? result[result.length - 1]?.id ?? '',
+                        id: clusterStartId,
                         kind: 'task-cluster',
-                        tasks: undefined,
-                        collapsedCount: collapsedToolCount,
-                        createdAt: collapsedMsgs[0]?.createdAt ?? Date.now(),
+                        tasks: taskItems,
+                        createdAt: clusterStartTime,
                     });
                 }
             } else {
@@ -132,7 +141,7 @@ const ChatListInternal = React.memo((props: {
                 <View style={{ flexDirection: 'row', justifyContent: 'center' }}>
                     <View style={{ flexDirection: 'column', flexGrow: 1, flexBasis: 0, maxWidth: layout.maxWidth }}>
                         <View style={{ marginHorizontal: 8, marginBottom: 12 }}>
-                            <TaskListView tasks={item.tasks} collapsedCount={item.collapsedCount} />
+                            <TaskListView tasks={item.tasks} />
                         </View>
                     </View>
                 </View>

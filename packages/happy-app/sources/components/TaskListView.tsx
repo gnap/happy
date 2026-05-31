@@ -10,12 +10,19 @@ export interface TaskItem {
     id: string;
     content: string;
     status: TaskStatus;
+    collapsedCount?: number;
 }
 
 const STATUS_CONFIG: Record<TaskStatus, { icon: string; color: string; textDecoration?: 'line-through' }> = {
     completed: { icon: '☑', color: '#34C759', textDecoration: 'line-through' },
     in_progress: { icon: '○', color: '#007AFF' },
     pending: { icon: '○', color: '#666' },
+};
+
+const STATUS_LABEL: Record<TaskStatus, string> = {
+    completed: 'completed',
+    in_progress: 'in progress',
+    pending: 'pending',
 };
 
 const LINE_COLOR = '#e0e0e0';
@@ -25,9 +32,15 @@ const stylesheet = StyleSheet.create((theme) => ({
         paddingVertical: 8,
         paddingHorizontal: 12,
     },
-    itemRow: {
+    // Top-level task node
+    taskRow: {
         flexDirection: 'row',
         minHeight: 28,
+    },
+    // Child status node (below each task)
+    childRow: {
+        flexDirection: 'row',
+        minHeight: 22,
     },
     timelineCol: {
         width: 20,
@@ -58,70 +71,72 @@ const stylesheet = StyleSheet.create((theme) => ({
         color: theme.colors.text,
         ...Typography.default(),
     },
-    collapsedRow: {
-        flexDirection: 'row',
-        minHeight: 20,
-    },
-    emptyText: {
-        fontSize: 13,
+    childText: {
+        fontSize: 12,
         color: theme.colors.textSecondary,
         ...Typography.default(),
-        fontStyle: 'italic',
     },
 }));
 
-export const TaskListView = React.memo(({ tasks, collapsedCount }: { tasks?: TaskItem[]; collapsedCount?: number }) => {
+export const TaskListView = React.memo(({ tasks }: { tasks?: TaskItem[] }) => {
     const styles = stylesheet;
 
-    if ((!tasks || tasks.length === 0) && !collapsedCount) {
+    if (!tasks || tasks.length === 0) {
         return null;
     }
 
     return (
         <View style={styles.container}>
-            {(tasks ?? []).map((task, index) => {
-                const isLast = index === (tasks ?? []).length - 1;
+            {tasks.map((task, index) => {
+                const isLast = index === tasks.length - 1;
                 const cfg = STATUS_CONFIG[task.status] ?? STATUS_CONFIG.pending;
+                const statusLabel = STATUS_LABEL[task.status] ?? 'pending';
+                const hasChild = task.collapsedCount !== undefined && task.collapsedCount > 0;
+
+                // Child node text mimics TUI: "completed (N tool calls)" or just "completed"
+                const childText = hasChild
+                    ? `${statusLabel} (${task.collapsedCount} tool ${task.collapsedCount === 1 ? 'call' : 'calls'})`
+                    : statusLabel;
 
                 return (
-                    <View key={task.id} style={styles.itemRow}>
-                        <View style={styles.timelineCol}>
-                            <View style={styles.dot}>
-                                <Text style={[styles.dotText, { color: cfg.color }]}>
-                                    {cfg.icon}
+                    <React.Fragment key={task.id}>
+                        {/* Top-level: task title with colored status */}
+                        <View style={styles.taskRow}>
+                            <View style={styles.timelineCol}>
+                                <View style={styles.dot}>
+                                    <Text style={[styles.dotText, { color: cfg.color }]}>
+                                        {cfg.icon}
+                                    </Text>
+                                </View>
+                                <View style={styles.lineContainer} />
+                            </View>
+                            <View style={styles.contentCol}>
+                                <Text
+                                    style={[
+                                        styles.contentText,
+                                        { color: cfg.color },
+                                        ...(cfg.textDecoration ? [{ textDecorationLine: cfg.textDecoration as 'line-through' }] : []),
+                                    ]}
+                                    numberOfLines={2}
+                                >
+                                    {task.content}
                                 </Text>
                             </View>
-                            {!isLast && <View style={styles.lineContainer} />}
                         </View>
-                        <View style={styles.contentCol}>
-                            <Text
-                                style={[
-                                    styles.contentText,
-                                    { color: cfg.color },
-                                    ...(cfg.textDecoration ? [{ textDecorationLine: cfg.textDecoration as 'line-through' }] : []),
-                                ]}
-                                numberOfLines={2}
-                            >
-                                {task.content}
-                            </Text>
+                        {/* Child: execution status + collapsed tool info */}
+                        <View style={styles.childRow}>
+                            <View style={styles.timelineCol}>
+                                {!isLast && <View style={styles.lineContainer} />}
+                            </View>
+                            <View style={styles.contentCol}>
+                                <Text style={styles.childText} numberOfLines={1}>
+                                    {childText}
+                                </Text>
+                            </View>
                         </View>
-                    </View>
+                    </React.Fragment>
                 );
             })}
-            {collapsedCount ? (
-                <View style={styles.collapsedRow}>
-                    {tasks && tasks.length > 0 ? (
-                        <View style={styles.timelineCol}>
-                            <View style={{ flex: 1, width: 2, backgroundColor: LINE_COLOR }} />
-                        </View>
-                    ) : null}
-                    <View style={styles.contentCol}>
-                        <Text style={styles.emptyText}>
-                            {collapsedCount} tool {collapsedCount === 1 ? 'call' : 'calls'} collapsed
-                        </Text>
-                    </View>
-                </View>
-            ) : null}
         </View>
     );
 });
