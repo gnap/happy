@@ -1107,6 +1107,11 @@ export class ApiSessionClient extends EventEmitter {
         const startLastSeq = this.lastSeq;
         let afterSeq = this.lastSeq;
         let pages = 0;
+        // Absolute deadline: axios `timeout` only covers socket inactivity and can fail to fire
+        // on reused keep-alive connections, leaving the request permanently hung. AbortController
+        // enforces a hard wall-clock limit so fetchMessages always completes.
+        const abort = new AbortController();
+        const abortTimer = setTimeout(() => abort.abort(), 90000);
         logger.debug('[API] fetchMessages start', {
             sessionId: this.sessionId,
             afterSeq,
@@ -1126,6 +1131,7 @@ export class ApiSessionClient extends EventEmitter {
                         headers: this.authHeaders(),
                         timeout: 60000,
                         httpsAgent: serverHttpsAgent,
+                        signal: abort.signal,
                     }
                 );
 
@@ -1189,6 +1195,7 @@ export class ApiSessionClient extends EventEmitter {
             });
             throw error;
         } finally {
+            clearTimeout(abortTimer);
             const catchUpTarget = untilSeq;
             if (catchUpTarget !== null && this.lastSeq < catchUpTarget) {
                 logger.debug('[API] fetchMessages stopped before catch-up target (will retry on next sync)', {
