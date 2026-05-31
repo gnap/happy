@@ -1304,6 +1304,9 @@ function trackTaskFromToolInput(
             const updated = [...existing];
             updated[idx] = { ...updated[idx], status };
             state.latestTasks = { tasks: updated, timestamp: createdAt };
+        } else {
+            // New task — add to the list
+            state.latestTasks = { tasks: [...existing, { id: taskId, content: taskId, status }], timestamp: createdAt };
         }
     }
 }

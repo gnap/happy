@@ -139,11 +139,15 @@ const ChatListInternal = React.memo((props: {
                     }
                 }
                 const tasks = Array.from(taskMap.values());
+                // Only count tool-call messages (exclude text/event/aggregated text blocks)
+                const collapsedToolCount = collapsedMsgs.filter(
+                    (m: any) => m.kind === 'tool-call' && m.tool?.name !== 'TaskCreate' && m.tool?.name !== 'TaskUpdate'
+                ).length;
                 result.push({
                     id: clusterMsgs[0].id,
                     kind: 'task-cluster',
                     tasks: tasks.length > 0 ? tasks : undefined,
-                    collapsedCount: collapsedMsgs.length,
+                    collapsedCount: collapsedToolCount,
                     createdAt: clusterMsgs[0].createdAt,
                 });
             } else {
