@@ -9,7 +9,7 @@ import { loop } from '@/claude/loop';
 import { AgentState, Metadata } from '@/api/types';
 import type { UserMessage } from '@/api/types';
 import packageJson from '../../package.json';
-import { Credentials, readSettings, writeSessionPidFile, removeSessionPidFile } from '@/persistence';
+import { Credentials, readSettings, getProfileEnvironmentVariables, writeSessionPidFile, removeSessionPidFile } from '@/persistence';
 import { EnhancedMode, PermissionMode } from './loop';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
@@ -37,6 +37,7 @@ import {
     isA2ATriggerMessage,
     pruneA2AInboxOnSessionStart,
 } from '@/a2a/inboxTurnController';
+import { applyProfileEnvToProcess, mergeProfileIntoEnv } from '@/utils/profileEnv';
 
 /** JavaScript runtime to use for spawning Claude Code */
 export type JsRuntime = 'node' | 'bun'
@@ -242,20 +243,20 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     reportToDaemon();
     setInterval(reportToDaemon, 60_000);
 
-    // Extract SDK metadata in background and update session when ready
-    extractSDKMetadataAsync(async (sdkMetadata) => {
+    // Extract SDK metadata in background and update session when ready.
+    // The callback fires asynchronously after extractSDKMetadata completes, so `session`
+    // (declared below) is already initialized by the time this runs.
+    extractSDKMetadataAsync((sdkMetadata) => {
         logger.debug('[start] SDK metadata extracted, updating session:', sdkMetadata);
-        try {
-            // Update session metadata with tools and slash commands
-            api.sessionSyncClient(response).updateMetadata((currentMetadata) => ({
-                ...currentMetadata,
-                tools: sdkMetadata.tools,
-                slashCommands: sdkMetadata.slashCommands
-            }));
+        session.updateMetadata((currentMetadata) => ({
+            ...currentMetadata,
+            tools: sdkMetadata.tools,
+            slashCommands: sdkMetadata.slashCommands
+        })).then(() => {
             logger.debug('[start] Session metadata updated with SDK capabilities');
-        } catch (error) {
-            logger.debug('[start] Failed to update session metadata:', error);
-        }
+        }).catch((err: unknown) => {
+            logger.debug('[start] Failed to update session metadata:', err);
+        });
     });
 
     // Create realtime session
@@ -265,14 +266,17 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     const session = api.sessionSyncClient(response, true, sessionClientOpts);
     writeSessionPidFile(session.sessionId);
 
-    let handleUserMessage: ((message: UserMessage) => void) | null = null;
+    let handleUserMessage: ((message: UserMessage) => Promise<void>) | null = null;
     let isA2AInboxTurnActiveFn: () => boolean = () => false;
+    let describeInboxMcpScopeFn: () => string = () => 'empty';
 
     // Start Happy MCP server
-    const happyServer = await startHappyServer(session, {
+    const happyServer = await startHappyServer(() => session, {
         useDaemonA2ARoute: options.startedBy === 'daemon',
         onA2aMessage: (message) => handleUserMessage?.(message),
         isA2AInboxTurnActive: () => isA2AInboxTurnActiveFn(),
+        describeInboxMcpScope: () => describeInboxMcpScopeFn(),
+        workspacePath: workingDirectory,
     });
     logger.debug(`[START] Happy MCP server started at ${happyServer.url}`);
 
@@ -338,6 +342,20 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     let currentAppendSystemPrompt: string | undefined = undefined; // Track current append system prompt
     let currentAllowedTools: string[] | undefined = undefined; // Track current allowed tools
     let currentDisallowedTools: string[] | undefined = undefined; // Track current disallowed tools
+    let currentProfileId: string | null | undefined = undefined; // Track current env profile id for change detection
+    const daemonClaudeEnvVars: Record<string, string> = (() => {
+        const explicit = options.claudeEnvVars;
+        if (explicit && Object.keys(explicit).length > 0) return { ...explicit };
+        // Fallback: capture profile-managed keys from process.env at startup
+        const fromEnv: Record<string, string> = {};
+        for (const [key, value] of Object.entries(process.env)) {
+            if (value !== undefined && (key.startsWith('ANTHROPIC_') || key.startsWith('CLAUDE_CODE_'))) {
+                fromEnv[key] = value;
+            }
+        }
+        return fromEnv;
+    })();
+    let currentClaudeEnvVars: Record<string, string> = { ...daemonClaudeEnvVars };
     const claudeTurnActiveRef = { current: false };
     const currentEnhancedMode = (): EnhancedMode => ({
         permissionMode: currentPermissionMode || 'default',
@@ -359,11 +377,12 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         buildTurnPrompt: buildA2ATurnPromptForClaude,
         scheduleCompactTurn: (mode) => messageQueue.pushIsolateAndClear('', mode),
     });
-    isA2AInboxTurnActiveFn = a2aInbox.isInboxTurnActive;
+    isA2AInboxTurnActiveFn = a2aInbox.isInboxMcpAllowed;
+    describeInboxMcpScopeFn = a2aInbox.describeInboxMcpScope;
     pruneA2AInboxOnSessionStart('claude', workingDirectory, session.sessionId, options.startedBy === 'daemon');
     a2aInbox.peekInbox();
 
-    handleUserMessage = (message) => {
+    handleUserMessage = async (message) => {
 
         // Resolve permission mode from meta - pass through as-is, mapping happens at SDK boundary
         let messagePermissionMode: PermissionMode | undefined = currentPermissionMode;
@@ -434,6 +453,56 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             logger.debug(`[loop] Disallowed tools updated from user message: ${messageDisallowedTools ? messageDisallowedTools.join(', ') : 'reset to none'}`);
         } else {
             logger.debug(`[loop] User message received with no disallowed tools override, using current: ${currentDisallowedTools ? currentDisallowedTools.join(', ') : 'none'}`);
+        }
+
+        // Profile env: only apply when profileId changes (detected via currentProfileId).
+        // Missing meta.profileId means "no override, keep current"; explicit null means "clear".
+        // When changed, use pre-resolved environmentVariables from the App meta directly.
+        // Fall back to local settings lookup if environmentVariables is absent (backward compat).
+        const profileIdProvided =
+            message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'profileId');
+        if (profileIdProvided) {
+            const messageProfileId = message.meta!.profileId ?? null;
+            if (messageProfileId !== currentProfileId) {
+                currentProfileId = messageProfileId;
+                if (messageProfileId) {
+                    const profileEnv = message.meta?.environmentVariables;
+                    if (profileEnv && Object.keys(profileEnv).length > 0) {
+                        applyProfileEnvToProcess(profileEnv);
+                        currentClaudeEnvVars = mergeProfileIntoEnv(currentClaudeEnvVars, profileEnv, process.env);
+                        logger.debug(`[loop] Profile env applied from meta: ${messageProfileId} (${Object.keys(profileEnv).join(', ')})`);
+                    } else {
+                        // Fallback: resolve from local settings (backward compat or App didn't send env vars)
+                        try {
+                            const settings = await readSettings();
+                            const profile = settings.profiles.find(p => p.id === messageProfileId);
+                            if (profile) {
+                                const localEnv = getProfileEnvironmentVariables(profile);
+                                applyProfileEnvToProcess(localEnv);
+                                currentClaudeEnvVars = mergeProfileIntoEnv(currentClaudeEnvVars, localEnv, process.env);
+                                logger.debug(`[loop] Profile env resolved from local settings: ${messageProfileId} (${Object.keys(localEnv).join(', ')})`);
+                            }
+                        } catch (error) {
+                            logger.debug('[loop] Failed to resolve profile env from local settings:', error);
+                        }
+                    }
+                    if (currentSession) {
+                        currentSession.claudeEnvVars = currentClaudeEnvVars;
+                        currentSession.claudeEnvVarsGeneration++;
+                    }
+                } else {
+                    // profileId explicitly null → reset to daemon-spawn-time baseline
+                    applyProfileEnvToProcess(daemonClaudeEnvVars);
+                    currentClaudeEnvVars = { ...daemonClaudeEnvVars };
+                    if (currentSession) {
+                        currentSession.claudeEnvVars = currentClaudeEnvVars;
+                        currentSession.claudeEnvVarsGeneration++;
+                    }
+                    logger.debug(`[loop] Profile cleared (profileId: null) → reset to daemon baseline: ${Object.keys(daemonClaudeEnvVars).join(', ') || '(none)'}`);
+                }
+            }
+        } else {
+            logger.debug(`[loop] User message received with no profileId override, using current: ${currentProfileId ?? '(none)'}`);
         }
 
         // Check for special commands before processing
@@ -625,7 +694,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             }
         },
         session,
-        claudeEnvVars: options.claudeEnvVars,
+        claudeEnvVars: currentClaudeEnvVars,
         claudeArgs: options.claudeArgs,
         sandboxConfig,
         hookSettingsPath,

@@ -15,6 +15,7 @@ import { EnhancedMode } from "./loop";
 import { RawJSONLines } from "@/claude/types";
 import { OutgoingMessageQueue } from "./utils/OutgoingMessageQueue";
 import { getToolName } from "./utils/getToolName";
+import { buildClaudeTurnUsagePayload } from "./utils/claudeTurnUsage";
 
 interface PermissionsField {
     date: number;
@@ -380,6 +381,15 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
 
                         let msg = await session.queue.waitForMessagesAndGetAsString(controller.signal);
 
+                        // Note: we used to echo user messages back as session envelopes here
+                        // for "cross-app dedup" (commit f4206dc). That premise was wrong —
+                        // the Claude SDK does feed the user message back through its stream as
+                        // a type:'user' log entry, which sessionProtocolMapper turns into a
+                        // user envelope. Echoing here as well produced two `role:'user'` rows
+                        // in the App for every prompt (especially visible on /compact, where
+                        // App's optimistic copy + the CLI echo + mapper echo could surface as
+                        // duplicate user messages). Mapper handles it; launcher should not.
+
                         // Check if mode has changed
                         if (msg) {
                             const inboxHooks = session.a2aInboxTurn;
@@ -399,6 +409,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 mode = msg.mode;
                                 permissionHandler.handleModeChange(mode.permissionMode);
                                 logger.debug('[remote]: processing A2A inbox turn');
+                                // Signal thinking immediately on message receipt, before SDK is invoked
+                                session.onThinkingChange(true);
                                 return {
                                     message: inboxPrompt,
                                     mode: msg.mode,
@@ -416,6 +428,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             modeHash = msg.hash;
                             mode = msg.mode;
                             permissionHandler.handleModeChange(mode.permissionMode);
+                            // Signal thinking immediately on message receipt, before SDK is invoked
+                            session.onThinkingChange(true);
                             return {
                                 message: msg.message,
                                 mode: msg.mode
@@ -432,6 +446,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     },
                     onThinkingChange: session.onThinkingChange,
                     claudeEnvVars: session.claudeEnvVars,
+                    claudeEnvVarsGeneration: session.claudeEnvVarsGeneration,
+                    getClaudeEnvVarsGeneration: () => session.claudeEnvVarsGeneration,
                     claudeArgs: session.claudeArgs,
                     onMessage,
                     onCompletionEvent: (message: string) => {
@@ -442,9 +458,18 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         logger.debug('[remote]: Session reset');
                         session.clearSessionId();
                     },
-                    onReady: () => {
+                    onEnvChanged: (msg: { message: string; mode: EnhancedMode }) => {
+                        logger.debug('[remote]: Env changed, re-queuing message as pending');
+                        pending = msg;
+                    },
+                    onReady: (result) => {
                         turnSucceeded = true;
-                        session.client.closeClaudeSessionTurn('completed');
+                        const usage = buildClaudeTurnUsagePayload(result);
+                        const extras: Record<string, unknown> = {};
+                        if (usage) extras.usage = usage;
+                        if (typeof result.total_cost_usd === 'number') extras.costUsd = result.total_cost_usd;
+                        if (typeof result.duration_ms === 'number') extras.durationMs = result.duration_ms;
+                        session.client.closeClaudeSessionTurn('completed', extras);
                         // Per-turn release (Cursor clears currentTurnIdRef before peekA2AInboxInLoop).
                         // claudeTurnActiveRef stayed true across multi-turn claudeRemote() calls, which
                         // blocked scheduleA2ATurnIfNeeded in onTurnEnd until process exit.
@@ -453,6 +478,18 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         }
                         if (wasInboxTurn) {
                             session.a2aInboxTurn?.setInboxTurnActive(false);
+                            // claudeRemote()'s for-await loop keeps iterating across turns, so the
+                            // launcher's finally-block onTurnEnd never runs between back-to-back
+                            // inbox turns. Settle the inbox turn here so backoff can arm and
+                            // unconsumed inbox messages don't tight-loop.
+                            session.a2aInboxTurn?.onTurnEnd({
+                                succeeded: true,
+                                cancelled: false,
+                                wasInboxTurn: true,
+                            });
+                            // Already accounted for; prevent the finally block from double-firing.
+                            wasInboxTurn = false;
+                            turnSucceeded = false;
                         }
                         session.a2aInboxTurn?.peekInbox();
                         if (!pending && session.queue.size() === 0) {
@@ -509,6 +546,13 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                 permissionHandler.reset();
                 if (session.claudeTurnActiveRef) {
                     session.claudeTurnActiveRef.current = false;
+                }
+                // onReady pops inbox-turn MCP scope on the happy path. When claudeRemote()
+                // returns without ever delivering a result (env-changed re-spawn, abort,
+                // unexpected exit), the scope leaks and every future peekInbox() sees
+                // hasScope('inbox-turn') === true and defers forever, deadlocking the inbox.
+                if (wasInboxTurn && session.a2aInboxTurn?.isInboxTurnActive()) {
+                    session.a2aInboxTurn.setInboxTurnActive(false);
                 }
                 session.a2aInboxTurn?.onTurnEnd({
                     succeeded: turnSucceeded && !turnCancelled,

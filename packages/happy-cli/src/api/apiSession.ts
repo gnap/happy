@@ -28,8 +28,11 @@ import { resolveSessionLastSeq } from './sessionLastSeq';
 import {
     cloneA2AInboxState,
     extractLegacyInboxFromAgentState,
+    getServerA2AUnreadCount,
+    listA2AInboxMessages,
     markA2AInboxMessageRead,
     markA2AInboxMessagesRead,
+    shouldScheduleA2AInboxTurn,
     pruneA2AInboxState,
     loadLocalA2AInbox,
     saveLocalA2AInbox,
@@ -242,6 +245,8 @@ export class ApiSessionClient extends EventEmitter {
     private socketConnectedPromise: Promise<void>;
     private socketConnectedResolve: (() => void) | undefined;
     private routedA2ASessionEnvelopeIds = new Set<string>();
+    /** Trigger ids already drained; blocks fetch/reconnect replay from re-opening the inbox. */
+    private consumedA2ATriggerIds = new Set<string>();
     private a2aInboxStateSyncTimer: ReturnType<typeof setTimeout> | null = null;
     /** Replace legacy server blob (full messages) with unreadCount-only snapshot. */
     private a2aInboxNeedsServerUnreadSync = false;
@@ -441,6 +446,11 @@ export class ApiSessionClient extends EventEmitter {
         } else {
             this.a2aInbox = localInbox;
         }
+        if (this.a2aInbox.consumedTriggerIds?.length) {
+            for (const id of this.a2aInbox.consumedTriggerIds) {
+                this.consumedA2ATriggerIds.add(id);
+            }
+        }
         this.requestedMetadata = session.requestedMetadata ?? null;
         this.encryptionKey = session.encryptionKey;
         this.encryptionVariant = session.encryptionVariant;
@@ -636,6 +646,7 @@ export class ApiSessionClient extends EventEmitter {
                     if (data.body.agentState && data.body.agentState.version > this.agentStateVersion) {
                         this.agentState = data.body.agentState.value ? decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.agentState.value)) : null;
                         this.agentStateVersion = data.body.agentState.version;
+                        this.reconcileLocalA2AInboxWithServerAgentState();
                         this.stripServerInboxFromAgentState();
                     }
                 } else if (data.body.t === 'update-machine') {
@@ -697,6 +708,10 @@ export class ApiSessionClient extends EventEmitter {
         }
 
         const triggerId = typeof raw.localKey === 'string' && raw.localKey.trim().length > 0 ? raw.localKey : randomUUID();
+        if (this.consumedA2ATriggerIds.has(triggerId)) {
+            logger.debug(`[API] Ignoring duplicate A2A inbox trigger id=${triggerId}`);
+            return triggerId;
+        }
         this.recordA2AMessage({
             id: triggerId,
             title: typeof inboxMessage.title === 'string' && inboxMessage.title.trim().length > 0 ? inboxMessage.title.trim() : undefined,
@@ -839,6 +854,74 @@ export class ApiSessionClient extends EventEmitter {
         return cloneA2AInboxState(this.a2aInbox);
     }
 
+    getServerA2AUnreadCount(): number | undefined {
+        return getServerA2AUnreadCount(this.agentState);
+    }
+
+    shouldEnqueueA2AInboxTurn(): boolean {
+        return shouldScheduleA2AInboxTurn(
+            this.a2aInbox,
+            getServerA2AUnreadCount(this.agentState),
+            { consumedTriggerIds: this.consumedA2ATriggerIds },
+        );
+    }
+
+    noteA2ATriggersConsumed(ids: string[]): void {
+        for (const id of ids) {
+            this.rememberConsumedA2ATriggerId(id);
+        }
+    }
+
+    /** Force-clear local unread when server already reports unreadCount=0 (stuck drain loop). */
+    abandonLocalA2AInboxWhenServerDrained(): number {
+        if (getServerA2AUnreadCount(this.agentState) !== 0) {
+            return 0;
+        }
+        const unread = listA2AInboxMessages(this.a2aInbox, { unreadOnly: true });
+        if (unread.length === 0) {
+            return 0;
+        }
+        this.noteA2ATriggersConsumed(unread.map((message) => message.id));
+        this.markA2AMessagesRead(unread.map((message) => message.id));
+        logger.debug(
+            `[API] Abandoned ${unread.length} local A2A unread message(s) `
+            + '(server unreadCount=0, inbox drain gave up)',
+        );
+        return unread.length;
+    }
+
+    /**
+     * Drop ghost local unread rows that were already consumed while server unreadCount=0.
+     */
+    reconcileLocalA2AInboxWithServerAgentState(): number {
+        if (getServerA2AUnreadCount(this.agentState) !== 0) {
+            return 0;
+        }
+        const ghosts = listA2AInboxMessages(this.a2aInbox, { unreadOnly: true })
+            .filter((message) => this.consumedA2ATriggerIds.has(message.id));
+        if (ghosts.length === 0) {
+            return 0;
+        }
+        this.markA2AMessagesRead(ghosts.map((message) => message.id));
+        logger.debug(
+            `[API] Reconciled ${ghosts.length} ghost local A2A unread message(s) `
+            + '(server unreadCount=0, trigger already consumed)',
+        );
+        return ghosts.length;
+    }
+
+    private rememberConsumedA2ATriggerId(id: string): void {
+        this.consumedA2ATriggerIds.add(id);
+        if (this.consumedA2ATriggerIds.size > 2000) {
+            this.consumedA2ATriggerIds.clear();
+            this.consumedA2ATriggerIds.add(id);
+        }
+        this.a2aInbox = {
+            ...this.a2aInbox,
+            consumedTriggerIds: [...this.consumedA2ATriggerIds],
+        };
+    }
+
     private stripServerInboxFromAgentState(): void {
         if (!this.agentState) {
             return;
@@ -875,7 +958,12 @@ export class ApiSessionClient extends EventEmitter {
 
     private flushA2AInboxAgentStateSync(): void {
         const snapshot = toServerA2AInboxSnapshot(this.a2aInbox);
-        logger.debug(`[API] Syncing A2A inbox to server: unreadCount=${snapshot.unreadCount}`);
+        const localCount = this.a2aInbox.messages.length;
+        const localUnread = this.a2aInbox.messages.filter((m) => !m.readAt).length;
+        logger.debug(
+            `[API] Syncing A2A inbox to server: unreadCount=${snapshot.unreadCount} `
+            + `(local messages=${localCount}, unread=${localUnread}, ids=${this.a2aInbox.messages.map((m) => `${m.id.slice(-12)}:${m.readAt ? 'R' : 'U'}`).join(',')})`,
+        );
         this.updateAgentState((currentState) => ({
             ...currentState,
             a2aInbox: snapshot,
@@ -888,11 +976,15 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     markA2AMessageRead(id: string): void {
+        this.rememberConsumedA2ATriggerId(id);
         this.a2aInbox = markA2AInboxMessageRead(this.a2aInbox, id);
         this.scheduleA2AInboxAgentStateSync({ immediate: true });
     }
 
     markA2AMessagesRead(ids: string[]): void {
+        for (const id of ids) {
+            this.rememberConsumedA2ATriggerId(id);
+        }
         this.a2aInbox = markA2AInboxMessagesRead(this.a2aInbox, ids);
         this.scheduleA2AInboxAgentStateSync({ immediate: true });
     }
@@ -1294,11 +1386,18 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
-    closeClaudeSessionTurn(status: SessionTurnEndStatus = 'completed') {
-        const mapped = closeClaudeTurnWithStatus(this.claudeSessionProtocolState, status);
+    closeClaudeSessionTurn(status: SessionTurnEndStatus = 'completed', extras?: Record<string, unknown>) {
+        const mapped = closeClaudeTurnWithStatus(this.claudeSessionProtocolState, status, extras);
         this.claudeSessionProtocolState.currentTurnId = mapped.currentTurnId;
         for (const envelope of mapped.envelopes) {
-            this.sendSessionProtocolMessage(envelope);
+            // Use the lifecycle path for turn-end so the App stops the thinking timer
+            // (same shape Cursor uses; otherwise the timer can stick on after a long turn).
+            const isTurnEnd = (envelope.ev as { t?: string }).t === 'turn-end';
+            if (isTurnEnd) {
+                this.sendSessionLifecycleEnvelope(envelope);
+            } else {
+                this.sendSessionProtocolMessage(envelope);
+            }
         }
     }
 

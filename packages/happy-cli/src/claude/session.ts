@@ -13,7 +13,9 @@ export class Session {
     readonly api: ApiClient;
     readonly client: ApiSessionClient;
     readonly queue: MessageQueue2<EnhancedMode>;
-    readonly claudeEnvVars?: Record<string, string>;
+    claudeEnvVars?: Record<string, string>;
+    /** Increments every time claudeEnvVars is replaced — used to detect mid-turn profile switches. */
+    claudeEnvVarsGeneration: number = 0;
     claudeArgs?: string[];  // Made mutable to allow filtering
     readonly mcpServers: Record<string, any>;
     readonly allowedTools?: string[];

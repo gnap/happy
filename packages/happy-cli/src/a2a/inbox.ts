@@ -1,5 +1,6 @@
 import type { A2AInboxMessage, A2AInboxState } from '@/api/types';
 import { pruneA2AInboxState, resolveA2AInboxRetentionSettings } from './inboxRetention';
+import { isFullA2AInboxState, isServerA2AInboxSnapshot } from './inboxServer';
 
 export { pruneA2AInboxState, resolveA2AInboxRetentionSettings } from './inboxRetention';
 export {
@@ -22,6 +23,7 @@ function cloneMessage(message: A2AInboxMessage): A2AInboxMessage {
 export function cloneA2AInboxState(inbox: A2AInboxState | null | undefined): A2AInboxState {
   return {
     messages: Array.isArray(inbox?.messages) ? inbox!.messages.map(cloneMessage) : [],
+    consumedTriggerIds: inbox?.consumedTriggerIds?.slice(),
   };
 }
 
@@ -115,6 +117,49 @@ export function hasUnreadA2AInboxMessages(inbox: A2AInboxState | null | undefine
   return getA2AUnreadCount(inbox) > 0;
 }
 
+/** True when an inbox turn may end successfully (all messages marked read / dropped). */
+export function isA2AInboxTurnConsumed(inbox: A2AInboxState | null | undefined): boolean {
+  return !hasUnreadA2AInboxMessages(inbox);
+}
+
+/** Read unreadCount from server agentState (snapshot or legacy full inbox). */
+export function getServerA2AUnreadCount(
+  agentState: { a2aInbox?: unknown } | null | undefined,
+): number | undefined {
+  const raw = agentState?.a2aInbox;
+  if (isServerA2AInboxSnapshot(raw)) {
+    return raw.unreadCount;
+  }
+  if (isFullA2AInboxState(raw)) {
+    return getA2AUnreadCount(raw);
+  }
+  return undefined;
+}
+
+/**
+ * Whether to enqueue an inbox turn.
+ * When server unreadCount is still 0 (sync debounce), allow fresh local rows;
+ * suppress only ghost rows whose trigger ids were already consumed.
+ */
+export function shouldScheduleA2AInboxTurn(
+  localInbox: A2AInboxState | null | undefined,
+  serverUnreadCount: number | undefined,
+  options?: { consumedTriggerIds?: ReadonlySet<string> },
+): boolean {
+  if (!hasUnreadA2AInboxMessages(localInbox)) {
+    return false;
+  }
+  if (serverUnreadCount !== 0) {
+    return true;
+  }
+  const unread = listA2AInboxMessages(localInbox, { unreadOnly: true });
+  const consumed = options?.consumedTriggerIds;
+  if (!consumed || consumed.size === 0) {
+    return unread.length > 0;
+  }
+  return unread.some((message) => !consumed.has(message.id));
+}
+
 export function listA2AInboxMessages(
   inbox: A2AInboxState | null | undefined,
   options?: { unreadOnly?: boolean; limit?: number },
@@ -188,6 +233,7 @@ export function buildA2ATurnPrompt(notification: string, snapshotPath?: string, 
   const inboxMcpSteps = [
     'Call Happy MCP list_a2a_messages with unreadOnly=true.',
     'For each unread id: read_a2a_message, then mark_a2a_message_read (or mark_a2a_messages_read in one batch).',
+    'Each returned message includes a truncated text preview and a bodyFile absolute path; only when textTruncated is true and you need the full content, read bodyFile with the file tool.',
     'Return only a concise combined summary for the main agent; do not paste full inbox bodies unless asked.',
   ].join(' ');
   const subagentPrompt = stacked
@@ -202,9 +248,11 @@ export function buildA2ATurnPrompt(notification: string, snapshotPath?: string, 
     `Set the Task description (card title) exactly to: ${taskTitle}`,
     `Task prompt: ${subagentPrompt}`,
     'Output discipline (main agent): before the Task tool call, send no user-visible text — no preamble, plan, status, or reasoning.',
-    'After the Task completes, your only user-visible reply is a short introduction of the Task result (one combined summary).',
+    'After the Task completes, if any inbox message ids were not marked read, call mark_a2a_messages_read for them before your user-visible reply.',
+    'Your only user-visible reply is a short introduction of the Task result (one combined summary).',
     'Do not mention inbox turns, MCP, Task delegation, or that you spawned a subagent; do not repeat the Task prompt or raw tool output.',
-    'Happy inbox MCP tools (list/read/mark) only work during this inbox turn; the Task must finish before you end the turn.',
+    'Happy inbox MCP tools (list/read/mark) work during this inbox turn and inside the Task subagent while the Task tool is running.',
+    'If Happy MCP inbox tools fail in the Task, read the snapshot JSON file and return message ids; the main agent will mark them read after the Task.',
     'Do not leave unread inbox messages for a later turn.',
   ].filter((line): line is string => line !== null && line.length > 0).join(' ');
 }
@@ -220,6 +268,7 @@ export function buildA2ATurnPromptForClaude(
   const inboxMcpSteps = [
     'Call mcp__happy__list_a2a_messages with unreadOnly=true.',
     'For each unread id: mcp__happy__read_a2a_message, then mcp__happy__mark_a2a_message_read (or mcp__happy__mark_a2a_messages_read in one batch).',
+    'Each returned message includes a truncated text preview and a bodyFile absolute path; only when textTruncated is true and you need the full content, Read bodyFile with the agent file tool.',
     'Reply with a concise combined summary for the user; do not paste full inbox bodies unless asked.',
   ].join(' ');
   const work = stacked

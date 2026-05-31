@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { createEnvelope } from '@slopus/happy-wire';
 import type { ApiSessionClient } from '@/api/apiSession';
 import { formatCursorCliErrorLine } from './cursorProcess';
 
@@ -7,29 +6,34 @@ import { formatCursorCliErrorLine } from './cursorProcess';
 export const TURN_ABORTED_USER_MESSAGE = 'Turn stopped by user.';
 
 /**
- * Deliver a user-visible abort notice for the active turn (session envelope + cursor lifecycle).
- * Do not dual-send legacy agent events — App renders those as duplicate status lines alongside envelope text.
+ * User-visible status for abort (Claude-style agent event, not session service text).
+ * Lifecycle still uses cursor turn_aborted so thinking clears in the App.
  */
 export function notifyUserTurnAborted(
   session: ApiSessionClient,
   turnId: string,
   message: string = TURN_ABORTED_USER_MESSAGE,
 ): void {
-  session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'service', text: message }, { turn: turnId }));
+  void turnId;
+  session.sendSessionEvent({ type: 'message', message });
   session.sendCursorMessage({ type: 'turn_aborted', id: randomUUID() });
 }
 
 /**
- * Deliver a user-visible error for the active turn (CLI/provider failures, billing, etc.).
- * Session envelope only; avoid sendSessionEvent so errors are not shown twice (event + assistant text).
+ * User-visible turn error (Claude-style agent event).
+ * Do not use session service envelopes for errors — App routes those through text heuristics.
  */
 export function notifyUserTurnError(
   session: ApiSessionClient,
   turnId: string,
   errorText: string,
 ): void {
+  void turnId;
   const message = formatCursorCliErrorLine(errorText);
-  session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'service', text: message }, { turn: turnId }));
+  session.sendSessionEvent({
+    type: 'message',
+    message: message.startsWith('Error:') ? message : `Error: ${message}`,
+  });
 }
 
 /**

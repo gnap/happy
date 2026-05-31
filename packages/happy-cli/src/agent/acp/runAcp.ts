@@ -643,7 +643,7 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
   let sawModes = false;
   let sawModels = false;
 
-  const happyServer = await startHappyServer(session, {
+  const happyServer = await startHappyServer(() => session, {
     useDaemonA2ARoute: opts.startedBy === 'daemon',
     onA2aMessage: (message) => userMessageHandler?.(message),
   });

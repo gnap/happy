@@ -420,12 +420,13 @@ function closeTurn(
     state: ClaudeSessionProtocolState,
     status: SessionTurnEndStatus,
     envelopes: SessionEnvelope[],
+    extras?: Record<string, unknown>,
 ): void {
     if (!state.currentTurnId) {
         return;
     }
 
-    envelopes.push(createEnvelope('agent', { t: 'turn-end', status }, { turn: state.currentTurnId }));
+    envelopes.push(createEnvelope('agent', { t: 'turn-end', status, ...(extras ?? {}) }, { turn: state.currentTurnId }));
     state.currentTurnId = null;
     clearSubagentTracking(state);
 }
@@ -435,6 +436,17 @@ function toolTitle(name: string, input: unknown): string {
         const description = (input as { description?: unknown }).description;
         if (typeof description === 'string' && description.trim().length > 0) {
             return description.length > 80 ? `${description.slice(0, 77)}...` : description;
+        }
+        // Models sometimes skip the optional `description` (sonnet does this often for Bash);
+        // fall back to a short echo of the primary input so the App card has something
+        // descriptive instead of the generic "Bash call".
+        const fallbackKeys = ['command', 'cmd', 'query', 'pattern', 'file_path', 'path', 'url'];
+        for (const key of fallbackKeys) {
+            const value = (input as Record<string, unknown>)[key];
+            if (typeof value === 'string' && value.trim().length > 0) {
+                const trimmed = value.trim().replace(/\s+/g, ' ');
+                return trimmed.length > 80 ? `${trimmed.slice(0, 77)}...` : trimmed;
+            }
         }
     }
     return `${name} call`;
@@ -453,9 +465,10 @@ function toToolArgs(input: unknown): Record<string, unknown> {
 export function closeClaudeTurnWithStatus(
     state: ClaudeSessionProtocolState,
     status: SessionTurnEndStatus,
+    extras?: Record<string, unknown>,
 ): ClaudeMapperResult {
     const envelopes: SessionEnvelope[] = [];
-    closeTurn(state, status, envelopes);
+    closeTurn(state, status, envelopes, extras);
     return {
         currentTurnId: state.currentTurnId,
         envelopes,
@@ -515,7 +528,11 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
             }
 
             if (block.type === 'thinking' && typeof block.thinking === 'string') {
-                envelopes.push(createEnvelope('agent', { t: 'text', text: block.thinking, thinking: true }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
+                // Thinking blocks are intentionally not surfaced to the App:
+                // they flood the chat, waste bandwidth, and break the assistant's
+                // signed-thinking contract when echoed back. Cursor does the same.
+                // (Re-suppress: this had landed via d8ff7d8e and was reverted by
+                // 768d5d90's rebase. See also fallback toolTitle below.)
                 continue;
             }
 

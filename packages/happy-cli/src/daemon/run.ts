@@ -23,9 +23,20 @@ import { join } from 'path';
 import { projectPath } from '@/projectPath';
 import { getTmuxUtilities, isTmuxAvailable, parseTmuxSessionIdentifier, formatTmuxSessionIdentifier } from '@/utils/tmux';
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
+import { stripProfileManagedEnv } from '@/utils/profileEnv';
+import { fetchSessionProfileMeta } from './fetchSessionProfileMeta';
 
 /** Time to wait for a spawned session to report via /session-started webhook before failing the spawn (Cursor cold start can exceed 30s). */
 const SESSION_WEBHOOK_TIMEOUT_MS = 60_000;
+
+/** Cursor CLI max-mode flag for daemon-spawned sessions. Default on; opt out with HAPPY_CURSOR_INITIAL_MAX_MODE=0|false. */
+function cursorCliMaxModeArg(extraEnv: Record<string, string | undefined>): '--max-mode' | '--no-max-mode' {
+  const initialMax = extraEnv.HAPPY_CURSOR_INITIAL_MAX_MODE?.trim();
+  if (initialMax === '0' || initialMax === 'false') {
+    return '--no-max-mode';
+  }
+  return '--max-mode';
+}
 
 function isRunningUnderSystemdService(): boolean {
   return typeof process.env.INVOCATION_ID === 'string' && process.env.INVOCATION_ID.length > 0;
@@ -656,10 +667,7 @@ export async function startDaemon(): Promise<void> {
             logger.debug(`[DAEMON RUN] Passing --resume-after-seq ${options.resumeAfterSeq} to CLI (tmux)`);
           }
           if (options.agent === 'cursor') {
-            const initialMax = extraEnv.HAPPY_CURSOR_INITIAL_MAX_MODE?.trim();
-            tmuxCommandArgs.push(
-              initialMax === '1' || initialMax === 'true' ? '--max-mode' : '--no-max-mode',
-            );
+            tmuxCommandArgs.push(cursorCliMaxModeArg(extraEnv));
           }
           const fullCommand = [launchSpec.executable, ...tmuxCommandArgs]
             .map((part) => JSON.stringify(part))
@@ -671,17 +679,14 @@ export async function startDaemon(): Promise<void> {
           // 2. Regular spawn uses env: { ...process.env, ...extraEnv }
           // 3. tmux needs explicit environment via -e flags to ensure all variables are available
           const windowName = `happy-${Date.now()}-${agent.replace(/\s+/g, '-')}`;
-          const tmuxEnv: Record<string, string> = {};
-
-          // Add all daemon environment variables (filtering out undefined)
-          for (const [key, value] of Object.entries(process.env)) {
-            if (value !== undefined) {
-              tmuxEnv[key] = value;
-            }
-          }
-
-          // Add extra environment variables (these should already be filtered)
-          Object.assign(tmuxEnv, extraEnv);
+          const hasGuiProfileEnvForTmux =
+            !!options.environmentVariables && Object.keys(options.environmentVariables).length > 0;
+          const tmuxBaseEnv = hasGuiProfileEnvForTmux
+            ? stripProfileManagedEnv(process.env)
+            : Object.fromEntries(
+              Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+            );
+          const tmuxEnv: Record<string, string> = { ...tmuxBaseEnv, ...extraEnv };
 
           const tmuxResult = await tmux.spawnInTmux([fullCommand], {
             sessionName: tmuxSessionName,
@@ -787,21 +792,19 @@ export async function startDaemon(): Promise<void> {
             logger.debug(`[DAEMON RUN] Passing --resume-after-seq ${options.resumeAfterSeq} to CLI`);
           }
           if (options.agent === 'cursor') {
-            const initialMax = extraEnv.HAPPY_CURSOR_INITIAL_MAX_MODE?.trim();
-            args.push(
-              initialMax === '1' || initialMax === 'true' ? '--max-mode' : '--no-max-mode',
-            );
+            args.push(cursorCliMaxModeArg(extraEnv));
           }
 
-          const baseEnv = { ...process.env };
+          const hasGuiProfileEnv =
+            !!options.environmentVariables && Object.keys(options.environmentVariables).length > 0;
+          const spawnEnv = hasGuiProfileEnv
+            ? { ...stripProfileManagedEnv(process.env), ...extraEnv }
+            : { ...process.env, ...extraEnv };
           const happyProcess = spawnHappyCLI(args, {
             cwd: directory,
             detached: true,  // Sessions stay alive when daemon stops
             stdio: ['ignore', 'pipe', 'pipe'],  // Capture stdout/stderr for debugging
-            env: {
-              ...baseEnv,
-              ...extraEnv
-            }
+            env: spawnEnv,
           });
 
           // Log output for debugging
@@ -1105,11 +1108,23 @@ export async function startDaemon(): Promise<void> {
       }
 
       // Spawn new process, reconnecting to the same server session via explicit CLI arg.
+      // Recover the App's last profile + env from the most recent user message so the
+      // respawned process is auth-ready before any A2A inbox turn fires. (Without this,
+      // the child boots with daemon-baseline env and inbox turns 401 until the next
+      // human user message arrives carrying meta.environmentVariables.)
+      //
+      // resumeAfterSeq is intentionally omitted here: restart-session is a user-initiated
+      // "wipe and pick up from now" action. Passing the stale daemon-tracked seq would
+      // make the child fetch every user message that arrived since the last poll and
+      // re-execute them, which surfaces as the App replaying historical messages on
+      // restart. The offline-wake auto-respawn path still passes resumeAfterSeq because
+      // that flow is meant to catch up missed messages while the PID was dead.
+      const recoveredProfile = await fetchSessionProfileMeta(sessionId);
       const result = await spawnSession({
         directory,
         agent,
         resumeSessionTag: sessionTag,
-        resumeAfterSeq: resumeAfterSeqBySessionId[sessionId],
+        environmentVariables: recoveredProfile?.environmentVariables ?? undefined,
       });
 
       if (result.type === 'success') {
@@ -1280,6 +1295,7 @@ export async function startDaemon(): Promise<void> {
     apiMachine.setRPCHandlers({
       spawnSession,
       stopSession,
+      archiveSession,
       requestShutdown: () => requestShutdown('happy-app')
     });
 

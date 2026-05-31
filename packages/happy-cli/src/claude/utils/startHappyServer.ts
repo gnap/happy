@@ -23,6 +23,7 @@ import { randomUUID } from "node:crypto";
 import { SubagentManager } from "@/cursor/subagentManager";
 import { extractA2aText, extractA2aTitle } from "@/a2a/parse";
 import { buildA2AInboxNotificationWithPreview, getA2AUnreadCount, listA2AInboxMessages } from "@/a2a/inbox";
+import { buildA2AInboxMessagePreview } from "@/a2a/inboxMessageBody";
 import { getDaemonA2aMessageUri } from "@/daemon/controlClient";
 
 export interface HappyServerCursorContext {
@@ -38,7 +39,18 @@ export interface StartHappyServerOptions {
     useDaemonA2ARoute?: boolean;
     /** When false, inbox mark MCP tools reject (consume+mark must happen in the active A2A turn). */
     isA2AInboxTurnActive?: () => boolean;
+    /** Optional debug snapshot when inbox MCP is blocked (e.g. scope stack describe()). */
+    describeInboxMcpScope?: () => string;
+    /**
+     * Workspace path used to drop per-message body files for the inbox MCP tools.
+     * Cursor passes it via cursorContext.workspacePath; other agents (Claude/Codex/Gemini)
+     * set this directly. When omitted, MCP returns previews without a bodyFile path.
+     */
+    workspacePath?: string;
 }
+
+/** Resolves the live session client (e.g. after offline→online swap). MCP must not capture a one-shot reference. */
+export type GetSessionClient = () => ApiSessionClient;
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
     const chunks: Buffer[] = [];
@@ -58,15 +70,15 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
     }
 }
 
-export async function startHappyServer(client: ApiSessionClient, options?: StartHappyServerOptions) {
-    logger.debug(`[happyMCP] server:start sessionId=${client.sessionId}`);
+export async function startHappyServer(getSession: GetSessionClient, options?: StartHappyServerOptions) {
+    logger.debug(`[happyMCP] server:start sessionId=${getSession().sessionId}`);
 
     // Handler that sends title updates via the client
     const handler = async (title: string) => {
         logger.info('[happyMCP] change_title called title=%s', title);
         try {
             // Send title as a summary message; await so we catch updateMetadata failure (e.g. socket disconnected)
-            const sent = client.sendClaudeSessionMessage({
+            const sent = getSession().sendClaudeSessionMessage({
                 type: 'summary',
                 summary: title,
                 leafUuid: randomUUID()
@@ -90,7 +102,7 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
     const taskMessageQueue = new InMemoryTaskMessageQueue();
 
     const mcp = new McpServer({
-        name: `Happy MCP ${client.sessionId.slice(0, 8)}`,
+        name: 'Happy MCP',
         version: "1.0.1",
     }, {
         taskStore,
@@ -129,24 +141,35 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
     });
 
     const startedByDaemon = options?.useDaemonA2ARoute === true;
-    let a2aUrl = startedByDaemon ? (await getDaemonA2aMessageUri(client.sessionId) ?? '') : '';
+    let embeddedA2aUrl = '';
     mcp.registerTool('get_a2a_message_uri', {
         description: 'Get the local HTTP URI that accepts POSTed A2A-compatible messages for this session.',
         title: 'Get A2A Message URI',
         inputSchema: {},
     }, async () => {
+        const url = startedByDaemon
+            ? (await getDaemonA2aMessageUri(getSession().sessionId) ?? '')
+            : embeddedA2aUrl;
         return {
-            content: [{ type: 'text', text: a2aUrl }],
+            content: [{ type: 'text', text: url }],
             isError: false,
         };
     });
 
     const ctx = options?.cursorContext;
 
+    const inboxWorkspacePath = (): string | null => {
+        return options?.workspacePath ?? ctx?.workspacePath ?? null;
+    };
+
     const requireA2AInboxTurn = (action: string) => {
         if (options?.isA2AInboxTurnActive?.()) {
             return null;
         }
+        const scopes = options?.describeInboxMcpScope?.() ?? 'unknown';
+        logger.debug(
+            `[happyMCP] inbox-mcp-blocked action=${action} sessionId=${getSession().sessionId} scopes=${scopes}`,
+        );
         return {
             content: [{ type: 'text' as const, text: `${action} is only available during an active A2A inbox turn.` }],
             isError: true,
@@ -154,7 +177,7 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
     };
 
     mcp.registerTool('list_a2a_messages', {
-        description: 'List messages in the A2A inbox. Call at the start of each A2A inbox turn with unreadOnly=true before read/mark.',
+        description: 'List messages in the A2A inbox. Returns each message with a truncated text preview and a bodyFile absolute path to the full JSON. If textTruncated is true, use the agent file tool to read bodyFile for the complete message. Call at the start of each A2A inbox turn with unreadOnly=true before read/mark.',
         title: 'List Inbox Messages',
         inputSchema: {
             unreadOnly: z.boolean().optional().describe('Only return unread messages'),
@@ -163,22 +186,27 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
     }, async (args) => {
         const blocked = requireA2AInboxTurn('List inbox messages');
         if (blocked) return blocked;
-        const inbox = client.getA2AInbox();
+        const session = getSession();
+        const inbox = session.getA2AInbox();
         const messages = listA2AInboxMessages(inbox, {
             unreadOnly: args.unreadOnly,
             limit: args.limit,
         });
+        const workspacePath = inboxWorkspacePath();
+        const previews = workspacePath
+            ? messages.map((message) => buildA2AInboxMessagePreview(workspacePath, session.sessionId, message))
+            : messages;
         return {
             content: [{ type: 'text', text: JSON.stringify({
                 unreadCount: getA2AUnreadCount(inbox),
-                messages,
+                messages: previews,
             }, null, 2) }],
             isError: false,
         };
     });
 
     mcp.registerTool('read_a2a_message', {
-        description: 'Read a single inbox message by id without changing its read state. Call during the A2A inbox turn for each unread id you will handle.',
+        description: 'Read a single inbox message by id without changing its read state. Returns a truncated text preview plus bodyFile absolute path. If textTruncated is true, read bodyFile with the agent file tool to get the full content. Call during the A2A inbox turn for each unread id you will handle.',
         title: 'Read Inbox Message',
         inputSchema: {
             id: z.string().describe('A2A inbox message id'),
@@ -186,12 +214,17 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
     }, async (args) => {
         const blocked = requireA2AInboxTurn('Read inbox message');
         if (blocked) return blocked;
-        const message = client.getA2AInbox().messages.find((item) => item.id === args.id);
+        const session = getSession();
+        const message = session.getA2AInbox().messages.find((item) => item.id === args.id);
         if (!message) {
             return { content: [{ type: 'text', text: `A2A message ${args.id} not found.` }], isError: true };
         }
+        const workspacePath = inboxWorkspacePath();
+        const preview = workspacePath
+            ? buildA2AInboxMessagePreview(workspacePath, session.sessionId, message)
+            : message;
         return {
-            content: [{ type: 'text', text: JSON.stringify(message, null, 2) }],
+            content: [{ type: 'text', text: JSON.stringify(preview, null, 2) }],
             isError: false,
         };
     });
@@ -205,12 +238,17 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
     }, async (args) => {
         const blocked = requireA2AInboxTurn('Mark inbox message read');
         if (blocked) return blocked;
-        client.markA2AMessageRead(args.id);
-        const message = client.getA2AInbox().messages.find((item) => item.id === args.id);
+        const readAt = Date.now();
+        getSession().markA2AMessageRead(args.id);
+        // markA2AInboxMessageRead also prunes already-read rows, so the message
+        // is gone from getA2AInbox() by the time we return. Report the timestamp
+        // we used for the mark instead of looking it back up, otherwise the agent
+        // sees `readAt: null` and assumes the mark failed (causing retries).
         return {
             content: [{ type: 'text', text: JSON.stringify({
                 id: args.id,
-                readAt: message?.readAt ?? null,
+                readAt,
+                marked: true,
             }, null, 2) }],
             isError: false,
         };
@@ -225,13 +263,15 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
     }, async (args) => {
         const blocked = requireA2AInboxTurn('Mark inbox messages read');
         if (blocked) return blocked;
-        client.markA2AMessagesRead(args.ids);
-        const inbox = client.getA2AInbox();
-        const updated = inbox.messages.filter((item) => args.ids.includes(item.id));
+        const readAt = Date.now();
+        getSession().markA2AMessagesRead(args.ids);
+        // Same pruning caveat as mark_a2a_message_read: the just-marked rows are
+        // dropped from the inbox, so report the timestamp directly.
         return {
             content: [{ type: 'text', text: JSON.stringify({
                 ids: args.ids,
-                updated,
+                readAt,
+                marked: args.ids.length,
             }, null, 2) }],
             isError: false,
         };
@@ -443,7 +483,7 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
                     return;
                 }
 
-                client.recordA2AMessage({
+                getSession().recordA2AMessage({
                     id: randomUUID(),
                     title,
                     text,
@@ -452,7 +492,7 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
 
                 await options.onA2aMessage({
                     role: 'user',
-                    content: { type: 'text', text: buildA2AInboxNotificationWithPreview(client.getA2AInbox()) },
+                    content: { type: 'text', text: buildA2AInboxNotificationWithPreview(getSession().getA2AInbox()) },
                     meta: { origin: 'a2a', a2aTrigger: true },
                 });
 
@@ -465,7 +505,7 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
             }
         });
 
-        a2aUrl = await new Promise<string>((resolve, reject) => {
+        embeddedA2aUrl = await new Promise<string>((resolve, reject) => {
             a2aServer!.listen(0, '127.0.0.1', () => {
                 const addr = a2aServer!.address();
                 if (addr && typeof addr === 'object') {
@@ -477,9 +517,9 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
             a2aServer!.on('error', reject);
         });
 
-        logger.debug(`[happyMCP] a2a:server ready sessionId=${client.sessionId} url=${a2aUrl}`);
+        logger.debug(`[happyMCP] a2a:server ready sessionId=${getSession().sessionId} url=${embeddedA2aUrl}`);
     } else {
-        logger.debug(`[happyMCP] a2a:using-daemon-route sessionId=${client.sessionId} url=${a2aUrl}`);
+        logger.debug(`[happyMCP] a2a:using-daemon-route sessionId=${getSession().sessionId}`);
     }
 
     //
@@ -487,6 +527,13 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
     //
 
     const server = createServer(async (req, res) => {
+        const closeSocket = () => {
+            if (!req.socket.destroyed) {
+                req.socket.destroy();
+            }
+        };
+        res.once('finish', closeSocket);
+        res.once('close', closeSocket);
         try {
             await transport.handleRequest(req, res);
         } catch (error) {
@@ -496,6 +543,8 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
             }
         }
     });
+    server.keepAliveTimeout = 2_000;
+    server.headersTimeout = 5_000;
 
     const baseUrl = await new Promise<URL>((resolve) => {
         server.listen(0, "127.0.0.1", () => {
@@ -504,14 +553,14 @@ export async function startHappyServer(client: ApiSessionClient, options?: Start
         });
     });
 
-    logger.debug(`[happyMCP] server:ready sessionId=${client.sessionId} url=${baseUrl.toString()}`);
+    logger.debug(`[happyMCP] server:ready sessionId=${getSession().sessionId} url=${baseUrl.toString()}`);
 
     return {
         url: baseUrl.toString(),
-        a2aUrl,
+        a2aUrl: embeddedA2aUrl,
         toolNames,
         stop: () => {
-            logger.debug(`[happyMCP] server:stop sessionId=${client.sessionId}`);
+            logger.debug(`[happyMCP] server:stop sessionId=${getSession().sessionId}`);
             subagentManager?.dispose();
             mcp.close();
             server.close();

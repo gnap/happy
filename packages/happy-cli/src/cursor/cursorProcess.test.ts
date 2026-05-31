@@ -129,6 +129,15 @@ describe('cursor CLI error lines', () => {
     expect(formatted).toContain('pay your invoice');
     expect(formatted.startsWith('S:')).toBe(false);
   });
+
+  it('detects Max Mode Required errors', () => {
+    const line = 'S: Max Mode Required The model "gpt-5.5-medium" requires Max Mode to be enabled. Please enable Max Mode and try again.';
+    expect(isCursorCliErrorLine(line)).toBe(true);
+    const formatted = formatCursorCliErrorLine(line);
+    expect(formatted).toContain('Max Mode');
+    expect(formatted).toContain('gpt-5.5-medium');
+    expect(formatted.startsWith('S:')).toBe(false);
+  });
 });
 
 describe('resolveCursorAgentPath', () => {

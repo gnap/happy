@@ -1,5 +1,5 @@
 import { EnhancedMode } from "./loop";
-import { query, type QueryOptions, type SDKMessage, type SDKSystemMessage, AbortError, SDKUserMessage } from '@/claude/sdk'
+import { query, type QueryOptions, type SDKMessage, type SDKSystemMessage, AbortError, SDKUserMessage, type SDKResultMessage } from '@/claude/sdk'
 import { mapToClaudeMode } from "./utils/permissionMode";
 import { claudeCheckSession } from "./utils/claudeCheckSession";
 import { join, resolve } from 'node:path';
@@ -21,6 +21,10 @@ export async function claudeRemote(opts: {
     path: string,
     mcpServers?: Record<string, any>,
     claudeEnvVars?: Record<string, string>,
+    /** Snapshot of session.claudeEnvVarsGeneration at call time — if it changes mid-turn, return to force re-spawn. */
+    claudeEnvVarsGeneration: number,
+    /** Returns current session.claudeEnvVarsGeneration to detect mid-turn profile changes. */
+    getClaudeEnvVarsGeneration: () => number,
     claudeArgs?: string[],
     allowedTools: string[],
     signal?: AbortSignal,
@@ -32,7 +36,7 @@ export async function claudeRemote(opts: {
 
     // Dynamic parameters
     nextMessage: () => Promise<{ message: string, mode: EnhancedMode } | null>,
-    onReady: () => void,
+    onReady: (result: SDKResultMessage) => void,
     isAborted: (toolCallId: string) => boolean,
 
     // Callbacks
@@ -40,8 +44,12 @@ export async function claudeRemote(opts: {
     onThinkingChange?: (thinking: boolean) => void,
     onMessage: (message: SDKMessage) => void,
     onCompletionEvent?: (message: string) => void,
-    onSessionReset?: () => void
-}) {
+    onSessionReset?: () => void,
+    /** Called when env changed mid-turn — launcher should set this message as pending for re-spawn. */
+    onEnvChanged?: (msg: { message: string; mode: EnhancedMode }) => void
+}): Promise<void> {
+
+    let currentGeneration = opts.claudeEnvVarsGeneration;
 
     // Check if session is valid
     let startFrom = opts.sessionId;
@@ -176,9 +184,6 @@ export async function claudeRemote(opts: {
 
             // Handle special system messages
             if (message.type === 'system' && message.subtype === 'init') {
-                // Start thinking when session initializes
-                updateThinking(true);
-
                 const systemInit = message as SDKSystemMessage;
 
                 // Session id is still in memory, wait until session file is written to disk
@@ -207,15 +212,28 @@ export async function claudeRemote(opts: {
                 }
 
                 // Send ready event
-                opts.onReady();
+                opts.onReady(message as SDKResultMessage);
 
-                // Push next message
+                // Push next message — but first check if profile env changed since we started
                 const next = await opts.nextMessage();
                 if (!next) {
                     messages.end();
                     return;
                 }
+                const latestGeneration = opts.getClaudeEnvVarsGeneration();
+                if (latestGeneration !== currentGeneration) {
+                    logger.debug(`[claudeRemote] Profile env changed (gen ${currentGeneration} → ${latestGeneration}), returning to re-spawn with updated env`);
+                    opts.onEnvChanged?.({ message: next.message, mode: next.mode });
+                    messages.end();
+                    return;
+                }
+                currentGeneration = latestGeneration;
                 mode = next.mode;
+                // Mark thinking back on before pushing the next prompt into the SDK queue.
+                // Without this, only the first turn flips thinking=true; subsequent turns in
+                // the same claudeRemote() loop reuse the SDK's already-running query and the
+                // App's thinking timer stays off until the process restarts.
+                updateThinking(true);
                 messages.push({ type: 'user', message: { role: 'user', content: next.message } });
             }
 

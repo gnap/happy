@@ -179,12 +179,13 @@ export const MessageMetaSchema = z.object({
   permissionMode: z.enum(['default', 'acceptEdits', 'bypassPermissions', 'plan', 'read-only', 'safe-yolo', 'yolo', 'ask', 'force']).optional(), // Permission mode for this message
   model: z.string().nullable().optional(), // Model name for this message (null = reset)
   maxMode: z.boolean().optional(), // Cursor max mode for this message (cli-config.json snapshot at spawn)
-  environmentVariables: z.record(z.string(), z.string()).optional(), // Env profile vars for this message (${VAR} expanded at spawn)
+  environmentVariables: z.record(z.string(), z.string()).optional(), // Resolved env vars (${VAR} expanded at spawn), applied only when profileId changes
   fallbackModel: z.string().nullable().optional(), // Fallback model for this message (null = reset)
   customSystemPrompt: z.string().nullable().optional(), // Custom system prompt for this message (null = reset)
   appendSystemPrompt: z.string().nullable().optional(), // Append to system prompt for this message (null = reset)
   allowedTools: z.array(z.string()).nullable().optional(), // Allowed tools for this message (null = reset)
-  disallowedTools: z.array(z.string()).nullable().optional() // Disallowed tools for this message (null = reset)
+  disallowedTools: z.array(z.string()).nullable().optional(), // Disallowed tools for this message (null = reset)
+  profileId: z.string().nullable().optional(), // Env profile id (null = clear). Daemon tracks this to detect changes.
 })
 
 export type MessageMeta = z.infer<typeof MessageMetaSchema>
@@ -290,6 +291,8 @@ export type A2AInboxMessage = {
 
 export type A2AInboxState = {
   messages: A2AInboxMessage[],
+  /** Trigger ids already drained; prevents fetch/reconnect replay from re-opening the inbox. */
+  consumedTriggerIds?: string[],
 };
 
 /** Synced to server via update-state; full message bodies stay on the CLI machine only. */

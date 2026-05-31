@@ -10,6 +10,8 @@ import {
   resolveA2AInboxTaskModel,
   cloneA2AInboxState,
   getA2AUnreadCount,
+  shouldScheduleA2AInboxTurn,
+  getServerA2AUnreadCount,
   hasUnreadA2AInboxMessages,
   listA2AInboxMessages,
   mergeA2AInboxState,
@@ -107,6 +109,8 @@ describe('A2A inbox helpers', () => {
     expect(prompt).toContain('only user-visible reply is a short introduction of the Task result');
     expect(prompt).toContain('Do not mention inbox turns');
     expect(prompt).toContain('Do not leave unread inbox messages for a later turn');
+    expect(prompt).toContain('mark_a2a_messages_read for them');
+    expect(prompt).toContain('inside the Task subagent');
   });
 
   it('encourages one-turn batch handling when multiple messages are stacked', () => {
@@ -155,6 +159,24 @@ describe('A2A inbox helpers', () => {
 
     const merged = mergeA2AInboxState(local, remote);
     expect(merged.messages[0]).toEqual(expect.objectContaining({ id: 'one', readAt: null }));
+  });
+
+  it('suppresses ghost inbox turns when server unreadCount is 0 and trigger was consumed', () => {
+    const inbox = upsertA2AInboxMessage(undefined, {
+      id: 'one',
+      text: 'ghost',
+      createdAt: 1000,
+    });
+    expect(shouldScheduleA2AInboxTurn(inbox, 0, { consumedTriggerIds: new Set(['one']) })).toBe(false);
+    expect(shouldScheduleA2AInboxTurn(inbox, 0)).toBe(true);
+    expect(shouldScheduleA2AInboxTurn(inbox, 1)).toBe(true);
+    expect(shouldScheduleA2AInboxTurn(inbox, undefined)).toBe(true);
+  });
+
+  it('reads server unreadCount from agentState snapshot', () => {
+    expect(getServerA2AUnreadCount({ a2aInbox: { unreadCount: 3 } })).toBe(3);
+    expect(getServerA2AUnreadCount({ a2aInbox: { unreadCount: 0 } })).toBe(0);
+    expect(getServerA2AUnreadCount(null)).toBeUndefined();
   });
 
   it('peeks unread inbox work for turn scheduling', () => {

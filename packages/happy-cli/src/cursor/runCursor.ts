@@ -43,10 +43,12 @@ import {
   buildA2ATurnPrompt,
   getA2AUnreadCount,
   hasUnreadA2AInboxMessages,
+  isA2AInboxTurnConsumed,
   listA2AInboxMessages,
   pruneA2AInboxSnapshots,
 } from '@/a2a/inbox';
 import { a2aInboxBackoffDelayMs, isA2AInboxBackoffActive, resolveA2AInboxBackoffSettings } from '@/a2a/inboxBackoff';
+import { A2AInboxMcpScopeStack } from '@/a2a/inboxMcpScopeStack';
 import type { ApiSessionClient } from '@/api/apiSession';
 import type { PermissionMode } from '@/api/types';
 import type { UserMessage } from '@/api/types';
@@ -315,7 +317,7 @@ export async function runCursor(opts: {
   resumeSessionTag?: string;
   /** Pre-wake server seq (daemon wake); CLI fetches messages with seq > this value. */
   resumeAfterSeq?: number;
-  /** Force cursor-agent maxMode (cli-config.json) for headless turns. null/undefined = leave as-is. */
+  /** Force cursor-agent maxMode (cli-config.json) for headless turns. Defaults to true when unset. */
   maxMode?: boolean | null;
   /** Set by index.ts: Date.now() at start of CLI async IIFE, so we can report "time to runCursor entry". */
   cliStartTime?: number;
@@ -454,11 +456,10 @@ export async function runCursor(opts: {
   }));
   let currentPermissionMode: PermissionMode | undefined = undefined;
   let currentModel: string | undefined = undefined;
-  let currentMaxMode: boolean | undefined =
-    opts.maxMode !== null && opts.maxMode !== undefined ? opts.maxMode : undefined;
+  let currentMaxMode: boolean = opts.maxMode ?? true;
   let currentProfileEnv: Record<string, string> | undefined = undefined;
   let a2aTurnQueued = false;
-  let a2aInboxTurnActive = false;
+  const inboxMcpScopeStack = new A2AInboxMcpScopeStack();
   let a2aInboxBackoffStreak = 0;
   let a2aInboxBackoffUntil = 0;
   let a2aInboxBackoffTimer: ReturnType<typeof setTimeout> | null = null;
@@ -567,6 +568,14 @@ export async function runCursor(opts: {
     }
     const isA2ATrigger = (message.meta as { a2aTrigger?: boolean } | undefined)?.a2aTrigger === true;
     if (isA2ATrigger) {
+      const reconciled = session.reconcileLocalA2AInboxWithServerAgentState();
+      if (reconciled > 0) {
+        logger.debug(`[cursor] Reconciled ${reconciled} orphan local A2A unread before trigger poke`);
+      }
+      if (!session.shouldEnqueueA2AInboxTurn()) {
+        logger.debug('[cursor] A2A trigger ignored (no inbox work to schedule)');
+        return;
+      }
       logger.debug('[cursor] A2A message recorded in inbox; poking message loop');
       messageQueue.poke();
       return;
@@ -593,6 +602,7 @@ export async function runCursor(opts: {
     initialLastSeq: opts.resumeAfterSeq,
     onSessionSwap: (newSession) => {
       session = newSession;
+      logger.debug(`[cursor] Session runtime swapped for MCP/inbox: ${newSession.sessionId}`);
       newSession.onUserMessage(handleUserMessage);
       attachSessionMetadataListener(newSession);
       // Re-register run-specific RPC handlers so kill/abort work after reconnect (they are not on the new session by default).
@@ -632,7 +642,7 @@ export async function runCursor(opts: {
     }
   };
   scheduleA2ATurnIfNeeded = (mode: CursorMode) => {
-    if (currentTurnIdRef !== null || a2aInboxTurnActive) {
+    if (currentTurnIdRef !== null || inboxMcpScopeStack.hasScope('inbox-turn')) {
       logger.debug('[cursor] Deferring A2A inbox turn until the active turn finishes');
       return;
     }
@@ -641,6 +651,13 @@ export async function runCursor(opts: {
         `[cursor] A2A inbox backoff active (streak ${a2aInboxBackoffStreak}, `
         + `retry in ${a2aInboxBackoffUntil - Date.now()}ms)`,
       );
+      return;
+    }
+    const reconciled = session.reconcileLocalA2AInboxWithServerAgentState();
+    if (reconciled > 0) {
+      logger.debug(`[cursor] Reconciled ${reconciled} orphan local A2A unread (server unreadCount=0)`);
+    }
+    if (!session.shouldEnqueueA2AInboxTurn()) {
       return;
     }
     const unreadMessages = listA2AInboxMessages(session.getA2AInbox(), { unreadOnly: true });
@@ -927,9 +944,10 @@ export async function runCursor(opts: {
 
   let currentTurnIdRef: string | null = null;
   const enableSubagentMcp = process.env.HAPPY_SUBAGENT_MCP === '1';
-  const happyServer = await startHappyServer(session, {
+  const happyServer = await startHappyServer(() => session, {
     useDaemonA2ARoute: opts.startedBy === 'daemon',
-    isA2AInboxTurnActive: () => a2aInboxTurnActive,
+    isA2AInboxTurnActive: () => inboxMcpScopeStack.isAllowed(),
+    describeInboxMcpScope: () => inboxMcpScopeStack.describe(),
     cursorContext: {
       getCurrentTurnId: () => currentTurnIdRef,
       sendSessionEnvelope: (envelope) => session.sendSessionProtocolMessage(envelope),
@@ -1020,13 +1038,18 @@ export async function runCursor(opts: {
       const { message: userMessage, mode, meta } = batch;
       const isA2AInboxTurn = !!(meta && typeof meta === 'object' && (meta as { a2aInboxTurn?: boolean }).a2aInboxTurn === true);
       const isCursorCompactTurn = !!(meta && typeof meta === 'object' && (meta as { cursorCompactTurn?: boolean }).cursorCompactTurn === true);
+      const inboxTurnIdsAtStart = isA2AInboxTurn
+        ? listA2AInboxMessages(session.getA2AInbox(), { unreadOnly: true }).map((message) => message.id)
+        : [];
       if (isA2AInboxTurn) {
         a2aTurnQueued = false;
-        if (!hasUnreadA2AInboxMessages(session.getA2AInbox())) {
-          logger.debug('[cursor] A2A inbox turn dequeued with no unread messages; skipping');
+        session.reconcileLocalA2AInboxWithServerAgentState();
+        if (!session.shouldEnqueueA2AInboxTurn()) {
+          logger.debug('[cursor] A2A inbox turn dequeued with no inbox work; skipping');
           continue;
         }
-        a2aInboxTurnActive = true;
+        inboxMcpScopeStack.push('inbox-turn');
+        logger.debug(`[cursor] A2A inbox MCP scope push: inbox-turn (stack=${inboxMcpScopeStack.describe()})`);
       }
       if (isCursorCompactTurn) {
         messageBuffer.addMessage('Summarizing...', 'system');
@@ -1053,6 +1076,12 @@ export async function runCursor(opts: {
       const toolCallTimeoutHandles = new Map<string, ReturnType<typeof setTimeout>>();
       let turnCompletedNormally = false;
       let turnEndStatus: 'completed' | 'failed' | 'cancelled' = 'completed';
+      /** Set when a user-visible service envelope was sent for this turn (CLI error, catch, compact failure). */
+      let turnUserErrorNotified = false;
+      const notifyTurnError = (errorText: string) => {
+        turnUserErrorNotified = true;
+        notifyUserTurnError(session, turnId, errorText);
+      };
       let turnToolCallCount = 0;
       let inboxTurnUnreadCount = 0;
       let turnContextWindowTokens = DEFAULT_CONTEXT_WINDOW_TOKENS;
@@ -1137,7 +1166,7 @@ export async function runCursor(opts: {
           signal: abortController.signal,
           timeoutMs: processTimeoutMs,
           approveMcps: true, // load Happy MCP from .cursor/mcp.json without prompting
-          maxMode: mode.maxMode ?? opts.maxMode ?? null,
+          maxMode: mode.maxMode ?? opts.maxMode ?? true,
         });
         // Per-tool timeout: after this we send tool_call_end (running in background) so App stops timer; process keeps running.
         // 0 = disabled (Codex-style: no per-tool cutoff, only process timeout or natural tool_call_end).
@@ -1234,6 +1263,8 @@ export async function runCursor(opts: {
               let toolTitle = msg.description ?? deriveToolTitle(msg.toolName, msg.args);
               let toolCallArgs = msg.args;
               if (isA2AInboxTurn && msg.toolName === 'Task') {
+                inboxMcpScopeStack.push('inbox-task');
+                logger.debug(`[cursor] A2A inbox MCP scope push: inbox-task (stack=${inboxMcpScopeStack.describe()})`);
                 toolTitle = buildA2AInboxTaskTitle(inboxTurnUnreadCount);
                 toolCallArgs = buildA2AInboxTaskToolArgs(msg.args);
               }
@@ -1265,6 +1296,11 @@ export async function runCursor(opts: {
               if (msg.subagentId) {
                 session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId }, { turn: turnId, subagent: msg.subagentId }));
                 break;
+              }
+              if (isA2AInboxTurn && msg.toolName === 'Task') {
+                if (inboxMcpScopeStack.pop('inbox-task')) {
+                  logger.debug(`[cursor] A2A inbox MCP scope pop: inbox-task (stack=${inboxMcpScopeStack.describe()})`);
+                }
               }
               const existingHandle = toolCallTimeoutHandles.get(msg.callId);
               if (existingHandle) {
@@ -1322,7 +1358,7 @@ export async function runCursor(opts: {
               // Drop partial assistant stream; error is delivered once via session envelope (service).
               accumulatedResponse = '';
               messageBuffer.addMessage(`Error: ${userErrorText}`, 'status');
-              notifyUserTurnError(session, turnId, msg.message);
+              notifyTurnError(msg.message);
               break;
             }
           }
@@ -1344,6 +1380,7 @@ export async function runCursor(opts: {
             logger.debug(`[cursor] Compact turn ${compactResult.outcome}: ${compactDetail}`);
             messageBuffer.addMessage(compactDetail, 'status');
             session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'service', text: compactDetail }, { turn: turnId }));
+            turnUserErrorNotified = true;
             turnEndStatus = 'failed';
           }
         } else {
@@ -1362,7 +1399,7 @@ export async function runCursor(opts: {
           const errorMsg = error instanceof Error ? error.message : 'Process error';
           logger.debug('[cursor] Error:', error);
           messageBuffer.addMessage(errorMsg, 'status');
-          notifyUserTurnError(session, turnId, errorMsg);
+          notifyTurnError(errorMsg);
         }
       } finally {
         cancelTextFlushTimer();
@@ -1388,6 +1425,9 @@ export async function runCursor(opts: {
             : (turnEndStatus === 'failed' || !turnCompletedNormally)
               ? 'failed'
               : 'completed';
+        if (status === 'failed' && !turnUserErrorNotified) {
+          notifyTurnError('The agent stopped before completing this turn.');
+        }
         // Single turn-end signal: session lifecycle only. Sending codex + cursor task_complete as well caused turn summary to appear three times in the App.
         session.sendSessionLifecycleEnvelope(createEnvelope('agent', {
           t: 'turn-end',
@@ -1411,13 +1451,54 @@ export async function runCursor(opts: {
         messageParser.clear();
         currentTurnIdRef = null;
         if (isA2AInboxTurn) {
-          a2aInboxTurnActive = false;
+          const staleTasks = inboxMcpScopeStack.popAll('inbox-task');
+          if (staleTasks > 0) {
+            logger.debug(
+              `[cursor] A2A inbox turn end: cleared ${staleTasks} stale inbox-task MCP scope(s) `
+              + `(stack=${inboxMcpScopeStack.describe()})`,
+            );
+          }
+          if (inboxMcpScopeStack.pop('inbox-turn')) {
+            logger.debug(`[cursor] A2A inbox MCP scope pop: inbox-turn (stack=${inboxMcpScopeStack.describe()})`);
+          } else {
+            logger.debug('[cursor] A2A inbox turn end: inbox-turn scope was not on MCP stack');
+          }
         }
         const turnSucceeded = turnCompletedNormally && turnEndStatus !== 'cancelled';
         if (isA2AInboxTurn) {
           if (turnSucceeded) {
-            clearA2AInboxBackoff();
-            logger.debug('[cursor] A2A inbox turn succeeded; backoff reset');
+            const remainingUnread = getA2AUnreadCount(session.getA2AInbox());
+            if (isA2AInboxTurnConsumed(session.getA2AInbox())) {
+              session.noteA2ATriggersConsumed(inboxTurnIdsAtStart);
+              clearA2AInboxBackoff();
+              logger.debug('[cursor] A2A inbox turn succeeded; backoff reset');
+            } else {
+              a2aInboxBackoffStreak += 1;
+              const delayMs = a2aInboxBackoffDelayMs(
+                a2aInboxBackoffStreak,
+                a2aInboxBackoffSettings,
+              );
+              a2aInboxBackoffUntil = Date.now() + delayMs;
+              if (
+                session.getServerA2AUnreadCount() === 0
+                && a2aInboxBackoffStreak >= 4
+              ) {
+                const abandoned = session.abandonLocalA2AInboxWhenServerDrained();
+                if (abandoned > 0) {
+                  logger.debug(
+                    `[cursor] Abandoned ${abandoned} local A2A unread after repeated drain `
+                    + 'failures while server unreadCount=0',
+                  );
+                  clearA2AInboxBackoff();
+                }
+              } else {
+                logger.debug(
+                  `[cursor] A2A inbox turn finished but ${remainingUnread} unread message(s) remain; `
+                  + `backing off ${delayMs}ms (streak ${a2aInboxBackoffStreak})`,
+                );
+                scheduleA2AInboxRetryPeek(delayMs);
+              }
+            }
           } else if (turnEndStatus !== 'cancelled') {
             a2aInboxBackoffStreak += 1;
             const delayMs = a2aInboxBackoffDelayMs(
