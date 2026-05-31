@@ -23,6 +23,7 @@ function cloneMessage(message: A2AInboxMessage): A2AInboxMessage {
 export function cloneA2AInboxState(inbox: A2AInboxState | null | undefined): A2AInboxState {
   return {
     messages: Array.isArray(inbox?.messages) ? inbox!.messages.map(cloneMessage) : [],
+    consumedTriggerIds: inbox?.consumedTriggerIds?.slice(),
   };
 }
 

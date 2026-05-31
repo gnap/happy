@@ -46,5 +46,5 @@ export function pruneA2AInboxState(
     messages = messages.filter((message) => message.id !== drop.id);
   }
 
-  return { messages };
+  return { messages, consumedTriggerIds: inbox?.consumedTriggerIds };
 }

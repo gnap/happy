@@ -446,6 +446,11 @@ export class ApiSessionClient extends EventEmitter {
         } else {
             this.a2aInbox = localInbox;
         }
+        if (this.a2aInbox.consumedTriggerIds?.length) {
+            for (const id of this.a2aInbox.consumedTriggerIds) {
+                this.consumedA2ATriggerIds.add(id);
+            }
+        }
         this.requestedMetadata = session.requestedMetadata ?? null;
         this.encryptionKey = session.encryptionKey;
         this.encryptionVariant = session.encryptionVariant;
@@ -911,6 +916,10 @@ export class ApiSessionClient extends EventEmitter {
             this.consumedA2ATriggerIds.clear();
             this.consumedA2ATriggerIds.add(id);
         }
+        this.a2aInbox = {
+            ...this.a2aInbox,
+            consumedTriggerIds: [...this.consumedA2ATriggerIds],
+        };
     }
 
     private stripServerInboxFromAgentState(): void {

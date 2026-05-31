@@ -291,6 +291,8 @@ export type A2AInboxMessage = {
 
 export type A2AInboxState = {
   messages: A2AInboxMessage[],
+  /** Trigger ids already drained; prevents fetch/reconnect replay from re-opening the inbox. */
+  consumedTriggerIds?: string[],
 };
 
 /** Synced to server via update-state; full message bodies stay on the CLI machine only. */
