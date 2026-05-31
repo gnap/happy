@@ -99,15 +99,23 @@ const ChatListInternal = React.memo((props: {
                         if (m.tool?.name === 'TaskUpdate') foundTaskUpdate = true;
                         i++;
                     } else if (!foundTaskUpdate) {
-                        // Intermediate messages between TaskCreate and TaskUpdate — collapse them
+                        // Before first TaskUpdate: collapse everything (Cursor pattern)
+                        collapsedMsgs.push(m);
+                        i++;
+                    } else if (m.kind === 'tool-call' || m.kind === 'agent-text') {
+                        // After TaskUpdate: collapse tool calls + text (Claude pattern —
+                        // work is done between successive TaskUpdates, not before them)
                         collapsedMsgs.push(m);
                         i++;
                     } else {
+                        // User message or event — cluster is done
                         break;
                     }
                 }
-                // Extract task items from cluster messages
-                const taskMap = new Map<string, { id: string; content: string; status: string }>();
+                // Extract task items from cluster messages.
+                // Claude uses sequential numeric taskIds (1, 2, 3...) that map to
+                // TaskCreates by position. Cursor uses descriptive IDs that match content.
+                const taskItems: { id: string; content: string; status: string }[] = [];
                 for (const cm of clusterMsgs) {
                     const tool = cm.tool;
                     const name = tool?.name;
@@ -115,30 +123,17 @@ const ChatListInternal = React.memo((props: {
                     if (name === 'TaskCreate') {
                         const content = input.description || input.subject || input.activeForm || '';
                         if (content) {
-                            const key = content;
-                            if (!taskMap.has(key)) {
-                                taskMap.set(key, { id: content, content, status: 'pending' });
-                            }
+                            taskItems.push({ id: String(taskItems.length + 1), content, status: 'pending' });
                         }
                     } else if (name === 'TaskUpdate') {
                         const tid = input.taskId || input.id || '';
-                        if (tid) {
-                            for (const [key, entry] of taskMap) {
-                                if (entry.id === key && key !== tid) {
-                                    taskMap.delete(key);
-                                    entry.id = tid;
-                                    taskMap.set(tid, entry);
-                                    break;
-                                }
-                            }
-                            const existing = taskMap.get(tid);
-                            if (existing) {
-                                existing.status = input.status || existing.status;
-                            }
+                        const idx = parseInt(tid, 10) - 1; // Claude uses 1-indexed task IDs
+                        if (!isNaN(idx) && idx >= 0 && idx < taskItems.length) {
+                            taskItems[idx].status = input.status || taskItems[idx].status;
                         }
                     }
                 }
-                const tasks = Array.from(taskMap.values());
+                const tasks = taskItems.length > 0 ? taskItems : undefined;
                 // Only count tool-call messages (exclude text/event/aggregated text blocks)
                 const collapsedToolCount = collapsedMsgs.filter(
                     (m: any) => m.kind === 'tool-call' && m.tool?.name !== 'TaskCreate' && m.tool?.name !== 'TaskUpdate'
@@ -146,7 +141,7 @@ const ChatListInternal = React.memo((props: {
                 result.push({
                     id: clusterMsgs[0].id,
                     kind: 'task-cluster',
-                    tasks: tasks.length > 0 ? tasks : undefined,
+                    tasks,
                     collapsedCount: collapsedToolCount,
                     createdAt: clusterMsgs[0].createdAt,
                 });
