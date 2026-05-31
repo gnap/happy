@@ -79,8 +79,8 @@ export const TaskListView = React.memo(({ tasks, collapsedCount }: { tasks?: Tas
 
     return (
         <View style={styles.container}>
-            {tasks.map((task, index) => {
-                const isLast = index === tasks.length - 1;
+            {(tasks ?? []).map((task, index) => {
+                const isLast = index === (tasks ?? []).length - 1;
                 const cfg = STATUS_CONFIG[task.status] ?? STATUS_CONFIG.pending;
 
                 return (
@@ -110,9 +110,11 @@ export const TaskListView = React.memo(({ tasks, collapsedCount }: { tasks?: Tas
             })}
             {collapsedCount ? (
                 <View style={styles.collapsedRow}>
-                    <View style={styles.timelineCol}>
-                        <View style={{ flex: 1, width: 2, backgroundColor: LINE_COLOR }} />
-                    </View>
+                    {tasks && tasks.length > 0 ? (
+                        <View style={styles.timelineCol}>
+                            <View style={{ flex: 1, width: 2, backgroundColor: LINE_COLOR }} />
+                        </View>
+                    ) : null}
                     <View style={styles.contentCol}>
                         <Text style={styles.emptyText}>
                             {collapsedCount} tool {collapsedCount === 1 ? 'call' : 'calls'} collapsed

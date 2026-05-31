@@ -76,75 +76,47 @@ const ChatListInternal = React.memo((props: {
     const isNearBottomRef = useRef(true);
     const prevMessagesLengthRef = useRef(props.messages.length);
 
-    // Collapse TaskCreate → [intermediate work] → TaskUpdate into a task-cluster item
+    // TaskCreate/TaskUpdate cards are rendered individually via TaskTrackerView
+    // (rich colored status). Only intermediate tool calls are collapsed.
     const messagesWithTasks = useMemo(() => {
         const taskNames = new Set(['TaskCreate', 'TaskUpdate']);
         const result: any[] = [];
         let i = 0;
         while (i < props.messages.length) {
             const msg = props.messages[i] as any;
-            const isTaskMsg = msg.kind === 'tool-call' && taskNames.has(msg.tool?.name);
-            if (isTaskMsg) {
-                // Find all task messages and the messages between them
-                const clusterMsgs: any[] = [];
+            const isTaskCreate = msg.kind === 'tool-call' && msg.tool?.name === 'TaskCreate';
+            if (isTaskCreate) {
+                // Enter task mode — collect intermediate tool calls for collapse,
+                // while letting TaskCreate/TaskUpdate pass through as individual cards.
                 const collapsedMsgs: any[] = [];
-                let foundTaskUpdate = false;
                 while (i < props.messages.length) {
                     const m = props.messages[i] as any;
-                    if (m.kind === 'tool-call' && m.tool?.name === 'TaskCreate' && clusterMsgs.length === 0) {
-                        clusterMsgs.push(m);
-                        i++;
-                    } else if (m.kind === 'tool-call' && taskNames.has(m.tool?.name)) {
-                        clusterMsgs.push(m);
-                        if (m.tool?.name === 'TaskUpdate') foundTaskUpdate = true;
-                        i++;
-                    } else if (!foundTaskUpdate) {
-                        // Before first TaskUpdate: collapse everything (Cursor pattern)
-                        collapsedMsgs.push(m);
+                    if (m.kind === 'tool-call' && taskNames.has(m.tool?.name)) {
+                        // TaskCreate/TaskUpdate — pass through individually
+                        result.push(m);
                         i++;
                     } else if (m.kind === 'tool-call' || m.kind === 'agent-text') {
-                        // After TaskUpdate: collapse tool calls + text (Claude pattern —
-                        // work is done between successive TaskUpdates, not before them)
+                        // Intermediate tool call or text — collapse
                         collapsedMsgs.push(m);
                         i++;
                     } else {
-                        // User message or event — cluster is done
+                        // User message, event, or other — exit task mode
                         break;
                     }
                 }
-                // Extract task items from cluster messages.
-                // Claude uses sequential numeric taskIds (1, 2, 3...) that map to
-                // TaskCreates by position. Cursor uses descriptive IDs that match content.
-                const taskItems: { id: string; content: string; status: string }[] = [];
-                for (const cm of clusterMsgs) {
-                    const tool = cm.tool;
-                    const name = tool?.name;
-                    const input = tool?.input || {};
-                    if (name === 'TaskCreate') {
-                        const content = input.description || input.subject || input.activeForm || '';
-                        if (content) {
-                            taskItems.push({ id: String(taskItems.length + 1), content, status: 'pending' });
-                        }
-                    } else if (name === 'TaskUpdate') {
-                        const tid = input.taskId || input.id || '';
-                        const idx = parseInt(tid, 10) - 1; // Claude uses 1-indexed task IDs
-                        if (!isNaN(idx) && idx >= 0 && idx < taskItems.length) {
-                            taskItems[idx].status = input.status || taskItems[idx].status;
-                        }
-                    }
-                }
-                const tasks = taskItems.length > 0 ? taskItems : undefined;
-                // Only count tool-call messages (exclude text/event/aggregated text blocks)
+                // Emit collapse card for intermediate tool calls (not task msgs themselves)
                 const collapsedToolCount = collapsedMsgs.filter(
-                    (m: any) => m.kind === 'tool-call' && m.tool?.name !== 'TaskCreate' && m.tool?.name !== 'TaskUpdate'
+                    (m: any) => m.kind === 'tool-call'
                 ).length;
-                result.push({
-                    id: clusterMsgs[0].id,
-                    kind: 'task-cluster',
-                    tasks,
-                    collapsedCount: collapsedToolCount,
-                    createdAt: clusterMsgs[0].createdAt,
-                });
+                if (collapsedToolCount > 0) {
+                    result.push({
+                        id: collapsedMsgs[0]?.id ?? result[result.length - 1]?.id ?? '',
+                        kind: 'task-cluster',
+                        tasks: undefined,
+                        collapsedCount: collapsedToolCount,
+                        createdAt: collapsedMsgs[0]?.createdAt ?? Date.now(),
+                    });
+                }
             } else {
                 result.push(msg);
                 i++;
