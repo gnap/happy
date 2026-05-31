@@ -83,7 +83,6 @@ export const knownTools = {
         },
         icon: ICON_TODO,
         noStatus: true,
-        minimal: true,
         input: z.object({}).partial().passthrough(),
     },
     'TaskUpdate': {
@@ -96,7 +95,6 @@ export const knownTools = {
         },
         icon: ICON_TODO,
         noStatus: true,
-        minimal: true,
         input: z.object({}).partial().passthrough(),
     },
     'Bash': {
