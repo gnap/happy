@@ -70,12 +70,12 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
             },
         } as any, { currentTurnId: started.currentTurnId });
 
-        expect(ended.currentTurnId).toBe(started.currentTurnId);
+        // closeTurn nullifies currentTurnId; tool-call-end still emitted
+        expect(ended.currentTurnId).toBeNull();
         expect(ended.envelopes).toEqual(
             expect.arrayContaining([
-                expect.objectContaining({
-                    ev: { t: 'tool-call-end', call: 'tool-1' },
-                }),
+                expect.objectContaining({ ev: { t: 'turn-end', status: 'completed' } }),
+                expect.objectContaining({ ev: { t: 'tool-call-end', call: 'tool-1' } }),
             ]),
         );
     });

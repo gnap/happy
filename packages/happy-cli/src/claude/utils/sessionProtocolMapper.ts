@@ -640,11 +640,12 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
             };
         }
 
+        // Process tool_result blocks first (subagent stop, tool-call-end)
+        // before closeTurn, which clears subagent tracking.
         const turnId = ensureTurn(state, envelopes);
         if (message.isSidechain) {
             maybeEmitSubagentStart(state, turnId, subagent, envelopes);
         }
-        // Record bgTaskId → callId mapping for Bash run_in_background
         for (const block of blocks) {
             if (block.type === 'tool_result' && typeof block.tool_use_id === 'string' && block.tool_use_id.length > 0) {
                 const bgTaskId = extractBackgroundTaskId(block, message);
@@ -670,10 +671,14 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                 }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
                 continue;
             }
+        }
 
-            if (block.type === 'text' && typeof block.text === 'string' && block.text.trim().length > 0) {
-                envelopes.push(createEnvelope('agent', { t: 'text', text: block.text }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
-            }
+        // Close the old turn and emit user text as a user envelope
+        closeTurn(state, 'completed', envelopes);
+        const textBlocks = blocks.filter(b => b.type === 'text' && typeof b.text === 'string' && b.text.trim().length > 0);
+        const userText = textBlocks.map(b => (b as { text: string }).text).join('\n');
+        if (userText) {
+            envelopes.push(createEnvelope('user', { t: 'text', text: userText }));
         }
 
         return {
