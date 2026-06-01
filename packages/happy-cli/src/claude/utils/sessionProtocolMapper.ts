@@ -18,6 +18,7 @@ export type ClaudeSessionProtocolState = {
     activeSubagents?: Set<string>;
     taskCallBySubagent?: Map<string, string>; // session subagent cuid -> Task provider tool call ID
     bgTaskIdToCallId?: Map<string, string>; // background task_id → Bash call ID
+    lastTaskCreateCallId?: string; // most recent TaskCreate call ID for Agent remapping
 };
 
 type ClaudeMapperResult = {
@@ -403,6 +404,7 @@ function clearSubagentTracking(state: ClaudeSessionProtocolState): void {
     getActiveSubagents(state).clear();
     getTaskCallBySubagent(state).clear();
     if (state.bgTaskIdToCallId) state.bgTaskIdToCallId.clear();
+    state.lastTaskCreateCallId = undefined;
 }
 
 function ensureTurn(state: ClaudeSessionProtocolState, envelopes: SessionEnvelope[]): string {
@@ -547,6 +549,11 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                     continue;
                 }
 
+                // Track most recent TaskCreate call ID so Agent can remap its children
+                if (name === 'TaskCreate') {
+                    state.lastTaskCreateCallId = call;
+                }
+
                 // TaskOutput/TaskStop: link to original Bash card via bgTaskId
                 if (name === 'TaskOutput' || name === 'TaskStop') {
                     const taskId = (block.input as Record<string, unknown>)?.task_id as string | undefined;
@@ -558,20 +565,23 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                     }
                 }
 
-                // Agent: setup subagent tracking so child messages link via taskCall
+                // Agent: hide card and remap subagent children to TaskCreate card
                 if (name === 'Agent') {
                     const prompt = pickTaskPrompt(block.input);
                     if (prompt) {
                         queueTaskPromptSubagent(state, prompt, call);
                     }
                     setSubagentTitle(state, sessionSubagentForCall, pickTaskTitle(block.input) ?? prompt);
-                    getTaskCallBySubagent(state).set(sessionSubagentForCall, call);
+                    const mappedTaskCall = state.lastTaskCreateCallId ?? call;
+                    getTaskCallBySubagent(state).set(sessionSubagentForCall, mappedTaskCall);
+                    getHiddenParentToolCalls(state).add(call);
 
                     const buffered = consumeBufferedSubagentMessages(state, call);
                     for (const bufferedMessage of buffered) {
                         const replay = mapClaudeLogMessageToSessionEnvelopesInternal(bufferedMessage, state);
                         envelopes.push(...replay.envelopes);
                     }
+                    continue;
                 }
 
                 envelopes.push(createEnvelope('agent', {
@@ -597,6 +607,14 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
     }
 
     if (message.type === 'user') {
+        // Skip meta messages (skill content injection, etc.)
+        if ((message as Record<string, unknown>).isMeta === true) {
+            return {
+                currentTurnId: state.currentTurnId,
+                envelopes,
+            };
+        }
+
         const taskCallId = subagent ? getTaskCallBySubagent(state).get(subagent) : undefined;
         if (typeof message.message.content === 'string') {
             if (message.isSidechain) {

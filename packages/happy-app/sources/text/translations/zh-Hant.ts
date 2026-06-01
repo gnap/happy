@@ -516,6 +516,12 @@ export const zhHant: TranslationStructure = {
             initializing: '正在初始化 agent...',
             moreTools: ({ count }: { count: number }) => `+${count} 個更多${plural({ count, singular: '工具', plural: '工具' })}`,
         },
+        agentView: {
+            prompt: '提示',
+            agentTools: '使用的工具',
+            output: 'Agent 輸出',
+            result: '結果',
+        },
         multiEdit: {
             editNumber: ({ index, total }: { index: number; total: number }) => `編輯 ${index}/${total}`,
             replaceAll: '全部替換',
@@ -540,6 +546,7 @@ export const zhHant: TranslationStructure = {
             applyChanges: '更新檔案',
             viewDiff: '目前檔案更改',
             question: '問題',
+            agent: 'Agent',
         },
         askUserQuestion: {
             submit: '提交答案',

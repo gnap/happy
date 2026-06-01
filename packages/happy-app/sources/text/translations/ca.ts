@@ -515,6 +515,12 @@ export const ca: TranslationStructure = {
             initializing: 'Inicialitzant l\'agent...',
             moreTools: ({ count }: { count: number }) => `+${count} més ${plural({ count, singular: 'eina', plural: 'eines' })}`,
         },
+        agentView: {
+            prompt: 'Prompt',
+            agentTools: 'Eines usades',
+            output: 'Sortida de l\'agent',
+            result: 'Resultat',
+        },
         multiEdit: {
             editNumber: ({ index, total }: { index: number; total: number }) => `Edició ${index} de ${total}`,
             replaceAll: 'Reemplaça tot',
@@ -539,6 +545,7 @@ export const ca: TranslationStructure = {
             applyChanges: 'Actualitza fitxer',
             viewDiff: 'Canvis del fitxer actual',
             question: 'Pregunta',
+            agent: 'Agent',
         },
         desc: {
             terminalCmd: ({ cmd }: { cmd: string }) => `Terminal(cmd: ${cmd})`,

@@ -547,6 +547,12 @@ export const ja: TranslationStructure = {
             initializing: 'エージェントを初期化中...',
             moreTools: ({ count }: { count: number }) => `+${count} 個のツール`,
         },
+        agentView: {
+            prompt: 'プロンプト',
+            agentTools: '使用ツール',
+            output: 'エージェント出力',
+            result: '結果',
+        },
         askUserQuestion: {
             submit: '回答を送信',
             multipleQuestions: ({ count }: { count: number }) => `${count}件の質問`,
@@ -578,6 +584,7 @@ export const ja: TranslationStructure = {
             applyChanges: 'ファイルを更新',
             viewDiff: '現在のファイル変更',
             question: '質問',
+            agent: 'エージェント',
         },
         desc: {
             terminalCmd: ({ cmd }: { cmd: string }) => `ターミナル(cmd: ${cmd})`,
