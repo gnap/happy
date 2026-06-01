@@ -695,7 +695,6 @@ function normalizeSessionEnvelope(
             if (!isSessionProtocolSendEnabled()) {
                 return null;
             }
-
             return {
                 id: messageId,
                 localId,

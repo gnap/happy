@@ -6,6 +6,7 @@ import { useHeaderHeight } from '@/utils/responsive';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MessageView } from './MessageView';
 import { TaskListView } from './TaskListView';
+import { computeMessageClusters, ClusterOptions } from './clusterTimeline';
 import { Metadata, Session } from '@/sync/storageTypes';
 import { layout } from './layout';
 import { ChatFooter } from './ChatFooter';
@@ -76,63 +77,15 @@ const ChatListInternal = React.memo((props: {
     const isNearBottomRef = useRef(true);
     const prevMessagesLengthRef = useRef(props.messages.length);
 
-    // Collapse TaskCreate → [work] → TaskUpdate batches into a single timeline card.
-    // Each task gets a top-level node (title) + one child node (execution status).
-    const messagesWithTasks = useMemo(() => {
-        const taskNames = new Set(['TaskCreate', 'TaskUpdate']);
-        const result: any[] = [];
-        let i = 0;
-        while (i < props.messages.length) {
-            const msg = props.messages[i] as any;
-            const isTaskCreate = msg.kind === 'tool-call' && msg.tool?.name === 'TaskCreate';
-            if (isTaskCreate) {
-                const taskItems: { id: string; content: string; status: string; collapsedCount: number }[] = [];
-                let currentTaskIdx = -1;
-                let clusterStartId = msg.id;
-                let clusterStartTime = msg.createdAt;
-                while (i < props.messages.length) {
-                    const m = props.messages[i] as any;
-                    if (m.kind === 'tool-call' && m.tool?.name === 'TaskCreate') {
-                        const input = m.tool?.input || {};
-                        const content = input.description || input.subject || input.activeForm || '';
-                        taskItems.push({ id: String(taskItems.length + 1), content, status: 'pending', collapsedCount: 0 });
-                        currentTaskIdx = taskItems.length - 1;
-                        i++;
-                    } else if (m.kind === 'tool-call' && m.tool?.name === 'TaskUpdate') {
-                        const input = m.tool?.input || {};
-                        const tid = input.taskId || input.id || '';
-                        const idx = parseInt(tid, 10) - 1;
-                        if (!isNaN(idx) && idx >= 0 && idx < taskItems.length) {
-                            taskItems[idx].status = input.status || taskItems[idx].status;
-                            currentTaskIdx = idx;
-                        }
-                        i++;
-                    } else if (m.kind === 'tool-call' || m.kind === 'agent-text') {
-                        // Intermediate tool calls / text — count towards current task
-                        if (m.kind === 'tool-call' && currentTaskIdx >= 0 && currentTaskIdx < taskItems.length) {
-                            taskItems[currentTaskIdx].collapsedCount++;
-                        }
-                        i++;
-                    } else {
-                        // User message, event, or other — exit task mode
-                        break;
-                    }
-                }
-                if (taskItems.length > 0) {
-                    result.push({
-                        id: clusterStartId,
-                        kind: 'task-cluster',
-                        tasks: taskItems,
-                        createdAt: clusterStartTime,
-                    });
-                }
-            } else {
-                result.push(msg);
-                i++;
-            }
-        }
-        return result;
-    }, [props.messages]);
+    const clusterOptions: ClusterOptions | undefined = useMemo(() => {
+        if (!props.tasks || props.tasks.length === 0) return undefined;
+        return { tasks: props.tasks.map(t => ({ id: t.id, content: t.content, status: t.status })) };
+    }, [props.tasks]);
+
+    const messagesWithTasks = useMemo(
+        () => computeMessageClusters(props.messages, clusterOptions),
+        [props.messages, clusterOptions],
+    );
 
     const keyExtractor = useCallback((item: any) => item.id, []);
     const renderItem = useCallback(({ item }: { item: any }) => {
@@ -141,7 +94,7 @@ const ChatListInternal = React.memo((props: {
                 <View style={{ flexDirection: 'row', justifyContent: 'center' }}>
                     <View style={{ flexDirection: 'column', flexGrow: 1, flexBasis: 0, maxWidth: layout.maxWidth }}>
                         <View style={{ marginHorizontal: 8, marginBottom: 12 }}>
-                            <TaskListView tasks={item.tasks} />
+                            <TaskListView tasks={item.tasks} collapsedCount={item.collapsedCount} />
                         </View>
                     </View>
                 </View>
