@@ -571,7 +571,8 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                     if (prompt) {
                         queueTaskPromptSubagent(state, prompt, call);
                     }
-                    setSubagentTitle(state, sessionSubagentForCall, pickTaskTitle(block.input) ?? prompt);
+                    // Don't fall back to raw prompt — would leak sub-agent instructions
+                    setSubagentTitle(state, sessionSubagentForCall, pickTaskTitle(block.input));
                     const mappedTaskCall = state.lastTaskCreateCallId ?? call;
                     getTaskCallBySubagent(state).set(sessionSubagentForCall, mappedTaskCall);
                     getHiddenParentToolCalls(state).add(call);

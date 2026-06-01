@@ -73,17 +73,9 @@ export const AgentViewFull = React.memo<ToolViewProps>(({ tool, metadata, messag
     }
 
     const resultSummary = extractTaskResult(tool.result) ?? (agentTexts.length > 0 ? agentTexts[agentTexts.length - 1] : null);
-    const prompt = tool.input?.prompt && typeof tool.input.prompt === 'string' ? tool.input.prompt : null;
 
     return (
         <View style={{ paddingVertical: 8 }}>
-            {/* Prompt section */}
-            {prompt !== null && (
-                <ToolSectionView title={t('tools.agentView.prompt')}>
-                    <MarkdownView markdown={prompt} />
-                </ToolSectionView>
-            )}
-
             {/* Tools Used section */}
             {childTools.length > 0 && (
                 <ToolSectionView title={t('tools.agentView.agentTools')}>
@@ -150,7 +142,7 @@ export const AgentViewFull = React.memo<ToolViewProps>(({ tool, metadata, messag
             )}
 
             {/* Empty state */}
-            {!prompt && childTools.length === 0 && agentTexts.length === 0 && tool.state === 'running' && (
+            {childTools.length === 0 && agentTexts.length === 0 && tool.state === 'running' && (
                 <View style={{ paddingVertical: 12, alignItems: 'center' }}>
                     <ActivityIndicator size="small" color={theme.colors.textSecondary} />
                 </View>
