@@ -21,9 +21,14 @@ const ICON_QUESTION = (size: number = 24, color: string = '#000') => <Ionicons n
 export const knownTools = {
     'Task': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            const subagentType = opts.tool.input?.subagent_type;
+            const input = opts.tool.input as Record<string, unknown> | undefined;
+            const subagentType = input?.subagent_type;
             if (subagentType && typeof subagentType === 'string' && subagentType.trim()) {
                 return subagentType;
+            }
+            const description = input?.description;
+            if (description && typeof description === 'string' && description.trim()) {
+                return description;
             }
             return t('tools.names.task');
         },
@@ -49,9 +54,14 @@ export const knownTools = {
     },
     'Agent': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            const subagentType = opts.tool.input?.subagent_type;
+            const input = opts.tool.input as Record<string, unknown> | undefined;
+            const subagentType = input?.subagent_type;
             if (subagentType && typeof subagentType === 'string' && subagentType.trim()) {
                 return subagentType;
+            }
+            const description = input?.description;
+            if (description && typeof description === 'string' && description.trim()) {
+                return description;
             }
             return t('tools.names.agent');
         },
