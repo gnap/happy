@@ -19,7 +19,6 @@ export const MessageView = (props: {
   sessionId: string;
   getMessageById?: (id: string) => Message | null;
 }) => {
-  // TaskCreate/TaskUpdate render as timeline items via task-cluster; hide individual cards
   if (props.message.kind === 'tool-call') {
     const name = (props.message as any).tool?.name;
     if (name === 'TaskCreate' || name === 'TaskUpdate') {

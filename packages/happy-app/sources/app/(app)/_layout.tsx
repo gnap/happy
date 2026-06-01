@@ -257,6 +257,12 @@ export default function RootLayout() {
                 }}
             />
             <Stack.Screen
+                name="dev/timeline-demo"
+                options={{
+                    headerTitle: 'Timeline Clustering',
+                }}
+            />
+            <Stack.Screen
                 name="dev/masked-progress"
                 options={{
                     headerTitle: 'Masked Progress',

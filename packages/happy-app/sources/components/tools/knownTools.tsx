@@ -83,6 +83,7 @@ export const knownTools = {
         },
         icon: ICON_TODO,
         noStatus: true,
+        minimal: true,
         input: z.object({}).partial().passthrough(),
     },
     'TaskUpdate': {
@@ -90,11 +91,12 @@ export const knownTools = {
             const input = opts.tool.input as Record<string, unknown> | undefined;
             const taskId = input?.taskId;
             const status = input?.status;
-            if (taskId && status) return `${t('tools.names.task')} #${taskId}: ${status}`;
+            if (taskId && status) return `Task #${taskId}: ${status}`;
             return t('tools.names.task');
         },
         icon: ICON_TODO,
         noStatus: true,
+        minimal: true,
         input: z.object({}).partial().passthrough(),
     },
     'Bash': {

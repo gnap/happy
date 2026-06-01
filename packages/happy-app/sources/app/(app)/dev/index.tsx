@@ -240,6 +240,12 @@ export default function DevScreen() {
                     onPress={() => router.push('/dev/tests')}
                 />
                 <Item
+                    title="Timeline Clustering"
+                    subtitle="Debug task timeline clustering logic"
+                    icon={<Ionicons name="git-branch-outline" size={28} color="#007AFF" />}
+                    onPress={() => router.push('/dev/timeline-demo')}
+                />
+                <Item
                     title="Unistyles Demo"
                     subtitle="React Native Unistyles features and capabilities"
                     icon={<Ionicons name="brush-outline" size={28} color="#FF6B6B" />}
