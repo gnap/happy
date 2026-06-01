@@ -37,26 +37,64 @@ export function computeMessageClusters(
     messages: readonly Message[],
     options?: ClusterOptions,
 ): ClusteredMessage[] {
+    // ---- Dedup adjacent user-text echoes (same text, ≤5s apart) --------------
+    const msgs = dedupUserEchoes(messages);
+
     // ---- Split into segments at user-text boundaries ----------------------
     const segments: { start: number; end: number }[] = [];
     let segStart = 0;
-    for (let i = 1; i < messages.length; i++) {
-        if (messages[i].kind === 'user-text') {
+    for (let i = 1; i < msgs.length; i++) {
+        if (msgs[i].kind === 'user-text') {
             segments.push({ start: segStart, end: i });
             segStart = i;
         }
     }
-    segments.push({ start: segStart, end: messages.length });
+    segments.push({ start: segStart, end: msgs.length });
 
     // ---- Process each segment ---------------------------------------------
     const result: ClusteredMessage[] = [];
     for (const seg of segments) {
         const clustered = clusterSegment(
-            messages.slice(seg.start, seg.end),
+            msgs.slice(seg.start, seg.end),
             seg.start,
             options,
         );
         for (const cm of clustered) result.push(cm);
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Dedup adjacent user-text echoes (same text, ≤5s apart)
+// ---------------------------------------------------------------------------
+
+/**
+ * When the client sends a user message an optimistic copy is inserted
+ * immediately.  The server echo may arrive via socket / fetch with a different
+ * id and no localId, creating a second copy.  This function removes the
+ * duplicate when two user-text messages share the same text and their
+ * timestamps are within 5 seconds of each other.
+ */
+function dedupUserEchoes(messages: readonly Message[]): readonly Message[] {
+    const DEDUP_WINDOW_MS = 5000;
+    const result: Message[] = [];
+    let lastUserText: { text: string; createdAt: number } | null = null;
+
+    for (let i = 0; i < messages.length; i++) {
+        const m = messages[i];
+        if (m.kind === 'user-text') {
+            if (
+                lastUserText &&
+                lastUserText.text === m.text &&
+                Math.abs(lastUserText.createdAt - m.createdAt) <=
+                    DEDUP_WINDOW_MS
+            ) {
+                // Duplicate echo — skip
+                continue;
+            }
+            lastUserText = { text: m.text, createdAt: m.createdAt };
+        }
+        result.push(m);
     }
     return result;
 }

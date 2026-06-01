@@ -781,4 +781,51 @@ describe('computeMessageClusters', () => {
             expect(tl.tasks[0].status).toBe('in_progress');
         });
     });
+
+    // -------------------------------------------------------------------
+    // User echo dedup
+    // -------------------------------------------------------------------
+
+    describe('user echo dedup', () => {
+        it('deduplicates adjacent user-text with same text within 5s', () => {
+            // Simulates optimistic + server echo arriving with different ids
+            const msgs: Message[] = [
+                ut('hello', 2000), // server echo (newer, different id)
+                ut('hello', 1500), // optimistic (older, same text)
+            ];
+            const result = computeMessageClusters(msgs);
+            expect(result.filter((r) => r.kind === 'user-text')).toHaveLength(1);
+        });
+
+        it('keeps user-text messages with different text', () => {
+            const msgs: Message[] = [
+                ut('message two', 2000),
+                ut('message one', 1000),
+            ];
+            const result = computeMessageClusters(msgs);
+            expect(result.filter((r) => r.kind === 'user-text')).toHaveLength(2);
+        });
+
+        it('keeps user-text messages with same text but >5s apart', () => {
+            const msgs: Message[] = [
+                ut('retry', 12000),
+                ut('retry', 1000),
+            ];
+            const result = computeMessageClusters(msgs);
+            expect(result.filter((r) => r.kind === 'user-text')).toHaveLength(2);
+        });
+
+        it('only deduplicates user-text, not task tool-calls', () => {
+            // Two TaskCreates with same subject are NOT deduped (dedup only
+            // applies to user-text echoes)
+            const msgs: Message[] = [
+                taskCreate('Fix bug', 2000),
+                taskCreate('Fix bug', 1500),
+            ];
+            const result = computeMessageClusters(msgs);
+            const tl = result.find((r) => r.kind === 'task-cluster') as any;
+            expect(tl).toBeDefined();
+            expect(tl.tasks).toHaveLength(2); // NOT deduped — two distinct tasks
+        });
+    });
 });
