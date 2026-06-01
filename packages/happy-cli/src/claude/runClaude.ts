@@ -18,7 +18,6 @@ import { extractSDKMetadataAsync } from '@/claude/sdk/metadataExtractor';
 import { parseSpecialCommand } from '@/parsers/specialCommands';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { configuration } from '@/configuration';
-import { createEnvelope } from '@slopus/happy-wire';
 import { notifyDaemonSessionStarted, notifyDaemonSessionEnding } from '@/daemon/controlClient';
 import { initialMachineMetadata } from '@/daemon/run';
 import { startHappyServer } from '@/claude/utils/startHappyServer';
@@ -573,12 +572,6 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             a2aInbox.peekInbox();
             return;
         }
-        // Echo user text as session protocol envelope.
-        // The Claude SDK output stream only contains assistant messages;
-        // user messages pushed into the input never reach the mapper.
-        session.sendSessionProtocolMessage(
-            createEnvelope('user', { t: 'text', text: message.content.text })
-        );
         messageQueue.push(message.content.text, enhancedMode);
         logger.debugLargeJson('User message pushed to queue:', message)
     };
