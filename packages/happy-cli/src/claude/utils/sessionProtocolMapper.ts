@@ -544,7 +544,7 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                 const args = toToolArgs(block.input);
                 const title = toolTitle(name, block.input);
                 const sessionSubagentForCall = ensureSessionSubagentIdForProviderSubagent(state, call);
-                if (name === 'Task' || name === 'Skill') {
+                if (name === 'Task') {
                     getHiddenParentToolCalls(state).add(call);
                     continue;
                 }

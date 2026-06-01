@@ -104,11 +104,11 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         expect(result.envelopes[1].ev).toEqual({ t: 'text', text: 'sidechain text' });
     });
 
-    it('hides Task/Skill/Agent, shows TaskCreate/TaskUpdate/TaskOutput/TaskStop as cards', () => {
+    it('hides Task/Agent, shows Skill/TaskCreate/TaskUpdate/TaskOutput/TaskStop as cards', () => {
         const state = { currentTurnId: 'turn-active' };
 
         // These should be hidden
-        for (const name of ['Task', 'Skill', 'Agent']) {
+        for (const name of ['Task', 'Agent']) {
             const result = mapClaudeLogMessageToSessionEnvelopes({
                 type: 'assistant',
                 uuid: `a-${name}`,
@@ -119,7 +119,6 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
                         id: `call-${name}`,
                         name,
                         input: name === 'Agent' ? { prompt: 'do work', description: 'Work' }
-                             : name === 'Skill' ? { skill: 'test', args: '' }
                              : { prompt: 'test', description: 'Test' },
                     }],
                 },
@@ -128,7 +127,7 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         }
 
         // These should emit tool-call-start (visible cards)
-        for (const name of ['TaskCreate', 'TaskUpdate', 'TaskOutput', 'TaskStop']) {
+        for (const name of ['Skill', 'TaskCreate', 'TaskUpdate', 'TaskOutput', 'TaskStop']) {
             const result = mapClaudeLogMessageToSessionEnvelopes({
                 type: 'assistant',
                 uuid: `a-${name}`,
@@ -140,6 +139,7 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
                         name,
                         input: name === 'TaskCreate' ? { subject: 'Test', description: 'Test task' }
                              : name === 'TaskUpdate' ? { taskId: '1', status: 'in_progress' }
+                             : name === 'Skill' ? { skill: 'test', args: '' }
                              : { task_id: 'bg123' },
                     }],
                 },
