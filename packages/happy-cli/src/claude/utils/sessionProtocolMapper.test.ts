@@ -25,7 +25,7 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         expect(result.envelopes[0].ev).toEqual({ t: 'text', text: 'hello from user' });
     });
 
-    it('starts a turn and maps assistant text blocks', () => {
+    it('starts a turn and maps assistant text blocks (thinking suppressed)', () => {
         const result = mapClaudeLogMessageToSessionEnvelopes({
             type: 'assistant',
             uuid: 'a-1',
@@ -40,10 +40,9 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         } as any, { currentTurnId: null });
 
         expect(result.currentTurnId).not.toBeNull();
-        expect(result.envelopes).toHaveLength(3);
+        expect(result.envelopes).toHaveLength(2);
         expect(result.envelopes[0].ev.t).toBe('turn-start');
         expect(result.envelopes[1].ev).toEqual({ t: 'text', text: 'working...' });
-        expect(result.envelopes[2].ev).toEqual({ t: 'text', text: 'internal', thinking: true });
     });
 
     it('maps tool use and tool result blocks to tool-call lifecycle', () => {

@@ -244,6 +244,7 @@ export class ApiSessionClient extends EventEmitter {
     /** Resolves when the WebSocket first connects; used by updateMetadata to wait for initial connection. */
     private socketConnectedPromise: Promise<void>;
     private socketConnectedResolve: (() => void) | undefined;
+    private routedMessageIds = new Set<string>();
     private routedA2ASessionEnvelopeIds = new Set<string>();
     /** Trigger ids already drained; blocks fetch/reconnect replay from re-opening the inbox. */
     private consumedA2ATriggerIds = new Set<string>();
@@ -595,7 +596,7 @@ export class ApiSessionClient extends EventEmitter {
                             this.receiveSync.invalidate();
                             return;
                         }
-                        this.routeIncomingMessage(body);
+                        this.routeIncomingMessage(body, messageSeq);
                         this.lastSeq = messageSeq;
                         return;
                     }
@@ -737,7 +738,16 @@ export class ApiSessionClient extends EventEmitter {
         };
     }
 
-    private routeIncomingMessage(message: unknown) {
+    private routeIncomingMessage(message: unknown, seq?: number) {
+        // Deduplicate by seq: WebSocket push and HTTP fetch may deliver
+        // the same message concurrently.
+        if (typeof seq === 'number') {
+            const key = String(seq);
+            if (this.routedMessageIds.has(key)) return;
+            this.routedMessageIds.add(key);
+            if (this.routedMessageIds.size > 1000) this.routedMessageIds.clear();
+        }
+
         const triggerInboxMessageId = this.ingestA2AInboxFromTrigger(message);
 
         const userResult = UserMessageSchema.safeParse(message);
@@ -1157,7 +1167,7 @@ export class ApiSessionClient extends EventEmitter {
                             });
                             continue;
                         }
-                        this.routeIncomingMessage(body);
+                        this.routeIncomingMessage(body, message.seq);
                     } catch (error) {
                         logger.debug('[API] Failed to decrypt fetched message', {
                             sessionId: this.sessionId,
