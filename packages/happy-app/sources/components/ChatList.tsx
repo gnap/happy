@@ -6,7 +6,7 @@ import { useHeaderHeight } from '@/utils/responsive';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MessageView } from './MessageView';
 import { TaskListView } from './TaskListView';
-import { computeMessageClusters } from './clusterTimeline';
+import { computeMessageClusters, ClusterOptions } from './clusterTimeline';
 import { Metadata, Session } from '@/sync/storageTypes';
 import { layout } from './layout';
 import { ChatFooter } from './ChatFooter';
@@ -77,9 +77,18 @@ const ChatListInternal = React.memo((props: {
     const isNearBottomRef = useRef(true);
     const prevMessagesLengthRef = useRef(props.messages.length);
 
+    const clusterOptions: ClusterOptions | undefined = useMemo(() => {
+        if (!props.tasks || props.tasks.length === 0) return undefined;
+        const m = new Map<string, string>();
+        for (const t of props.tasks) {
+            if (t.content) m.set(t.id, t.content);
+        }
+        return { taskContentMap: m };
+    }, [props.tasks]);
+
     const messagesWithTasks = useMemo(
-        () => computeMessageClusters(props.messages),
-        [props.messages],
+        () => computeMessageClusters(props.messages, clusterOptions),
+        [props.messages, clusterOptions],
     );
 
     const keyExtractor = useCallback((item: any) => item.id, []);

@@ -9,6 +9,7 @@ import { computeMessageClusters, ClusteredMessage, TaskClusterMessage } from '@/
 import { TaskListView } from '@/components/TaskListView';
 import { Message, UserTextMessage, AgentTextMessage, ToolCallMessage } from '@/sync/typesMessage';
 import { StyleSheet } from 'react-native-unistyles';
+import { useLocalSearchParams } from 'expo-router';
 
 // ---------------------------------------------------------------------------
 // Test scenario definitions
@@ -119,6 +120,49 @@ const SCENARIOS: Scenario[] = [
         name: '空输入',
         description: '0 条消息 → 空输出',
         messages: [],
+    },
+    {
+        name: '无user-text多batch',
+        description: '模拟真实session：无user-text，TaskUpdate先于TaskCreate，多轮task batch',
+        messages: [
+            // batch 1: pre-updates then TaskCreates
+            tc('TaskUpdate', 500, { taskId: '1', status: 'completed' }),
+            tc('TaskUpdate', 600, { taskId: '2', status: 'completed' }),
+            tc('Bash', 700, { command: 'setup' }),
+            tc('TaskUpdate', 800, { taskId: '3', status: 'in_progress' }),
+            taskCreate('Batch1-A', 1000, 'Batch1-A'),
+            taskCreate('Batch1-B', 1100, 'Batch1-B'),
+            taskCreate('Batch1-C', 1200, 'Batch1-C'),
+            tc('Bash', 1300, { command: 'build' }),
+            taskUpdate('1', 'completed', 1400),
+            taskUpdate('2', 'completed', 1500),
+            taskUpdate('3', 'completed', 1600),
+            // batch 2: all previous done (activeCount=0), new TaskCreate starts new cluster
+            taskCreate('Batch2-A', 2000, 'Batch2-A'),
+            taskCreate('Batch2-B', 2100, 'Batch2-B'),
+            tc('Bash', 2200, { command: 'deploy' }),
+            taskUpdate('4', 'in_progress', 2300),
+            taskUpdate('5', 'completed', 2400),
+            taskUpdate('4', 'completed', 2500),
+        ],
+    },
+    {
+        name: '多回合（BUG 复现）',
+        description: '两轮对话各有独立 TaskCreate，应渲染两个 timeline card',
+        messages: [
+            ut('第一轮：修 bug', 1000),
+            taskCreate('修复登录崩溃', 2000),
+            taskUpdate('1', 'in_progress', 2500),
+            tc('Bash', 3000, { command: 'git log' }),
+            taskUpdate('1', 'completed', 3500),
+            at('修好了', 4000),
+            ut('第二轮：加功能', 5000),
+            taskCreate('添加导出按钮', 6000),
+            taskUpdate('2', 'in_progress', 6500),
+            tc('Write', 7000, { file: 'Export.tsx', content: '...' }),
+            taskUpdate('2', 'completed', 7500),
+            at('加好了', 8000),
+        ],
     },
 ];
 
@@ -286,7 +330,12 @@ function DebugTimeline({ result }: { result: ClusteredMessage[] }) {
 // ---------------------------------------------------------------------------
 
 export default function TimelineDemoScreen() {
-    const [scenarioIdx, setScenarioIdx] = React.useState(0);
+    const params = useLocalSearchParams<{ scenario?: string }>();
+    const initialIdx = React.useMemo(() => {
+        const n = parseInt(params.scenario ?? '', 10);
+        return (n >= 0 && n < SCENARIOS.length) ? n : 0;
+    }, [params.scenario]);
+    const [scenarioIdx, setScenarioIdx] = React.useState(initialIdx);
     const scenario = SCENARIOS[scenarioIdx];
     const result = React.useMemo(
         () => computeMessageClusters(scenario.messages),
@@ -305,6 +354,7 @@ export default function TimelineDemoScreen() {
                 {SCENARIOS.map((s, i) => (
                     <Pressable
                         key={s.name}
+                        testID={`scenario-chip-${i}`}
                         style={[st.chip, i === scenarioIdx && st.chipActive]}
                         onPress={() => setScenarioIdx(i)}
                     >

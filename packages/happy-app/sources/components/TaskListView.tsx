@@ -124,7 +124,7 @@ export const TaskListView = React.memo(({ tasks }: { tasks?: TaskItem[] }) => {
     }
 
     return (
-        <View style={styles.container}>
+        <View style={styles.container} testID="task-list-view">
             {tasks.map((task, index) => {
                 const isLast = index === tasks.length - 1;
                 const dotColor = DOT_COLORS[task.status] ?? DOT_COLORS.pending;
@@ -132,10 +132,10 @@ export const TaskListView = React.memo(({ tasks }: { tasks?: TaskItem[] }) => {
                 return (
                     <React.Fragment key={task.id}>
                         {/* Top-level: task title */}
-                        <View style={styles.taskRow}>
+                        <View style={styles.taskRow} testID={`task-row-${index}`}>
                             <View style={styles.timelineCol}>
                                 <TaskDot status={task.status} />
-                                <View style={styles.lineBox} />
+                                <View style={styles.lineBox} testID={`task-line-${index}`} />
                             </View>
                             <View style={styles.contentCol}>
                                 <Text
@@ -147,18 +147,23 @@ export const TaskListView = React.memo(({ tasks }: { tasks?: TaskItem[] }) => {
                                             : []),
                                     ]}
                                     numberOfLines={2}
+                                    testID={`task-title-${index}`}
                                 >
                                     {task.content}
                                 </Text>
                             </View>
                         </View>
                         {/* Child: execution status */}
-                        <View style={styles.childRow}>
+                        <View style={styles.childRow} testID={`task-child-${index}`}>
                             <View style={styles.timelineCol}>
                                 {!isLast && <View style={styles.lineBox} />}
                             </View>
                             <View style={styles.contentCol}>
-                                <Text style={styles.childText} numberOfLines={1}>
+                                <Text
+                                    style={styles.childText}
+                                    numberOfLines={1}
+                                    testID={`task-status-${index}`}
+                                >
                                     {childLabel(task)}
                                 </Text>
                             </View>
