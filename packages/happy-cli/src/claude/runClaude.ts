@@ -579,6 +579,12 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         session.sendSessionProtocolMessage(
             createEnvelope('user', { t: 'text', text: message.content.text })
         );
+        // Echo user text as session protocol envelope.
+        // The Claude SDK output stream only contains assistant messages;
+        // user messages pushed into the input never reach the mapper.
+        session.sendSessionProtocolMessage(
+            createEnvelope('user', { t: 'text', text: message.content.text })
+        );
         messageQueue.push(message.content.text, enhancedMode);
         logger.debugLargeJson('User message pushed to queue:', message)
     };
