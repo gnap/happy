@@ -79,11 +79,7 @@ const ChatListInternal = React.memo((props: {
 
     const clusterOptions: ClusterOptions | undefined = useMemo(() => {
         if (!props.tasks || props.tasks.length === 0) return undefined;
-        const m = new Map<string, string>();
-        for (const t of props.tasks) {
-            if (t.content) m.set(t.id, t.content);
-        }
-        return { taskContentMap: m };
+        return { tasks: props.tasks.map(t => ({ id: t.id, content: t.content, status: t.status })) };
     }, [props.tasks]);
 
     const messagesWithTasks = useMemo(
@@ -98,7 +94,7 @@ const ChatListInternal = React.memo((props: {
                 <View style={{ flexDirection: 'row', justifyContent: 'center' }}>
                     <View style={{ flexDirection: 'column', flexGrow: 1, flexBasis: 0, maxWidth: layout.maxWidth }}>
                         <View style={{ marginHorizontal: 8, marginBottom: 12 }}>
-                            <TaskListView tasks={item.tasks} />
+                            <TaskListView tasks={item.tasks} collapsedCount={item.collapsedCount} />
                         </View>
                     </View>
                 </View>
