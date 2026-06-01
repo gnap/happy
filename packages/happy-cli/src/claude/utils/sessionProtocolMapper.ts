@@ -204,6 +204,12 @@ function queueTaskPromptSubagent(state: ClaudeSessionProtocolState, prompt: stri
     promptMap.set(normalized, queue);
 }
 
+function isKnownTaskPrompt(state: ClaudeSessionProtocolState, prompt: string): boolean {
+    const normalized = normalizePrompt(prompt);
+    if (normalized.length === 0) return false;
+    return getTaskPromptToSubagents(state).has(normalized);
+}
+
 function consumeTaskPromptSubagent(state: ClaudeSessionProtocolState, prompt: string): string | undefined {
     const normalized = normalizePrompt(prompt);
     if (normalized.length === 0) {
@@ -618,9 +624,14 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
         const taskCallId = subagent ? getTaskCallBySubagent(state).get(subagent) : undefined;
         if (typeof message.message.content === 'string') {
             if (message.isSidechain) {
-                const turnId = ensureTurn(state, envelopes);
-                maybeEmitSubagentStart(state, turnId, subagent, envelopes);
-                envelopes.push(createEnvelope('agent', { t: 'text', text: message.message.content }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
+                // Don't emit the sub-agent prompt as a visible text bubble in the
+                // main conversation.  The prompt is internal metadata for the
+                // delegation — the user shouldn't see it as a standalone message.
+                if (!isKnownTaskPrompt(state, message.message.content)) {
+                    const turnId = ensureTurn(state, envelopes);
+                    maybeEmitSubagentStart(state, turnId, subagent, envelopes);
+                    envelopes.push(createEnvelope('agent', { t: 'text', text: message.message.content }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
+                }
             } else {
                 closeTurn(state, 'completed', envelopes);
                 envelopes.push(createEnvelope('user', { t: 'text', text: message.message.content }));
