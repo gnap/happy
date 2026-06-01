@@ -25,24 +25,34 @@ export type UsageData = z.infer<typeof usageDataSchema>;
 let _sessionProtocolSendEnabledLogged = false;
 
 function isSessionProtocolSendEnabled(): boolean {
-    // Allow explicit opt-out via env var for debugging
     const raw = (
         process.env.EXPO_PUBLIC_ENABLE_SESSION_PROTOCOL_SEND
         ?? process.env.ENABLE_SESSION_PROTOCOL_SEND
         ?? ''
     ).toLowerCase();
-    if (raw === '0' || raw === 'false' || raw === 'no') {
+    const fromEnv = raw === '1' || raw === 'true' || raw === 'yes';
+    if (fromEnv) {
         if (!_sessionProtocolSendEnabledLogged) {
             _sessionProtocolSendEnabledLogged = true;
-            console.log('[session protocol] enableSessionProtocolSend=false (env)');
+            console.log('[session protocol] enableSessionProtocolSend=true (env)');
+        }
+        return true;
+    }
+    try {
+        const Constants = require('expo-constants').default;
+        const fromExtra = Constants.expoConfig?.extra?.enableSessionProtocolSend === true;
+        if (!_sessionProtocolSendEnabledLogged) {
+            _sessionProtocolSendEnabledLogged = true;
+            console.log('[session protocol] enableSessionProtocolSend=', fromExtra, '(expoConfig.extra)');
+        }
+        return fromExtra;
+    } catch (e) {
+        if (!_sessionProtocolSendEnabledLogged) {
+            _sessionProtocolSendEnabledLogged = true;
+            console.warn('[session protocol] enableSessionProtocolSend=false (expo-constants failed)');
         }
         return false;
     }
-    if (!_sessionProtocolSendEnabledLogged) {
-        _sessionProtocolSendEnabledLogged = true;
-        console.log('[session protocol] enableSessionProtocolSend=true (default)');
-    }
-    return true;
 }
 
 const agentEventSchema = z.discriminatedUnion('type', [z.object({

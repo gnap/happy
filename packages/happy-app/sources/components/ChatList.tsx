@@ -94,7 +94,7 @@ const ChatListInternal = React.memo((props: {
                 <View style={{ flexDirection: 'row', justifyContent: 'center' }}>
                     <View style={{ flexDirection: 'column', flexGrow: 1, flexBasis: 0, maxWidth: layout.maxWidth }}>
                         <View style={{ marginHorizontal: 8, marginBottom: 12 }}>
-                            <TaskListView tasks={item.tasks} collapsedCount={item.collapsedCount} />
+                            <TaskListView tasks={item.tasks} />
                         </View>
                     </View>
                 </View>
