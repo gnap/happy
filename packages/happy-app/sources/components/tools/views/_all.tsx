@@ -24,6 +24,7 @@ import { GeminiEditView } from './GeminiEditView';
 import { GeminiExecuteView } from './GeminiExecuteView';
 import { CursorEditView } from './CursorEditView';
 import { CursorWriteView } from './CursorWriteView';
+import { AgentViewFull } from './AgentViewFull';
 
 export type ToolViewProps = {
     tool: ToolCall;
@@ -77,7 +78,7 @@ export const toolFullViewRegistry: Record<string, ToolViewComponent> = {
     edit: GeminiEditView,
     execute: GeminiExecuteView,
     Task: TaskView, // Task output is in children (sidechain agent-text), not tool.result
-    Agent: TaskView,
+    Agent: AgentViewFull,
 };
 
 // Helper function to get the appropriate view component for a tool
@@ -110,3 +111,4 @@ export { GeminiEditView } from './GeminiEditView';
 export { GeminiExecuteView } from './GeminiExecuteView';
 export { CursorEditView } from './CursorEditView';
 export { CursorWriteView } from './CursorWriteView';
+export { AgentViewFull } from './AgentViewFull';

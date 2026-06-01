@@ -21,9 +21,9 @@ const ICON_QUESTION = (size: number = 24, color: string = '#000') => <Ionicons n
 export const knownTools = {
     'Task': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            // Check for description field at runtime
-            if (opts.tool.input && opts.tool.input.description && typeof opts.tool.input.description === 'string') {
-                return opts.tool.input.description;
+            const subagentType = opts.tool.input?.subagent_type;
+            if (subagentType && typeof subagentType === 'string' && subagentType.trim()) {
+                return subagentType;
             }
             return t('tools.names.task');
         },
@@ -49,26 +49,15 @@ export const knownTools = {
     },
     'Agent': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (opts.tool.input && opts.tool.input.description && typeof opts.tool.input.description === 'string') {
-                return opts.tool.input.description;
+            const subagentType = opts.tool.input?.subagent_type;
+            if (subagentType && typeof subagentType === 'string' && subagentType.trim()) {
+                return subagentType;
             }
-            return t('tools.names.task');
+            return t('tools.names.agent');
         },
         icon: ICON_TASK,
         isMutable: true,
-        minimal: (opts: { metadata: Metadata | null, tool: ToolCall, messages?: Message[] }) => {
-            const messages = opts.messages || [];
-            for (let m of messages) {
-                if (m.kind === 'tool-call' &&
-                    (m.tool.state === 'running' || m.tool.state === 'completed' || m.tool.state === 'error')) {
-                    return false;
-                }
-                if (m.kind === 'agent-text' && m.text) {
-                    return false;
-                }
-            }
-            return true;
-        },
+        minimal: true,
         input: z.object({
             description: z.string().optional().describe('Short description of what the agent should do'),
             prompt: z.string().describe('The task for the agent to perform'),

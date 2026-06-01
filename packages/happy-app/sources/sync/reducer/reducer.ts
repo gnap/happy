@@ -1003,7 +1003,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
 
         // Process and add new sidechain messages
         if (msg.role === 'agent' && msg.content[0]?.type === 'sidechain') {
-            // This is the sidechain root - create a user message
+            // This is the sidechain root - create a user message for the Agent's children only
             let mid = allocateId();
             let userMsg: ReducerMessage = {
                 id: mid,
@@ -1015,7 +1015,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                 event: null,
                 meta: msg.meta,
             };
-            state.messages.set(mid, userMsg);
+            // Only add to sidechain children (visible in detail page), not to main message list
             existingSidechain.push(userMsg);
         } else if (msg.role === 'agent') {
             // Process agent content in sidechain

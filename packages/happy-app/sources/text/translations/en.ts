@@ -530,6 +530,12 @@ export const en: TranslationStructure = {
             initializing: 'Initializing agent...',
             moreTools: ({ count }: { count: number }) => `+${count} more ${plural({ count, singular: 'tool', plural: 'tools' })}`,
         },
+        agentView: {
+            prompt: 'Prompt',
+            agentTools: 'Tools Used',
+            output: 'Agent Output',
+            result: 'Result',
+        },
         multiEdit: {
             editNumber: ({ index, total }: { index: number; total: number }) => `Edit ${index} of ${total}`,
             replaceAll: 'Replace All',
@@ -554,6 +560,7 @@ export const en: TranslationStructure = {
             applyChanges: 'Update file',
             viewDiff: 'Current file changes',
             question: 'Question',
+            agent: 'Agent',
         },
         askUserQuestion: {
             submit: 'Submit Answer',

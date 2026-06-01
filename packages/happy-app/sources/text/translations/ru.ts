@@ -525,6 +525,12 @@ export const ru: TranslationStructure = {
             initializing: 'Инициализация агента...',
             moreTools: ({ count }: { count: number }) => `+${count} ещё ${plural({ count, one: 'инструмент', few: 'инструмента', many: 'инструментов' })}`,
         },
+        agentView: {
+            prompt: 'Промпт',
+            agentTools: 'Используемые инструменты',
+            output: 'Вывод агента',
+            result: 'Результат',
+        },
         multiEdit: {
             editNumber: ({ index, total }: { index: number; total: number }) => `Правка ${index} из ${total}`,
             replaceAll: 'Заменить все',
@@ -549,6 +555,7 @@ export const ru: TranslationStructure = {
             applyChanges: 'Обновить файл',
             viewDiff: 'Текущие изменения файла',
             question: 'Вопрос',
+            agent: 'Агент',
         },
         desc: {
             terminalCmd: ({ cmd }: { cmd: string }) => `Терминал(команда: ${cmd})`,
