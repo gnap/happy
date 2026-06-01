@@ -25,7 +25,7 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         expect(result.envelopes[0].ev).toEqual({ t: 'text', text: 'hello from user' });
     });
 
-    it('starts a turn and maps assistant text blocks', () => {
+    it('starts a turn and maps assistant text blocks, suppressing thinking', () => {
         const result = mapClaudeLogMessageToSessionEnvelopes({
             type: 'assistant',
             uuid: 'a-1',
@@ -40,10 +40,9 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         } as any, { currentTurnId: null });
 
         expect(result.currentTurnId).not.toBeNull();
-        expect(result.envelopes).toHaveLength(3);
+        expect(result.envelopes).toHaveLength(2);
         expect(result.envelopes[0].ev.t).toBe('turn-start');
         expect(result.envelopes[1].ev).toEqual({ t: 'text', text: 'working...' });
-        expect(result.envelopes[2].ev).toEqual({ t: 'text', text: 'internal', thinking: true });
     });
 
     it('maps tool use and tool result blocks to tool-call lifecycle', () => {
@@ -105,11 +104,11 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         expect(result.envelopes[1].ev).toEqual({ t: 'text', text: 'sidechain text' });
     });
 
-    it('hides Task/TaskOutput/TaskStop, shows TaskCreate/TaskUpdate/Agent as cards', () => {
+    it('hides Task/Skill/Agent, shows TaskCreate/TaskUpdate/TaskOutput/TaskStop as cards', () => {
         const state = { currentTurnId: 'turn-active' };
 
         // These should be hidden
-        for (const name of ['Task']) {
+        for (const name of ['Task', 'Skill', 'Agent']) {
             const result = mapClaudeLogMessageToSessionEnvelopes({
                 type: 'assistant',
                 uuid: `a-${name}`,
@@ -119,7 +118,9 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
                         type: 'tool_use',
                         id: `call-${name}`,
                         name,
-                        input: { prompt: 'test', description: 'Test' },
+                        input: name === 'Agent' ? { prompt: 'do work', description: 'Work' }
+                             : name === 'Skill' ? { skill: 'test', args: '' }
+                             : { prompt: 'test', description: 'Test' },
                     }],
                 },
             } as any, state);
@@ -127,7 +128,7 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         }
 
         // These should emit tool-call-start (visible cards)
-        for (const name of ['TaskCreate', 'TaskUpdate', 'TaskOutput', 'TaskStop', 'Agent']) {
+        for (const name of ['TaskCreate', 'TaskUpdate', 'TaskOutput', 'TaskStop']) {
             const result = mapClaudeLogMessageToSessionEnvelopes({
                 type: 'assistant',
                 uuid: `a-${name}`,
@@ -139,13 +140,56 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
                         name,
                         input: name === 'TaskCreate' ? { subject: 'Test', description: 'Test task' }
                              : name === 'TaskUpdate' ? { taskId: '1', status: 'in_progress' }
-                             : name === 'Agent' ? { prompt: 'do work', description: 'Work' }
                              : { task_id: 'bg123' },
                     }],
                 },
             } as any, state);
             expect(result.envelopes.filter(e => e.ev.t === 'tool-call-start')).toHaveLength(1);
         }
+    });
+
+    it('hides Agent and remaps subagent children to TaskCreate card', () => {
+        const state: any = {
+            currentTurnId: 'turn-1',
+            lastTaskCreateCallId: 'task-create-call-1',
+        };
+
+        // Agent should be hidden (no tool-call-start)
+        const result = mapClaudeLogMessageToSessionEnvelopes({
+            type: 'assistant',
+            uuid: 'a-agent-1',
+            message: {
+                role: 'assistant',
+                content: [{
+                    type: 'tool_use',
+                    id: 'agent-call-1',
+                    name: 'Agent',
+                    input: { prompt: 'do work', description: 'Test agent' },
+                }],
+            },
+        } as any, state);
+
+        expect(result.envelopes.filter(e => e.ev.t === 'tool-call-start')).toHaveLength(0);
+
+        // Subagent messages should get taskCall = TaskCreate's call ID
+        const sessionSubagent = state.providerSubagentToSessionSubagent?.get('agent-call-1');
+        expect(sessionSubagent).toBeDefined();
+        expect(state.taskCallBySubagent?.get(sessionSubagent!)).toBe('task-create-call-1');
+    });
+
+    it('skips isMeta user messages (skill content injection)', () => {
+        const result = mapClaudeLogMessageToSessionEnvelopes({
+            type: 'user',
+            uuid: 'u-meta-1',
+            isMeta: true,
+            message: {
+                role: 'user',
+                content: [{ type: 'text', text: 'Skill: loop instructions here...' }],
+            },
+        } as any, { currentTurnId: 'turn-1' });
+
+        expect(result.currentTurnId).toBe('turn-1');
+        expect(result.envelopes).toHaveLength(0);
     });
 
     it('hides Task tool_use in fixture logs', () => {
