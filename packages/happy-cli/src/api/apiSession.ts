@@ -1482,6 +1482,10 @@ export class ApiSessionClient extends EventEmitter {
         // Apply lazy encoding at the single exit point so all code paths
         // (Claude via sendClaudeSessionMessage, Cursor via direct call, etc.) are covered.
         const finalEnvelope = this.maybeLazyEncodeEnvelope(envelope);
+        if (finalEnvelope.role === 'user' && finalEnvelope.ev.t === 'text') {
+            const stack = new Error().stack?.split('\n').slice(1, 4).map(s => s.trim()).join(' <- ');
+            logger.debug(`[API] USER ENVELOPE: "${(finalEnvelope.ev as any).text?.slice(0,50)}" callstack: ${stack}`);
+        }
         if (process.env.HAPPY_CURSOR_TRACE_ENVELOPES === '1') {
             this._envelopeSendCount += 1;
             const ev = finalEnvelope.ev as { t?: string; text?: string; call?: string };
