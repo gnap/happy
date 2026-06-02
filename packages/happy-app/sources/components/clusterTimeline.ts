@@ -15,30 +15,67 @@ export interface ClusterOptions {
     taskContentMap?: ReadonlyMap<string, string>;
 }
 
+// Incremental cache: avoids re-scanning all messages on every render.
+// Keyed by the messages array reference (which changes when new msgs arrive).
+let _cachedArray: readonly Message[] | null = null;
+let _cachedLen = 0;
+const __globalTaskStatus = new Map<string, string>();
+let _globalBase = 1;
+const statusOrder: Record<string, number> = { pending: 0, in_progress: 1, completed: 2 };
+
+function updateGlobalScan(messages: readonly Message[]) {
+    // If it's the same array ref with more messages, scan only new ones
+    if (messages === _cachedArray && messages.length >= _cachedLen) {
+        for (let i = _cachedLen; i < messages.length; i++) {
+            const m = messages[i];
+            if (m.kind === 'tool-call' && m.tool?.name === 'TaskUpdate') {
+                const input = m.tool.input || {};
+                const tid = String(input.taskId || input.id || '');
+                const st = String(input.status || '');
+                if (st && (!__globalTaskStatus.has(tid) || (statusOrder[st] ?? -1) > (statusOrder[__globalTaskStatus.get(tid)!] ?? -1))) {
+                    __globalTaskStatus.set(tid, st);
+                }
+            }
+            // Also update globalBase from new messages
+            if (m.kind === 'tool-call' && m.tool?.name === 'TaskUpdate') {
+                const n = parseInt(String((m.tool?.input?.taskId || m.tool?.input?.id)), 10);
+                if (!isNaN(n) && n < _globalBase) _globalBase = n;
+            }
+        }
+    } else {
+        // New array or shorter — full rescan
+        __globalTaskStatus.clear();
+        _globalBase = 1;
+        let seenTc = false;
+        for (const m of messages) {
+            if (m.kind === 'tool-call' && m.tool?.name === 'TaskCreate') seenTc = true;
+            if (seenTc && m.kind === 'tool-call' && m.tool?.name === 'TaskUpdate') {
+                const input = m.tool.input || {};
+                const tid = String(input.taskId || input.id || '');
+                const st = String(input.status || '');
+                if (st && (!__globalTaskStatus.has(tid) || (statusOrder[st] ?? -1) > (statusOrder[__globalTaskStatus.get(tid)!] ?? -1))) {
+                    __globalTaskStatus.set(tid, st);
+                }
+                const n = parseInt(String(input.taskId || input.id || ''), 10);
+                if (!isNaN(n) && n < _globalBase) _globalBase = n;
+            }
+        }
+    }
+    _cachedArray = messages;
+    _cachedLen = messages.length;
+}
+
 // ---------------------------------------------------------------------------
 // Top-level: split at user-text boundaries, process each segment independently.
-// A global pre-scan builds a taskStatus map from all TaskUpdates, so updates
-// from any segment apply to tasks in any segment.
+// Uses incremental global scan for TaskUpdate statuses and taskId base.
 // ---------------------------------------------------------------------------
 
 export function computeMessageClusters(
     messages: readonly Message[],
     options?: ClusterOptions,
 ): ClusteredMessage[] {
-    // ---- Global pre-scan: collect TaskUpdate statuses -----------------------
-    // Maps global taskId → best status. Applies across all segments.
-    const globalTaskStatus = new Map<string, string>();
-    const statusOrder: Record<string, number> = { pending: 0, in_progress: 1, completed: 2 };
-    for (const m of messages) {
-        if (m.kind === 'tool-call' && m.tool?.name === 'TaskUpdate') {
-            const input = m.tool.input || {};
-            const tid = String(input.taskId || input.id || '');
-            const st = String(input.status || '');
-            if (st && (!globalTaskStatus.has(tid) || (statusOrder[st] ?? -1) > (statusOrder[globalTaskStatus.get(tid)!] ?? -1))) {
-                globalTaskStatus.set(tid, st);
-            }
-        }
-    }
+    // ---- Incremental global scan --------------------------------------------
+    updateGlobalScan(messages);
 
     // ---- Split into segments -----------------------------------------------
     const segments: { start: number; end: number }[] = [];
@@ -51,35 +88,20 @@ export function computeMessageClusters(
     }
     segments.push({ start: segStart, end: messages.length });
 
-    // ---- Compute global base for numeric fallback ---------------------------
-    let globalBase = 1;
-    {
-        let seenTc = false;
-        let minTid = Infinity;
-        for (const m of messages) {
-            if (m.kind === 'tool-call' && m.tool?.name === 'TaskCreate') seenTc = true;
-            if (seenTc && m.kind === 'tool-call' && m.tool?.name === 'TaskUpdate') {
-                const n = parseInt(String((m.tool?.input?.taskId || m.tool?.input?.id)), 10);
-                if (!isNaN(n) && n < minTid) minTid = n;
-            }
-        }
-        if (isFinite(minTid)) globalBase = minTid;
-    }
-
     // ---- Process each segment ----------------------------------------------
     const result: ClusteredMessage[] = [];
     let cumulativeTotal = 0;
     let segmentOffset = 0;
 
     for (const seg of segments) {
-        const segBase = globalBase + cumulativeTotal;
+        const segBase = _globalBase + cumulativeTotal;
         const clustered = clusterSegment(
             messages.slice(seg.start, seg.end),
             seg.start,
             options?.taskContentMap,
             segBase,
             segmentOffset,
-            globalTaskStatus,
+            _globalTaskStatus,
         );
         for (const cm of clustered) {
             result.push(cm);
@@ -117,7 +139,7 @@ function clusterSegment(
     taskContentMap: ReadonlyMap<string, string> | undefined,
     segmentBase: number,
     segmentOffset: number,
-    globalTaskStatus: Map<string, string>,
+    _globalTaskStatus: Map<string, string>,
 ): ClusteredMessage[] {
     if (messages.length === 0) return [];
 
@@ -179,7 +201,7 @@ function clusterSegment(
         // Try both per-cluster base and legacy base (1-indexed)
         for (const base of [taskIdBase, 1]) {
             const tid = String(base + idx);
-            const gs = globalTaskStatus.get(tid);
+            const gs = _globalTaskStatus.get(tid);
             if (gs && (statusOrder[gs] ?? -1) > (statusOrder[item.status] ?? -1)) {
                 item.status = gs as TaskItem['status'];
                 if (gs === 'completed' && !completedOnce.get(item.id)) {
