@@ -663,12 +663,12 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
             };
         }
 
-        // Suppress meta messages (e.g. Skill injection prompts)
-        if (message.isMeta) {
-            return {
-                currentTurnId: state.currentTurnId,
-                envelopes,
-            };
+        // Suppress meta / CLI-injected prompts
+        if (message.isMeta || (state.suppressNextUserTextCount ?? 0) > 0) {
+            if (!message.isMeta) {
+                state.suppressNextUserTextCount = (state.suppressNextUserTextCount ?? 1) - 1;
+            }
+            return { currentTurnId: state.currentTurnId, envelopes };
         }
 
         // Process tool_result blocks first (subagent stop, tool-call-end)
