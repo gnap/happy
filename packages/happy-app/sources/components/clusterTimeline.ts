@@ -274,8 +274,9 @@ function clusterSegment(
             hideSet.add(i); allHidden.add(i);
 
             if (taskContentMap) {
+                // Exact match first (no fuzzy includes — risks cross-task misattribution)
                 for (const [tid, tc] of taskContentMap) {
-                    if (tc === content || tc === descKey || content.includes(tc) || tc.includes(content)) {
+                    if (tc === content || tc === descKey) {
                         tidToIdx.set(tid, newIdx);
                         break;
                     }
