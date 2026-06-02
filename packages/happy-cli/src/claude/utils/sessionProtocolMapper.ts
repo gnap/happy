@@ -345,12 +345,19 @@ function pickTaskTitle(input: unknown): string | undefined {
         return undefined;
     }
 
-    const candidateKeys = ['description', 'title', 'subagent_type'];
-    for (const key of candidateKeys) {
-        const value = (input as Record<string, unknown>)[key];
+    const record = input as Record<string, unknown>;
+    // Prefer explicit human-readable title fields; never use subagent_type ("claude", "opus", etc.)
+    for (const key of ['description', 'title']) {
+        const value = record[key];
         if (typeof value === 'string' && value.trim().length > 0) {
             return value.trim();
         }
+    }
+    // Fall back to a truncated prompt so the card has something descriptive.
+    const prompt = record['prompt'];
+    if (typeof prompt === 'string' && prompt.trim().length > 0) {
+        const trimmed = prompt.trim().replace(/\s+/g, ' ');
+        return trimmed.length > 60 ? `${trimmed.slice(0, 57)}...` : trimmed;
     }
 
     return undefined;
