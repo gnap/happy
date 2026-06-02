@@ -585,6 +585,7 @@ export const ja: TranslationStructure = {
             viewDiff: '現在のファイル変更',
             question: '質問',
             agent: 'エージェント',
+            skill: 'Skill',
         },
         desc: {
             terminalCmd: ({ cmd }: { cmd: string }) => `ターミナル(cmd: ${cmd})`,

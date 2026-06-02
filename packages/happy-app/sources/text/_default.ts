@@ -545,6 +545,7 @@ export const en = {
             viewDiff: 'Current file changes',
             question: 'Question',
             agent: 'Agent',
+            skill: 'Skill',
         },
         askUserQuestion: {
             submit: 'Submit Answer',

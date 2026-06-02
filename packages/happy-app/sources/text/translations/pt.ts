@@ -546,6 +546,7 @@ export const pt: TranslationStructure = {
             viewDiff: 'Alterações do arquivo atual',
             question: 'Pergunta',
             agent: 'Agente',
+            skill: 'Skill',
         },
         desc: {
             terminalCmd: ({ cmd }: { cmd: string }) => `Terminal(cmd: ${cmd})`,

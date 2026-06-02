@@ -556,6 +556,7 @@ export const ru: TranslationStructure = {
             viewDiff: 'Текущие изменения файла',
             question: 'Вопрос',
             agent: 'Агент',
+            skill: 'Skill',
         },
         desc: {
             terminalCmd: ({ cmd }: { cmd: string }) => `Терминал(команда: ${cmd})`,

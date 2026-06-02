@@ -548,6 +548,7 @@ export const zhHans: TranslationStructure = {
             viewDiff: '当前文件更改',
             question: '问题',
             agent: 'Agent',
+            skill: 'Skill',
         },
         desc: {
             terminalCmd: ({ cmd }: { cmd: string }) => `终端(命令: ${cmd})`,

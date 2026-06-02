@@ -18,6 +18,8 @@ const ICON_TODO = (size: number = 24, color: string = '#000') => <Ionicons name=
 const ICON_REASONING = (size: number = 24, color: string = '#000') => <Octicons name="light-bulb" size={size} color={color} />;
 const ICON_QUESTION = (size: number = 24, color: string = '#000') => <Ionicons name="help-circle-outline" size={size} color={color} />;
 
+const ICON_SKILL = (size: number = 24, color: string = '#000') => <Ionicons name="flash-outline" size={size} color={color} />;
+
 export const knownTools = {
     'Task': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
@@ -1099,6 +1101,18 @@ export const knownTools = {
             }
             return null;
         }
+    },
+    'Skill': {
+        title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const skill = (opts.tool.input as any)?.skill;
+            return skill ? `Skill: ${skill}` : t('tools.names.skill');
+        },
+        icon: ICON_SKILL,
+        minimal: true,
+        extractDescription: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const args = (opts.tool.input as any)?.args;
+            return args || null;
+        },
     }
 } satisfies Record<string, {
     title?: string | ((opts: { metadata: Metadata | null, tool: ToolCall }) => string);

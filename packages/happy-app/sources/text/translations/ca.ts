@@ -546,6 +546,7 @@ export const ca: TranslationStructure = {
             viewDiff: 'Canvis del fitxer actual',
             question: 'Pregunta',
             agent: 'Agent',
+            skill: 'Skill',
         },
         desc: {
             terminalCmd: ({ cmd }: { cmd: string }) => `Terminal(cmd: ${cmd})`,

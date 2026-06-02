@@ -25,6 +25,7 @@ import { GeminiExecuteView } from './GeminiExecuteView';
 import { CursorEditView } from './CursorEditView';
 import { CursorWriteView } from './CursorWriteView';
 import { AgentViewFull } from './AgentViewFull';
+import { SkillView } from './SkillView';
 
 export type ToolViewProps = {
     tool: ToolCall;
@@ -60,6 +61,7 @@ export const toolViewRegistry: Record<string, ToolViewComponent> = {
     TaskCreate: TaskTrackerView,
     TaskUpdate: TaskTrackerView,
     AskUserQuestion: AskUserQuestionView,
+    Skill: SkillView,
     // Gemini tools (lowercase)
     edit: GeminiEditView,
     execute: GeminiExecuteView,
@@ -79,6 +81,7 @@ export const toolFullViewRegistry: Record<string, ToolViewComponent> = {
     execute: GeminiExecuteView,
     Task: TaskView, // Task output is in children (sidechain agent-text), not tool.result
     Agent: AgentViewFull,
+    Skill: SkillView,
 };
 
 // Helper function to get the appropriate view component for a tool

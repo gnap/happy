@@ -560,7 +560,8 @@ export const en: TranslationStructure = {
             applyChanges: 'Update file',
             viewDiff: 'Current file changes',
             question: 'Question',
-            agent: 'Agent',
+            agent: "Agent",
+            skill: "Skill",
         },
         askUserQuestion: {
             submit: 'Submit Answer',
