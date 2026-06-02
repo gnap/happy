@@ -24,24 +24,30 @@ let _globalBase = 1;
 const statusOrder: Record<string, number> = { pending: 0, in_progress: 1, completed: 2 };
 
 function updateGlobalScan(messages: readonly Message[]) {
-    // If it's the same array ref with more messages, scan only new ones
+    // Incremental scan — only possible when same array ref gains messages.
+    // Important: _globalBase may still be the default (1) if the first
+    // render had no TaskCreate/TaskUpdate.  Use _baseSeen to capture the
+    // first real taskId, otherwise n < _globalBase would never fire for
+    // taskIds > 1.
     if (messages === _cachedArray && messages.length >= _cachedLen) {
+        let baseSeen = _globalBase > 1;
         for (let i = _cachedLen; i < messages.length; i++) {
             const m = messages[i];
             const toolName = m.kind === 'tool-call' ? m.tool?.name : undefined;
             if (toolName === 'TaskUpdate' || toolName === 'TaskCreate') {
                 const input = m.tool?.input || {};
                 const tid = String(input.taskId || input.id || '');
-                // Track status (TaskUpdate only)
                 if (toolName === 'TaskUpdate') {
                     const st = String(input.status || '');
                     if (st && (!globalTaskStatusMap.has(tid) || (statusOrder[st] ?? -1) > (statusOrder[globalTaskStatusMap.get(tid)!] ?? -1))) {
                         globalTaskStatusMap.set(tid, st);
                     }
                 }
-                // Update globalBase from both TaskUpdate and TaskCreate
                 const n = parseInt(tid, 10);
-                if (!isNaN(n) && n < _globalBase) _globalBase = n;
+                if (!isNaN(n)) {
+                    if (!baseSeen) { _globalBase = n; baseSeen = true; }
+                    else if (n < _globalBase) _globalBase = n;
+                }
             }
         }
     } else {
