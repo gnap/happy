@@ -16,14 +16,31 @@ export interface ClusterOptions {
 }
 
 // ---------------------------------------------------------------------------
-// Top-level: split at user-text boundaries, compute global taskId base once,
-// then process each segment independently with cross-segment matching.
+// Top-level: split at user-text boundaries, process each segment independently.
+// A global pre-scan builds a taskStatus map from all TaskUpdates, so updates
+// from any segment apply to tasks in any segment.
 // ---------------------------------------------------------------------------
 
 export function computeMessageClusters(
     messages: readonly Message[],
     options?: ClusterOptions,
 ): ClusteredMessage[] {
+    // ---- Global pre-scan: collect TaskUpdate statuses -----------------------
+    // Maps global taskId → best status. Applies across all segments.
+    const globalTaskStatus = new Map<string, string>();
+    const statusOrder: Record<string, number> = { pending: 0, in_progress: 1, completed: 2 };
+    for (const m of messages) {
+        if (m.kind === 'tool-call' && m.tool?.name === 'TaskUpdate') {
+            const input = m.tool.input || {};
+            const tid = String(input.taskId || input.id || '');
+            const st = String(input.status || '');
+            if (st && (!globalTaskStatus.has(tid) || (statusOrder[st] ?? -1) > (statusOrder[globalTaskStatus.get(tid)!] ?? -1))) {
+                globalTaskStatus.set(tid, st);
+            }
+        }
+    }
+
+    // ---- Split into segments -----------------------------------------------
     const segments: { start: number; end: number }[] = [];
     let segStart = 0;
     for (let i = 1; i < messages.length; i++) {
@@ -34,10 +51,9 @@ export function computeMessageClusters(
     }
     segments.push({ start: segStart, end: messages.length });
 
-    // Compute global taskId base once across all messages so segments
-    // that lack TaskUpdates still get the correct offset.
+    // ---- Compute global base for numeric fallback ---------------------------
     let globalBase = 1;
-    if (!options?.taskContentMap || options.taskContentMap.size === 0) {
+    {
         let seenTc = false;
         let minTid = Infinity;
         for (const m of messages) {
@@ -50,27 +66,21 @@ export function computeMessageClusters(
         if (isFinite(minTid)) globalBase = minTid;
     }
 
-    // Shared tidToIdx allows TaskUpdates in later segments to match
-    // TaskCreates from earlier segments (cross-segment matching).
-    const sharedTidToIdx = new Map<string, number>();
-    let segmentOffset = 0;
-    let cumulativeTotal = 0;
-
+    // ---- Process each segment ----------------------------------------------
     const result: ClusteredMessage[] = [];
+    let cumulativeTotal = 0;
+    let segmentOffset = 0;
+
     for (const seg of segments) {
         const segBase = globalBase + cumulativeTotal;
-        const { result: clustered, tidToIdxSnapshot } = clusterMessages(
+        const clustered = clusterSegment(
             messages.slice(seg.start, seg.end),
             seg.start,
             options?.taskContentMap,
             segBase,
             segmentOffset,
-            sharedTidToIdx,
+            globalTaskStatus,
         );
-        // Merge this segment's tidToIdx into shared map for cross-segment matching
-        for (const [tid, idx] of tidToIdxSnapshot) {
-            if (!sharedTidToIdx.has(tid)) sharedTidToIdx.set(tid, segmentOffset + idx);
-        }
         for (const cm of clustered) {
             result.push(cm);
             if (cm.kind === 'task-cluster') cumulativeTotal += cm.tasks.length;
@@ -78,13 +88,11 @@ export function computeMessageClusters(
         segmentOffset = cumulativeTotal;
     }
 
-    // Deduplicate adjacent user-text echoes with same text within 5s
+    // ---- Deduplicate adjacent user-text echoes ------------------------------
     for (let i = result.length - 1; i >= 1; i--) {
-        const a = result[i];
-        const b = result[i - 1];
+        const a = result[i], b = result[i - 1];
         if (a.kind === 'user-text' && b.kind === 'user-text'
-            && a.text === b.text
-            && Math.abs(a.createdAt - b.createdAt) <= 5000) {
+            && a.text === b.text && Math.abs(a.createdAt - b.createdAt) <= 5000) {
             result.splice(i - 1, 1);
         }
     }
@@ -103,15 +111,15 @@ interface ClusterSnap {
     preCount: number;
 }
 
-function clusterMessages(
+function clusterSegment(
     messages: readonly Message[],
     offset: number,
     taskContentMap: ReadonlyMap<string, string> | undefined,
     segmentBase: number,
     segmentOffset: number,
-    sharedTidToIdx: Map<string, number>,
-): { result: ClusteredMessage[]; tidToIdxSnapshot: Map<string, number> } {
-    if (messages.length === 0) return { result: [], tidToIdxSnapshot: new Map() };
+    globalTaskStatus: Map<string, string>,
+): ClusteredMessage[] {
+    if (messages.length === 0) return [];
 
     const clusterSnaps: ClusterSnap[] = [];
 
@@ -127,6 +135,9 @@ function clusterMessages(
     const pendingUpdates: { tid: string; status: string }[] = [];
     let clusterStart = 0;
     let taskIdBase = segmentBase;
+    let cumulativeTaskCount = 0;
+
+    const statusOrder: Record<string, number> = { pending: 0, in_progress: 1, completed: 2 };
 
     const resolveTaskIndex = (tid: string): number => {
         let mi = taskItems.findIndex((t) => t.id === tid);
@@ -134,45 +145,17 @@ function clusterMessages(
         const content = taskContentMap?.get(tid);
         if (content) {
             mi = taskItems.findIndex((t) => t.content === content || t.id === content);
-            if (mi >= 0) {
-                const n = parseInt(tid, 10);
-                if (!isNaN(n)) taskIdBase = n - mi;
-                sharedTidToIdx.set(tid, segmentOffset + mi);
-                tidToIdx.set(tid, mi);
-                return mi;
-            }
-            mi = taskItems.findIndex((t) =>
-                t.content.includes(content) || content.includes(t.content));
-            if (mi >= 0) {
-                const n = parseInt(tid, 10);
-                if (!isNaN(n)) taskIdBase = n - mi;
-                sharedTidToIdx.set(tid, segmentOffset + mi);
-                tidToIdx.set(tid, mi);
-                return mi;
-            }
+            if (mi >= 0) { const n = parseInt(tid, 10); if (!isNaN(n)) taskIdBase = n - mi; tidToIdx.set(tid, mi); return mi; }
+            mi = taskItems.findIndex((t) => t.content.includes(content) || content.includes(t.content));
+            if (mi >= 0) { const n = parseInt(tid, 10); if (!isNaN(n)) taskIdBase = n - mi; tidToIdx.set(tid, mi); return mi; }
         }
         if (tidToIdx.has(tid)) return tidToIdx.get(tid)!;
         const num = parseInt(tid, 10);
         if (!isNaN(num)) {
             let pi = num - 1;
-            if (pi >= 0 && pi < taskItems.length) {
-                sharedTidToIdx.set(tid, segmentOffset + pi);
-                tidToIdx.set(tid, pi); return pi;
-            }
-            pi = num - taskIdBase;
-            if (pi >= 0 && pi < taskItems.length) {
-                sharedTidToIdx.set(tid, segmentOffset + pi);
-                tidToIdx.set(tid, pi); return pi;
-            }
-            // Cross-segment match: try shared tidToIdx from earlier segments
-            pi = sharedTidToIdx.get(tid) ?? -1;
             if (pi >= 0 && pi < taskItems.length) { tidToIdx.set(tid, pi); return pi; }
-            // Try previous-segment offset
-            pi = num - (taskIdBase - segmentOffset);
-            if (pi >= 0 && pi < taskItems.length) {
-                sharedTidToIdx.set(tid, segmentOffset + pi);
-                tidToIdx.set(tid, pi); return pi;
-            }
+            pi = num - taskIdBase;
+            if (pi >= 0 && pi < taskItems.length) { tidToIdx.set(tid, pi); return pi; }
         }
         return -1;
     };
@@ -180,9 +163,8 @@ function clusterMessages(
     const applyTaskUpdate = (tid: string, status: string) => {
         const mi = resolveTaskIndex(tid);
         if (mi < 0 || mi >= taskItems.length) return;
-        const order: Record<string, number> = { pending: 0, in_progress: 1, completed: 2 };
         const ns = status || taskItems[mi].status;
-        if ((order[ns] ?? -1) > (order[taskItems[mi].status] ?? -1)) {
+        if ((statusOrder[ns] ?? -1) > (statusOrder[taskItems[mi].status] ?? -1)) {
             taskItems[mi] = { ...taskItems[mi], status: ns as TaskItem['status'] };
         }
         if (ns === 'completed' && !completedOnce.get(taskItems[mi].id)) {
@@ -192,18 +174,37 @@ function clusterMessages(
         currentTaskIdx = mi;
     };
 
+    /** Apply any known status from the global pre-scan to a task item. */
+    const applyGlobalStatus = (item: TaskItem, idx: number) => {
+        // Try both per-cluster base and legacy base (1-indexed)
+        for (const base of [taskIdBase, 1]) {
+            const tid = String(base + idx);
+            const gs = globalTaskStatus.get(tid);
+            if (gs && (statusOrder[gs] ?? -1) > (statusOrder[item.status] ?? -1)) {
+                item.status = gs as TaskItem['status'];
+                if (gs === 'completed' && !completedOnce.get(item.id)) {
+                    completedOnce.set(item.id, true);
+                    activeCount = Math.max(0, activeCount - 1);
+                }
+                return;
+            }
+        }
+    };
+
     const snapshotCluster = (preCount: number) => {
         if (taskItems.length === 0) return;
         const snap = new Set<number>();
         for (const idx of hideSet) { if (idx >= clusterStart) snap.add(idx); }
+        // Apply global status before snapshotting
+        for (let i = 0; i < taskItems.length; i++) {
+            applyGlobalStatus(taskItems[i], i);
+        }
         clusterSnaps.push({
             taskItems: taskItems.map(t => ({ ...t })),
             firstIdx: firstTaskIdx, firstCreatedAt: firstTaskCreatedAt,
             hideSet: snap, preCount,
         });
     };
-
-    let cumulativeTaskCount = 0;
 
     const resetClusterState = () => {
         cumulativeTaskCount += taskItems.length;
@@ -249,7 +250,6 @@ function clusterMessages(
             if (taskContentMap) {
                 for (const [tid, tc] of taskContentMap) {
                     if (tc === content || tc === descKey || content.includes(tc) || tc.includes(content)) {
-                        sharedTidToIdx.set(tid, segmentOffset + newIdx);
                         tidToIdx.set(tid, newIdx);
                         break;
                     }
@@ -291,7 +291,7 @@ function clusterMessages(
         snapshotCluster(pre);
     }
 
-    if (clusterSnaps.length === 0) return { result: messages.slice(), tidToIdxSnapshot: tidToIdx };
+    if (clusterSnaps.length === 0) return messages.slice();
 
     const result: ClusteredMessage[] = [];
     let cursor = 0;
@@ -320,5 +320,5 @@ function clusterMessages(
         }
         cursor = nextFirst;
     }
-    return { result, tidToIdxSnapshot: tidToIdx };
+    return result;
 }

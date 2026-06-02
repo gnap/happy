@@ -502,16 +502,15 @@ describe('computeMessageClusters', () => {
             expect(tl.tasks[0].content).toBe('Running tests...');
         });
 
-        it('ignores completed pre-TaskCreate updates (cross-turn noise)', () => {
-            // Pre-TaskCreate "completed" updates are from other turns;
-            // they should NOT prematurely finish current-turn tasks.
+        it('applies pre-TaskCreate completed updates via global pre-scan', () => {
+            // Global pre-scan captures all TaskUpdate statuses regardless of position.
             const msgs: Message[] = [
                 taskUpdate('1', 'completed', 1000),
                 taskCreate('Main', 5000),
             ];
             const result = computeMessageClusters(msgs);
             const tl = findTimeline(result)!;
-            expect(tl.tasks[0].status).toBe('pending');
+            expect(tl.tasks[0].status).toBe('completed');
         });
 
         it('replays non-completed pre-TaskCreate updates', () => {
@@ -764,7 +763,7 @@ describe('computeMessageClusters', () => {
             // Batch 2: both completed
             expect(cards[1].tasks[0].status).toBe('completed');
             expect(cards[1].tasks[1].status).toBe('completed');
-            // Batch 3: first in_progress, others completed
+            // Global pre-scan picks best status: TaskUpdate 38 is 'in_progress'
             expect(cards[2].tasks[0].status).toBe('in_progress');
             expect(cards[2].tasks[1].status).toBe('completed');
             expect(cards[2].tasks[2].status).toBe('completed');
