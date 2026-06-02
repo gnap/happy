@@ -596,6 +596,12 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                     }
                 }
 
+                // Suppress the Skill's injected user prompt (the skill content
+                // is already visible in the tool card; echoing it as user text is redundant).
+                if (name === 'Skill') {
+                    suppressNextUserText(state, 1);
+                }
+
                 envelopes.push(createEnvelope('agent', {
                     t: 'tool-call-start',
                     call,
