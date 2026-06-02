@@ -153,9 +153,7 @@ function clusterSegment(
     let firstTaskIdx = -1;
     let firstTaskCreatedAt = 0;
     const pendingUpdates: { tid: string; status: string }[] = [];
-    let clusterStart = 0;
     let taskIdBase = segmentBase;
-    let cumulativeTaskCount = 0;
 
     const statusOrder: Record<string, number> = { pending: 0, in_progress: 1, completed: 2 };
 
@@ -223,8 +221,7 @@ function clusterSegment(
                 }
             }
         }
-        const snap = new Set<number>();
-        for (const idx of hideSet) { if (idx >= clusterStart) snap.add(idx); }
+        const snap = new Set(hideSet);
         clusterSnaps.push({
             taskItems: taskItems.map(t => ({ ...t })),
             firstIdx: firstTaskIdx, firstCreatedAt: firstTaskCreatedAt,
@@ -232,37 +229,10 @@ function clusterSegment(
         });
     };
 
-    const resetClusterState = () => {
-        cumulativeTaskCount += taskItems.length;
-        taskIdBase = segmentBase + cumulativeTaskCount;
-        taskItems = [];
-        activeCount = 0;
-        currentTaskIdx = -1;
-        completedOnce.clear();
-        tidToIdx.clear();
-        hideSet = new Set<number>();
-        firstTaskIdx = -1;
-        firstTaskCreatedAt = 0;
-        pendingUpdates.length = 0;
-    };
-
     for (let i = 0; i < messages.length; i++) {
         const m = messages[i];
 
         if (m.kind === 'tool-call' && m.tool?.name === 'TaskCreate') {
-            if (activeCount === 0 && taskItems.length > 0) {
-                let pre = 0;
-                if (firstTaskIdx > clusterStart) {
-                    for (let j = firstTaskIdx - 1; j >= clusterStart; j--) {
-                        if (messages[j].kind === 'tool-call') { pre++; allHidden.add(j); }
-                        else break;
-                    }
-                }
-                snapshotCluster(pre);
-                resetClusterState();
-                clusterStart = i;
-            }
-
             const input = m.tool?.input || {};
             const content = input.subject || input.description || input.activeForm || '';
             const descKey = input.description || '';
@@ -319,8 +289,8 @@ function clusterSegment(
 
     if (taskItems.length > 0) {
         let pre = 0;
-        if (firstTaskIdx > clusterStart) {
-            for (let j = firstTaskIdx - 1; j >= clusterStart; j--) {
+        if (firstTaskIdx > 0) {
+            for (let j = firstTaskIdx - 1; j >= 0; j--) {
                 if (messages[j].kind === 'tool-call') { pre++; allHidden.add(j); }
                 else break;
             }
