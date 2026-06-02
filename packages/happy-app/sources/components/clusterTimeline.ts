@@ -19,7 +19,7 @@ export interface ClusterOptions {
 // Keyed by the messages array reference (which changes when new msgs arrive).
 let _cachedArray: readonly Message[] | null = null;
 let _cachedLen = 0;
-const __globalTaskStatus = new Map<string, string>();
+const ___globalTaskStatus = new Map<string, string>();
 let _globalBase = 1;
 const statusOrder: Record<string, number> = { pending: 0, in_progress: 1, completed: 2 };
 
@@ -32,8 +32,8 @@ function updateGlobalScan(messages: readonly Message[]) {
                 const input = m.tool.input || {};
                 const tid = String(input.taskId || input.id || '');
                 const st = String(input.status || '');
-                if (st && (!__globalTaskStatus.has(tid) || (statusOrder[st] ?? -1) > (statusOrder[__globalTaskStatus.get(tid)!] ?? -1))) {
-                    __globalTaskStatus.set(tid, st);
+                if (st && (!___globalTaskStatus.has(tid) || (statusOrder[st] ?? -1) > (statusOrder[___globalTaskStatus.get(tid)!] ?? -1))) {
+                    ___globalTaskStatus.set(tid, st);
                 }
             }
             // Also update globalBase from new messages
@@ -44,7 +44,7 @@ function updateGlobalScan(messages: readonly Message[]) {
         }
     } else {
         // New array or shorter — full rescan
-        __globalTaskStatus.clear();
+        ___globalTaskStatus.clear();
         _globalBase = 1;
         let seenTc = false;
         for (const m of messages) {
@@ -53,8 +53,8 @@ function updateGlobalScan(messages: readonly Message[]) {
                 const input = m.tool.input || {};
                 const tid = String(input.taskId || input.id || '');
                 const st = String(input.status || '');
-                if (st && (!__globalTaskStatus.has(tid) || (statusOrder[st] ?? -1) > (statusOrder[__globalTaskStatus.get(tid)!] ?? -1))) {
-                    __globalTaskStatus.set(tid, st);
+                if (st && (!___globalTaskStatus.has(tid) || (statusOrder[st] ?? -1) > (statusOrder[___globalTaskStatus.get(tid)!] ?? -1))) {
+                    ___globalTaskStatus.set(tid, st);
                 }
                 const n = parseInt(String(input.taskId || input.id || ''), 10);
                 if (!isNaN(n) && n < _globalBase) _globalBase = n;
@@ -101,7 +101,7 @@ export function computeMessageClusters(
             options?.taskContentMap,
             segBase,
             segmentOffset,
-            _globalTaskStatus,
+            __globalTaskStatus,
         );
         for (const cm of clustered) {
             result.push(cm);
@@ -139,7 +139,7 @@ function clusterSegment(
     taskContentMap: ReadonlyMap<string, string> | undefined,
     segmentBase: number,
     segmentOffset: number,
-    _globalTaskStatus: Map<string, string>,
+    __globalTaskStatus: Map<string, string>,
 ): ClusteredMessage[] {
     if (messages.length === 0) return [];
 
@@ -201,7 +201,7 @@ function clusterSegment(
         // Try both per-cluster base and legacy base (1-indexed)
         for (const base of [taskIdBase, 1]) {
             const tid = String(base + idx);
-            const gs = _globalTaskStatus.get(tid);
+            const gs = __globalTaskStatus.get(tid);
             if (gs && (statusOrder[gs] ?? -1) > (statusOrder[item.status] ?? -1)) {
                 item.status = gs as TaskItem['status'];
                 if (gs === 'completed' && !completedOnce.get(item.id)) {
