@@ -175,17 +175,12 @@ function clusterSegment(
             pi = num - taskIdBase;
             if (pi >= 0 && pi < taskItems.length) { tidToIdx.set(tid, pi); return pi; }
         }
-        // TEMP: diagnostic log
-        console.warn('[clusterTimeline] resolveTaskIndex FAILED', { tid, num: parseInt(tid,10), taskIdBase, taskItemsLen: taskItems.length, hasContentMap: !!taskContentMap, contentForTid: taskContentMap?.get(tid) });
         return -1;
     };
 
     const applyTaskUpdate = (tid: string, status: string) => {
         const mi = resolveTaskIndex(tid);
-        if (mi < 0 || mi >= taskItems.length) {
-            if (mi < 0) console.warn('[clusterTimeline] applyTaskUpdate FAILED to resolve', { tid, status, taskIdBase, _globalBase, taskItemsLen: taskItems.length });
-            return;
-        }
+        if (mi < 0 || mi >= taskItems.length) return;
         const ns = status || taskItems[mi].status;
         if ((statusOrder[ns] ?? -1) > (statusOrder[taskItems[mi].status] ?? -1)) {
             taskItems[mi] = { ...taskItems[mi], status: ns as TaskItem['status'] };
@@ -250,12 +245,18 @@ function clusterSegment(
             if (firstTaskIdx < 0) { firstTaskIdx = i; firstTaskCreatedAt = m.createdAt; }
             hideSet.add(i); allHidden.add(i);
 
-            if (taskContentMap) {
-                // Exact match first (no fuzzy includes — risks cross-task misattribution)
-                for (const [tid, tc] of taskContentMap) {
-                    if (tc === content || tc === descKey) {
-                        tidToIdx.set(tid, newIdx);
-                        break;
+            if (taskContentMap && taskContentMap.size > 0) {
+                // Prefer matching by TaskCreate's own taskId (from input.taskId / input.id).
+                // Falls back to exact content match (fuzzy includes removed — misattributes).
+                const createTid = String(input.taskId || input.id || '');
+                if (createTid && taskContentMap.has(createTid)) {
+                    tidToIdx.set(createTid, newIdx);
+                } else {
+                    for (const [tid, tc] of taskContentMap) {
+                        if (tc === content || tc === descKey) {
+                            tidToIdx.set(tid, newIdx);
+                            break;
+                        }
                     }
                 }
             }
