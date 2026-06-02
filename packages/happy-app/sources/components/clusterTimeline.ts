@@ -209,6 +209,16 @@ function clusterSegment(
         // NOT affect activeCount, which is managed by in-stream TaskUpdates).
         const promote = (current: string, candidate: string) =>
             (statusOrder[candidate] ?? -1) > (statusOrder[current] ?? -1);
+        // Step 0: direct lookup via taskItem.taskId (set at TaskCreate time)
+        for (let idx = 0; idx < taskItems.length; idx++) {
+            const tid = taskItems[idx].taskId;
+            if (tid) {
+                const gs = globalStatusMap.get(tid);
+                if (gs && promote(taskItems[idx].status, gs)) {
+                    taskItems[idx] = { ...taskItems[idx], status: gs as TaskItem['status'] };
+                }
+            }
+        }
         // Step 1: exact mapping via tidToIdx — safe, allows all statuses
         const matched = new Set<number>();
         for (const [tid, idx] of tidToIdx) {
@@ -249,7 +259,8 @@ function clusterSegment(
             const content = input.subject || input.description || input.activeForm || '';
             const descKey = input.description || '';
             const newIdx = taskItems.length;
-            taskItems.push({ id: descKey || String(newIdx + 1), content, status: 'pending', collapsedCount: 0 });
+            const createTid = String(input.taskId || input.id || '');
+            taskItems.push({ id: descKey || String(newIdx + 1), content, status: 'pending', collapsedCount: 0, taskId: createTid || undefined });
             activeCount++;
             currentTaskIdx = newIdx;
             if (firstTaskIdx < 0) { firstTaskIdx = i; firstTaskCreatedAt = m.createdAt; }

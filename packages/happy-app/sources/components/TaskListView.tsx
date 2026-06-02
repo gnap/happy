@@ -11,6 +11,7 @@ export interface TaskItem {
     content: string;
     status: TaskStatus;
     collapsedCount?: number;
+    taskId?: string;  // SDK taskId for direct global status lookup
 }
 
 const LINE_COLOR = '#e0e0e0';
