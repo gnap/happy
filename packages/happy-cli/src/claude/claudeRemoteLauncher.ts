@@ -409,6 +409,11 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 mode = msg.mode;
                                 permissionHandler.handleModeChange(mode.permissionMode);
                                 logger.debug('[remote]: processing A2A inbox turn');
+                                // Inbox turns run in a fresh session so they don't resume the
+                                // potentially huge main-agent context. Resuming a large session
+                                // triggers Claude Code's auto-compact which requires a separate auth
+                                // call that fails when the main agent is not concurrently active.
+                                session.clearSessionId();
                                 // Suppress the inbox notification prompt from appearing as a
                                 // user bubble in the App — it is an internal CLI-injected turn.
                                 session.client.suppressNextMapperUserText();
