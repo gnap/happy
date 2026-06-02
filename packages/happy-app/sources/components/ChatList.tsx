@@ -79,7 +79,11 @@ const ChatListInternal = React.memo((props: {
 
     const clusterOptions: ClusterOptions | undefined = useMemo(() => {
         if (!props.tasks || props.tasks.length === 0) return undefined;
-        return { tasks: props.tasks.map(t => ({ id: t.id, content: t.content, status: t.status })) };
+        const m = new Map<string, string>();
+        for (const t of props.tasks) {
+            if (t.content) m.set(t.id, t.content);
+        }
+        return m.size > 0 ? { taskContentMap: m } : undefined;
     }, [props.tasks]);
 
     const messagesWithTasks = useMemo(

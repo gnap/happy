@@ -25,6 +25,7 @@
         }
       ]
     },
-    "websocket:default"
+    "websocket:default",
+    "connector:default"
   ]
 }
