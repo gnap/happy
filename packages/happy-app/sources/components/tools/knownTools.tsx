@@ -54,14 +54,13 @@ export const knownTools = {
     },
     'Agent': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            // Prefer top-level title/description from CLI envelope over raw args
+            if (opts.tool.title && opts.tool.title.trim()) return opts.tool.title;
+            if (opts.tool.description && opts.tool.description.trim()) return opts.tool.description;
             const input = opts.tool.input as Record<string, unknown> | undefined;
             const subagentType = input?.subagent_type;
             if (subagentType && typeof subagentType === 'string' && subagentType.trim()) {
                 return subagentType;
-            }
-            const description = input?.description;
-            if (description && typeof description === 'string' && description.trim()) {
-                return description;
             }
             return t('tools.names.agent');
         },

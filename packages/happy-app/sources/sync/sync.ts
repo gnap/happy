@@ -428,7 +428,8 @@ class Sync {
         const READY_TIMEOUT_MS = 20_000;
         const readyPromise = Promise.all([
             this.sessionsSync.awaitQueue(),
-            this.machinesSync.awaitQueue()
+            this.machinesSync.awaitQueue(),
+            this.settingsSync.awaitQueue(),
         ]);
         const timeoutPromise = new Promise<void>((resolve) => {
             setTimeout(() => {
