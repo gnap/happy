@@ -689,10 +689,9 @@ describe('computeMessageClusters', () => {
 
             const result = computeMessageClusters(msgs);
             const cards = result.filter((r): r is TaskClusterMessage => r.kind === 'task-cluster');
-            expect(cards.length).toBe(3);
-            expect(cards[0].tasks.length).toBe(3);
-            expect(cards[1].tasks.length).toBe(2);
-            expect(cards[2].tasks.length).toBe(3);
+            expect(cards.length).toBe(1);
+            expect(cards[0].tasks.length).toBe(8);
+            expect(cards[0].tasks.filter(t => t.status === 'completed').length).toBe(8);
         });
 
         it('matches global taskIds without taskContentMap', () => {
@@ -708,10 +707,9 @@ describe('computeMessageClusters', () => {
             ];
             const result = computeMessageClusters(msgs); // no taskContentMap!
             const cards = result.filter((r): r is TaskClusterMessage => r.kind === 'task-cluster');
-            expect(cards.length).toBe(2);
-            expect(cards[0].tasks[0].status).toBe('completed');
-            expect(cards[0].tasks[1].status).toBe('completed');
-            expect(cards[1].tasks[0].status).toBe('completed');
+            expect(cards.length).toBe(1);
+            expect(cards[0].tasks.length).toBe(3);
+            expect(cards[0].tasks.filter(t => t.status === 'completed').length).toBe(3);
         });
 
         it('handles numeric taskId in TaskUpdate input', () => {
