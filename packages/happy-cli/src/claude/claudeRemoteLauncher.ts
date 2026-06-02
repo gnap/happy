@@ -150,7 +150,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     // Handle messages
     let planModeToolCalls = new Set<string>();
     let ongoingToolCalls = new Map<string, { parentToolCallId: string | null }>();
-    let pendingSkillSuppress = false; // suppress next user message after Skill tool use
 
     function onMessage(message: SDKMessage) {
 
@@ -173,7 +172,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             }
         }
 
-        // Track active tool calls + Skill detection for user message suppression
+        // Track active tool calls
         if (message.type === 'assistant') {
             let umessage = message as SDKAssistantMessage;
             if (umessage.message.content && Array.isArray(umessage.message.content)) {
@@ -181,10 +180,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     if (c.type === 'tool_use') {
                         logger.debug('[remote]: detected tool use ' + c.id! + ' parent: ' + umessage.parent_tool_use_id);
                         ongoingToolCalls.set(c.id!, { parentToolCallId: umessage.parent_tool_use_id ?? null });
-                        // Mark the next user message as meta if it's a Skill injection
-                        if (c.name === 'Skill') {
-                            pendingSkillSuppress = true;
-                        }
                     }
                 }
             }
@@ -238,12 +233,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
 
         const logMessage = sdkToLogConverter.convert(msg);
         if (logMessage) {
-            // Suppress Skill-injected user messages: they contain the
-            // Skill's instruction text and should not appear in the chat.
-            if (pendingSkillSuppress && logMessage.type === 'user') {
-                (logMessage as any).isMeta = true;
-                pendingSkillSuppress = false;
-            }
             // Add permissions field to tool result content
             if (logMessage.type === 'user' && logMessage.message?.content) {
                 const content = Array.isArray(logMessage.message.content)
