@@ -28,17 +28,19 @@ function updateGlobalScan(messages: readonly Message[]) {
     if (messages === _cachedArray && messages.length >= _cachedLen) {
         for (let i = _cachedLen; i < messages.length; i++) {
             const m = messages[i];
-            if (m.kind === 'tool-call' && m.tool?.name === 'TaskUpdate') {
-                const input = m.tool.input || {};
+            const toolName = m.kind === 'tool-call' ? m.tool?.name : undefined;
+            if (toolName === 'TaskUpdate' || toolName === 'TaskCreate') {
+                const input = m.tool?.input || {};
                 const tid = String(input.taskId || input.id || '');
-                const st = String(input.status || '');
-                if (st && (!globalTaskStatusMap.has(tid) || (statusOrder[st] ?? -1) > (statusOrder[globalTaskStatusMap.get(tid)!] ?? -1))) {
-                    globalTaskStatusMap.set(tid, st);
+                // Track status (TaskUpdate only)
+                if (toolName === 'TaskUpdate') {
+                    const st = String(input.status || '');
+                    if (st && (!globalTaskStatusMap.has(tid) || (statusOrder[st] ?? -1) > (statusOrder[globalTaskStatusMap.get(tid)!] ?? -1))) {
+                        globalTaskStatusMap.set(tid, st);
+                    }
                 }
-            }
-            // Also update globalBase from new messages
-            if (m.kind === 'tool-call' && m.tool?.name === 'TaskUpdate') {
-                const n = parseInt(String((m.tool?.input?.taskId || m.tool?.input?.id)), 10);
+                // Update globalBase from both TaskUpdate and TaskCreate
+                const n = parseInt(tid, 10);
                 if (!isNaN(n) && n < _globalBase) _globalBase = n;
             }
         }
@@ -48,12 +50,15 @@ function updateGlobalScan(messages: readonly Message[]) {
         _globalBase = 1;
         let _baseSeen = false;
         for (const m of messages) {
-            if (m.kind === 'tool-call' && m.tool?.name === 'TaskUpdate') {
-                const input = m.tool.input || {};
+            const toolName = m.kind === 'tool-call' ? m.tool?.name : undefined;
+            if (toolName === 'TaskUpdate' || toolName === 'TaskCreate') {
+                const input = m.tool?.input || {};
                 const tid = String(input.taskId || input.id || '');
-                const st = String(input.status || '');
-                if (st && (!globalTaskStatusMap.has(tid) || (statusOrder[st] ?? -1) > (statusOrder[globalTaskStatusMap.get(tid)!] ?? -1))) {
-                    globalTaskStatusMap.set(tid, st);
+                if (toolName === 'TaskUpdate') {
+                    const st = String(input.status || '');
+                    if (st && (!globalTaskStatusMap.has(tid) || (statusOrder[st] ?? -1) > (statusOrder[globalTaskStatusMap.get(tid)!] ?? -1))) {
+                        globalTaskStatusMap.set(tid, st);
+                    }
                 }
                 const n = parseInt(tid, 10);
                 if (!isNaN(n)) {
@@ -78,6 +83,7 @@ export function computeMessageClusters(
 ): ClusteredMessage[] {
     // ---- Incremental global scan --------------------------------------------
     updateGlobalScan(messages);
+    console.warn('[clusterTimeline] compute', { msgCount: messages.length, _globalBase, mapSize: globalTaskStatusMap.size, hasContentMap: !!options?.taskContentMap, contentMapSize: options?.taskContentMap?.size, someTaskCreateInputs: messages.filter(m => m.kind === 'tool-call' && m.tool?.name === 'TaskCreate').slice(0,3).map(m => ({ taskId: (m as any).tool?.input?.taskId, subject: (m as any).tool?.input?.subject })) });
 
     // ---- Split into segments -----------------------------------------------
     const segments: { start: number; end: number }[] = [];
