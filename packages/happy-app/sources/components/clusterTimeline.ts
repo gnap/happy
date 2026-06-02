@@ -245,13 +245,17 @@ function clusterSegment(
             if (firstTaskIdx < 0) { firstTaskIdx = i; firstTaskCreatedAt = m.createdAt; }
             hideSet.add(i); allHidden.add(i);
 
+            // TEMP: check if taskContentMap is present
+            if (!taskContentMap || taskContentMap.size === 0) {
+                console.warn('[clusterTimeline] TaskCreate NO taskContentMap', { hasTasks: !!taskContentMap, size: taskContentMap?.size, inputKeys: Object.keys(input) });
+            }
             if (taskContentMap && taskContentMap.size > 0) {
                 // Prefer matching by TaskCreate's own taskId (from input.taskId / input.id).
-                // Falls back to exact content match (fuzzy includes removed — misattributes).
                 const createTid = String(input.taskId || input.id || '');
                 if (createTid && taskContentMap.has(createTid)) {
                     tidToIdx.set(createTid, newIdx);
                 } else {
+                    console.warn('[clusterTimeline] TaskCreate no tidToIdx match', { createTid, inputTaskId: input.taskId, inputId: input.id, mapKeys: [...taskContentMap.keys()].slice(0,5), content, descKey });
                     for (const [tid, tc] of taskContentMap) {
                         if (tc === content || tc === descKey) {
                             tidToIdx.set(tid, newIdx);
