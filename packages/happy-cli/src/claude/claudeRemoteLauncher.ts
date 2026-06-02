@@ -409,11 +409,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 mode = msg.mode;
                                 permissionHandler.handleModeChange(mode.permissionMode);
                                 logger.debug('[remote]: processing A2A inbox turn');
-                                // Inbox turns run in a fresh session so they don't resume the
-                                // potentially huge main-agent context. Resuming a large session
-                                // triggers Claude Code's auto-compact which requires a separate auth
-                                // call that fails when the main agent is not concurrently active.
-                                session.clearSessionId();
                                 // Suppress the inbox notification prompt from appearing as a
                                 // user bubble in the App — it is an internal CLI-injected turn.
                                 session.client.suppressNextMapperUserText();
@@ -471,13 +466,22 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         pending = msg;
                     },
                     onReady: (result) => {
-                        turnSucceeded = true;
+                        const isError = result.is_error === true;
+                        turnSucceeded = !isError;
                         const usage = buildClaudeTurnUsagePayload(result);
                         const extras: Record<string, unknown> = {};
                         if (usage) extras.usage = usage;
                         if (typeof result.total_cost_usd === 'number') extras.costUsd = result.total_cost_usd;
                         if (typeof result.duration_ms === 'number') extras.durationMs = result.duration_ms;
-                        session.client.closeClaudeSessionTurn('completed', extras);
+                        if (isError) {
+                            session.client.closeClaudeSessionTurn('failed');
+                            const msg = typeof result.result === 'string' && result.result.trim().length > 0
+                                ? result.result.trim()
+                                : 'Claude exited with an error';
+                            session.client.sendSessionEvent({ type: 'message', message: msg });
+                        } else {
+                            session.client.closeClaudeSessionTurn('completed', extras);
+                        }
                         // Per-turn release (Cursor clears currentTurnIdRef before peekA2AInboxInLoop).
                         // claudeTurnActiveRef stayed true across multi-turn claudeRemote() calls, which
                         // blocked scheduleA2ATurnIfNeeded in onTurnEnd until process exit.
@@ -491,7 +495,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             // inbox turns. Settle the inbox turn here so backoff can arm and
                             // unconsumed inbox messages don't tight-loop.
                             session.a2aInboxTurn?.onTurnEnd({
-                                succeeded: true,
+                                succeeded: !isError,
                                 cancelled: false,
                                 wasInboxTurn: true,
                             });
@@ -500,7 +504,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             turnSucceeded = false;
                         }
                         session.a2aInboxTurn?.peekInbox();
-                        if (!pending && session.queue.size() === 0) {
+                        if (!isError && !pending && session.queue.size() === 0) {
                             session.api.push().sendToAllDevices(
                                 'It\'s ready!',
                                 `Claude is waiting for your command`,
