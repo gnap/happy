@@ -239,6 +239,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         if (logMessage) {
             // Suppress Skill-injected user messages
             if (pendingSkillSuppress && logMessage.type === 'user') {
+                logger.debug('[remote] Suppressing Skill user message via isMeta');
                 (logMessage as any).isMeta = true;
                 pendingSkillSuppress = false;
             }
