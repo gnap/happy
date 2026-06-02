@@ -183,8 +183,10 @@ function pickParentUuid(message: RawJSONLines): string | undefined {
 }
 
 function isSidechainMessage(message: RawJSONLines): boolean {
-    const raw = message as { isSidechain?: unknown };
-    return raw.isSidechain === true;
+    const raw = message as { isSidechain?: unknown; parent_tool_use_id?: unknown };
+    // Legacy interactive mode sets isSidechain:true; SDK remote mode uses parent_tool_use_id.
+    return raw.isSidechain === true
+        || (raw.parent_tool_use_id !== undefined && raw.parent_tool_use_id !== null);
 }
 
 function normalizePrompt(prompt: string): string {
@@ -651,7 +653,8 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
         // Process tool_result blocks first (subagent stop, tool-call-end)
         // before closeTurn, which clears subagent tracking.
         const turnId = ensureTurn(state, envelopes);
-        if (message.isSidechain) {
+        const isChain = isSidechainMessage(message);
+        if (isChain) {
             maybeEmitSubagentStart(state, turnId, subagent, envelopes);
         }
         for (const block of blocks) {
@@ -661,7 +664,7 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                     ensureBgTaskIdToCallId(state).set(bgTaskId, block.tool_use_id);
                 }
                 const sessionSubagentForToolResult = getSessionSubagentIdForProviderSubagent(state, block.tool_use_id);
-                if (!message.isSidechain) {
+                if (!isChain) {
                     if (getHiddenParentToolCalls(state).has(block.tool_use_id)) {
                         if (sessionSubagentForToolResult) {
                             maybeEmitSubagentStop(state, turnId, sessionSubagentForToolResult, envelopes);
@@ -681,12 +684,21 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
             }
         }
 
-        // Close the old turn and emit user text as a user envelope
-        closeTurn(state, 'completed', envelopes);
+        // Sidechain text blocks (sub-agent prompts, internal delegations) should never
+        // appear as standalone user bubbles in the main conversation.
         const textBlocks = blocks.filter(b => b.type === 'text' && typeof b.text === 'string' && b.text.trim().length > 0);
         const userText = textBlocks.map(b => (b as { text: string }).text).join('\n');
-        if (userText) {
-            envelopes.push(createEnvelope('user', { t: 'text', text: userText }));
+        if (isChain) {
+            // Suppress known task prompts; emit others as agent text so they link to the subagent.
+            if (userText && !isKnownTaskPrompt(state, userText)) {
+                envelopes.push(createEnvelope('agent', { t: 'text', text: userText }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
+            }
+        } else {
+            // Close the old turn and emit user text as a user envelope
+            closeTurn(state, 'completed', envelopes);
+            if (userText) {
+                envelopes.push(createEnvelope('user', { t: 'text', text: userText }));
+            }
         }
 
         return {
