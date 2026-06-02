@@ -150,6 +150,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     // Handle messages
     let planModeToolCalls = new Set<string>();
     let ongoingToolCalls = new Map<string, { parentToolCallId: string | null }>();
+    let pendingSkillSuppress = false;
 
     function onMessage(message: SDKMessage) {
 
@@ -172,7 +173,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             }
         }
 
-        // Track active tool calls
+        // Track active tool calls + Skill suppression
         if (message.type === 'assistant') {
             let umessage = message as SDKAssistantMessage;
             if (umessage.message.content && Array.isArray(umessage.message.content)) {
@@ -180,6 +181,9 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     if (c.type === 'tool_use') {
                         logger.debug('[remote]: detected tool use ' + c.id! + ' parent: ' + umessage.parent_tool_use_id);
                         ongoingToolCalls.set(c.id!, { parentToolCallId: umessage.parent_tool_use_id ?? null });
+                        if (c.name === 'Skill') {
+                            pendingSkillSuppress = true;
+                        }
                     }
                 }
             }
@@ -233,6 +237,11 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
 
         const logMessage = sdkToLogConverter.convert(msg);
         if (logMessage) {
+            // Suppress Skill-injected user messages
+            if (pendingSkillSuppress && logMessage.type === 'user') {
+                (logMessage as any).isMeta = true;
+                pendingSkillSuppress = false;
+            }
             // Add permissions field to tool result content
             if (logMessage.type === 'user' && logMessage.message?.content) {
                 const content = Array.isArray(logMessage.message.content)
