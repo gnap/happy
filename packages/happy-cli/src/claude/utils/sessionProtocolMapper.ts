@@ -657,6 +657,14 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
             };
         }
 
+        // Suppress meta messages (e.g. Skill injection prompts)
+        if (message.isMeta) {
+            return {
+                currentTurnId: state.currentTurnId,
+                envelopes,
+            };
+        }
+
         // Process tool_result blocks first (subagent stop, tool-call-end)
         // before closeTurn, which clears subagent tracking.
         const turnId = ensureTurn(state, envelopes);
