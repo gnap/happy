@@ -502,8 +502,9 @@ describe('computeMessageClusters', () => {
             expect(tl.tasks[0].content).toBe('Running tests...');
         });
 
-        it('applies pre-TaskCreate completed updates via global pre-scan', () => {
-            // Global pre-scan captures all TaskUpdate statuses regardless of position.
+        it('applies pre-TaskCreate completed updates via pendingUpdates replay', () => {
+            // pendingUpdates buffers TaskUpdates that arrive before TaskCreate,
+            // and replays them (including 'completed') when TaskCreate arrives.
             const msgs: Message[] = [
                 taskUpdate('1', 'completed', 1000),
                 taskCreate('Main', 5000),
@@ -659,8 +660,8 @@ describe('computeMessageClusters', () => {
         });
 
         it('splits clusters with 8 zero-crossings and global taskIds (real session sim)', () => {
-            // Simulate the real session: taskIds 54..79 (26 tasks), 8 zero-crossings
-            // 3 tasks per batch, each batch completes before the next
+            // Simulate the real session: taskIds 54..61 (8 tasks), 3 batches
+            // Each batch completes before the next — should split at zero-crossings
             const msgs: any[] = [];
             const makeTC = (subj: string, time: number) =>
                 tc('TaskCreate', time, { subject: subj, description: subj, activeForm: '' });
@@ -674,7 +675,7 @@ describe('computeMessageClusters', () => {
             msgs.push(makeTU(54, 'completed', 1300));
             msgs.push(makeTU(55, 'completed', 1400));
             msgs.push(makeTU(56, 'completed', 1500));
-            // Batch 2: tasks 57,58 (zero #1, should trigger new cluster)
+            // Batch 2: tasks 57,58 (zero #1, triggers new cluster)
             msgs.push(makeTC('B1', 2000));
             msgs.push(makeTC('B2', 2100));
             msgs.push(makeTU(57, 'completed', 2200));
@@ -689,27 +690,34 @@ describe('computeMessageClusters', () => {
 
             const result = computeMessageClusters(msgs);
             const cards = result.filter((r): r is TaskClusterMessage => r.kind === 'task-cluster');
-            expect(cards.length).toBe(1);
-            expect(cards[0].tasks.length).toBe(8);
-            expect(cards[0].tasks.filter(t => t.status === 'completed').length).toBe(8);
+            expect(cards.length).toBe(3);
+            expect(cards[0].tasks.length).toBe(3);
+            expect(cards[0].tasks.filter(t => t.status === 'completed').length).toBe(3);
+            expect(cards[1].tasks.length).toBe(2);
+            expect(cards[1].tasks.filter(t => t.status === 'completed').length).toBe(2);
+            expect(cards[2].tasks.length).toBe(3);
+            expect(cards[2].tasks.filter(t => t.status === 'completed').length).toBe(3);
         });
 
         it('matches global taskIds without taskContentMap', () => {
             // Real session: session.tasks is empty, taskIds are global (#48+)
+            // Batch 1 completes (activeCount→0), then batch 2 starts new cluster
             const msgs: Message[] = [
                 taskCreate('Task A', 1000),
                 taskCreate('Task B', 1100),
                 tc('TaskUpdate', 1200, { taskId: 48, status: 'completed' } as any),
                 tc('TaskUpdate', 1300, { taskId: 49, status: 'completed' } as any),
-                // activeCount=0, new cluster
+                // activeCount=0, triggers new cluster
                 taskCreate('Task C', 2000),
                 tc('TaskUpdate', 2100, { taskId: 50, status: 'completed' } as any),
             ];
             const result = computeMessageClusters(msgs); // no taskContentMap!
             const cards = result.filter((r): r is TaskClusterMessage => r.kind === 'task-cluster');
-            expect(cards.length).toBe(1);
-            expect(cards[0].tasks.length).toBe(3);
-            expect(cards[0].tasks.filter(t => t.status === 'completed').length).toBe(3);
+            expect(cards.length).toBe(2);
+            expect(cards[0].tasks.length).toBe(2);
+            expect(cards[0].tasks.filter(t => t.status === 'completed').length).toBe(2);
+            expect(cards[1].tasks.length).toBe(1);
+            expect(cards[1].tasks[0].status).toBe('completed');
         });
 
         it('handles numeric taskId in TaskUpdate input', () => {
@@ -761,7 +769,7 @@ describe('computeMessageClusters', () => {
             // Batch 2: both completed
             expect(cards[1].tasks[0].status).toBe('completed');
             expect(cards[1].tasks[1].status).toBe('completed');
-            // Global pre-scan picks best status: TaskUpdate 38 is 'in_progress'
+            // TaskUpdate 38 is 'in_progress', not 'completed'
             expect(cards[2].tasks[0].status).toBe('in_progress');
             expect(cards[2].tasks[1].status).toBe('completed');
             expect(cards[2].tasks[2].status).toBe('completed');

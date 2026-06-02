@@ -93,7 +93,6 @@ export function computeMessageClusters(
     // ---- Process each segment ----------------------------------------------
     const result: ClusteredMessage[] = [];
     let cumulativeTotal = 0;
-    let segmentOffset = 0;
 
     for (const seg of segments) {
         const segBase = _globalBase + cumulativeTotal;
@@ -102,14 +101,12 @@ export function computeMessageClusters(
             seg.start,
             options?.taskContentMap,
             segBase,
-            segmentOffset,
             globalTaskStatusMap,
         );
         for (const cm of clustered) {
             result.push(cm);
             if (cm.kind === 'task-cluster') cumulativeTotal += cm.tasks.length;
         }
-        segmentOffset = cumulativeTotal;
     }
 
     // ---- Deduplicate adjacent user-text echoes ------------------------------
@@ -140,8 +137,7 @@ function clusterSegment(
     offset: number,
     taskContentMap: ReadonlyMap<string, string> | undefined,
     segmentBase: number,
-    segmentOffset: number,
-    globalTaskStatusMap: Map<string, string>,
+    globalStatusMap: Map<string, string>,
 ): ClusteredMessage[] {
     if (messages.length === 0) return [];
 
@@ -198,31 +194,37 @@ function clusterSegment(
         currentTaskIdx = mi;
     };
 
-    /** Apply any known status from the global pre-scan to a task item. */
-    const applyGlobalStatus = (item: TaskItem, idx: number) => {
-        // Try both per-cluster base and legacy base (1-indexed)
-        for (const base of [taskIdBase, 1]) {
-            const tid = String(base + idx);
-            const gs = globalTaskStatusMap.get(tid);
-            if (gs && (statusOrder[gs] ?? -1) > (statusOrder[item.status] ?? -1)) {
-                item.status = gs as TaskItem['status'];
-                if (gs === 'completed' && !completedOnce.get(item.id)) {
-                    completedOnce.set(item.id, true);
-                    activeCount = Math.max(0, activeCount - 1);
-                }
-                return;
-            }
-        }
-    };
-
     const snapshotCluster = (preCount: number) => {
         if (taskItems.length === 0) return;
+        // Apply best-known status from global pre-scan (display only).
+        // Step 1: exact mapping via tidToIdx (populated by TaskUpdate resolution).
+        const matched = new Set<number>();
+        for (const [tid, idx] of tidToIdx) {
+            if (idx >= 0 && idx < taskItems.length) {
+                const gs = globalStatusMap.get(tid);
+                if (gs && (statusOrder[gs] ?? -1) > (statusOrder[taskItems[idx].status] ?? -1)) {
+                    taskItems[idx] = { ...taskItems[idx], status: gs as TaskItem['status'] };
+                }
+                matched.add(idx);
+            }
+        }
+        // Step 2: for unmatched tasks, try base+idx heuristic.
+        // Only apply if the computed taskId isn't already claimed by tidToIdx.
+        for (let idx = 0; idx < taskItems.length; idx++) {
+            if (matched.has(idx)) continue;
+            for (const base of [taskIdBase, 1]) {
+                const tid = String(base + idx);
+                // Skip if this taskId is already mapped to a different index
+                if (tidToIdx.has(tid) && tidToIdx.get(tid) !== idx) continue;
+                const gs = globalStatusMap.get(tid);
+                if (gs && (statusOrder[gs] ?? -1) > (statusOrder[taskItems[idx].status] ?? -1)) {
+                    taskItems[idx] = { ...taskItems[idx], status: gs as TaskItem['status'] };
+                    break;
+                }
+            }
+        }
         const snap = new Set<number>();
         for (const idx of hideSet) { if (idx >= clusterStart) snap.add(idx); }
-        // Apply global status before snapshotting
-        for (let i = 0; i < taskItems.length; i++) {
-            applyGlobalStatus(taskItems[i], i);
-        }
         clusterSnaps.push({
             taskItems: taskItems.map(t => ({ ...t })),
             firstIdx: firstTaskIdx, firstCreatedAt: firstTaskCreatedAt,
@@ -281,7 +283,17 @@ function clusterSegment(
             }
 
             for (const pu of pendingUpdates) {
-                if (pu.status !== 'completed') applyTaskUpdate(pu.tid, pu.status);
+                if (pu.status !== 'completed') {
+                    applyTaskUpdate(pu.tid, pu.status);
+                } else {
+                    // Set completed status directly (don't affect activeCount —
+                    // that's managed by real TaskUpdate messages in the stream)
+                    const mi = resolveTaskIndex(pu.tid);
+                    if (mi >= 0 && mi < taskItems.length
+                        && (statusOrder[pu.status] ?? -1) > (statusOrder[taskItems[mi].status] ?? -1)) {
+                        taskItems[mi] = { ...taskItems[mi], status: pu.status as TaskItem['status'] };
+                    }
+                }
             }
             pendingUpdates.length = 0;
         } else if (m.kind === 'tool-call' && m.tool?.name === 'TaskUpdate') {
