@@ -182,6 +182,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         logger.debug('[remote]: detected tool use ' + c.id! + ' parent: ' + umessage.parent_tool_use_id);
                         ongoingToolCalls.set(c.id!, { parentToolCallId: umessage.parent_tool_use_id ?? null });
                         if (c.name === 'Skill') {
+                            logger.debug('[remote] Skill tool_use detected: ' + JSON.stringify(c.input).slice(0, 100));
                             pendingSkillSuppress = true;
                         }
                     }
