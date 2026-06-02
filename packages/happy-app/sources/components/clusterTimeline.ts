@@ -59,7 +59,7 @@ export function computeMessageClusters(
     const result: ClusteredMessage[] = [];
     for (const seg of segments) {
         const segBase = globalBase + cumulativeTotal;
-        const clustered = clusterMessages(
+        const { result: clustered, tidToIdxSnapshot } = clusterMessages(
             messages.slice(seg.start, seg.end),
             seg.start,
             options?.taskContentMap,
@@ -67,6 +67,10 @@ export function computeMessageClusters(
             segmentOffset,
             sharedTidToIdx,
         );
+        // Merge this segment's tidToIdx into shared map for cross-segment matching
+        for (const [tid, idx] of tidToIdxSnapshot) {
+            if (!sharedTidToIdx.has(tid)) sharedTidToIdx.set(tid, segmentOffset + idx);
+        }
         for (const cm of clustered) {
             result.push(cm);
             if (cm.kind === 'task-cluster') cumulativeTotal += cm.tasks.length;
@@ -106,8 +110,8 @@ function clusterMessages(
     segmentBase: number,
     segmentOffset: number,
     sharedTidToIdx: Map<string, number>,
-): ClusteredMessage[] {
-    if (messages.length === 0) return [];
+): { result: ClusteredMessage[]; tidToIdxSnapshot: Map<string, number> } {
+    if (messages.length === 0) return { result: [], tidToIdxSnapshot: new Map() };
 
     const clusterSnaps: ClusterSnap[] = [];
 
@@ -199,7 +203,11 @@ function clusterMessages(
         });
     };
 
+    let cumulativeTaskCount = 0;
+
     const resetClusterState = () => {
+        cumulativeTaskCount += taskItems.length;
+        taskIdBase = segmentBase + cumulativeTaskCount;
         taskItems = [];
         activeCount = 0;
         currentTaskIdx = -1;
@@ -283,7 +291,7 @@ function clusterMessages(
         snapshotCluster(pre);
     }
 
-    if (clusterSnaps.length === 0) return messages.slice();
+    if (clusterSnaps.length === 0) return { result: messages.slice(), tidToIdxSnapshot: tidToIdx };
 
     const result: ClusteredMessage[] = [];
     let cursor = 0;
@@ -312,5 +320,5 @@ function clusterMessages(
         }
         cursor = nextFirst;
     }
-    return result;
+    return { result, tidToIdxSnapshot: tidToIdx };
 }
