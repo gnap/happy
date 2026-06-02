@@ -237,12 +237,11 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
 
         const logMessage = sdkToLogConverter.convert(msg);
         if (logMessage) {
-            // Suppress Skill-injected user messages: don't send them at all
+            // Suppress Skill-injected user messages
             if (pendingSkillSuppress && logMessage.type === 'user') {
-                logger.debug('[remote] Suppressing Skill user message');
+                logger.debug('[remote] Suppressing Skill user message, text: ' + JSON.stringify(logMessage.message?.content).slice(0,100));
                 pendingSkillSuppress = false;
-                // Skip messageQueue.enqueue for this message
-                if (message.type === 'user') return;
+                return;
             }
             // Add permissions field to tool result content
             if (logMessage.type === 'user' && logMessage.message?.content) {
