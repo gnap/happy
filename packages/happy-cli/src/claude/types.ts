@@ -23,6 +23,7 @@ export const RawJSONLinesSchema = z.discriminatedUnion("type", [
     type: z.literal("user"),
     isSidechain: z.boolean().optional(),
     isMeta: z.boolean().optional(),
+    isSynthetic: z.boolean().optional(),
     uuid: z.string(), // Used in getMessageKey()
     message: z.object({
       content: z.union([z.string(), z.any()]) // Used in sessionScanner.ts

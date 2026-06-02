@@ -596,12 +596,6 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                     }
                 }
 
-                // Suppress the Skill's injected user prompt (the skill content
-                // is already visible in the tool card; echoing it as user text is redundant).
-                if (name === 'Skill') {
-                    suppressNextUserText(state, 1);
-                }
-
                 envelopes.push(createEnvelope('agent', {
                     t: 'tool-call-start',
                     call,
@@ -636,10 +630,10 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                     maybeEmitSubagentStart(state, turnId, subagent, envelopes);
                     envelopes.push(createEnvelope('agent', { t: 'text', text: message.message.content }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
                 }
-            } else if (message.isMeta) {
-                // isMeta messages are internal prompts (e.g. inbox turn notifications)
-                // injected by the CLI — not typed by the user. Suppress them so they
-                // don't appear as standalone user bubbles in the App.
+            } else if (message.isMeta || message.isSynthetic) {
+                // isMeta: internal prompts (e.g. inbox turn notifications)
+                // isSynthetic: SDK-injected prompts (e.g. Skill invocations)
+                // Suppress these so they don't appear as standalone user bubbles.
             } else if ((state.suppressNextUserTextCount ?? 0) > 0) {
                 // Suppress internal CLI-injected prompts (e.g. inbox turn notifications)
                 // that were registered via suppressNextUserText() before the turn started.
@@ -663,9 +657,9 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
             };
         }
 
-        // Suppress meta / CLI-injected prompts
-        if (message.isMeta || (state.suppressNextUserTextCount ?? 0) > 0) {
-            if (!message.isMeta) {
+        // Suppress meta / synthetic / CLI-injected prompts
+        if (message.isMeta || message.isSynthetic || (state.suppressNextUserTextCount ?? 0) > 0) {
+            if (!message.isMeta && !message.isSynthetic) {
                 state.suppressNextUserTextCount = (state.suppressNextUserTextCount ?? 1) - 1;
             }
             return { currentTurnId: state.currentTurnId, envelopes };
