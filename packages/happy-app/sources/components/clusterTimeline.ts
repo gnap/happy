@@ -83,7 +83,6 @@ export function computeMessageClusters(
 ): ClusteredMessage[] {
     // ---- Incremental global scan --------------------------------------------
     updateGlobalScan(messages);
-    console.warn('[clusterTimeline] compute', { msgCount: messages.length, _globalBase, mapSize: globalTaskStatusMap.size, hasContentMap: !!options?.taskContentMap, contentMapSize: options?.taskContentMap?.size, someTaskCreateInputs: messages.filter(m => m.kind === 'tool-call' && m.tool?.name === 'TaskCreate').slice(0,3).map(m => ({ taskId: (m as any).tool?.input?.taskId, subject: (m as any).tool?.input?.subject })) });
 
     // ---- Split into segments -----------------------------------------------
     const segments: { start: number; end: number }[] = [];
@@ -200,12 +199,11 @@ function clusterSegment(
 
     const snapshotCluster = (preCount: number) => {
         if (taskItems.length === 0) return;
-        // Supplement display status from global pre-scan, but only apply
-        // 'in_progress' — never 'completed', which must come from within-segment
-        // TaskUpdates (global map spans all segments and can misattribute).
+        // Apply best-known status from global pre-scan (display only — does
+        // NOT affect activeCount, which is managed by in-stream TaskUpdates).
         const promote = (current: string, candidate: string) =>
-            candidate === 'in_progress' && (statusOrder[candidate] ?? -1) > (statusOrder[current] ?? -1);
-        // Step 1: exact mapping via tidToIdx
+            (statusOrder[candidate] ?? -1) > (statusOrder[current] ?? -1);
+        // Step 1: exact mapping via tidToIdx — safe, allows all statuses
         const matched = new Set<number>();
         for (const [tid, idx] of tidToIdx) {
             if (idx >= 0 && idx < taskItems.length) {
@@ -216,14 +214,14 @@ function clusterSegment(
                 matched.add(idx);
             }
         }
-        // Step 2: base+idx heuristic for unmatched tasks
+        // Step 2: base+idx heuristic — only in_progress (avoid misattributed completed)
         for (let idx = 0; idx < taskItems.length; idx++) {
             if (matched.has(idx)) continue;
             for (const base of [taskIdBase, 1]) {
                 const tid = String(base + idx);
                 if (tidToIdx.has(tid) && tidToIdx.get(tid) !== idx) continue;
                 const gs = globalStatusMap.get(tid);
-                if (gs && promote(taskItems[idx].status, gs)) {
+                if (gs === 'in_progress' && promote(taskItems[idx].status, gs)) {
                     taskItems[idx] = { ...taskItems[idx], status: gs as TaskItem['status'] };
                     break;
                 }
@@ -251,17 +249,12 @@ function clusterSegment(
             if (firstTaskIdx < 0) { firstTaskIdx = i; firstTaskCreatedAt = m.createdAt; }
             hideSet.add(i); allHidden.add(i);
 
-            // TEMP: check if taskContentMap is present
-            if (!taskContentMap || taskContentMap.size === 0) {
-                console.warn('[clusterTimeline] TaskCreate NO taskContentMap', { hasTasks: !!taskContentMap, size: taskContentMap?.size, inputKeys: Object.keys(input) });
-            }
             if (taskContentMap && taskContentMap.size > 0) {
                 // Prefer matching by TaskCreate's own taskId (from input.taskId / input.id).
                 const createTid = String(input.taskId || input.id || '');
                 if (createTid && taskContentMap.has(createTid)) {
                     tidToIdx.set(createTid, newIdx);
                 } else {
-                    console.warn('[clusterTimeline] TaskCreate no tidToIdx match', { createTid, inputTaskId: input.taskId, inputId: input.id, mapKeys: [...taskContentMap.keys()].slice(0,5), content, descKey });
                     for (const [tid, tc] of taskContentMap) {
                         if (tc === content || tc === descKey) {
                             tidToIdx.set(tid, newIdx);
