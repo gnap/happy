@@ -194,28 +194,30 @@ function clusterSegment(
 
     const snapshotCluster = (preCount: number) => {
         if (taskItems.length === 0) return;
-        // Apply best-known status from global pre-scan (display only).
-        // Step 1: exact mapping via tidToIdx (populated by TaskUpdate resolution).
+        // Supplement display status from global pre-scan, but only apply
+        // 'in_progress' — never 'completed', which must come from within-segment
+        // TaskUpdates (global map spans all segments and can misattribute).
+        const promote = (current: string, candidate: string) =>
+            candidate === 'in_progress' && (statusOrder[candidate] ?? -1) > (statusOrder[current] ?? -1);
+        // Step 1: exact mapping via tidToIdx
         const matched = new Set<number>();
         for (const [tid, idx] of tidToIdx) {
             if (idx >= 0 && idx < taskItems.length) {
                 const gs = globalStatusMap.get(tid);
-                if (gs && (statusOrder[gs] ?? -1) > (statusOrder[taskItems[idx].status] ?? -1)) {
+                if (gs && promote(taskItems[idx].status, gs)) {
                     taskItems[idx] = { ...taskItems[idx], status: gs as TaskItem['status'] };
                 }
                 matched.add(idx);
             }
         }
-        // Step 2: for unmatched tasks, try base+idx heuristic.
-        // Only apply if the computed taskId isn't already claimed by tidToIdx.
+        // Step 2: base+idx heuristic for unmatched tasks
         for (let idx = 0; idx < taskItems.length; idx++) {
             if (matched.has(idx)) continue;
             for (const base of [taskIdBase, 1]) {
                 const tid = String(base + idx);
-                // Skip if this taskId is already mapped to a different index
                 if (tidToIdx.has(tid) && tidToIdx.get(tid) !== idx) continue;
                 const gs = globalStatusMap.get(tid);
-                if (gs && (statusOrder[gs] ?? -1) > (statusOrder[taskItems[idx].status] ?? -1)) {
+                if (gs && promote(taskItems[idx].status, gs)) {
                     taskItems[idx] = { ...taskItems[idx], status: gs as TaskItem['status'] };
                     break;
                 }
