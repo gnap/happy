@@ -409,6 +409,9 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 mode = msg.mode;
                                 permissionHandler.handleModeChange(mode.permissionMode);
                                 logger.debug('[remote]: processing A2A inbox turn');
+                                // Suppress the inbox notification prompt from appearing as a
+                                // user bubble in the App — it is an internal CLI-injected turn.
+                                session.client.suppressNextMapperUserText();
                                 // Signal thinking immediately on message receipt, before SDK is invoked
                                 session.onThinkingChange(true);
                                 return {

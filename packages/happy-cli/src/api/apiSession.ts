@@ -20,6 +20,7 @@ import { type SessionEnvelope, type SessionTurnEndStatus } from '@slopus/happy-w
 import {
     closeClaudeTurnWithStatus,
     mapClaudeLogMessageToSessionEnvelopes,
+    suppressNextUserText,
     type ClaudeSessionProtocolState,
 } from '@/claude/utils/sessionProtocolMapper';
 import { InvalidateSync } from '@/utils/sync';
@@ -1477,6 +1478,13 @@ export class ApiSessionClient extends EventEmitter {
 
     /** Count of envelopes sent this process (for trace log); resets only by process restart. */
     private _envelopeSendCount = 0;
+
+    /** Suppress the next N non-sidechain user text envelopes produced by the mapper.
+     *  Call before injecting an internal CLI prompt (e.g. inbox turn notification) so it
+     *  does not appear as a user bubble in the App. */
+    suppressNextMapperUserText(count = 1): void {
+        suppressNextUserText(this.claudeSessionProtocolState, count);
+    }
 
     sendSessionProtocolMessage(envelope: SessionEnvelope) {
         // Apply lazy encoding at the single exit point so all code paths

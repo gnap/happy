@@ -18,6 +18,8 @@ export type ClaudeSessionProtocolState = {
     activeSubagents?: Set<string>;
     taskCallBySubagent?: Map<string, string>; // session subagent cuid -> Task provider tool call ID
     bgTaskIdToCallId?: Map<string, string>; // background task_id → Bash call ID
+    /** Number of upcoming non-sidechain user text messages to suppress (e.g. inbox turn prompts). */
+    suppressNextUserTextCount?: number;
 };
 
 type ClaudeMapperResult = {
@@ -468,6 +470,11 @@ function toToolArgs(input: unknown): Record<string, unknown> {
     return { input };
 }
 
+/** Mark the next N non-sidechain user text messages as internal CLI prompts to suppress. */
+export function suppressNextUserText(state: ClaudeSessionProtocolState, count = 1): void {
+    state.suppressNextUserTextCount = (state.suppressNextUserTextCount ?? 0) + count;
+}
+
 export function closeClaudeTurnWithStatus(
     state: ClaudeSessionProtocolState,
     status: SessionTurnEndStatus,
@@ -614,6 +621,14 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                     maybeEmitSubagentStart(state, turnId, subagent, envelopes);
                     envelopes.push(createEnvelope('agent', { t: 'text', text: message.message.content }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
                 }
+            } else if (message.isMeta) {
+                // isMeta messages are internal prompts (e.g. inbox turn notifications)
+                // injected by the CLI — not typed by the user. Suppress them so they
+                // don't appear as standalone user bubbles in the App.
+            } else if ((state.suppressNextUserTextCount ?? 0) > 0) {
+                // Suppress internal CLI-injected prompts (e.g. inbox turn notifications)
+                // that were registered via suppressNextUserText() before the turn started.
+                state.suppressNextUserTextCount = (state.suppressNextUserTextCount ?? 1) - 1;
             } else {
                 closeTurn(state, 'completed', envelopes);
                 envelopes.push(createEnvelope('user', { t: 'text', text: message.message.content }));
