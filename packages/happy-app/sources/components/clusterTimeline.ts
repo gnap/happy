@@ -43,12 +43,11 @@ function updateGlobalScan(messages: readonly Message[]) {
             }
         }
     } else {
-        // Full rescan: capture ALL TaskUpdate statuses (no seenTc filter)
+        // Full rescan: capture ALL TaskUpdate statuses, compute base from minTid
         globalTaskStatusMap.clear();
         _globalBase = 1;
-        let seenTc = false;
+        let _baseSeen = false;
         for (const m of messages) {
-            if (m.kind === 'tool-call' && m.tool?.name === 'TaskCreate') seenTc = true;
             if (m.kind === 'tool-call' && m.tool?.name === 'TaskUpdate') {
                 const input = m.tool.input || {};
                 const tid = String(input.taskId || input.id || '');
@@ -56,9 +55,10 @@ function updateGlobalScan(messages: readonly Message[]) {
                 if (st && (!globalTaskStatusMap.has(tid) || (statusOrder[st] ?? -1) > (statusOrder[globalTaskStatusMap.get(tid)!] ?? -1))) {
                     globalTaskStatusMap.set(tid, st);
                 }
-                if (seenTc) {
-                    const n = parseInt(tid, 10);
-                    if (!isNaN(n) && n < _globalBase) _globalBase = n;
+                const n = parseInt(tid, 10);
+                if (!isNaN(n)) {
+                    if (!_baseSeen) { _globalBase = n; _baseSeen = true; }
+                    else if (n < _globalBase) _globalBase = n;
                 }
             }
         }
