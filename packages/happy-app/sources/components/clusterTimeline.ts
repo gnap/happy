@@ -234,7 +234,7 @@ function clusterSegment(
                 diag.push({ idx, tid: null, current: taskItems[idx].status, NO_TASKID: true });
             }
         }
-        console.warn('[clusterTimeline] snapshot', { total: taskItems.length, items: diag, mapKeys: [...globalStatusMap.keys()].slice(0,10), applyTaskUpdateCalled: tidToIdx.size > 0 });
+        console.warn('[clusterTimeline] snapshot', { total: taskItems.length, items: diag, mapKeys: [...globalStatusMap.keys()].slice(0,10), applyTaskUpdateCalled: tidToIdx.size > 0, clusterTaskIds: taskItems.map(t => t.taskId), clusterStatuses: taskItems.map(t => t.status) });
         // Step 1: exact mapping via tidToIdx — safe, allows all statuses
         const matched = new Set<number>();
         for (const [tid, idx] of tidToIdx) {
@@ -277,6 +277,9 @@ function clusterSegment(
             const newIdx = taskItems.length;
             // taskId: try taskId, task_id, id (in that order)
             const createTid = String(input.taskId || input.task_id || input.id || '');
+            if (!createTid) {
+                console.warn('[clusterTimeline] TaskCreate NO taskId in input', { inputKeys: Object.keys(input), sampleValues: JSON.stringify(input).slice(0,200) });
+            }
             taskItems.push({ id: descKey || String(newIdx + 1), content, status: 'pending', collapsedCount: 0, taskId: createTid || undefined });
             activeCount++;
             currentTaskIdx = newIdx;
