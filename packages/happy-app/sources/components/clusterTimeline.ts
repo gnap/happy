@@ -191,7 +191,11 @@ function clusterSegment(
 
     const applyTaskUpdate = (tid: string, status: string) => {
         const mi = resolveTaskIndex(tid);
-        if (mi < 0 || mi >= taskItems.length) return;
+        if (mi < 0 || mi >= taskItems.length) {
+            if (mi < 0) console.warn('[clusterTimeline] applyTaskUpdate MISS', { tid, status, taskIdBase, taskItemsLen: taskItems.length, taskItemTaskIds: taskItems.map(t => t.taskId) });
+            return;
+        }
+        console.warn('[clusterTimeline] applyTaskUpdate HIT', { tid, status, mi, taskItemTaskId: taskItems[mi].taskId });
         const ns = status || taskItems[mi].status;
         if ((statusOrder[ns] ?? -1) > (statusOrder[taskItems[mi].status] ?? -1)) {
             taskItems[mi] = { ...taskItems[mi], status: ns as TaskItem['status'] };
@@ -210,6 +214,7 @@ function clusterSegment(
         const promote = (current: string, candidate: string) =>
             (statusOrder[candidate] ?? -1) > (statusOrder[current] ?? -1);
         // Step 0: direct lookup via taskItem.taskId (set at TaskCreate time)
+        const diag: any[] = [];
         for (let idx = 0; idx < taskItems.length; idx++) {
             const tid = taskItems[idx].taskId;
             if (tid) {
@@ -217,8 +222,12 @@ function clusterSegment(
                 if (gs && promote(taskItems[idx].status, gs)) {
                     taskItems[idx] = { ...taskItems[idx], status: gs as TaskItem['status'] };
                 }
+                diag.push({ idx, tid, current: taskItems[idx].status, fromMap: gs || null });
+            } else {
+                diag.push({ idx, tid: null, current: taskItems[idx].status, NO_TASKID: true });
             }
         }
+        console.warn('[clusterTimeline] snapshot', { total: taskItems.length, items: diag, mapKeys: [...globalStatusMap.keys()].slice(0,10), applyTaskUpdateCalled: tidToIdx.size > 0 });
         // Step 1: exact mapping via tidToIdx — safe, allows all statuses
         const matched = new Set<number>();
         for (const [tid, idx] of tidToIdx) {
