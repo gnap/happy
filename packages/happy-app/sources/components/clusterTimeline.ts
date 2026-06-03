@@ -148,7 +148,7 @@ function clusterSegment(
     offset: number,
     taskContentMap: ReadonlyMap<string, string> | undefined,
     segmentBase: number,
-    globalStatusMap: Map<string, string>,
+    _globalStatusMap: Map<string, string>,
 ): ClusteredMessage[] {
     if (messages.length === 0) return [];
 
@@ -167,6 +167,20 @@ function clusterSegment(
     let taskIdBase = segmentBase;
 
     const statusOrder: Record<string, number> = { pending: 0, in_progress: 1, completed: 2 };
+
+    // Per-segment status: only TaskUpdates within this segment.
+    // Prevents future-segment completed from marking tasks done prematurely.
+    const localStatusMap = new Map<string, string>();
+    for (const m of messages) {
+        if (m.kind === 'tool-call' && m.tool?.name === 'TaskUpdate') {
+            const input = m.tool?.input || {};
+            const tid = String(input.taskId || input.task_id || input.id || '');
+            const st = String(input.status || '');
+            if (tid && st && (!localStatusMap.has(tid) || (statusOrder[st] ?? -1) > (statusOrder[localStatusMap.get(tid)!] ?? -1))) {
+                localStatusMap.set(tid, st);
+            }
+        }
+    }
 
     const resolveTaskIndex = (tid: string): number => {
         let mi = taskItems.findIndex((t) => t.id === tid);
@@ -225,7 +239,7 @@ function clusterSegment(
                 tid = mapKeys[idx];
             }
             if (tid) {
-                const gs = globalStatusMap.get(tid);
+                const gs = localStatusMap.get(tid);
                 if (gs && promote(taskItems[idx].status, gs)) {
                     taskItems[idx] = { ...taskItems[idx], status: gs as TaskItem['status'] };
                 }
@@ -235,7 +249,7 @@ function clusterSegment(
         const matched = new Set<number>();
         for (const [tid, idx] of tidToIdx) {
             if (idx >= 0 && idx < taskItems.length) {
-                const gs = globalStatusMap.get(tid);
+                const gs = localStatusMap.get(tid);
                 if (gs && promote(taskItems[idx].status, gs)) {
                     taskItems[idx] = { ...taskItems[idx], status: gs as TaskItem['status'] };
                 }
@@ -248,7 +262,7 @@ function clusterSegment(
             for (const base of [taskIdBase, 1]) {
                 const tid = String(base + idx);
                 if (tidToIdx.has(tid) && tidToIdx.get(tid) !== idx) continue;
-                const gs = globalStatusMap.get(tid);
+                const gs = localStatusMap.get(tid);
                 if (gs === 'in_progress' && promote(taskItems[idx].status, gs)) {
                     taskItems[idx] = { ...taskItems[idx], status: gs as TaskItem['status'] };
                     break;
