@@ -256,6 +256,7 @@ function clusterSegment(
                 matched.add(idx);
             }
         }
+        try { localStorage.setItem('_v', JSON.stringify({ tids: taskItems.map(t => t.taskId), sts: taskItems.map(t => t.status), lmapN: localStatusMap.size, lmap: [...localStatusMap.entries()].slice(0,6), ts: Date.now() })); } catch {}
         // Step 2: base+idx heuristic — only in_progress (avoid misattributed completed)
         for (let idx = 0; idx < taskItems.length; idx++) {
             if (matched.has(idx)) continue;
