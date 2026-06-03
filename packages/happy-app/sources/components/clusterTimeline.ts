@@ -174,9 +174,9 @@ function clusterSegment(
         const content = taskContentMap?.get(tid);
         if (content) {
             mi = taskItems.findIndex((t) => t.content === content || t.id === content);
-            if (mi >= 0) { const n = parseInt(tid, 10); if (!isNaN(n)) taskIdBase = n - mi; tidToIdx.set(tid, mi); return mi; }
+            if (mi >= 0) { tidToIdx.set(tid, mi); return mi; }
             mi = taskItems.findIndex((t) => t.content.includes(content) || content.includes(t.content));
-            if (mi >= 0) { const n = parseInt(tid, 10); if (!isNaN(n)) taskIdBase = n - mi; tidToIdx.set(tid, mi); return mi; }
+            if (mi >= 0) { tidToIdx.set(tid, mi); return mi; }
         }
         if (tidToIdx.has(tid)) return tidToIdx.get(tid)!;
         const num = parseInt(tid, 10);
@@ -205,7 +205,6 @@ function clusterSegment(
 
     const snapshotCluster = (preCount: number) => {
         if (taskItems.length === 0) return;
-        try { localStorage.setItem('_snap', JSON.stringify({ n: taskItems.length, tids: taskItems.map(t => t.taskId), sts: taskItems.map(t => t.status), gmapN: globalStatusMap.size, gmapKeys: [...globalStatusMap.keys()].slice(0,10), atuHits: tidToIdx.size })); } catch {}
         // Apply best-known status from global pre-scan (display only — does
         // NOT affect activeCount, which is managed by in-stream TaskUpdates).
         const promote = (current: string, candidate: string) =>
@@ -272,7 +271,17 @@ function clusterSegment(
             const descKey = input.description || '';
             const newIdx = taskItems.length;
             // taskId: try taskId, task_id, id (in that order)
-            const createTid = String(input.taskId || input.task_id || input.id || '');
+            let createTid = String(input.taskId || input.task_id || input.id || '');
+            // Fallback: TaskCreate input often lacks taskId. Use the first
+            // unclaimed taskContentMap key (Map insertion order = task creation order).
+            if (!createTid && taskContentMap && taskContentMap.size > 0) {
+                for (const k of taskContentMap.keys()) {
+                    if (!tidToIdx.has(k)) { createTid = k; tidToIdx.set(k, newIdx); break; }
+                }
+            }
+            if (createTid && taskContentMap?.has(createTid)) {
+                tidToIdx.set(createTid, newIdx);
+            }
             taskItems.push({ id: descKey || String(newIdx + 1), content, status: 'pending', collapsedCount: 0, taskId: createTid || undefined });
             activeCount++;
             currentTaskIdx = newIdx;

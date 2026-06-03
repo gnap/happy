@@ -87,10 +87,7 @@ const ChatListInternal = React.memo((props: {
     }, [props.tasks]);
 
     const messagesWithTasks = useMemo(
-        () => {
-            try { localStorage.setItem('_diag', JSON.stringify({ hasTasks: !!props.tasks?.length, taskCount: props.tasks?.length ?? 0, msgCount: props.messages.length })); } catch {}
-            return computeMessageClusters(props.messages, clusterOptions);
-        },
+        () => computeMessageClusters(props.messages, clusterOptions),
         [props.messages, clusterOptions],
     );
 
