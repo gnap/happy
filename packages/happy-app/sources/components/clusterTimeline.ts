@@ -215,14 +215,19 @@ function clusterSegment(
             (statusOrder[candidate] ?? -1) > (statusOrder[current] ?? -1);
         // Step 0: direct lookup via taskItem.taskId (set at TaskCreate time)
         const diag: any[] = [];
+        const mapKeys = taskContentMap ? [...taskContentMap.keys()] : [];
         for (let idx = 0; idx < taskItems.length; idx++) {
             let tid = taskItems[idx].taskId;
-            // Fallback: if no taskId stored, try to find via taskContentMap
+            // Fallback 1: if no taskId stored, try content matching in taskContentMap
             if (!tid && taskContentMap) {
                 const c = taskItems[idx].content;
                 for (const [k, v] of taskContentMap) {
                     if (v === c || c.includes(v) || v.includes(c)) { tid = k; break; }
                 }
+            }
+            // Fallback 2: position-based — taskContentMap keys are insertion-ordered
+            if (!tid && idx < mapKeys.length) {
+                tid = mapKeys[idx];
             }
             if (tid) {
                 const gs = globalStatusMap.get(tid);
