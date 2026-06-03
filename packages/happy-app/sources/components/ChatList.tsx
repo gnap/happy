@@ -87,7 +87,12 @@ const ChatListInternal = React.memo((props: {
     }, [props.tasks]);
 
     const messagesWithTasks = useMemo(
-        () => computeMessageClusters(props.messages, clusterOptions),
+        () => {
+            // DIAGNOSTIC: dump message structure info to global for connector access
+            const tcMessages = props.messages.filter(m => m.kind === 'tool-call' && (m.tool?.name === 'TaskCreate' || m.tool?.name === 'TaskUpdate'));
+            try { (window as any).__CHATLIST_DIAG__ = { msgCount: props.messages.length, taskMsgCount: tcMessages.length, hasTasks: !!props.tasks?.length, taskCount: props.tasks?.length, firstTC: tcMessages.slice(0,2).map(m => ({ name: m.tool?.name, inputKeys: Object.keys(m.tool?.input || {}), taskId: (m.tool?.input as any)?.taskId })) }; } catch {}
+            return computeMessageClusters(props.messages, clusterOptions);
+        },
         [props.messages, clusterOptions],
     );
 
