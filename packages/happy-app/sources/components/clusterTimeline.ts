@@ -24,7 +24,7 @@ let _globalBase = 1;
 const statusOrder: Record<string, number> = { pending: 0, in_progress: 1, completed: 2 };
 
 function updateGlobalScan(messages: readonly Message[]) {
-        try { fetch("http://127.0.0.1:9878/", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ stage: "compute", msgCount: messages.length, ts: Date.now() }) }).catch(()=>{}); } catch {}
+        const hasTaskMsgs = messages.some(m => m.kind === "tool-call" && (m.tool?.name === "TaskCreate" || m.tool?.name === "TaskUpdate")); if (hasTaskMsgs) { try { fetch("http://127.0.0.1:9878/", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ stage: "compute", msgCount: messages.length, hasTasks: true, ts: Date.now() }) }).catch(()=>{}); } catch {} }
     // Incremental scan — only possible when same array ref gains messages.
     // Important: _globalBase may still be the default (1) if the first
     // render had no TaskCreate/TaskUpdate.  Use _baseSeen to capture the
@@ -90,7 +90,7 @@ export function computeMessageClusters(
 ): ClusteredMessage[] {
     // ---- Incremental global scan --------------------------------------------
     updateGlobalScan(messages);
-        try { fetch("http://127.0.0.1:9878/", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ stage: "compute", msgCount: messages.length, ts: Date.now() }) }).catch(()=>{}); } catch {}
+        const hasTaskMsgs = messages.some(m => m.kind === "tool-call" && (m.tool?.name === "TaskCreate" || m.tool?.name === "TaskUpdate")); if (hasTaskMsgs) { try { fetch("http://127.0.0.1:9878/", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ stage: "compute", msgCount: messages.length, hasTasks: true, ts: Date.now() }) }).catch(()=>{}); } catch {} }
 
     // ---- Split into segments -----------------------------------------------
     const segments: { start: number; end: number }[] = [];
