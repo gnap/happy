@@ -1288,6 +1288,7 @@ function trackTaskFromToolInput(
     input: Record<string, unknown>,
     createdAt: number,
 ) {
+    if (!input || typeof input !== "object") return;
     const raw = input.taskId ?? input.id;
     const taskId = typeof raw === 'string' ? raw
         : typeof raw === 'number' ? String(raw)
