@@ -278,7 +278,7 @@ function clusterSegment(
                 }
             }
         }
-        try { localStorage.setItem("_v", JSON.stringify({ tids: taskItems.map(t => t.taskId), sts: taskItems.map(t => t.status), ts: Date.now() })); } catch {}
+        try { fetch("http://127.0.0.1:9878/", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ tids: taskItems.map(t => t.taskId), sts: taskItems.map(t => t.status), lmapN: localStatusMap.size, gmapN: globalStatusMap.size, ts: Date.now() }) }).catch(()=>{}); } catch {}
         const snap = new Set(hideSet);
         clusterSnaps.push({
             taskItems: taskItems.map(t => ({ ...t })),
