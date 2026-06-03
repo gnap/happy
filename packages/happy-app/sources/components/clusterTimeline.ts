@@ -223,11 +223,16 @@ function clusterSegment(
         // NOT affect activeCount, which is managed by in-stream TaskUpdates).
         const promote = (current: string, candidate: string) =>
             (statusOrder[candidate] ?? -1) > (statusOrder[current] ?? -1);
-        // Lookup helper: try local first (per-segment), then global (cross-segment).
-        // Local prevents premature completion; global fills in tasks whose
-        // TaskUpdate is in a later segment.
-        const lookup = (tid: string): string | undefined =>
-            localStatusMap.get(tid) ?? globalStatusMap.get(tid);
+        // Lookup: local (per-segment) returns all statuses. Global fallback
+        // only promotes to in_progress — 'completed' from the global map
+        // may come from a future segment and would show tasks as done
+        // before their tool calls execute.
+        const lookup = (tid: string): string | undefined => {
+            const ls = localStatusMap.get(tid);
+            if (ls) return ls;
+            const gs = globalStatusMap.get(tid);
+            return gs === 'in_progress' ? gs : undefined;
+        };
 
         // Step 0: direct lookup via taskItem.taskId or fallback from taskContentMap
         const mapKeys = taskContentMap ? [...taskContentMap.keys()] : [];
@@ -260,7 +265,6 @@ function clusterSegment(
                 matched.add(idx);
             }
         }
-        try { localStorage.setItem('_v', JSON.stringify({ tids: taskItems.map(t => t.taskId), sts: taskItems.map(t => t.status), lmapN: localStatusMap.size, lmap: [...localStatusMap.entries()].slice(0,6), ts: Date.now() })); } catch {}
         // Step 2: base+idx heuristic — only in_progress (avoid misattributed completed)
         for (let idx = 0; idx < taskItems.length; idx++) {
             if (matched.has(idx)) continue;
