@@ -32,12 +32,9 @@ export interface CursorAuthData {
 
 export interface CursorPlanUsage {
   enabled: boolean;
-  /** Base plan limit (may be exhausted while bonus remains — use breakdown.total for real quota). */
   used: number;
   limit: number;
   remaining: number;
-  /** Real total quota = included + bonus. Use this as the denominator for usage percentage. */
-  breakdown?: { included: number; bonus: number; total: number };
   totalPercentUsed: number;
   autoPercentUsed: number;
   apiPercentUsed: number;
@@ -152,21 +149,11 @@ export async function fetchCursorUsageSummary(accessToken: string): Promise<Curs
     const individual = json.individualUsage as Record<string, unknown> | undefined;
     if (individual?.plan && typeof individual.plan === 'object') {
       const p = individual.plan as Record<string, unknown>;
-      const used = (p.used as number) ?? 0;
-      const bd = p.breakdown as Record<string, unknown> | undefined;
-      // Cursor returns breakdown.total = included + bonus, which is the real cap.
-      // p.limit only reflects the included quota and may show 0 remaining even when bonus is available.
-      const totalLimit = typeof bd?.total === 'number' ? bd.total : ((p.limit as number) ?? 0);
       planUsage = {
         enabled: (p.enabled as boolean) ?? false,
-        used,
-        limit: totalLimit,
-        remaining: Math.max(0, totalLimit - used),
-        breakdown: bd ? {
-          included: (bd.included as number) ?? 0,
-          bonus: (bd.bonus as number) ?? 0,
-          total: (bd.total as number) ?? 0,
-        } : undefined,
+        used: (p.used as number) ?? 0,
+        limit: (p.limit as number) ?? 0,
+        remaining: (p.remaining as number) ?? 0,
         totalPercentUsed: (p.totalPercentUsed as number) ?? 0,
         autoPercentUsed: (p.autoPercentUsed as number) ?? 0,
         apiPercentUsed: (p.apiPercentUsed as number) ?? 0,
@@ -262,36 +249,26 @@ export function hasCursorStateDb(platform?: CursorPlatform): boolean {
 
 /**
  * Build usage-report payload for Happy server (key: 'cursor-ide').
- *
- * Plan usage (tokens):
- *   - plan_limit: plan.limit (base plan, in cents)
- *   - plan_used:  plan.used (in cents, as reported by Cursor API)
- *
- * OnDemand usage (cost, in US cents):
- *   - on_demand_used_cents: amount spent this billing cycle
- *   - on_demand_limit_cents: user-configured spending cap (null → omitted)
+ * Server expects tokens.total and cost.total. We send plan usage as tokens and
+ * on-demand usage as cost (Cursor API reports on-demand used count; we treat as cost cents for display).
  */
 export function buildCursorUsageReportPayload(info: CursorQuotaInfo): {
   tokens: { total: number; [key: string]: number };
   cost: { total: number; [key: string]: number };
 } {
   const planUsed = info.planUsage?.used ?? 0;
-  const planLimit = info.planUsage?.limit ?? 0;
+  const planRemaining = info.planUsage?.remaining ?? 0;
   const onDemandUsedCents = info.onDemandUsage?.used ?? 0;
-  const onDemandLimit = info.onDemandUsage?.limit;
-
-  const cost: { total: number; [key: string]: number } = {
-    total: onDemandUsedCents,
-    on_demand_used_cents: onDemandUsedCents,
-  };
-  if (onDemandLimit != null) cost.on_demand_limit_cents = onDemandLimit;
 
   return {
     tokens: {
       total: planUsed,
-      plan_used: planUsed,
-      plan_limit: planLimit,
+      plan_requests_used: planUsed,
+      plan_requests_remaining: planRemaining,
     },
-    cost,
+    cost: {
+      total: onDemandUsedCents,
+      on_demand_cents: onDemandUsedCents,
+    },
   };
 }

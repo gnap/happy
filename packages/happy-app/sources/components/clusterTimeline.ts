@@ -230,7 +230,7 @@ function clusterSegment(
         const lookup = (tid: string): string | undefined => {
             const ls = localStatusMap.get(tid);
             if (ls) return ls;
-            const gs = globalStatusMap.get(tid);
+            const gs = _globalStatusMap.get(tid);
             return gs === 'in_progress' ? gs : undefined;
         };
 
