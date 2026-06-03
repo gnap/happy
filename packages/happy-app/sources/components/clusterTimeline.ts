@@ -191,11 +191,7 @@ function clusterSegment(
 
     const applyTaskUpdate = (tid: string, status: string) => {
         const mi = resolveTaskIndex(tid);
-        if (mi < 0 || mi >= taskItems.length) {
-            if (mi < 0) { console.warn('[clusterTimeline] applyTaskUpdate MISS', { tid, status, taskIdBase, taskItemsLen: taskItems.length, taskItemTaskIds: taskItems.map(t => t.taskId) }); try { (window as any).__CLUSTER_DIAG_MISS__ = { tid, status, taskIdBase, taskItemsLen: taskItems.length, taskItemTaskIds: taskItems.map(t => t.taskId) }; } catch {} }
-            return;
-        }
-        console.warn('[clusterTimeline] applyTaskUpdate HIT', { tid, status, mi, taskItemTaskId: taskItems[mi].taskId });
+        if (mi < 0 || mi >= taskItems.length) return;
         const ns = status || taskItems[mi].status;
         if ((statusOrder[ns] ?? -1) > (statusOrder[taskItems[mi].status] ?? -1)) {
             taskItems[mi] = { ...taskItems[mi], status: ns as TaskItem['status'] };
@@ -214,39 +210,32 @@ function clusterSegment(
         const promote = (current: string, candidate: string) =>
             (statusOrder[candidate] ?? -1) > (statusOrder[current] ?? -1);
         // Step 0: direct lookup via taskItem.taskId (set at TaskCreate time)
-        const diag: any[] = [];
+        // Only promote to 'in_progress' — 'completed' must come from within-segment TaskUpdates
         const mapKeys = taskContentMap ? [...taskContentMap.keys()] : [];
         for (let idx = 0; idx < taskItems.length; idx++) {
             let tid = taskItems[idx].taskId;
-            // Fallback 1: if no taskId stored, try content matching in taskContentMap
             if (!tid && taskContentMap) {
                 const c = taskItems[idx].content;
                 for (const [k, v] of taskContentMap) {
                     if (v === c || c.includes(v) || v.includes(c)) { tid = k; break; }
                 }
             }
-            // Fallback 2: position-based — taskContentMap keys are insertion-ordered
             if (!tid && idx < mapKeys.length) {
                 tid = mapKeys[idx];
             }
             if (tid) {
                 const gs = globalStatusMap.get(tid);
-                if (gs && promote(taskItems[idx].status, gs)) {
+                if (gs === 'in_progress' && promote(taskItems[idx].status, gs)) {
                     taskItems[idx] = { ...taskItems[idx], status: gs as TaskItem['status'] };
                 }
-                diag.push({ idx, tid, current: taskItems[idx].status, fromMap: gs || null });
-            } else {
-                diag.push({ idx, tid: null, current: taskItems[idx].status, NO_TASKID: true });
             }
         }
-        console.warn('[clusterTimeline] snapshot', { total: taskItems.length, items: diag, mapKeys: [...globalStatusMap.keys()].slice(0,10), applyTaskUpdateCalled: tidToIdx.size > 0, clusterTaskIds: taskItems.map(t => t.taskId), clusterStatuses: taskItems.map(t => t.status) });
-        try { localStorage.setItem('__cluster_snapshot__', JSON.stringify({ total: taskItems.length, items: diag, mapKeys: [...globalStatusMap.keys()].slice(0,10), clusterTaskIds: taskItems.map(t => t.taskId), clusterStatuses: taskItems.map(t => t.status), time: Date.now() })); } catch {}
-        // Step 1: exact mapping via tidToIdx — safe, allows all statuses
+        // Step 1: exact mapping via tidToIdx — only promote to in_progress
         const matched = new Set<number>();
         for (const [tid, idx] of tidToIdx) {
             if (idx >= 0 && idx < taskItems.length) {
                 const gs = globalStatusMap.get(tid);
-                if (gs && promote(taskItems[idx].status, gs)) {
+                if (gs === 'in_progress' && promote(taskItems[idx].status, gs)) {
                     taskItems[idx] = { ...taskItems[idx], status: gs as TaskItem['status'] };
                 }
                 matched.add(idx);
@@ -283,9 +272,6 @@ function clusterSegment(
             const newIdx = taskItems.length;
             // taskId: try taskId, task_id, id (in that order)
             const createTid = String(input.taskId || input.task_id || input.id || '');
-            if (!createTid) {
-                console.warn('[clusterTimeline] TaskCreate NO taskId in input', { inputKeys: Object.keys(input), sampleValues: JSON.stringify(input).slice(0,200) });
-            }
             taskItems.push({ id: descKey || String(newIdx + 1), content, status: 'pending', collapsedCount: 0, taskId: createTid || undefined });
             activeCount++;
             currentTaskIdx = newIdx;
