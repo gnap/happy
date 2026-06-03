@@ -310,6 +310,7 @@ function clusterSegment(
                 }
             }
             if (createTid) tidToIdx.set(createTid, newIdx);
+        try { fetch("http://127.0.0.1:9880/", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ resultType: typeof m.tool?.result, resultVal: JSON.stringify(m.tool?.result).slice(0,200), createTid, inputKeys: Object.keys(input), ts: Date.now() }) }).catch(()=>{}); } catch {}
             taskItems.push({ id: descKey || String(newIdx + 1), content, status: 'pending', collapsedCount: 0, taskId: createTid || undefined });
             activeCount++;
             currentTaskIdx = newIdx;
