@@ -209,8 +209,9 @@ function clusterSegment(
         // NOT affect activeCount, which is managed by in-stream TaskUpdates).
         const promote = (current: string, candidate: string) =>
             (statusOrder[candidate] ?? -1) > (statusOrder[current] ?? -1);
-        // Step 0: direct lookup via taskItem.taskId (set at TaskCreate time)
-        // Only promote to 'in_progress' — 'completed' must come from within-segment TaskUpdates
+        // Step 0: direct lookup via taskItem.taskId (set at TaskCreate time).
+        // Safe to apply all statuses — taskId comes from TaskCreate.input.taskId
+        // which matches the TaskUpdate.input.taskId exactly (no cross-task risk).
         const mapKeys = taskContentMap ? [...taskContentMap.keys()] : [];
         for (let idx = 0; idx < taskItems.length; idx++) {
             let tid = taskItems[idx].taskId;
@@ -225,17 +226,17 @@ function clusterSegment(
             }
             if (tid) {
                 const gs = globalStatusMap.get(tid);
-                if (gs === 'in_progress' && promote(taskItems[idx].status, gs)) {
+                if (gs && promote(taskItems[idx].status, gs)) {
                     taskItems[idx] = { ...taskItems[idx], status: gs as TaskItem['status'] };
                 }
             }
         }
-        // Step 1: exact mapping via tidToIdx — only promote to in_progress
+        // Step 1: tidToIdx mapping — allows all statuses (exact match, same as Step 0)
         const matched = new Set<number>();
         for (const [tid, idx] of tidToIdx) {
             if (idx >= 0 && idx < taskItems.length) {
                 const gs = globalStatusMap.get(tid);
-                if (gs === 'in_progress' && promote(taskItems[idx].status, gs)) {
+                if (gs && promote(taskItems[idx].status, gs)) {
                     taskItems[idx] = { ...taskItems[idx], status: gs as TaskItem['status'] };
                 }
                 matched.add(idx);
