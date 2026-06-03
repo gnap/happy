@@ -205,6 +205,7 @@ function clusterSegment(
 
     const snapshotCluster = (preCount: number) => {
         if (taskItems.length === 0) return;
+        try { localStorage.setItem('_snap', JSON.stringify({ n: taskItems.length, tids: taskItems.map(t => t.taskId), sts: taskItems.map(t => t.status), gmapN: globalStatusMap.size, gmapKeys: [...globalStatusMap.keys()].slice(0,10), atuHits: tidToIdx.size })); } catch {}
         // Apply best-known status from global pre-scan (display only — does
         // NOT affect activeCount, which is managed by in-stream TaskUpdates).
         const promote = (current: string, candidate: string) =>
