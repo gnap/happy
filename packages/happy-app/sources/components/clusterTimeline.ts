@@ -205,13 +205,13 @@ function clusterSegment(
 
     const snapshotCluster = (preCount: number) => {
         if (taskItems.length === 0) return;
-        try { localStorage.setItem('_s2', JSON.stringify({ tids: taskItems.map(t => t.taskId), sts: taskItems.map(t => t.status), tidToIdxSize: tidToIdx.size, gmapKeys: [...globalStatusMap.keys()].slice(0,10), ts: Date.now() })); } catch {}
         // Apply best-known status from global pre-scan (display only — does
         // NOT affect activeCount, which is managed by in-stream TaskUpdates).
         const promote = (current: string, candidate: string) =>
             (statusOrder[candidate] ?? -1) > (statusOrder[current] ?? -1);
-        // Step 0: direct lookup via taskItem.taskId (set at TaskCreate time).
-        // Only promotes to 'in_progress' — 'completed' must come from within-segment TaskUpdates.
+        // Exact taskId matching (taskItem.taskId + tidToIdx): safe to apply any
+        // status including completed — taskId is precise, no cross-task risk.
+        // Only the base+idx heuristic (Step 2) is restricted to in_progress.
         const mapKeys = taskContentMap ? [...taskContentMap.keys()] : [];
         for (let idx = 0; idx < taskItems.length; idx++) {
             let tid = taskItems[idx].taskId;
@@ -226,17 +226,17 @@ function clusterSegment(
             }
             if (tid) {
                 const gs = globalStatusMap.get(tid);
-                if (gs === 'in_progress' && promote(taskItems[idx].status, gs)) {
+                if (gs && promote(taskItems[idx].status, gs)) {
                     taskItems[idx] = { ...taskItems[idx], status: gs as TaskItem['status'] };
                 }
             }
         }
-        // Step 1: tidToIdx mapping — only in_progress
+        // Step 1: tidToIdx — exact matching, all statuses
         const matched = new Set<number>();
         for (const [tid, idx] of tidToIdx) {
             if (idx >= 0 && idx < taskItems.length) {
                 const gs = globalStatusMap.get(tid);
-                if (gs === 'in_progress' && promote(taskItems[idx].status, gs)) {
+                if (gs && promote(taskItems[idx].status, gs)) {
                     taskItems[idx] = { ...taskItems[idx], status: gs as TaskItem['status'] };
                 }
                 matched.add(idx);
