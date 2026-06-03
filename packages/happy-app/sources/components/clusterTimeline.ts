@@ -294,38 +294,26 @@ function clusterSegment(
             const content = input.subject || input.description || input.activeForm || '';
             const descKey = input.description || '';
             const newIdx = taskItems.length;
-            // taskId: try taskId, task_id, id (in that order)
-            let createTid = String(input.taskId || input.task_id || input.id || '');
-            // Fallback: TaskCreate input often lacks taskId. Use the first
-            // unclaimed taskContentMap key (Map insertion order = task creation order).
+            // SDK TaskCreate input lacks taskId — parse result
+            // "Task #N created successfully: ..." instead.
+            let createTid = '';
+            const result = m.tool?.result;
+            if (typeof result === 'string') {
+                const m2 = result.match(/^Task #(\d+) created/i);
+                if (m2) createTid = m2[1];
+            }
+            if (!createTid) createTid = String(input.taskId || input.task_id || input.id || '');
             if (!createTid && taskContentMap && taskContentMap.size > 0) {
                 for (const k of taskContentMap.keys()) {
-                    if (!tidToIdx.has(k)) { createTid = k; tidToIdx.set(k, newIdx); break; }
+                    if (!tidToIdx.has(k)) { createTid = k; break; }
                 }
             }
-            if (createTid && taskContentMap?.has(createTid)) {
-                tidToIdx.set(createTid, newIdx);
-            }
+            if (createTid) tidToIdx.set(createTid, newIdx);
             taskItems.push({ id: descKey || String(newIdx + 1), content, status: 'pending', collapsedCount: 0, taskId: createTid || undefined });
             activeCount++;
             currentTaskIdx = newIdx;
             if (firstTaskIdx < 0) { firstTaskIdx = i; firstTaskCreatedAt = m.createdAt; }
             hideSet.add(i); allHidden.add(i);
-
-            if (taskContentMap && taskContentMap.size > 0) {
-                // Prefer matching by TaskCreate's own taskId (from input.taskId / input.id).
-                const createTid = String(input.taskId || input.id || '');
-                if (createTid && taskContentMap.has(createTid)) {
-                    tidToIdx.set(createTid, newIdx);
-                } else {
-                    for (const [tid, tc] of taskContentMap) {
-                        if (tc === content || tc === descKey) {
-                            tidToIdx.set(tid, newIdx);
-                            break;
-                        }
-                    }
-                }
-            }
 
             for (const pu of pendingUpdates) {
                 if (pu.status !== 'completed') {
