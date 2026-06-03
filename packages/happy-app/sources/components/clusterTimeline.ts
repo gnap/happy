@@ -223,9 +223,13 @@ function clusterSegment(
         // NOT affect activeCount, which is managed by in-stream TaskUpdates).
         const promote = (current: string, candidate: string) =>
             (statusOrder[candidate] ?? -1) > (statusOrder[current] ?? -1);
-        // Exact taskId matching (taskItem.taskId + tidToIdx): safe to apply any
-        // status including completed — taskId is precise, no cross-task risk.
-        // Only the base+idx heuristic (Step 2) is restricted to in_progress.
+        // Lookup helper: try local first (per-segment), then global (cross-segment).
+        // Local prevents premature completion; global fills in tasks whose
+        // TaskUpdate is in a later segment.
+        const lookup = (tid: string): string | undefined =>
+            localStatusMap.get(tid) ?? globalStatusMap.get(tid);
+
+        // Step 0: direct lookup via taskItem.taskId or fallback from taskContentMap
         const mapKeys = taskContentMap ? [...taskContentMap.keys()] : [];
         for (let idx = 0; idx < taskItems.length; idx++) {
             let tid = taskItems[idx].taskId;
@@ -239,7 +243,7 @@ function clusterSegment(
                 tid = mapKeys[idx];
             }
             if (tid) {
-                const gs = localStatusMap.get(tid);
+                const gs = lookup(tid);
                 if (gs && promote(taskItems[idx].status, gs)) {
                     taskItems[idx] = { ...taskItems[idx], status: gs as TaskItem['status'] };
                 }
@@ -249,7 +253,7 @@ function clusterSegment(
         const matched = new Set<number>();
         for (const [tid, idx] of tidToIdx) {
             if (idx >= 0 && idx < taskItems.length) {
-                const gs = localStatusMap.get(tid);
+                const gs = lookup(tid);
                 if (gs && promote(taskItems[idx].status, gs)) {
                     taskItems[idx] = { ...taskItems[idx], status: gs as TaskItem['status'] };
                 }
