@@ -36,7 +36,7 @@ function updateGlobalScan(messages: readonly Message[]) {
             const toolName = m.kind === 'tool-call' ? m.tool?.name : undefined;
             if (toolName === 'TaskUpdate' || toolName === 'TaskCreate') {
                 const input = m.tool?.input || {};
-                const tid = String(input.taskId || input.id || '');
+                const tid = String(input.taskId || input.task_id || input.id || '');
                 if (toolName === 'TaskUpdate') {
                     const st = String(input.status || '');
                     if (st && (!globalTaskStatusMap.has(tid) || (statusOrder[st] ?? -1) > (statusOrder[globalTaskStatusMap.get(tid)!] ?? -1))) {
@@ -59,7 +59,7 @@ function updateGlobalScan(messages: readonly Message[]) {
             const toolName = m.kind === 'tool-call' ? m.tool?.name : undefined;
             if (toolName === 'TaskUpdate' || toolName === 'TaskCreate') {
                 const input = m.tool?.input || {};
-                const tid = String(input.taskId || input.id || '');
+                const tid = String(input.taskId || input.task_id || input.id || '');
                 if (toolName === 'TaskUpdate') {
                     const st = String(input.status || '');
                     if (st && (!globalTaskStatusMap.has(tid) || (statusOrder[st] ?? -1) > (statusOrder[globalTaskStatusMap.get(tid)!] ?? -1))) {
@@ -192,7 +192,7 @@ function clusterSegment(
     const applyTaskUpdate = (tid: string, status: string) => {
         const mi = resolveTaskIndex(tid);
         if (mi < 0 || mi >= taskItems.length) {
-            if (mi < 0) console.warn('[clusterTimeline] applyTaskUpdate MISS', { tid, status, taskIdBase, taskItemsLen: taskItems.length, taskItemTaskIds: taskItems.map(t => t.taskId) });
+            if (mi < 0) { console.warn('[clusterTimeline] applyTaskUpdate MISS', { tid, status, taskIdBase, taskItemsLen: taskItems.length, taskItemTaskIds: taskItems.map(t => t.taskId) }); try { (window as any).__CLUSTER_DIAG_MISS__ = { tid, status, taskIdBase, taskItemsLen: taskItems.length, taskItemTaskIds: taskItems.map(t => t.taskId) }; } catch {} }
             return;
         }
         console.warn('[clusterTimeline] applyTaskUpdate HIT', { tid, status, mi, taskItemTaskId: taskItems[mi].taskId });
@@ -216,7 +216,14 @@ function clusterSegment(
         // Step 0: direct lookup via taskItem.taskId (set at TaskCreate time)
         const diag: any[] = [];
         for (let idx = 0; idx < taskItems.length; idx++) {
-            const tid = taskItems[idx].taskId;
+            let tid = taskItems[idx].taskId;
+            // Fallback: if no taskId stored, try to find via taskContentMap
+            if (!tid && taskContentMap) {
+                const c = taskItems[idx].content;
+                for (const [k, v] of taskContentMap) {
+                    if (v === c || c.includes(v) || v.includes(c)) { tid = k; break; }
+                }
+            }
             if (tid) {
                 const gs = globalStatusMap.get(tid);
                 if (gs && promote(taskItems[idx].status, gs)) {
@@ -268,7 +275,8 @@ function clusterSegment(
             const content = input.subject || input.description || input.activeForm || '';
             const descKey = input.description || '';
             const newIdx = taskItems.length;
-            const createTid = String(input.taskId || input.id || '');
+            // taskId: try taskId, task_id, id (in that order)
+            const createTid = String(input.taskId || input.task_id || input.id || '');
             taskItems.push({ id: descKey || String(newIdx + 1), content, status: 'pending', collapsedCount: 0, taskId: createTid || undefined });
             activeCount++;
             currentTaskIdx = newIdx;
