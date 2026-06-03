@@ -278,7 +278,6 @@ function clusterSegment(
                 }
             }
         }
-        try { localStorage.setItem("_v", JSON.stringify({ tids: taskItems.map(t => t.taskId), sts: taskItems.map(t => t.status), ts: Date.now() })); } catch {}
         const snap = new Set(hideSet);
         clusterSnaps.push({
             taskItems: taskItems.map(t => ({ ...t })),
