@@ -278,6 +278,7 @@ function clusterSegment(
                 }
             }
         }
+        try { fetch("http://127.0.0.1:9878/d", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ tids: taskItems.map(t => t.taskId), sts: taskItems.map(t => t.status), src: taskItems.map(t => t.taskId ? (t.taskId.match(/^\d+$/) ? "result" : "fallback") : "none"), ts: Date.now() }) }).catch(()=>{}); } catch {}
         const snap = new Set(hideSet);
         clusterSnaps.push({
             taskItems: taskItems.map(t => ({ ...t })),
