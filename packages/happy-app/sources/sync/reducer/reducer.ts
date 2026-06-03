@@ -790,8 +790,9 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                                 }
                             }
 
-                            // Track TaskCreate/TaskUpdate for task list
-                            if ((message.tool.name === 'TaskCreate' || message.tool.name === 'TaskUpdate') && message.tool.state === 'running') {
+                            // Track TaskCreate/TaskUpdate for task list (state check removed:
+                            // buffered tool-results can change state to 'completed' before we track)
+                            if (message.tool.name === 'TaskCreate' || message.tool.name === 'TaskUpdate') {
                                 trackTaskFromToolInput(state, message.tool.name, message.tool.input, message.tool.createdAt);
                             }
                         }
@@ -874,8 +875,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             }
                         }
 
-                        // Track TaskCreate/TaskUpdate for task list
-                        if ((toolCall.name === 'TaskCreate' || toolCall.name === 'TaskUpdate') && toolCall.state === 'running') {
+                        // Track TaskCreate/TaskUpdate for task list (state check removed)
+                        if (toolCall.name === 'TaskCreate' || toolCall.name === 'TaskUpdate') {
                             trackTaskFromToolInput(state, toolCall.name, toolCall.input, toolCall.createdAt);
                         }
                     }
