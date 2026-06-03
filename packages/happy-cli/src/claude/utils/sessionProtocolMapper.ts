@@ -694,6 +694,7 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                 envelopes.push(createEnvelope('agent', {
                     t: 'tool-call-end',
                     call: block.tool_use_id,
+                    result: block.content,
                 }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
                 continue;
             }
