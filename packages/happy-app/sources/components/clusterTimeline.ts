@@ -240,6 +240,7 @@ function clusterSegment(
             }
         }
         console.warn('[clusterTimeline] snapshot', { total: taskItems.length, items: diag, mapKeys: [...globalStatusMap.keys()].slice(0,10), applyTaskUpdateCalled: tidToIdx.size > 0, clusterTaskIds: taskItems.map(t => t.taskId), clusterStatuses: taskItems.map(t => t.status) });
+        try { localStorage.setItem('__cluster_snapshot__', JSON.stringify({ total: taskItems.length, items: diag, mapKeys: [...globalStatusMap.keys()].slice(0,10), clusterTaskIds: taskItems.map(t => t.taskId), clusterStatuses: taskItems.map(t => t.status), time: Date.now() })); } catch {}
         // Step 1: exact mapping via tidToIdx — safe, allows all statuses
         const matched = new Set<number>();
         for (const [tid, idx] of tidToIdx) {

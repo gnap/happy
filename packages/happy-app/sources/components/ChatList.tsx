@@ -90,7 +90,7 @@ const ChatListInternal = React.memo((props: {
         () => {
             // DIAGNOSTIC: dump message structure info to global for connector access
             const tcMessages = props.messages.filter(m => m.kind === 'tool-call' && (m.tool?.name === 'TaskCreate' || m.tool?.name === 'TaskUpdate'));
-            try { (window as any).__CHATLIST_DIAG__ = { msgCount: props.messages.length, taskMsgCount: tcMessages.length, hasTasks: !!props.tasks?.length, taskCount: props.tasks?.length, firstTC: tcMessages.slice(0,2).map(m => ({ name: m.tool?.name, inputKeys: Object.keys(m.tool?.input || {}), taskId: (m.tool?.input as any)?.taskId })) }; } catch {}
+            try { localStorage.setItem('__cluster_diag__', JSON.stringify({ msgCount: props.messages.length, taskMsgCount: tcMessages.length, hasTasks: !!props.tasks?.length, taskCount: props.tasks?.length, firstTC: tcMessages.slice(0,2).map(m => ({ name: m.tool?.name, inputKeys: Object.keys(m.tool?.input || {}), sampleInput: JSON.stringify(m.tool?.input).slice(0,300) })), time: Date.now() })); } catch {}
             return computeMessageClusters(props.messages, clusterOptions);
         },
         [props.messages, clusterOptions],
