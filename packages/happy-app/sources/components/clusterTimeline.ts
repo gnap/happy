@@ -265,14 +265,14 @@ function clusterSegment(
                 matched.add(idx);
             }
         }
-        // Step 2: base+idx heuristic — only in_progress (avoid misattributed completed)
+        // Step 2: base+idx heuristic — last resort, allows all statuses
         for (let idx = 0; idx < taskItems.length; idx++) {
             if (matched.has(idx)) continue;
             for (const base of [taskIdBase, 1]) {
                 const tid = String(base + idx);
                 if (tidToIdx.has(tid) && tidToIdx.get(tid) !== idx) continue;
-                const gs = localStatusMap.get(tid);
-                if (gs === 'in_progress' && promote(taskItems[idx].status, gs)) {
+                const gs = lookup(tid);
+                if (gs && promote(taskItems[idx].status, gs)) {
                     taskItems[idx] = { ...taskItems[idx], status: gs as TaskItem['status'] };
                     break;
                 }
@@ -295,22 +295,22 @@ function clusterSegment(
             const content = input.subject || input.description || input.activeForm || '';
             const descKey = input.description || '';
             const newIdx = taskItems.length;
-            // SDK TaskCreate input lacks taskId — parse result
-            // "Task #N created successfully: ..." instead.
-            let createTid = '';
-            const result = m.tool?.result;
-            if (typeof result === 'string') {
-                const m2 = result.match(/^Task #(\d+) created/i);
-                if (m2) createTid = m2[1];
-            }
-            if (!createTid) createTid = String(input.taskId || input.task_id || input.id || '');
+            // SDK TaskCreate input lacks taskId, and m.tool.result is null.
+            // Use content-match first, then unclaimed taskContentMap key.
+            let createTid = String(input.taskId || input.task_id || input.id || '');
             if (!createTid && taskContentMap && taskContentMap.size > 0) {
-                for (const k of taskContentMap.keys()) {
-                    if (!tidToIdx.has(k)) { createTid = k; break; }
+                // Try exact content match first
+                for (const [k, v] of taskContentMap) {
+                    if (v === content || v === descKey) { createTid = k; break; }
+                }
+                // Fallback: first unclaimed key
+                if (!createTid) {
+                    for (const k of taskContentMap.keys()) {
+                        if (!tidToIdx.has(k)) { createTid = k; break; }
+                    }
                 }
             }
             if (createTid) tidToIdx.set(createTid, newIdx);
-        try { fetch("http://127.0.0.1:9880/", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ resultType: typeof m.tool?.result, resultVal: JSON.stringify(m.tool?.result).slice(0,200), createTid, inputKeys: Object.keys(input), ts: Date.now() }) }).catch(()=>{}); } catch {}
             taskItems.push({ id: descKey || String(newIdx + 1), content, status: 'pending', collapsedCount: 0, taskId: createTid || undefined });
             activeCount++;
             currentTaskIdx = newIdx;
