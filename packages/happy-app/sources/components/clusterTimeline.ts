@@ -295,15 +295,19 @@ function clusterSegment(
             const content = input.subject || input.description || input.activeForm || '';
             const descKey = input.description || '';
             const newIdx = taskItems.length;
-            // SDK TaskCreate input lacks taskId, and m.tool.result is null.
-            // Use content-match first, then unclaimed taskContentMap key.
-            let createTid = String(input.taskId || input.task_id || input.id || '');
+            // TaskCreate input lacks taskId. Parse result text stored by CLI:
+            // "Task #N created successfully: ..." (requires CLI fix:
+            // sessionProtocolMapper now includes result in tool-call-end).
+            let createTid = '';
+            if (typeof m.tool?.result === 'string') {
+                const m2 = (m.tool.result as string).match(/^Task #(\d+) created/i);
+                if (m2) createTid = m2[1];
+            }
+            if (!createTid) createTid = String(input.taskId || input.task_id || input.id || '');
             if (!createTid && taskContentMap && taskContentMap.size > 0) {
-                // Try exact content match first
                 for (const [k, v] of taskContentMap) {
                     if (v === content || v === descKey) { createTid = k; break; }
                 }
-                // Fallback: first unclaimed key
                 if (!createTid) {
                     for (const k of taskContentMap.keys()) {
                         if (!tidToIdx.has(k)) { createTid = k; break; }
