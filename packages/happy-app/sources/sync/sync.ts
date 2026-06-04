@@ -2460,27 +2460,37 @@ class Sync {
             let didFastPath = false;
             const sid = updateData.body.sid;
             if (updateData.body.message) {
-                const decrypted = await encryption.decryptMessage(updateData.body.message);
-                if (decrypted) {
-                    lastMessage = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
+                // Fast ack: if the incoming localId matches a pending sent message,
+                // this is our own user message echo. Ack it without decrypting.
+                const incomingLocalId = (updateData.body.message as any).localId as string | undefined;
+                if (incomingLocalId && this.claimSentMessageLocalIdByValue(sid, incomingLocalId)) {
+                    storage.getState().markOutboxMessageAcked(incomingLocalId, updateData.body.message.createdAt as number);
+                    const session2 = storage.getState().sessions[sid];
+                    if (session2) {
+                        this.applySessions([{ ...session2, updatedAt: updateData.createdAt, seq: updateData.body.message.seq }]);
+                    }
+                    this.sessionLastSeq.set(sid, updateData.body.message.seq);
+                    didFastPath = true;
+                } else {
+                    const decrypted = await encryption.decryptMessage(updateData.body.message);
+                    if (decrypted) {
+                        lastMessage = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
 
-                    // Session envelopes carry their own server-assigned localId (different from
-                    // the original user message localId), so resolve by text for ALL user messages.
-                    if (lastMessage && lastMessage.role === 'user') {
-                        const claimedLocalId = this.resolveLocalIdForIncoming(sid, lastMessage.id, lastMessage.content.text, decrypted.localId);
-                        if (claimedLocalId) {
-                            lastMessage = { ...lastMessage, localId: claimedLocalId };
+                        if (lastMessage && lastMessage.role === 'user') {
+                            const claimedLocalId = this.resolveLocalIdForIncoming(sid, lastMessage.id, lastMessage.content.text, decrypted.localId);
+                            if (claimedLocalId) {
+                                lastMessage = { ...lastMessage, localId: claimedLocalId };
+                            }
                         }
                     }
 
                     const thinkingPatch = this.applySessionThinkingFromRawContent(
                         updateData.body.sid,
-                        decrypted.content,
+                        decrypted?.content,
                         updateData.createdAt,
                     );
                     const shouldClearThinking = thinkingPatch?.thinking === false;
 
-                    // Update session (use body.message.seq = session-internal seq, same as GET /v1/sessions; do not use updateData.seq which is global user seq)
                     const session = storage.getState().sessions[updateData.body.sid];
                     if (session) {
                         this.applySessions([{
