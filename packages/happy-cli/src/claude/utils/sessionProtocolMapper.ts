@@ -675,10 +675,8 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
             };
         }
 
-        // Suppress meta / synthetic / CLI-injected user text prompts.
-        // Only suppress user-type messages — sub-agent output (assistant messages
-        // with tool_use blocks) must pass through even during inbox turns.
-        if (message.isMeta || message.isSynthetic || (message.type === 'user' && (state.suppressNextUserTextCount ?? 0) > 0)) {
+        // Suppress meta / synthetic / CLI-injected prompts
+        if (message.isMeta || message.isSynthetic || (state.suppressNextUserTextCount ?? 0) > 0) {
             if (!message.isMeta && !message.isSynthetic) {
                 state.suppressNextUserTextCount = (state.suppressNextUserTextCount ?? 1) - 1;
             }
