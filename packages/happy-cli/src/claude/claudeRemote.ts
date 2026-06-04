@@ -200,6 +200,35 @@ export async function claudeRemote(opts: {
             // Handle result messages
             if (message.type === 'result') {
                 updateThinking(false);
+
+                // Task-notification results come from background tools (Monitor,
+                // ScheduleWakeup). They are NOT actual turn completions — the SDK
+                // surfaces them as results but the real user message is still
+                // pending. Treating them as normal results sends a false turn-end
+                // to the server and causes irrelevant answers (the notification
+                // text) to be returned instead of the user's actual query.
+                if ((message as any).origin?.kind === 'task-notification') {
+                    logger.debug('[claudeRemote] Skipping task-notification result, waiting for next message');
+                    const next = await opts.nextMessage();
+                    if (next) {
+                        const latestGeneration = opts.getClaudeEnvVarsGeneration();
+                        if (latestGeneration !== currentGeneration) {
+                            logger.debug(`[claudeRemote] Profile env changed (gen ${currentGeneration} → ${latestGeneration}), returning to re-spawn with updated env`);
+                            opts.onEnvChanged?.({ message: next.message, mode: next.mode });
+                            messages.end();
+                            return;
+                        }
+                        currentGeneration = latestGeneration;
+                        mode = next.mode;
+                        updateThinking(true);
+                        messages.push({ type: 'user', message: { role: 'user', content: next.message } });
+                    } else {
+                        messages.end();
+                        return;
+                    }
+                    continue;
+                }
+
                 logger.debug('[claudeRemote] Result received, exiting claudeRemote');
 
                 // Send completion messages
