@@ -416,9 +416,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 mode = msg.mode;
                                 permissionHandler.handleModeChange(mode.permissionMode);
                                 logger.debug('[remote]: processing A2A inbox turn');
-                                // Suppress inbox prompt user texts — internal CLI turn.
-                                // Count 10 covers split/long inbox prompts.
-                                session.client.suppressNextMapperUserText(10);
+                                // Suppress all user text during inbox turn.
+                                session.client.setSuppressAllMapperUserText(true);
                                 // Signal thinking immediately on message receipt, before SDK is invoked
                                 session.onThinkingChange(true);
                                 return {
@@ -505,6 +504,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         }
                         if (wasInboxTurn) {
                             session.a2aInboxTurn?.setInboxTurnActive(false);
+                            session.client.setSuppressAllMapperUserText(false);
                             // claudeRemote()'s for-await loop keeps iterating across turns, so the
                             // launcher's finally-block onTurnEnd never runs between back-to-back
                             // inbox turns. Settle the inbox turn here so backoff can arm and
@@ -578,8 +578,11 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                 // returns without ever delivering a result (env-changed re-spawn, abort,
                 // unexpected exit), the scope leaks and every future peekInbox() sees
                 // hasScope('inbox-turn') === true and defers forever, deadlocking the inbox.
-                if (wasInboxTurn && session.a2aInboxTurn?.isInboxTurnActive()) {
-                    session.a2aInboxTurn.setInboxTurnActive(false);
+                if (wasInboxTurn) {
+                    if (session.a2aInboxTurn?.isInboxTurnActive()) {
+                        session.a2aInboxTurn.setInboxTurnActive(false);
+                    }
+                    session.client.setSuppressAllMapperUserText(false);
                 }
                 session.a2aInboxTurn?.onTurnEnd({
                     succeeded: turnSucceeded && !turnCancelled,

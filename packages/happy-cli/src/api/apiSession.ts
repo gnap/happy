@@ -21,6 +21,7 @@ import {
     closeClaudeTurnWithStatus,
     mapClaudeLogMessageToSessionEnvelopes,
     suppressNextUserText,
+    setSuppressAllUserText,
     type ClaudeSessionProtocolState,
 } from '@/claude/utils/sessionProtocolMapper';
 import { InvalidateSync } from '@/utils/sync';
@@ -1485,6 +1486,12 @@ export class ApiSessionClient extends EventEmitter {
      *  does not appear as a user bubble in the App. */
     suppressNextMapperUserText(count = 1): void {
         suppressNextUserText(this.claudeSessionProtocolState, count);
+    }
+
+    /** Suppress ALL user text until cleared. Use for inbox turns where all output
+     *  from the internal prompt should be hidden from the App. */
+    setSuppressAllMapperUserText(enabled: boolean): void {
+        setSuppressAllUserText(this.claudeSessionProtocolState, enabled);
     }
 
     sendSessionProtocolMessage(envelope: SessionEnvelope, extraMeta?: Record<string, unknown>) {
