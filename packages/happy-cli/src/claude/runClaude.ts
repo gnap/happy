@@ -576,8 +576,12 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         // Echo user text as session protocol envelope.
         // The Claude SDK output stream only contains assistant messages;
         // user messages pushed into the input never reach the mapper.
+        // Carry the app's localId through the round-trip: the envelope id
+        // becomes the server's localId, enabling O(1) dedup on the app side.
+        const appMessageId = (message.meta as any)?.appMessageId;
         session.sendSessionProtocolMessage(
-            createEnvelope('user', { t: 'text', text: message.content.text })
+            createEnvelope('user', { t: 'text', text: message.content.text },
+                appMessageId ? { id: appMessageId } : {})
         );
         messageQueue.push(message.content.text, enhancedMode);
         logger.debugLargeJson('User message pushed to queue:', message)
