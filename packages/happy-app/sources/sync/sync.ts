@@ -789,7 +789,8 @@ class Sync {
                 ...(maxMode !== undefined ? { maxMode } : {}),
                 profileId: session.profileId ?? null,
                 ...(environmentVariables ? { environmentVariables } : {}),
-                ...(displayText && { displayText }) // Add displayText if provided
+                ...(displayText && { displayText }), // Add displayText if provided
+                appMessageId: localId, // Carried through CLI round-trip for O(1) dedup
             }
         };
 
@@ -2045,16 +2046,39 @@ class Sync {
      * mapping in claimedServerMessageIds. The second caller finds it already registered and
      * reuses it – preventing the reducer from creating a second, duplicate message.
      */
-    private resolveLocalIdForIncoming(sessionId: string, serverMsgId: string, text: string): string | null {
+    private resolveLocalIdForIncoming(sessionId: string, serverMsgId: string, text: string, incomingLocalId?: string | null): string | null {
         // Already claimed by another code path → reuse the same localId.
         const existing = this.claimedServerMessageIds.get(serverMsgId);
         if (existing) return existing;
 
-        const localId = this.claimSentMessageLocalId(sessionId, text);
+        // O(1) direct match: CLI echoed back the app's localId via envelope.id → server localId
+        let localId: string | null = null;
+        if (incomingLocalId) {
+            localId = this.claimSentMessageLocalIdByValue(sessionId, incomingLocalId);
+            if (localId) {
+                console.log(`[Sync] resolveLocalId: ${serverMsgId} → ${localId} (direct localId match)`);
+            }
+        }
+        // Fallback: text-based matching (legacy path for old CLI versions)
+        if (!localId) {
+            localId = this.claimSentMessageLocalId(sessionId, text);
+        }
         if (localId) {
             this.claimedServerMessageIds.set(serverMsgId, localId);
             this.markOutboxMessageDelivered(sessionId, localId);
-            console.log(`[Sync] resolveLocalId: ${serverMsgId} → ${localId} (text="${text}")`);
+        }
+        return localId;
+    }
+
+    /** Direct localId lookup in sentMessageLocalIds — O(n) by value, avoids text ambiguity. */
+    private claimSentMessageLocalIdByValue(sessionId: string, localId: string): string | null {
+        const pending = this.sentMessageLocalIds.get(sessionId);
+        if (!pending || pending.length === 0) return null;
+        const idx = pending.findIndex(e => e.localId === localId);
+        if (idx === -1) return null;
+        pending.splice(idx, 1);
+        if (pending.length === 0) {
+            this.sentMessageLocalIds.delete(sessionId);
         }
         return localId;
     }
@@ -2152,7 +2176,7 @@ class Sync {
                     // Session envelopes carry their own server-assigned localId (different from
                     // the original user message localId), so resolve by text for ALL user messages.
                     if (normalized.role === 'user') {
-                        const claimedLocalId = this.resolveLocalIdForIncoming(sessionId, normalized.id, normalized.content.text);
+                        const claimedLocalId = this.resolveLocalIdForIncoming(sessionId, normalized.id, normalized.content.text, decrypted.localId);
                         if (claimedLocalId) {
                             normalized = { ...normalized, localId: claimedLocalId };
                         }
@@ -2442,7 +2466,7 @@ class Sync {
                     // Session envelopes carry their own server-assigned localId (different from
                     // the original user message localId), so resolve by text for ALL user messages.
                     if (lastMessage && lastMessage.role === 'user') {
-                        const claimedLocalId = this.resolveLocalIdForIncoming(sid, lastMessage.id, lastMessage.content.text);
+                        const claimedLocalId = this.resolveLocalIdForIncoming(sid, lastMessage.id, lastMessage.content.text, decrypted.localId);
                         if (claimedLocalId) {
                             lastMessage = { ...lastMessage, localId: claimedLocalId };
                         }
