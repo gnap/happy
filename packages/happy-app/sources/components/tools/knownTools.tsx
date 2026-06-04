@@ -1114,7 +1114,7 @@ export const knownTools = {
             const args = (opts.tool.input as any)?.args;
             return args || null;
         },
-    }
+    },
     'Monitor': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
             if (opts.tool.description) return opts.tool.description;
