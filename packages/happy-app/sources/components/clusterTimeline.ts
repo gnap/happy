@@ -35,7 +35,7 @@ function updateGlobalScan(messages: readonly Message[]) {
             const m = messages[i];
             const toolName = m.kind === 'tool-call' ? m.tool?.name : undefined;
             if (toolName === 'TaskUpdate' || toolName === 'TaskCreate') {
-                const input = m.tool?.input || {};
+                const input = (m as any).tool?.input || {};
                 const tid = String(input.taskId || input.task_id || input.id || '');
                 if (toolName === 'TaskUpdate') {
                     const st = String(input.status || '');
@@ -58,7 +58,7 @@ function updateGlobalScan(messages: readonly Message[]) {
         for (const m of messages) {
             const toolName = m.kind === 'tool-call' ? m.tool?.name : undefined;
             if (toolName === 'TaskUpdate' || toolName === 'TaskCreate') {
-                const input = m.tool?.input || {};
+                const input = (m as any).tool?.input || {};
                 const tid = String(input.taskId || input.task_id || input.id || '');
                 if (toolName === 'TaskUpdate') {
                     const st = String(input.status || '');

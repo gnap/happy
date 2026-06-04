@@ -1919,8 +1919,8 @@ class Sync {
             const data = await response.json() as V3PostSessionMessagesResponse;
             pending.splice(0, batch.length);
 
-            // Server confirmed – mark as acked (green). The CLI pop echo
-            // will remove the entry when the turn actually starts processing.
+            // Server confirmed – mark as acked (green check). The echo
+            // (fast-ack or text-matched session-protocol echo) will remove it.
             for (const msg of batch) {
                 storage.getState().markOutboxMessageAcked(msg.localId);
             }
@@ -2066,10 +2066,9 @@ class Sync {
         }
         if (localId) {
             this.claimedServerMessageIds.set(serverMsgId, localId);
-            const entry = storage.getState().outbox[localId];
-            if (!entry || entry.status === 'sending') {
-                storage.getState().removeOutboxEntry(localId);
-            }
+            // User text echo in session-protocol mode = CLI has received the message.
+            // Remove the outbox entry regardless of current status.
+            storage.getState().removeOutboxEntry(localId);
         }
         return localId;
     }
@@ -2468,12 +2467,8 @@ class Sync {
                 // this is our own user message echo. Ack it without decrypting.
                 const incomingLocalId = (updateData.body as { message: { localId?: string | null } }).message.localId ?? undefined;
                 if (incomingLocalId && this.claimSentMessageLocalIdByValue(sid, incomingLocalId)) {
-                    // Only clear if still 'sending'. If already 'acked' (from flushOutbox),
-                    // leave it for the CLI pop echo to remove — avoid premature green→normal flash.
-                    const entry = storage.getState().outbox[incomingLocalId];
-                    if (!entry || entry.status === 'sending') {
-                        storage.getState().removeOutboxEntry(incomingLocalId);
-                    }
+                    // Fast-ack: user message echo from server → CLI has it.
+                    storage.getState().removeOutboxEntry(incomingLocalId);
                     const session2 = storage.getState().sessions[sid];
                     if (session2) {
                         this.applySessions([{ ...session2, updatedAt: updateData.createdAt, seq: updateData.body.message.seq }]);
@@ -2491,11 +2486,8 @@ class Sync {
                                 lastMessage = { ...lastMessage, localId: claimedLocalId };
                             }
                         }
-                        // CLI pop echo: clear outbox by echoedMessageId from envelope meta
-                        const echoedId = (lastMessage?.meta as any)?.echoedMessageId as string | undefined;
-                        if (echoedId) {
-                            storage.getState().removeOutboxEntry(echoedId);
-                        }
+                        // Outbox cleanup handled above by resolveLocalIdForIncoming
+                        // (text match = CLI session-protocol echo of user message).
                     }
 
                     const thinkingPatch = this.applySessionThinkingFromRawContent(

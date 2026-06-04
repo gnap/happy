@@ -169,6 +169,8 @@ interface StorageState {
     // Outbox (send status tracking)
     addOutboxEntry: (entry: Omit<OutboxEntry, 'status'>) => void;
     removeOutboxEntry: (localId: string) => void;
+    markOutboxMessageAcked: (localId: string) => void;
+    removeOutboxEntriesForSession: (sessionId: string) => void;
     failOutboxEntries: (localIds: string[], reason: string) => void;
     deleteSessionMessages: (sessionId: string) => void;
     // Project management methods
