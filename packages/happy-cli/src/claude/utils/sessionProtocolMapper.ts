@@ -19,6 +19,8 @@ export type ClaudeSessionProtocolState = {
     taskCallBySubagent?: Map<string, string>; // session subagent cuid -> Task provider tool call ID
     bgTaskIdToCallId?: Map<string, string>; // background task_id → Bash call ID
     lastTaskCreateCallId?: string; // most recent TaskCreate call ID for Agent remapping
+    /** Number of upcoming non-sidechain user text messages to suppress (e.g. inbox turn prompts). */
+    suppressNextUserTextCount?: number;
 };
 
 type ClaudeMapperResult = {
@@ -182,8 +184,10 @@ function pickParentUuid(message: RawJSONLines): string | undefined {
 }
 
 function isSidechainMessage(message: RawJSONLines): boolean {
-    const raw = message as { isSidechain?: unknown };
-    return raw.isSidechain === true;
+    const raw = message as { isSidechain?: unknown; parent_tool_use_id?: unknown };
+    // Legacy interactive mode sets isSidechain:true; SDK remote mode uses parent_tool_use_id.
+    return raw.isSidechain === true
+        || (raw.parent_tool_use_id !== undefined && raw.parent_tool_use_id !== null);
 }
 
 function normalizePrompt(prompt: string): string {
@@ -342,12 +346,19 @@ function pickTaskTitle(input: unknown): string | undefined {
         return undefined;
     }
 
-    const candidateKeys = ['description', 'title', 'subagent_type'];
-    for (const key of candidateKeys) {
-        const value = (input as Record<string, unknown>)[key];
+    const record = input as Record<string, unknown>;
+    // Prefer explicit human-readable title fields; never use subagent_type ("claude", "opus", etc.)
+    for (const key of ['description', 'title']) {
+        const value = record[key];
         if (typeof value === 'string' && value.trim().length > 0) {
             return value.trim();
         }
+    }
+    // Fall back to a truncated prompt so the card has something descriptive.
+    const prompt = record['prompt'];
+    if (typeof prompt === 'string' && prompt.trim().length > 0) {
+        const trimmed = prompt.trim().replace(/\s+/g, ' ');
+        return trimmed.length > 60 ? `${trimmed.slice(0, 57)}...` : trimmed;
     }
 
     return undefined;
@@ -468,6 +479,11 @@ function toToolArgs(input: unknown): Record<string, unknown> {
         return {};
     }
     return { input };
+}
+
+/** Mark the next N non-sidechain user text messages as internal CLI prompts to suppress. */
+export function suppressNextUserText(state: ClaudeSessionProtocolState, count = 1): void {
+    state.suppressNextUserTextCount = (state.suppressNextUserTextCount ?? 0) + count;
 }
 
 export function closeClaudeTurnWithStatus(
@@ -632,6 +648,14 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                     maybeEmitSubagentStart(state, turnId, subagent, envelopes);
                     envelopes.push(createEnvelope('agent', { t: 'text', text: message.message.content }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
                 }
+            } else if (message.isMeta || message.isSynthetic) {
+                // isMeta: internal prompts (e.g. inbox turn notifications)
+                // isSynthetic: SDK-injected prompts (e.g. Skill invocations)
+                // Suppress these so they don't appear as standalone user bubbles.
+            } else if ((state.suppressNextUserTextCount ?? 0) > 0) {
+                // Suppress internal CLI-injected prompts (e.g. inbox turn notifications)
+                // that were registered via suppressNextUserText() before the turn started.
+                state.suppressNextUserTextCount = (state.suppressNextUserTextCount ?? 1) - 1;
             } else {
                 closeTurn(state, 'completed', envelopes);
                 envelopes.push(createEnvelope('user', { t: 'text', text: message.message.content }));
@@ -651,11 +675,21 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
             };
         }
 
+        // Suppress meta / synthetic / CLI-injected prompts
+        if (message.isMeta || message.isSynthetic || (state.suppressNextUserTextCount ?? 0) > 0) {
+            if (!message.isMeta && !message.isSynthetic) {
+                state.suppressNextUserTextCount = (state.suppressNextUserTextCount ?? 1) - 1;
+            }
+            return { currentTurnId: state.currentTurnId, envelopes };
+        }
+
+        // Process tool_result blocks first (subagent stop, tool-call-end)
+        // before closeTurn, which clears subagent tracking.
         const turnId = ensureTurn(state, envelopes);
-        if (message.isSidechain) {
+        const isChain = isSidechainMessage(message);
+        if (isChain) {
             maybeEmitSubagentStart(state, turnId, subagent, envelopes);
         }
-        // Record bgTaskId → callId mapping for Bash run_in_background
         for (const block of blocks) {
             if (block.type === 'tool_result' && typeof block.tool_use_id === 'string' && block.tool_use_id.length > 0) {
                 const bgTaskId = extractBackgroundTaskId(block, message);
@@ -663,7 +697,7 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                     ensureBgTaskIdToCallId(state).set(bgTaskId, block.tool_use_id);
                 }
                 const sessionSubagentForToolResult = getSessionSubagentIdForProviderSubagent(state, block.tool_use_id);
-                if (!message.isSidechain) {
+                if (!isChain) {
                     if (getHiddenParentToolCalls(state).has(block.tool_use_id)) {
                         if (sessionSubagentForToolResult) {
                             maybeEmitSubagentStop(state, turnId, sessionSubagentForToolResult, envelopes);
@@ -678,12 +712,26 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                 envelopes.push(createEnvelope('agent', {
                     t: 'tool-call-end',
                     call: block.tool_use_id,
+                    result: block.content,
                 }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
                 continue;
             }
+        }
 
-            if (block.type === 'text' && typeof block.text === 'string' && block.text.trim().length > 0) {
-                envelopes.push(createEnvelope('agent', { t: 'text', text: block.text }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
+        // Sidechain text blocks (sub-agent prompts, internal delegations) should never
+        // appear as standalone user bubbles in the main conversation.
+        const textBlocks = blocks.filter(b => b.type === 'text' && typeof b.text === 'string' && b.text.trim().length > 0);
+        const userText = textBlocks.map(b => (b as { text: string }).text).join('\n');
+        if (isChain) {
+            // Suppress known task prompts; emit others as agent text so they link to the subagent.
+            if (userText && !isKnownTaskPrompt(state, userText)) {
+                envelopes.push(createEnvelope('agent', { t: 'text', text: userText }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
+            }
+        } else {
+            // Close the old turn and emit user text as a user envelope
+            closeTurn(state, 'completed', envelopes);
+            if (userText) {
+                envelopes.push(createEnvelope('user', { t: 'text', text: userText }));
             }
         }
 

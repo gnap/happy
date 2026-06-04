@@ -25,7 +25,7 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         expect(result.envelopes[0].ev).toEqual({ t: 'text', text: 'hello from user' });
     });
 
-    it('starts a turn and maps assistant text blocks, suppressing thinking', () => {
+    it('starts a turn and maps assistant text blocks (thinking suppressed)', () => {
         const result = mapClaudeLogMessageToSessionEnvelopes({
             type: 'assistant',
             uuid: 'a-1',

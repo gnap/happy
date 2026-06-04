@@ -150,6 +150,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     // Handle messages
     let planModeToolCalls = new Set<string>();
     let ongoingToolCalls = new Map<string, { parentToolCallId: string | null }>();
+    let pendingSkillSuppress = false;
 
     function onMessage(message: SDKMessage) {
 
@@ -172,7 +173,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             }
         }
 
-        // Track active tool calls
+        // Track active tool calls + Skill suppression
         if (message.type === 'assistant') {
             let umessage = message as SDKAssistantMessage;
             if (umessage.message.content && Array.isArray(umessage.message.content)) {
@@ -180,6 +181,10 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     if (c.type === 'tool_use') {
                         logger.debug('[remote]: detected tool use ' + c.id! + ' parent: ' + umessage.parent_tool_use_id);
                         ongoingToolCalls.set(c.id!, { parentToolCallId: umessage.parent_tool_use_id ?? null });
+                        if (c.name === 'Skill') {
+                            logger.debug('[remote] Skill tool_use detected: ' + JSON.stringify(c.input).slice(0, 100));
+                            pendingSkillSuppress = true;
+                        }
                     }
                 }
             }
@@ -233,6 +238,12 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
 
         const logMessage = sdkToLogConverter.convert(msg);
         if (logMessage) {
+            // Suppress Skill-injected user messages
+            if (pendingSkillSuppress && logMessage.type === 'user') {
+                logger.debug('[remote] Suppressing Skill user message, text: ' + JSON.stringify(logMessage.message?.content).slice(0,100));
+                pendingSkillSuppress = false;
+                return;
+            }
             // Add permissions field to tool result content
             if (logMessage.type === 'user' && logMessage.message?.content) {
                 const content = Array.isArray(logMessage.message.content)
@@ -409,6 +420,9 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 mode = msg.mode;
                                 permissionHandler.handleModeChange(mode.permissionMode);
                                 logger.debug('[remote]: processing A2A inbox turn');
+                                // Suppress the inbox notification prompt from appearing as a
+                                // user bubble in the App — it is an internal CLI-injected turn.
+                                session.client.suppressNextMapperUserText();
                                 // Signal thinking immediately on message receipt, before SDK is invoked
                                 session.onThinkingChange(true);
                                 return {
@@ -463,13 +477,22 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         pending = msg;
                     },
                     onReady: (result) => {
-                        turnSucceeded = true;
+                        const isError = result.is_error === true;
+                        turnSucceeded = !isError;
                         const usage = buildClaudeTurnUsagePayload(result);
                         const extras: Record<string, unknown> = {};
                         if (usage) extras.usage = usage;
                         if (typeof result.total_cost_usd === 'number') extras.costUsd = result.total_cost_usd;
                         if (typeof result.duration_ms === 'number') extras.durationMs = result.duration_ms;
-                        session.client.closeClaudeSessionTurn('completed', extras);
+                        if (isError) {
+                            session.client.closeClaudeSessionTurn('failed');
+                            const msg = typeof result.result === 'string' && result.result.trim().length > 0
+                                ? result.result.trim()
+                                : 'Claude exited with an error';
+                            session.client.sendSessionEvent({ type: 'message', message: msg });
+                        } else {
+                            session.client.closeClaudeSessionTurn('completed', extras);
+                        }
                         // Per-turn release (Cursor clears currentTurnIdRef before peekA2AInboxInLoop).
                         // claudeTurnActiveRef stayed true across multi-turn claudeRemote() calls, which
                         // blocked scheduleA2ATurnIfNeeded in onTurnEnd until process exit.
@@ -483,7 +506,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             // inbox turns. Settle the inbox turn here so backoff can arm and
                             // unconsumed inbox messages don't tight-loop.
                             session.a2aInboxTurn?.onTurnEnd({
-                                succeeded: true,
+                                succeeded: !isError,
                                 cancelled: false,
                                 wasInboxTurn: true,
                             });
@@ -492,7 +515,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             turnSucceeded = false;
                         }
                         session.a2aInboxTurn?.peekInbox();
-                        if (!pending && session.queue.size() === 0) {
+                        if (!isError && !pending && session.queue.size() === 0) {
                             session.api.push().sendToAllDevices(
                                 'It\'s ready!',
                                 `Claude is waiting for your command`,

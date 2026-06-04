@@ -20,6 +20,7 @@ import { type SessionEnvelope, type SessionTurnEndStatus } from '@slopus/happy-w
 import {
     closeClaudeTurnWithStatus,
     mapClaudeLogMessageToSessionEnvelopes,
+    suppressNextUserText,
     type ClaudeSessionProtocolState,
 } from '@/claude/utils/sessionProtocolMapper';
 import { InvalidateSync } from '@/utils/sync';
@@ -244,6 +245,7 @@ export class ApiSessionClient extends EventEmitter {
     /** Resolves when the WebSocket first connects; used by updateMetadata to wait for initial connection. */
     private socketConnectedPromise: Promise<void>;
     private socketConnectedResolve: (() => void) | undefined;
+    private routedMessageIds = new Set<string>();
     private routedA2ASessionEnvelopeIds = new Set<string>();
     /** Trigger ids already drained; blocks fetch/reconnect replay from re-opening the inbox. */
     private consumedA2ATriggerIds = new Set<string>();
@@ -595,7 +597,7 @@ export class ApiSessionClient extends EventEmitter {
                             this.receiveSync.invalidate();
                             return;
                         }
-                        this.routeIncomingMessage(body);
+                        this.routeIncomingMessage(body, messageSeq);
                         this.lastSeq = messageSeq;
                         return;
                     }
@@ -737,7 +739,16 @@ export class ApiSessionClient extends EventEmitter {
         };
     }
 
-    private routeIncomingMessage(message: unknown) {
+    private routeIncomingMessage(message: unknown, seq?: number) {
+        // Deduplicate by seq: WebSocket push and HTTP fetch may deliver
+        // the same message concurrently.
+        if (typeof seq === 'number') {
+            const key = String(seq);
+            if (this.routedMessageIds.has(key)) return;
+            this.routedMessageIds.add(key);
+            if (this.routedMessageIds.size > 1000) this.routedMessageIds.clear();
+        }
+
         const triggerInboxMessageId = this.ingestA2AInboxFromTrigger(message);
 
         const userResult = UserMessageSchema.safeParse(message);
@@ -1107,6 +1118,11 @@ export class ApiSessionClient extends EventEmitter {
         const startLastSeq = this.lastSeq;
         let afterSeq = this.lastSeq;
         let pages = 0;
+        // Absolute deadline: axios `timeout` only covers socket inactivity and can fail to fire
+        // on reused keep-alive connections, leaving the request permanently hung. AbortController
+        // enforces a hard wall-clock limit so fetchMessages always completes.
+        const abort = new AbortController();
+        const abortTimer = setTimeout(() => abort.abort(), 90000);
         logger.debug('[API] fetchMessages start', {
             sessionId: this.sessionId,
             afterSeq,
@@ -1126,6 +1142,7 @@ export class ApiSessionClient extends EventEmitter {
                         headers: this.authHeaders(),
                         timeout: 60000,
                         httpsAgent: serverHttpsAgent,
+                        signal: abort.signal,
                     }
                 );
 
@@ -1151,7 +1168,7 @@ export class ApiSessionClient extends EventEmitter {
                             });
                             continue;
                         }
-                        this.routeIncomingMessage(body);
+                        this.routeIncomingMessage(body, message.seq);
                     } catch (error) {
                         logger.debug('[API] Failed to decrypt fetched message', {
                             sessionId: this.sessionId,
@@ -1189,6 +1206,7 @@ export class ApiSessionClient extends EventEmitter {
             });
             throw error;
         } finally {
+            clearTimeout(abortTimer);
             const catchUpTarget = untilSeq;
             if (catchUpTarget !== null && this.lastSeq < catchUpTarget) {
                 logger.debug('[API] fetchMessages stopped before catch-up target (will retry on next sync)', {
@@ -1461,10 +1479,21 @@ export class ApiSessionClient extends EventEmitter {
     /** Count of envelopes sent this process (for trace log); resets only by process restart. */
     private _envelopeSendCount = 0;
 
+    /** Suppress the next N non-sidechain user text envelopes produced by the mapper.
+     *  Call before injecting an internal CLI prompt (e.g. inbox turn notification) so it
+     *  does not appear as a user bubble in the App. */
+    suppressNextMapperUserText(count = 1): void {
+        suppressNextUserText(this.claudeSessionProtocolState, count);
+    }
+
     sendSessionProtocolMessage(envelope: SessionEnvelope) {
         // Apply lazy encoding at the single exit point so all code paths
         // (Claude via sendClaudeSessionMessage, Cursor via direct call, etc.) are covered.
         const finalEnvelope = this.maybeLazyEncodeEnvelope(envelope);
+        if (finalEnvelope.role === 'user' && finalEnvelope.ev.t === 'text') {
+            const stack = new Error().stack?.split('\n').slice(1, 4).map(s => s.trim()).join(' <- ');
+            logger.debug(`[API] USER ENVELOPE: "${(finalEnvelope.ev as any).text?.slice(0,50)}" callstack: ${stack}`);
+        }
         if (process.env.HAPPY_CURSOR_TRACE_ENVELOPES === '1') {
             this._envelopeSendCount += 1;
             const ev = finalEnvelope.ev as { t?: string; text?: string; call?: string };

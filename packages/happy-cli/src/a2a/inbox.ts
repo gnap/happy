@@ -257,7 +257,9 @@ export function buildA2ATurnPrompt(notification: string, snapshotPath?: string, 
   ].filter((line): line is string => line !== null && line.length > 0).join(' ');
 }
 
-/** Claude Code inbox turn: drain via Happy MCP tools in the main agent (no Task model slug). */
+/** Claude Code inbox turn: delegate to a claude sub-agent so the main agent's large context
+ *  does not bury the inbox notification. The sub-agent runs with a fresh context and handles
+ *  all MCP read/mark calls; the main agent only spawns it and surfaces the summary. */
 export function buildA2ATurnPromptForClaude(
   notification: string,
   snapshotPath?: string,
@@ -269,17 +271,23 @@ export function buildA2ATurnPromptForClaude(
     'Call mcp__happy__list_a2a_messages with unreadOnly=true.',
     'For each unread id: mcp__happy__read_a2a_message, then mcp__happy__mark_a2a_message_read (or mcp__happy__mark_a2a_messages_read in one batch).',
     'Each returned message includes a truncated text preview and a bodyFile absolute path; only when textTruncated is true and you need the full content, Read bodyFile with the agent file tool.',
-    'Reply with a concise combined summary for the user; do not paste full inbox bodies unless asked.',
+    'Return only a concise combined summary; do not paste full inbox bodies unless asked.',
   ].join(' ');
-  const work = stacked
+  const subagentPrompt = stacked
     ? `There are ${count} unread A2A inbox messages. ${inboxMcpSteps}`
     : `There is 1 unread A2A inbox message. ${inboxMcpSteps}`;
   return [
     notification,
     snapshotPath ? `Snapshot (debug only, prefer MCP over file): ${snapshotPath}` : null,
-    'This is an A2A inbox turn.',
-    work,
-    'Happy inbox MCP tools (mcp__happy__list/read/mark_a2a_*) only work during this inbox turn.',
+    'This is an A2A inbox turn. Do not read or mark inbox messages yourself in the main agent.',
+    'Delegate inbox work to a claude sub-agent using the Agent tool.',
+    `Agent prompt: ${subagentPrompt}`,
+    'Output discipline (main agent): before the Agent tool call, send no user-visible text — no preamble, plan, status, or reasoning.',
+    'After the Agent completes, if any inbox message ids were not marked read, call mcp__happy__mark_a2a_messages_read for them before your user-visible reply.',
+    'Your only user-visible reply is a short introduction of the Agent result (one combined summary).',
+    'Do not mention inbox turns, MCP, or that you spawned a sub-agent.',
+    'Happy inbox MCP tools (mcp__happy__list/read/mark_a2a_*) work during this inbox turn and inside the Agent sub-agent while it is running.',
+    'If Happy MCP inbox tools fail in the Agent, read the snapshot JSON file and return message ids; the main agent will mark them read after.',
     'Do not leave unread inbox messages for a later turn.',
   ].filter((line): line is string => line !== null && line.length > 0).join(' ');
 }

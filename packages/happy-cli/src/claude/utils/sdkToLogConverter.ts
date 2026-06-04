@@ -114,6 +114,7 @@ export class SDKToLogConverter {
                     type: 'user',
                     message: userMsg.message,
                     ...(userMsg.parent_tool_use_id ? { parent_tool_use_id: userMsg.parent_tool_use_id } : {}),
+                    ...((sdkMessage as any).isSynthetic === true ? { isSynthetic: true } : {}),
                 }
 
                 // Check if this is a tool result and add mode if available
