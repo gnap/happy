@@ -186,7 +186,10 @@ export const MessageMetaSchema = z.object({
   allowedTools: z.array(z.string()).nullable().optional(), // Allowed tools for this message (null = reset)
   disallowedTools: z.array(z.string()).nullable().optional(), // Disallowed tools for this message (null = reset)
   profileId: z.string().nullable().optional(), // Env profile id (null = clear). Daemon tracks this to detect changes.
-})
+  appMessageId: z.string().optional(), // App→CLI: carried through for outbox pop echo
+  echoedMessageId: z.string().optional(), // CLI→App: outbox entry to remove on pop echo
+  displayText: z.string().optional(), // Optional display text
+}).passthrough()
 
 export type MessageMeta = z.infer<typeof MessageMetaSchema>
 
