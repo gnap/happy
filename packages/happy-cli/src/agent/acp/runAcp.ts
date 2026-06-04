@@ -1068,9 +1068,9 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     };
     const isA2A = (message.meta as { origin?: string } | undefined)?.origin === 'a2a';
     if (isA2A) {
-      messageQueue.pushIsolated(message.content.text, mode);
+      messageQueue.pushIsolated(message.content.text, mode, message.meta);
     } else {
-      messageQueue.push(message.content.text, mode);
+      messageQueue.push(message.content.text, mode, message.meta);
     }
   };
   session.onUserMessage(userMessageHandler);

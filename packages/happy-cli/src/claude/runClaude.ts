@@ -520,7 +520,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 allowedTools: messageAllowedTools,
                 disallowedTools: messageDisallowedTools
             };
-            messageQueue.pushIsolateAndClear(specialCommand.originalMessage || message.content.text, enhancedMode);
+            messageQueue.pushIsolateAndClear(specialCommand.originalMessage || message.content.text, enhancedMode, message.meta);
             logger.debugLargeJson('[start] /compact command pushed to queue:', message);
             return;
         }
@@ -536,7 +536,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 allowedTools: messageAllowedTools,
                 disallowedTools: messageDisallowedTools
             };
-            messageQueue.pushIsolateAndClear(specialCommand.originalMessage || message.content.text, enhancedMode);
+            messageQueue.pushIsolateAndClear(specialCommand.originalMessage || message.content.text, enhancedMode, message.meta);
             logger.debugLargeJson('[start] /compact command pushed to queue:', message);
             return;
         }
@@ -576,7 +576,9 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         // No explicit echo — the turn output from the SDK serves as the
         // user message echo once the server processes it. This avoids
         // the seq gap caused by a separate envelope round-trip.
-        messageQueue.push(message.content.text, enhancedMode);
+        // Pass message.meta so claudeRemoteLauncher can read appMessageId
+        // and echo it back for outbox cleanup.
+        messageQueue.push(message.content.text, enhancedMode, message.meta);
         logger.debugLargeJson('User message pushed to queue:', message)
     };
     session.onUserMessage(handleUserMessage);
