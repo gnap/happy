@@ -2066,9 +2066,9 @@ class Sync {
         }
         if (localId) {
             this.claimedServerMessageIds.set(serverMsgId, localId);
-            // User text echo in session-protocol mode = CLI has received the message.
-            // Remove the outbox entry regardless of current status.
-            storage.getState().removeOutboxEntry(localId);
+            // Text match = session-protocol echo. Mark as acked (green).
+            // The CLI pop echo (via echoedMessageId) will remove.
+            storage.getState().markOutboxMessageAcked(localId);
         }
         return localId;
     }
@@ -2467,8 +2467,9 @@ class Sync {
                 // this is our own user message echo. Ack it without decrypting.
                 const incomingLocalId = (updateData.body as { message: { localId?: string | null } }).message.localId ?? undefined;
                 if (incomingLocalId && this.claimSentMessageLocalIdByValue(sid, incomingLocalId)) {
-                    // Fast-ack: user message echo from server → CLI has it.
-                    storage.getState().removeOutboxEntry(incomingLocalId);
+                    // Fast-ack: mark as acked (green). Only the CLI pop echo
+                    // (via echoedMessageId in session-protocol user text) removes.
+                    storage.getState().markOutboxMessageAcked(incomingLocalId);
                     const session2 = storage.getState().sessions[sid];
                     if (session2) {
                         this.applySessions([{ ...session2, updatedAt: updateData.createdAt, seq: updateData.body.message.seq }]);
@@ -2486,8 +2487,12 @@ class Sync {
                                 lastMessage = { ...lastMessage, localId: claimedLocalId };
                             }
                         }
-                        // Outbox cleanup handled above by resolveLocalIdForIncoming
-                        // (text match = CLI session-protocol echo of user message).
+                        // CLI pop echo: clear outbox by echoedMessageId from envelope meta.
+                        // This is the ONLY path that removes the green check.
+                        const echoedId = lastMessage?.meta?.echoedMessageId;
+                        if (echoedId) {
+                            storage.getState().removeOutboxEntry(echoedId);
+                        }
                     }
 
                     const thinkingPatch = this.applySessionThinkingFromRawContent(
