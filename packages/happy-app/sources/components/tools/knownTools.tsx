@@ -19,6 +19,8 @@ const ICON_REASONING = (size: number = 24, color: string = '#000') => <Octicons 
 const ICON_QUESTION = (size: number = 24, color: string = '#000') => <Ionicons name="help-circle-outline" size={size} color={color} />;
 
 const ICON_SKILL = (size: number = 24, color: string = '#000') => <Ionicons name="flash-outline" size={size} color={color} />;
+    const ICON_SCHEDULE = (size: number = 24, color: string = '#000') => <Ionicons name="time-outline" size={size} color={color} />;
+    const ICON_MONITOR = (size: number = 24, color: string = '#000') => <Ionicons name="pulse-outline" size={size} color={color} />;
 
 export const knownTools = {
     'Task': {
@@ -1113,6 +1115,51 @@ export const knownTools = {
             return args || null;
         },
     }
+    'Monitor': {
+        title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            if (opts.tool.description) return opts.tool.description;
+            const cmd = typeof opts.tool.input?.command === 'string' ? opts.tool.input.command : '';
+            return cmd ? `Watch: ${cmd.slice(0, 60)}` : 'Monitor';
+        },
+        icon: ICON_MONITOR,
+        minimal: true,
+        isMutable: false,
+        input: z.object({
+            description: z.string().optional(),
+            timeout_ms: z.number().optional(),
+            persistent: z.boolean().optional(),
+            command: z.string(),
+        }).partial().passthrough(),
+        extractDescription: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            if (opts.tool.input?.persistent) return `persistent watch, timeout=${opts.tool.input?.timeout_ms || '?'}ms`;
+            return `timeout=${opts.tool.input?.timeout_ms || '?'}ms`;
+        },
+    },
+    'CronCreate': {
+        title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const prompt = typeof opts.tool.input?.prompt === 'string' ? opts.tool.input.prompt : '';
+            return prompt.slice(0, 80) || `Cron: ${opts.tool.input?.cron || '?'}`;
+        },
+        icon: ICON_SCHEDULE,
+        minimal: true,
+        noStatus: true,
+        input: z.object({
+            cron: z.string(),
+            prompt: z.string(),
+            recurring: z.boolean().optional(),
+        }).partial().passthrough(),
+        extractDescription: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const cron = opts.tool.input?.cron;
+            const recurring = opts.tool.input?.recurring;
+            if (typeof cron === 'string') return `${recurring ? 'recurring' : 'one-shot'} @ ${cron}`;
+            return recurring ? 'recurring schedule' : 'one-shot schedule';
+        },
+    },
+    'TaskOutput': { title: 'Task Output', icon: ICON_TERMINAL, minimal: true, noStatus: true, input: z.object({ task_id: z.string() }).partial().passthrough() },
+    'TaskStop':   { title: 'Stop Task',   icon: ICON_TERMINAL, minimal: true, noStatus: true, input: z.object({ task_id: z.string() }).partial().passthrough() },
+    'TaskList':  { title: 'Task List',   icon: ICON_TODO,    minimal: true, noStatus: true, input: z.object({}).partial().passthrough() },
+    'CronDelete':{ title: 'Delete Cron', icon: ICON_SCHEDULE, minimal: true, noStatus: true, input: z.object({ id: z.string() }).partial().passthrough() },
+    'CronList': { title: 'Cron List',    icon: ICON_SCHEDULE, minimal: true, noStatus: true, input: z.object({}).partial().passthrough() },
 } satisfies Record<string, {
     title?: string | ((opts: { metadata: Metadata | null, tool: ToolCall }) => string);
     icon: (size: number, color: string) => React.ReactNode;
