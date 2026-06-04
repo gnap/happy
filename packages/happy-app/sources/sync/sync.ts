@@ -2481,11 +2481,11 @@ class Sync {
                     if (decrypted) {
                         lastMessage = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
 
-                        // CLI pop echo: clear outbox by echoedMessageId from envelope meta.
+                        // CLI pop echo: mark as delivered (green check) via echoedMessageId.
                         // Also set localId so the reducer deduplicates with the optimistic bubble.
                         const echoedId = lastMessage?.meta?.echoedMessageId;
                         if (echoedId) {
-                            storage.getState().removeOutboxEntry(echoedId);
+                            storage.getState().markOutboxMessageDelivered(echoedId);
                             if (lastMessage && lastMessage.role === 'user') {
                                 lastMessage = { ...lastMessage, localId: echoedId };
                                 this.claimedServerMessageIds.set(lastMessage.id, echoedId);

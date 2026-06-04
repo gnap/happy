@@ -56,7 +56,7 @@ export interface OutboxEntry {
     sessionId: string;
     text: string;
     displayText?: string;
-    status: 'sending' | 'acked' | 'failed';
+    status: 'sending' | 'acked' | 'delivered' | 'failed';
     failReason?: string;
     createdAt: number;
 }
@@ -170,6 +170,7 @@ interface StorageState {
     addOutboxEntry: (entry: Omit<OutboxEntry, 'status'>) => void;
     removeOutboxEntry: (localId: string) => void;
     markOutboxMessageAcked: (localId: string) => void;
+    markOutboxMessageDelivered: (localId: string) => void;
     removeOutboxEntriesForSession: (sessionId: string) => void;
     failOutboxEntries: (localIds: string[], reason: string) => void;
     deleteSessionMessages: (sessionId: string) => void;
@@ -1385,6 +1386,11 @@ export const storage = create<StorageState>()((set, get) => {
             const entry = state.outbox[localId];
             if (!entry) return state;
             return { ...state, outbox: { ...state.outbox, [localId]: { ...entry, status: 'acked' as const } } };
+        }),
+        markOutboxMessageDelivered: (localId: string) => set((state) => {
+            const entry = state.outbox[localId];
+            if (!entry) return state;
+            return { ...state, outbox: { ...state.outbox, [localId]: { ...entry, status: 'delivered' as const } } };
         }),
         removeOutboxEntriesForSession: (sessionId: string) => set((state) => {
             const updated = { ...state.outbox };

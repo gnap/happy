@@ -10,7 +10,7 @@ import { ToolView } from "./tools/ToolView";
 import { AgentEvent } from "@/sync/typesRaw";
 import { sync } from '@/sync/sync';
 import { Option } from './markdown/MarkdownView';
-import { useSetting, useOutboxEntry } from "@/sync/storage";
+import { useSetting, useOutboxEntry, storage } from "@/sync/storage";
 import { Ionicons } from '@expo/vector-icons';
 
 export const MessageView = (props: {
@@ -79,7 +79,18 @@ function UserTextBlock(props: {
   const outbox = useOutboxEntry(props.message.localId);
   const isSending = outbox?.status === 'sending';
   const isAcked = outbox?.status === 'acked';
+  const isDelivered = outbox?.status === 'delivered';
   const isFailed = outbox?.status === 'failed';
+
+  // Show green check briefly then remove on delivery
+  React.useEffect(() => {
+    if (isDelivered && props.message.localId) {
+      const id = setTimeout(() => {
+        storage.getState().removeOutboxEntry(props.message.localId!);
+      }, 1500);
+      return () => clearTimeout(id);
+    }
+  }, [isDelivered, props.message.localId]);
 
   const handleOptionPress = React.useCallback((option: Option) => {
     sync.sendMessage(props.sessionId, option.title);
@@ -99,6 +110,9 @@ function UserTextBlock(props: {
           <ActivityIndicator size="small" color="#8E8E93" style={styles.sendingSpinner} />
         )}
         {isAcked && (
+          <Ionicons name="time-outline" size={14} color="#FF9500" style={styles.ackedIcon} />
+        )}
+        {isDelivered && (
           <Ionicons name="checkmark-circle" size={14} color="#34C759" style={styles.ackedIcon} />
         )}
         {isFailed && (
@@ -106,7 +120,7 @@ function UserTextBlock(props: {
             <Ionicons name="alert-circle" size={18} color="#FF3B30" />
           </Pressable>
         )}
-        <View style={[styles.userMessageBubble, isSending && styles.userMessageBubbleSending, isAcked && styles.userMessageBubbleAcked]}>
+        <View style={[styles.userMessageBubble, isSending && styles.userMessageBubbleSending, (isAcked || isDelivered) && styles.userMessageBubbleAcked]}>
           <MarkdownView markdown={props.message.displayText || props.message.text} onOptionPress={handleOptionPress} />
         </View>
       </View>
