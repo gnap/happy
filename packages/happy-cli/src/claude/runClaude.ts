@@ -573,12 +573,9 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             a2aInbox.peekInbox();
             return;
         }
-        // Echo user text as session protocol envelope.
-        // The Claude SDK output stream only contains assistant messages;
-        // user messages pushed into the input never reach the mapper.
-        session.sendSessionProtocolMessage(
-            createEnvelope('user', { t: 'text', text: message.content.text })
-        );
+        // No explicit echo — the turn output from the SDK serves as the
+        // user message echo once the server processes it. This avoids
+        // the seq gap caused by a separate envelope round-trip.
         messageQueue.push(message.content.text, enhancedMode);
         logger.debugLargeJson('User message pushed to queue:', message)
     };

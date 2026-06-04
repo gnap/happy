@@ -16,6 +16,7 @@ import { RawJSONLines } from "@/claude/types";
 import { OutgoingMessageQueue } from "./utils/OutgoingMessageQueue";
 import { getToolName } from "./utils/getToolName";
 import { buildClaudeTurnUsagePayload } from "./utils/claudeTurnUsage";
+import { createEnvelope } from '@slopus/happy-wire';
 
 interface PermissionsField {
     date: number;
@@ -392,14 +393,9 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
 
                         let msg = await session.queue.waitForMessagesAndGetAsString(controller.signal);
 
-                        // Note: we used to echo user messages back as session envelopes here
-                        // for "cross-app dedup" (commit f4206dc). That premise was wrong —
-                        // the Claude SDK does feed the user message back through its stream as
-                        // a type:'user' log entry, which sessionProtocolMapper turns into a
-                        // user envelope. Echoing here as well produced two `role:'user'` rows
-                        // in the App for every prompt (especially visible on /compact, where
-                        // App's optimistic copy + the CLI echo + mapper echo could surface as
-                        // duplicate user messages). Mapper handles it; launcher should not.
+                        // Echo the app's messageId back via session protocol so the App
+                        // can clear its outbox. The envelope id becomes the server localId,
+                        // which the App matches via claimSentMessageLocalIdByValue.
 
                         // Check if mode has changed
                         if (msg) {
@@ -444,6 +440,15 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             permissionHandler.handleModeChange(mode.permissionMode);
                             // Signal thinking immediately on message receipt, before SDK is invoked
                             session.onThinkingChange(true);
+                            // Echo the app messageId back via meta so the App can clear its outbox.
+                            // Uses a fresh cuid for the envelope id (doesn't collide with server dedup).
+                            const appMessageId = (msg.meta as any)?.appMessageId as string | undefined;
+                            if (appMessageId) {
+                                session.client.sendSessionProtocolMessage(
+                                    createEnvelope('user', { t: 'text', text: msg.message }),
+                                    { echoedMessageId: appMessageId }
+                                );
+                            }
                             return {
                                 message: msg.message,
                                 mode: msg.mode
