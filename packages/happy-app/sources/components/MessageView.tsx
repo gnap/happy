@@ -252,7 +252,8 @@ const styles = StyleSheet.create((theme) => ({
     opacity: 0.55,
   },
   userMessageBubbleAcked: {
-    borderLeftWidth: 2,
+    backgroundColor: 'rgba(52, 199, 89, 0.08)',
+    borderLeftWidth: 3,
     borderLeftColor: '#34C759',
   },
   ackedIcon: {

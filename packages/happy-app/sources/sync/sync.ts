@@ -2536,10 +2536,18 @@ class Sync {
                     if (shouldClearThinking) {
                         gitStatusSync.invalidate(updateData.body.sid);
                     }
-                    // Agent message arrived → user message has been consumed by the turn.
-                    // Clear any 'acked' outbox entries so user bubbles lose their pending indicator.
+                    // Clear 'acked' outbox when the turn produces real output (text or tool-call).
+                    // Don't clear on thinking-only messages — the acked state should persist
+                    // until visible agent content arrives.
                     if (lastMessage && lastMessage.role === 'agent') {
-                        storage.getState().clearAckedOutbox(updateData.body.sid);
+                        const blocks = Array.isArray(lastMessage.content) ? lastMessage.content : [lastMessage.content];
+                        const hasVisibleContent = blocks.some((b: any) =>
+                            b?.type === 'text' || b?.type === 'tool-result' || b?.type === 'tool-call'
+                            || (b?.type === 'tool-call-start' || b?.type === 'tool-call-end')
+                        );
+                        if (hasVisibleContent) {
+                            storage.getState().clearAckedOutbox(updateData.body.sid);
+                        }
                     }
                 }
             }
