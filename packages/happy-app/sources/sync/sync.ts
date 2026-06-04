@@ -2532,13 +2532,6 @@ class Sync {
                             this.enqueueMessages(updateData.body.sid, [lastMessage]);
                         }
                     }
-                    // Turn started producing output → clear pending/acked outbox entries.
-                    if (lastMessage && lastMessage.role === 'agent') {
-                        const blocks = Array.isArray(lastMessage.content) ? lastMessage.content : [lastMessage.content];
-                        if (blocks.some((b: any) => b?.type === 'text' || b?.type === 'tool-call-start' || b?.type === 'tool-call-end' || b?.t === 'tool-call-start' || b?.t === 'tool-call-end')) {
-                            storage.getState().removeOutboxEntriesForSession(updateData.body.sid);
-                        }
-                    }
                     // Refresh git status only when turn is done (ready), not on every mutable tool result
                     if (shouldClearThinking) {
                         gitStatusSync.invalidate(updateData.body.sid);
