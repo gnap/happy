@@ -2477,17 +2477,22 @@ class Sync {
                     const currentLastSeq = this.sessionLastSeq.get(updateData.body.sid);
                     const incomingSeq = updateData.body.message.seq;
                     const isFastPath = lastMessage !== null && currentLastSeq !== undefined && incomingSeq === currentLastSeq + 1;
+                    let didFastPath = false;
                     if (isFastPath && lastMessage) {
                         console.log('🔄 Sync: Applying message (fast path):', JSON.stringify(lastMessage));
                         this.enqueueMessages(updateData.body.sid, [lastMessage]);
                         this.sessionLastSeq.set(updateData.body.sid, incomingSeq);
+                        didFastPath = true;
                     } else {
-                        // Seq gap → trigger fetch to fill missing messages
-                        this.getMessagesSync(updateData.body.sid).invalidate();
-                        // Also enqueue the current message immediately if non-null so the UI
-                        // updates without waiting for the full fetchMessages round-trip.
-                        // sessionLastSeq is NOT updated here; fetchMessages will set it correctly
-                        // after retrieving the gap, preventing future messages from skipping ahead.
+                        // Seq gap → trigger fetch to fill missing messages.
+                        // Skip invalidate when the message normalized to null — the gap is
+                        // caused by a null-normalized message (e.g. session-protocol user msg),
+                        // not by actual missing data, so no fetch is needed.
+                        if (lastMessage) {
+                            this.getMessagesSync(updateData.body.sid).invalidate();
+                        }
+                        // Enqueue immediately so the UI updates without waiting for fetchMessages.
+                        // sessionLastSeq is NOT updated here; fetchMessages will set it correctly.
                         if (lastMessage) {
                             console.log('🔄 Sync: Applying message (lenient path, seq gap):', JSON.stringify(lastMessage));
                             this.enqueueMessages(updateData.body.sid, [lastMessage]);
@@ -2500,8 +2505,11 @@ class Sync {
                 }
             }
 
-            // Ping session
-            this.onSessionVisible(updateData.body.sid);
+            // Fast path already applied the message and updated sessionLastSeq —
+            // no need to trigger a redundant fetchMessages via onSessionVisible.
+            if (!didFastPath) {
+                this.onSessionVisible(updateData.body.sid);
+            }
 
         } else if (updateData.body.t === 'new-session') {
             log.log('🆕 New session update received');
