@@ -2457,6 +2457,7 @@ class Sync {
 
             // Decrypt message
             let lastMessage: NormalizedMessage | null = null;
+            let didFastPath = false;
             const sid = updateData.body.sid;
             if (updateData.body.message) {
                 const decrypted = await encryption.decryptMessage(updateData.body.message);
@@ -2501,7 +2502,6 @@ class Sync {
                     const currentLastSeq = this.sessionLastSeq.get(updateData.body.sid);
                     const incomingSeq = updateData.body.message.seq;
                     const isFastPath = lastMessage !== null && currentLastSeq !== undefined && incomingSeq === currentLastSeq + 1;
-                    let didFastPath = false;
                     if (isFastPath && lastMessage) {
                         console.log('🔄 Sync: Applying message (fast path):', JSON.stringify(lastMessage));
                         this.enqueueMessages(updateData.body.sid, [lastMessage]);
