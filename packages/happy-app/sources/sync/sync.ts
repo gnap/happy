@@ -1919,9 +1919,10 @@ class Sync {
             const data = await response.json() as V3PostSessionMessagesResponse;
             pending.splice(0, batch.length);
 
-            // Confirmed by server – remove from outbox
+            // Server confirmed – mark as acked (green). The CLI pop echo
+            // will remove the entry when the turn actually starts processing.
             for (const msg of batch) {
-                storage.getState().removeOutboxEntry(msg.localId);
+                storage.getState().markOutboxMessageAcked(msg.localId);
             }
 
             if (Array.isArray(data.messages) && data.messages.length > 0) {
@@ -2065,7 +2066,7 @@ class Sync {
         }
         if (localId) {
             this.claimedServerMessageIds.set(serverMsgId, localId);
-            storage.getState().markOutboxMessageAcked(localId);
+            storage.getState().removeOutboxEntry(localId);
         }
         return localId;
     }
@@ -2464,7 +2465,7 @@ class Sync {
                 // this is our own user message echo. Ack it without decrypting.
                 const incomingLocalId = (updateData.body as { message: { localId?: string | null } }).message.localId ?? undefined;
                 if (incomingLocalId && this.claimSentMessageLocalIdByValue(sid, incomingLocalId)) {
-                    storage.getState().markOutboxMessageAcked(incomingLocalId);
+                    storage.getState().removeOutboxEntry(incomingLocalId);
                     const session2 = storage.getState().sessions[sid];
                     if (session2) {
                         this.applySessions([{ ...session2, updatedAt: updateData.createdAt, seq: updateData.body.message.seq }]);
