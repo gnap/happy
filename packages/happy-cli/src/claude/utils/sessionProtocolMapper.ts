@@ -685,8 +685,8 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
         }
 
         // Suppress meta / synthetic / CLI-injected prompts
-        if (message.isMeta || message.isSynthetic || state.suppressAllUserText || (state.suppressNextUserTextCount ?? 0) > 0) {
-            if (!message.isMeta && !message.isSynthetic && !state.suppressAllUserText) {
+        if (message.isMeta || message.isSynthetic || (state.suppressNextUserTextCount ?? 0) > 0) {
+            if (!message.isMeta && !message.isSynthetic) {
                 state.suppressNextUserTextCount = (state.suppressNextUserTextCount ?? 1) - 1;
             }
             return { currentTurnId: state.currentTurnId, envelopes };
