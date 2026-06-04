@@ -26,7 +26,8 @@ export function isA2AInboxTurnMeta(meta: unknown): boolean {
   if (!meta || typeof meta !== 'object') {
     return false;
   }
-  return (meta as { a2aInboxTurn?: boolean }).a2aInboxTurn === true;
+  const m = meta as { a2aInboxTurn?: boolean; origin?: string };
+  return m.a2aInboxTurn === true || m.origin === 'a2a';
 }
 
 export type A2AInboxTurnHooks = {
