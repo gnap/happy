@@ -78,7 +78,6 @@ function UserTextBlock(props: {
 }) {
   const outbox = useOutboxEntry(props.message.localId);
   const isSending = outbox?.status === 'sending';
-  const isAcked = outbox?.status === 'acked';
   const isFailed = outbox?.status === 'failed';
 
   const handleOptionPress = React.useCallback((option: Option) => {
@@ -98,15 +97,12 @@ function UserTextBlock(props: {
         {isSending && (
           <ActivityIndicator size="small" color="#8E8E93" style={styles.sendingSpinner} />
         )}
-        {isAcked && (
-          <Ionicons name="checkmark-circle-outline" size={14} color="#34C759" style={styles.ackedIcon} />
-        )}
         {isFailed && (
           <Pressable onPress={handleRetry} style={styles.retryButton} hitSlop={8}>
             <Ionicons name="alert-circle" size={18} color="#FF3B30" />
           </Pressable>
         )}
-        <View style={[styles.userMessageBubble, isSending && styles.userMessageBubbleSending, isAcked && styles.userMessageBubbleAcked]}>
+        <View style={[styles.userMessageBubble, isSending && styles.userMessageBubbleSending]}>
           <MarkdownView markdown={props.message.displayText || props.message.text} onOptionPress={handleOptionPress} />
         </View>
       </View>
@@ -250,14 +246,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   userMessageBubbleSending: {
     opacity: 0.55,
-  },
-  userMessageBubbleAcked: {
-    backgroundColor: 'rgba(52, 199, 89, 0.08)',
-    borderLeftWidth: 3,
-    borderLeftColor: '#34C759',
-  },
-  ackedIcon: {
-    marginRight: 4,
   },
   sendingSpinner: {},
   retryButton: {

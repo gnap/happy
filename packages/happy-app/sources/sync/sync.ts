@@ -2065,7 +2065,7 @@ class Sync {
         }
         if (localId) {
             this.claimedServerMessageIds.set(serverMsgId, localId);
-            storage.getState().markOutboxMessageAcked(localId, Date.now());
+            storage.getState().removeOutboxEntry(localId);
         }
         return localId;
     }
@@ -2464,7 +2464,7 @@ class Sync {
                 // this is our own user message echo. Ack it without decrypting.
                 const incomingLocalId = (updateData.body as { message: { localId?: string | null } }).message.localId ?? undefined;
                 if (incomingLocalId && this.claimSentMessageLocalIdByValue(sid, incomingLocalId)) {
-                    storage.getState().markOutboxMessageAcked(incomingLocalId, updateData.body.message.createdAt as number);
+                    storage.getState().removeOutboxEntry(incomingLocalId);
                     const session2 = storage.getState().sessions[sid];
                     if (session2) {
                         this.applySessions([{ ...session2, updatedAt: updateData.createdAt, seq: updateData.body.message.seq }]);
@@ -2530,17 +2530,6 @@ class Sync {
                         if (lastMessage) {
                             console.log('🔄 Sync: Applying message (lenient path, seq gap):', JSON.stringify(lastMessage));
                             this.enqueueMessages(updateData.body.sid, [lastMessage]);
-                        }
-                    }
-                    // Clear acked outbox when turn produces visible output (text/tool-call).
-                    // Don't clear on thinking — the acked state persists until real content.
-                    if (lastMessage && lastMessage.role === 'agent') {
-                        const blocks = Array.isArray(lastMessage.content) ? lastMessage.content : [lastMessage.content];
-                        const hasContent = blocks.some((b: any) =>
-                            b?.type === 'text' || b?.type === 'tool-call-start' || b?.type === 'tool-call-end' || b?.t === 'tool-call-start' || b?.t === 'tool-call-end'
-                        );
-                        if (hasContent) {
-                            storage.getState().clearAckedOutbox(updateData.body.sid);
                         }
                     }
                     // Refresh git status only when turn is done (ready), not on every mutable tool result
