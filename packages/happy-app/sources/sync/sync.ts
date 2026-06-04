@@ -2462,7 +2462,7 @@ class Sync {
             if (updateData.body.message) {
                 // Fast ack: if the incoming localId matches a pending sent message,
                 // this is our own user message echo. Ack it without decrypting.
-                const incomingLocalId = (updateData.body.message as any).localId as string | undefined;
+                const incomingLocalId = (updateData.body as { message: { localId?: string | null } }).message.localId ?? undefined;
                 if (incomingLocalId && this.claimSentMessageLocalIdByValue(sid, incomingLocalId)) {
                     storage.getState().markOutboxMessageAcked(incomingLocalId, updateData.body.message.createdAt as number);
                     const session2 = storage.getState().sessions[sid];
