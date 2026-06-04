@@ -864,10 +864,6 @@ export function normalizeRawMessage(
     }
     raw = parsed.data;
     if (raw.role === 'user') {
-        if (isSessionProtocolSendEnabled()) {
-            return null;
-        }
-
         return {
             id,
             localId,
