@@ -2491,6 +2491,11 @@ class Sync {
                                 lastMessage = { ...lastMessage, localId: claimedLocalId };
                             }
                         }
+                        // CLI pop echo: clear outbox by echoedMessageId from envelope meta
+                        const echoedId = (lastMessage?.meta as any)?.echoedMessageId as string | undefined;
+                        if (echoedId) {
+                            storage.getState().removeOutboxEntry(echoedId);
+                        }
                     }
 
                     const thinkingPatch = this.applySessionThinkingFromRawContent(
