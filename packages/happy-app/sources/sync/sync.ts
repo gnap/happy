@@ -2065,7 +2065,7 @@ class Sync {
         }
         if (localId) {
             this.claimedServerMessageIds.set(serverMsgId, localId);
-            storage.getState().removeOutboxEntry(localId);
+            storage.getState().markOutboxMessageAcked(localId);
         }
         return localId;
     }
@@ -2464,7 +2464,7 @@ class Sync {
                 // this is our own user message echo. Ack it without decrypting.
                 const incomingLocalId = (updateData.body as { message: { localId?: string | null } }).message.localId ?? undefined;
                 if (incomingLocalId && this.claimSentMessageLocalIdByValue(sid, incomingLocalId)) {
-                    storage.getState().removeOutboxEntry(incomingLocalId);
+                    storage.getState().markOutboxMessageAcked(incomingLocalId);
                     const session2 = storage.getState().sessions[sid];
                     if (session2) {
                         this.applySessions([{ ...session2, updatedAt: updateData.createdAt, seq: updateData.body.message.seq }]);
@@ -2530,6 +2530,13 @@ class Sync {
                         if (lastMessage) {
                             console.log('🔄 Sync: Applying message (lenient path, seq gap):', JSON.stringify(lastMessage));
                             this.enqueueMessages(updateData.body.sid, [lastMessage]);
+                        }
+                    }
+                    // Turn started producing output → clear pending/acked outbox entries.
+                    if (lastMessage && lastMessage.role === 'agent') {
+                        const blocks = Array.isArray(lastMessage.content) ? lastMessage.content : [lastMessage.content];
+                        if (blocks.some((b: any) => b?.type === 'text' || b?.type === 'tool-call-start' || b?.type === 'tool-call-end' || b?.t === 'tool-call-start' || b?.t === 'tool-call-end')) {
+                            storage.getState().removeOutboxEntriesForSession(updateData.body.sid);
                         }
                     }
                     // Refresh git status only when turn is done (ready), not on every mutable tool result
