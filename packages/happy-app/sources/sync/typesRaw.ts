@@ -864,6 +864,10 @@ export function normalizeRawMessage(
     }
     raw = parsed.data;
     if (raw.role === 'user') {
+        // A2A trigger messages are daemon infrastructure — never user-visible.
+        if (raw.meta?.origin === 'a2a') {
+            return null;
+        }
         return {
             id,
             localId,

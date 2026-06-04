@@ -2481,6 +2481,13 @@ class Sync {
                     if (decrypted) {
                         lastMessage = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
 
+                        // Filter A2A inbox notification messages from appearing as user bubbles.
+                        // Server-sent notifications have origin='a2a' and text starts with "A2A inbox".
+                        if (lastMessage && lastMessage.role === 'user' && lastMessage.meta?.origin === 'a2a'
+                            && (lastMessage as any).content?.text?.startsWith?.('A2A inbox')) {
+                            lastMessage = null;
+                        }
+
                         // CLI pop echo: mark as delivered (green check) via echoedMessageId.
                         // Also set localId so the reducer deduplicates with the optimistic bubble.
                         const echoedId = lastMessage?.meta?.echoedMessageId;
