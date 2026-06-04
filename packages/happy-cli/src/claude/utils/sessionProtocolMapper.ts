@@ -675,8 +675,11 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
             };
         }
 
-        // Suppress meta / synthetic / CLI-injected prompts
-        if (message.isMeta || message.isSynthetic || (state.suppressNextUserTextCount ?? 0) > 0) {
+        // Suppress meta / synthetic / CLI-injected user text prompts.
+        // Only suppress messages without tool calls — sub-agent cards
+        // must pass through even during inbox turns.
+        const hasToolCall = blocks.some((b: any) => b.type === 'tool_use');
+        if (message.isMeta || message.isSynthetic || (!hasToolCall && (state.suppressNextUserTextCount ?? 0) > 0)) {
             if (!message.isMeta && !message.isSynthetic) {
                 state.suppressNextUserTextCount = (state.suppressNextUserTextCount ?? 1) - 1;
             }
