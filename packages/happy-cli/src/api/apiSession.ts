@@ -1464,12 +1464,13 @@ export class ApiSessionClient extends EventEmitter {
         this.enqueueMessage(content);
     }
 
-    private enqueueSessionProtocolEnvelope(envelope: SessionEnvelope, invalidate: boolean = true) {
+    private enqueueSessionProtocolEnvelope(envelope: SessionEnvelope, invalidate: boolean = true, extraMeta?: Record<string, unknown>) {
         const content = {
             role: 'session',
             content: envelope,
             meta: {
-                sentFrom: 'cli'
+                sentFrom: 'cli',
+                ...(extraMeta ?? {}),
             }
         };
         // Use envelope.id as localId so server dedupes by localId; same envelope sent multiple times becomes one row.
@@ -1486,7 +1487,7 @@ export class ApiSessionClient extends EventEmitter {
         suppressNextUserText(this.claudeSessionProtocolState, count);
     }
 
-    sendSessionProtocolMessage(envelope: SessionEnvelope) {
+    sendSessionProtocolMessage(envelope: SessionEnvelope, extraMeta?: Record<string, unknown>) {
         // Apply lazy encoding at the single exit point so all code paths
         // (Claude via sendClaudeSessionMessage, Cursor via direct call, etc.) are covered.
         const finalEnvelope = this.maybeLazyEncodeEnvelope(envelope);
@@ -1504,7 +1505,7 @@ export class ApiSessionClient extends EventEmitter {
                 appendFileSync(process.env.HAPPY_CURSOR_TRACE_LOG ?? '/tmp/cursor-envelope-trace.log', `${line}\n`);
             } catch { /* ignore */ }
         }
-        this.enqueueSessionProtocolEnvelope(finalEnvelope);
+        this.enqueueSessionProtocolEnvelope(finalEnvelope, true, extraMeta);
     }
 
     /**

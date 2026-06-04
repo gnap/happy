@@ -440,11 +440,13 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             permissionHandler.handleModeChange(mode.permissionMode);
                             // Signal thinking immediately on message receipt, before SDK is invoked
                             session.onThinkingChange(true);
-                            // Echo the app messageId back so the App can clear its outbox.
+                            // Echo the app messageId back via meta so the App can clear its outbox.
+                            // Uses a fresh cuid for the envelope id (doesn't collide with server dedup).
                             const appMessageId = (msg.meta as any)?.appMessageId as string | undefined;
                             if (appMessageId) {
-                                session.sendSessionProtocolMessage(
-                                    createEnvelope('user', { t: 'text', text: msg.message }, { id: appMessageId })
+                                session.client.sendSessionProtocolMessage(
+                                    createEnvelope('user', { t: 'text', text: msg.message }),
+                                    { echoedMessageId: appMessageId }
                                 );
                             }
                             return {
