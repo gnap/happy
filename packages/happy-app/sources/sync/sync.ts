@@ -2481,17 +2481,20 @@ class Sync {
                     if (decrypted) {
                         lastMessage = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
 
-                        if (lastMessage && lastMessage.role === 'user') {
+                        // CLI pop echo: clear outbox by echoedMessageId from envelope meta.
+                        // Also set localId so the reducer deduplicates with the optimistic bubble.
+                        const echoedId = lastMessage?.meta?.echoedMessageId;
+                        if (echoedId) {
+                            storage.getState().removeOutboxEntry(echoedId);
+                            if (lastMessage && lastMessage.role === 'user') {
+                                lastMessage = { ...lastMessage, localId: echoedId };
+                                this.claimedServerMessageIds.set(lastMessage.id, echoedId);
+                            }
+                        } else if (lastMessage && lastMessage.role === 'user') {
                             const claimedLocalId = this.resolveLocalIdForIncoming(sid, lastMessage.id, lastMessage.content.text, decrypted.localId);
                             if (claimedLocalId) {
                                 lastMessage = { ...lastMessage, localId: claimedLocalId };
                             }
-                        }
-                        // CLI pop echo: clear outbox by echoedMessageId from envelope meta.
-                        // This is the ONLY path that removes the green check.
-                        const echoedId = lastMessage?.meta?.echoedMessageId;
-                        if (echoedId) {
-                            storage.getState().removeOutboxEntry(echoedId);
                         }
                     }
 
