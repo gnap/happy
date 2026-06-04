@@ -184,10 +184,19 @@ export const ApiEphemeralMachineActivityUpdateSchema = z.object({
     activeAt: z.number(),
 });
 
+export const ApiEphemeralMessageAckSchema = z.object({
+    type: z.literal('message-ack'),
+    sid: z.string(),
+    localId: z.string(),
+    seq: z.number(),
+    createdAt: z.number(),
+});
+
 export const ApiEphemeralUpdateSchema = z.union([
     ApiEphemeralActivityUpdateSchema,
     ApiEphemeralUsageUpdateSchema,
     ApiEphemeralMachineActivityUpdateSchema,
+    ApiEphemeralMessageAckSchema,
 ]);
 
 export type ApiEphemeralActivityUpdate = z.infer<typeof ApiEphemeralActivityUpdateSchema>;
