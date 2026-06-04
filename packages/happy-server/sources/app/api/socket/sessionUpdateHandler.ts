@@ -1,6 +1,6 @@
 import { sessionAliveEventsCounter, websocketEventsCounter } from "@/app/monitoring/metrics2";
 import { activityCache } from "@/app/presence/sessionCache";
-import { buildNewMessageUpdate, buildMessageAckEphemeral, buildSessionActivityEphemeral, buildUpdateSessionUpdate, ClientConnection, eventRouter } from "@/app/events/eventRouter";
+import { buildNewMessageUpdate, buildSessionActivityEphemeral, buildUpdateSessionUpdate, ClientConnection, eventRouter } from "@/app/events/eventRouter";
 import { db } from "@/storage/db";
 import { allocateSessionSeq, allocateUserSeq } from "@/storage/seq";
 import { AsyncLock } from "@/utils/lock";
@@ -230,7 +230,7 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
                     }
                 });
 
-                // Emit new message update to all session-interested clients
+                // Emit new message update to relevant clients
                 const updatePayload = buildNewMessageUpdate(msg, sid, updSeq, randomKeyNaked(12));
                 eventRouter.emitUpdate({
                     userId,
@@ -238,16 +238,6 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
                     recipientFilter: { type: 'all-interested-in-session', sessionId: sid },
                     skipSenderConnection: connection
                 });
-                // Emit lightweight ack to the sender so they can update outbox state
-                // without waiting for (or decrypting) the full message echo.
-                if (useLocalId) {
-                    const ackPayload = buildMessageAckEphemeral(sid, useLocalId, msgSeq, msg.createdAt);
-                    eventRouter.emitEphemeral({
-                        userId,
-                        payload: ackPayload,
-                        recipientFilter: { type: 'connection', connection },
-                    });
-                }
             } catch (error) {
                 log({ module: 'websocket', level: 'error' }, `Error in message handler: ${error}`);
             }

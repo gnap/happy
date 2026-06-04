@@ -2947,16 +2947,6 @@ class Sync {
             this.activityAccumulator.addUpdate(updateData);
         }
 
-        // Handle message ack — lightweight echo for user message delivery confirmation.
-        // Updates outbox state and seq cursor without needing the full encrypted message.
-        if (updateData.type === 'message-ack') {
-            storage.getState().markOutboxMessageAcked(updateData.localId, updateData.createdAt);
-            const currentSeq = this.sessionLastSeq.get(updateData.sid) ?? 0;
-            if (updateData.seq > currentSeq) {
-                this.sessionLastSeq.set(updateData.sid, updateData.seq);
-            }
-        }
-
         // Handle machine activity updates
         if (updateData.type === 'machine-activity') {
             // Update machine's active status and lastActiveAt

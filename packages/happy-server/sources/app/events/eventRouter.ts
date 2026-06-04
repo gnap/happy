@@ -35,8 +35,7 @@ export type RecipientFilter =
     | { type: 'all-interested-in-session'; sessionId: string }
     | { type: 'user-scoped-only' }
     | { type: 'machine-scoped-only'; machineId: string }  // For update-machine: sends to user-scoped + only the specific machine
-    | { type: 'all-user-authenticated-connections' }
-    | { type: 'connection'; connection: ClientConnection };
+    | { type: 'all-user-authenticated-connections' };
 
 // === UPDATE EVENT TYPES (Persistent) ===
 
@@ -164,12 +163,6 @@ export type EphemeralEvent = {
     active: boolean;
     activeAt: number;
     thinking?: boolean;
-} | {
-    type: 'message-ack';
-    sid: string;
-    localId: string;
-    seq: number;
-    createdAt: number;
 } | {
     type: 'machine-activity';
     id: string;
@@ -301,9 +294,6 @@ class EventRouter {
             case 'all-user-authenticated-connections':
                 // Send to all connection types (default behavior)
                 return true;
-
-            case 'connection':
-                return connection === filter.connection;
 
             default:
                 return false;
@@ -528,16 +518,6 @@ export function buildMachineStatusEphemeral(machineId: string, online: boolean):
         machineId,
         online,
         timestamp: Date.now()
-    };
-}
-
-export function buildMessageAckEphemeral(sid: string, localId: string, seq: number, createdAt: Date): EphemeralPayload {
-    return {
-        type: 'message-ack',
-        sid,
-        localId,
-        seq,
-        createdAt: createdAt.getTime()
     };
 }
 
