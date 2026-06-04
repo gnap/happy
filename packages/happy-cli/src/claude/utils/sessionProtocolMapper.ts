@@ -21,8 +21,6 @@ export type ClaudeSessionProtocolState = {
     lastTaskCreateCallId?: string; // most recent TaskCreate call ID for Agent remapping
     /** Number of upcoming non-sidechain user text messages to suppress (e.g. inbox turn prompts). */
     suppressNextUserTextCount?: number;
-    /** Suppress ALL non-sidechain user text until explicitly cleared (inbox turns). */
-    suppressAllUserText?: boolean;
 };
 
 type ClaudeMapperResult = {
@@ -488,11 +486,6 @@ export function suppressNextUserText(state: ClaudeSessionProtocolState, count = 
     state.suppressNextUserTextCount = (state.suppressNextUserTextCount ?? 0) + count;
 }
 
-/** Suppress ALL non-sidechain user text until cleared (for inbox turns). */
-export function setSuppressAllUserText(state: ClaudeSessionProtocolState, enabled: boolean): void {
-    state.suppressAllUserText = enabled;
-}
-
 export function closeClaudeTurnWithStatus(
     state: ClaudeSessionProtocolState,
     status: SessionTurnEndStatus,
@@ -659,12 +652,10 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                 // isMeta: internal prompts (e.g. inbox turn notifications)
                 // isSynthetic: SDK-injected prompts (e.g. Skill invocations)
                 // Suppress these so they don't appear as standalone user bubbles.
-            } else if (state.suppressAllUserText || (state.suppressNextUserTextCount ?? 0) > 0) {
+            } else if ((state.suppressNextUserTextCount ?? 0) > 0) {
                 // Suppress internal CLI-injected prompts (e.g. inbox turn notifications)
                 // that were registered via suppressNextUserText() before the turn started.
-                if (!state.suppressAllUserText) {
-                    state.suppressNextUserTextCount = (state.suppressNextUserTextCount ?? 1) - 1;
-                }
+                state.suppressNextUserTextCount = (state.suppressNextUserTextCount ?? 1) - 1;
             } else {
                 closeTurn(state, 'completed', envelopes);
                 envelopes.push(createEnvelope('user', { t: 'text', text: message.message.content }));
