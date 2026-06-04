@@ -2065,7 +2065,7 @@ class Sync {
         }
         if (localId) {
             this.claimedServerMessageIds.set(serverMsgId, localId);
-            this.markOutboxMessageDelivered(sessionId, localId);
+            storage.getState().markOutboxMessageAcked(localId, Date.now());
         }
         return localId;
     }
@@ -2525,6 +2525,11 @@ class Sync {
                     // Refresh git status only when turn is done (ready), not on every mutable tool result
                     if (shouldClearThinking) {
                         gitStatusSync.invalidate(updateData.body.sid);
+                    }
+                    // Agent message arrived → user message has been consumed by the turn.
+                    // Clear any 'acked' outbox entries so user bubbles lose their pending indicator.
+                    if (lastMessage && lastMessage.role === 'agent') {
+                        storage.getState().clearAckedOutbox(updateData.body.sid);
                     }
                 }
             }
