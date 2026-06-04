@@ -2532,22 +2532,20 @@ class Sync {
                             this.enqueueMessages(updateData.body.sid, [lastMessage]);
                         }
                     }
+                    // Clear acked outbox when turn produces visible output (text/tool-call).
+                    // Don't clear on thinking — the acked state persists until real content.
+                    if (lastMessage && lastMessage.role === 'agent') {
+                        const blocks = Array.isArray(lastMessage.content) ? lastMessage.content : [lastMessage.content];
+                        const hasContent = blocks.some((b: any) =>
+                            b?.type === 'text' || b?.type === 'tool-call-start' || b?.type === 'tool-call-end' || b?.t === 'tool-call-start' || b?.t === 'tool-call-end'
+                        );
+                        if (hasContent) {
+                            storage.getState().clearAckedOutbox(updateData.body.sid);
+                        }
+                    }
                     // Refresh git status only when turn is done (ready), not on every mutable tool result
                     if (shouldClearThinking) {
                         gitStatusSync.invalidate(updateData.body.sid);
-                    }
-                    // Clear 'acked' outbox when the turn produces real output (text or tool-call).
-                    // Don't clear on thinking-only messages — the acked state should persist
-                    // until visible agent content arrives.
-                    if (lastMessage && lastMessage.role === 'agent') {
-                        const blocks = Array.isArray(lastMessage.content) ? lastMessage.content : [lastMessage.content];
-                        const hasVisibleContent = blocks.some((b: any) =>
-                            b?.type === 'text' || b?.type === 'tool-result' || b?.type === 'tool-call'
-                            || (b?.type === 'tool-call-start' || b?.type === 'tool-call-end')
-                        );
-                        if (hasVisibleContent) {
-                            storage.getState().clearAckedOutbox(updateData.body.sid);
-                        }
                     }
                 }
             }
