@@ -2066,7 +2066,10 @@ class Sync {
         }
         if (localId) {
             this.claimedServerMessageIds.set(serverMsgId, localId);
-            storage.getState().removeOutboxEntry(localId);
+            const entry = storage.getState().outbox[localId];
+            if (!entry || entry.status === 'sending') {
+                storage.getState().removeOutboxEntry(localId);
+            }
         }
         return localId;
     }
@@ -2465,7 +2468,12 @@ class Sync {
                 // this is our own user message echo. Ack it without decrypting.
                 const incomingLocalId = (updateData.body as { message: { localId?: string | null } }).message.localId ?? undefined;
                 if (incomingLocalId && this.claimSentMessageLocalIdByValue(sid, incomingLocalId)) {
-                    storage.getState().removeOutboxEntry(incomingLocalId);
+                    // Only clear if still 'sending'. If already 'acked' (from flushOutbox),
+                    // leave it for the CLI pop echo to remove — avoid premature green→normal flash.
+                    const entry = storage.getState().outbox[incomingLocalId];
+                    if (!entry || entry.status === 'sending') {
+                        storage.getState().removeOutboxEntry(incomingLocalId);
+                    }
                     const session2 = storage.getState().sessions[sid];
                     if (session2) {
                         this.applySessions([{ ...session2, updatedAt: updateData.createdAt, seq: updateData.body.message.seq }]);
