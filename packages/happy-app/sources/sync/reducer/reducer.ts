@@ -790,9 +790,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                                 }
                             }
 
-                            // Track TaskCreate/TaskUpdate for task list (state check removed:
-                            // buffered tool-results can change state to 'completed' before we track)
-                            if (message.tool.name === 'TaskCreate' || message.tool.name === 'TaskUpdate') {
+                            // Track TaskCreate/TaskUpdate for task list
+                            if ((message.tool.name === 'TaskCreate' || message.tool.name === 'TaskUpdate')) {
                                 trackTaskFromToolInput(state, message.tool.name, message.tool.input, message.tool.createdAt);
                             }
                         }
@@ -875,7 +874,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             }
                         }
 
-                        // Track TaskCreate/TaskUpdate for task list (state check removed)
+                        // Track TaskCreate/TaskUpdate for task list
                         if (toolCall.name === 'TaskCreate' || toolCall.name === 'TaskUpdate') {
                             trackTaskFromToolInput(state, toolCall.name, toolCall.input, toolCall.createdAt);
                         }
@@ -1016,7 +1015,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                 event: null,
                 meta: msg.meta,
             };
-            // Only add to sidechain children (visible in detail page), not to main message list
+            state.messages.set(mid, userMsg);
             existingSidechain.push(userMsg);
         } else if (msg.role === 'agent') {
             // Process agent content in sidechain
