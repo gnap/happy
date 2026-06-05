@@ -571,7 +571,7 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                     continue;
                 }
 
-                // Track most recent TaskCreate call ID so Agent can remap its children
+                // Track most recent TaskCreate for Agent remapping
                 if (name === 'TaskCreate') {
                     state.lastTaskCreateCallId = call;
                 }
@@ -587,24 +587,27 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                     }
                 }
 
-                // Agent: hide card and remap subagent children to TaskCreate card.
-                // When no TaskCreate exists (e.g. inbox turns), emit the card.
-                if (name === 'Agent' && state.lastTaskCreateCallId) {
+                // Agent: setup subagent tracking so child messages link via taskCall.
+                // Hide the card only when a TaskCreate exists to remap children to.
+                if (name === 'Agent') {
                     const prompt = pickTaskPrompt(block.input);
                     if (prompt) {
                         queueTaskPromptSubagent(state, prompt, call);
                     }
                     setSubagentTitle(state, sessionSubagentForCall, pickTaskTitle(block.input) ?? prompt);
-                    const mappedTaskCall = state.lastTaskCreateCallId;
+                    const mappedTaskCall = state.lastTaskCreateCallId ?? call;
                     getTaskCallBySubagent(state).set(sessionSubagentForCall, mappedTaskCall);
-                    getHiddenParentToolCalls(state).add(call);
 
                     const buffered = consumeBufferedSubagentMessages(state, call);
                     for (const bufferedMessage of buffered) {
                         const replay = mapClaudeLogMessageToSessionEnvelopesInternal(bufferedMessage, state);
                         envelopes.push(...replay.envelopes);
                     }
-                    continue;
+                    if (state.lastTaskCreateCallId) {
+                        getHiddenParentToolCalls(state).add(call);
+                        continue;
+                    }
+                    // No TaskCreate (e.g. inbox turn): fall through to emit card.
                 }
 
                 envelopes.push(createEnvelope('agent', {
@@ -630,14 +633,6 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
     }
 
     if (message.type === 'user') {
-        // Skip meta messages (skill content injection, etc.)
-        if ((message as Record<string, unknown>).isMeta === true) {
-            return {
-                currentTurnId: state.currentTurnId,
-                envelopes,
-            };
-        }
-
         const taskCallId = subagent ? getTaskCallBySubagent(state).get(subagent) : undefined;
         if (typeof message.message.content === 'string') {
             if (message.isSidechain) {
@@ -676,12 +671,9 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
             };
         }
 
-        // Suppress meta / synthetic / CLI-injected user text prompts.
-        // Only decrement counter for user-type messages — assistant
-        // messages with tool_use blocks (sub-agent spawns) must pass.
-        const isUserText = message.type === 'user';
-        if (message.isMeta || message.isSynthetic || (isUserText && (state.suppressNextUserTextCount ?? 0) > 0)) {
-            if (!message.isMeta && !message.isSynthetic && isUserText) {
+        // Suppress meta / synthetic / CLI-injected prompts
+        if (message.isMeta || message.isSynthetic || (state.suppressNextUserTextCount ?? 0) > 0) {
+            if (!message.isMeta && !message.isSynthetic) {
                 state.suppressNextUserTextCount = (state.suppressNextUserTextCount ?? 1) - 1;
             }
             return { currentTurnId: state.currentTurnId, envelopes };
