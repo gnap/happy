@@ -587,14 +587,15 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                     }
                 }
 
-                // Agent: hide card and remap subagent children to TaskCreate card
-                if (name === 'Agent') {
+                // Agent: hide card and remap subagent children to TaskCreate card.
+                // When no TaskCreate exists (e.g. inbox turns), emit the card.
+                if (name === 'Agent' && state.lastTaskCreateCallId) {
                     const prompt = pickTaskPrompt(block.input);
                     if (prompt) {
                         queueTaskPromptSubagent(state, prompt, call);
                     }
                     setSubagentTitle(state, sessionSubagentForCall, pickTaskTitle(block.input) ?? prompt);
-                    const mappedTaskCall = state.lastTaskCreateCallId ?? call;
+                    const mappedTaskCall = state.lastTaskCreateCallId;
                     getTaskCallBySubagent(state).set(sessionSubagentForCall, mappedTaskCall);
                     getHiddenParentToolCalls(state).add(call);
 
