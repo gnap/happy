@@ -1101,7 +1101,6 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                                 decision: perms.decision,
                             };
                         }
-                        changed.add(mid);
                     }
                 } else if (c.type === 'tool-result') {
                     // Process tool result in sidechain - update BOTH messages
@@ -1151,7 +1150,6 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                                     };
                                 }
                             }
-                            changed.add(sidechainMessageId);
                         }
                     }
 
