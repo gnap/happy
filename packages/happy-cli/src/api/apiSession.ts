@@ -750,6 +750,14 @@ export class ApiSessionClient extends EventEmitter {
         }
 
         const triggerInboxMessageId = this.ingestA2AInboxFromTrigger(message);
+        // When an A2A trigger was ingested into the local inbox, it is an
+        // internal CLI notification — not a user text message for Claude.
+        // Skip user message routing so the inbox turn controller picks it up
+        // via its own peekInbox / scheduleA2ATurnIfNeeded cycle instead of
+        // injecting it mid-turn as a stray user turn.
+        if (triggerInboxMessageId) {
+            return;
+        }
 
         const userResult = UserMessageSchema.safeParse(message);
         if (userResult.success) {
