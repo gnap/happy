@@ -588,37 +588,40 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                 }
 
                 // Agent: hide card and remap subagent children to TaskCreate card.
-                // When no TaskCreate exists (e.g. inbox turns), emit the card.
-                if (name === 'Agent' && state.lastTaskCreateCallId) {
+                // When no TaskCreate exists (e.g. inbox turns), emit the card normally.
+                if (name === 'Agent') {
                     const prompt = pickTaskPrompt(block.input);
                     if (prompt) {
                         queueTaskPromptSubagent(state, prompt, call);
                     }
                     setSubagentTitle(state, sessionSubagentForCall, pickTaskTitle(block.input) ?? prompt);
-                    const mappedTaskCall = state.lastTaskCreateCallId;
-                    getTaskCallBySubagent(state).set(sessionSubagentForCall, mappedTaskCall);
-                    getHiddenParentToolCalls(state).add(call);
 
+                    if (state.lastTaskCreateCallId) {
+                        // Has TaskCreate → hide Agent, remap children
+                        getTaskCallBySubagent(state).set(sessionSubagentForCall, state.lastTaskCreateCallId);
+                        getHiddenParentToolCalls(state).add(call);
+                        const buffered = consumeBufferedSubagentMessages(state, call);
+                        for (const bufferedMessage of buffered) {
+                            const replay = mapClaudeLogMessageToSessionEnvelopesInternal(bufferedMessage, state);
+                            envelopes.push(...replay.envelopes);
+                        }
+                        continue;
+                    }
+                    // No TaskCreate → emit card with subagent tracking
+                    envelopes.push(createEnvelope('agent', {
+                        t: 'tool-call-start',
+                        call,
+                        name,
+                        title,
+                        description: title,
+                        args,
+                    }, { turn: turnId, subagent: sessionSubagentForCall, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
                     const buffered = consumeBufferedSubagentMessages(state, call);
                     for (const bufferedMessage of buffered) {
                         const replay = mapClaudeLogMessageToSessionEnvelopesInternal(bufferedMessage, state);
                         envelopes.push(...replay.envelopes);
                     }
                     continue;
-                }
-
-                envelopes.push(createEnvelope('agent', {
-                    t: 'tool-call-start',
-                    call,
-                    name,
-                    title,
-                    description: title,
-                    args,
-                }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
-                const buffered = consumeBufferedSubagentMessages(state, call);
-                for (const bufferedMessage of buffered) {
-                    const replay = mapClaudeLogMessageToSessionEnvelopesInternal(bufferedMessage, state);
-                    envelopes.push(...replay.envelopes);
                 }
             }
         }
