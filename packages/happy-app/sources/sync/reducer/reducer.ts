@@ -791,7 +791,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             }
 
                             // Track TaskCreate/TaskUpdate for task list
-                            if ((message.tool.name === 'TaskCreate' || message.tool.name === 'TaskUpdate')) {
+                            if ((message.tool.name === 'TaskCreate' || message.tool.name === 'TaskUpdate' || message.tool.name === 'TaskGet')) {
                                 trackTaskFromToolInput(state, message.tool.name, message.tool.input, message.tool.createdAt);
                             }
                         }
@@ -875,7 +875,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         }
 
                         // Track TaskCreate/TaskUpdate for task list
-                        if (toolCall.name === 'TaskCreate' || toolCall.name === 'TaskUpdate') {
+                        if (toolCall.name === 'TaskCreate' || toolCall.name === 'TaskUpdate' || toolCall.name === 'TaskGet') {
                             trackTaskFromToolInput(state, toolCall.name, toolCall.input, toolCall.createdAt);
                         }
                     }
@@ -964,6 +964,27 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                                 }
                             }
                         }
+                    }
+
+                    // TaskGet result: parse task status and dependency info from result JSON.
+                    // Result shape: {"task":{"id":"1","status":"completed","blocks":["2"],"blockedBy":[]}}
+                    if (message.tool.name === 'TaskGet' && !c.is_error && typeof c.content === 'string') {
+                        try {
+                            const parsed = JSON.parse(c.content);
+                            if (parsed?.task?.id && typeof parsed.task.id === 'string') {
+                                const gtid = parsed.task.id;
+                                const gstatus = parsed.task.status as string | undefined;
+                                if (gstatus && ['pending', 'in_progress', 'completed'].includes(gstatus) && state.latestTasks && msg.createdAt >= state.latestTasks.timestamp) {
+                                    const existing = state.latestTasks.tasks;
+                                    const idx = existing.findIndex(t => t.id === gtid);
+                                    if (idx >= 0) {
+                                        const updated = [...existing];
+                                        updated[idx] = { ...updated[idx], status: gstatus as 'pending' | 'in_progress' | 'completed' };
+                                        state.latestTasks = { tasks: updated, timestamp: msg.createdAt };
+                                    }
+                                }
+                            }
+                        } catch {}
                     }
 
                     // Update permission data if provided by backend
@@ -1306,6 +1327,19 @@ function trackTaskFromToolInput(
         : typeof raw === 'number' ? String(raw)
         : '';
     if (!taskId) return;
+
+    // TaskGet is read-only — don't infer a status change.
+    if (toolName === 'TaskGet') {
+        // Still register the task if unseen, keeping its current status.
+        if (!state.latestTasks || createdAt > state.latestTasks.timestamp) {
+            const existing = state.latestTasks?.tasks ?? [];
+            const idx = existing.findIndex(t => t.id === taskId);
+            if (idx < 0) {
+                state.latestTasks = { tasks: [...existing, { id: taskId, content: taskId, status: 'pending' }], timestamp: createdAt };
+            }
+        }
+        return;
+    }
 
     const status = typeof input.status === 'string'
         && ['pending', 'in_progress', 'completed'].includes(input.status as string)
