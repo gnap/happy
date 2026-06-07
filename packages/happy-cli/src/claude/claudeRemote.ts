@@ -202,30 +202,31 @@ export async function claudeRemote(opts: {
                 updateThinking(false);
 
                 // Task-notification results come from background tools (Monitor,
-                // ScheduleWakeup). They are NOT actual turn completions — the SDK
-                // surfaces them as results but the real user message is still
-                // pending. Treating them as normal results sends a false turn-end
-                // to the server and causes irrelevant answers (the notification
-                // text) to be returned instead of the user's actual query.
-                if ((message as any).origin?.kind === 'task-notification') {
-                    logger.debug('[claudeRemote] Skipping task-notification result, waiting for next message');
-                    const next = await opts.nextMessage();
-                    if (next) {
-                        const latestGeneration = opts.getClaudeEnvVarsGeneration();
-                        if (latestGeneration !== currentGeneration) {
-                            logger.debug(`[claudeRemote] Profile env changed (gen ${currentGeneration} → ${latestGeneration}), returning to re-spawn with updated env`);
-                            opts.onEnvChanged?.({ message: next.message, mode: next.mode });
-                            messages.end();
-                            return;
-                        }
-                        currentGeneration = latestGeneration;
-                        mode = next.mode;
-                        updateThinking(true);
-                        messages.push({ type: 'user', message: { role: 'user', content: next.message } });
-                    } else {
-                        messages.end();
-                        return;
-                    }
+                // ScheduleWakeup). When they lack a terminal_reason they are
+                // interstitial SDK events, not actual turn completions — the real
+                // user message is still pending. Treating them as normal results
+                // sends a false turn-end and causes irrelevant answers. Once
+                // terminal_reason is set (e.g. "completed"), the SDK has finished
+                // the turn and we must NOT skip or the for-await loop hangs.
+                const isTaskNotification = (message as any).origin?.kind === 'task-notification';
+                const hasTerminalReason = typeof (message as any).terminal_reason === 'string'
+                    && (message as any).terminal_reason.length > 0;
+                if (isTaskNotification && !hasTerminalReason) {
+                    // Interstitial notification: a background task completed mid-turn.
+                    // Feed the result straight back to Claude so it continues autonomously
+                    // — do NOT block on nextMessage() waiting for App input here.
+                    logger.debug('[claudeRemote] Task-notification (interstitial) — feeding background result back to Claude');
+                    const taskResult = (message as SDKResultMessage).result || '';
+                    updateThinking(true);
+                    messages.push({
+                        type: 'user',
+                        message: {
+                            role: 'user',
+                            content: taskResult
+                                ? `Background task output:\n${taskResult}`
+                                : 'Continue.',
+                        },
+                    });
                     continue;
                 }
 
