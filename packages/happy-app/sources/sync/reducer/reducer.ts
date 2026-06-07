@@ -171,6 +171,8 @@ export type ReducerState = {
             id: string;
             content: string;
             status: 'pending' | 'in_progress' | 'completed';
+            blocks?: string[];
+            blockedBy?: string[];
         }>;
         timestamp: number;
     };
@@ -966,7 +968,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         }
                     }
 
-                    // TaskGet result: parse task status and dependency info from result JSON.
+                    // TaskGet result: parse status and dependency info.
                     // Result shape: {"task":{"id":"1","status":"completed","blocks":["2"],"blockedBy":[]}}
                     if (message.tool.name === 'TaskGet' && !c.is_error && typeof c.content === 'string') {
                         try {
@@ -974,14 +976,49 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             if (parsed?.task?.id && typeof parsed.task.id === 'string') {
                                 const gtid = parsed.task.id;
                                 const gstatus = parsed.task.status as string | undefined;
-                                if (gstatus && ['pending', 'in_progress', 'completed'].includes(gstatus) && state.latestTasks && msg.createdAt >= state.latestTasks.timestamp) {
+                                const gblocks = Array.isArray(parsed.task.blocks) ? (parsed.task.blocks as string[]) : undefined;
+                                const gblockedBy = Array.isArray(parsed.task.blockedBy) ? (parsed.task.blockedBy as string[]) : undefined;
+                                if (state.latestTasks && msg.createdAt >= state.latestTasks.timestamp) {
                                     const existing = state.latestTasks.tasks;
                                     const idx = existing.findIndex(t => t.id === gtid);
-                                    if (idx >= 0) {
-                                        const updated = [...existing];
-                                        updated[idx] = { ...updated[idx], status: gstatus as 'pending' | 'in_progress' | 'completed' };
-                                        state.latestTasks = { tasks: updated, timestamp: msg.createdAt };
+                                    const patch: Record<string, unknown> = {};
+                                    if (gstatus && ['pending', 'in_progress', 'completed'].includes(gstatus)) patch.status = gstatus;
+                                    if (gblocks) patch.blocks = gblocks;
+                                    if (gblockedBy) patch.blockedBy = gblockedBy;
+                                    if (Object.keys(patch).length > 0) {
+                                        if (idx >= 0) {
+                                            const updated = [...existing];
+                                            updated[idx] = { ...updated[idx], ...patch };
+                                            state.latestTasks = { tasks: updated, timestamp: msg.createdAt };
+                                        } else {
+                                            state.latestTasks = { tasks: [...existing, { id: gtid, content: gtid, status: (patch.status as any) ?? 'pending', ...patch }], timestamp: msg.createdAt };
+                                        }
                                     }
+                                }
+                            }
+                        } catch {}
+                    }
+
+                    // TaskList result: full-sync task list from the SDK.
+                    // Result shape: {"tasks":[{"id":"1","subject":"Fix","status":"in_progress","blockedBy":[]}, ...]}
+                    if (message.tool.name === 'TaskList' && !c.is_error && typeof c.content === 'string') {
+                        try {
+                            const parsed = JSON.parse(c.content);
+                            if (Array.isArray(parsed?.tasks) && state.latestTasks && msg.createdAt >= state.latestTasks.timestamp) {
+                                const incoming: Array<{ id: string; content: string; status: 'pending' | 'in_progress' | 'completed'; blocks?: string[]; blockedBy?: string[] }> = [];
+                                for (const t of parsed.tasks) {
+                                    if (t?.id && typeof t.id === 'string') {
+                                        incoming.push({
+                                            id: t.id,
+                                            content: t.subject || t.id,
+                                            status: ['pending', 'in_progress', 'completed'].includes(t.status) ? t.status : 'pending',
+                                            blocks: Array.isArray(t.blocks) ? t.blocks : undefined,
+                                            blockedBy: Array.isArray(t.blockedBy) ? t.blockedBy : undefined,
+                                        });
+                                    }
+                                }
+                                if (incoming.length > 0) {
+                                    state.latestTasks = { tasks: incoming, timestamp: msg.createdAt };
                                 }
                             }
                         } catch {}
