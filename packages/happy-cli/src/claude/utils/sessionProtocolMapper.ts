@@ -19,6 +19,10 @@ export type ClaudeSessionProtocolState = {
     taskCallBySubagent?: Map<string, string>; // session subagent cuid -> Task provider tool call ID
     bgTaskIdToCallId?: Map<string, string>; // background task_id → Bash call ID
     lastTaskCreateCallId?: string; // most recent TaskCreate call ID for Agent remapping
+    /** SDK task ID ("1", "2", …) → provider tool call ID (TaskUpdate/TaskGet remapping). */
+    sdkTaskIdToCallId?: Map<string, string>;
+    /** Provider call IDs that are TaskCreate calls (for result parsing in user handler). */
+    taskCreateCallIds?: Set<string>;
     /** Number of upcoming non-sidechain user text messages to suppress (e.g. inbox turn prompts). */
     suppressNextUserTextCount?: number;
 };
@@ -142,6 +146,36 @@ function ensureBgTaskIdToCallId(state: ClaudeSessionProtocolState): Map<string, 
         state.bgTaskIdToCallId = new Map<string, string>();
     }
     return state.bgTaskIdToCallId;
+}
+
+function ensureSdkTaskIdToCallId(state: ClaudeSessionProtocolState): Map<string, string> {
+    if (!state.sdkTaskIdToCallId) {
+        state.sdkTaskIdToCallId = new Map<string, string>();
+    }
+    return state.sdkTaskIdToCallId;
+}
+
+function ensureTaskCreateCallIds(state: ClaudeSessionProtocolState): Set<string> {
+    if (!state.taskCreateCallIds) {
+        state.taskCreateCallIds = new Set<string>();
+    }
+    return state.taskCreateCallIds;
+}
+
+function parseTaskCreateResult(result: unknown): { id: string; subject: string } | null {
+    if (typeof result !== 'string') return null;
+    try {
+        const parsed = JSON.parse(result);
+        if (parsed?.task?.id && typeof parsed.task.id === 'string') {
+            return { id: parsed.task.id, subject: parsed.task.subject || '' };
+        }
+    } catch {}
+    // Fallback: interactive mode text "Task #N created successfully: ..."
+    const m = result.match(/^Task #(\d+) created(?: successfully)?:\s*(.*)/i);
+    if (m) {
+        return { id: m[1], subject: (m[2] || '').trim() };
+    }
+    return null;
 }
 
 function extractBackgroundTaskId(block: Record<string, unknown>, message: RawJSONLines): string | undefined {
@@ -421,6 +455,8 @@ function clearSubagentTracking(state: ClaudeSessionProtocolState): void {
     getActiveSubagents(state).clear();
     getTaskCallBySubagent(state).clear();
     if (state.bgTaskIdToCallId) state.bgTaskIdToCallId.clear();
+    if (state.sdkTaskIdToCallId) state.sdkTaskIdToCallId.clear();
+    if (state.taskCreateCallIds) state.taskCreateCallIds.clear();
     state.lastTaskCreateCallId = undefined;
 }
 
@@ -571,9 +607,11 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                     continue;
                 }
 
-                // Track most recent TaskCreate for Agent remapping
+                // Track most recent TaskCreate for Agent remapping, and register
+                // the call ID so we can parse its result (SDK task ID) later.
                 if (name === 'TaskCreate') {
                     state.lastTaskCreateCallId = call;
+                    ensureTaskCreateCallIds(state).add(call);
                 }
 
                 // TaskOutput/TaskStop: link to original Bash card via bgTaskId
@@ -586,6 +624,20 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                         }
                     }
                 }
+
+                // TaskUpdate / TaskGet: remap to the original TaskCreate card via SDK task ID.
+                if (name === 'TaskUpdate' || name === 'TaskGet') {
+                    const inputTaskId = (block.input as Record<string, unknown>)?.taskId as string | undefined;
+                    if (inputTaskId && state.sdkTaskIdToCallId) {
+                        const taskCreateCallId = state.sdkTaskIdToCallId.get(inputTaskId);
+                        if (taskCreateCallId) {
+                            getTaskCallBySubagent(state).set(sessionSubagentForCall, taskCreateCallId);
+                        }
+                    }
+                }
+
+                // TaskGet / TaskList: read-only management ops — absorb like TaskUpdate.
+                // Emit tool-call-start so tool-call-end can link; App will hide the card.
 
                 // Agent: setup subagent tracking so child messages link via taskCall.
                 // Hide the card only when a TaskCreate exists to remap children to.
@@ -694,6 +746,15 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                 const bgTaskId = extractBackgroundTaskId(block, message);
                 if (bgTaskId) {
                     ensureBgTaskIdToCallId(state).set(bgTaskId, block.tool_use_id);
+                }
+                // Parse TaskCreate results to extract the SDK-assigned task ID
+                // (e.g. {"task":{"id":"1","subject":"Fix bug"}} → sdkTaskIdToCallId).
+                if (state.taskCreateCallIds?.has(block.tool_use_id)) {
+                    const taskInfo = parseTaskCreateResult(block.content);
+                    if (taskInfo) {
+                        ensureSdkTaskIdToCallId(state).set(taskInfo.id, block.tool_use_id);
+                        state.taskCreateCallIds?.delete(block.tool_use_id);
+                    }
                 }
                 const sessionSubagentForToolResult = getSessionSubagentIdForProviderSubagent(state, block.tool_use_id);
                 if (!isChain) {

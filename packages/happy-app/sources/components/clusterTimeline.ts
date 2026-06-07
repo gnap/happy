@@ -300,8 +300,18 @@ function clusterSegment(
             // sessionProtocolMapper now includes result in tool-call-end).
             let createTid = '';
             if (typeof m.tool?.result === 'string') {
-                const m2 = (m.tool.result as string).match(/^Task #(\d+) created/i);
-                if (m2) createTid = m2[1];
+                // Try SDK JSON format first: {"task":{"id":"1","subject":"..."}}
+                try {
+                    const parsed = JSON.parse(m.tool.result);
+                    if (parsed?.task?.id && typeof parsed.task.id === 'string') {
+                        createTid = parsed.task.id;
+                    }
+                } catch {}
+                // Fallback: interactive mode text "Task #N created ..."
+                if (!createTid) {
+                    const m2 = (m.tool.result as string).match(/^Task #(\d+) created/i);
+                    if (m2) createTid = m2[1];
+                }
             }
             if (!createTid) createTid = String(input.taskId || input.task_id || input.id || '');
             if (!createTid && taskContentMap && taskContentMap.size > 0) {

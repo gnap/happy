@@ -928,22 +928,37 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         }
                     }
 
-                    // TaskCreate result: parse task ID and subject from result text
+                    // TaskCreate result: parse task ID and subject from result
                     if (message.tool.name === 'TaskCreate' && !c.is_error && typeof c.content === 'string') {
-                        const m = c.content.match(/^Task #(\d+) created successfully:\s*(.+)/);
-                        if (m) {
-                            const taskId = m[1];
-                            const subject = m[2];
+                        let taskId: string | undefined;
+                        let subject: string | undefined;
+                        // Try SDK JSON format first: {"task":{"id":"1","subject":"..."}}
+                        try {
+                            const parsed = JSON.parse(c.content);
+                            if (parsed?.task?.id && typeof parsed.task.id === 'string') {
+                                taskId = parsed.task.id;
+                                subject = parsed.task.subject || '';
+                            }
+                        } catch {}
+                        // Fallback: interactive mode text "Task #N created successfully: ..."
+                        if (!taskId) {
+                            const m = c.content.match(/^Task #(\d+) created successfully:\s*(.+)/);
+                            if (m) {
+                                taskId = m[1];
+                                subject = m[2];
+                            }
+                        }
+                        if (taskId) {
                             if (!state.latestTasks || msg.createdAt > state.latestTasks.timestamp) {
                                 const existing = state.latestTasks?.tasks ?? [];
                                 const idx = existing.findIndex(t => t.id === taskId);
                                 if (idx >= 0) {
                                     const updated = [...existing];
-                                    updated[idx] = { ...updated[idx], content: subject };
+                                    updated[idx] = { ...updated[idx], content: subject || '' };
                                     state.latestTasks = { tasks: updated, timestamp: msg.createdAt };
                                 } else {
                                     state.latestTasks = {
-                                        tasks: [...existing, { id: taskId, content: subject, status: 'pending' }],
+                                        tasks: [...existing, { id: taskId, content: subject || '', status: 'pending' }],
                                         timestamp: msg.createdAt,
                                     };
                                 }

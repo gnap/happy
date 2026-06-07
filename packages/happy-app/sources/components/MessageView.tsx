@@ -21,7 +21,7 @@ export const MessageView = (props: {
 }) => {
   if (props.message.kind === 'tool-call') {
     const name = (props.message as any).tool?.name;
-    if (name === 'TaskCreate' || name === 'TaskUpdate') {
+    if (name === 'TaskCreate' || name === 'TaskUpdate' || name === 'TaskGet' || name === 'TaskList') {
       return null;
     }
   }
