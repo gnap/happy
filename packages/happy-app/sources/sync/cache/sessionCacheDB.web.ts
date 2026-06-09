@@ -32,6 +32,11 @@ export interface CachedMessageRow {
     messageJson: string;
 }
 
+export interface CachedSessionListRow {
+    sessionsJson: string;
+    cachedAt: number;
+}
+
 export interface ISessionCacheDB {
     initialize(): Promise<void>;
     getSessionCache(sessionId: string): Promise<CachedSessionRow | null>;
@@ -39,6 +44,9 @@ export interface ISessionCacheDB {
     saveSessionCache(row: CachedSessionRow, messages: Message[]): Promise<void>;
     clearSessionCache(sessionId: string): Promise<void>;
     clearAllCaches(): Promise<void>;
+    getSessionsListCache(): Promise<CachedSessionListRow | null>;
+    saveSessionsListCache(row: CachedSessionListRow): Promise<void>;
+    clearSessionsListCache(): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -48,6 +56,7 @@ export interface ISessionCacheDB {
 export class MemorySessionCacheDB implements ISessionCacheDB {
     private sessions = new Map<string, CachedSessionRow>();
     private messages = new Map<string, Message[]>();
+    private sessionsList: CachedSessionListRow | null = null;
 
     async initialize(): Promise<void> {}
 
@@ -72,6 +81,19 @@ export class MemorySessionCacheDB implements ISessionCacheDB {
     async clearAllCaches(): Promise<void> {
         this.sessions.clear();
         this.messages.clear();
+        this.sessionsList = null;
+    }
+
+    async getSessionsListCache(): Promise<CachedSessionListRow | null> {
+        return this.sessionsList;
+    }
+
+    async saveSessionsListCache(row: CachedSessionListRow): Promise<void> {
+        this.sessionsList = row;
+    }
+
+    async clearSessionsListCache(): Promise<void> {
+        this.sessionsList = null;
     }
 }
 
@@ -80,9 +102,10 @@ export class MemorySessionCacheDB implements ISessionCacheDB {
 // ---------------------------------------------------------------------------
 
 const IDB_NAME = 'happy_message_cache';
-const IDB_VERSION = 2;
+const IDB_VERSION = 3;
 const STORE_SESSION_CACHE = 'session_cache';
 const STORE_SESSION_MESSAGES = 'session_messages';
+const STORE_SESSIONS_LIST = 'sessions_list';
 
 export class IndexedDBSessionCacheDB implements ISessionCacheDB {
     private db: IDBDatabase | null = null;
@@ -110,6 +133,9 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
                 }
                 if (!db.objectStoreNames.contains(STORE_SESSION_MESSAGES)) {
                     db.createObjectStore(STORE_SESSION_MESSAGES, { keyPath: 'sessionId' });
+                }
+                if (!db.objectStoreNames.contains(STORE_SESSIONS_LIST)) {
+                    db.createObjectStore(STORE_SESSIONS_LIST, { keyPath: 'id' });
                 }
             };
         });
@@ -214,12 +240,48 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
         });
     }
 
+    async getSessionsListCache(): Promise<CachedSessionListRow | null> {
+        await this.initialize();
+        return new Promise((resolve, reject) => {
+            const tx = this.db!.transaction([STORE_SESSIONS_LIST], 'readonly');
+            const req = tx.objectStore(STORE_SESSIONS_LIST).get(1);
+            req.onsuccess = () => {
+                const row = req.result as { id: number; sessionsJson: string; cachedAt: number } | undefined;
+                if (!row) { resolve(null); return; }
+                resolve({ sessionsJson: row.sessionsJson, cachedAt: row.cachedAt });
+            };
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async saveSessionsListCache(row: CachedSessionListRow): Promise<void> {
+        await this.initialize();
+        return new Promise((resolve, reject) => {
+            const tx = this.db!.transaction([STORE_SESSIONS_LIST], 'readwrite');
+            tx.objectStore(STORE_SESSIONS_LIST).put({ id: 1, ...row });
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    async clearSessionsListCache(): Promise<void> {
+        await this.initialize();
+        return new Promise((resolve, reject) => {
+            const tx = this.db!.transaction([STORE_SESSIONS_LIST], 'readwrite');
+            tx.objectStore(STORE_SESSIONS_LIST).delete(1);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
     async clearAllCaches(): Promise<void> {
         await this.initialize();
         return new Promise((resolve, reject) => {
             const { cache, messages } = this.getStore('readwrite');
             cache.clear();
             messages.clear();
+            const txSessionList = this.db!.transaction([STORE_SESSIONS_LIST], 'readwrite');
+            txSessionList.objectStore(STORE_SESSIONS_LIST).clear();
             const tx = cache.transaction;
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);

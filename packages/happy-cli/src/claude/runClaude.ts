@@ -501,6 +501,9 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                     }
                     logger.debug(`[loop] Profile cleared (profileId: null) → reset to daemon baseline: ${Object.keys(daemonClaudeEnvVars).join(', ') || '(none)'}`);
                 }
+                // Sync profileId to session metadata so the App can read it on session list / load
+                session.updateMetadata((m) => ({ ...m, profileId: currentProfileId }))
+                    .catch((err) => logger.debug('[loop] Failed to persist profileId to session metadata', err));
             }
         } else {
             logger.debug(`[loop] User message received with no profileId override, using current: ${currentProfileId ?? '(none)'}`);

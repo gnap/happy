@@ -160,6 +160,8 @@ interface StorageState {
     clearSessionMaxMode: (sessionId: string) => void;
     updateSessionProfileId: (sessionId: string, profileId: string) => void;
     clearSessionProfileId: (sessionId: string) => void;
+    /** Clear in-memory profileId override at turn end so remote metadata wins next resolution. MMKV is preserved for cold-start fallback. */
+    releaseSessionProfileId: (sessionId: string) => void;
     // Artifact methods
     applyArtifacts: (artifacts: DecryptedArtifact[]) => void;
     addArtifact: (artifact: DecryptedArtifact) => void;
@@ -511,7 +513,8 @@ export const storage = create<StorageState>()((set, get) => {
                                 : session.maxMode ?? undefined;
                 const existingProfileId = state.sessions[session.id]?.profileId;
                 const savedProfileId = savedProfileIds[session.id];
-                const resolvedProfileId = existingProfileId ?? savedProfileId ?? session.profileId ?? undefined;
+                const metadataProfileId = session.metadata?.profileId ?? undefined;
+                const resolvedProfileId = existingProfileId ?? metadataProfileId ?? savedProfileId ?? session.profileId ?? undefined;
                 // todos: derived by replay (reducer) when messages load; not synced to server. Preserve here so
                 // list fetches do not overwrite; replay will update session.todos when that session's messages load.
                 const existingTodos = state.sessions[session.id]?.todos;
@@ -1207,36 +1210,51 @@ export const storage = create<StorageState>()((set, get) => {
         }),
         updateSessionProfileId: (sessionId: string, profileId: string) => set((state) => {
             const session = state.sessions[sessionId];
-            if (!session) return state;
 
-            const updatedSessions = {
-                ...state.sessions,
-                [sessionId]: {
-                    ...session,
-                    profileId,
-                },
-            };
-            const allProfileIds: Record<string, string> = {};
-            Object.entries(updatedSessions).forEach(([id, sess]) => {
-                if (sess.profileId) {
-                    allProfileIds[id] = sess.profileId;
-                }
-            });
-            saveSessionProfileIds(allProfileIds);
+            // Always persist to MMKV so applySessions() can resolve the profileId
+            // from savedProfileIds fallback when the session arrives later (e.g.
+            // new session spawn where the session entry does not exist yet).
+            const profileIds = loadSessionProfileIds();
+            profileIds[sessionId] = profileId;
+            saveSessionProfileIds(profileIds);
+
+            if (!session) return state;
 
             return {
                 ...state,
-                sessions: updatedSessions,
+                sessions: {
+                    ...state.sessions,
+                    [sessionId]: {
+                        ...session,
+                        profileId,
+                    },
+                },
             };
         }),
         clearSessionProfileId: (sessionId: string) => set((state) => {
             const session = state.sessions[sessionId];
-            if (!session) return state;
 
+            // Always clear MMKV so it doesn't leak a stale entry.
             const profileIds = loadSessionProfileIds();
             delete profileIds[sessionId];
             saveSessionProfileIds(profileIds);
 
+            if (!session) return state;
+
+            return {
+                ...state,
+                sessions: {
+                    ...state.sessions,
+                    [sessionId]: { ...session, profileId: undefined },
+                },
+            };
+        }),
+        releaseSessionProfileId: (sessionId: string) => set((state) => {
+            const session = state.sessions[sessionId];
+            if (!session) return state;
+
+            // Only clear in-memory state — keep MMKV for cold-start fallback.
+            // remote (metadata.profileId) will win on next applySessions resolution.
             return {
                 ...state,
                 sessions: {

@@ -44,6 +44,7 @@ export const MetadataSchema = z.object({
     flavor: z.string().nullish(), // Session flavor/variant identifier
     sandbox: z.any().nullish(), // Sandbox config metadata from CLI (or null when disabled)
     dangerouslySkipPermissions: z.boolean().nullish(), // Claude --dangerously-skip-permissions mode (or null when unknown)
+    profileId: z.string().nullish(), // Active environment profile ID, synced from CLI
 });
 
 export type Metadata = z.infer<typeof MetadataSchema>;

@@ -280,6 +280,8 @@ export type Metadata = {
   archivedBy?: string,
   archiveReason?: string,
   flavor?: string
+  /** Active environment profile ID (synced from App message meta, persisted to session metadata). */
+  profileId?: string | null
   sandbox?: SandboxConfig | null
   dangerouslySkipPermissions?: boolean | null
 };
@@ -353,6 +355,7 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
     hostPid,
     flavor,
     sandbox,
+    profileId,
     dangerouslySkipPermissions,
   } = metadata;
 
@@ -364,6 +367,7 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
     ...(currentOperatingModeCode !== undefined ? { currentOperatingModeCode } : {}),
     ...(thoughtLevels !== undefined ? { thoughtLevels } : {}),
     ...(currentThoughtLevelCode !== undefined ? { currentThoughtLevelCode } : {}),
+    ...(profileId !== undefined ? { profileId } : {}),
     path,
     host,
     ...(version !== undefined ? { version } : {}),

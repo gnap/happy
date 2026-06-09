@@ -458,6 +458,7 @@ export async function runCursor(opts: {
   let currentModel: string | undefined = undefined;
   let currentMaxMode: boolean = opts.maxMode ?? true;
   let currentProfileEnv: Record<string, string> | undefined = undefined;
+  let currentProfileId: string | null = null;
   let a2aTurnQueued = false;
   const inboxMcpScopeStack = new A2AInboxMcpScopeStack();
   let a2aInboxBackoffStreak = 0;
@@ -533,6 +534,15 @@ export async function runCursor(opts: {
     if (message.meta?.maxMode !== undefined) {
       currentMaxMode = message.meta.maxMode;
       logger.debug(`[Cursor] Max mode: ${currentMaxMode}`);
+    }
+    const messageProfileId =
+      message.meta && Object.prototype.hasOwnProperty.call(message.meta, 'profileId')
+        ? (message.meta as { profileId?: string | null }).profileId ?? null
+        : undefined;
+    if (messageProfileId !== undefined && messageProfileId !== currentProfileId) {
+      currentProfileId = messageProfileId;
+      session.updateMetadata((m) => ({ ...m, profileId: currentProfileId }))
+        .catch((err) => logger.debug('[Cursor] Failed to persist profileId to session metadata', err));
     }
     if (message.meta?.environmentVariables && Object.keys(message.meta.environmentVariables).length > 0) {
       currentProfileEnv = expandEnvironmentVariables(message.meta.environmentVariables, process.env);

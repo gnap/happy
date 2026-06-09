@@ -43,6 +43,7 @@ import { FeedItem } from './feedTypes';
 import { UserProfile } from './friendTypes';
 import { resolveMessageModeMeta, resolveMessageProfileEnv } from './messageMeta';
 import { loadMessageCache, saveMessageCache, clearMessageCache, clearAllMessageCaches, preloadSessionCacheDB, getCachedLastSeq } from './cache/messageCache';
+import { preloadSessionsListCache, loadSessionsListCache, saveSessionsListCache, clearSessionsListCache } from './cache/sessionsListCache';
 import { olderAfterSeq } from './cacheSegment';
 import { overrideSessionCacheDB, IndexedDBSessionCacheDB } from './cache/sessionCacheDB';
 import {
@@ -393,6 +394,7 @@ class Sync {
         // Preload session cache DB (expo-sqlite) in background so opening a session doesn't block on first use.
         // Must not await here or init never completes and UI stays black (setInitState never runs).
         void preloadSessionCacheDB();
+        void preloadSessionsListCache();
 
         // Subscribe to updates
         this.subscribeToUpdates();
@@ -405,6 +407,17 @@ class Sync {
             } else {
                 tracking.optIn();
             }
+        }
+
+        // Load cached session list before network fetch so UI shows instantly
+        try {
+            const cachedSessions = await loadSessionsListCache();
+            if (cachedSessions && cachedSessions.length > 0) {
+                log.log(`📦 sessionsListCache: applying ${cachedSessions.length} cached sessions`);
+                this.applySessions(cachedSessions);
+            }
+        } catch (e) {
+            log.log(`📦 sessionsListCache: error applying cached list: ${e}`);
         }
 
         // Invalidate sync
@@ -1093,6 +1106,7 @@ class Sync {
             // Apply to storage
             this.applySessions(decryptedSessions);
             log.log(`📥 fetchSessions completed - processed ${decryptedSessions.length} sessions`);
+            void saveSessionsListCache(decryptedSessions);
             this._loggedMissingSessionForSid.clear();
 
             // Only eagerly catch up messages for active sessions (agent is running).
@@ -3026,7 +3040,9 @@ class Sync {
             if (wasThinking) {
                 storage.getState().clearSessionModelMode(sessionId);
                 storage.getState().clearSessionMaxMode(sessionId);
-                // profileId is session-scoped (MMKV), not per-turn — keep until user changes profile
+                // profileId is session-scoped: keep local override until next fetchSessions
+                // refreshes metadata.profileId from remote.  Resolution order ensures
+                // metadata beats stale MMKV on the next applySessions pass.
             }
         }
 
