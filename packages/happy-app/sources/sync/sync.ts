@@ -3040,9 +3040,10 @@ class Sync {
             if (wasThinking) {
                 storage.getState().clearSessionModelMode(sessionId);
                 storage.getState().clearSessionMaxMode(sessionId);
-                // profileId is session-scoped: keep local override until next fetchSessions
-                // refreshes metadata.profileId from remote.  Resolution order ensures
-                // metadata beats stale MMKV on the next applySessions pass.
+                // Release local profile override so remote metadata wins next turn,
+                // consistent with model/maxMode. CLI now syncs profileId to metadata
+                // via updateMetadata on every message, so the remote value is current.
+                storage.getState().releaseSessionProfileId(sessionId);
             }
         }
 
