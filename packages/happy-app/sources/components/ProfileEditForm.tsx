@@ -134,13 +134,13 @@ export function ProfileEditForm({
 
 const formStyles = StyleSheet.create((theme) => ({
     scrollView: {
-        flex: 1,
+        maxHeight: '100%',
     },
     scrollContent: {
         padding: theme.margins.md,
+        flexGrow: 1,
     },
     formContainer: {
-        backgroundColor: theme.colors.surface,
         borderRadius: theme.borderRadius.xl,
         padding: theme.margins.md,
         width: '100%',
