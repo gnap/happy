@@ -1302,9 +1302,15 @@ export async function runCursor(opts: {
               break;
 
             case 'tool_call_end':
-              // Sidechain tool calls — only send session envelope with subagent
+              // Sidechain tool calls (sub-agent Task) — include result so App shows summary
               if (msg.subagentId) {
-                session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'tool-call-end', call: msg.callId }, { turn: turnId, subagent: msg.subagentId }));
+                const sidechainResult: string | Record<string, unknown> | undefined =
+                  msg.result != null ? (msg.result as string | Record<string, unknown>) : undefined;
+                session.sendSessionProtocolMessage(createEnvelope('agent', {
+                  t: 'tool-call-end',
+                  call: msg.callId,
+                  ...(sidechainResult !== undefined ? { result: sidechainResult } : {}),
+                }, { turn: turnId, subagent: msg.subagentId }));
                 break;
               }
               if (isA2AInboxTurn && msg.toolName === 'Task') {
