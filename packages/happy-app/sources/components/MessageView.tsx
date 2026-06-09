@@ -128,6 +128,16 @@ function UserTextBlock(props: {
   );
 }
 
+/** Platform/infrastructure notices — meaningful but not conversational. Rendered as muted text bars. */
+function isInfrastructureNotice(text: string): boolean {
+  if (!text || typeof text !== 'string') return false;
+  const t = text.trim();
+  // Compaction / context-window notifications from the model provider
+  if (/^Compacted Tip:/.test(t)) return true;
+  if (/you have access to.*\d+M.*context/i.test(t)) return true;
+  return false;
+}
+
 /** Hide only known CLI/system placeholders that should never be shown as bubbles (e.g. empty tool result). */
 function isHiddenSystemToolResultText(text: string): boolean {
   if (!text || typeof text !== 'string') return true;
@@ -154,6 +164,16 @@ function AgentTextBlock(props: {
   }
   if (isHiddenSystemToolResultText(props.message.text)) {
     return null;
+  }
+
+  // Infrastructure/compaction messages: render as muted notification bar
+  // instead of a full chat bubble.
+  if (isInfrastructureNotice(props.message.text)) {
+    return (
+      <View style={styles.agentEventContainer}>
+        <Text style={styles.agentEventText}>{props.message.text}</Text>
+      </View>
+    );
   }
 
   return (
