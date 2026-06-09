@@ -775,6 +775,21 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                 if (!isChain) {
                     if (getHiddenParentToolCalls(state).has(block.tool_use_id)) {
                         if (sessionSubagentForToolResult) {
+                            // Sub-agent output lives in the tool_result content.
+                            // Extract readable result so the App's sidechain shows the summary.
+                            const subagentResult = typeof block.content === 'string'
+                                ? block.content
+                                : Array.isArray(block.content)
+                                    ? block.content.map((c: unknown) =>
+                                        typeof c === 'object' && c !== null && 'text' in (c as object)
+                                            ? (c as { text: string }).text : '').join('\n').trim()
+                                    : undefined;
+                            envelopes.push(createEnvelope('agent', {
+                                t: 'tool-call-end',
+                                call: block.tool_use_id,
+                                ...(subagentResult ? { result: subagentResult } : {}),
+                            }, { turn: turnId, subagent: sessionSubagentForToolResult,
+                                ...(taskCallId ? { taskCall: taskCallId } : {}) }));
                             maybeEmitSubagentStop(state, turnId, sessionSubagentForToolResult, envelopes);
                         }
                         getHiddenParentToolCalls(state).delete(block.tool_use_id);
