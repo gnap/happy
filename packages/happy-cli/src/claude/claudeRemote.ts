@@ -222,9 +222,7 @@ export async function claudeRemote(opts: {
                         type: 'user',
                         message: {
                             role: 'user',
-                            content: taskResult
-                                ? `Background task output:\n${taskResult}`
-                                : 'Continue.',
+                            content: taskResult || 'Continue.',
                         },
                     });
                     continue;
