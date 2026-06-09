@@ -1,61 +1,37 @@
 import React from 'react';
 import { View, Text, TextInput, Pressable } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useUnistyles } from 'react-native-unistyles';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
 import { useEnvironmentVariables } from '@/hooks/useEnvironmentVariables';
 
 export interface EnvironmentVariableCardProps {
     variable: { name: string; value: string };
     machineId: string | null;
-    expectedValue?: string;  // From profile documentation
-    description?: string;    // Variable description
-    isSecret?: boolean;      // Whether this is a secret (never query remote)
+    expectedValue?: string;
+    description?: string;
+    isSecret?: boolean;
     onUpdate: (newValue: string) => void;
     onDelete: () => void;
     onDuplicate: () => void;
 }
 
-/**
- * Parse environment variable value to determine configuration
- */
 function parseVariableValue(value: string): {
     useRemoteVariable: boolean;
     remoteVariableName: string;
     defaultValue: string;
 } {
-    // Match: ${VARIABLE_NAME:-default_value}
     const matchWithFallback = value.match(/^\$\{([A-Z_][A-Z0-9_]*):-(.*)\}$/);
     if (matchWithFallback) {
-        return {
-            useRemoteVariable: true,
-            remoteVariableName: matchWithFallback[1],
-            defaultValue: matchWithFallback[2]
-        };
+        return { useRemoteVariable: true, remoteVariableName: matchWithFallback[1], defaultValue: matchWithFallback[2] };
     }
-
-    // Match: ${VARIABLE_NAME} (no fallback)
     const matchNoFallback = value.match(/^\$\{([A-Z_][A-Z0-9_]*)\}$/);
     if (matchNoFallback) {
-        return {
-            useRemoteVariable: true,
-            remoteVariableName: matchNoFallback[1],
-            defaultValue: ''
-        };
+        return { useRemoteVariable: true, remoteVariableName: matchNoFallback[1], defaultValue: '' };
     }
-
-    // Literal value (no template)
-    return {
-        useRemoteVariable: false,
-        remoteVariableName: '',
-        defaultValue: value
-    };
+    return { useRemoteVariable: false, remoteVariableName: '', defaultValue: value };
 }
 
-/**
- * Single environment variable card component
- * Matches profile list pattern from index.tsx:1163-1217
- */
 export function EnvironmentVariableCard({
     variable,
     machineId,
@@ -68,269 +44,221 @@ export function EnvironmentVariableCard({
 }: EnvironmentVariableCardProps) {
     const { theme } = useUnistyles();
 
-    // Parse current value
     const parsed = parseVariableValue(variable.value);
     const [useRemoteVariable, setUseRemoteVariable] = React.useState(parsed.useRemoteVariable);
     const [remoteVariableName, setRemoteVariableName] = React.useState(parsed.remoteVariableName);
     const [defaultValue, setDefaultValue] = React.useState(parsed.defaultValue);
 
-    // Query remote machine for variable value (only if checkbox enabled and not secret)
     const shouldQueryRemote = useRemoteVariable && !isSecret && remoteVariableName.trim() !== '';
     const { variables: remoteValues } = useEnvironmentVariables(
         machineId,
         shouldQueryRemote ? [remoteVariableName] : []
     );
-
     const remoteValue = remoteValues[remoteVariableName];
 
-    // Update parent when local state changes
     React.useEffect(() => {
         const newValue = useRemoteVariable && remoteVariableName.trim() !== ''
             ? `\${${remoteVariableName}${defaultValue ? `:-${defaultValue}` : ''}}`
             : defaultValue;
-
         if (newValue !== variable.value) {
             onUpdate(newValue);
         }
     }, [useRemoteVariable, remoteVariableName, defaultValue, variable.value, onUpdate]);
 
-    // Determine status
-    const showRemoteDiffersWarning = remoteValue !== null && expectedValue && remoteValue !== expectedValue;
-    const showDefaultOverrideWarning = expectedValue && defaultValue !== expectedValue;
+    const remoteStatus = !useRemoteVariable || isSecret || !machineId || !remoteVariableName.trim()
+        ? null
+        : remoteValue === undefined ? 'checking'
+        : remoteValue === null ? 'not-found'
+        : 'found';
 
     return (
-        <View style={{
-            backgroundColor: theme.colors.input.background,
-            borderRadius: theme.borderRadius.xl,
-            padding: theme.margins.lg,
-            marginBottom: theme.margins.md
-        }}>
-            {/* Header row with variable name and action buttons */}
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                <Text style={{
-                    fontSize: 12,
-                    fontWeight: '600',
-                    color: theme.colors.text,
-                    ...Typography.default('semiBold')
-                }}>
-                    {variable.name}
+        <View style={cardStyles.card}>
+            {/* Header: name + actions */}
+            <View style={cardStyles.header}>
+                <View style={cardStyles.headerLeft}>
                     {isSecret && (
-                        <Ionicons name="lock-closed" size={theme.iconSize.small} color={theme.colors.textDestructive} style={{ marginLeft: 4 }} />
+                        <Ionicons name="lock-closed" size={10} color={theme.colors.textDestructive} style={{ marginRight: 4 }} />
                     )}
-                </Text>
-
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: theme.margins.md }}>
-                    <Pressable
-                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                        onPress={onDelete}
-                    >
-                        <Ionicons name="trash-outline" size={theme.iconSize.large} color={theme.colors.deleteAction} />
+                    <Text style={cardStyles.varName} numberOfLines={1}>
+                        {variable.name}
+                    </Text>
+                </View>
+                <View style={cardStyles.actions}>
+                    <Pressable hitSlop={10} onPress={onDuplicate}>
+                        <Ionicons name="copy-outline" size={16} color={theme.colors.button.secondary.tint} />
                     </Pressable>
-                    <Pressable
-                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                        onPress={onDuplicate}
-                    >
-                        <Ionicons name="copy-outline" size={theme.iconSize.large} color={theme.colors.button.secondary.tint} />
+                    <Pressable hitSlop={10} onPress={onDelete} style={{ marginLeft: 12 }}>
+                        <Ionicons name="trash-outline" size={16} color={theme.colors.deleteAction} />
                     </Pressable>
                 </View>
             </View>
 
-            {/* Description */}
-            {description && (
-                <Text style={{
-                    fontSize: 11,
-                    color: theme.colors.textSecondary,
-                    marginBottom: 8,
-                    ...Typography.default()
-                }}>
-                    {description}
-                </Text>
-            )}
+            {description ? (
+                <Text style={cardStyles.description} numberOfLines={2}>{description}</Text>
+            ) : null}
 
-            {/* Checkbox: First try copying variable from remote machine */}
-            <Pressable
-                style={{
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    marginBottom: 8,
-                }}
-                onPress={() => setUseRemoteVariable(!useRemoteVariable)}
-            >
-                <View style={{
-                    width: 20,
-                    height: 20,
-                    borderRadius: theme.borderRadius.sm,
-                    borderWidth: 2,
-                    borderColor: useRemoteVariable ? theme.colors.button.primary.background : theme.colors.textSecondary,
-                    backgroundColor: useRemoteVariable ? theme.colors.button.primary.background : 'transparent',
-                    justifyContent: 'center',
-                    alignItems: 'center',
-                    marginRight: theme.margins.sm,
-                }}>
-                    {useRemoteVariable && (
-                        <Ionicons name="checkmark" size={theme.iconSize.small} color={theme.colors.button.primary.tint} />
-                    )}
+            {/* Value row: checkbox + input */}
+            <View style={cardStyles.valueRow}>
+                <Text style={cardStyles.label}>Value</Text>
+                <TextInput
+                    style={cardStyles.input}
+                    placeholder={expectedValue || 'Value'}
+                    placeholderTextColor={theme.colors.input.placeholder}
+                    value={defaultValue}
+                    onChangeText={setDefaultValue}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    secureTextEntry={isSecret}
+                />
+            </View>
+
+            {/* Remote variable toggle + input (collapsed by default unless enabled) */}
+            <Pressable style={cardStyles.checkRow} onPress={() => setUseRemoteVariable(!useRemoteVariable)}>
+                <View style={[cardStyles.checkbox, useRemoteVariable && cardStyles.checkboxActive]}>
+                    {useRemoteVariable && <Ionicons name="checkmark" size={10} color={theme.colors.button.primary.tint} />}
                 </View>
-                <Text style={{
-                    fontSize: 11,
-                    color: theme.colors.textSecondary,
-                    ...Typography.default()
-                }}>
-                    First try copying variable from remote machine:
-                </Text>
+                <Text style={cardStyles.checkLabel}>Copy from remote: ${'{VARIABLE}'}</Text>
             </Pressable>
 
-            {/* Remote variable name input */}
-            <TextInput
-                style={{
-                    backgroundColor: theme.colors.surface,
-                    borderRadius: theme.borderRadius.lg,
-                    padding: theme.margins.sm,
-                    fontSize: 14,
-                    color: theme.colors.text,
-                    marginBottom: 4,
-                    borderWidth: 1,
-                    borderColor: theme.colors.textSecondary,
-                    opacity: useRemoteVariable ? 1 : 0.5,
-                }}
-                placeholder="Variable name (e.g., Z_AI_MODEL)"
-                placeholderTextColor={theme.colors.input.placeholder}
-                value={remoteVariableName}
-                onChangeText={setRemoteVariableName}
-                editable={useRemoteVariable}
-                autoCapitalize="none"
-                autoCorrect={false}
-            />
-
-            {/* Remote variable status */}
-            {useRemoteVariable && !isSecret && machineId && remoteVariableName.trim() !== '' && (
-                <View style={{ marginBottom: 8 }}>
-                    {remoteValue === undefined ? (
-                        <Text style={{
-                            fontSize: 11,
-                            color: theme.colors.textSecondary,
-                            fontStyle: 'italic',
-                            ...Typography.default()
-                        }}>
-                            ⏳ Checking remote machine...
+            {useRemoteVariable && (
+                <View style={cardStyles.remoteSection}>
+                    <TextInput
+                        style={cardStyles.input}
+                        placeholder="Variable name (e.g., Z_AI_MODEL)"
+                        placeholderTextColor={theme.colors.input.placeholder}
+                        value={remoteVariableName}
+                        onChangeText={setRemoteVariableName}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                    />
+                    {remoteStatus === 'checking' && (
+                        <Text style={cardStyles.statusText}>Checking remote...</Text>
+                    )}
+                    {remoteStatus === 'not-found' && (
+                        <Text style={[cardStyles.statusText, { color: theme.colors.warning }]}>Value not found</Text>
+                    )}
+                    {remoteStatus === 'found' && (
+                        <Text style={[cardStyles.statusText, { color: theme.colors.success }]}>
+                            Current: {remoteValue}
                         </Text>
-                    ) : remoteValue === null ? (
-                        <Text style={{
-                            fontSize: 11,
-                            color: theme.colors.warning,
-                            ...Typography.default()
-                        }}>
-                            ✗ Value not found
-                        </Text>
-                    ) : (
-                        <>
-                            <Text style={{
-                                fontSize: 11,
-                                color: theme.colors.success,
-                                ...Typography.default()
-                            }}>
-                                ✓ Value found: {remoteValue}
-                            </Text>
-                            {showRemoteDiffersWarning && (
-                                <Text style={{
-                                    fontSize: 11,
-                                    color: theme.colors.textSecondary,
-                                    marginTop: 2,
-                                    ...Typography.default()
-                                }}>
-                                    ⚠️ Differs from documented value: {expectedValue}
-                                </Text>
-                            )}
-                        </>
+                    )}
+                    {isSecret && (
+                        <Text style={cardStyles.statusText}>Secret — not retrieved</Text>
+                    )}
+                    {!isSecret && !machineId && (
+                        <Text style={cardStyles.statusText}>Select a machine to check</Text>
                     )}
                 </View>
-            )}
-
-            {useRemoteVariable && !isSecret && !machineId && (
-                <Text style={{
-                    fontSize: 11,
-                    color: theme.colors.textSecondary,
-                    marginBottom: 8,
-                    fontStyle: 'italic',
-                    ...Typography.default()
-                }}>
-                    ℹ️ Select a machine to check if variable exists
-                </Text>
-            )}
-
-            {/* Security message for secrets */}
-            {isSecret && (
-                <Text style={{
-                    fontSize: 11,
-                    color: theme.colors.textSecondary,
-                    marginBottom: 8,
-                    fontStyle: 'italic',
-                    ...Typography.default()
-                }}>
-                    🔒 Secret value - not retrieved for security
-                </Text>
-            )}
-
-            {/* Default value label */}
-            <Text style={{
-                fontSize: 11,
-                color: theme.colors.textSecondary,
-                marginBottom: 4,
-                ...Typography.default()
-            }}>
-                Default value:
-            </Text>
-
-            {/* Default value input */}
-            <TextInput
-                style={{
-                    backgroundColor: theme.colors.surface,
-                    borderRadius: theme.borderRadius.lg,
-                    padding: theme.margins.sm,
-                    fontSize: 14,
-                    color: theme.colors.text,
-                    marginBottom: 4,
-                    borderWidth: 1,
-                    borderColor: theme.colors.textSecondary,
-                }}
-                placeholder={expectedValue || "Value"}
-                placeholderTextColor={theme.colors.input.placeholder}
-                value={defaultValue}
-                onChangeText={setDefaultValue}
-                autoCapitalize="none"
-                autoCorrect={false}
-                secureTextEntry={isSecret}
-            />
-
-            {/* Default override warning */}
-            {showDefaultOverrideWarning && !isSecret && (
-                <Text style={{
-                    fontSize: 11,
-                    color: theme.colors.textSecondary,
-                    marginBottom: 8,
-                    ...Typography.default()
-                }}>
-                    ⚠️ Overriding documented default: {expectedValue}
-                </Text>
             )}
 
             {/* Session preview */}
-            <Text style={{
-                fontSize: 11,
-                color: theme.colors.textSecondary,
-                marginTop: 4,
-                ...Typography.default()
-            }}>
-                Session will receive: {variable.name} = {
+            <Text style={cardStyles.preview} numberOfLines={1}>
+                → {variable.name} = {
                     isSecret
-                        ? (useRemoteVariable && remoteVariableName
-                            ? `\${${remoteVariableName}${defaultValue ? `:-***` : ''}} - hidden for security`
-                            : (defaultValue ? '***hidden***' : '(empty)'))
-                        : (useRemoteVariable && remoteValue !== undefined && remoteValue !== null
-                            ? remoteValue
-                            : defaultValue || '(empty)')
+                        ? (defaultValue ? '***' : '(empty)')
+                        : (remoteStatus === 'found' ? remoteValue : (defaultValue || '(empty)'))
                 }
             </Text>
         </View>
     );
 }
+
+const cardStyles = StyleSheet.create((theme) => ({
+    card: {
+        backgroundColor: theme.colors.input.background,
+        borderRadius: theme.borderRadius.md,
+        padding: theme.margins.sm,
+        marginBottom: theme.margins.sm,
+    },
+    header: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        marginBottom: 2,
+    },
+    headerLeft: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        flex: 1,
+        marginRight: theme.margins.sm,
+    },
+    varName: {
+        fontSize: 13,
+        fontWeight: '600',
+        color: theme.colors.text,
+        ...Typography.default('semiBold'),
+        flexShrink: 1,
+    },
+    actions: {
+        flexDirection: 'row',
+        alignItems: 'center',
+    },
+    description: {
+        fontSize: 11,
+        color: theme.colors.textSecondary,
+        marginBottom: 6,
+        ...Typography.default(),
+    },
+    valueRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        marginBottom: 6,
+    },
+    label: {
+        fontSize: 12,
+        color: theme.colors.textSecondary,
+        ...Typography.default(),
+        marginRight: theme.margins.sm,
+        width: 36,
+    },
+    input: {
+        flex: 1,
+        backgroundColor: theme.colors.surface,
+        borderRadius: theme.borderRadius.sm,
+        paddingHorizontal: theme.margins.sm,
+        paddingVertical: 6,
+        fontSize: 13,
+        color: theme.colors.text,
+        borderWidth: 1,
+        borderColor: theme.colors.textSecondary,
+    },
+    checkRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        marginBottom: 4,
+    },
+    checkbox: {
+        width: 16,
+        height: 16,
+        borderRadius: 3,
+        borderWidth: 1.5,
+        borderColor: theme.colors.textSecondary,
+        justifyContent: 'center',
+        alignItems: 'center',
+        marginRight: 6,
+    },
+    checkboxActive: {
+        backgroundColor: theme.colors.button.primary.background,
+        borderColor: theme.colors.button.primary.background,
+    },
+    checkLabel: {
+        fontSize: 11,
+        color: theme.colors.textSecondary,
+        ...Typography.default(),
+    },
+    remoteSection: {
+        marginBottom: 4,
+    },
+    statusText: {
+        fontSize: 10,
+        color: theme.colors.textSecondary,
+        marginTop: 2,
+        ...Typography.default(),
+    },
+    preview: {
+        fontSize: 10,
+        color: theme.colors.textSecondary,
+        ...Typography.default(),
+        marginTop: 2,
+    },
+}));

@@ -1,12 +1,12 @@
 import React from 'react';
-import { View, Text, Pressable, ScrollView, Alert } from 'react-native';
+import { View, Text, Pressable, ScrollView, KeyboardAvoidingView, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettingMutable } from '@/sync/storage';
 import { StyleSheet } from 'react-native-unistyles';
 import { useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
-import { Modal as HappyModal } from '@/modal/ModalManager';
+import { Modal } from '@/modal';
 import { layout } from '@/components/layout';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useWindowDimensions } from 'react-native';
@@ -57,37 +57,22 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
         setShowAddForm(true);
     };
 
-    const handleDeleteProfile = (profile: AIBackendProfile) => {
-        // Show confirmation dialog before deleting
-        Alert.alert(
+    const handleDeleteProfile = async (profile: AIBackendProfile) => {
+        const ok = await Modal.confirm(
             t('profiles.delete.title'),
             t('profiles.delete.message', { name: profile.name }),
-            [
-                {
-                    text: t('profiles.delete.cancel'),
-                    style: 'cancel',
-                },
-                {
-                    text: t('profiles.delete.confirm'),
-                    style: 'destructive',
-                    onPress: () => {
-                        const updatedProfiles = profiles.filter(p => p.id !== profile.id);
-                        setProfiles(updatedProfiles);
-
-                        // Clear last used profile if it was deleted
-                        if (lastUsedProfile === profile.id) {
-                            setLastUsedProfile(null);
-                        }
-
-                        // Notify parent if this was the selected profile
-                        if (selectedProfileId === profile.id && onProfileSelect) {
-                            onProfileSelect(null);
-                        }
-                    },
-                },
-            ],
-            { cancelable: true }
+            { confirmText: t('profiles.delete.confirm'), destructive: true }
         );
+        if (!ok) return;
+
+        const updatedProfiles = profiles.filter(p => p.id !== profile.id);
+        setProfiles(updatedProfiles);
+        if (lastUsedProfile === profile.id) {
+            setLastUsedProfile(null);
+        }
+        if (selectedProfileId === profile.id && onProfileSelect) {
+            onProfileSelect(null);
+        }
     };
 
     const handleSelectProfile = (profileId: string | null) => {
@@ -394,19 +379,28 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
 
             {/* Profile Add/Edit Modal */}
             {showAddForm && editingProfile && (
-                <View style={profileManagerStyles.modalOverlay}>
-                    <View style={profileManagerStyles.modalContent}>
-                        <ProfileEditForm
-                            profile={editingProfile}
-                            machineId={null}
-                            onSave={handleSaveProfile}
-                            onCancel={() => {
-                                setShowAddForm(false);
-                                setEditingProfile(null);
-                            }}
-                        />
+                <KeyboardAvoidingView
+                    style={profileManagerStyles.modalOverlay}
+                    behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+                    keyboardVerticalOffset={safeArea.top}
+                >
+                    <View style={profileManagerStyles.modalBackdrop}>
+                        <View style={[
+                            profileManagerStyles.modalContent,
+                            { paddingTop: safeArea.top + 16, paddingBottom: safeArea.bottom + 16 }
+                        ]}>
+                            <ProfileEditForm
+                                profile={editingProfile}
+                                machineId={null}
+                                onSave={handleSaveProfile}
+                                onCancel={() => {
+                                    setShowAddForm(false);
+                                    setEditingProfile(null);
+                                }}
+                            />
+                        </View>
                     </View>
-                </View>
+                </KeyboardAvoidingView>
             )}
         </View>
     );
@@ -414,17 +408,20 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
 
 // ProfileEditForm now imported from @/components/ProfileEditForm
 
-const profileManagerStyles = StyleSheet.create((theme) => ({
+const profileManagerStyles = StyleSheet.create((theme, rt) => ({
     modalOverlay: {
         position: 'absolute',
         top: 0,
         left: 0,
         right: 0,
         bottom: 0,
+    },
+    modalBackdrop: {
+        flex: 1,
         backgroundColor: 'rgba(0, 0, 0, 0.5)',
         justifyContent: 'center',
         alignItems: 'center',
-        padding: 20,
+        paddingHorizontal: theme.margins.md,
     },
     modalContent: {
         width: '100%',

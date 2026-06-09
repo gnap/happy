@@ -1,8 +1,7 @@
 import React from 'react';
 import { View, Text, Pressable, ScrollView, TextInput, ViewStyle, Linking, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { StyleSheet } from 'react-native-unistyles';
-import { useUnistyles } from 'react-native-unistyles';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
 import { AIBackendProfile } from '@/sync/settings';
@@ -27,32 +26,22 @@ export function ProfileEditForm({
 }: ProfileEditFormProps) {
     const { theme } = useUnistyles();
 
-    // Get documentation for built-in profiles
     const profileDocs = React.useMemo(() => {
         if (!profile.isBuiltIn) return null;
         return getBuiltInProfileDocumentation(profile.id);
     }, [profile.isBuiltIn, profile.id]);
 
-    // Local state for environment variables (unified for all config)
     const [environmentVariables, setEnvironmentVariables] = React.useState<Array<{ name: string; value: string }>>(
         profile.environmentVariables || []
     );
 
-    // Extract ${VAR} references from environmentVariables for querying daemon
-    const envVarNames = React.useMemo(() => {
-        return extractEnvVarReferences(environmentVariables);
-    }, [environmentVariables]);
-
-    // Query daemon environment using hook
+    const envVarNames = React.useMemo(() => extractEnvVarReferences(environmentVariables), [environmentVariables]);
     const { variables: actualEnvVars } = useEnvironmentVariables(machineId, envVarNames);
 
     const [name, setName] = React.useState(profile.name || '');
 
     const handleSave = () => {
-        if (!name.trim()) {
-            return;
-        }
-
+        if (!name.trim()) return;
         onSave({
             ...profile,
             name: name.trim(),
@@ -73,199 +62,176 @@ export function ProfileEditForm({
 
     return (
         <ScrollView
-            style={[profileEditFormStyles.scrollView, containerStyle]}
-            contentContainerStyle={profileEditFormStyles.scrollContent}
+            style={[formStyles.scrollView, containerStyle]}
+            contentContainerStyle={formStyles.scrollContent}
             keyboardShouldPersistTaps="handled"
         >
-            <View style={profileEditFormStyles.formContainer}>
-                    {/* Profile Name */}
-                    <Text style={{
-                        fontSize: 14,
-                        fontWeight: '600',
-                        color: theme.colors.text,
-                        marginBottom: 8,
-                        ...Typography.default('semiBold')
-                    }}>
-                        {t('profiles.profileName')}
-                    </Text>
-                    <TextInput
-                        style={{
-                            backgroundColor: theme.colors.input.background,
-                            borderRadius: 10, // Matches new session panel input fields
-                            padding: 12,
-                            fontSize: 16,
-                            color: theme.colors.text,
-                            marginBottom: 16,
-                            borderWidth: 1,
-                            borderColor: theme.colors.textSecondary,
-                        }}
-                        placeholder={t('profiles.enterName')}
-                        value={name}
-                        onChangeText={setName}
-                    />
+            <View style={formStyles.formContainer}>
+                {/* Profile Name */}
+                <Text style={formStyles.sectionTitle}>
+                    {t('profiles.profileName')}
+                </Text>
+                <TextInput
+                    style={formStyles.textInput}
+                    placeholder={t('profiles.enterName')}
+                    placeholderTextColor={theme.colors.input.placeholder}
+                    value={name}
+                    onChangeText={setName}
+                />
 
-                    {/* Built-in Profile Documentation - Setup Instructions */}
-                    {profile.isBuiltIn && profileDocs && (
-                        <View style={{
-                            backgroundColor: theme.colors.surface,
-                            borderRadius: 12,
-                            padding: 16,
-                            marginBottom: 20,
-                            borderWidth: 1,
-                            borderColor: theme.colors.button.primary.background,
-                        }}>
-                            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
-                                <Ionicons name="information-circle" size={20} color={theme.colors.button.primary.tint} style={{ marginRight: 8 }} />
-                                <Text style={{
-                                    fontSize: 15,
-                                    fontWeight: '600',
-                                    color: theme.colors.text,
-                                    ...Typography.default('semiBold')
-                                }}>
-                                    Setup Instructions
-                                </Text>
-                            </View>
-
-                            <Text style={{
-                                fontSize: 13,
-                                color: theme.colors.text,
-                                marginBottom: 12,
-                                lineHeight: 18,
-                                ...Typography.default()
-                            }}>
-                                {profileDocs.description}
-                            </Text>
-
-                            {profileDocs.setupGuideUrl && (
-                                <Pressable
-                                    onPress={async () => {
-                                        try {
-                                            const url = profileDocs.setupGuideUrl!;
-                                            // On web/Tauri desktop, use window.open
-                                            if (Platform.OS === 'web') {
-                                                window.open(url, '_blank');
-                                            } else {
-                                                // On native (iOS/Android), use Linking API
-                                                await Linking.openURL(url);
-                                            }
-                                        } catch (error) {
-                                            console.error('Failed to open URL:', error);
-                                        }
-                                    }}
-                                    style={{
-                                        flexDirection: 'row',
-                                        alignItems: 'center',
-                                        backgroundColor: theme.colors.button.primary.background,
-                                        borderRadius: 8,
-                                        padding: 12,
-                                        marginBottom: 16,
-                                    }}
-                                >
-                                    <Ionicons name="book-outline" size={16} color={theme.colors.button.primary.tint} style={{ marginRight: 8 }} />
-                                    <Text style={{
-                                        fontSize: 13,
-                                        color: theme.colors.button.primary.tint,
-                                        fontWeight: '600',
-                                        flex: 1,
-                                        ...Typography.default('semiBold')
-                                    }}>
-                                        View Official Setup Guide
-                                    </Text>
-                                    <Ionicons name="open-outline" size={14} color={theme.colors.button.primary.tint} />
-                                </Pressable>
-                            )}
+                {/* Built-in Profile Docs */}
+                {profile.isBuiltIn && profileDocs && (
+                    <View style={formStyles.docsBox}>
+                        <View style={formStyles.docsHeader}>
+                            <Ionicons name="information-circle" size={16} color={theme.colors.button.primary.tint} style={{ marginRight: 6 }} />
+                            <Text style={formStyles.docsTitle}>Setup Instructions</Text>
                         </View>
-                    )}
-
-                    {/* Environment Variables */}
-                    <EnvironmentVariablesList
-                        environmentVariables={environmentVariables}
-                        machineId={machineId}
-                        profileDocs={profileDocs}
-                        onChange={setEnvironmentVariables}
-                    />
-
-                    {/* Action buttons */}
-                    <View style={{ flexDirection: 'row', gap: 12 }}>
-                        <Pressable
-                            style={{
-                                flex: 1,
-                                backgroundColor: theme.colors.surface,
-                                borderRadius: 8,
-                                padding: 12,
-                                alignItems: 'center',
-                            }}
-                            onPress={onCancel}
-                        >
-                            <Text style={{
-                                fontSize: 16,
-                                fontWeight: '600',
-                                color: theme.colors.button.secondary.tint,
-                                ...Typography.default('semiBold')
-                            }}>
-                                {t('common.cancel')}
-                            </Text>
-                        </Pressable>
-                        {profile.isBuiltIn ? (
-                            // For built-in profiles, show "Save As" button (creates custom copy)
+                        <Text style={formStyles.docsText}>{profileDocs.description}</Text>
+                        {profileDocs.setupGuideUrl && (
                             <Pressable
-                                style={{
-                                    flex: 1,
-                                    backgroundColor: theme.colors.button.primary.background,
-                                    borderRadius: 8,
-                                    padding: 12,
-                                    alignItems: 'center',
+                                onPress={async () => {
+                                    try {
+                                        if (Platform.OS === 'web') {
+                                            window.open(profileDocs.setupGuideUrl!, '_blank');
+                                        } else {
+                                            await Linking.openURL(profileDocs.setupGuideUrl!);
+                                        }
+                                    } catch { /* ignore */ }
                                 }}
-                                onPress={handleSave}
+                                style={formStyles.docsButton}
                             >
-                                <Text style={{
-                                    fontSize: 16,
-                                    fontWeight: '600',
-                                    color: theme.colors.button.primary.tint,
-                                    ...Typography.default('semiBold')
-                                }}>
-                                    {t('common.saveAs')}
-                                </Text>
-                            </Pressable>
-                        ) : (
-                            // For custom profiles, show regular "Save" button
-                            <Pressable
-                                style={{
-                                    flex: 1,
-                                    backgroundColor: theme.colors.button.primary.background,
-                                    borderRadius: 8,
-                                    padding: 12,
-                                    alignItems: 'center',
-                                }}
-                                onPress={handleSave}
-                            >
-                                <Text style={{
-                                    fontSize: 16,
-                                    fontWeight: '600',
-                                    color: theme.colors.button.primary.tint,
-                                    ...Typography.default('semiBold')
-                                }}>
-                                    {t('common.save')}
-                                </Text>
+                                <Ionicons name="book-outline" size={14} color={theme.colors.button.primary.tint} style={{ marginRight: 6 }} />
+                                <Text style={formStyles.docsButtonText}>View Official Setup Guide</Text>
+                                <Ionicons name="open-outline" size={12} color={theme.colors.button.primary.tint} />
                             </Pressable>
                         )}
                     </View>
+                )}
+
+                {/* Environment Variables */}
+                <EnvironmentVariablesList
+                    environmentVariables={environmentVariables}
+                    machineId={machineId}
+                    profileDocs={profileDocs}
+                    onChange={setEnvironmentVariables}
+                />
+
+                {/* Actions */}
+                <View style={formStyles.actions}>
+                    <Pressable style={formStyles.cancelButton} onPress={onCancel}>
+                        <Text style={formStyles.cancelText}>{t('common.cancel')}</Text>
+                    </Pressable>
+                    <Pressable style={formStyles.saveButton} onPress={handleSave}>
+                        <Text style={formStyles.saveText}>
+                            {profile.isBuiltIn ? t('common.saveAs') : t('common.save')}
+                        </Text>
+                    </Pressable>
                 </View>
+            </View>
         </ScrollView>
     );
 }
 
-const profileEditFormStyles = StyleSheet.create((theme, rt) => ({
+const formStyles = StyleSheet.create((theme) => ({
     scrollView: {
         flex: 1,
     },
     scrollContent: {
-        padding: 20,
+        padding: theme.margins.md,
     },
     formContainer: {
         backgroundColor: theme.colors.surface,
-        borderRadius: 16, // Matches new session panel main container
-        padding: 20,
+        borderRadius: theme.borderRadius.xl,
+        padding: theme.margins.md,
         width: '100%',
+    },
+    sectionTitle: {
+        fontSize: 13,
+        fontWeight: '600',
+        color: theme.colors.text,
+        marginBottom: 6,
+        ...Typography.default('semiBold'),
+    },
+    textInput: {
+        backgroundColor: theme.colors.input.background,
+        borderRadius: theme.borderRadius.lg,
+        paddingHorizontal: theme.margins.sm,
+        paddingVertical: 10,
+        fontSize: 15,
+        color: theme.colors.text,
+        marginBottom: theme.margins.md,
+        borderWidth: 1,
+        borderColor: theme.colors.textSecondary,
+    },
+    docsBox: {
+        backgroundColor: theme.colors.surfaceHigh,
+        borderRadius: theme.borderRadius.md,
+        padding: theme.margins.sm,
+        marginBottom: theme.margins.md,
+        borderWidth: 1,
+        borderColor: theme.colors.button.primary.background,
+    },
+    docsHeader: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        marginBottom: 6,
+    },
+    docsTitle: {
+        fontSize: 13,
+        fontWeight: '600',
+        color: theme.colors.text,
+        ...Typography.default('semiBold'),
+    },
+    docsText: {
+        fontSize: 12,
+        color: theme.colors.text,
+        marginBottom: 8,
+        lineHeight: 17,
+        ...Typography.default(),
+    },
+    docsButton: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: theme.colors.button.primary.background,
+        borderRadius: theme.borderRadius.sm,
+        paddingHorizontal: theme.margins.sm,
+        paddingVertical: 8,
+    },
+    docsButtonText: {
+        fontSize: 12,
+        color: theme.colors.button.primary.tint,
+        fontWeight: '600',
+        flex: 1,
+        ...Typography.default('semiBold'),
+    },
+    actions: {
+        flexDirection: 'row',
+        gap: 10,
+    },
+    cancelButton: {
+        flex: 1,
+        backgroundColor: theme.colors.surfaceHigh,
+        borderRadius: theme.borderRadius.sm,
+        paddingVertical: 10,
+        alignItems: 'center',
+    },
+    cancelText: {
+        fontSize: 15,
+        fontWeight: '600',
+        color: theme.colors.button.secondary.tint,
+        ...Typography.default('semiBold'),
+    },
+    saveButton: {
+        flex: 1,
+        backgroundColor: theme.colors.button.primary.background,
+        borderRadius: theme.borderRadius.sm,
+        paddingVertical: 10,
+        alignItems: 'center',
+    },
+    saveText: {
+        fontSize: 15,
+        fontWeight: '600',
+        color: theme.colors.button.primary.tint,
+        ...Typography.default('semiBold'),
     },
 }));
