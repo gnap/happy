@@ -776,13 +776,19 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                     if (getHiddenParentToolCalls(state).has(block.tool_use_id)) {
                         if (sessionSubagentForToolResult) {
                             // Sub-agent output lives in the tool_result content.
-                            // Extract readable result so the App's sidechain shows the summary.
+                            // Only emit the last text block as the summary.
                             const subagentResult = typeof block.content === 'string'
                                 ? block.content
                                 : Array.isArray(block.content)
-                                    ? block.content.map((c: unknown) =>
-                                        typeof c === 'object' && c !== null && 'text' in (c as object)
-                                            ? (c as { text: string }).text : '').join('\n').trim()
+                                    ? (() => {
+                                        for (let i = block.content.length - 1; i >= 0; i--) {
+                                            const c = block.content[i];
+                                            if (typeof c === 'object' && c !== null && 'text' in (c as object)) {
+                                                return (c as { text: string }).text;
+                                            }
+                                        }
+                                        return '';
+                                    })()
                                     : undefined;
                             envelopes.push(createEnvelope('agent', {
                                 t: 'tool-call-end',
