@@ -137,8 +137,8 @@ export class Session {
     onModelInit = (info: { model: string; version: string }) => {
         this.client.updateMetadata((metadata) => ({
             ...metadata,
-            claudeModel: info.model,
-            claudeVersion: info.version || undefined,
+            sessionModel: info.model,
+            sessionProvider: info.version || undefined,
         }));
         logger.debug(`[Session] Model info stored in metadata: ${info.model}${info.version ? ' v' + info.version : ''}`);
     }
