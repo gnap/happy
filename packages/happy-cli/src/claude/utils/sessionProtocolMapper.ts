@@ -569,6 +569,21 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
     }
 
     if (message.type === 'system') {
+        // task_notification: background task (Monitor, Bash run_in_background) completed.
+        // Emit a tool-call-end so the App's tool card transitions from "running" to done.
+        const subtype = (message as Record<string, unknown>).subtype;
+        if (subtype === 'task_notification') {
+            const toolUseId = (message as Record<string, unknown>).tool_use_id;
+            const status = (message as Record<string, unknown>).status;
+            if (typeof toolUseId === 'string' && toolUseId.length > 0) {
+                const turnId = ensureTurn(state, envelopes);
+                envelopes.push(createEnvelope('agent', {
+                    t: 'tool-call-end',
+                    call: toolUseId,
+                    result: { task_notification: status },
+                }, { turn: turnId }));
+            }
+        }
         return {
             currentTurnId: state.currentTurnId,
             envelopes,
