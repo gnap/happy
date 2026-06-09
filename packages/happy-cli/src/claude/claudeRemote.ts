@@ -46,7 +46,9 @@ export async function claudeRemote(opts: {
     onCompletionEvent?: (message: string) => void,
     onSessionReset?: () => void,
     /** Called when env changed mid-turn — launcher should set this message as pending for re-spawn. */
-    onEnvChanged?: (msg: { message: string; mode: EnhancedMode }) => void
+    onEnvChanged?: (msg: { message: string; mode: EnhancedMode }) => void;
+    /** Called when the SDK emits the system init message with model/capability info. */
+    onModelInit?: (info: { model: string; version: string; sessionId: string }) => void;
 }): Promise<void> {
 
     let currentGeneration = opts.claudeEnvVarsGeneration;
@@ -185,6 +187,15 @@ export async function claudeRemote(opts: {
             // Handle special system messages
             if (message.type === 'system' && message.subtype === 'init') {
                 const systemInit = message as SDKSystemMessage;
+
+                // Notify the launcher about model/capability info for App display.
+                if (systemInit.model && systemInit.session_id) {
+                    opts.onModelInit?.({
+                        model: systemInit.model,
+                        version: (systemInit as any).claude_code_version || '',
+                        sessionId: systemInit.session_id,
+                    });
+                }
 
                 // Session id is still in memory, wait until session file is written to disk
                 // Start a watcher for to detect the session id
