@@ -427,7 +427,7 @@ const profileManagerStyles = StyleSheet.create((theme, rt) => ({
         width: '100%',
         maxWidth: Math.min(layout.maxWidth, 600),
         maxHeight: '90%',
-        backgroundColor: theme.colors.background,
+        backgroundColor: theme.colors.surface,
         borderRadius: theme.borderRadius.xl,
         overflow: 'hidden',
     },

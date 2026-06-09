@@ -463,11 +463,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         session.onSessionFound(sessionId);
                     },
                     onModelInit: (info) => {
-                        const versionSuffix = info.version ? ` · Claude Code ${info.version}` : '';
-                        session.client.sendSessionEvent({
-                            type: 'message',
-                            message: `${info.model}${versionSuffix}`,
-                        });
+                        session.onModelInit(info);
                     },
                     onThinkingChange: session.onThinkingChange,
                     claudeEnvVars: session.claudeEnvVars,

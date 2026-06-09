@@ -13,6 +13,7 @@ import { useSidebar } from './SidebarContext';
 interface ChatHeaderViewProps {
     title: string;
     subtitle?: string;
+    rightSubtitle?: string;
     onBackPress?: () => void;
     onAvatarPress?: () => void;
     avatarId?: string;
@@ -25,6 +26,7 @@ interface ChatHeaderViewProps {
 export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
     title,
     subtitle,
+    rightSubtitle,
     onBackPress,
     onAvatarPress,
     avatarId,
@@ -86,21 +88,41 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
                     >
                         {title}
                     </Text>
-                    {subtitle && (
-                        <Text
-                            numberOfLines={1}
-                            ellipsizeMode="tail"
-                            style={[
-                                styles.subtitle,
-                                {
-                                    color: theme.colors.header.tint,
-                                    opacity: 0.7,
-                                    ...Typography.default()
-                                }
-                            ]}
-                        >
-                            {subtitle}
-                        </Text>
+                    {(subtitle || rightSubtitle) && (
+                        <View style={styles.subtitleRow}>
+                            {subtitle && (
+                                <Text
+                                    numberOfLines={1}
+                                    ellipsizeMode="tail"
+                                    style={[
+                                        styles.subtitle,
+                                        { flex: 1 },
+                                        {
+                                            color: theme.colors.header.tint,
+                                            opacity: 0.7,
+                                            ...Typography.default()
+                                        }
+                                    ]}
+                                >
+                                    {subtitle}
+                                </Text>
+                            )}
+                            {rightSubtitle && (
+                                <Text
+                                    numberOfLines={1}
+                                    style={[
+                                        styles.subtitle,
+                                        {
+                                            color: theme.colors.header.tint,
+                                            opacity: 0.5,
+                                            ...Typography.default()
+                                        }
+                                    ]}
+                                >
+                                    {rightSubtitle}
+                                </Text>
+                            )}
+                        </View>
                     )}
                 </View>
                 
@@ -162,6 +184,10 @@ const styles = StyleSheet.create({
         fontSize: 12,
         fontWeight: '400',
         lineHeight: 14,
+    },
+    subtitleRow: {
+        flexDirection: 'row',
+        width: '100%',
     },
     avatarButton: {
         width: 44,

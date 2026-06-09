@@ -263,6 +263,8 @@ export type Metadata = {
   },
   machineId?: string,
   claudeSessionId?: string, // Claude Code session ID
+  claudeModel?: string, // Model name from SDK init (e.g. "deepseek-v4-pro[1m]")
+  claudeVersion?: string, // Claude Code version from SDK init (e.g. "2.1.169")
   tools?: string[],
   slashCommands?: string[],
   homeDir: string,
@@ -348,6 +350,8 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
     summary,
     machineId,
     claudeSessionId,
+    claudeModel,
+    claudeVersion,
     tools,
     slashCommands,
     homeDir,
@@ -376,6 +380,8 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
     ...(summary !== undefined ? { summary } : {}),
     ...(machineId !== undefined ? { machineId } : {}),
     ...(claudeSessionId !== undefined ? { claudeSessionId } : {}),
+    ...(claudeModel !== undefined ? { claudeModel } : {}),
+    ...(claudeVersion !== undefined ? { claudeVersion } : {}),
     ...(tools !== undefined ? { tools } : {}),
     ...(slashCommands !== undefined ? { slashCommands } : {}),
     ...(homeDir !== undefined ? { homeDir } : {}),

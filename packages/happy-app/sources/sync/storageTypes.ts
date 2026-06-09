@@ -36,6 +36,8 @@ export const MetadataSchema = z.object({
     }).optional(),
     machineId: z.string().optional(),
     claudeSessionId: z.string().optional(), // Claude Code session ID
+    claudeModel: z.string().optional(), // Model name from SDK init (e.g. "deepseek-v4-pro[1m]")
+    claudeVersion: z.string().optional(), // Claude Code version from SDK init (e.g. "2.1.169")
     tools: z.array(z.string()).optional(),
     slashCommands: z.array(z.string()).optional(),
     homeDir: z.string().optional(), // User's home directory on the machine

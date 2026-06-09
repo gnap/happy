@@ -334,6 +334,14 @@ function SessionInfoContent({ session }: { session: Session }) {
                         icon={<Ionicons name="finger-print-outline" size={29} color="#007AFF" />}
                         onPress={handleCopySessionId}
                     />
+                    {session.metadata?.claudeModel && (
+                        <Item
+                            title="Model"
+                            subtitle={`${session.metadata.claudeModel}${session.metadata.claudeVersion ? ' · CC v' + session.metadata.claudeVersion : ''}`}
+                            icon={<Ionicons name="hardware-chip-outline" size={29} color="#FF9500" />}
+                            showChevron={false}
+                        />
+                    )}
                     {session.metadata?.claudeSessionId && (
                         <Item
                             title={t('sessionInfo.claudeCodeSessionId')}

@@ -116,18 +116,31 @@ export class Session {
      */
     onSessionFound = (sessionId: string) => {
         this.sessionId = sessionId;
-        
+
         // Update metadata with Claude Code session ID
         this.client.updateMetadata((metadata) => ({
             ...metadata,
             claudeSessionId: sessionId
         }));
         logger.debug(`[Session] Claude Code session ID ${sessionId} added to metadata`);
-        
+
         // Notify all registered callbacks
         for (const callback of this.sessionFoundCallbacks) {
             callback(sessionId);
         }
+    }
+
+    /**
+     * Store model/capability info from the SDK init message in session metadata.
+     * Called once per spawn when the SDK emits its system init event.
+     */
+    onModelInit = (info: { model: string; version: string }) => {
+        this.client.updateMetadata((metadata) => ({
+            ...metadata,
+            claudeModel: info.model,
+            claudeVersion: info.version || undefined,
+        }));
+        logger.debug(`[Session] Model info stored in metadata: ${info.model}${info.version ? ' v' + info.version : ''}`);
     }
     
     /**
