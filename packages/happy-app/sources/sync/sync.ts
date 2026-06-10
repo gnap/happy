@@ -182,7 +182,7 @@ class Sync {
     private currentVisibleSessionId: string | null = null;
     private lastDesktopSessionRefreshAt = 0;
     private lastSessionRefreshAt = 0;
-    /** Timestamp of the last non-delta full-session fetch; used for incremental delta requests. */
+    /** Timestamp of the last successful session fetch; used as delta base. */
     private lastSessionRefreshNonDeltaAt = 0;
     /** Per-session cooldown for single-session fetches (15s). */
     private sessionRefreshCooldowns = new Map<string, number>();
@@ -500,8 +500,6 @@ class Sync {
         }
 
         // Load cached session list before network fetch so UI shows instantly.
-        // The cache's cachedAt timestamp serves as the delta base — if the cache
-        // is fresh (< 10 min), the first network fetch will be an incremental delta.
         try {
             const cached = await loadSessionsListCache();
             if (cached && cached.sessions.length > 0) {
@@ -1159,14 +1157,15 @@ class Sync {
         try {
             const t0 = performance.now();
             const API_ENDPOINT = getServerUrl();
-            // Pass updatedSince to request only sessions changed since our last full fetch.
-            // Falls back to full list if the server does not support delta filtering.
-            const since = this.lastSessionRefreshNonDeltaAt
-                ? `?updatedSince=${this.lastSessionRefreshNonDeltaAt}`
-                : '';
-            log.log(`📥 fetchSessions: GET ${API_ENDPOINT}/v1/sessions${since}`);
+            const params = new URLSearchParams();
+            if (this.lastSessionRefreshNonDeltaAt) {
+                params.set('changedSince', String(this.lastSessionRefreshNonDeltaAt));
+            }
+            params.set('limit', '200');
+            const qs = params.toString();
+            log.log(`📥 fetchSessions: GET ${API_ENDPOINT}/v2/sessions?${qs}`);
             const fetchStart = performance.now();
-            const response = await this.instrumentedFetch(`${API_ENDPOINT}/v1/sessions${since}`, {
+            const response = await this.instrumentedFetch(`${API_ENDPOINT}/v2/sessions?${qs}`, {
                 headers: {
                     'Authorization': `Bearer ${this.credentials.token}`,
                     'Content-Type': 'application/json',
@@ -1257,8 +1256,9 @@ class Sync {
             // Apply to storage
             const applyStart = performance.now();
             this.applySessions(decryptedSessions);
-            // Record timestamp for next delta fetch (only when we got a non-delta response).
-            if (!since) this.lastSessionRefreshNonDeltaAt = Date.now();
+            // Record timestamp for next delta fetch. Moves forward every successful fetch
+            // so subsequent deltas only request sessions changed since THIS fetch.
+            this.lastSessionRefreshNonDeltaAt = Date.now();
             const applyMs = Math.round(performance.now() - applyStart);
             const metadataDecryptMs = Math.round(performance.now() - metadataDecryptStart);
             const totalMs = Math.round(performance.now() - t0);
@@ -1267,9 +1267,12 @@ class Sync {
                 `⏱️ fetchSessions: ${totalMs}ms total | ` +
                 `network ${networkMs}ms | parse ${parseMs}ms (${respSizeKb}KB uncompressed${xferKb !== respSizeKb ? `, ${xferKb}KB on wire` : ''}) | ` +
                 `decrypt ${decryptTotalMs}ms (keys ${keyDecryptMs}ms + meta ${metadataDecryptMs}ms) | ` +
-                `apply ${applyMs}ms | ${decryptedSessions.length} sessions`
+                `apply ${applyMs}ms | ${decryptedSessions.length} sessions (delta)`
             );
-            void saveSessionsListCache(decryptedSessions);
+            // Save full merged state (cached + delta), not just the delta results.
+            const fullState = storage.getState().sessions;
+            const allValues = Object.values(fullState).map(({ presence, ...s }) => s);
+            void saveSessionsListCache(allValues);
             this._loggedMissingSessionForSid.clear();
 
             // Only eagerly catch up messages for active sessions (agent is running).
