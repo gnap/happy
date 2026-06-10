@@ -182,6 +182,8 @@ class Sync {
     private currentVisibleSessionId: string | null = null;
     private lastDesktopSessionRefreshAt = 0;
     private lastSessionRefreshAt = 0;
+    /** Timestamp of the last non-delta full-session fetch; used for incremental delta requests. */
+    private lastSessionRefreshNonDeltaAt = 0;
     /** Per-session cooldown for single-session fetches (15s). */
     private sessionRefreshCooldowns = new Map<string, number>();
     /** Last user interaction timestamp (desktop idle detection). */
@@ -1152,9 +1154,15 @@ class Sync {
         try {
             const t0 = performance.now();
             const API_ENDPOINT = getServerUrl();
-            log.log(`📥 fetchSessions: GET ${API_ENDPOINT}/v1/sessions`);
+            // Pass updatedSince to request only sessions changed since our last full fetch.
+            // Falls back to full list if the server does not support delta filtering.
+            const deltaMs = this.lastSessionRefreshNonDeltaAt && (Date.now() - this.lastSessionRefreshNonDeltaAt);
+            const since = deltaMs && deltaMs < 600_000 // within 10 min — ask for delta
+                ? `?updatedSince=${this.lastSessionRefreshNonDeltaAt}`
+                : '';
+            log.log(`📥 fetchSessions: GET ${API_ENDPOINT}/v1/sessions${since}`);
             const fetchStart = performance.now();
-            const response = await this.instrumentedFetch(`${API_ENDPOINT}/v1/sessions`, {
+            const response = await this.instrumentedFetch(`${API_ENDPOINT}/v1/sessions${since}`, {
                 headers: {
                     'Authorization': `Bearer ${this.credentials.token}`,
                     'Content-Type': 'application/json',
@@ -1245,6 +1253,8 @@ class Sync {
             // Apply to storage
             const applyStart = performance.now();
             this.applySessions(decryptedSessions);
+            // Record timestamp for next delta fetch (only when we got a non-delta response).
+            if (!since) this.lastSessionRefreshNonDeltaAt = Date.now();
             const applyMs = Math.round(performance.now() - applyStart);
             const metadataDecryptMs = Math.round(performance.now() - metadataDecryptStart);
             const totalMs = Math.round(performance.now() - t0);
