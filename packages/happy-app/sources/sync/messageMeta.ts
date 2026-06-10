@@ -41,7 +41,11 @@ export function resolveMessageModeMeta(
             : (sandboxEnabled ? 'bypassPermissions' : 'default');
 
     const modelMode = session.modelMode || 'default';
-    const model = modelMode !== 'default' ? modelMode : null;
+    // When no explicit model is selected, resolve to the effective model from metadata
+    // so the CLI's mode hash stays stable across turns (no spurious process restart).
+    const model = modelMode !== 'default'
+        ? modelMode
+        : (session.metadata?.currentModelCode?.trim() || null);
 
     const maxMode =
         session.maxMode !== undefined && session.maxMode !== null
