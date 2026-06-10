@@ -2584,6 +2584,29 @@ class Sync {
 
         } else if (updateData.body.t === 'new-session') {
             log.log('🆕 New session update received');
+            // Immediately insert a lightweight placeholder so the session
+            // appears in the list before the full HTTP fetch completes.
+            // The subsequent fetchSessions() will overwrite it with full data.
+            const { id, createdAt, updatedAt } = updateData.body;
+            if (id && createdAt && updatedAt) {
+                try {
+                    storage.getState().applySessions([{
+                        id,
+                        seq: 0,
+                        createdAt: createdAt,
+                        updatedAt: updatedAt,
+                        active: true,
+                        activeAt: createdAt,
+                        metadata: null,
+                        metadataVersion: 0,
+                        agentState: null,
+                        agentStateVersion: 0,
+                        thinking: false,
+                        thinkingAt: 0,
+                        presence: 'online' as const,
+                    }]);
+                } catch { /* best-effort placeholder — fetch will retry */ }
+            }
             this.sessionsSync.invalidate();
         } else if (updateData.body.t === 'delete-session') {
             log.log('🗑️ Delete session update received');
