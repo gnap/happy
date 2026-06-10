@@ -428,7 +428,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             }
                             wasInboxTurn = false;
                             if ((modeHash && msg.hash !== modeHash) || msg.isolate) {
-                                logger.debug('[remote]: mode has changed, pending message');
+                                logger.info(`[remote] nextMessage returning null (mode changed): modeHash=${modeHash?.slice(0,8)} msgHash=${msg.hash?.slice(0,8)} isolate=${msg.isolate}`);
                                 pending = { message: msg.message, mode: msg.mode, meta: msg.meta };
                                 return null;
                             }
@@ -436,6 +436,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 session.claudeTurnActiveRef.current = true;
                             }
                             modeHash = msg.hash;
+                            logger.info(`[remote] nextMessage kept in-process: msgHash=${msg.hash?.slice(0,8)}`);
                             mode = msg.mode;
                             permissionHandler.handleModeChange(mode.permissionMode);
                             // Signal thinking immediately on message receipt, before SDK is invoked
