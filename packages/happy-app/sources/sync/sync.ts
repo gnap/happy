@@ -130,6 +130,8 @@ class Sync {
     private lastSessionRefreshAt = 0;
     /** Per-session cooldown for single-session fetches (15s). */
     private sessionRefreshCooldowns = new Map<string, number>();
+    /** Last user interaction timestamp (desktop idle detection). */
+    private lastUserActivityAt = Date.now();
     /** Per-session turn-start time; used to drop lagging session-alive thinking=false. */
     private sessionTurnStartAt = new Map<string, number>();
     /** Last known network connectivity; null until first change event fires. */
@@ -246,7 +248,13 @@ class Sync {
         // pick up new sessions from other devices without needing a restart.
         // Cooldown in fetchSessions prevents this from running back-to-back
         // with event-driven invalidations.
+        // Skips refresh when the user has been idle for > 10 minutes (desktop).
         this.sessionsRefreshInterval = setInterval(() => {
+            const idleMs = Date.now() - this.lastUserActivityAt;
+            if (idleMs > 600_000) {
+                log.log(`🕐 Skipping periodic session refresh — idle for ${Math.round(idleMs / 1000)}s`);
+                return;
+            }
             this.sessionsSync.invalidate();
         }, Sync.SESSION_REFRESH_INTERVAL_MS);
     }
@@ -337,6 +345,16 @@ class Sync {
             }
         });
         window.addEventListener('blur', onDesktopBlur);
+
+        // Track user activity for idle detection on desktop.
+        // Skips periodic session refreshes when the user hasn't interacted
+        // with the app for a while (e.g. app running in background on another
+        // virtual desktop / space).
+        const markActivity = () => { this.lastUserActivityAt = Date.now(); };
+        document.addEventListener('mousemove', markActivity, { passive: true });
+        document.addEventListener('keydown', markActivity, { passive: true });
+        document.addEventListener('scroll', markActivity, { passive: true });
+        document.addEventListener('touchstart', markActivity, { passive: true });
 
         // Match native `expo-network` behaviour: desktop has no reachability API, but the browser
         // exposes online/offline. Without this, a broken connect can sit in `error` until the next
