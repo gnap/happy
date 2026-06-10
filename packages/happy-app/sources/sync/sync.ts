@@ -128,6 +128,8 @@ class Sync {
     private currentVisibleSessionId: string | null = null;
     private lastDesktopSessionRefreshAt = 0;
     private lastSessionRefreshAt = 0;
+    /** Per-session cooldown for single-session fetches (15s). */
+    private sessionRefreshCooldowns = new Map<string, number>();
     /** Per-session turn-start time; used to drop lagging session-alive thinking=false. */
     private sessionTurnStartAt = new Map<string, number>();
     /** Last known network connectivity; null until first change event fires. */
@@ -481,6 +483,40 @@ class Sync {
 
         // Also invalidate git status sync for this session
         gitStatusSync.getSync(sessionId).invalidate();
+
+        // Rate-limited single-session refresh: when the user opens a cached
+        // session, pull its latest metadata/agentState without waiting for
+        // the full list fetch. Cooldown: 15s per session.
+        const now = Date.now();
+        const lastRefresh = this.sessionRefreshCooldowns.get(sessionId) ?? 0;
+        if (now - lastRefresh >= 15_000) {
+            this.sessionRefreshCooldowns.set(sessionId, now);
+            void (async () => {
+                try {
+                    const API_ENDPOINT = getServerUrl();
+                    const response = await fetch(`${API_ENDPOINT}/v1/sessions/${sessionId}`, {
+                        headers: {
+                            'Authorization': `Bearer ${this.credentials!.token}`,
+                            'Content-Type': 'application/json'
+                        }
+                    });
+                    if (response.ok) {
+                        const raw = await response.json() as {
+                            id: string; tag: string; seq: number;
+                            metadata: string; metadataVersion: number;
+                            agentState: string | null; agentStateVersion: number;
+                            dataEncryptionKey: string | null;
+                            active: boolean; activeAt: number;
+                            createdAt: number; updatedAt: number;
+                        };
+                        const decrypted = await this.decryptSingleSession(raw);
+                        if (decrypted) {
+                            storage.getState().applySessions([decrypted]);
+                        }
+                    }
+                } catch { /* best-effort */ }
+            })();
+        }
 
         // If this session still has pending outbox messages, recover from stale
         // request state after the user returns to the session.
