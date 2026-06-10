@@ -1026,8 +1026,10 @@ class Sync {
         }
 
         try {
+            const t0 = performance.now();
             const API_ENDPOINT = getServerUrl();
             log.log(`📥 fetchSessions: GET ${API_ENDPOINT}/v1/sessions`);
+            const fetchStart = performance.now();
             const response = await fetch(`${API_ENDPOINT}/v1/sessions`, {
                 headers: {
                     'Authorization': `Bearer ${this.credentials.token}`,
@@ -1107,7 +1109,9 @@ class Sync {
 
             // Apply to storage
             this.applySessions(decryptedSessions);
-            log.log(`📥 fetchSessions completed - processed ${decryptedSessions.length} sessions`);
+            const totalMs = Math.round(performance.now() - t0);
+            const fetchMs = Math.round(performance.now() - fetchStart);
+            log.log(`⏱️ fetchSessions: ${totalMs}ms total, ${fetchMs}ms fetch+decrypt, ${decryptedSessions.length} sessions`);
             void saveSessionsListCache(decryptedSessions);
             this._loggedMissingSessionForSid.clear();
 
@@ -2641,6 +2645,7 @@ class Sync {
                 //    much faster than waiting for the full list fetch.
                 void (async () => {
                     try {
+                        const t0 = performance.now();
                         const API_ENDPOINT = getServerUrl();
                         const response = await fetch(`${API_ENDPOINT}/v1/sessions/${id}`, {
                             headers: {
@@ -2661,6 +2666,7 @@ class Sync {
                             if (decrypted) {
                                 storage.getState().applySessions([decrypted]);
                             }
+                            log.log(`⏱️ fetchSingleSession ${id}: ${Math.round(performance.now() - t0)}ms`);
                         }
                     } catch { /* best-effort — full list fetch will catch up */ }
                 })();
