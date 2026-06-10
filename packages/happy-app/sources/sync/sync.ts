@@ -565,13 +565,7 @@ class Sync {
             this.sessionRefreshCooldowns.set(sessionId, now);
             void (async () => {
                 try {
-                    const API_ENDPOINT = getServerUrl();
-                    const response = await this.instrumentedFetch(`${API_ENDPOINT}/v1/sessions/${sessionId}`, {
-                        headers: {
-                            'Authorization': `Bearer ${this.credentials!.token}`,
-                            'Content-Type': 'application/json'
-                        }
-                    });
+                    const response = await apiSocket.request(`/v1/sessions/${sessionId}`);
                     if (response.ok) {
                         const raw = await response.json() as {
                             id: string; tag: string; seq: number;
@@ -2776,13 +2770,7 @@ class Sync {
                 void (async () => {
                     try {
                         const t0 = performance.now();
-                        const API_ENDPOINT = getServerUrl();
-                        const response = await this.instrumentedFetch(`${API_ENDPOINT}/v1/sessions/${id}`, {
-                            headers: {
-                                'Authorization': `Bearer ${this.credentials!.token}`,
-                                'Content-Type': 'application/json'
-                            }
-                        });
+                        const response = await apiSocket.request(`/v1/sessions/${id}`);
                         if (response.ok) {
                             const raw = await response.json() as {
                                 id: string; tag: string; seq: number;
