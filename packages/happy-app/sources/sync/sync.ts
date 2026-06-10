@@ -74,6 +74,10 @@ type OutboxMessage = {
 class Sync {
     private static readonly BACKGROUND_SEND_TIMEOUT_MS = 30_000;
     private static readonly DESKTOP_SESSION_REFRESH_COOLDOWN_MS = 15_000;
+    /** Minimum interval between full session list fetches (rate-limit). */
+    private static readonly SESSION_REFRESH_COOLDOWN_MS = 30_000;
+    /** Periodic fallback refresh interval when no events arrive. */
+    private static readonly SESSION_REFRESH_INTERVAL_MS = 300_000; // 5 min
     /** Ignore stale ephemeral thinking=false shortly after turn-start (debounced session-alive). */
     private static readonly TURN_START_EPHEMERAL_GRACE_MS = 8_000;
     encryption!: Encryption;
@@ -123,6 +127,7 @@ class Sync {
     private networkStateSubscription: ReturnType<typeof Network.addNetworkStateListener> | null = null;
     private currentVisibleSessionId: string | null = null;
     private lastDesktopSessionRefreshAt = 0;
+    private lastSessionRefreshAt = 0;
     /** Per-session turn-start time; used to drop lagging session-alive thinking=false. */
     private sessionTurnStartAt = new Map<string, number>();
     /** Last known network connectivity; null until first change event fires. */
@@ -237,9 +242,11 @@ class Sync {
 
         // Periodic session list refresh so long-running foreground sessions
         // pick up new sessions from other devices without needing a restart.
+        // Cooldown in fetchSessions prevents this from running back-to-back
+        // with event-driven invalidations.
         this.sessionsRefreshInterval = setInterval(() => {
             this.sessionsSync.invalidate();
-        }, 120_000); // every 2 minutes
+        }, Sync.SESSION_REFRESH_INTERVAL_MS);
     }
 
     /** Invalidate all data syncs (called on app resume / window becoming visible). */
@@ -1031,6 +1038,14 @@ class Sync {
             log.log('📥 fetchSessions: no credentials, skipping');
             return;
         }
+
+        // Rate-limit: don't fetch more than once per cooldown period.
+        const now = Date.now();
+        if (now - this.lastSessionRefreshAt < Sync.SESSION_REFRESH_COOLDOWN_MS) {
+            log.log(`⏱️ fetchSessions: skipped — cooldown (${now - this.lastSessionRefreshAt}ms since last)`);
+            return;
+        }
+        this.lastSessionRefreshAt = now;
 
         try {
             const t0 = performance.now();
