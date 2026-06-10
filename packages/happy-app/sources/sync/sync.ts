@@ -1111,7 +1111,7 @@ class Sync {
             this.applySessions(decryptedSessions);
             const totalMs = Math.round(performance.now() - t0);
             const fetchMs = Math.round(performance.now() - fetchStart);
-            log.log(`⏱️ fetchSessions: ${totalMs}ms total, ${fetchMs}ms fetch+decrypt, ${decryptedSessions.length} sessions`);
+            console.warn(`⏱️ fetchSessions: ${totalMs}ms total, ${fetchMs}ms fetch+decrypt, ${decryptedSessions.length} sessions`);
             void saveSessionsListCache(decryptedSessions);
             this._loggedMissingSessionForSid.clear();
 
@@ -2666,7 +2666,7 @@ class Sync {
                             if (decrypted) {
                                 storage.getState().applySessions([decrypted]);
                             }
-                            log.log(`⏱️ fetchSingleSession ${id}: ${Math.round(performance.now() - t0)}ms`);
+                            console.warn(`⏱️ fetchSingleSession ${id}: ${Math.round(performance.now() - t0)}ms`);
                         }
                     } catch { /* best-effort — full list fetch will catch up */ }
                 })();
