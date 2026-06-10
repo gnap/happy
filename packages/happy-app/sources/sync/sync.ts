@@ -415,6 +415,8 @@ class Sync {
             if (cachedSessions && cachedSessions.length > 0) {
                 log.log(`📦 sessionsListCache: applying ${cachedSessions.length} cached sessions`);
                 this.applySessions(cachedSessions);
+                // Mark data ready immediately so UI renders cached list while network fetch runs
+                storage.getState().applyReady();
             }
         } catch (e) {
             log.log(`📦 sessionsListCache: error applying cached list: ${e}`);
