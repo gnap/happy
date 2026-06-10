@@ -1160,6 +1160,7 @@ class Sync {
                     'Content-Type': 'application/json'
                 }
             });
+            const networkMs = Math.round(performance.now() - fetchStart);
 
             if (!response.ok) {
                 const body = await response.text();
@@ -1167,7 +1168,11 @@ class Sync {
                 throw new Error(`Failed to fetch sessions: ${response.status}`);
             }
 
-            const data = await response.json();
+            const parseStart = performance.now();
+            const respText = await response.text();
+            const respSizeKb = Math.round(respText.length / 1024);
+            const data = JSON.parse(respText);
+            const parseMs = Math.round(performance.now() - parseStart);
             const rawSessions = data.sessions;
             if (!Array.isArray(rawSessions)) {
                 log.log(`📥 fetchSessions: API did not return sessions array (got ${typeof rawSessions})`);
@@ -1189,6 +1194,7 @@ class Sync {
             }>;
 
             // Initialize all session encryptions first
+            const keyDecryptStart = performance.now();
             const sessionKeys = new Map<string, Uint8Array | null>();
             for (const session of sessions) {
                 if (session.dataEncryptionKey) {
@@ -1203,8 +1209,10 @@ class Sync {
                 }
             }
             await this.encryption.initializeSessions(sessionKeys);
+            const keyDecryptMs = Math.round(performance.now() - keyDecryptStart);
 
             // Decrypt sessions
+            const metadataDecryptStart = performance.now();
             let decryptedSessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[] = [];
             for (const session of sessions) {
                 // Get session encryption (should always exist after initialization)
@@ -1232,10 +1240,18 @@ class Sync {
             }
 
             // Apply to storage
+            const applyStart = performance.now();
             this.applySessions(decryptedSessions);
+            const applyMs = Math.round(performance.now() - applyStart);
+            const metadataDecryptMs = Math.round(performance.now() - metadataDecryptStart);
             const totalMs = Math.round(performance.now() - t0);
-            const fetchMs = Math.round(performance.now() - fetchStart);
-            console.warn(`⏱️ fetchSessions: ${totalMs}ms total, ${fetchMs}ms fetch+decrypt, ${decryptedSessions.length} sessions`);
+            const decryptTotalMs = keyDecryptMs + metadataDecryptMs;
+            console.warn(
+                `⏱️ fetchSessions: ${totalMs}ms total | ` +
+                `network ${networkMs}ms | parse ${parseMs}ms (${respSizeKb}KB) | ` +
+                `decrypt ${decryptTotalMs}ms (keys ${keyDecryptMs}ms + meta ${metadataDecryptMs}ms) | ` +
+                `apply ${applyMs}ms | ${decryptedSessions.length} sessions`
+            );
             void saveSessionsListCache(decryptedSessions);
             this._loggedMissingSessionForSid.clear();
 
