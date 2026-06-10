@@ -80,7 +80,61 @@ class Sync {
     private static readonly SESSION_REFRESH_INTERVAL_MS = 300_000; // 5 min
     /** Ignore stale ephemeral thinking=false shortly after turn-start (debounced session-alive). */
     private static readonly TURN_START_EPHEMERAL_GRACE_MS = 8_000;
-    encryption!: Encryption;
+
+    // ---- Fetch instrumentation ----
+    private fetchMetrics = {
+        count: 0,
+        totalMs: 0,
+        errors: 0,
+        byPath: new Map<string, { count: number; totalMs: number; errors: number }>(),
+    };
+    private lastFetchMetricsLog = Date.now();
+    private static readonly FETCH_METRICS_LOG_INTERVAL_MS = 60_000; // log summary every 60s
+
+    /** Wrapper that instruments a fetch call and logs periodic summaries. */
+    private async instrumentedFetch(url: string, init?: RequestInit): Promise<Response> {
+        const t0 = performance.now();
+        let response: Response;
+        try {
+            response = await fetch(url, init);
+        } catch (e) {
+            this.fetchMetrics.count++;
+            this.fetchMetrics.errors++;
+            const path = this.fetchMetricsPath(url);
+            const p = this.fetchMetrics.byPath.get(path) ?? { count: 0, totalMs: 0, errors: 0 };
+            p.count++; p.errors++;
+            this.fetchMetrics.byPath.set(path, p);
+            throw e;
+        }
+        const elapsed = Math.round(performance.now() - t0);
+        this.fetchMetrics.count++;
+        this.fetchMetrics.totalMs += elapsed;
+        const path = this.fetchMetricsPath(url);
+        const p = this.fetchMetrics.byPath.get(path) ?? { count: 0, totalMs: 0, errors: 0 };
+        p.count++; p.totalMs += elapsed;
+        if (!response.ok) p.errors++;
+        this.fetchMetrics.byPath.set(path, p);
+
+        // Periodic summary
+        if (Date.now() - this.lastFetchMetricsLog >= Sync.FETCH_METRICS_LOG_INTERVAL_MS) {
+            this.lastFetchMetricsLog = Date.now();
+            const lines: string[] = [
+                `📊 HTTP stats (${Math.round((Date.now() - this.lastFetchMetricsLog + Sync.FETCH_METRICS_LOG_INTERVAL_MS) / 1000)}s window):`,
+            ];
+            for (const [path, m] of this.fetchMetrics.byPath) {
+                const avg = Math.round(m.totalMs / m.count);
+                lines.push(`  ${path}: ${m.count} req, avg ${avg}ms, ${m.errors} err`);
+            }
+            console.warn(lines.join('\n'));
+        }
+
+        return response;
+    }
+
+    private fetchMetricsPath(url: string): string {
+        try { return new URL(url).pathname.replace(/\/[a-zA-Z0-9_-]{20,}/g, '/:id'); } catch { return url; }
+    }
+    // ---- End fetch instrumentation ----
     serverID!: string;
     anonID!: string;
     private credentials!: AuthCredentials;
@@ -512,7 +566,7 @@ class Sync {
             void (async () => {
                 try {
                     const API_ENDPOINT = getServerUrl();
-                    const response = await fetch(`${API_ENDPOINT}/v1/sessions/${sessionId}`, {
+                    const response = await this.instrumentedFetch(`${API_ENDPOINT}/v1/sessions/${sessionId}`, {
                         headers: {
                             'Authorization': `Bearer ${this.credentials!.token}`,
                             'Content-Type': 'application/json'
@@ -1106,7 +1160,7 @@ class Sync {
             const API_ENDPOINT = getServerUrl();
             log.log(`📥 fetchSessions: GET ${API_ENDPOINT}/v1/sessions`);
             const fetchStart = performance.now();
-            const response = await fetch(`${API_ENDPOINT}/v1/sessions`, {
+            const response = await this.instrumentedFetch(`${API_ENDPOINT}/v1/sessions`, {
                 headers: {
                     'Authorization': `Bearer ${this.credentials.token}`,
                     'Content-Type': 'application/json'
@@ -2723,7 +2777,7 @@ class Sync {
                     try {
                         const t0 = performance.now();
                         const API_ENDPOINT = getServerUrl();
-                        const response = await fetch(`${API_ENDPOINT}/v1/sessions/${id}`, {
+                        const response = await this.instrumentedFetch(`${API_ENDPOINT}/v1/sessions/${id}`, {
                             headers: {
                                 'Authorization': `Bearer ${this.credentials!.token}`,
                                 'Content-Type': 'application/json'
