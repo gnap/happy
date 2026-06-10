@@ -1157,7 +1157,8 @@ class Sync {
             const response = await this.instrumentedFetch(`${API_ENDPOINT}/v1/sessions`, {
                 headers: {
                     'Authorization': `Bearer ${this.credentials.token}`,
-                    'Content-Type': 'application/json'
+                    'Content-Type': 'application/json',
+                    'Accept-Encoding': 'gzip, deflate',
                 }
             });
             const networkMs = Math.round(performance.now() - fetchStart);
@@ -1171,6 +1172,8 @@ class Sync {
             const parseStart = performance.now();
             const respText = await response.text();
             const respSizeKb = Math.round(respText.length / 1024);
+            const contentLength = response.headers.get('content-length');
+            const xferKb = contentLength ? Math.round(parseInt(contentLength) / 1024) : respSizeKb;
             const data = JSON.parse(respText);
             const parseMs = Math.round(performance.now() - parseStart);
             const rawSessions = data.sessions;
@@ -1248,7 +1251,7 @@ class Sync {
             const decryptTotalMs = keyDecryptMs + metadataDecryptMs;
             console.warn(
                 `⏱️ fetchSessions: ${totalMs}ms total | ` +
-                `network ${networkMs}ms | parse ${parseMs}ms (${respSizeKb}KB) | ` +
+                `network ${networkMs}ms | parse ${parseMs}ms (${respSizeKb}KB uncompressed${xferKb !== respSizeKb ? `, ${xferKb}KB on wire` : ''}) | ` +
                 `decrypt ${decryptTotalMs}ms (keys ${keyDecryptMs}ms + meta ${metadataDecryptMs}ms) | ` +
                 `apply ${applyMs}ms | ${decryptedSessions.length} sessions`
             );
