@@ -499,14 +499,19 @@ class Sync {
             }
         }
 
-        // Load cached session list before network fetch so UI shows instantly
+        // Load cached session list before network fetch so UI shows instantly.
+        // The cache's cachedAt timestamp serves as the delta base — if the cache
+        // is fresh (< 10 min), the first network fetch will be an incremental delta.
         try {
-            const cachedSessions = await loadSessionsListCache();
-            if (cachedSessions && cachedSessions.length > 0) {
-                log.log(`📦 sessionsListCache: applying ${cachedSessions.length} cached sessions`);
-                this.applySessions(cachedSessions);
-                // Mark data ready immediately so UI renders cached list while network fetch runs
+            const cached = await loadSessionsListCache();
+            if (cached && cached.sessions.length > 0) {
+                log.log(`📦 sessionsListCache: applying ${cached.sessions.length} cached sessions (cachedAt=${cached.cachedAt})`);
+                this.applySessions(cached.sessions);
                 storage.getState().applyReady();
+                // Use the cache timestamp as the base for delta fetches.
+                if (!this.lastSessionRefreshNonDeltaAt) {
+                    this.lastSessionRefreshNonDeltaAt = cached.cachedAt;
+                }
             }
         } catch (e) {
             log.log(`📦 sessionsListCache: error applying cached list: ${e}`);

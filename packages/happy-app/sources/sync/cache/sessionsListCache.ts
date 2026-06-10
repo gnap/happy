@@ -42,7 +42,7 @@ export async function preloadSessionsListCache(): Promise<void> {
 /**
  * Try to load the cached session list. Returns null if empty or unavailable.
  */
-export async function loadSessionsListCache(): Promise<SessionListEntry[] | null> {
+export async function loadSessionsListCache(): Promise<{ sessions: SessionListEntry[]; cachedAt: number } | null> {
     try {
         const db = getSessionCacheDB();
         const row = await db.getSessionsListCache();
@@ -52,7 +52,7 @@ export async function loadSessionsListCache(): Promise<SessionListEntry[] | null
         }
         const sessions = JSON.parse(row.sessionsJson) as SessionListEntry[];
         log.log(`📦 sessionsListCache: loaded ${sessions.length} sessions (cachedAt=${row.cachedAt})`);
-        return sessions;
+        return { sessions, cachedAt: row.cachedAt };
     } catch (err) {
         log.log(`📦 sessionsListCache: load error: ${err}`);
         return null;
