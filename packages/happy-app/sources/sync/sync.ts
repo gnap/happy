@@ -1161,8 +1161,7 @@ class Sync {
             const API_ENDPOINT = getServerUrl();
             // Pass updatedSince to request only sessions changed since our last full fetch.
             // Falls back to full list if the server does not support delta filtering.
-            const deltaMs = this.lastSessionRefreshNonDeltaAt && (Date.now() - this.lastSessionRefreshNonDeltaAt);
-            const since = deltaMs && deltaMs < 600_000 // within 10 min — ask for delta
+            const since = this.lastSessionRefreshNonDeltaAt
                 ? `?updatedSince=${this.lastSessionRefreshNonDeltaAt}`
                 : '';
             log.log(`📥 fetchSessions: GET ${API_ENDPOINT}/v1/sessions${since}`);
