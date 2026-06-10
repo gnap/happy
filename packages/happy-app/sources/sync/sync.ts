@@ -94,19 +94,10 @@ class Sync {
     /** Wrapper that instruments a fetch call and logs periodic summaries. */
     private async instrumentedFetch(url: string, init?: RequestInit): Promise<Response> {
         const t0 = performance.now();
-        // Tauri's @tauri-apps/plugin-http uses reqwest with no default timeout.
-        // Add a 30s deadline to prevent hung connections from stalling the app.
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 30_000);
-        const signal = controller.signal;
-        if (init?.signal) {
-            init.signal.addEventListener('abort', () => controller.abort(), { once: true });
-        }
         let response: Response;
         try {
-            response = await fetch(url, { ...init, signal });
+            response = await fetch(url, init);
         } catch (e) {
-            clearTimeout(timeoutId);
             this.fetchMetrics.count++;
             this.fetchMetrics.errors++;
             const path = this.fetchMetricsPath(url);
@@ -115,7 +106,6 @@ class Sync {
             this.fetchMetrics.byPath.set(path, p);
             throw e;
         }
-        clearTimeout(timeoutId);
         const elapsed = Math.round(performance.now() - t0);
         this.fetchMetrics.count++;
         this.fetchMetrics.totalMs += elapsed;
@@ -192,7 +182,7 @@ class Sync {
     private currentVisibleSessionId: string | null = null;
     private lastDesktopSessionRefreshAt = 0;
     private lastSessionRefreshAt = 0;
-    /** Timestamp of the last successful session fetch; used as delta base. */
+    /** Timestamp of the last non-delta full-session fetch; used for incremental delta requests. */
     private lastSessionRefreshNonDeltaAt = 0;
     /** Per-session cooldown for single-session fetches (15s). */
     private sessionRefreshCooldowns = new Map<string, number>();
@@ -510,11 +500,14 @@ class Sync {
         }
 
         // Load cached session list before network fetch so UI shows instantly.
+        // The cache's cachedAt timestamp serves as the delta base — if the cache
+        // is fresh (< 10 min), the first network fetch will be an incremental delta.
         try {
             const cached = await loadSessionsListCache();
             if (cached && cached.sessions.length > 0) {
                 log.log(`📦 sessionsListCache: applying ${cached.sessions.length} cached sessions (cachedAt=${cached.cachedAt})`);
                 this.applySessions(cached.sessions);
+                storage.getState().applyReady();
                 // Use the cache timestamp as the base for delta fetches.
                 if (!this.lastSessionRefreshNonDeltaAt) {
                     this.lastSessionRefreshNonDeltaAt = cached.cachedAt;
@@ -523,11 +516,6 @@ class Sync {
         } catch (e) {
             log.log(`📦 sessionsListCache: error applying cached list: ${e}`);
         }
-        // Mark data ready now regardless of cache hit — cached sessions are already
-        // applied above, and if there's no cache the UI shows an empty list while the
-        // network fetch runs in the background. Avoids a white screen waiting for the
-        // 20s ready timeout on cold starts.
-        storage.getState().applyReady();
 
         // Invalidate sync
         log.log('🔄 #init: Invalidating all syncs');
@@ -576,13 +564,31 @@ class Sync {
         gitStatusSync.getSync(sessionId).invalidate();
 
         // Rate-limited single-session refresh: when the user opens a cached
-        // session, invalidate the sessions list sync so the delta fetch picks
-        // up the latest metadata/agentState. Cooldown: 15s per session.
+        // session, pull its latest metadata/agentState without waiting for
+        // the full list fetch. Cooldown: 15s per session.
         const now = Date.now();
         const lastRefresh = this.sessionRefreshCooldowns.get(sessionId) ?? 0;
         if (now - lastRefresh >= 15_000) {
             this.sessionRefreshCooldowns.set(sessionId, now);
-            this.sessionsSync.invalidate();
+            void (async () => {
+                try {
+                    const response = await apiSocket.request(`/v1/sessions/${sessionId}`);
+                    if (response.ok) {
+                        const raw = await response.json() as {
+                            id: string; tag: string; seq: number;
+                            metadata: string; metadataVersion: number;
+                            agentState: string | null; agentStateVersion: number;
+                            dataEncryptionKey: string | null;
+                            active: boolean; activeAt: number;
+                            createdAt: number; updatedAt: number;
+                        };
+                        const decrypted = await this.decryptSingleSession(raw);
+                        if (decrypted) {
+                            storage.getState().applySessions([decrypted]);
+                        }
+                    }
+                } catch { /* best-effort */ }
+            })();
         }
 
         // If this session still has pending outbox messages, recover from stale
@@ -1153,15 +1159,15 @@ class Sync {
         try {
             const t0 = performance.now();
             const API_ENDPOINT = getServerUrl();
-            const params = new URLSearchParams();
-            if (this.lastSessionRefreshNonDeltaAt) {
-                params.set('changedSince', String(this.lastSessionRefreshNonDeltaAt));
-            }
-            params.set('limit', '200');
-            const qs = params.toString();
-            log.log(`📥 fetchSessions: GET ${API_ENDPOINT}/v2/sessions?${qs}`);
+            // Pass updatedSince to request only sessions changed since our last full fetch.
+            // Falls back to full list if the server does not support delta filtering.
+            const deltaMs = this.lastSessionRefreshNonDeltaAt && (Date.now() - this.lastSessionRefreshNonDeltaAt);
+            const since = deltaMs && deltaMs < 600_000 // within 10 min — ask for delta
+                ? `?updatedSince=${this.lastSessionRefreshNonDeltaAt}`
+                : '';
+            log.log(`📥 fetchSessions: GET ${API_ENDPOINT}/v1/sessions${since}`);
             const fetchStart = performance.now();
-            const response = await this.instrumentedFetch(`${API_ENDPOINT}/v2/sessions?${qs}`, {
+            const response = await this.instrumentedFetch(`${API_ENDPOINT}/v1/sessions${since}`, {
                 headers: {
                     'Authorization': `Bearer ${this.credentials.token}`,
                     'Content-Type': 'application/json',
@@ -1253,9 +1259,8 @@ class Sync {
             // Apply to storage
             const applyStart = performance.now();
             this.applySessions(decryptedSessions);
-            // Record timestamp for next delta fetch. Moves forward every successful fetch
-            // so subsequent deltas only request sessions changed since THIS fetch.
-            this.lastSessionRefreshNonDeltaAt = Date.now();
+            // Record timestamp for next delta fetch (only when we got a non-delta response).
+            if (!since) this.lastSessionRefreshNonDeltaAt = Date.now();
             const applyMs = Math.round(performance.now() - applyStart);
             const metadataDecryptMs = Math.round(performance.now() - metadataDecryptStart);
             const totalMs = Math.round(performance.now() - t0);
@@ -1264,12 +1269,9 @@ class Sync {
                 `⏱️ fetchSessions: ${totalMs}ms total | ` +
                 `network ${networkMs}ms | parse ${parseMs}ms (${respSizeKb}KB uncompressed${xferKb !== respSizeKb ? `, ${xferKb}KB on wire` : ''}) | ` +
                 `decrypt ${decryptTotalMs}ms (keys ${keyDecryptMs}ms + meta ${metadataDecryptMs}ms) | ` +
-                `apply ${applyMs}ms | ${decryptedSessions.length} sessions (delta)`
+                `apply ${applyMs}ms | ${decryptedSessions.length} sessions`
             );
-            // Save full merged state (cached + delta), not just the delta results.
-            const fullState = storage.getState().sessions;
-            const allValues = Object.values(fullState).map(({ presence, ...s }) => s);
-            void saveSessionsListCache(allValues);
+            void saveSessionsListCache(decryptedSessions);
             this._loggedMissingSessionForSid.clear();
 
             // Only eagerly catch up messages for active sessions (agent is running).
@@ -2779,8 +2781,6 @@ class Sync {
             if (id && createdAt && updatedAt) {
                 // 1. Immediately insert a lightweight placeholder so the session
                 //    appears in the list without waiting for any network round-trip.
-                //    Minimal metadata with path set to a sentinel so getSessionName
-                //    renders a localized "Creating…" label instead of "unknown".
                 try {
                     storage.getState().applySessions([{
                         id,
@@ -2789,10 +2789,7 @@ class Sync {
                         updatedAt: updatedAt,
                         active: true,
                         activeAt: createdAt,
-                        metadata: {
-                            path: '​creating​', // zero-width-space sentinel
-                            host: '',
-                        } as any,
+                        metadata: null,
                         metadataVersion: 0,
                         agentState: null,
                         agentStateVersion: 0,
@@ -2802,9 +2799,32 @@ class Sync {
                     }]);
                 } catch { /* best-effort placeholder */ }
 
+                // 2. Fetch this single session's full details immediately.
+                //    This enriches the placeholder with metadata & agentState
+                //    much faster than waiting for the full list fetch.
+                void (async () => {
+                    try {
+                        const t0 = performance.now();
+                        const response = await apiSocket.request(`/v1/sessions/${id}`);
+                        if (response.ok) {
+                            const raw = await response.json() as {
+                                id: string; tag: string; seq: number;
+                                metadata: string; metadataVersion: number;
+                                agentState: string | null; agentStateVersion: number;
+                                dataEncryptionKey: string | null;
+                                active: boolean; activeAt: number;
+                                createdAt: number; updatedAt: number;
+                            };
+                            const decrypted = await this.decryptSingleSession(raw);
+                            if (decrypted) {
+                                storage.getState().applySessions([decrypted]);
+                            }
+                            console.warn(`⏱️ fetchSingleSession ${id}: ${Math.round(performance.now() - t0)}ms`);
+                        }
+                    } catch { /* best-effort — full list fetch will catch up */ }
+                })();
             }
-            // 2. Full list sync via delta fetch picks up the new session's metadata.
-            //    /v1/sessions/{id} was removed; delta is the canonical path.
+            // 3. Full list sync still runs (updates all sessions, writes cache).
             this.sessionsSync.invalidate();
         } else if (updateData.body.t === 'delete-session') {
             log.log('🗑️ Delete session update received');
