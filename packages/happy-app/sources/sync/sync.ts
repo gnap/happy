@@ -132,6 +132,7 @@ class Sync {
     private backgroundSendTimeout: ReturnType<typeof setTimeout> | null = null;
     private backgroundSendNotificationId: string | null = null;
     private backgroundSendStartedAt: number | null = null;
+    private sessionsRefreshInterval: ReturnType<typeof setInterval> | null = null;
     revenueCatInitialized = false;
 
     // Generic locking mechanism
@@ -233,6 +234,12 @@ class Sync {
         if (Platform.OS === 'web') {
             this.#setupDesktopLifecycle();
         }
+
+        // Periodic session list refresh so long-running foreground sessions
+        // pick up new sessions from other devices without needing a restart.
+        this.sessionsRefreshInterval = setInterval(() => {
+            this.sessionsSync.invalidate();
+        }, 120_000); // every 2 minutes
     }
 
     /** Invalidate all data syncs (called on app resume / window becoming visible). */
