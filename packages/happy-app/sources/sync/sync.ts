@@ -1135,6 +1135,36 @@ class Sync {
         }
     }
 
+    private decryptSingleSession = async (raw: {
+        id: string; tag: string; seq: number;
+        metadata: string; metadataVersion: number;
+        agentState: string | null; agentStateVersion: number;
+        dataEncryptionKey: string | null;
+        active: boolean; activeAt: number;
+        createdAt: number; updatedAt: number;
+    }): Promise<(Omit<Session, 'presence'> & { presence?: 'online' | number }) | null> => {
+        try {
+            if (raw.dataEncryptionKey) {
+                const key = await this.encryption.decryptEncryptionKey(raw.dataEncryptionKey);
+                if (key) {
+                    const keyMap = new Map<string, Uint8Array | null>();
+                    keyMap.set(raw.id, key);
+                    await this.encryption.initializeSessions(keyMap);
+                }
+            }
+            const sessionEncryption = this.encryption.getSessionEncryption(raw.id);
+            if (!sessionEncryption) {
+                // No encryption key yet — return raw session with null metadata.
+                return { ...raw, metadata: null, agentState: null, thinking: false, thinkingAt: 0 };
+            }
+            const metadata = await sessionEncryption.decryptMetadata(raw.metadataVersion, raw.metadata);
+            const agentState = await sessionEncryption.decryptAgentState(raw.agentStateVersion, raw.agentState);
+            return { ...raw, metadata, agentState, thinking: false, thinkingAt: 0 };
+        } catch {
+            return null;
+        }
+    }
+
     public refreshMachines = async () => {
         return this.fetchMachines();
     }
@@ -2584,11 +2614,10 @@ class Sync {
 
         } else if (updateData.body.t === 'new-session') {
             log.log('🆕 New session update received');
-            // Immediately insert a lightweight placeholder so the session
-            // appears in the list before the full HTTP fetch completes.
-            // The subsequent fetchSessions() will overwrite it with full data.
             const { id, createdAt, updatedAt } = updateData.body;
             if (id && createdAt && updatedAt) {
+                // 1. Immediately insert a lightweight placeholder so the session
+                //    appears in the list without waiting for any network round-trip.
                 try {
                     storage.getState().applySessions([{
                         id,
@@ -2605,8 +2634,38 @@ class Sync {
                         thinkingAt: 0,
                         presence: 'online' as const,
                     }]);
-                } catch { /* best-effort placeholder — fetch will retry */ }
+                } catch { /* best-effort placeholder */ }
+
+                // 2. Fetch this single session's full details immediately.
+                //    This enriches the placeholder with metadata & agentState
+                //    much faster than waiting for the full list fetch.
+                void (async () => {
+                    try {
+                        const API_ENDPOINT = getServerUrl();
+                        const response = await fetch(`${API_ENDPOINT}/v1/sessions/${id}`, {
+                            headers: {
+                                'Authorization': `Bearer ${this.credentials!.token}`,
+                                'Content-Type': 'application/json'
+                            }
+                        });
+                        if (response.ok) {
+                            const raw = await response.json() as {
+                                id: string; tag: string; seq: number;
+                                metadata: string; metadataVersion: number;
+                                agentState: string | null; agentStateVersion: number;
+                                dataEncryptionKey: string | null;
+                                active: boolean; activeAt: number;
+                                createdAt: number; updatedAt: number;
+                            };
+                            const decrypted = await this.decryptSingleSession(raw);
+                            if (decrypted) {
+                                storage.getState().applySessions([decrypted]);
+                            }
+                        }
+                    } catch { /* best-effort — full list fetch will catch up */ }
+                })();
             }
+            // 3. Full list sync still runs (updates all sessions, writes cache).
             this.sessionsSync.invalidate();
         } else if (updateData.body.t === 'delete-session') {
             log.log('🗑️ Delete session update received');
