@@ -537,8 +537,11 @@ export class ApiSessionClient extends EventEmitter {
             // Sync CLI version and worktree info on every connect.
             this.updateMetadata((metadata) => {
                 const wt = detectWorktree(metadata.path ?? process.cwd());
+                // Strip stale worktree fields from main-repo sessions so
+                // they don't leak a branch indicator after the fix revert.
+                const { projectPath: _pp, worktreeBranch: _wb, ...rest } = metadata as any;
                 return {
-                    ...metadata,
+                    ...(rest as Metadata),
                     version: BUILD_VERSION,
                     ...(wt ? { projectPath: wt.projectPath, worktreeBranch: wt.worktreeBranch } : {}),
                 };
