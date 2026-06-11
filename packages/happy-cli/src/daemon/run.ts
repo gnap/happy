@@ -1204,13 +1204,14 @@ export async function startDaemon(): Promise<void> {
     if (persistedStopped) {
       const MAX_STOPPED_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
       const now = Date.now();
+      let stoppedFallbackCount = 0;
       for (const s of persistedStopped) {
         if (archivedSessionIds[s.happySessionId]) continue;
         if (s.exitTime && now - s.exitTime > MAX_STOPPED_AGE_MS) continue;
         stoppedSessions.set(s.happySessionId, {
           startedBy: 'daemon',
           happySessionId: s.happySessionId,
-          pid: s.pid,
+          pid: s.pid ?? -1,
           directory: s.directory,
           sessionTag: s.sessionTag,
           agent: s.agent as any,
@@ -1219,7 +1220,28 @@ export async function startDaemon(): Promise<void> {
           lastHeartbeat: s.lastHeartbeat,
         });
       }
-      logger.debug(`[DAEMON RUN] Restored ${stoppedSessions.size} stopped session(s) from persisted state`);
+      // Also restore sessions from persisted metadata maps that aren't in stoppedSessions.
+      // This covers the case where daemon was killed before serializing stoppedSessions
+      // (e.g., version self-restart), but metadata maps (directory, tag, agent) survived.
+      for (const [id, directory] of Object.entries(lastDirectoryBySessionId)) {
+        if (!id || !directory) continue;
+        if (stoppedSessions.has(id)) continue;
+        if (archivedSessionIds[id]) continue;
+        if (Array.from(pidToTrackedSession.values()).some(s => s.happySessionId === id)) continue;
+        const tag = lastSessionTagBySessionId[id];
+        const agent = lastAgentBySessionId[id];
+        if (!tag || !agent) continue;
+        stoppedSessions.set(id, {
+          startedBy: 'daemon',
+          happySessionId: id,
+          pid: -1,
+          directory,
+          sessionTag: tag,
+          agent: agent as any,
+        });
+        stoppedFallbackCount++;
+      }
+      logger.debug(`[DAEMON RUN] Restored ${stoppedSessions.size} stopped session(s) from persisted state (${stoppedFallbackCount} from metadata fallback)`);
     }
     const serializeStoppedSessions = () =>
       Array.from(stoppedSessions.values()).map(s => ({
@@ -1314,6 +1336,7 @@ export async function startDaemon(): Promise<void> {
         }
       }
       logger.debug(`[DAEMON RUN] Bootstrapped lastSeq for ${seeded}/${bootstrapSessions.length} session(s) from server`);
+
       persistNow();
     } catch (err) {
       logger.debug('[DAEMON RUN] Failed to bootstrap session seq baselines:', err);
@@ -1451,10 +1474,10 @@ export async function startDaemon(): Promise<void> {
       }
 
       // Check if daemon needs update
-      // If version on disk is different from the one in package.json - we need to restart
-      // BIG if - does this get updated from underneath us on npm upgrade?
+      // DISABLED: the version-on-disk check kills all active sessions
+      // when package.json changes during dev.
       const projectVersion = JSON.parse(readFileSync(join(projectPath(), 'package.json'), 'utf-8')).version;
-      if (projectVersion !== configuration.currentCliVersion) {
+      if (false && projectVersion !== configuration.currentCliVersion) {
         logger.debug('[DAEMON RUN] Daemon is outdated, triggering self-restart with latest version, clearing heartbeat interval');
 
         clearInterval(restartOnStaleVersionAndHeartbeat);
