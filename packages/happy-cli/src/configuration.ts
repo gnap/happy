@@ -109,7 +109,7 @@ class Configuration {
     this.isExperimentalEnabled = ['true', '1', 'yes'].includes(process.env.HAPPY_EXPERIMENTAL?.toLowerCase() || '');
     this.disableCaffeinate = ['true', '1', 'yes'].includes(process.env.HAPPY_DISABLE_CAFFEINATE?.toLowerCase() || '');
 
-    this.currentCliVersion = packageJson.version
+    this.currentCliVersion = packageJson.version.replace(/-0$/, `-${process.env.BUILD_COMMIT}`)
 
     // Validate variant configuration
     const variant = process.env.HAPPY_VARIANT || 'stable'
