@@ -164,7 +164,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         dangerouslySkipPermissions,
         ...(worktree ? {
             projectPath: worktree.projectPath,
-            worktreeBranch: worktree.worktreeBranch,
+            branchName: worktree.branchName,
+            isWorktree: worktree.isWorktree,
         } : {}),
     };
 

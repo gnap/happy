@@ -51,31 +51,40 @@ export interface SessionMetadataResult {
     metadata: Metadata;
 }
 
-export function detectWorktree(cwd: string): { projectPath: string; worktreeBranch?: string } | null {
+export interface GitInfo {
+    /** Absolute path to the main repo (worktree: parsed from .git file; main repo: cwd) */
+    projectPath: string;
+    /** Current git branch name (both main repo and worktrees) */
+    branchName?: string;
+    /** True if this is a git worktree (main repo has .git/ directory, worktree has .git file) */
+    isWorktree: boolean;
+}
+
+export function detectWorktree(cwd: string): GitInfo | null {
     const gitFile = resolve(cwd, '.git');
     try {
         if (!existsSync(gitFile)) return null;
-        const stat = statSync(gitFile);
-        if (!stat.isFile()) return null; // directory → main repo
 
-        // Worktree: .git is a file containing "gitdir: /path/to/main/.git/worktrees/name"
-        const content = readFileSync(gitFile, 'utf-8');
-        const m = content.match(/^gitdir:\s*(.+)$/m);
-        if (!m) return null;
-
-        // Extract main repo path: strip .git/worktrees/<name> suffix
-        const gitdir = m[1].trim();
-        const worktreesIdx = gitdir.indexOf('/.git/worktrees/');
-        if (worktreesIdx < 0) return null;
-        const projectPath = gitdir.slice(0, worktreesIdx);
-
-        // Get current branch
-        let branch: string | undefined;
+        let branchName: string | undefined;
         try {
-            branch = execSync('git branch --show-current', { cwd, encoding: 'utf-8' }).trim() || undefined;
+            branchName = execSync('git branch --show-current', { cwd, encoding: 'utf-8' }).trim() || undefined;
         } catch { /* non-fatal */ }
 
-        return { projectPath, worktreeBranch: branch };
+        const stat = statSync(gitFile);
+        if (stat.isFile()) {
+            // Worktree: .git is a file containing "gitdir: /path/to/main/.git/worktrees/name"
+            const content = readFileSync(gitFile, 'utf-8');
+            const m = content.match(/^gitdir:\s*(.+)$/m);
+            if (!m) return null;
+            const gitdir = m[1].trim();
+            const worktreesIdx = gitdir.indexOf('/.git/worktrees/');
+            if (worktreesIdx < 0) return null;
+            const projectPath = gitdir.slice(0, worktreesIdx);
+            return { projectPath, branchName, isWorktree: true };
+        }
+
+        // Main repo: .git is a directory — projectPath is its own cwd
+        return { projectPath: cwd, branchName, isWorktree: false };
     } catch {
         return null;
     }
@@ -129,7 +138,8 @@ export function createSessionMetadata(opts: CreateSessionMetadataOptions): Sessi
         dangerouslySkipPermissions: opts.dangerouslySkipPermissions ?? null,
         ...(worktree ? {
             projectPath: worktree.projectPath,
-            worktreeBranch: worktree.worktreeBranch,
+            branchName: worktree.branchName,
+            isWorktree: worktree.isWorktree,
         } : {}),
     };
 
