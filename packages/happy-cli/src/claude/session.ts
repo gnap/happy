@@ -2,7 +2,6 @@ import { ApiClient, ApiSessionClient } from "@/lib";
 import { MessageQueue2 } from "@/utils/MessageQueue2";
 import { EnhancedMode } from "./loop";
 import { logger } from "@/ui/logger";
-import { BUILD_VERSION } from '../version';
 import type { JsRuntime } from "./runClaude";
 import type { SandboxConfig } from "@/persistence";
 import type { A2AInboxTurnHooks } from "@/a2a/inboxTurnController";
@@ -118,13 +117,12 @@ export class Session {
     onSessionFound = (sessionId: string) => {
         this.sessionId = sessionId;
 
-        // Update metadata with Claude Code session ID and current CLI version
+        // Update metadata with Claude Code session ID
         this.client.updateMetadata((metadata) => ({
             ...metadata,
-            version: BUILD_VERSION,
             claudeSessionId: sessionId
         }));
-        logger.debug(`[Session] Claude Code session ID ${sessionId} added to metadata (cli ${BUILD_VERSION})`);
+        logger.debug(`[Session] Claude Code session ID ${sessionId} added to metadata`);
 
         // Notify all registered callbacks
         for (const callback of this.sessionFoundCallbacks) {

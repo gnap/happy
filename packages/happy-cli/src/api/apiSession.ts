@@ -1,4 +1,5 @@
 import { logger } from '@/ui/logger'
+import { BUILD_VERSION } from '../version'
 import { EventEmitter } from 'node:events'
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
@@ -532,6 +533,10 @@ export class ApiSessionClient extends EventEmitter {
             this.socketConnectedResolve = undefined;
             this.stopFallbackPoll();
             this.rpcHandlerManager.onSocketConnect(this.socket);
+            // Sync CLI version on every connect so the App always sees the current build.
+            this.updateMetadata((metadata) => ({ ...metadata, version: BUILD_VERSION })).catch((error) => {
+                logger.debug('[API] Failed to sync CLI version on connect:', error);
+            });
             if (this.requestedMetadata && shouldSyncSessionMetadata(this.metadata, this.requestedMetadata)) {
                 logger.debug('[API] Session metadata changed, syncing static metadata to server');
                 this.updateMetadata((currentMetadata) => buildSyncedSessionMetadata(currentMetadata, this.requestedMetadata as Metadata)).catch((error) => {
