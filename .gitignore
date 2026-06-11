@@ -6,6 +6,12 @@
 # dependencies
 node_modules/
 
+# npm lock (project uses yarn)
+package-lock.json
+
+# Expo generated (use app.config.ts instead)
+app.json
+
 # Expo
 .expo/
 dist/
