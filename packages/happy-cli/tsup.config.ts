@@ -1,4 +1,9 @@
 import { defineConfig } from 'tsup'
+import { execSync } from 'child_process'
+
+const gitCommit = (() => {
+  try { return execSync('git rev-parse --short HEAD', { encoding: 'utf-8' }).trim(); } catch { return 'unknown'; }
+})();
 
 export default defineConfig({
   entry: {
@@ -11,6 +16,9 @@ export default defineConfig({
   dts: true,
   splitting: true,
   clean: true,
+  define: {
+    'process.env.BUILD_COMMIT': JSON.stringify(gitCommit),
+  },
   sourcemap: false,
   outDir: 'dist',
   // Bundle all node_modules into the output to eliminate per-module disk I/O at startup.
