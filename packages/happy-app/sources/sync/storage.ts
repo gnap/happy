@@ -91,6 +91,7 @@ export type SessionListViewItem =
     | { type: 'header'; title: string }
     | { type: 'active-sessions'; sessions: Session[] }
     | { type: 'project-group'; displayPath: string; machine: Machine }
+    | { type: 'worktree-group'; projectPath: string; homeDir?: string; branch?: string }
     | { type: 'session'; session: Session; variant?: 'default' | 'no-path' };
 
 // Legacy type for backward compatibility - to be removed
@@ -219,6 +220,35 @@ function buildSessionListViewData(
     activeSessions.sort((a, b) => b.updatedAt - a.updatedAt);
     inactiveSessions.sort((a, b) => b.updatedAt - a.updatedAt);
 
+    // Helper: emit a date group, inserting worktree-group headers for
+    // worktree sessions grouped by their main repo (projectPath).
+    const emitSessionGroup = (group: Session[]) => {
+        // Sort: non-worktree first, then worktree sessions grouped by projectPath
+        const standard: Session[] = [];
+        const wtByProject = new Map<string, Session[]>();
+        for (const s of group) {
+            const pp = s.metadata?.projectPath;
+            if (pp) {
+                const arr = wtByProject.get(pp) || [];
+                arr.push(s);
+                wtByProject.set(pp, arr);
+            } else {
+                standard.push(s);
+            }
+        }
+        for (const s of standard) {
+            listData.push({ type: 'session', session: s });
+        }
+        for (const [projectPath, sessions] of wtByProject) {
+            const homeDir = sessions[0]?.metadata?.homeDir;
+            const branch = sessions[0]?.metadata?.worktreeBranch;
+            listData.push({ type: 'worktree-group', projectPath, homeDir, branch });
+            for (const s of sessions) {
+                listData.push({ type: 'session', session: s });
+            }
+        }
+    };
+
     // Build unified list view data
     const listData: SessionListViewItem[] = [];
 
@@ -257,9 +287,7 @@ function buildSessionListViewData(
                 }
 
                 listData.push({ type: 'header', title: headerTitle });
-                currentDateGroup.forEach(sess => {
-                    listData.push({ type: 'session', session: sess });
-                });
+                emitSessionGroup(currentDateGroup);
             }
 
             // Start new group
@@ -287,9 +315,7 @@ function buildSessionListViewData(
         }
 
         listData.push({ type: 'header', title: headerTitle });
-        currentDateGroup.forEach(sess => {
-            listData.push({ type: 'session', session: sess });
-        });
+        emitSessionGroup(currentDateGroup);
     }
 
     return listData;

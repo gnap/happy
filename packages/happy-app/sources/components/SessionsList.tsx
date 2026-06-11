@@ -5,7 +5,7 @@ import { Text } from '@/components/StyledText';
 import { usePathname } from 'expo-router';
 import { SessionListViewItem, useSessionIsFetching } from '@/sync/storage';
 import { Ionicons } from '@expo/vector-icons';
-import { getSessionName, useSessionStatus, getSessionSubtitle, getSessionAvatarId } from '@/utils/sessionUtils';
+import { getSessionName, useSessionStatus, getSessionSubtitle, getSessionAvatarId, formatPathRelativeToHome } from '@/utils/sessionUtils';
 import { Avatar } from './Avatar';
 import { ActiveSessionsGroup } from './ActiveSessionsGroup';
 import { ActiveSessionsGroupCompact } from './ActiveSessionsGroupCompact';
@@ -240,6 +240,7 @@ export function SessionsList() {
             case 'header': return `header-${item.title}-${index}`;
             case 'active-sessions': return 'active-sessions';
             case 'project-group': return `project-group-${item.machine.id}-${item.displayPath}-${index}`;
+            case 'worktree-group': return `worktree-group-${item.projectPath}-${index}`;
             case 'session': return `session-${item.session.id}`;
         }
     }, []);
@@ -280,6 +281,23 @@ export function SessionsList() {
                         <Text style={styles.projectGroupSubtitle}>
                             {item.machine.metadata?.displayName || item.machine.metadata?.host || item.machine.id}
                         </Text>
+                    </View>
+                );
+
+            case 'worktree-group':
+                return (
+                    <View style={styles.projectGroup}>
+                        <Ionicons name="git-branch-outline" size={14} color="#8E8E93" style={{ marginRight: 8 }} />
+                        <View style={{ flex: 1 }}>
+                            <Text style={styles.projectGroupTitle}>
+                                {formatPathRelativeToHome(item.projectPath, item.homeDir)}
+                            </Text>
+                            {item.branch && (
+                                <Text style={styles.projectGroupSubtitle}>
+                                    ⎇ {item.branch}
+                                </Text>
+                            )}
+                        </View>
                     </View>
                 );
 
