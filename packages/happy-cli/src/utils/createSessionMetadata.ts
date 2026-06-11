@@ -7,8 +7,10 @@
  * @module createSessionMetadata
  */
 
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import os from 'node:os';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 
 import type { AgentState, Metadata } from '@/api/types';
 import { configuration } from '@/configuration';
@@ -49,6 +51,36 @@ export interface SessionMetadataResult {
     metadata: Metadata;
 }
 
+export function detectWorktree(cwd: string): { projectPath: string; worktreeBranch?: string } | null {
+    const gitFile = resolve(cwd, '.git');
+    try {
+        if (!existsSync(gitFile)) return null;
+        const stat = statSync(gitFile);
+        if (!stat.isFile()) return null; // directory → main repo
+
+        // Worktree: .git is a file containing "gitdir: /path/to/main/.git/worktrees/name"
+        const content = readFileSync(gitFile, 'utf-8');
+        const m = content.match(/^gitdir:\s*(.+)$/m);
+        if (!m) return null;
+
+        // Extract main repo path: strip .git/worktrees/<name> suffix
+        const gitdir = m[1].trim();
+        const worktreesIdx = gitdir.indexOf('/.git/worktrees/');
+        if (worktreesIdx < 0) return null;
+        const projectPath = gitdir.slice(0, worktreesIdx);
+
+        // Get current branch
+        let branch: string | undefined;
+        try {
+            branch = execSync('git branch --show-current', { cwd, encoding: 'utf-8' }).trim() || undefined;
+        } catch { /* non-fatal */ }
+
+        return { projectPath, worktreeBranch: branch };
+    } catch {
+        return null;
+    }
+}
+
 /**
  * Creates session state and metadata for backend agents.
  *
@@ -74,8 +106,11 @@ export function createSessionMetadata(opts: CreateSessionMetadataOptions): Sessi
         controlledByUser: false,
     };
 
+    const cwd = opts.path !== undefined ? resolve(opts.path) : process.cwd();
+    const worktree = detectWorktree(cwd);
+
     const metadata: Metadata = {
-        path: opts.path !== undefined ? resolve(opts.path) : process.cwd(),
+        path: cwd,
         host: os.hostname(),
         version: BUILD_VERSION,
         os: os.platform(),
@@ -92,6 +127,10 @@ export function createSessionMetadata(opts: CreateSessionMetadataOptions): Sessi
         flavor: opts.flavor,
         sandbox: opts.sandbox?.enabled ? opts.sandbox : null,
         dangerouslySkipPermissions: opts.dangerouslySkipPermissions ?? null,
+        ...(worktree ? {
+            projectPath: worktree.projectPath,
+            worktreeBranch: worktree.worktreeBranch,
+        } : {}),
     };
 
     return { state, metadata };
