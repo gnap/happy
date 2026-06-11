@@ -95,6 +95,7 @@ export const pl: TranslationStructure = {
         permissionRequired: 'wymagane uprawnienie',
         activeNow: 'Aktywny teraz',
         unknown: 'nieznane',
+        creating: 'Tworzenie…',
     },
 
     time: {

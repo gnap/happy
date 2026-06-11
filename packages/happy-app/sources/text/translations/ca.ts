@@ -84,6 +84,7 @@ export const ca: TranslationStructure = {
         permissionRequired: 'permís requerit',
         activeNow: 'Actiu ara',
         unknown: 'desconegut',
+        creating: 'Creant…',
     },
 
     time: {

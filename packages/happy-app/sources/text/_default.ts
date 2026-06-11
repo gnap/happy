@@ -83,6 +83,7 @@ export const en = {
         permissionRequired: 'permission required',
         activeNow: 'Active now',
         unknown: 'unknown',
+        creating: 'Creating…',
     },
 
     time: {

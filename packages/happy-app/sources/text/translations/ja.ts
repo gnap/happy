@@ -116,6 +116,7 @@ export const ja: TranslationStructure = {
         permissionRequired: '権限が必要です',
         activeNow: 'アクティブ',
         unknown: '不明',
+        creating: '作成中…',
     },
 
     time: {

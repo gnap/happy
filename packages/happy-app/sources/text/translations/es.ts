@@ -84,6 +84,7 @@ export const es: TranslationStructure = {
         permissionRequired: 'permiso requerido',
         activeNow: 'Activo ahora',
         unknown: 'desconocido',
+        creating: 'Creando…',
     },
 
     time: {

@@ -99,6 +99,7 @@ export const en: TranslationStructure = {
         permissionRequired: 'permission required',
         activeNow: 'Active now',
         unknown: 'unknown',
+        creating: 'Creating…',
     },
 
     time: {

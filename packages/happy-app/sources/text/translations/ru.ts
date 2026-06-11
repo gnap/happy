@@ -396,6 +396,7 @@ export const ru: TranslationStructure = {
         permissionRequired: 'требуется разрешение',
         activeNow: 'Активен сейчас',
         unknown: 'неизвестно',
+        creating: 'Создание…',
     },
 
     time: {

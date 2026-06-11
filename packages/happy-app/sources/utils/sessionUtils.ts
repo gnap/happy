@@ -80,6 +80,11 @@ export function getSessionName(session: Session): string {
     if (session.metadata?.summary) {
         return session.metadata.summary.text;
     } else if (session.metadata) {
+        // Sentinel path used by the new-session placeholder to indicate the session
+        // is still being created by the CLI; metadata will be replaced on next fetch.
+        if (session.metadata.path === '​creating​') {
+            return t('status.creating');
+        }
         const segments = session.metadata.path.split('/').filter(Boolean);
         const lastSegment = segments.pop();
         if (!lastSegment) {

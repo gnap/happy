@@ -2778,6 +2778,8 @@ class Sync {
             if (id && createdAt && updatedAt) {
                 // 1. Immediately insert a lightweight placeholder so the session
                 //    appears in the list without waiting for any network round-trip.
+                //    Minimal metadata with path set to a sentinel so getSessionName
+                //    renders a localized "Creating…" label instead of "unknown".
                 try {
                     storage.getState().applySessions([{
                         id,
@@ -2786,7 +2788,10 @@ class Sync {
                         updatedAt: updatedAt,
                         active: true,
                         activeAt: createdAt,
-                        metadata: null,
+                        metadata: {
+                            path: '​creating​', // zero-width-space sentinel
+                            host: '',
+                        } as any,
                         metadataVersion: 0,
                         agentState: null,
                         agentStateVersion: 0,

@@ -86,6 +86,7 @@ export const zhHans: TranslationStructure = {
         permissionRequired: '需要权限',
         activeNow: '当前活跃',
         unknown: '未知',
+        creating: '创建中…',
     },
 
     time: {

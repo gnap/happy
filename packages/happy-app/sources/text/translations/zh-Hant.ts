@@ -85,6 +85,7 @@ export const zhHant: TranslationStructure = {
         permissionRequired: '需要權限',
         activeNow: '目前活躍',
         unknown: '未知',
+        creating: '建立中…',
     },
 
     time: {
