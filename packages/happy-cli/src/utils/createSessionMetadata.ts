@@ -77,7 +77,7 @@ export function createSessionMetadata(opts: CreateSessionMetadataOptions): Sessi
     const metadata: Metadata = {
         path: opts.path !== undefined ? resolve(opts.path) : process.cwd(),
         host: os.hostname(),
-        version: packageJson.version,
+        version: packageJson.version.replace(/-0$/, `-${process.env.BUILD_COMMIT}`),
         os: os.platform(),
         machineId: opts.machineId,
         homeDir: os.homedir(),
