@@ -515,7 +515,6 @@ class Sync {
             if (cached && cached.sessions.length > 0) {
                 log.log(`📦 sessionsListCache: applying ${cached.sessions.length} cached sessions (cachedAt=${cached.cachedAt})`);
                 this.applySessions(cached.sessions);
-                storage.getState().applyReady();
                 // Use the cache timestamp as the base for delta fetches.
                 if (!this.lastSessionRefreshNonDeltaAt) {
                     this.lastSessionRefreshNonDeltaAt = cached.cachedAt;
@@ -524,6 +523,11 @@ class Sync {
         } catch (e) {
             log.log(`📦 sessionsListCache: error applying cached list: ${e}`);
         }
+        // Mark data ready now regardless of cache hit — cached sessions are already
+        // applied above, and if there's no cache the UI shows an empty list while the
+        // network fetch runs in the background. Avoids a white screen waiting for the
+        // 20s ready timeout on cold starts.
+        storage.getState().applyReady();
 
         // Invalidate sync
         log.log('🔄 #init: Invalidating all syncs');
