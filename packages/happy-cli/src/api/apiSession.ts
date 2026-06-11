@@ -534,19 +534,22 @@ export class ApiSessionClient extends EventEmitter {
             this.socketConnectedResolve = undefined;
             this.stopFallbackPoll();
             this.rpcHandlerManager.onSocketConnect(this.socket);
-            // Sync CLI version and worktree info on every connect.
+            // Sync CLI version and git info (projectPath, branchName, isWorktree) on every connect.
             this.updateMetadata((metadata) => {
-                const wt = detectWorktree(metadata.path ?? process.cwd());
-                // Strip stale worktree fields from main-repo sessions so
-                // they don't leak a branch indicator after the fix revert.
-                const { projectPath: _pp, worktreeBranch: _wb, ...rest } = metadata as any;
+                const git = detectWorktree(metadata.path ?? process.cwd());
+                // Strip previous git fields so stale values don't persist.
+                const { projectPath: _pp, branchName: _bn, isWorktree: _iw, worktreeBranch: _wb, ...rest } = metadata as any;
                 return {
                     ...(rest as Metadata),
                     version: BUILD_VERSION,
-                    ...(wt ? { projectPath: wt.projectPath, worktreeBranch: wt.worktreeBranch } : {}),
+                    ...(git ? {
+                        projectPath: git.projectPath,
+                        branchName: git.branchName,
+                        isWorktree: git.isWorktree,
+                    } : {}),
                 };
             }).catch((error) => {
-                logger.debug('[API] Failed to sync CLI version/worktree on connect:', error);
+                logger.debug('[API] Failed to sync CLI version/git-info on connect:', error);
             });
             if (this.requestedMetadata && shouldSyncSessionMetadata(this.metadata, this.requestedMetadata)) {
                 logger.debug('[API] Session metadata changed, syncing static metadata to server');
