@@ -536,7 +536,7 @@ export class ApiSessionClient extends EventEmitter {
             this.rpcHandlerManager.onSocketConnect(this.socket);
             // Sync CLI version and worktree info on every connect.
             this.updateMetadata((metadata) => {
-                const wt = detectWorktree(process.cwd());
+                const wt = detectWorktree(metadata.path ?? process.cwd());
                 return {
                     ...metadata,
                     version: BUILD_VERSION,
