@@ -685,7 +685,10 @@ export const storage = create<StorageState>()((set, get) => {
         }),
         applyReady: () => set((state) => ({
             ...state,
-            isDataReady: true
+            isDataReady: true,
+            // If the sessions list hasn't been populated yet (cold start, no cache),
+            // initialize to an empty array so the UI doesn't show the loading spinner.
+            sessionListViewData: state.sessionListViewData ?? [],
         })),
         applyMessages: (sessionId: string, messages: NormalizedMessage[]) => {
             let changed = new Set<string>();
