@@ -44,10 +44,7 @@ pub fn run() {
 
   let mut builder = tauri::Builder::default();
 
-  #[cfg(debug_assertions)]
-  {
-    builder = builder.plugin(tauri_plugin_pilot::init());
-  }
+  builder = builder.plugin(tauri_plugin_pilot::init());
 
   builder
     .plugin(tauri_plugin_http::init())
