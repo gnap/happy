@@ -55,33 +55,27 @@ export function detectWorktree(cwd: string): { projectPath: string; worktreeBran
     const gitFile = resolve(cwd, '.git');
     try {
         if (!existsSync(gitFile)) return null;
+        const stat = statSync(gitFile);
+        if (!stat.isFile()) return null; // directory → main repo
 
-        let projectPath: string;
-        let worktreeBranch: string | undefined;
+        // Worktree: .git is a file containing "gitdir: /path/to/main/.git/worktrees/name"
+        const content = readFileSync(gitFile, 'utf-8');
+        const m = content.match(/^gitdir:\s*(.+)$/m);
+        if (!m) return null;
 
-        // Get current branch (works for both main repo and worktrees)
+        // Extract main repo path: strip .git/worktrees/<name> suffix
+        const gitdir = m[1].trim();
+        const worktreesIdx = gitdir.indexOf('/.git/worktrees/');
+        if (worktreesIdx < 0) return null;
+        const projectPath = gitdir.slice(0, worktreesIdx);
+
+        // Get current branch
+        let branch: string | undefined;
         try {
-            worktreeBranch = execSync('git branch --show-current', { cwd, encoding: 'utf-8' }).trim() || undefined;
+            branch = execSync('git branch --show-current', { cwd, encoding: 'utf-8' }).trim() || undefined;
         } catch { /* non-fatal */ }
 
-        const stat = statSync(gitFile);
-        if (stat.isFile()) {
-            // Worktree: .git is a file containing "gitdir: /path/to/main/.git/worktrees/name"
-            const content = readFileSync(gitFile, 'utf-8');
-            const m = content.match(/^gitdir:\s*(.+)$/m);
-            if (!m) return null;
-
-            // Extract main repo path: strip .git/worktrees/<name> suffix
-            const gitdir = m[1].trim();
-            const worktreesIdx = gitdir.indexOf('/.git/worktrees/');
-            if (worktreesIdx < 0) return null;
-            projectPath = gitdir.slice(0, worktreesIdx);
-        } else {
-            // Main repo: .git is a directory — projectPath is its own cwd
-            projectPath = cwd;
-        }
-
-        return { projectPath, worktreeBranch };
+        return { projectPath, worktreeBranch: branch };
     } catch {
         return null;
     }
