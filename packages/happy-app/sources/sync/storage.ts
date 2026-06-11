@@ -220,11 +220,8 @@ function buildSessionListViewData(
     activeSessions.sort((a, b) => b.updatedAt - a.updatedAt);
     inactiveSessions.sort((a, b) => b.updatedAt - a.updatedAt);
 
-    // Helper: emit a date group, inserting worktree-group headers for
-    // worktree sessions grouped by their main repo (projectPath).
-    // Non-worktree sessions whose path matches a worktree's projectPath
-    // are merged into the same group so the main-repo session appears
-    // alongside its worktree siblings.
+    // Helper: emit a date group, inserting git-project-group headers for
+    // sessions that share the same projectPath (main repo + its worktrees).
     const emitSessionGroup = (group: Session[]) => {
         const wtByProject = new Map<string, Session[]>();
         const standard: Session[] = [];
@@ -244,8 +241,15 @@ function buildSessionListViewData(
             listData.push({ type: 'session', session: s });
         }
         for (const [projectPath, sessions] of wtByProject) {
+            // Main repo first, then worktrees
+            sessions.sort((a, b) => {
+                const aWt = a.metadata?.isWorktree ?? true;
+                const bWt = b.metadata?.isWorktree ?? true;
+                return aWt === bWt ? 0 : aWt ? 1 : -1;
+            });
             const homeDir = sessions[0]?.metadata?.homeDir;
-            const branch = sessions.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
+            const branch = sessions.find(s => !!s.metadata?.branchName)?.metadata?.branchName
+                        ?? sessions.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
             listData.push({ type: 'worktree-group', projectPath, homeDir, branch });
             for (const s of sessions) {
                 listData.push({ type: 'session', session: s });
@@ -256,28 +260,39 @@ function buildSessionListViewData(
     // Build unified list view data
     const listData: SessionListViewItem[] = [];
 
-    // Emit active sessions with worktree-group headers so worktree sessions
-    // (identified by projectPath) are grouped at the top by main repo.
-    const activeWithProject = new Map<string, Session[]>();
-    const activeNoProject: Session[] = [];
-    for (const s of activeSessions) {
-        const pp = s.metadata?.projectPath;
-        if (pp) {
-            const arr = activeWithProject.get(pp) || [];
-            arr.push(s);
-            activeWithProject.set(pp, arr);
-        } else {
-            activeNoProject.push(s);
-        }
-    }
-    for (const [projectPath, sessions] of activeWithProject) {
-        const homeDir = sessions[0]?.metadata?.homeDir;
-        const branch = sessions.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
-        listData.push({ type: 'worktree-group', projectPath, homeDir, branch });
+    // Emit active sessions grouped by projectPath. Main repo first, then worktrees.
+    // Sessions without projectPath stay in the active-sessions carousel.
+    const emitProjectGroups = (sessions: Session[], toList: SessionListViewItem[]) => {
+        const byProject = new Map<string, Session[]>();
+        const noProject: Session[] = [];
         for (const s of sessions) {
-            listData.push({ type: 'session', session: s });
+            const pp = s.metadata?.projectPath;
+            if (pp) {
+                const arr = byProject.get(pp) || [];
+                arr.push(s);
+                byProject.set(pp, arr);
+            } else {
+                noProject.push(s);
+            }
         }
-    }
+        for (const [projectPath, group] of byProject) {
+            // Main repo first, then worktrees
+            group.sort((a, b) => {
+                const aWt = a.metadata?.isWorktree ?? true;
+                const bWt = b.metadata?.isWorktree ?? true;
+                return aWt === bWt ? 0 : aWt ? 1 : -1;
+            });
+            const homeDir = group[0]?.metadata?.homeDir;
+            const branch = group.find(s => !!s.metadata?.branchName)?.metadata?.branchName
+                        ?? group.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
+            toList.push({ type: 'worktree-group', projectPath, homeDir, branch });
+            for (const s of group) {
+                toList.push({ type: 'session', session: s });
+            }
+        }
+        return noProject;
+    };
+    const activeNoProject = emitProjectGroups(activeSessions, listData);
     if (activeNoProject.length > 0) {
         listData.push({ type: 'active-sessions', sessions: activeNoProject });
     }

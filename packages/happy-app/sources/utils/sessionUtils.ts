@@ -142,11 +142,12 @@ export function formatPathRelativeToHome(path: string, homeDir?: string): string
  */
 export function getSessionSubtitle(session: Session): string {
     if (session.metadata) {
-        // Worktree sessions: show main repo path (projectPath) instead of worktree path.
+        // Show main repo path (projectPath) instead of worktree-specific path when available.
         const displayPath = session.metadata.projectPath || session.metadata.path;
         const base = formatPathRelativeToHome(displayPath, session.metadata.homeDir);
-        if (session.metadata.worktreeBranch) {
-            return `${base}  ⎇ ${session.metadata.worktreeBranch}`;
+        const branch = session.metadata.branchName ?? session.metadata.worktreeBranch;
+        if (branch && session.metadata.isWorktree) {
+            return `${base}  ⎇ ${branch}`;
         }
         return base;
     }
