@@ -355,6 +355,8 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
     const sessionName = getSessionName(session);
     const isFetching = useSessionIsFetching(session.id);
     const sessionSubtitle = getSessionSubtitle(session);
+    const isWorktree = session.metadata?.isWorktree === true;
+    const avatarSize = isWorktree ? 36 : 48;
     const navigateToSession = useNavigateToSession();
     const isTablet = useIsTablet();
     const swipeableRef = React.useRef<Swipeable | null>(null);
@@ -408,7 +410,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
             }}
         >
             <View style={styles.avatarContainer}>
-                <Avatar id={avatarId} size={48} monochrome={!sessionStatus.isConnected} flavor={session.metadata?.flavor} />
+                <Avatar id={avatarId} size={avatarSize} monochrome={!sessionStatus.isConnected} flavor={session.metadata?.flavor} />
                 {session.draft && (
                     <View style={styles.draftIconContainer}>
                         <Ionicons
@@ -424,7 +426,8 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
                 <View style={styles.sessionTitleRow}>
                     <Text style={[
                         styles.sessionTitle,
-                        sessionStatus.isConnected ? styles.sessionTitleConnected : styles.sessionTitleDisconnected
+                        sessionStatus.isConnected ? styles.sessionTitleConnected : styles.sessionTitleDisconnected,
+                        isWorktree && { fontSize: 13 }
                     ]} numberOfLines={1}>
                         {sessionName}
                     </Text>
@@ -435,7 +438,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
                 </View>
 
                 {/* Subtitle line */}
-                <Text style={styles.sessionSubtitle} numberOfLines={1}>
+                <Text style={[styles.sessionSubtitle, isWorktree && { fontSize: 11 }]} numberOfLines={1}>
                     {sessionSubtitle}
                 </Text>
 
