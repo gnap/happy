@@ -222,10 +222,13 @@ function buildSessionListViewData(
 
     // Helper: emit a date group, inserting worktree-group headers for
     // worktree sessions grouped by their main repo (projectPath).
+    // Non-worktree sessions whose path matches a worktree's projectPath
+    // are merged into the same group so the main-repo session appears
+    // alongside its worktree siblings.
     const emitSessionGroup = (group: Session[]) => {
-        // Sort: non-worktree first, then worktree sessions grouped by projectPath
-        const standard: Session[] = [];
         const wtByProject = new Map<string, Session[]>();
+        const standard: Session[] = [];
+
         for (const s of group) {
             const pp = s.metadata?.projectPath;
             if (pp) {
@@ -236,12 +239,13 @@ function buildSessionListViewData(
                 standard.push(s);
             }
         }
+
         for (const s of standard) {
             listData.push({ type: 'session', session: s });
         }
         for (const [projectPath, sessions] of wtByProject) {
             const homeDir = sessions[0]?.metadata?.homeDir;
-            const branch = sessions[0]?.metadata?.worktreeBranch;
+            const branch = sessions.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
             listData.push({ type: 'worktree-group', projectPath, homeDir, branch });
             for (const s of sessions) {
                 listData.push({ type: 'session', session: s });
@@ -252,9 +256,30 @@ function buildSessionListViewData(
     // Build unified list view data
     const listData: SessionListViewItem[] = [];
 
-    // Add active sessions as a single item at the top (if any)
-    if (activeSessions.length > 0) {
-        listData.push({ type: 'active-sessions', sessions: activeSessions });
+    // Emit active sessions with worktree-group headers so worktree sessions
+    // (identified by projectPath) are grouped at the top by main repo.
+    const activeWithProject = new Map<string, Session[]>();
+    const activeNoProject: Session[] = [];
+    for (const s of activeSessions) {
+        const pp = s.metadata?.projectPath;
+        if (pp) {
+            const arr = activeWithProject.get(pp) || [];
+            arr.push(s);
+            activeWithProject.set(pp, arr);
+        } else {
+            activeNoProject.push(s);
+        }
+    }
+    for (const [projectPath, sessions] of activeWithProject) {
+        const homeDir = sessions[0]?.metadata?.homeDir;
+        const branch = sessions.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
+        listData.push({ type: 'worktree-group', projectPath, homeDir, branch });
+        for (const s of sessions) {
+            listData.push({ type: 'session', session: s });
+        }
+    }
+    if (activeNoProject.length > 0) {
+        listData.push({ type: 'active-sessions', sessions: activeNoProject });
     }
 
     // Group inactive sessions by date

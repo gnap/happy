@@ -286,7 +286,7 @@ export function SessionsList() {
 
             case 'worktree-group':
                 return (
-                    <View style={styles.projectGroup}>
+                    <View style={[styles.projectGroup, { flexDirection: 'row', alignItems: 'center' }]}>
                         <Ionicons name="git-branch-outline" size={14} color="#8E8E93" style={{ marginRight: 8 }} />
                         <View style={{ flex: 1 }}>
                             <Text style={styles.projectGroupTitle}>
