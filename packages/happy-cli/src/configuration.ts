@@ -9,7 +9,6 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import https from 'node:https'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import packageJson from '../package.json'
 import { BUILD_VERSION } from './version'
 import { isNode } from '@/utils/runtime'
 

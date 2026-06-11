@@ -8,7 +8,7 @@ import { logger } from '@/ui/logger';
 import { loop } from '@/claude/loop';
 import { AgentState, Metadata } from '@/api/types';
 import type { UserMessage } from '@/api/types';
-import packageJson from '../../package.json';
+import { BUILD_VERSION } from '../version';
 import { Credentials, readSettings, getProfileEnvironmentVariables, writeSessionPidFile, removeSessionPidFile } from '@/persistence';
 import { EnhancedMode, PermissionMode } from './loop';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
@@ -143,7 +143,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     let metadata: Metadata = {
         path: workingDirectory,
         host: os.hostname(),
-        version: packageJson.version,
+        version: BUILD_VERSION,
         os: os.platform(),
         machineId: machineId,
         homeDir: os.homedir(),
