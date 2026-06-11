@@ -265,6 +265,8 @@ export type Metadata = {
   claudeSessionId?: string, // Claude Code session ID
   sessionModel?: string, // Model name from SDK init (e.g. "deepseek-v4-pro[1m]")
   sessionProvider?: string, // Provider version from SDK init (e.g. "Claude Code 2.1.169")
+  projectPath?: string, // Main repo path when running in a git worktree
+  worktreeBranch?: string, // Git branch name when running in a worktree
   tools?: string[],
   slashCommands?: string[],
   homeDir: string,
@@ -352,6 +354,8 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
     claudeSessionId,
     sessionModel,
     sessionProvider,
+    projectPath,
+    worktreeBranch,
     tools,
     slashCommands,
     homeDir,
@@ -382,6 +386,8 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
     ...(claudeSessionId !== undefined ? { claudeSessionId } : {}),
     ...(sessionModel !== undefined ? { sessionModel } : {}),
     ...(sessionProvider !== undefined ? { sessionProvider } : {}),
+    ...(projectPath !== undefined ? { projectPath } : {}),
+    ...(worktreeBranch !== undefined ? { worktreeBranch } : {}),
     ...(tools !== undefined ? { tools } : {}),
     ...(slashCommands !== undefined ? { slashCommands } : {}),
     ...(homeDir !== undefined ? { homeDir } : {}),
