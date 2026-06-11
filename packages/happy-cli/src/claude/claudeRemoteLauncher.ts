@@ -153,7 +153,19 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     let ongoingToolCalls = new Map<string, { parentToolCallId: string | null }>();
     let pendingSkillSuppress = false;
 
+    // Pop echo: sent once on first SDK message, after Claude starts processing.
+    let pendingPopEcho: { echoedMessageId: string; text: string } | null = null;
+
     function onMessage(message: SDKMessage) {
+        // Send pop echo on first SDK message — Claude has started processing.
+        if (pendingPopEcho) {
+            const p = pendingPopEcho;
+            pendingPopEcho = null;
+            session.client.sendSessionProtocolMessage(
+                createEnvelope('user', { t: 'text', text: p.text }),
+                { echoedMessageId: p.echoedMessageId }
+            );
+        }
 
         // Write to message log
         formatClaudeMessageForInk(message, messageBuffer);
@@ -441,13 +453,15 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             permissionHandler.handleModeChange(mode.permissionMode);
                             // Signal thinking immediately on message receipt, before SDK is invoked
                             session.onThinkingChange(true);
+<<<<<<< HEAD
                             // Echo the app messageId back via meta so the App can clear its outbox.
+=======
+                            // Save for pop echo on first SDK response. Deferring until
+                            // Claude starts processing shows green check on App.
+>>>>>>> c931f55b (fix(cli): defer pop echo until first SDK message)
                             const appMessageId = (msg.meta as any)?.appMessageId as string | undefined;
                             if (appMessageId) {
-                                session.client.sendSessionProtocolMessage(
-                                    createEnvelope('user', { t: 'text', text: msg.message }),
-                                    { echoedMessageId: appMessageId }
-                                );
+                                pendingPopEcho = { echoedMessageId: appMessageId, text: msg.message };
                             }
                             return {
                                 message: msg.message,
