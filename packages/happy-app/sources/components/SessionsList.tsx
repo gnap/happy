@@ -161,6 +161,8 @@ const stylesheet = StyleSheet.create((theme) => ({
         position: 'relative',
         width: 48,
         height: 48,
+        alignItems: 'center',
+        justifyContent: 'center',
     },
     draftIconContainer: {
         position: 'absolute',
