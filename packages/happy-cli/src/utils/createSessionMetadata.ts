@@ -14,7 +14,7 @@ import type { AgentState, Metadata } from '@/api/types';
 import { configuration } from '@/configuration';
 import { projectPath } from '@/projectPath';
 import type { SandboxConfig } from '@/persistence';
-import packageJson from '../../package.json';
+import { BUILD_VERSION } from '../version';
 
 /**
  * Backend flavor identifier for session metadata.
@@ -77,7 +77,7 @@ export function createSessionMetadata(opts: CreateSessionMetadataOptions): Sessi
     const metadata: Metadata = {
         path: opts.path !== undefined ? resolve(opts.path) : process.cwd(),
         host: os.hostname(),
-        version: process.env.BUILD_VERSION || packageJson.version,
+        version: BUILD_VERSION,
         os: os.platform(),
         machineId: opts.machineId,
         homeDir: os.homedir(),

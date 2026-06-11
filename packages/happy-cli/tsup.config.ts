@@ -1,13 +1,4 @@
 import { defineConfig } from 'tsup'
-import { execSync } from 'child_process'
-import { readFileSync } from 'fs'
-import { resolve } from 'path'
-
-const gitCommit = (() => {
-  try { return execSync('git rev-parse --short HEAD', { encoding: 'utf-8' }).trim(); } catch { return 'unknown'; }
-})();
-const pkg = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf-8'));
-const buildVersion = `${pkg.version.replace(/-0$/, '')}-${gitCommit}`;
 
 export default defineConfig({
   entry: {
@@ -20,9 +11,6 @@ export default defineConfig({
   dts: true,
   splitting: true,
   clean: true,
-  define: {
-    'process.env.BUILD_VERSION': JSON.stringify(buildVersion),
-  },
   sourcemap: false,
   outDir: 'dist',
   // Bundle all node_modules into the output to eliminate per-module disk I/O at startup.

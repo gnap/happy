@@ -10,6 +10,7 @@ import https from 'node:https'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import packageJson from '../package.json'
+import { BUILD_VERSION } from './version'
 import { isNode } from '@/utils/runtime'
 
 /** HTTPS agent that forces IPv4 for server requests (avoids ETIMEDOUT on IPv6-unreachable hosts). */
@@ -109,7 +110,7 @@ class Configuration {
     this.isExperimentalEnabled = ['true', '1', 'yes'].includes(process.env.HAPPY_EXPERIMENTAL?.toLowerCase() || '');
     this.disableCaffeinate = ['true', '1', 'yes'].includes(process.env.HAPPY_DISABLE_CAFFEINATE?.toLowerCase() || '');
 
-    this.currentCliVersion = process.env.BUILD_VERSION || packageJson.version
+    this.currentCliVersion = BUILD_VERSION
 
     // Validate variant configuration
     const variant = process.env.HAPPY_VARIANT || 'stable'
