@@ -26,6 +26,7 @@
       ]
     },
     "websocket:default",
-    "connector:default"
+    "connector:default",
+    "pilot:default"
   ]
 }
