@@ -1177,11 +1177,12 @@ class Sync {
             }
 
             const parseStart = performance.now();
-            const respText = await response.text();
-            const respSizeKb = Math.round(respText.length / 1024);
+            // response.json() uses the browser's native streaming parser (faster than
+            // text()+JSON.parse, especially on JSC engines like WebKitGTK and iOS).
+            const data = await response.json() as { sessions?: unknown };
+            const respSizeKb = Math.round(JSON.stringify(data).length / 1024);
             const contentLength = response.headers.get('content-length');
             const xferKb = contentLength ? Math.round(parseInt(contentLength) / 1024) : respSizeKb;
-            const data = JSON.parse(respText);
             const parseMs = Math.round(performance.now() - parseStart);
             const rawSessions = data.sessions;
             if (!Array.isArray(rawSessions)) {
