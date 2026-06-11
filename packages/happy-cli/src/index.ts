@@ -961,7 +961,7 @@ ${chalk.bold.cyan('Claude Code Options (from `claude --help`):')}
 
     // Show version
     if (showVersion) {
-      console.log(`happy version: ${packageJson.version.replace(/-0$/, `-${process.env.BUILD_COMMIT}`)}`)
+      console.log(`happy version: ${process.env.BUILD_VERSION || packageJson.version}`)
       // Don't exit - continue to pass --version to Claude Code
     }
 
