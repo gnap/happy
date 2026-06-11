@@ -265,6 +265,11 @@ export type Metadata = {
   claudeSessionId?: string, // Claude Code session ID
   sessionModel?: string, // Model name from SDK init (e.g. "deepseek-v4-pro[1m]")
   sessionProvider?: string, // Provider version from SDK init (e.g. "Claude Code 2.1.169")
+  projectPath?: string, // Main repo path (worktree: main repo; main repo: own cwd)
+  branchName?: string, // Current git branch name
+  isWorktree?: boolean, // True for worktree sessions, false for main repo
+  /** @deprecated use branchName instead */
+  worktreeBranch?: string,
   tools?: string[],
   slashCommands?: string[],
   homeDir: string,
@@ -352,6 +357,10 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
     claudeSessionId,
     sessionModel,
     sessionProvider,
+    projectPath,
+    branchName,
+    isWorktree,
+    worktreeBranch,
     tools,
     slashCommands,
     homeDir,
@@ -382,6 +391,11 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
     ...(claudeSessionId !== undefined ? { claudeSessionId } : {}),
     ...(sessionModel !== undefined ? { sessionModel } : {}),
     ...(sessionProvider !== undefined ? { sessionProvider } : {}),
+    ...(projectPath !== undefined ? { projectPath } : {}),
+    ...(branchName !== undefined ? { branchName } : {}),
+    ...(isWorktree !== undefined ? { isWorktree } : {}),
+    // Keep worktreeBranch for backward compat with older App versions
+    ...(worktreeBranch !== undefined ? { worktreeBranch } : {}),
     ...(tools !== undefined ? { tools } : {}),
     ...(slashCommands !== undefined ? { slashCommands } : {}),
     ...(homeDir !== undefined ? { homeDir } : {}),

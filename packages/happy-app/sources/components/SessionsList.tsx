@@ -5,7 +5,7 @@ import { Text } from '@/components/StyledText';
 import { usePathname } from 'expo-router';
 import { SessionListViewItem, useSessionIsFetching } from '@/sync/storage';
 import { Ionicons } from '@expo/vector-icons';
-import { getSessionName, useSessionStatus, getSessionSubtitle, getSessionAvatarId } from '@/utils/sessionUtils';
+import { getSessionName, useSessionStatus, getSessionSubtitle, getSessionAvatarId, formatPathRelativeToHome } from '@/utils/sessionUtils';
 import { Avatar } from './Avatar';
 import { ActiveSessionsGroup } from './ActiveSessionsGroup';
 import { ActiveSessionsGroupCompact } from './ActiveSessionsGroupCompact';
@@ -240,6 +240,7 @@ export function SessionsList() {
             case 'header': return `header-${item.title}-${index}`;
             case 'active-sessions': return 'active-sessions';
             case 'project-group': return `project-group-${item.machine.id}-${item.displayPath}-${index}`;
+            case 'worktree-group': return `worktree-group-${item.projectPath}-${index}`;
             case 'session': return `session-${item.session.id}`;
         }
     }, []);
@@ -279,6 +280,16 @@ export function SessionsList() {
                         </Text>
                         <Text style={styles.projectGroupSubtitle}>
                             {item.machine.metadata?.displayName || item.machine.metadata?.host || item.machine.id}
+                        </Text>
+                    </View>
+                );
+
+            case 'worktree-group':
+                return (
+                    <View style={[styles.projectGroup, { flexDirection: 'row', alignItems: 'center' }]}>
+                        <Ionicons name="folder-outline" size={14} color="#8E8E93" style={{ marginRight: 8 }} />
+                        <Text style={styles.projectGroupTitle}>
+                            {formatPathRelativeToHome(item.projectPath, item.homeDir)}
                         </Text>
                     </View>
                 );
@@ -344,6 +355,8 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
     const sessionName = getSessionName(session);
     const isFetching = useSessionIsFetching(session.id);
     const sessionSubtitle = getSessionSubtitle(session);
+    const isWorktree = session.metadata?.isWorktree === true;
+    const avatarSize = isWorktree ? 36 : 48;
     const navigateToSession = useNavigateToSession();
     const isTablet = useIsTablet();
     const swipeableRef = React.useRef<Swipeable | null>(null);
@@ -397,7 +410,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
             }}
         >
             <View style={styles.avatarContainer}>
-                <Avatar id={avatarId} size={48} monochrome={!sessionStatus.isConnected} flavor={session.metadata?.flavor} />
+                <Avatar id={avatarId} size={avatarSize} monochrome={!sessionStatus.isConnected} flavor={session.metadata?.flavor} />
                 {session.draft && (
                     <View style={styles.draftIconContainer}>
                         <Ionicons
@@ -413,7 +426,8 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
                 <View style={styles.sessionTitleRow}>
                     <Text style={[
                         styles.sessionTitle,
-                        sessionStatus.isConnected ? styles.sessionTitleConnected : styles.sessionTitleDisconnected
+                        sessionStatus.isConnected ? styles.sessionTitleConnected : styles.sessionTitleDisconnected,
+                        isWorktree && { fontSize: 13 }
                     ]} numberOfLines={1}>
                         {sessionName}
                     </Text>
@@ -424,7 +438,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
                 </View>
 
                 {/* Subtitle line */}
-                <Text style={styles.sessionSubtitle} numberOfLines={1}>
+                <Text style={[styles.sessionSubtitle, isWorktree && { fontSize: 11 }]} numberOfLines={1}>
                     {sessionSubtitle}
                 </Text>
 

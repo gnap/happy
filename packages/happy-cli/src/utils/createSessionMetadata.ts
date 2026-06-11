@@ -7,8 +7,10 @@
  * @module createSessionMetadata
  */
 
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import os from 'node:os';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 
 import type { AgentState, Metadata } from '@/api/types';
 import { configuration } from '@/configuration';
@@ -49,6 +51,45 @@ export interface SessionMetadataResult {
     metadata: Metadata;
 }
 
+export interface GitInfo {
+    /** Absolute path to the main repo (worktree: parsed from .git file; main repo: cwd) */
+    projectPath: string;
+    /** Current git branch name (both main repo and worktrees) */
+    branchName?: string;
+    /** True if this is a git worktree (main repo has .git/ directory, worktree has .git file) */
+    isWorktree: boolean;
+}
+
+export function detectWorktree(cwd: string): GitInfo | null {
+    const gitFile = resolve(cwd, '.git');
+    try {
+        if (!existsSync(gitFile)) return null;
+
+        let branchName: string | undefined;
+        try {
+            branchName = execSync('git branch --show-current', { cwd, encoding: 'utf-8' }).trim() || undefined;
+        } catch { /* non-fatal */ }
+
+        const stat = statSync(gitFile);
+        if (stat.isFile()) {
+            // Worktree: .git is a file containing "gitdir: /path/to/main/.git/worktrees/name"
+            const content = readFileSync(gitFile, 'utf-8');
+            const m = content.match(/^gitdir:\s*(.+)$/m);
+            if (!m) return null;
+            const gitdir = m[1].trim();
+            const worktreesIdx = gitdir.indexOf('/.git/worktrees/');
+            if (worktreesIdx < 0) return null;
+            const projectPath = gitdir.slice(0, worktreesIdx);
+            return { projectPath, branchName, isWorktree: true };
+        }
+
+        // Main repo: .git is a directory — projectPath is its own cwd
+        return { projectPath: cwd, branchName, isWorktree: false };
+    } catch {
+        return null;
+    }
+}
+
 /**
  * Creates session state and metadata for backend agents.
  *
@@ -74,8 +115,11 @@ export function createSessionMetadata(opts: CreateSessionMetadataOptions): Sessi
         controlledByUser: false,
     };
 
+    const cwd = opts.path !== undefined ? resolve(opts.path) : process.cwd();
+    const worktree = detectWorktree(cwd);
+
     const metadata: Metadata = {
-        path: opts.path !== undefined ? resolve(opts.path) : process.cwd(),
+        path: cwd,
         host: os.hostname(),
         version: BUILD_VERSION,
         os: os.platform(),
@@ -92,6 +136,11 @@ export function createSessionMetadata(opts: CreateSessionMetadataOptions): Sessi
         flavor: opts.flavor,
         sandbox: opts.sandbox?.enabled ? opts.sandbox : null,
         dangerouslySkipPermissions: opts.dangerouslySkipPermissions ?? null,
+        ...(worktree ? {
+            projectPath: worktree.projectPath,
+            branchName: worktree.branchName,
+            isWorktree: worktree.isWorktree,
+        } : {}),
     };
 
     return { state, metadata };

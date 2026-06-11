@@ -26,6 +26,7 @@ import { startHookServer } from '@/claude/utils/startHookServer';
 import { generateHookSettingsFile, cleanupHookSettingsFile } from '@/claude/utils/generateHookSettings';
 import { registerKillSessionHandler } from './registerKillSessionHandler';
 import { projectPath } from '../projectPath';
+import { detectWorktree } from '../utils/createSessionMetadata';
 import { startOfflineReconnection, connectionState } from '@/utils/serverConnectionErrors';
 import { claudeLocal } from '@/claude/claudeLocal';
 import { createSessionScanner } from '@/claude/utils/sessionScanner';
@@ -140,6 +141,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     }
     logger.debug(`Using machineId: ${machineId}`);
 
+    const worktree = detectWorktree(workingDirectory);
     let metadata: Metadata = {
         path: workingDirectory,
         host: os.hostname(),
@@ -160,6 +162,11 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         flavor: 'claude',
         sandbox: sandboxConfig?.enabled ? sandboxConfig : null,
         dangerouslySkipPermissions,
+        ...(worktree ? {
+            projectPath: worktree.projectPath,
+            branchName: worktree.branchName,
+            isWorktree: worktree.isWorktree,
+        } : {}),
     };
 
     // When started by the daemon, the machine is already registered — skip the redundant call.

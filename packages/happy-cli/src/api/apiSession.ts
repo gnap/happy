@@ -1,5 +1,6 @@
 import { logger } from '@/ui/logger'
 import { BUILD_VERSION } from '../version'
+import { detectWorktree } from '../utils/createSessionMetadata'
 import { EventEmitter } from 'node:events'
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
@@ -533,9 +534,22 @@ export class ApiSessionClient extends EventEmitter {
             this.socketConnectedResolve = undefined;
             this.stopFallbackPoll();
             this.rpcHandlerManager.onSocketConnect(this.socket);
-            // Sync CLI version on every connect so the App always sees the current build.
-            this.updateMetadata((metadata) => ({ ...metadata, version: BUILD_VERSION })).catch((error) => {
-                logger.debug('[API] Failed to sync CLI version on connect:', error);
+            // Sync CLI version and git info (projectPath, branchName, isWorktree) on every connect.
+            this.updateMetadata((metadata) => {
+                const git = detectWorktree(metadata.path ?? process.cwd());
+                // Strip previous git fields so stale values don't persist.
+                const { projectPath: _pp, branchName: _bn, isWorktree: _iw, worktreeBranch: _wb, ...rest } = metadata as any;
+                return {
+                    ...(rest as Metadata),
+                    version: BUILD_VERSION,
+                    ...(git ? {
+                        projectPath: git.projectPath,
+                        branchName: git.branchName,
+                        isWorktree: git.isWorktree,
+                    } : {}),
+                };
+            }).catch((error) => {
+                logger.debug('[API] Failed to sync CLI version/git-info on connect:', error);
             });
             if (this.requestedMetadata && shouldSyncSessionMetadata(this.metadata, this.requestedMetadata)) {
                 logger.debug('[API] Session metadata changed, syncing static metadata to server');

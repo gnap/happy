@@ -91,6 +91,7 @@ export type SessionListViewItem =
     | { type: 'header'; title: string }
     | { type: 'active-sessions'; sessions: Session[] }
     | { type: 'project-group'; displayPath: string; machine: Machine }
+    | { type: 'worktree-group'; projectPath: string; homeDir?: string; branch?: string }
     | { type: 'session'; session: Session; variant?: 'default' | 'no-path' };
 
 // Legacy type for backward compatibility - to be removed
@@ -219,12 +220,81 @@ function buildSessionListViewData(
     activeSessions.sort((a, b) => b.updatedAt - a.updatedAt);
     inactiveSessions.sort((a, b) => b.updatedAt - a.updatedAt);
 
+    // Helper: emit a date group, inserting git-project-group headers for
+    // sessions that share the same projectPath (main repo + its worktrees).
+    const emitSessionGroup = (group: Session[]) => {
+        const wtByProject = new Map<string, Session[]>();
+        const standard: Session[] = [];
+
+        for (const s of group) {
+            const pp = s.metadata?.projectPath;
+            if (pp) {
+                const arr = wtByProject.get(pp) || [];
+                arr.push(s);
+                wtByProject.set(pp, arr);
+            } else {
+                standard.push(s);
+            }
+        }
+
+        for (const s of standard) {
+            listData.push({ type: 'session', session: s });
+        }
+        for (const [projectPath, sessions] of wtByProject) {
+            // Main repo first, then worktrees
+            sessions.sort((a, b) => {
+                const aWt = a.metadata?.isWorktree ?? true;
+                const bWt = b.metadata?.isWorktree ?? true;
+                return aWt === bWt ? 0 : aWt ? 1 : -1;
+            });
+            const homeDir = sessions[0]?.metadata?.homeDir;
+            const branch = sessions.find(s => !!s.metadata?.branchName)?.metadata?.branchName
+                        ?? sessions.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
+            listData.push({ type: 'worktree-group', projectPath, homeDir, branch });
+            for (const s of sessions) {
+                listData.push({ type: 'session', session: s });
+            }
+        }
+    };
+
     // Build unified list view data
     const listData: SessionListViewItem[] = [];
 
-    // Add active sessions as a single item at the top (if any)
-    if (activeSessions.length > 0) {
-        listData.push({ type: 'active-sessions', sessions: activeSessions });
+    // Emit active sessions grouped by projectPath. Main repo first, then worktrees.
+    // Sessions without projectPath stay in the active-sessions carousel.
+    const emitProjectGroups = (sessions: Session[], toList: SessionListViewItem[]) => {
+        const byProject = new Map<string, Session[]>();
+        const noProject: Session[] = [];
+        for (const s of sessions) {
+            const pp = s.metadata?.projectPath;
+            if (pp) {
+                const arr = byProject.get(pp) || [];
+                arr.push(s);
+                byProject.set(pp, arr);
+            } else {
+                noProject.push(s);
+            }
+        }
+        for (const [projectPath, group] of byProject) {
+            // Main repo first, then worktrees
+            group.sort((a, b) => {
+                const aWt = a.metadata?.isWorktree ?? true;
+                const bWt = b.metadata?.isWorktree ?? true;
+                return aWt === bWt ? 0 : aWt ? 1 : -1;
+            });
+            const homeDir = group[0]?.metadata?.homeDir;
+            const branch = group.find(s => !!s.metadata?.branchName)?.metadata?.branchName
+                        ?? group.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
+            toList.push({ type: 'worktree-group', projectPath, homeDir, branch });
+            for (const s of group) {
+                toList.push({ type: 'session', session: s });
+            }
+        }
+        return noProject;
+    };
+    const activeNoProject = emitProjectGroups(activeSessions, listData);
+    if (activeNoProject.length > 0) {
+        listData.push({ type: 'active-sessions', sessions: activeNoProject });
     }
 
     // Group inactive sessions by date
@@ -257,9 +327,7 @@ function buildSessionListViewData(
                 }
 
                 listData.push({ type: 'header', title: headerTitle });
-                currentDateGroup.forEach(sess => {
-                    listData.push({ type: 'session', session: sess });
-                });
+                emitSessionGroup(currentDateGroup);
             }
 
             // Start new group
@@ -287,9 +355,7 @@ function buildSessionListViewData(
         }
 
         listData.push({ type: 'header', title: headerTitle });
-        currentDateGroup.forEach(sess => {
-            listData.push({ type: 'session', session: sess });
-        });
+        emitSessionGroup(currentDateGroup);
     }
 
     return listData;

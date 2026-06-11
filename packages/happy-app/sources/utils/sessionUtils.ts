@@ -142,6 +142,10 @@ export function formatPathRelativeToHome(path: string, homeDir?: string): string
  */
 export function getSessionSubtitle(session: Session): string {
     if (session.metadata) {
+        const branch = session.metadata.branchName ?? session.metadata.worktreeBranch;
+        if (branch) {
+            return `⎇ ${branch}`;
+        }
         return formatPathRelativeToHome(session.metadata.path, session.metadata.homeDir);
     }
     return t('status.unknown');

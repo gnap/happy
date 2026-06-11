@@ -38,6 +38,10 @@ export const MetadataSchema = z.object({
     claudeSessionId: z.string().optional(), // Claude Code session ID
     sessionModel: z.string().optional(), // Model name from SDK init (e.g. "deepseek-v4-pro[1m]")
     sessionProvider: z.string().optional(), // Provider version from SDK init (e.g. "Claude Code 2.1.169")
+    projectPath: z.string().optional(), // Main repo path (worktree: main repo; main repo: own cwd)
+    branchName: z.string().optional(), // Current git branch name
+    isWorktree: z.boolean().optional(), // True for worktree sessions, false for main repo
+    worktreeBranch: z.string().optional(), // @deprecated — use branchName
     tools: z.array(z.string()).optional(),
     slashCommands: z.array(z.string()).optional(),
     homeDir: z.string().optional(), // User's home directory on the machine
