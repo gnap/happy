@@ -118,9 +118,21 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
     private initPromise: Promise<void> | null = null;
 
     async initialize(): Promise<void> {
+        // Re-open if the existing connection is on an older schema version.
+        // Metro hot reload keeps the singleton alive with a stale DB reference.
+        if (this.db && (this.db.version as number) < IDB_VERSION) {
+            this.db.close();
+            this.db = null;
+            this.initPromise = null;
+        }
         if (this.db) return;
         if (this.initPromise) return this.initPromise;
-        this.initPromise = new Promise((resolve, reject) => {
+        this.initPromise = this._doInitialize();
+        await this.initPromise;
+    }
+
+    private async _doInitialize(): Promise<void> {
+        return new Promise((resolve, reject) => {
             if (typeof window === 'undefined' || !window.indexedDB) {
                 reject(new Error('IndexedDB not available'));
                 return;
@@ -129,7 +141,7 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
             req.onerror = () => reject(req.error);
             req.onsuccess = () => {
                 this.db = req.result;
-                log.log('📦 sessionCacheDB: using IndexedDB (persistent, web/Tauri)');
+                log.log(`📦 sessionCacheDB: using IndexedDB v${this.db.version} (persistent, web/Tauri)`);
                 resolve();
             };
             req.onupgradeneeded = (event) => {
@@ -145,7 +157,6 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
                 }
             };
         });
-        await this.initPromise;
     }
 
     private getStore(mode: IDBTransactionMode = 'readonly'): { cache: IDBObjectStore; messages: IDBObjectStore } {
