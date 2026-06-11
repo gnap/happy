@@ -102,7 +102,7 @@ export class MemorySessionCacheDB implements ISessionCacheDB {
 // ---------------------------------------------------------------------------
 
 const IDB_NAME = 'happy_message_cache';
-const IDB_VERSION = 3;
+const IDB_VERSION = 4;
 const STORE_SESSION_CACHE = 'session_cache';
 const STORE_SESSION_MESSAGES = 'session_messages';
 const STORE_SESSIONS_LIST = 'sessions_list';
