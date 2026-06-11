@@ -2,6 +2,7 @@ import { ApiClient, ApiSessionClient } from "@/lib";
 import { MessageQueue2 } from "@/utils/MessageQueue2";
 import { EnhancedMode } from "./loop";
 import { logger } from "@/ui/logger";
+import { BUILD_VERSION } from '../version';
 import type { JsRuntime } from "./runClaude";
 import type { SandboxConfig } from "@/persistence";
 import type { A2AInboxTurnHooks } from "@/a2a/inboxTurnController";
@@ -137,10 +138,11 @@ export class Session {
     onModelInit = (info: { model: string; version: string }) => {
         this.client.updateMetadata((metadata) => ({
             ...metadata,
+            version: BUILD_VERSION,
             sessionModel: info.model,
             sessionProvider: info.version || undefined,
         }));
-        logger.debug(`[Session] Model info stored in metadata: ${info.model}${info.version ? ' v' + info.version : ''}`);
+        logger.debug(`[Session] Model info stored in metadata: ${info.model}${info.version ? ' v' + info.version : ''} (cli ${BUILD_VERSION})`);
     }
     
     /**
