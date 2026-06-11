@@ -7,6 +7,7 @@ import { projectPath } from "@/projectPath";
 import { parseSpecialCommand } from "@/parsers/specialCommands";
 import { logger } from "@/lib";
 import { PushableAsyncIterable } from "@/utils/PushableAsyncIterable";
+import { Future } from "@/utils/future";
 import { getProjectPath } from "./utils/path";
 import { awaitFileExist } from "@/modules/watcher/awaitFileExist";
 import { systemPrompt } from "./utils/systemPrompt";
@@ -168,135 +169,146 @@ export async function claudeRemote(opts: {
         },
     });
 
-    // Start the loop
+    // Start the SDK query
     const response = query({
         prompt: messages,
         options: sdkOptions,
     });
 
     updateThinking(true);
-    try {
-        logger.debug(`[claudeRemote] Starting to iterate over response`);
 
-        for await (const message of response) {
-            logger.debugLargeJson(`[claudeRemote] Message ${message.type}`, message);
+    const stopSignal = new Future<void>();
 
-            // Handle messages
-            opts.onMessage(message);
+    // Input Loop: continuously reads user messages from the queue
+    // and pushes them to the SDK. Independent of output processing.
+    async function inputLoop(): Promise<void> {
+        while (true) {
+            const next = await Promise.race([
+                opts.nextMessage(),
+                stopSignal.promise.then(() => null),
+            ]);
+            if (next === null || next === undefined) break;
 
-            // Handle special system messages
-            if (message.type === 'system' && message.subtype === 'init') {
-                const systemInit = message as SDKSystemMessage;
-
-                // Notify the launcher about model/capability info for App display.
-                if (systemInit.model && systemInit.session_id) {
-                    opts.onModelInit?.({
-                        model: systemInit.model,
-                        version: (systemInit as any).claude_code_version || '',
-                        sessionId: systemInit.session_id,
-                    });
-                }
-
-                // Session id is still in memory, wait until session file is written to disk
-                // Start a watcher for to detect the session id
-                if (systemInit.session_id) {
-                    logger.debug(`[claudeRemote] Waiting for session file to be written to disk: ${systemInit.session_id}`);
-                    const projectDir = getProjectPath(opts.path);
-                    const found = await awaitFileExist(join(projectDir, `${systemInit.session_id}.jsonl`));
-                    logger.debug(`[claudeRemote] Session file found: ${systemInit.session_id} ${found}`);
-                    opts.onSessionFound(systemInit.session_id);
-                }
+            const latestGeneration = opts.getClaudeEnvVarsGeneration();
+            if (latestGeneration !== currentGeneration) {
+                logger.debug(`[claudeRemote] Profile env changed (gen ${currentGeneration} → ${latestGeneration}), returning to re-spawn`);
+                opts.onEnvChanged?.({ message: next.message, mode: next.mode });
+                break;
             }
+            currentGeneration = latestGeneration;
+            mode = next.mode;
+            updateThinking(true);
+            messages.push({
+                type: 'user',
+                message: { role: 'user', content: next.message },
+            });
+        }
+        messages.end();
+    }
 
-            // Handle result messages
-            if (message.type === 'result') {
-                updateThinking(false);
+    // Output Loop: processes all SDK response messages.
+    // Task-notifications are reported (onReady) but never trigger
+    // input-side actions. Normal results call onReady and continue;
+    // the input loop handles fetching the next message.
+    async function outputLoop(): Promise<void> {
+        try {
+            for await (const message of response) {
+                logger.debugLargeJson(`[claudeRemote] Message ${message.type}`, message);
 
-                // Task-notification results come from background tools (Monitor,
-                // ScheduleWakeup). When they lack a terminal_reason they are
-                // interstitial SDK events, not actual turn completions — the real
-                // user message is still pending. Treating them as normal results
-                // sends a false turn-end and causes irrelevant answers. Once
-                // terminal_reason is set (e.g. "completed"), the SDK has finished
-                // the turn and we must NOT skip or the for-await loop hangs.
-                const isTaskNotification = (message as any).origin?.kind === 'task-notification';
-                const hasTerminalReason = typeof (message as any).terminal_reason === 'string'
-                    && (message as any).terminal_reason.length > 0;
-                if (isTaskNotification && !hasTerminalReason) {
-                    // Interstitial notification: a background task completed mid-turn.
-                    // Feed the result straight back to Claude so it continues autonomously
-                    // — do NOT block on nextMessage() waiting for App input here.
-                    logger.debug('[claudeRemote] Task-notification (interstitial) — feeding background result back to Claude');
-                    const taskResult = (message as SDKResultMessage).result || '';
-                    updateThinking(true);
-                    messages.push({
-                        type: 'user',
-                        message: {
-                            role: 'user',
-                            content: taskResult || 'Continue.',
-                        },
-                    });
-                    continue;
-                }
+                opts.onMessage(message);
 
-                logger.debug('[claudeRemote] Result received, exiting claudeRemote');
+                // System init
+                if (message.type === 'system' && message.subtype === 'init') {
+                    const systemInit = message as SDKSystemMessage;
 
-                // Send completion messages
-                if (isCompactCommand) {
-                    logger.debug('[claudeRemote] Compaction completed');
-                    if (opts.onCompletionEvent) {
-                        opts.onCompletionEvent('Compaction completed');
+                    if (systemInit.model && systemInit.session_id) {
+                        opts.onModelInit?.({
+                            model: systemInit.model,
+                            version: (systemInit as any).claude_code_version || '',
+                            sessionId: systemInit.session_id,
+                        });
                     }
-                    isCompactCommand = false;
+
+                    if (systemInit.session_id) {
+                        logger.debug(`[claudeRemote] Waiting for session file: ${systemInit.session_id}`);
+                        const projectDir = getProjectPath(opts.path);
+                        const found = await awaitFileExist(join(projectDir, `${systemInit.session_id}.jsonl`));
+                        logger.debug(`[claudeRemote] Session file found: ${systemInit.session_id} ${found}`);
+                        opts.onSessionFound(systemInit.session_id);
+                    }
                 }
 
-                // Send ready event
-                opts.onReady(message as SDKResultMessage);
+                // Result handling
+                if (message.type === 'result') {
+                    updateThinking(false);
 
-                // Push next message — but first check if profile env changed since we started
-                const next = await opts.nextMessage();
-                if (!next) {
-                    messages.end();
-                    return;
-                }
-                const latestGeneration = opts.getClaudeEnvVarsGeneration();
-                if (latestGeneration !== currentGeneration) {
-                    logger.debug(`[claudeRemote] Profile env changed (gen ${currentGeneration} → ${latestGeneration}), returning to re-spawn with updated env`);
-                    opts.onEnvChanged?.({ message: next.message, mode: next.mode });
-                    messages.end();
-                    return;
-                }
-                currentGeneration = latestGeneration;
-                mode = next.mode;
-                // Mark thinking back on before pushing the next prompt into the SDK queue.
-                // Without this, only the first turn flips thinking=true; subsequent turns in
-                // the same claudeRemote() loop reuse the SDK's already-running query and the
-                // App's thinking timer stays off until the process restarts.
-                updateThinking(true);
-                messages.push({ type: 'user', message: { role: 'user', content: next.message } });
-            }
+                    const isTaskNotification = (message as any).origin?.kind === 'task-notification';
+                    const hasTerminalReason = typeof (message as any).terminal_reason === 'string'
+                        && (message as any).terminal_reason.length > 0;
 
-            // Handle tool result
-            if (message.type === 'user') {
-                const msg = message as SDKUserMessage;
-                if (msg.message.role === 'user' && Array.isArray(msg.message.content)) {
-                    for (let c of msg.message.content) {
-                        if (c.type === 'tool_result' && c.tool_use_id && opts.isAborted(c.tool_use_id)) {
-                            logger.debug('[claudeRemote] Tool aborted, exiting claudeRemote');
-                            return;
+                    // Interstitial: feed result back to Claude, continue draining
+                    if (isTaskNotification && !hasTerminalReason) {
+                        logger.debug('[claudeRemote] Task-notification (interstitial) — feeding result back to Claude');
+                        const taskResult = (message as SDKResultMessage).result || '';
+                        updateThinking(true);
+                        if (!messages.done) {
+                            messages.push({
+                                type: 'user',
+                                message: { role: 'user', content: taskResult || 'Continue.' },
+                            });
+                        }
+                        continue;
+                    }
+
+                    // Terminal task-notification: SDK-internal turn complete.
+                    // Notify App but leave the input loop alone.
+                    if (isTaskNotification && hasTerminalReason) {
+                        logger.debug('[claudeRemote] Task-notification (terminal) — reporting, not touching input loop');
+                        opts.onReady(message as SDKResultMessage);
+                        continue;
+                    }
+
+                    // Normal result (user-initiated turn)
+                    logger.debug('[claudeRemote] Result received');
+                    if (isCompactCommand) {
+                        logger.debug('[claudeRemote] Compaction completed');
+                        opts.onCompletionEvent?.('Compaction completed');
+                        isCompactCommand = false;
+                    }
+                    opts.onReady(message as SDKResultMessage);
+                    // inputLoop handles fetching the next message
+                }
+
+                // Abort check
+                if (message.type === 'user') {
+                    const msg = message as SDKUserMessage;
+                    if (msg.message.role === 'user' && Array.isArray(msg.message.content)) {
+                        for (let c of msg.message.content) {
+                            if (c.type === 'tool_result' && c.tool_use_id && opts.isAborted(c.tool_use_id)) {
+                                logger.debug('[claudeRemote] Tool aborted, exiting claudeRemote');
+                                return;
+                            }
                         }
                     }
                 }
             }
+        } catch (e) {
+            if (e instanceof AbortError) {
+                logger.debug('[claudeRemote] Aborted');
+            } else {
+                throw e;
+            }
+        } finally {
+            stopSignal.resolve();
+            updateThinking(false);
         }
-    } catch (e) {
-        if (e instanceof AbortError) {
-            logger.debug(`[claudeRemote] Aborted`);
-            // Ignore
-        } else {
-            throw e;
-        }
+    }
+
+    // Run both loops concurrently
+    try {
+        await Promise.all([inputLoop(), outputLoop()]);
     } finally {
+        messages.end();
         updateThinking(false);
     }
 }

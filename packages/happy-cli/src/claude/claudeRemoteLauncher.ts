@@ -453,12 +453,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             permissionHandler.handleModeChange(mode.permissionMode);
                             // Signal thinking immediately on message receipt, before SDK is invoked
                             session.onThinkingChange(true);
-<<<<<<< HEAD
-                            // Echo the app messageId back via meta so the App can clear its outbox.
-=======
                             // Save for pop echo on first SDK response. Deferring until
                             // Claude starts processing shows green check on App.
->>>>>>> c931f55b (fix(cli): defer pop echo until first SDK message)
                             const appMessageId = (msg.meta as any)?.appMessageId as string | undefined;
                             if (appMessageId) {
                                 pendingPopEcho = { echoedMessageId: appMessageId, text: msg.message };
