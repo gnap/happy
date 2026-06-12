@@ -124,13 +124,13 @@ export function startBackgroundContextFetcher(opts: {
     /** Dynamic getter — the Claude session ID can change during forks. */
     getClaudeSessionId: () => string | null;
     projectPath: string;
-    envVars?: Record<string, string>;
+    /** Dynamic getter — returns the current profile env vars so profile switches are reflected. */
+    getEnvVars?: () => Record<string, string>;
     intervalMs?: number;
-    /** Overrides ANTHROPIC_MODEL in child env to match the main session's model. */
-    model?: string;
+    /** Dynamic getter — returns the current model so profile/model switches are reflected. */
+    getModel?: () => string | undefined;
 }): () => void {
     const intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
-    const envVars = opts.envVars ?? {};
     let timer: ReturnType<typeof setInterval> | null = null;
 
     const tick = async () => {
@@ -139,8 +139,8 @@ export function startBackgroundContextFetcher(opts: {
         const usage = await spawnContextFetch({
             claudeSessionId,
             projectPath: opts.projectPath,
-            envVars,
-            model: opts.model,
+            envVars: opts.getEnvVars?.() ?? {},
+            model: opts.getModel?.(),
         });
         if (!usage) return;
 
