@@ -616,6 +616,13 @@ export const storage = create<StorageState>()((set, get) => {
                 };
             });
 
+            // Debug: check if any session has contextUsage in metadata
+            for (const s of Object.values(mergedSessions)) {
+                if (s.metadata?.contextUsage) {
+                    console.warn(`[applySessions] ${s.id} has contextUsage: ${s.metadata.contextUsage.currentTokens}/${s.metadata.contextUsage.maxTokens} (${s.metadata.contextUsage.pct}%)`);
+                }
+            }
+
             // Build active set from all sessions (including existing ones)
             const activeSet = new Set<string>();
             Object.values(mergedSessions).forEach(session => {
