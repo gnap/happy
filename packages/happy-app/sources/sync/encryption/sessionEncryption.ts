@@ -159,7 +159,11 @@ export class SessionEncryption {
         }
         const parsed = MetadataSchema.safeParse(decrypted[0]);
         if (!parsed.success) {
+            console.warn('[decryptMetadata] schema parse failed:', JSON.stringify(parsed.error.issues).slice(0, 500));
             return null;
+        }
+        if (parsed.data.contextUsage) {
+            console.warn(`[decryptMetadata] contextUsage present: ${parsed.data.contextUsage.currentTokens}/${parsed.data.contextUsage.maxTokens} (${parsed.data.contextUsage.pct}%)`);
         }
 
         // Cache the result
