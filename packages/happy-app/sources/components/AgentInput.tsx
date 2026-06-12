@@ -315,18 +315,17 @@ const BREAKDOWN_LABELS: Record<string, string> = {
 const ContextBreakdown = React.memo(({ breakdown }: { breakdown: NonNullable<AgentInputProps['usageData']>['contextBreakdown'] }) => {
     const { theme } = useUnistyles();
     if (!breakdown) return null;
-    const items = Object.entries(breakdown).filter(([, v]) => v > 0 || true);
     return (
-        <View style={{ padding: 12, gap: 6 }}>
+        <View style={{ padding: 12, gap: 5 }}>
             {(Object.keys(BREAKDOWN_LABELS) as (keyof typeof BREAKDOWN_LABELS)[]).map((key) => {
                 const value = (breakdown as Record<string, number>)[key];
                 if (value === undefined) return null;
                 return (
                     <View key={key} style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <Text style={{ fontSize: 13, color: theme.colors.textSecondary, ...Typography.default() }}>
+                        <Text style={{ fontSize: 12, color: theme.colors.textSecondary, ...Typography.default() }}>
                             {BREAKDOWN_LABELS[key]}
                         </Text>
-                        <Text style={{ fontSize: 13, color: theme.colors.text, ...Typography.mono() }}>
+                        <Text style={{ fontSize: 12, color: theme.colors.text, ...Typography.mono(), marginLeft: 16 }}>
                             {formatTokens(value)}
                         </Text>
                     </View>
@@ -929,46 +928,52 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                             )}
                             {(contextWarning || props.usageData?.contextSize) && (
                                 <>
-                                    <Pressable
-                                        onPress={() => {
-                                            if (props.usageData?.contextBreakdown) {
-                                                setShowContextBreakdown(!showContextBreakdown);
-                                            }
-                                        }}
-                                        style={({ pressed }) => ({
-                                            opacity: props.usageData?.contextBreakdown && pressed ? 0.6 : 1,
-                                        })}
+                                    <View
+                                        {...(Platform.OS === 'web' && props.usageData?.contextBreakdown ? {
+                                            // @ts-expect-error onMouseEnter/onMouseLeave work on RN Web View
+                                            onMouseEnter: () => setShowContextBreakdown(true),
+                                            onMouseLeave: () => setShowContextBreakdown(false),
+                                        } : {})}
                                     >
-                                        <Text style={{
-                                            fontSize: 11,
-                                            color: contextWarning?.color ?? theme.colors.textSecondary,
-                                            marginLeft: props.connectionStatus ? 8 : 0,
-                                            ...Typography.default()
-                                        }}>
-                                            {!props.usageData?.contextSize && props.connectionStatus ? '• ' : ''}
-                                            {props.usageData?.contextSize
-                                                ? (props.usageData.contextSize >= 1_000_000
-                                                    ? `${(props.usageData.contextSize / 1_000_000).toFixed(1)}M`
-                                                    : props.usageData.contextSize >= 1000
-                                                    ? `${Math.round(props.usageData.contextSize / 1000)}K`
-                                                    : String(props.usageData.contextSize))
-                                                : ''}
-                                            {props.usageData?.contextSize && props.usageData?.contextWindowTokens
-                                                ? ` / ${props.usageData.contextWindowTokens >= 1_000_000
-                                                    ? `${(props.usageData.contextWindowTokens / 1_000_000).toFixed(1)}M`
-                                                    : `${Math.round(props.usageData.contextWindowTokens / 1000)}K`}`
-                                                : ''}
-                                            {props.usageData?.contextSize && contextPct ? ` (${contextPct}%)` : ''}
-                                        </Text>
-                                    </Pressable>
+                                        <Pressable
+                                            onLongPress={Platform.OS !== 'web' && props.usageData?.contextBreakdown
+                                                ? () => setShowContextBreakdown(true)
+                                                : undefined}
+                                            delayLongPress={400}
+                                            style={({ pressed }) => ({
+                                                opacity: props.usageData?.contextBreakdown && pressed ? 0.6 : 1,
+                                            })}
+                                        >
+                                            <Text style={{
+                                                fontSize: 11,
+                                                color: contextWarning?.color ?? theme.colors.textSecondary,
+                                                marginLeft: props.connectionStatus ? 8 : 0,
+                                                ...Typography.default()
+                                            }}>
+                                                {!props.usageData?.contextSize && props.connectionStatus ? '• ' : ''}
+                                                {props.usageData?.contextSize
+                                                    ? (props.usageData.contextSize >= 1_000_000
+                                                        ? `${(props.usageData.contextSize / 1_000_000).toFixed(1)}M`
+                                                        : props.usageData.contextSize >= 1000
+                                                        ? `${Math.round(props.usageData.contextSize / 1000)}K`
+                                                        : String(props.usageData.contextSize))
+                                                    : ''}
+                                                {props.usageData?.contextSize && props.usageData?.contextWindowTokens
+                                                    ? ` / ${props.usageData.contextWindowTokens >= 1_000_000
+                                                        ? `${(props.usageData.contextWindowTokens / 1_000_000).toFixed(1)}M`
+                                                        : `${Math.round(props.usageData.contextWindowTokens / 1000)}K`}`
+                                                    : ''}
+                                                {props.usageData?.contextSize && contextPct ? ` (${contextPct}%)` : ''}
+                                            </Text>
+                                        </Pressable>
+                                    </View>
                                     {showContextBreakdown && props.usageData?.contextBreakdown && (
                                         <View style={{
                                             position: 'absolute',
                                             bottom: '100%',
                                             left: 0,
-                                            right: 0,
                                             zIndex: 1001,
-                                            paddingHorizontal: 16,
+                                            width: Math.min(screenWidth - 32, 300),
                                             paddingBottom: 4,
                                         }}>
                                             <FloatingOverlay maxHeight={260}>
@@ -976,7 +981,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                             </FloatingOverlay>
                                         </View>
                                     )}
-                                    {showContextBreakdown && props.usageData?.contextBreakdown && (
+                                    {showContextBreakdown && props.usageData?.contextBreakdown && Platform.OS !== 'web' && (
                                         <TouchableWithoutFeedback onPress={() => setShowContextBreakdown(false)}>
                                             <View style={{
                                                 position: 'absolute',
