@@ -113,6 +113,7 @@
     "expo-image-manipulator": "~14.0.7",
     "expo-image-picker": "~17.0.8",
     "expo-intent-launcher": "~13.0.7",
+    "expo-ios-background-task": "^0.1.1",
     "expo-keep-awake": "~15.0.7",
     "expo-linear-gradient": "~15.0.7",
     "expo-linking": "~8.0.8",
