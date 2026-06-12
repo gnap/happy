@@ -78,6 +78,8 @@ class Sync {
     private static readonly SESSION_REFRESH_COOLDOWN_MS = 30_000;
     /** Periodic fallback refresh interval when no events arrive. */
     private static readonly SESSION_REFRESH_INTERVAL_MS = 300_000; // 5 min
+    /** Interval between full (non-delta) session list refreshes to clean up stale cache. */
+    private static readonly FULL_REFRESH_INTERVAL_MS = 600_000; // 10 min
     /** Ignore stale ephemeral thinking=false shortly after turn-start (debounced session-alive). */
     private static readonly TURN_START_EPHEMERAL_GRACE_MS = 8_000;
 
@@ -184,6 +186,7 @@ class Sync {
     private lastSessionRefreshAt = 0;
     /** Timestamp of the last non-delta full-session fetch; used for incremental delta requests. */
     private lastSessionRefreshNonDeltaAt = 0;
+    private lastFullRefreshAt = 0;
     /** Per-session cooldown for single-session fetches (15s). */
     private sessionRefreshCooldowns = new Map<string, number>();
     /** Last user interaction timestamp (desktop idle detection). */
@@ -330,6 +333,22 @@ class Sync {
         this.feedSync.invalidate();
     }
 
+    /**
+     * Full (non-delta) session list refresh to clean up stale cached state.
+     * Delta fetches never remove sessions that were deleted or archived on another
+     * device — a periodic full fetch is needed to purge them from local cache.
+     */
+    #refreshSessionsFull() {
+        const now = Date.now();
+        if (now - this.lastFullRefreshAt < Sync.FULL_REFRESH_INTERVAL_MS) {
+            return;
+        }
+        this.lastFullRefreshAt = now;
+        log.log('🔄 Full sessions refresh — resetting delta base for cache cleanup');
+        this.lastSessionRefreshNonDeltaAt = 0;
+        this.sessionsSync.invalidate();
+    }
+
     #refreshSessionsAfterDesktopProbe() {
         const now = Date.now();
         if (now - this.lastDesktopSessionRefreshAt < Sync.DESKTOP_SESSION_REFRESH_COOLDOWN_MS) {
@@ -339,7 +358,7 @@ class Sync {
 
         this.lastDesktopSessionRefreshAt = now;
         log.log('🖥️ Desktop sessions refresh — invalidating sessions sync after confirmed connection');
-        this.sessionsSync.invalidate();
+        this.#refreshSessionsFull();
     }
 
     #refreshVisibleSessionAfterDesktopProbe() {
@@ -390,6 +409,9 @@ class Sync {
                 void apiSocket.resumeReconnection();
                 recoverDesktopPendingWork();
                 this.#invalidateAllSyncs();
+                // Full refresh after desktop wake to clean up stale cache.
+                const FULL_REFRESH_DESKTOP_WAKE_DELAY_MS = 3_000;
+                setTimeout(() => this.#refreshSessionsFull(), FULL_REFRESH_DESKTOP_WAKE_DELAY_MS);
             }
         });
 
@@ -553,6 +575,13 @@ class Sync {
             log.log(`🔄 #init: initial sync error, applying ready so UI can show: ${String(error)}`);
             storage.getState().applyReady();
         });
+
+        // Schedule a full refresh after startup settles to clean up stale cache entries.
+        const FULL_REFRESH_STARTUP_DELAY_MS = 10_000;
+        setTimeout(() => {
+            log.log('🔄 #init: scheduling full session refresh after startup settle');
+            this.#refreshSessionsFull();
+        }, FULL_REFRESH_STARTUP_DELAY_MS);
     }
 
 
