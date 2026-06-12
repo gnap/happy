@@ -216,9 +216,11 @@ function buildSessionListViewData(
         }
     });
 
-    // Sort sessions by updated date (newest first)
-    activeSessions.sort((a, b) => b.updatedAt - a.updatedAt);
-    inactiveSessions.sort((a, b) => b.updatedAt - a.updatedAt);
+    // Sort sessions by creation date (newest first).  Using createdAt instead of
+    // updatedAt keeps relative ordering stable — project groups won't jump when a
+    // session inside gets an update (e.g. draft, metadata sync).
+    activeSessions.sort((a, b) => b.createdAt - a.createdAt);
+    inactiveSessions.sort((a, b) => b.createdAt - a.createdAt);
 
     // Helper: emit a date group, inserting git-project-group headers for
     // sessions that share the same projectPath (main repo + its worktrees).
@@ -237,10 +239,18 @@ function buildSessionListViewData(
             }
         }
 
+        // Sort standard sessions by createdAt (stable, no jumping)
+        standard.sort((a, b) => b.createdAt - a.createdAt);
         for (const s of standard) {
             listData.push({ type: 'session', session: s });
         }
-        for (const [projectPath, sessions] of wtByProject) {
+        // Sort worktree groups by newest createdAt in each group (stable)
+        const sortedProjects = [...wtByProject.entries()].sort(([, a], [, b]) => {
+            const aMax = Math.max(...a.map(s => s.createdAt));
+            const bMax = Math.max(...b.map(s => s.createdAt));
+            return bMax - aMax;
+        });
+        for (const [projectPath, sessions] of sortedProjects) {
             // Main repo first, then worktrees
             sessions.sort((a, b) => {
                 const aWt = a.metadata?.isWorktree ?? true;
@@ -276,12 +286,19 @@ function buildSessionListViewData(
                 noProject.push(s);
             }
         }
-        for (const [projectPath, group] of byProject) {
+        // Sort project groups by newest createdAt in each group (stable)
+        const sortedProjects = [...byProject.entries()].sort(([, a], [, b]) => {
+            const aMax = Math.max(...a.map(s => s.createdAt));
+            const bMax = Math.max(...b.map(s => s.createdAt));
+            return bMax - aMax;
+        });
+        for (const [projectPath, group] of sortedProjects) {
             // Main repo first, then worktrees
             group.sort((a, b) => {
                 const aWt = a.metadata?.isWorktree ?? true;
                 const bWt = b.metadata?.isWorktree ?? true;
-                return aWt === bWt ? 0 : aWt ? 1 : -1;
+                if (aWt !== bWt) return aWt ? 1 : -1;
+                return b.createdAt - a.createdAt; // newest first within same type
             });
             const homeDir = group[0]?.metadata?.homeDir;
             const branch = group.find(s => !!s.metadata?.branchName)?.metadata?.branchName
