@@ -6,29 +6,21 @@ import { Platform } from 'react-native';
 
 interface BackgroundTaskResult { success: boolean; taskId?: string }
 
-let _module: { default: { beginBackgroundTask(name: string): Promise<BackgroundTaskResult>; endBackgroundTask(taskId: string): Promise<void> } } | null = null;
-
-function getModule() {
-    if (!_module) {
-        try {
-            _module = require('expo-ios-background-task');
-        } catch {
-            // Web/Tauri — module not available, use stub
-        }
-    }
-    return _module?.default;
+// Static import for Hermes/Runtime bundler compatibility.
+// On non-iOS platforms the native module may not be linked — catch the error.
+let bgTask: { beginBackgroundTask(name: string): Promise<BackgroundTaskResult>; endBackgroundTask(taskId: string): Promise<void> } | null = null;
+try {
+    bgTask = require('expo-ios-background-task').default;
+} catch {
+    // Module not available (non-iOS or not linked)
 }
 
 export async function beginBackgroundTask(name: string): Promise<BackgroundTaskResult> {
-    if (Platform.OS !== 'ios') return { success: false };
-    const mod = getModule();
-    if (!mod) return { success: false };
-    return mod.beginBackgroundTask(name);
+    if (Platform.OS !== 'ios' || !bgTask) return { success: false };
+    return bgTask.beginBackgroundTask(name);
 }
 
 export async function endBackgroundTask(taskId: string): Promise<void> {
-    if (Platform.OS !== 'ios') return;
-    const mod = getModule();
-    if (!mod) return;
-    return mod.endBackgroundTask(taskId);
+    if (Platform.OS !== 'ios' || !bgTask) return;
+    return bgTask.endBackgroundTask(taskId);
 }
