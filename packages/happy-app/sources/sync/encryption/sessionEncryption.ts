@@ -157,15 +157,9 @@ export class SessionEncryption {
         if (!decrypted[0]) {
             return null;
         }
-        const raw = decrypted[0] as Record<string, unknown>;
-        const parsed = MetadataSchema.safeParse(raw);
-        const hasContext = typeof raw === 'object' && raw !== null && 'contextUsage' in raw;
+        const parsed = MetadataSchema.safeParse(decrypted[0]);
         if (!parsed.success) {
-            console.warn(`[decryptMetadata] schema FAILED, rawHasContext=${hasContext}:`, JSON.stringify(parsed.error.issues).slice(0, 500));
             return null;
-        }
-        if (hasContext) {
-            console.warn(`[decryptMetadata] raw has contextUsage but parsed=${parsed.success} inParsed=${'contextUsage' in parsed.data}`);
         }
 
         // Cache the result
