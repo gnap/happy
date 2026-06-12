@@ -1,6 +1,7 @@
 import React from 'react';
 import { View, Text, Pressable, ScrollView, KeyboardAvoidingView, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { ExpoFocusMenuView } from 'expo-focus-menu';
 import { useSettingMutable } from '@/sync/storage';
 import { StyleSheet } from 'react-native-unistyles';
 import { useUnistyles } from 'react-native-unistyles';
@@ -91,20 +92,18 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
         setProfiles([...profiles, clone]);
     };
 
-    const handleLongPressProfile = (profile: AIBackendProfile) => {
-        Modal.alert(
-            profile.name,
-            undefined,
-            [
-                { text: t('profiles.copyProfile'), onPress: () => handleCloneProfile(profile) },
-                { text: t('profiles.editProfile'), onPress: () => handleEditProfile(profile) },
-                {
-                    text: t('profiles.deleteProfile'), style: 'destructive',
-                    onPress: () => handleDeleteProfile(profile),
-                },
-                { text: t('common.cancel'), style: 'cancel' },
-            ]
-        );
+    const buildContextMenuItems = (profile: AIBackendProfile) => [
+        { id: 'copy', title: t('profiles.copyProfile'), icon: <Ionicons name="copy-outline" size={20} color="#333" /> },
+        { id: 'edit', title: t('profiles.editProfile'), icon: <Ionicons name="create-outline" size={20} color="#333" /> },
+        { id: 'delete', title: t('profiles.deleteProfile'), destructive: true, icon: <Ionicons name="trash-outline" size={20} color="#FF3B30" /> },
+    ];
+
+    const handleContextMenuPress = (profile: AIBackendProfile, itemId: string) => {
+        switch (itemId) {
+            case 'copy': handleCloneProfile(profile); break;
+            case 'edit': handleEditProfile(profile); break;
+            case 'delete': handleDeleteProfile(profile); break;
+        }
     };
 
     const handleSelectProfile = (profileId: string | null) => {
@@ -255,8 +254,13 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                         if (!profile) return null;
 
                         return (
-                            <Pressable
+                            <ExpoFocusMenuView
                                 key={profile.id}
+                                items={buildContextMenuItems(profile)}
+                                onItemPress={(itemId) => handleContextMenuPress(profile, itemId)}
+                                hapticFeedback={true}
+                            >
+                            <Pressable
                                 style={{
                                     backgroundColor: theme.colors.input.background,
                                     borderRadius: 12,
@@ -268,7 +272,6 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                     borderColor: theme.colors.text,
                                 }}
                                 onPress={() => handleSelectProfile(profile.id)}
-                                onLongPress={() => handleLongPressProfile(profile)}
                             >
                                 <View style={{
                                     width: 24,
@@ -303,13 +306,19 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                     <Ionicons name="checkmark-circle" size={20} color={theme.colors.text} />
                                 )}
                             </Pressable>
+                            </ExpoFocusMenuView>
                         );
                     })}
 
                     {/* Custom profiles */}
                     {profiles.map((profile) => (
-                        <Pressable
+                        <ExpoFocusMenuView
                             key={profile.id}
+                            items={buildContextMenuItems(profile)}
+                            onItemPress={(itemId) => handleContextMenuPress(profile, itemId)}
+                            hapticFeedback={true}
+                        >
+                        <Pressable
                             style={{
                                 backgroundColor: theme.colors.input.background,
                                 borderRadius: 12,
@@ -321,7 +330,6 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                 borderColor: theme.colors.text,
                             }}
                             onPress={() => handleSelectProfile(profile.id)}
-                            onLongPress={() => handleLongPressProfile(profile)}
                         >
                             <View style={{
                                 width: 24,
@@ -358,6 +366,7 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                 <Ionicons name="checkmark-circle" size={20} color={theme.colors.text} />
                             )}
                         </Pressable>
+                        </ExpoFocusMenuView>
                     ))}
 
                     {/* Add profile button */}
