@@ -243,7 +243,7 @@ export function SessionsList() {
             case 'active-sessions': return 'active-sessions';
             case 'project-group': return `project-group-${item.machine.id}-${item.displayPath}-${index}`;
             case 'worktree-group': return `worktree-group-${item.projectPath}-${index}`;
-            case 'session': return `session-${item.session.id}`;
+            case 'session': return `session-${item.session.id}-${index}`;
         }
     }, []);
 
