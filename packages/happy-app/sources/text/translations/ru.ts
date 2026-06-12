@@ -993,6 +993,9 @@ export const ru: TranslationStructure = {
         nameRequired: 'Имя профиля обязательно',
         deleteConfirm: 'Вы уверены, что хотите удалить профиль "{name}"?',
         editProfile: 'Редактировать Профиль',
+        copyProfile: 'Копировать Профиль',
+        deleteProfile: 'Удалить Профиль',
+
         addProfileTitle: 'Добавить Новый Профиль',
         delete: {
             title: 'Удалить Профиль',

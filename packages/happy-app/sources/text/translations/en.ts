@@ -986,6 +986,8 @@ export const en: TranslationStructure = {
         nameRequired: 'Profile name is required',
         deleteConfirm: 'Are you sure you want to delete the profile "{name}"?',
         editProfile: 'Edit Profile',
+        copyProfile: 'Copy Profile',
+        deleteProfile: 'Delete Profile',
         addProfileTitle: 'Add New Profile',
         delete: {
             title: 'Delete Profile',

@@ -95,6 +95,9 @@ export const ja: TranslationStructure = {
         nameRequired: 'プロファイル名は必須です',
         deleteConfirm: 'プロファイル「{name}」を削除してもよろしいですか？',
         editProfile: 'プロファイルを編集',
+        copyProfile: 'プロファイルをコピー',
+        deleteProfile: 'プロファイルを削除',
+
         addProfileTitle: '新しいプロファイルを追加',
         delete: {
             title: 'プロファイルを削除',

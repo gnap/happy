@@ -948,6 +948,9 @@ export const pt: TranslationStructure = {
         addProfile: 'Adicionar perfil',
         addProfileTitle: 'Título do perfil de adição',
         editProfile: 'Editar perfil',
+        copyProfile: 'Copiar perfil',
+        deleteProfile: 'Eliminar perfil',
+
         profileName: 'Nome do perfil',
         enterName: 'Digite o nome do perfil',
         baseURL: 'URL base',

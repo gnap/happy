@@ -91,6 +91,22 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
         setProfiles([...profiles, clone]);
     };
 
+    const handleLongPressProfile = (profile: AIBackendProfile) => {
+        Modal.alert(
+            profile.name,
+            undefined,
+            [
+                { text: t('profiles.copyProfile'), onPress: () => handleCloneProfile(profile) },
+                { text: t('profiles.editProfile'), onPress: () => handleEditProfile(profile) },
+                {
+                    text: t('profiles.deleteProfile'), style: 'destructive',
+                    onPress: () => handleDeleteProfile(profile),
+                },
+                { text: t('common.cancel'), style: 'cancel' },
+            ]
+        );
+    };
+
     const handleSelectProfile = (profileId: string | null) => {
         let profile: AIBackendProfile | null = null;
 
@@ -252,6 +268,10 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                     borderColor: theme.colors.text,
                                 }}
                                 onPress={() => handleSelectProfile(profile.id)}
+<<<<<<< HEAD
+=======
+                                onLongPress={() => handleLongPressProfile(profile)}
+>>>>>>> be140fad (feat(app): iOS-style profile long-press menu + No Profile persistence)
                             >
                                 <View style={{
                                     width: 24,
@@ -282,6 +302,7 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                         {profile.id}
                                     </Text>
                                 </View>
+<<<<<<< HEAD
                                 <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                                     {selectedProfileId === profile.id && (
                                         <Ionicons name="checkmark-circle" size={20} color={theme.colors.text} style={{ marginRight: 12 }} />
@@ -307,6 +328,11 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                         <Ionicons name="trash-outline" size={20} color={theme.colors.deleteAction} />
                                     </Pressable>
                                 </View>
+=======
+                                {selectedProfileId === profile.id && (
+                                    <Ionicons name="checkmark-circle" size={20} color={theme.colors.text} />
+                                )}
+>>>>>>> be140fad (feat(app): iOS-style profile long-press menu + No Profile persistence)
                             </Pressable>
                         );
                     })}
@@ -326,6 +352,10 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                 borderColor: theme.colors.text,
                             }}
                             onPress={() => handleSelectProfile(profile.id)}
+<<<<<<< HEAD
+=======
+                            onLongPress={() => handleLongPressProfile(profile)}
+>>>>>>> be140fad (feat(app): iOS-style profile long-press menu + No Profile persistence)
                         >
                             <View style={{
                                 width: 24,
@@ -358,6 +388,7 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                     {profile.tmuxConfig?.tmpDir && ` • dir: ${profile.tmuxConfig.tmpDir}`}
                                 </Text>
                             </View>
+<<<<<<< HEAD
                             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                                 {selectedProfileId === profile.id && (
                                     <Ionicons name="checkmark-circle" size={20} color={theme.colors.text} style={{ marginRight: 12 }} />
@@ -383,6 +414,11 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                     <Ionicons name="trash-outline" size={20} color={theme.colors.deleteAction} />
                                 </Pressable>
                             </View>
+=======
+                            {selectedProfileId === profile.id && (
+                                <Ionicons name="checkmark-circle" size={20} color={theme.colors.text} />
+                            )}
+>>>>>>> be140fad (feat(app): iOS-style profile long-press menu + No Profile persistence)
                         </Pressable>
                     ))}
 

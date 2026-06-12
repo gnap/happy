@@ -948,6 +948,9 @@ export const ca: TranslationStructure = {
         addProfile: 'Afegeix un perfil',
         addProfileTitle: 'Títol del perfil d\'addició',
         editProfile: 'Edita el perfil',
+        copyProfile: 'Copia el perfil',
+        deleteProfile: 'Eliminar perfil',
+
         profileName: 'Nom del perfil',
         enterName: 'Introdueix el nom del perfil',
         baseURL: 'URL base',

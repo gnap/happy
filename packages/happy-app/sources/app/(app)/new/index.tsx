@@ -315,6 +315,7 @@ function NewSessionWizard() {
 
     // Wizard state
     const [selectedProfileId, setSelectedProfileId] = React.useState<string | null>(() => {
+        if (lastUsedProfile === null) return null; // User chose "No Profile" last time
         if (lastUsedProfile && profileMap.has(lastUsedProfile)) {
             return lastUsedProfile;
         }
