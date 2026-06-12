@@ -40,6 +40,7 @@ import {
     pruneA2AInboxOnSessionStart,
 } from '@/a2a/inboxTurnController';
 import { applyProfileEnvToProcess, mergeProfileIntoEnv } from '@/utils/profileEnv';
+import { startBackgroundContextFetcher } from '@/claude/utils/backgroundContextFetcher';
 
 /** JavaScript runtime to use for spawning Claude Code */
 export type JsRuntime = 'node' | 'bun'
@@ -390,6 +391,15 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     pruneA2AInboxOnSessionStart('claude', workingDirectory, session.sessionId, options.startedBy === 'daemon');
     a2aInbox.peekInbox();
 
+    // Start periodic background context-usage poller. Runs a lightweight
+    // `claude --resume --print "/context"` child process every 30 s and
+    // writes the real context usage to session metadata.
+    const disposeContextFetcher = startBackgroundContextFetcher({
+        session,
+        getClaudeSessionId: () => currentSession?.sessionId ?? initialClaudeSessionId,
+        projectPath: workingDirectory,
+    });
+
     handleUserMessage = async (message) => {
 
         // Resolve permission mode from meta - pass through as-is, mapping happens at SDK boundary
@@ -637,6 +647,9 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             stopCaffeinate();
 
             a2aInbox.dispose();
+
+            // Stop background context fetcher
+            disposeContextFetcher();
 
             // Stop Happy MCP server
             happyServer.stop();
