@@ -9,10 +9,13 @@ import { logger } from '@/ui/logger';
  * Result returned to the spawn path. environmentVariables is the resolved env
  * map the App sent on the matching user message; profileId identifies which
  * profile it came from. Both are null when no recoverable profile is found.
+ * model is the per-message model override (meta.model) so the respawned process
+ * can start with the correct model instead of the profile's ANTHROPIC_MODEL default.
  */
 export interface SessionProfileMeta {
     profileId: string | null;
     environmentVariables: Record<string, string> | null;
+    model: string | null;
 }
 
 type RawMessage = {
@@ -76,12 +79,14 @@ export async function fetchSessionProfileMeta(sessionId: string): Promise<Sessio
         const profileId = (meta as { profileId?: string | null }).profileId ?? null;
         const envVars = (meta as { environmentVariables?: Record<string, string> }).environmentVariables;
         const environmentVariables = envVars && Object.keys(envVars).length > 0 ? envVars : null;
+        const model = (meta as { model?: string | null }).model ?? null;
         logger.debug(
             `[DAEMON RUN] fetchSessionProfileMeta: recovered profileId=${profileId ?? 'null'} `
             + `envKeys=${environmentVariables ? Object.keys(environmentVariables).join(',') : '(none)'} `
+            + `model=${model ?? '(none)'} `
             + `from message seq=${message.seq}`,
         );
-        return { profileId, environmentVariables };
+        return { profileId, environmentVariables, model };
     }
     logger.debug(`[DAEMON RUN] fetchSessionProfileMeta: no message with profileId meta in ${messages.length} recent message(s)`);
     return null;

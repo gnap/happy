@@ -1120,11 +1120,21 @@ export async function startDaemon(): Promise<void> {
       // restart. The offline-wake auto-respawn path still passes resumeAfterSeq because
       // that flow is meant to catch up missed messages while the PID was dead.
       const recoveredProfile = await fetchSessionProfileMeta(sessionId);
+      // If the last user message specified an explicit model (e.g. Sonnet), inject it
+      // as ANTHROPIC_MODEL so the respawned process starts with the correct model.
+      // Without this, the profile's ANTHROPIC_MODEL (e.g. Opus) would take effect
+      // for the first 10s background context-fetcher tick before any user message
+      // arrives to update currentModel.
+      let recoveredEnv = recoveredProfile?.environmentVariables ?? undefined;
+      if (recoveredProfile?.model) {
+        recoveredEnv = { ...(recoveredEnv ?? {}), ANTHROPIC_MODEL: recoveredProfile.model };
+        logger.debug(`[DAEMON RUN] Restart: overriding ANTHROPIC_MODEL with recovered session model: ${recoveredProfile.model}`);
+      }
       const result = await spawnSession({
         directory,
         agent,
         resumeSessionTag: sessionTag,
-        environmentVariables: recoveredProfile?.environmentVariables ?? undefined,
+        environmentVariables: recoveredEnv,
       });
 
       if (result.type === 'success') {
