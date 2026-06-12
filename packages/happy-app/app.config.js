@@ -124,12 +124,14 @@ export default {
                     recordAudioAndroid: true
                 }
             ],
-            [
+            // Push notifications require paid Apple Developer account.
+            // Personal team dev builds skip this plugin to avoid aps-environment entitlement.
+            ...(variant === 'development' ? [] : [[
                 "expo-notifications",
                 {
                     "enableBackgroundRemoteNotifications": true
                 }
-            ],
+            ]]),
             [
                 'expo-splash-screen',
                 {

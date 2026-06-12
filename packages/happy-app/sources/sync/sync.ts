@@ -1,4 +1,5 @@
 import Constants from 'expo-constants';
+import ExpoIosBackgroundTask from 'expo-ios-background-task';
 import { apiSocket } from '@/sync/apiSocket';
 import { AuthCredentials } from '@/auth/tokenStorage';
 import { Encryption } from '@/sync/encryption/encryption';
@@ -210,6 +211,7 @@ class Sync {
     private backgroundSendTimeout: ReturnType<typeof setTimeout> | null = null;
     private backgroundSendNotificationId: string | null = null;
     private backgroundSendStartedAt: number | null = null;
+    private backgroundTaskId: number | null = null;
     private sessionsRefreshInterval: ReturnType<typeof setInterval> | null = null;
     revenueCatInitialized = false;
 
@@ -771,12 +773,26 @@ class Sync {
         return false;
     }
 
-    private maybeStartBackgroundSendWatchdog() {
+    private async maybeStartBackgroundSendWatchdog() {
         if (Platform.OS === 'web' || this.appState === 'active') {
             return;
         }
         if (!this.hasPendingOutboxMessages() || this.backgroundSendTimeout) {
             return;
+        }
+
+        // Request iOS background execution time so the JS thread isn't
+        // suspended before messages are sent. Works with personal team profiles.
+        if (Platform.OS === 'ios' && this.backgroundTaskId === null) {
+            try {
+                const result = await ExpoIosBackgroundTask.beginBackgroundTask('Send pending messages');
+                if (result.success) {
+                    this.backgroundTaskId = result.taskId;
+                    log.log(`📨 Background task started (id=${result.taskId})`);
+                }
+            } catch (e) {
+                log.log(`📨 Failed to start background task: ${e}`);
+            }
         }
 
         log.log('📨 Pending messages detected in background. Starting 30s send watchdog.');
@@ -794,6 +810,10 @@ class Sync {
             this.backgroundSendTimeout = null;
         }
         this.backgroundSendStartedAt = null;
+        if (this.backgroundTaskId !== null) {
+            void ExpoIosBackgroundTask.endBackgroundTask(this.backgroundTaskId);
+            this.backgroundTaskId = null;
+        }
     }
 
     private async scheduleBackgroundSendTimeoutNotification() {
@@ -869,6 +889,11 @@ class Sync {
     }
 
     private async handleBackgroundSendTimeout() {
+        if (this.backgroundTaskId !== null) {
+            await ExpoIosBackgroundTask.endBackgroundTask(this.backgroundTaskId);
+            this.backgroundTaskId = null;
+        }
+
         if (!this.hasPendingOutboxMessages()) {
             await this.cancelBackgroundSendTimeoutNotification();
             this.backgroundSendStartedAt = null;
