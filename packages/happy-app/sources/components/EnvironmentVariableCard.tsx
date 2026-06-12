@@ -3,11 +3,9 @@ import { View, Text, TextInput, Pressable } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
-import { useEnvironmentVariables } from '@/hooks/useEnvironmentVariables';
 
 export interface EnvironmentVariableCardProps {
     variable: { name: string; value: string };
-    machineId: string | null;
     expectedValue?: string;
     description?: string;
     isSecret?: boolean;
@@ -16,25 +14,8 @@ export interface EnvironmentVariableCardProps {
     onDuplicate: () => void;
 }
 
-function parseVariableValue(value: string): {
-    useRemoteVariable: boolean;
-    remoteVariableName: string;
-    defaultValue: string;
-} {
-    const matchWithFallback = value.match(/^\$\{([A-Z_][A-Z0-9_]*):-(.*)\}$/);
-    if (matchWithFallback) {
-        return { useRemoteVariable: true, remoteVariableName: matchWithFallback[1], defaultValue: matchWithFallback[2] };
-    }
-    const matchNoFallback = value.match(/^\$\{([A-Z_][A-Z0-9_]*)\}$/);
-    if (matchNoFallback) {
-        return { useRemoteVariable: true, remoteVariableName: matchNoFallback[1], defaultValue: '' };
-    }
-    return { useRemoteVariable: false, remoteVariableName: '', defaultValue: value };
-}
-
 export function EnvironmentVariableCard({
     variable,
-    machineId,
     expectedValue,
     description,
     isSecret = false,
@@ -43,47 +24,21 @@ export function EnvironmentVariableCard({
     onDuplicate,
 }: EnvironmentVariableCardProps) {
     const { theme } = useUnistyles();
-
-    const parsed = parseVariableValue(variable.value);
-    const [useRemoteVariable, setUseRemoteVariable] = React.useState(parsed.useRemoteVariable);
-    const [remoteVariableName, setRemoteVariableName] = React.useState(parsed.remoteVariableName);
-    const [defaultValue, setDefaultValue] = React.useState(parsed.defaultValue);
-
-    const shouldQueryRemote = useRemoteVariable && !isSecret && remoteVariableName.trim() !== '';
-    const { variables: remoteValues } = useEnvironmentVariables(
-        machineId,
-        shouldQueryRemote ? [remoteVariableName] : []
-    );
-    const remoteValue = remoteValues[remoteVariableName];
-
-    React.useEffect(() => {
-        const newValue = useRemoteVariable && remoteVariableName.trim() !== ''
-            ? `\${${remoteVariableName}${defaultValue ? `:-${defaultValue}` : ''}}`
-            : defaultValue;
-        if (newValue !== variable.value) {
-            onUpdate(newValue);
-        }
-    }, [useRemoteVariable, remoteVariableName, defaultValue, variable.value, onUpdate]);
-
-    const remoteStatus = !useRemoteVariable || isSecret || !machineId || !remoteVariableName.trim()
-        ? null
-        : remoteValue === undefined ? 'checking'
-        : remoteValue === null ? 'not-found'
-        : 'found';
+    const [showValue, setShowValue] = React.useState(false);
 
     return (
-        <View style={cardStyles.card}>
+        <View style={styles.card}>
             {/* Header: name + actions */}
-            <View style={cardStyles.header}>
-                <View style={cardStyles.headerLeft}>
+            <View style={styles.header}>
+                <View style={styles.headerLeft}>
                     {isSecret && (
                         <Ionicons name="lock-closed" size={10} color={theme.colors.textDestructive} style={{ marginRight: 4 }} />
                     )}
-                    <Text style={cardStyles.varName} numberOfLines={1}>
+                    <Text style={styles.varName} numberOfLines={1}>
                         {variable.name}
                     </Text>
                 </View>
-                <View style={cardStyles.actions}>
+                <View style={styles.actions}>
                     <Pressable hitSlop={10} onPress={onDuplicate}>
                         <Ionicons name="copy-outline" size={16} color={theme.colors.button.secondary.tint} />
                     </Pressable>
@@ -94,76 +49,39 @@ export function EnvironmentVariableCard({
             </View>
 
             {description ? (
-                <Text style={cardStyles.description} numberOfLines={2}>{description}</Text>
+                <Text style={styles.description} numberOfLines={2}>{description}</Text>
             ) : null}
 
-            {/* Value row: checkbox + input */}
-            <View style={cardStyles.valueRow}>
-                <Text style={cardStyles.label}>Value</Text>
+            <View style={styles.valueRow}>
                 <TextInput
-                    style={cardStyles.input}
+                    style={styles.input}
                     placeholder={expectedValue || 'Value'}
                     placeholderTextColor={theme.colors.input.placeholder}
-                    value={defaultValue}
-                    onChangeText={setDefaultValue}
+                    value={variable.value}
+                    onChangeText={onUpdate}
                     autoCapitalize="none"
                     autoCorrect={false}
-                    secureTextEntry={isSecret}
+                    secureTextEntry={isSecret && !showValue}
                 />
+                {isSecret && (
+                    <Pressable
+                        hitSlop={8}
+                        onPress={() => setShowValue(!showValue)}
+                        style={styles.eyeButton}
+                    >
+                        <Ionicons
+                            name={showValue ? 'eye-off-outline' : 'eye-outline'}
+                            size={18}
+                            color={theme.colors.textSecondary}
+                        />
+                    </Pressable>
+                )}
             </View>
-
-            {/* Remote variable toggle + input (collapsed by default unless enabled) */}
-            <Pressable style={cardStyles.checkRow} onPress={() => setUseRemoteVariable(!useRemoteVariable)}>
-                <View style={[cardStyles.checkbox, useRemoteVariable && cardStyles.checkboxActive]}>
-                    {useRemoteVariable && <Ionicons name="checkmark" size={10} color={theme.colors.button.primary.tint} />}
-                </View>
-                <Text style={cardStyles.checkLabel}>Copy from remote: ${'{VARIABLE}'}</Text>
-            </Pressable>
-
-            {useRemoteVariable && (
-                <View style={cardStyles.remoteSection}>
-                    <TextInput
-                        style={cardStyles.input}
-                        placeholder="Variable name (e.g., Z_AI_MODEL)"
-                        placeholderTextColor={theme.colors.input.placeholder}
-                        value={remoteVariableName}
-                        onChangeText={setRemoteVariableName}
-                        autoCapitalize="none"
-                        autoCorrect={false}
-                    />
-                    {remoteStatus === 'checking' && (
-                        <Text style={cardStyles.statusText}>Checking remote...</Text>
-                    )}
-                    {remoteStatus === 'not-found' && (
-                        <Text style={[cardStyles.statusText, { color: theme.colors.warning }]}>Value not found</Text>
-                    )}
-                    {remoteStatus === 'found' && (
-                        <Text style={[cardStyles.statusText, { color: theme.colors.success }]}>
-                            Current: {remoteValue}
-                        </Text>
-                    )}
-                    {isSecret && (
-                        <Text style={cardStyles.statusText}>Secret — not retrieved</Text>
-                    )}
-                    {!isSecret && !machineId && (
-                        <Text style={cardStyles.statusText}>Select a machine to check</Text>
-                    )}
-                </View>
-            )}
-
-            {/* Session preview */}
-            <Text style={cardStyles.preview} numberOfLines={1}>
-                → {variable.name} = {
-                    isSecret
-                        ? (defaultValue ? '***' : '(empty)')
-                        : (remoteStatus === 'found' ? remoteValue : (defaultValue || '(empty)'))
-                }
-            </Text>
         </View>
     );
 }
 
-const cardStyles = StyleSheet.create((theme) => ({
+const styles = StyleSheet.create((theme) => ({
     card: {
         backgroundColor: theme.colors.input.background,
         borderRadius: theme.borderRadius.md,
@@ -174,7 +92,7 @@ const cardStyles = StyleSheet.create((theme) => ({
         flexDirection: 'row',
         justifyContent: 'space-between',
         alignItems: 'center',
-        marginBottom: 2,
+        marginBottom: 4,
     },
     headerLeft: {
         flexDirection: 'row',
@@ -202,14 +120,6 @@ const cardStyles = StyleSheet.create((theme) => ({
     valueRow: {
         flexDirection: 'row',
         alignItems: 'center',
-        marginBottom: 6,
-    },
-    label: {
-        fontSize: 12,
-        color: theme.colors.textSecondary,
-        ...Typography.default(),
-        marginRight: theme.margins.sm,
-        width: 36,
     },
     input: {
         flex: 1,
@@ -222,43 +132,8 @@ const cardStyles = StyleSheet.create((theme) => ({
         borderWidth: 1,
         borderColor: theme.colors.textSecondary,
     },
-    checkRow: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        marginBottom: 4,
-    },
-    checkbox: {
-        width: 16,
-        height: 16,
-        borderRadius: 3,
-        borderWidth: 1.5,
-        borderColor: theme.colors.textSecondary,
-        justifyContent: 'center',
-        alignItems: 'center',
-        marginRight: 6,
-    },
-    checkboxActive: {
-        backgroundColor: theme.colors.button.primary.background,
-        borderColor: theme.colors.button.primary.background,
-    },
-    checkLabel: {
-        fontSize: 11,
-        color: theme.colors.textSecondary,
-        ...Typography.default(),
-    },
-    remoteSection: {
-        marginBottom: 4,
-    },
-    statusText: {
-        fontSize: 10,
-        color: theme.colors.textSecondary,
-        marginTop: 2,
-        ...Typography.default(),
-    },
-    preview: {
-        fontSize: 10,
-        color: theme.colors.textSecondary,
-        ...Typography.default(),
-        marginTop: 2,
+    eyeButton: {
+        marginLeft: 8,
+        padding: 4,
     },
 }));
