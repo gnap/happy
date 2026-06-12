@@ -31,6 +31,6 @@
         "patch-package": "^8.0.0"
     },
     "resolutions": {
-        "@tauri-apps/api": "2.10.1"
+        "@tauri-apps/api": "^2.11"
     }
 }

@@ -291,6 +291,21 @@ export type Metadata = {
   profileId?: string | null
   sandbox?: SandboxConfig | null
   dangerouslySkipPermissions?: boolean | null
+  contextUsage?: {
+    currentTokens: number
+    maxTokens: number
+    pct: number
+    model: string
+    breakdown: {
+      systemPrompt: number
+      systemTools: number
+      customAgents: number
+      skills: number
+      messages: number
+      freeSpace: number
+    }
+    fetchedAt: number
+  }
 };
 
 export type A2AInboxMessage = {
@@ -370,6 +385,7 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
     sandbox,
     profileId,
     dangerouslySkipPermissions,
+    contextUsage,
   } = metadata;
 
   return {
@@ -381,6 +397,7 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
     ...(thoughtLevels !== undefined ? { thoughtLevels } : {}),
     ...(currentThoughtLevelCode !== undefined ? { currentThoughtLevelCode } : {}),
     ...(profileId !== undefined ? { profileId } : {}),
+    ...(contextUsage !== undefined ? { contextUsage } : {}),
     path,
     host,
     ...(version !== undefined ? { version } : {}),
