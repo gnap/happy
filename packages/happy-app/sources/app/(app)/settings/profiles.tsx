@@ -268,10 +268,7 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                     borderColor: theme.colors.text,
                                 }}
                                 onPress={() => handleSelectProfile(profile.id)}
-<<<<<<< HEAD
-=======
                                 onLongPress={() => handleLongPressProfile(profile)}
->>>>>>> be140fad (feat(app): iOS-style profile long-press menu + No Profile persistence)
                             >
                                 <View style={{
                                     width: 24,
@@ -302,37 +299,9 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                         {profile.id}
                                     </Text>
                                 </View>
-<<<<<<< HEAD
-                                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                                    {selectedProfileId === profile.id && (
-                                        <Ionicons name="checkmark-circle" size={20} color={theme.colors.text} style={{ marginRight: 12 }} />
-                                    )}
-                                    <Pressable
-                                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                                        onPress={() => handleCloneProfile(profile)}
-                                    >
-                                        <Ionicons name="copy-outline" size={18} color={theme.colors.button.secondary.tint} />
-                                    </Pressable>
-                                    <Pressable
-                                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                                        onPress={() => handleEditProfile(profile)}
-                                        style={{ marginLeft: 16 }}
-                                    >
-                                        <Ionicons name="create-outline" size={20} color={theme.colors.button.secondary.tint} />
-                                    </Pressable>
-                                    <Pressable
-                                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                                        onPress={() => handleDeleteProfile(profile)}
-                                        style={{ marginLeft: 16 }}
-                                    >
-                                        <Ionicons name="trash-outline" size={20} color={theme.colors.deleteAction} />
-                                    </Pressable>
-                                </View>
-=======
                                 {selectedProfileId === profile.id && (
                                     <Ionicons name="checkmark-circle" size={20} color={theme.colors.text} />
                                 )}
->>>>>>> be140fad (feat(app): iOS-style profile long-press menu + No Profile persistence)
                             </Pressable>
                         );
                     })}
@@ -352,10 +321,7 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                 borderColor: theme.colors.text,
                             }}
                             onPress={() => handleSelectProfile(profile.id)}
-<<<<<<< HEAD
-=======
                             onLongPress={() => handleLongPressProfile(profile)}
->>>>>>> be140fad (feat(app): iOS-style profile long-press menu + No Profile persistence)
                         >
                             <View style={{
                                 width: 24,
@@ -388,37 +354,9 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                     {profile.tmuxConfig?.tmpDir && ` • dir: ${profile.tmuxConfig.tmpDir}`}
                                 </Text>
                             </View>
-<<<<<<< HEAD
-                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                                {selectedProfileId === profile.id && (
-                                    <Ionicons name="checkmark-circle" size={20} color={theme.colors.text} style={{ marginRight: 12 }} />
-                                )}
-                                <Pressable
-                                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                                    onPress={() => handleCloneProfile(profile)}
-                                >
-                                    <Ionicons name="copy-outline" size={18} color={theme.colors.button.secondary.tint} />
-                                </Pressable>
-                                <Pressable
-                                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                                    onPress={() => handleEditProfile(profile)}
-                                    style={{ marginLeft: 16 }}
-                                >
-                                    <Ionicons name="create-outline" size={20} color={theme.colors.button.secondary.tint} />
-                                </Pressable>
-                                <Pressable
-                                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                                    onPress={() => handleDeleteProfile(profile)}
-                                    style={{ marginLeft: 16 }}
-                                >
-                                    <Ionicons name="trash-outline" size={20} color={theme.colors.deleteAction} />
-                                </Pressable>
-                            </View>
-=======
                             {selectedProfileId === profile.id && (
                                 <Ionicons name="checkmark-circle" size={20} color={theme.colors.text} />
                             )}
->>>>>>> be140fad (feat(app): iOS-style profile long-press menu + No Profile persistence)
                         </Pressable>
                     ))}
 
