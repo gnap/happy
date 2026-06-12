@@ -186,6 +186,15 @@ export function resolveA2AInboxTaskModel(): string {
   return fromEnv || DEFAULT_A2A_INBOX_TASK_MODEL;
 }
 
+/** Default model alias for Claude Code Agent inbox sub-agent. */
+export const DEFAULT_A2A_INBOX_CLAUDE_AGENT_MODEL = 'sonnet';
+
+/** Override via CLAUDE_A2A_INBOX_AGENT_MODEL (accepts "haiku", "sonnet", "opus", or a full model ID). */
+export function resolveA2AInboxClaudeAgentModel(): string {
+  const fromEnv = process.env.CLAUDE_A2A_INBOX_AGENT_MODEL?.trim();
+  return fromEnv || DEFAULT_A2A_INBOX_CLAUDE_AGENT_MODEL;
+}
+
 /** Task tool-call args for App display (model slug is always set for inbox turns). */
 export function buildA2AInboxTaskToolArgs(args: Record<string, unknown> | undefined): Record<string, unknown> {
   return {
@@ -267,6 +276,7 @@ export function buildA2ATurnPromptForClaude(
 ): string {
   const count = typeof unreadCount === 'number' && unreadCount > 0 ? unreadCount : 1;
   const stacked = count > 1;
+  const agentModel = resolveA2AInboxClaudeAgentModel();
   const inboxMcpSteps = [
     'Call mcp__happy__list_a2a_messages with unreadOnly=true.',
     'For each unread id: mcp__happy__read_a2a_message, then mcp__happy__mark_a2a_message_read (or mcp__happy__mark_a2a_messages_read in one batch).',
@@ -280,7 +290,7 @@ export function buildA2ATurnPromptForClaude(
     notification,
     snapshotPath ? `Snapshot (debug only, prefer MCP over file): ${snapshotPath}` : null,
     'This is an A2A inbox turn. Do not read or mark inbox messages yourself in the main agent.',
-    'Delegate inbox work to a claude sub-agent using the Agent tool.',
+    `Delegate inbox work to a claude sub-agent using the Agent tool with model: "${agentModel}".`,
     `Agent prompt: ${subagentPrompt}`,
     'Output discipline (main agent): before the Agent tool call, send no user-visible text — no preamble, plan, status, or reasoning.',
     'After the Agent completes, if any inbox message ids were not marked read, call mcp__happy__mark_a2a_messages_read for them before your user-visible reply.',

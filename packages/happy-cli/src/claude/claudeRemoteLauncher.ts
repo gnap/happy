@@ -359,6 +359,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         // See: https://github.com/anthropics/happy-cli/issues/143
         let previousSessionId: string | null = null;
         while (!exitReason) {
+            // Before each turn, peek inbox: if there are unread messages,
+            // push an isolated inbox turn to the message queue.
             session.a2aInboxTurn?.peekInbox();
             logger.debug('[remote]: launch');
             messageBuffer.addMessage('═'.repeat(40), 'status');
@@ -532,7 +534,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             wasInboxTurn = false;
                             turnSucceeded = false;
                         }
-                        session.a2aInboxTurn?.peekInbox();
+                        // Inbox peek happens at the top of the while loop — no need to
+                        // peek here inside claudeRemote's turn lifecycle.
                         if (!isError && !pending && session.queue.size() === 0) {
                             session.api.push().sendToAllDevices(
                                 'It\'s ready!',

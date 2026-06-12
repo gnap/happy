@@ -276,7 +276,10 @@ export async function claudeRemote(opts: {
                         isCompactCommand = false;
                     }
                     opts.onReady(message as SDKResultMessage);
-                    // inputLoop handles fetching the next message
+                    // Signal inputLoop to exit so claudeRemote() returns
+                    // and the outer launcher loop can peek inbox / pick
+                    // up the next queued message.
+                    stopSignal.resolve();
                 }
 
                 // Abort check

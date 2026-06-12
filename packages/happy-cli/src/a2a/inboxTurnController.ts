@@ -19,9 +19,6 @@ import type { MessageQueue2 } from '@/utils/MessageQueue2';
 
 export const A2A_INBOX_TURN_META = { a2aInboxTurn: true } as const;
 
-/** Re-check interval after a backoff timer fires while the main agent is still busy. */
-const A2A_INBOX_RETRY_REARM_MS = 5_000;
-
 export function isA2AInboxTurnMeta(meta: unknown): boolean {
   if (!meta || typeof meta !== 'object') {
     return false;
@@ -81,20 +78,13 @@ export function createA2AInboxTurnController<TMode>(options: {
     if (delayMs <= 0) {
       return;
     }
-    // When the timer fires, the main agent may still be mid-turn (no waiter to wake,
-    // and `onReady → peekInbox` only re-evaluates when the agent's result arrives —
-    // which can be deferred indefinitely by SDK retries). Try scheduling directly so
-    // the deferral is logged, and re-arm a short tick if the agent is still busy so
-    // we don't silently drop the inbox turn.
-    const tickRetry = () => {
+    // After backoff expires, just try scheduling. If the while-loop is
+    // still mid-turn the push will land in the queue and get picked up
+    // on the next iteration.
+    a2aInboxBackoffTimer = setTimeout(() => {
       a2aInboxBackoffTimer = null;
-      if (isAgentTurnActive() || inboxMcpScopeStack.hasScope('inbox-turn')) {
-        a2aInboxBackoffTimer = setTimeout(tickRetry, A2A_INBOX_RETRY_REARM_MS);
-        return;
-      }
       scheduleA2ATurnIfNeeded();
-    };
-    a2aInboxBackoffTimer = setTimeout(tickRetry, delayMs);
+    }, delayMs);
   };
 
   const clearA2AInboxBackoff = () => {
@@ -107,10 +97,12 @@ export function createA2AInboxTurnController<TMode>(options: {
   };
 
   const scheduleA2ATurnIfNeeded = () => {
-    if (isAgentTurnActive() || inboxMcpScopeStack.hasScope('inbox-turn')) {
-      logger.debug(`[${logTag}] Deferring A2A inbox turn until the active turn finishes`);
+    // When a turn is already queued, no need to push another.
+    // It will be dequeued by the launcher on the next loop iteration.
+    if (a2aTurnQueued) {
       return;
     }
+    // Honour backoff after failed inbox turns.
     if (isA2AInboxBackoffActive(a2aInboxBackoffUntil)) {
       logger.debug(
         `[${logTag}] A2A inbox backoff active (streak ${a2aInboxBackoffStreak}, `
@@ -118,33 +110,21 @@ export function createA2AInboxTurnController<TMode>(options: {
       );
       return;
     }
-    const reconciled = session.reconcileLocalA2AInboxWithServerAgentState();
-    if (reconciled > 0) {
-      logger.debug(`[${logTag}] Reconciled ${reconciled} orphan local A2A unread (server unreadCount=0)`);
-    }
-    if (!session.shouldEnqueueA2AInboxTurn()) {
+    // Only schedule when the local inbox has unread rows.
+    if (!hasUnreadA2AInboxMessages(session.getA2AInbox())) {
       return;
     }
-    const unreadMessages = listA2AInboxMessages(session.getA2AInbox(), { unreadOnly: true });
-    const compactMessage = unreadMessages.find((message) => parseSpecialCommand(message.text).type === 'compact');
+    a2aTurnQueued = true;
+    const unread = listA2AInboxMessages(session.getA2AInbox(), { unreadOnly: true });
+    const unreadCount = unread.length;
+    // Check for a compact command in the inbox.
+    const compactMessage = unread.find((message) => parseSpecialCommand(message.text).type === 'compact');
     if (compactMessage && scheduleCompactTurn) {
-      if (a2aTurnQueued) {
-        return;
-      }
-      a2aTurnQueued = true;
       logger.debug(`[${logTag}] A2A compact command peek: scheduling compression for message ${compactMessage.id}`);
       session.markA2AMessageRead(compactMessage.id);
       scheduleCompactTurn(getMode());
       return;
     }
-    const unreadCount = unreadMessages.length;
-    if (unreadCount === 0) {
-      return;
-    }
-    if (a2aTurnQueued) {
-      return;
-    }
-    a2aTurnQueued = true;
     logger.debug(`[${logTag}] A2A inbox peek: scheduling turn for ${unreadCount} unread message(s)`);
     messageQueue.pushIsolated('', getMode(), A2A_INBOX_TURN_META);
   };
@@ -169,13 +149,12 @@ export function createA2AInboxTurnController<TMode>(options: {
     describeInboxMcpScope: () => inboxMcpScopeStack.describe(),
     prepareInboxTurnPrompt: () => {
       a2aTurnQueued = false;
-      session.reconcileLocalA2AInboxWithServerAgentState();
-      if (!session.shouldEnqueueA2AInboxTurn()) {
+      const inbox = session.getA2AInbox();
+      if (!hasUnreadA2AInboxMessages(inbox)) {
         logger.debug(`[${logTag}] A2A inbox turn dequeued with no inbox work; skipping`);
         return null;
       }
       const turnId = createId();
-      const inbox = session.getA2AInbox();
       const unreadCount = getA2AUnreadCount(inbox);
       const snapshotPath = writeA2AInboxSnapshot(workspacePath, sessionId, turnId, inbox);
       const summary = buildA2AInboxNotificationWithPreview(inbox);
@@ -184,7 +163,6 @@ export function createA2AInboxTurnController<TMode>(options: {
     onTurnEnd: ({ succeeded, cancelled, wasInboxTurn }) => {
       if (wasInboxTurn) {
         if (succeeded) {
-          const remainingUnread = getA2AUnreadCount(session.getA2AInbox());
           if (isA2AInboxTurnConsumed(session.getA2AInbox())) {
             clearA2AInboxBackoff();
             logger.debug(`[${logTag}] A2A inbox turn succeeded; backoff reset`);
@@ -192,24 +170,20 @@ export function createA2AInboxTurnController<TMode>(options: {
             a2aInboxBackoffStreak += 1;
             const delayMs = a2aInboxBackoffDelayMs(a2aInboxBackoffStreak, a2aInboxBackoffSettings);
             a2aInboxBackoffUntil = Date.now() + delayMs;
-            if (
-              session.getServerA2AUnreadCount() === 0
-              && a2aInboxBackoffStreak >= 4
-            ) {
-              const abandoned = session.abandonLocalA2AInboxWhenServerDrained();
-              if (abandoned > 0) {
+            logger.debug(
+              `[${logTag}] A2A inbox turn finished but unread messages remain; `
+              + `backing off ${delayMs}ms (streak ${a2aInboxBackoffStreak})`,
+            );
+            scheduleA2AInboxRetryPeek(delayMs);
+            if (a2aInboxBackoffStreak >= 4) {
+              const unread = listA2AInboxMessages(session.getA2AInbox(), { unreadOnly: true });
+              if (unread.length > 0) {
+                session.markA2AMessagesRead(unread.map((m) => m.id));
                 logger.debug(
-                  `[${logTag}] Abandoned ${abandoned} local A2A unread after repeated drain `
-                  + 'failures while server unreadCount=0',
+                  `[${logTag}] Force-cleared ${unread.length} local A2A unread after ${a2aInboxBackoffStreak} repeated drain failures`,
                 );
                 clearA2AInboxBackoff();
               }
-            } else {
-              logger.debug(
-                `[${logTag}] A2A inbox turn finished but ${remainingUnread} unread message(s) remain; `
-                + `backing off ${delayMs}ms (streak ${a2aInboxBackoffStreak})`,
-              );
-              scheduleA2AInboxRetryPeek(delayMs);
             }
           }
         } else if (!cancelled) {
