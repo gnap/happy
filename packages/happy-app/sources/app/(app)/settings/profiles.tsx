@@ -1,6 +1,7 @@
 import React from 'react';
 import { View, Text, Pressable, ScrollView, KeyboardAvoidingView, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { ExpoFocusMenuView } from 'expo-focus-menu';
 import { useSettingMutable } from '@/sync/storage';
 import { StyleSheet } from 'react-native-unistyles';
 import { useUnistyles } from 'react-native-unistyles';
@@ -105,6 +106,20 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                 { text: t('common.cancel'), style: 'cancel' },
             ]
         );
+    };
+
+    const buildContextMenuItems = (profile: AIBackendProfile) => [
+        { id: 'copy', title: t('profiles.copyProfile'), icon: <Ionicons name="doc-on-doc-outline" size={20} color="#333" /> },
+        { id: 'edit', title: t('profiles.editProfile'), icon: <Ionicons name="pencil-outline" size={20} color="#333" /> },
+        { id: 'delete', title: t('profiles.deleteProfile'), destructive: true, icon: <Ionicons name="trash-outline" size={20} color="#FF3B30" /> },
+    ];
+
+    const handleContextMenuPress = (profile: AIBackendProfile, itemId: string) => {
+        switch (itemId) {
+            case 'copy': handleCloneProfile(profile); break;
+            case 'edit': handleEditProfile(profile); break;
+            case 'delete': handleDeleteProfile(profile); break;
+        }
     };
 
     const handleSelectProfile = (profileId: string | null) => {
@@ -255,8 +270,71 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                         if (!profile) return null;
 
                         return (
-                            <Pressable
+                            <ExpoFocusMenuView
                                 key={profile.id}
+                                items={buildContextMenuItems(profile)}
+                                onItemPress={(itemId) => handleContextMenuPress(profile, itemId)}
+                                hapticFeedback={true}
+                            >
+                                <Pressable
+                                    onPress={() => handleSelectProfile(profile.id)}
+                                    style={{
+                                        backgroundColor: theme.colors.input.background,
+                                        borderRadius: 12,
+                                        padding: 16,
+                                        marginBottom: 12,
+                                        flexDirection: 'row',
+                                        alignItems: 'center',
+                                        borderWidth: selectedProfileId === profile.id ? 2 : 0,
+                                        borderColor: theme.colors.text,
+                                    }}>
+                                    <View style={{
+                                        width: 24,
+                                        height: 24,
+                                        borderRadius: 12,
+                                        backgroundColor: theme.colors.button.primary.background,
+                                        justifyContent: 'center',
+                                        alignItems: 'center',
+                                        marginRight: 12,
+                                    }}>
+                                        <Ionicons name="star" size={16} color="white" />
+                                    </View>
+                                    <View style={{ flex: 1 }}>
+                                        <Text style={{
+                                            fontSize: 16,
+                                            fontWeight: '600',
+                                            color: theme.colors.text,
+                                            ...Typography.default('semiBold')
+                                        }}>
+                                            {profile.name}
+                                        </Text>
+                                        <Text style={{
+                                            fontSize: 14,
+                                            color: theme.colors.textSecondary,
+                                            marginTop: 2,
+                                            ...Typography.default()
+                                        }}>
+                                            {profile.id}
+                                        </Text>
+                                    </View>
+                                    {selectedProfileId === profile.id && (
+                                        <Ionicons name="checkmark-circle" size={20} color={theme.colors.text} />
+                                    )}
+                                </Pressable>
+                            </ExpoFocusMenuView>
+                        );
+                    })}
+
+                    {/* Custom profiles */}
+                    {profiles.map((profile) => (
+                        <ExpoFocusMenuView
+                            key={profile.id}
+                            items={buildContextMenuItems(profile)}
+                            onItemPress={(itemId) => handleContextMenuPress(profile, itemId)}
+                            hapticFeedback={true}
+                        >
+                            <Pressable
+                                onPress={() => handleSelectProfile(profile.id)}
                                 style={{
                                     backgroundColor: theme.colors.input.background,
                                     borderRadius: 12,
@@ -266,20 +344,17 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                     alignItems: 'center',
                                     borderWidth: selectedProfileId === profile.id ? 2 : 0,
                                     borderColor: theme.colors.text,
-                                }}
-                                onPress={() => handleSelectProfile(profile.id)}
-                                onLongPress={() => handleLongPressProfile(profile)}
-                            >
+                                }}>
                                 <View style={{
                                     width: 24,
                                     height: 24,
                                     borderRadius: 12,
-                                    backgroundColor: theme.colors.button.primary.background,
+                                    backgroundColor: theme.colors.button.secondary.tint,
                                     justifyContent: 'center',
                                     alignItems: 'center',
                                     marginRight: 12,
                                 }}>
-                                    <Ionicons name="star" size={16} color="white" />
+                                    <Ionicons name="person" size={16} color="white" />
                                 </View>
                                 <View style={{ flex: 1 }}>
                                     <Text style={{
@@ -296,68 +371,16 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                         marginTop: 2,
                                         ...Typography.default()
                                     }}>
-                                        {profile.id}
+                                        {profile.anthropicConfig?.model || t('profiles.defaultModel')}
+                                        {profile.tmuxConfig?.sessionName && ` • tmux: ${profile.tmuxConfig.sessionName}`}
+                                        {profile.tmuxConfig?.tmpDir && ` • dir: ${profile.tmuxConfig.tmpDir}`}
                                     </Text>
                                 </View>
                                 {selectedProfileId === profile.id && (
                                     <Ionicons name="checkmark-circle" size={20} color={theme.colors.text} />
                                 )}
                             </Pressable>
-                        );
-                    })}
-
-                    {/* Custom profiles */}
-                    {profiles.map((profile) => (
-                        <Pressable
-                            key={profile.id}
-                            style={{
-                                backgroundColor: theme.colors.input.background,
-                                borderRadius: 12,
-                                padding: 16,
-                                marginBottom: 12,
-                                flexDirection: 'row',
-                                alignItems: 'center',
-                                borderWidth: selectedProfileId === profile.id ? 2 : 0,
-                                borderColor: theme.colors.text,
-                            }}
-                            onPress={() => handleSelectProfile(profile.id)}
-                            onLongPress={() => handleLongPressProfile(profile)}
-                        >
-                            <View style={{
-                                width: 24,
-                                height: 24,
-                                borderRadius: 12,
-                                backgroundColor: theme.colors.button.secondary.tint,
-                                justifyContent: 'center',
-                                alignItems: 'center',
-                                marginRight: 12,
-                            }}>
-                                <Ionicons name="person" size={16} color="white" />
-                            </View>
-                            <View style={{ flex: 1 }}>
-                                <Text style={{
-                                    fontSize: 16,
-                                    fontWeight: '600',
-                                    color: theme.colors.text,
-                                    ...Typography.default('semiBold')
-                                }}>
-                                    {profile.name}
-                                </Text>
-                                <Text style={{
-                                    fontSize: 14,
-                                    color: theme.colors.textSecondary,
-                                    marginTop: 2,
-                                    ...Typography.default()
-                                }}>
-                                    {profile.anthropicConfig?.model || t('profiles.defaultModel')}
-                                    {profile.tmuxConfig?.sessionName && ` • tmux: ${profile.tmuxConfig.sessionName}`}
-                                    {profile.tmuxConfig?.tmpDir && ` • dir: ${profile.tmuxConfig.tmpDir}`}
-                                </Text>
-                            </View>
-                            {selectedProfileId === profile.id && (
-                                <Ionicons name="checkmark-circle" size={20} color={theme.colors.text} />
-                            )}
-                        </Pressable>
+                        </ExpoFocusMenuView>
                     ))}
 
                     {/* Add profile button */}
