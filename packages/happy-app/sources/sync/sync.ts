@@ -784,8 +784,8 @@ class Sync {
         // suspended before messages are sent. Works with personal team profiles.
         if (Platform.OS === 'ios' && this.backgroundTaskId === null) {
             try {
-                const ExpoIosBackgroundTask = require('expo-ios-background-task').default;
-                const result = await ExpoIosBackgroundTask.beginBackgroundTask('Send pending messages');
+                const { beginBackgroundTask } = await import('./iosBackgroundTask');
+                const result = await beginBackgroundTask('Send pending messages');
                 if (result.success) {
                     this.backgroundTaskId = result.taskId;
                     log.log(`📨 Background task started (id=${result.taskId})`);
@@ -811,8 +811,7 @@ class Sync {
         }
         this.backgroundSendStartedAt = null;
         if (this.backgroundTaskId !== null) {
-            const task = require('expo-ios-background-task').default;
-            void task.endBackgroundTask(this.backgroundTaskId);
+            void import('./iosBackgroundTask').then(m => m.endBackgroundTask(this.backgroundTaskId!));
             this.backgroundTaskId = null;
         }
     }
@@ -891,8 +890,8 @@ class Sync {
 
     private async handleBackgroundSendTimeout() {
         if (this.backgroundTaskId !== null) {
-            const task = require('expo-ios-background-task').default;
-            await task.endBackgroundTask(this.backgroundTaskId);
+            const { endBackgroundTask } = await import('./iosBackgroundTask');
+            await endBackgroundTask(this.backgroundTaskId);
             this.backgroundTaskId = null;
         }
 
