@@ -62,11 +62,22 @@ interface AgentInputProps {
     autocompletePrefixes: string[];
     autocompleteSuggestions: (query: string) => Promise<{ key: string, text: string, component: React.ElementType }[]>;
     usageData?: {
-        inputTokens: number;
-        outputTokens: number;
-        cacheCreation: number;
-        cacheRead: number;
+        inputTokens?: number;
+        outputTokens?: number;
+        cacheCreation?: number;
+        cacheRead?: number;
         contextSize: number;
+        /** CLI /context counters — when present, display these instead of turn-end usage. */
+        contextWindowTokens?: number;
+        contextPct?: number;
+        contextBreakdown?: {
+            systemPrompt: number;
+            systemTools: number;
+            customAgents: number;
+            skills: number;
+            messages: number;
+            freeSpace: number;
+        };
     };
     alwaysShowContextSize?: boolean;
     maxContextSize?: number;

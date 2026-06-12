@@ -51,6 +51,21 @@ export const MetadataSchema = z.object({
     sandbox: z.any().nullish(), // Sandbox config metadata from CLI (or null when disabled)
     dangerouslySkipPermissions: z.boolean().nullish(), // Claude --dangerously-skip-permissions mode (or null when unknown)
     profileId: z.string().nullish(), // Active environment profile ID, synced from CLI
+	    contextUsage: z.object({
+	        currentTokens: z.number(),
+	        maxTokens: z.number(),
+	        pct: z.number(),
+	        model: z.string(),
+	        breakdown: z.object({
+	            systemPrompt: z.number(),
+	            systemTools: z.number(),
+	            customAgents: z.number(),
+	            skills: z.number(),
+	            messages: z.number(),
+	            freeSpace: z.number(),
+	        }),
+	        fetchedAt: z.number(),
+	    }).optional(),
 });
 
 export type Metadata = z.infer<typeof MetadataSchema>;
