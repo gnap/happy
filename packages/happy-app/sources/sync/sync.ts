@@ -1,5 +1,4 @@
 import Constants from 'expo-constants';
-import ExpoIosBackgroundTask from 'expo-ios-background-task';
 import { apiSocket } from '@/sync/apiSocket';
 import { AuthCredentials } from '@/auth/tokenStorage';
 import { Encryption } from '@/sync/encryption/encryption';
@@ -785,6 +784,7 @@ class Sync {
         // suspended before messages are sent. Works with personal team profiles.
         if (Platform.OS === 'ios' && this.backgroundTaskId === null) {
             try {
+                const ExpoIosBackgroundTask = require('expo-ios-background-task').default;
                 const result = await ExpoIosBackgroundTask.beginBackgroundTask('Send pending messages');
                 if (result.success) {
                     this.backgroundTaskId = result.taskId;
@@ -811,7 +811,8 @@ class Sync {
         }
         this.backgroundSendStartedAt = null;
         if (this.backgroundTaskId !== null) {
-            void ExpoIosBackgroundTask.endBackgroundTask(this.backgroundTaskId);
+            const task = require('expo-ios-background-task').default;
+            void task.endBackgroundTask(this.backgroundTaskId);
             this.backgroundTaskId = null;
         }
     }
@@ -890,7 +891,8 @@ class Sync {
 
     private async handleBackgroundSendTimeout() {
         if (this.backgroundTaskId !== null) {
-            await ExpoIosBackgroundTask.endBackgroundTask(this.backgroundTaskId);
+            const task = require('expo-ios-background-task').default;
+            await task.endBackgroundTask(this.backgroundTaskId);
             this.backgroundTaskId = null;
         }
 
