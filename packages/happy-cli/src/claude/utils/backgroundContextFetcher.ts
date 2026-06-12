@@ -45,14 +45,25 @@ async function spawnContextFetch(opts: {
     projectPath: string;
     envVars: Record<string, string>;
     signal?: AbortSignal;
+    /** If set, overrides ANTHROPIC_MODEL in child env so fetcher uses the same model as the main session. */
+    model?: string;
 }): Promise<ParsedContextUsage | null> {
-    const env = {
+    const env: Record<string, string | undefined> = {
         ...process.env,
         ...collectEnvByPrefix(INHERITED_ENV_PREFIXES),
         ...opts.envVars,
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
         CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
     };
+    // Align with the main session's model. When model is set, override
+    // ANTHROPIC_MODEL so the child uses the same model. When model is
+    // undefined (adaptiveUsage / default), clear ANTHROPIC_MODEL so the
+    // child — like the main session — lets Claude pick the model.
+    if (opts.model) {
+        env.ANTHROPIC_MODEL = opts.model;
+    } else if (Object.prototype.hasOwnProperty.call(opts, 'model')) {
+        delete env.ANTHROPIC_MODEL;
+    }
 
     const child = spawn(
         'claude',
@@ -115,6 +126,8 @@ export function startBackgroundContextFetcher(opts: {
     projectPath: string;
     envVars?: Record<string, string>;
     intervalMs?: number;
+    /** Overrides ANTHROPIC_MODEL in child env to match the main session's model. */
+    model?: string;
 }): () => void {
     const intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
     const envVars = opts.envVars ?? {};
@@ -127,6 +140,7 @@ export function startBackgroundContextFetcher(opts: {
             claudeSessionId,
             projectPath: opts.projectPath,
             envVars,
+            model: opts.model,
         });
         if (!usage) return;
 

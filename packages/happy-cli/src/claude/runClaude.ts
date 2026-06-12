@@ -398,6 +398,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         session,
         getClaudeSessionId: () => currentSession?.sessionId ?? initialClaudeSessionId,
         projectPath: workingDirectory,
+        model: currentModel,
     });
 
     handleUserMessage = async (message) => {
