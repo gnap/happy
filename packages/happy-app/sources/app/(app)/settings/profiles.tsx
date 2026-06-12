@@ -252,7 +252,6 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                     borderColor: theme.colors.text,
                                 }}
                                 onPress={() => handleSelectProfile(profile.id)}
-                                onLongPress={() => handleCloneProfile(profile)}
                             >
                                 <View style={{
                                     width: 24,
@@ -289,7 +288,14 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                     )}
                                     <Pressable
                                         hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                                        onPress={() => handleCloneProfile(profile)}
+                                    >
+                                        <Ionicons name="copy-outline" size={18} color={theme.colors.button.secondary.tint} />
+                                    </Pressable>
+                                    <Pressable
+                                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                                         onPress={() => handleEditProfile(profile)}
+                                        style={{ marginLeft: 16 }}
                                     >
                                         <Ionicons name="create-outline" size={20} color={theme.colors.button.secondary.tint} />
                                     </Pressable>
@@ -320,7 +326,6 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                 borderColor: theme.colors.text,
                             }}
                             onPress={() => handleSelectProfile(profile.id)}
-                            onLongPress={() => handleCloneProfile(profile)}
                         >
                             <View style={{
                                 width: 24,
@@ -359,7 +364,14 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                 )}
                                 <Pressable
                                     hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                                    onPress={() => handleCloneProfile(profile)}
+                                >
+                                    <Ionicons name="copy-outline" size={18} color={theme.colors.button.secondary.tint} />
+                                </Pressable>
+                                <Pressable
+                                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                                     onPress={() => handleEditProfile(profile)}
+                                    style={{ marginLeft: 16 }}
                                 >
                                     <Ionicons name="create-outline" size={20} color={theme.colors.button.secondary.tint} />
                                 </Pressable>
