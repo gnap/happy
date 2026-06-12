@@ -1,5 +1,12 @@
 import Constants from 'expo-constants';
-import ExpoIosBackgroundTask from 'expo-ios-background-task';
+// expo-ios-background-task is iOS-only; lazy-load so web/Tauri builds don't break
+let _IosBackgroundTask: typeof import('expo-ios-background-task').default | null = null;
+async function _getIosBackgroundTask() {
+    if (_IosBackgroundTask) return _IosBackgroundTask;
+    try { _IosBackgroundTask = (await import('expo-ios-background-task')).default; }
+    catch { return null; }
+    return _IosBackgroundTask;
+}
 import { apiSocket } from '@/sync/apiSocket';
 import { AuthCredentials } from '@/auth/tokenStorage';
 import { Encryption } from '@/sync/encryption/encryption';
@@ -791,7 +798,8 @@ class Sync {
         // suspended before messages are sent. Works with personal team profiles.
         if (Platform.OS === 'ios' && this.backgroundTaskId === null) {
             try {
-                const result = await ExpoIosBackgroundTask.beginBackgroundTask('Send pending messages');
+                const bgTask = await _getIosBackgroundTask();
+                const result = await bgTask?.beginBackgroundTask('Send pending messages') ?? { success: false };
                 if (result.success) {
                     this.backgroundTaskId = result.taskId;
                     log.log(`📨 Background task started (id=${result.taskId})`);
@@ -817,7 +825,7 @@ class Sync {
         }
         this.backgroundSendStartedAt = null;
         if (this.backgroundTaskId !== null) {
-            void ExpoIosBackgroundTask.endBackgroundTask(this.backgroundTaskId);
+            void _getIosBackgroundTask().then(bg => bg?.endBackgroundTask(this.backgroundTaskId!));
             this.backgroundTaskId = null;
         }
     }
@@ -896,7 +904,8 @@ class Sync {
 
     private async handleBackgroundSendTimeout() {
         if (this.backgroundTaskId !== null) {
-            await ExpoIosBackgroundTask.endBackgroundTask(this.backgroundTaskId);
+            const bgTask = await _getIosBackgroundTask();
+            await bgTask?.endBackgroundTask(this.backgroundTaskId!);
             this.backgroundTaskId = null;
         }
 
