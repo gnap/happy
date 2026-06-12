@@ -55,14 +55,11 @@ async function spawnContextFetch(opts: {
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
         CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
     };
-    // Align with the main session's model. When model is set, override
-    // ANTHROPIC_MODEL so the child uses the same model. When model is
-    // undefined (adaptiveUsage / default), clear ANTHROPIC_MODEL so the
-    // child — like the main session — lets Claude pick the model.
+    // Only override ANTHROPIC_MODEL when an explicit model is requested.
+    // Otherwise leave whatever envVars (currentClaudeEnvVars) provided —
+    // deleting it would strip the profile's model and cause a mismatch.
     if (opts.model) {
         env.ANTHROPIC_MODEL = opts.model;
-    } else if (Object.prototype.hasOwnProperty.call(opts, 'model')) {
-        delete env.ANTHROPIC_MODEL;
     }
 
     const child = spawn(
