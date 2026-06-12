@@ -156,6 +156,8 @@ class Sync {
     private sendSync = new Map<string, InvalidateSync>();
     private sendAbortControllers = new Map<string, AbortController>();
     private sessionLastSeq = new Map<string, number>();
+    private sessionLastFetchTime = new Map<string, number>(); // debounce re-fetches
+    private sessionLastWsMessageAt = new Map<string, number>(); // track last WS delivery per session
     private pendingOutbox = new Map<string, OutboxMessage[]>();
     // In session-protocol mode user messages arrive back as session envelopes without localId.
     // We track sent message texts here so we can re-attach the localId when the echo arrives,
@@ -706,6 +708,9 @@ class Sync {
         if (messages.length === 0) {
             return;
         }
+
+        // Track last WS delivery so fetchSessions can skip redundant HTTP fetches
+        this.sessionLastWsMessageAt.set(sessionId, Date.now());
 
         let queue = this.sessionMessageQueue.get(sessionId);
         if (!queue) {
@@ -1336,6 +1341,15 @@ class Sync {
                     try {
                         const cached = await getCachedLastSeq(session.id);
                         if (cached != null && cached < session.seq) {
+                            // Skip if WebSocket recently delivered messages — the WS path
+                            // already handles gap resolution via enqueueMessages, so an
+                            // additional HTTP fetch at this point would be redundant.
+                            const lastWsAt = this.sessionLastWsMessageAt.get(session.id) ?? 0;
+                            const wsGap = Date.now() - lastWsAt;
+                            if (wsGap < 5000) {
+                                log.log(`📥 fetchSessions: skipping redundant message fetch for ${session.id} (WS delivered ${wsGap}ms ago, cached=${cached} < seq=${session.seq})`);
+                                continue;
+                            }
                             log.log(`📥 fetchSessions: cached lastSeq ${cached} < session.seq ${session.seq} for ${session.id}, invalidating message sync`);
                             this.getMessagesSync(session.id).invalidate();
                         }
@@ -2475,12 +2489,19 @@ class Sync {
 
                 log.log(`💬 fetchMessages completed for ${sessionId}: ${normalizedMessages.length} messages, maxSeq=${maxSeq}, oldestSeq=${oldestSeq}, hasOlderMessages=${hasOlderMessages}, sessionSeq=${sessionSeq}`);
 
-                // If we're still behind session.seq, kick off another fetch immediately.
-                // This handles cases where new messages arrived during this fetch, or where
-                // the batch of 100 didn't reach the latest seq.
+                // If we're still behind session.seq, kick off another fetch — but only if
+                // the last re-invalidation wasn't too recent (debounce 2s) to avoid tight
+                // spin-loops when the agent produces messages faster than fetches return.
                 if (maxSeq < sessionSeq) {
-                    log.log(`💬 fetchMessages: still behind (maxSeq=${maxSeq} < sessionSeq=${sessionSeq}), re-invalidating`);
-                    this.getMessagesSync(sessionId).invalidate();
+                    const lastRevalidate = this.sessionLastFetchTime.get(sessionId) ?? 0;
+                    const elapsed = Date.now() - lastRevalidate;
+                    if (elapsed >= 2000) {
+                        this.sessionLastFetchTime.set(sessionId, Date.now());
+                        log.log(`💬 fetchMessages: still behind (maxSeq=${maxSeq} < sessionSeq=${sessionSeq}), re-invalidating`);
+                        this.getMessagesSync(sessionId).invalidate();
+                    } else {
+                        log.log(`💬 fetchMessages: still behind but debounced (maxSeq=${maxSeq} < sessionSeq=${sessionSeq}, elapsed=${elapsed}ms), skipping re-invalidate`);
+                    }
                 }
 
                 // Only patch store for cold-start path; incremental path already has correct values.
