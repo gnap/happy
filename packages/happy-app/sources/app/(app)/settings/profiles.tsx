@@ -383,9 +383,11 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                     marginTop: 2,
                                     ...Typography.default()
                                 }}>
-                                    {profile.anthropicConfig?.model || t('profiles.defaultModel')}
-                                    {profile.tmuxConfig?.sessionName && ` • tmux: ${profile.tmuxConfig.sessionName}`}
-                                    {profile.tmuxConfig?.tmpDir && ` • dir: ${profile.tmuxConfig.tmpDir}`}
+                                    {profile.anthropicConfig?.baseUrl
+                                        || profile.openaiConfig?.baseUrl
+                                        || profile.azureOpenAIConfig?.endpoint
+                                        || profile.environmentVariables?.find(v => v.name.includes('URL') || v.name.includes('ENDPOINT'))?.value
+                                        || t('profiles.defaultModel')}
                                 </Text>
                             </View>
 <<<<<<< HEAD
@@ -463,7 +465,6 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                         ]}>
                             <ProfileEditForm
                                 profile={editingProfile}
-                                machineId={null}
                                 onSave={handleSaveProfile}
                                 onCancel={() => {
                                     setShowAddForm(false);

@@ -8,14 +8,12 @@ import type { ProfileDocumentation } from '@/sync/profileUtils';
 
 export interface EnvironmentVariablesListProps {
     environmentVariables: Array<{ name: string; value: string }>;
-    machineId: string | null;
     profileDocs?: ProfileDocumentation | null;
     onChange: (newVariables: Array<{ name: string; value: string }>) => void;
 }
 
 export function EnvironmentVariablesList({
     environmentVariables,
-    machineId,
     profileDocs,
     onChange,
 }: EnvironmentVariablesListProps) {
@@ -34,11 +32,6 @@ export function EnvironmentVariablesList({
             isSecret: doc?.isSecret || false
         };
     }, [profileDocs]);
-
-    const extractVarNameFromValue = React.useCallback((value: string): string | null => {
-        const match = value.match(/^\$\{([A-Z_][A-Z0-9_]*)/);
-        return match ? match[1] : null;
-    }, []);
 
     const handleUpdateVariable = React.useCallback((index: number, newValue: string) => {
         const updated = [...environmentVariables];
@@ -64,25 +57,25 @@ export function EnvironmentVariablesList({
         if (!newVarName.trim()) return;
         if (!/^[A-Z_][A-Z0-9_]*$/.test(newVarName.trim())) return;
         if (environmentVariables.some(v => v.name === newVarName.trim())) return;
-        onChange([...environmentVariables, { name: newVarName.trim(), value: newVarValue.trim() || '' }]);
+        onChange([...environmentVariables, { name: newVarName.trim(), value: newVarValue }]);
         setNewVarName('');
         setNewVarValue('');
         setShowAddForm(false);
     }, [newVarName, newVarValue, environmentVariables, onChange]);
 
     return (
-        <View style={listStyles.container}>
-            <Text style={listStyles.sectionTitle}>Environment Variables</Text>
+        <View style={styles.container}>
+            <Text style={styles.sectionTitle}>Environment Variables</Text>
 
-            <Pressable style={listStyles.addButton} onPress={() => setShowAddForm(true)}>
+            <Pressable style={styles.addButton} onPress={() => setShowAddForm(true)}>
                 <Ionicons name="add" size={14} color={theme.colors.button.primary.tint} />
-                <Text style={listStyles.addButtonText}>Add Variable</Text>
+                <Text style={styles.addButtonText}>Add Variable</Text>
             </Pressable>
 
             {showAddForm && (
-                <View style={listStyles.addForm}>
+                <View style={styles.addForm}>
                     <TextInput
-                        style={listStyles.addInput}
+                        style={styles.addInput}
                         placeholder="Variable name (e.g., MY_CUSTOM_VAR)"
                         placeholderTextColor={theme.colors.input.placeholder}
                         value={newVarName}
@@ -91,39 +84,37 @@ export function EnvironmentVariablesList({
                         autoCorrect={false}
                     />
                     <TextInput
-                        style={listStyles.addInput}
-                        placeholder="Value (e.g., my-value or ${VAR})"
+                        style={styles.addInput}
+                        placeholder="Value"
                         placeholderTextColor={theme.colors.input.placeholder}
                         value={newVarValue}
                         onChangeText={setNewVarValue}
                         autoCapitalize="none"
                         autoCorrect={false}
                     />
-                    <View style={listStyles.addFormActions}>
-                        <Pressable style={listStyles.addFormCancel} onPress={() => {
+                    <View style={styles.addFormActions}>
+                        <Pressable style={styles.addFormCancel} onPress={() => {
                             setShowAddForm(false);
                             setNewVarName('');
                             setNewVarValue('');
                         }}>
-                            <Text style={listStyles.addFormCancelText}>Cancel</Text>
+                            <Text style={styles.addFormCancelText}>Cancel</Text>
                         </Pressable>
-                        <Pressable style={listStyles.addFormSubmit} onPress={handleAddVariable}>
-                            <Text style={listStyles.addFormSubmitText}>Add</Text>
+                        <Pressable style={styles.addFormSubmit} onPress={handleAddVariable}>
+                            <Text style={styles.addFormSubmitText}>Add</Text>
                         </Pressable>
                     </View>
                 </View>
             )}
 
             {environmentVariables.map((envVar, index) => {
-                const varNameFromValue = extractVarNameFromValue(envVar.value);
-                const docs = getDocumentation(varNameFromValue || envVar.name);
-                const isSecret = docs.isSecret || /TOKEN|KEY|SECRET|AUTH/i.test(envVar.name) || /TOKEN|KEY|SECRET|AUTH/i.test(varNameFromValue || '');
+                const docs = getDocumentation(envVar.name);
+                const isSecret = docs.isSecret || /TOKEN|KEY|SECRET|AUTH/i.test(envVar.name);
 
                 return (
                     <EnvironmentVariableCard
                         key={index}
                         variable={envVar}
-                        machineId={machineId}
                         expectedValue={docs.expectedValue}
                         description={docs.description}
                         isSecret={isSecret}
@@ -137,7 +128,7 @@ export function EnvironmentVariablesList({
     );
 }
 
-const listStyles = StyleSheet.create((theme) => ({
+const styles = StyleSheet.create((theme) => ({
     container: {
         marginBottom: theme.margins.md,
     },
