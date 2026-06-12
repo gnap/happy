@@ -1350,6 +1350,12 @@ class Sync {
                                 log.log(`📥 fetchSessions: skipping redundant message fetch for ${session.id} (WS delivered ${wsGap}ms ago, cached=${cached} < seq=${session.seq})`);
                                 continue;
                             }
+                            // Skip if encryption keys are not available — can never fetch
+                            // (e.g. session archived/deleted on another device).
+                            if (!this.encryption.getSessionEncryption(session.id)) {
+                                log.log(`📥 fetchSessions: skipping message sync for ${session.id} — encryption not ready`);
+                                continue;
+                            }
                             log.log(`📥 fetchSessions: cached lastSeq ${cached} < session.seq ${session.seq} for ${session.id}, invalidating message sync`);
                             this.getMessagesSync(session.id).invalidate();
                         }
@@ -2377,8 +2383,8 @@ class Sync {
             try {
                 const encryption = this.encryption.getSessionEncryption(sessionId);
                 if (!encryption) {
-                    log.log(`💬 fetchMessages: Session encryption not ready for ${sessionId}, will retry`);
-                    throw new Error(`Session encryption not ready for ${sessionId}`);
+                    log.log(`💬 fetchMessages: Session encryption not ready for ${sessionId}, skipping`);
+                    return;
                 }
 
                 // --- Cache: cold-start hydration (Cursor sessions only) ---
