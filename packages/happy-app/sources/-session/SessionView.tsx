@@ -385,7 +385,13 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             // Autocomplete configuration
             autocompletePrefixes={['@', '/']}
             autocompleteSuggestions={(query) => getSuggestions(sessionId, query)}
-            usageData={sessionUsage ? {
+            usageData={session.metadata?.contextUsage ? {
+                // CLI /context data is the authoritative real-time counter
+                contextSize: session.metadata.contextUsage.currentTokens,
+                contextWindowTokens: session.metadata.contextUsage.maxTokens,
+                contextPct: session.metadata.contextUsage.pct,
+                contextBreakdown: session.metadata.contextUsage.breakdown,
+            } : sessionUsage ? {
                 inputTokens: sessionUsage.inputTokens,
                 outputTokens: sessionUsage.outputTokens,
                 cacheCreation: sessionUsage.cacheCreation,
