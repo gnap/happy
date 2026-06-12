@@ -971,6 +971,9 @@ export const zhHant: TranslationStructure = {
         nameRequired: '設定檔名稱為必填',
         deleteConfirm: '確定要刪除設定檔「{name}」嗎？',
         editProfile: '編輯設定檔',
+        copyProfile: '複製設定檔',
+        deleteProfile: '刪除設定檔',
+
         addProfileTitle: '新增設定檔',
         delete: {
             title: '刪除設定檔',

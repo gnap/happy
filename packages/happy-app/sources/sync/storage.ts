@@ -597,8 +597,11 @@ export const storage = create<StorageState>()((set, get) => {
                                 : session.maxMode ?? undefined;
                 const existingProfileId = state.sessions[session.id]?.profileId;
                 const savedProfileId = savedProfileIds[session.id];
-                const metadataProfileId = session.metadata?.profileId ?? undefined;
-                const resolvedProfileId = existingProfileId ?? metadataProfileId ?? savedProfileId ?? session.profileId ?? undefined;
+                // '__none__' sentinel means user explicitly chose 'No Profile'.
+                // Do NOT fall back to metadata in that case.
+                const savedIsNone = savedProfileId === '__none__';
+                const metadataProfileId = savedIsNone ? undefined : (session.metadata?.profileId ?? undefined);
+                const resolvedProfileId = existingProfileId ?? metadataProfileId ?? (savedIsNone ? null : savedProfileId) ?? session.profileId ?? undefined;
                 // todos: derived by replay (reducer) when messages load; not synced to server. Preserve here so
                 // list fetches do not overwrite; replay will update session.todos when that session's messages load.
                 const existingTodos = state.sessions[session.id]?.todos;
@@ -1298,12 +1301,12 @@ export const storage = create<StorageState>()((set, get) => {
         updateSessionProfileId: (sessionId: string, profileId: string | null) => set((state) => {
             const session = state.sessions[sessionId];
 
-            // Persist to MMKV (null = clear, "No Profile" selected).
+            // Persist to MMKV. '__none__' sentinel for explicit "No Profile" choice.
             const profileIds = loadSessionProfileIds();
             if (profileId !== null) {
                 profileIds[sessionId] = profileId;
             } else {
-                delete profileIds[sessionId];
+                profileIds[sessionId] = '__none__';
             }
             saveSessionProfileIds(profileIds);
 

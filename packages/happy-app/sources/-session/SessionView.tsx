@@ -256,11 +256,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
 
     const sessionProfileId = session.profileId ?? null;
     const updateProfileId = React.useCallback((profileId: string | null) => {
-        if (profileId) {
-            storage.getState().updateSessionProfileId(sessionId, profileId);
-        } else {
-            storage.getState().clearSessionProfileId(sessionId);
-        }
+        storage.getState().updateSessionProfileId(sessionId, profileId);
         sync.applySettings({ lastUsedProfile: profileId });
     }, [sessionId]);
 
