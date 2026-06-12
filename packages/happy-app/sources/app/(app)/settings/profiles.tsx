@@ -58,6 +58,9 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
     };
 
     const handleDeleteProfile = async (profile: AIBackendProfile) => {
+        if (profile.id === 'no-profile') {
+            return;
+        }
         const ok = await Modal.confirm(
             t('profiles.delete.title'),
             t('profiles.delete.message', { name: profile.name }),
@@ -65,6 +68,7 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
         );
         if (!ok) return;
 
+        // Built-in profile: remove from local store by id (they are regenerated from DEFAULT_PROFILES)
         const updatedProfiles = profiles.filter(p => p.id !== profile.id);
         setProfiles(updatedProfiles);
         if (lastUsedProfile === profile.id) {
@@ -73,6 +77,18 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
         if (selectedProfileId === profile.id && onProfileSelect) {
             onProfileSelect(null);
         }
+    };
+
+    const handleCloneProfile = (profile: AIBackendProfile) => {
+        const clone: AIBackendProfile = {
+            ...profile,
+            id: randomUUID(),
+            name: `${profile.name} (Copy)`,
+            isBuiltIn: false,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+        };
+        setProfiles([...profiles, clone]);
     };
 
     const handleSelectProfile = (profileId: string | null) => {
@@ -236,6 +252,7 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                     borderColor: theme.colors.text,
                                 }}
                                 onPress={() => handleSelectProfile(profile.id)}
+                                onLongPress={() => handleCloneProfile(profile)}
                             >
                                 <View style={{
                                     width: 24,
@@ -263,8 +280,7 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                         marginTop: 2,
                                         ...Typography.default()
                                     }}>
-                                        {profile.anthropicConfig?.model || 'Default model'}
-                                        {profile.anthropicConfig?.baseUrl && ` • ${profile.anthropicConfig.baseUrl}`}
+                                        {profile.id}
                                     </Text>
                                 </View>
                                 <View style={{ flexDirection: 'row', alignItems: 'center' }}>
@@ -276,6 +292,13 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                         onPress={() => handleEditProfile(profile)}
                                     >
                                         <Ionicons name="create-outline" size={20} color={theme.colors.button.secondary.tint} />
+                                    </Pressable>
+                                    <Pressable
+                                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                                        onPress={() => handleDeleteProfile(profile)}
+                                        style={{ marginLeft: 16 }}
+                                    >
+                                        <Ionicons name="trash-outline" size={20} color={theme.colors.deleteAction} />
                                     </Pressable>
                                 </View>
                             </Pressable>
@@ -297,6 +320,7 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                 borderColor: theme.colors.text,
                             }}
                             onPress={() => handleSelectProfile(profile.id)}
+                            onLongPress={() => handleCloneProfile(profile)}
                         >
                             <View style={{
                                 width: 24,
