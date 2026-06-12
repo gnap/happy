@@ -159,7 +159,7 @@ interface StorageState {
     clearSessionModelMode: (sessionId: string) => void;
     updateSessionMaxMode: (sessionId: string, maxMode: boolean) => void;
     clearSessionMaxMode: (sessionId: string) => void;
-    updateSessionProfileId: (sessionId: string, profileId: string) => void;
+    updateSessionProfileId: (sessionId: string, profileId: string | null) => void;
     clearSessionProfileId: (sessionId: string) => void;
     /** Clear in-memory profileId override at turn end so remote metadata wins next resolution. MMKV is preserved for cold-start fallback. */
     releaseSessionProfileId: (sessionId: string) => void;
@@ -1295,14 +1295,16 @@ export const storage = create<StorageState>()((set, get) => {
                 },
             };
         }),
-        updateSessionProfileId: (sessionId: string, profileId: string) => set((state) => {
+        updateSessionProfileId: (sessionId: string, profileId: string | null) => set((state) => {
             const session = state.sessions[sessionId];
 
-            // Always persist to MMKV so applySessions() can resolve the profileId
-            // from savedProfileIds fallback when the session arrives later (e.g.
-            // new session spawn where the session entry does not exist yet).
+            // Persist to MMKV (null = clear, "No Profile" selected).
             const profileIds = loadSessionProfileIds();
-            profileIds[sessionId] = profileId;
+            if (profileId !== null) {
+                profileIds[sessionId] = profileId;
+            } else {
+                delete profileIds[sessionId];
+            }
             saveSessionProfileIds(profileIds);
 
             if (!session) return state;
@@ -1313,7 +1315,7 @@ export const storage = create<StorageState>()((set, get) => {
                     ...state.sessions,
                     [sessionId]: {
                         ...session,
-                        profileId,
+                        profileId: profileId ?? undefined,
                     },
                 },
             };
