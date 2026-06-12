@@ -246,7 +246,7 @@ function buildSessionListViewData(
                 const aWt = a.metadata?.isWorktree ?? true;
                 const bWt = b.metadata?.isWorktree ?? true;
                 if (aWt !== bWt) return aWt ? 1 : -1;
-                return b.updatedAt - a.updatedAt; // newest first within same type
+                return b.createdAt - a.createdAt; // newest first within same type (stable, doesn't jump)
             });
             const homeDir = sessions[0]?.metadata?.homeDir;
             const branch = sessions.find(s => !!s.metadata?.branchName)?.metadata?.branchName
