@@ -133,6 +133,10 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
 
     // True while processing a /context fetch turn — suppress all output to the App.
     let suppressContextOutput = false;
+    // True between pushing the contextFetch pending and onReady completing it.
+    // Prevents the concurrent inputLoop from resetting suppressContextOutput
+    // before the outputLoop finishes draining the /context response.
+    let contextFetchActive = false;
 
     // Create outgoing message queue
     const messageQueue = new OutgoingMessageQueue(
@@ -452,8 +456,12 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
 
                         let msg = await session.queue.waitForMessagesAndGetAsString(controller.signal);
                         // Any message from the real queue (not a deferred pending context
-                        // fetch) means the suppress flag should be off.
-                        suppressContextOutput = false;
+                        // fetch) means the suppress flag should be off — but only if a
+                        // context fetch isn't currently active (outputLoop might still be
+                        // draining the /context response on the other fiber).
+                        if (!contextFetchActive) {
+                            suppressContextOutput = false;
+                        }
 
                         // Echo the app's messageId back via session protocol so the App
                         // can clear its outbox. The envelope id becomes the server localId,
@@ -595,6 +603,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             }
                             // Consume context fetch, close the PREVIOUS turn, then notify.
                             pendingTurnContext = undefined;
+                            contextFetchActive = false;
+                            suppressContextOutput = false;
                             session.client.closeClaudeSessionTurn('completed', extras);
                             session.api.push().sendToAllDevices(
                                 'It\'s ready!',
@@ -607,6 +617,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         if (isError) {
                             // If context fetch failed, still close the previous turn.
                             if (pendingTurnContext) {
+                                contextFetchActive = false;
+                                suppressContextOutput = false;
                                 session.client.closeClaudeSessionTurn('completed', pendingTurnContext.extras ?? {});
                                 pendingTurnContext = undefined;
                                 return;
@@ -649,7 +661,10 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             pending = { message: '/context', mode: mode!, meta: { contextFetch: true } };
                             // Set suppress immediately so outputLoop blocks any
                             // SDK output that arrives before nextMessage() runs.
+                            // contextFetchActive prevents the concurrent inputLoop
+                            // from resetting suppressContextOutput via the queue path.
                             suppressContextOutput = true;
+                            contextFetchActive = true;
                             wasCompactTurn = false;
                             return;
                         }
