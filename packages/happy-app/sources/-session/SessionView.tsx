@@ -396,18 +396,19 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             autocompleteSuggestions={(query) => getSuggestions(sessionId, query)}
             usageData={(() => {
                 // Primary: reducer state (populated from turn-end contextUsage snapshot).
-                // Falls back to session.latestUsage for older sessions.
+                // Fall back to metadata.contextUsage for sessions running older CLI.
                 const base = sessionUsage ?? session.latestUsage;
-                if (!base) return undefined;
+                const meta = session.metadata?.contextUsage;
+                if (!base && !meta) return undefined;
                 return {
-                    inputTokens: base.inputTokens,
-                    outputTokens: base.outputTokens,
-                    cacheCreation: base.cacheCreation,
-                    cacheRead: base.cacheRead,
-                    contextSize: base.contextSize,
-                    contextWindowTokens: base.contextWindowTokens,
-                    contextPct: base.contextPct,
-                    contextBreakdown: base.contextBreakdown,
+                    inputTokens: base?.inputTokens,
+                    outputTokens: base?.outputTokens,
+                    cacheCreation: base?.cacheCreation,
+                    cacheRead: base?.cacheRead,
+                    contextSize: meta?.currentTokens ?? base?.contextSize,
+                    contextWindowTokens: meta?.maxTokens ?? base?.contextWindowTokens,
+                    contextPct: meta?.pct ?? base?.contextPct,
+                    contextBreakdown: meta?.breakdown ?? base?.contextBreakdown,
                 };
             })()}
             alwaysShowContextSize={alwaysShowContextSize}
