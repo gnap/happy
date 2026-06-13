@@ -30,8 +30,6 @@ export class Session {
     a2aInboxTurn?: A2AInboxTurnHooks;
     /** Remote loop sets true while a Claude turn is in flight. */
     claudeTurnActiveRef?: { current: boolean };
-    /** Poke the background context-usage fetcher after a successful turn. */
-    contextFetchPoke?: () => void;
     /** Sync App permission mode changes to the active PermissionHandler (remote mode). */
     syncPermissionMode?: (mode: PermissionMode) => void;
 

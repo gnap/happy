@@ -40,7 +40,6 @@ import {
     pruneA2AInboxOnSessionStart,
 } from '@/a2a/inboxTurnController';
 import { applyProfileEnvToProcess, mergeProfileIntoEnv } from '@/utils/profileEnv';
-import { startBackgroundContextFetcher } from '@/claude/utils/backgroundContextFetcher';
 
 /** JavaScript runtime to use for spawning Claude Code */
 export type JsRuntime = 'node' | 'bun'
@@ -280,8 +279,6 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     let handleUserMessage: ((message: UserMessage) => Promise<void>) | null = null;
     let isA2AInboxTurnActiveFn: () => boolean = () => false;
     let describeInboxMcpScopeFn: () => string = () => 'empty';
-    /** Poke the background context fetcher after a successful turn. */
-    let contextFetchPoke: () => void = () => {};
 
     // Start Happy MCP server
     const happyServer = await startHappyServer(() => session, {
@@ -397,19 +394,6 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     describeInboxMcpScopeFn = a2aInbox.describeInboxMcpScope;
     pruneA2AInboxOnSessionStart('claude', workingDirectory, session.sessionId, options.startedBy === 'daemon');
     a2aInbox.peekInbox();
-
-    // Start periodic background context-usage poller. Runs a lightweight
-    // `claude --resume --print "/context"` child process every 30 s and
-    // writes the real context usage to session metadata.
-    const contextFetcher = startBackgroundContextFetcher({
-        session,
-        getClaudeSessionId: () => currentSession?.sessionId ?? initialClaudeSessionId,
-        projectPath: workingDirectory,
-        getEnvVars: () => currentClaudeEnvVars,
-        getModel: () => currentModel,
-    });
-    // Expose poke so the launcher can trigger a fetch after each turn.
-    contextFetchPoke = contextFetcher.poke;
 
     handleUserMessage = async (message) => {
 
@@ -686,9 +670,6 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
 
             a2aInbox.dispose();
 
-            // Stop background context fetcher
-            contextFetcher.dispose();
-
             // Stop Happy MCP server
             happyServer.stop();
 
@@ -753,7 +734,6 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             currentSession = sessionInstance;
             sessionInstance.a2aInboxTurn = a2aInbox;
             sessionInstance.claudeTurnActiveRef = claudeTurnActiveRef;
-            sessionInstance.contextFetchPoke = contextFetchPoke;
         },
         mcpServers: {
             'happy': {
