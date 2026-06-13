@@ -13,6 +13,8 @@ export const MetadataSchema = z.object({
     })).optional(),
     currentModelCode: z.string().optional(),
     currentMaxMode: z.boolean().optional(),
+    /** Claude Code effort level (low, medium, high, xhigh, max). Written by CLI at turn start. */
+    currentEffort: z.string().optional(),
     operatingModes: z.array(z.object({
         code: z.string(),
         value: z.string(),
@@ -51,22 +53,23 @@ export const MetadataSchema = z.object({
     sandbox: z.any().nullish(), // Sandbox config metadata from CLI (or null when disabled)
     dangerouslySkipPermissions: z.boolean().nullish(), // Claude --dangerously-skip-permissions mode (or null when unknown)
     profileId: z.string().nullish(), // Active environment profile ID, synced from CLI
-    contextUsage: z.object({
-        currentTokens: z.number(),
-        maxTokens: z.number(),
-        pct: z.number(),
-        model: z.string(),
-        breakdown: z.object({
-            systemPrompt: z.number(),
-            systemTools: z.number(),
-            customAgents: z.number(),
-            skills: z.number(),
-            messages: z.number(),
-            freeSpace: z.number(),
-        }),
-        fetchedAt: z.number(),
-    }).optional(),
-});
+	    contextUsage: z.object({
+	        currentTokens: z.number(),
+	        maxTokens: z.number(),
+	        pct: z.number(),
+	        model: z.string(),
+	        breakdown: z.object({
+	            systemPrompt: z.number(),
+	            systemTools: z.number(),
+	            customAgents: z.number(),
+	            skills: z.number(),
+	            messages: z.number(),
+	            freeSpace: z.number(),
+	        }),
+	        fetchedAt: z.number(),
+	    }).optional(),
+}).passthrough();
+
 
 export type Metadata = z.infer<typeof MetadataSchema>;
 

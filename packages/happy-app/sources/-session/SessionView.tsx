@@ -211,8 +211,13 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         if (session.thinkingLevel !== undefined && session.thinkingLevel !== null) {
             return session.thinkingLevel;
         }
+        // Fall back to CLI's metadata.currentEffort (written at turn start)
+        const mdEffort = session.metadata?.currentEffort;
+        if (mdEffort === 'low' || mdEffort === 'medium' || mdEffort === 'high' || mdEffort === 'xhigh' || mdEffort === 'max') {
+            return mdEffort;
+        }
         return null;
-    }, [session.thinkingLevel]);
+    }, [session.thinkingLevel, session.metadata?.currentEffort]);
 
     const sessionStatus = useSessionStatus(session);
     const sessionUsage = useSessionUsage(sessionId);
