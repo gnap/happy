@@ -647,6 +647,9 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         if (!isError && !wasInboxTurn && !wasCompactTurn) {
                             pendingTurnContext = { extras, meta: { contextFetch: true } };
                             pending = { message: '/context', mode: mode!, meta: { contextFetch: true } };
+                            // Set suppress immediately so outputLoop blocks any
+                            // SDK output that arrives before nextMessage() runs.
+                            suppressContextOutput = true;
                             wasCompactTurn = false;
                             return;
                         }
