@@ -1001,7 +1001,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                                 <FloatingOverlay maxHeight={420}>
                                                     {/* Per-turn usage stats */}
                                                     {(props.usageData?.inputTokens != null || props.usageData?.outputTokens != null) && (
-                                                        <View style={{ marginBottom: (props.usageData?.contextBreakdown || (isClaude && props.onThinkingLevelChange)) ? 10 : 0 }}>
+                                                        <View style={{ paddingHorizontal: 12, paddingTop: 12, marginBottom: (props.usageData?.contextBreakdown || (isClaude && props.onThinkingLevelChange)) ? 2 : 0 }}>
                                                             <Text style={{ fontSize: 10, fontWeight: '600', color: theme.colors.textSecondary, marginBottom: 4, ...Typography.default('semiBold') }}>
                                                                 Turn usage
                                                             </Text>
@@ -1027,13 +1027,13 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                                     {props.usageData?.contextBreakdown && (
                                                         <>
                                                             {(props.usageData?.inputTokens != null) && (
-                                                                <View style={{ borderTopWidth: 0.5, borderTopColor: theme.colors.textSecondary + '40', marginBottom: 8 }} />
+                                                                <View style={{ borderTopWidth: 0.5, borderTopColor: theme.colors.textSecondary + '40', marginBottom: 8, marginHorizontal: 12 }} />
                                                             )}
                                                             <ContextBreakdown breakdown={props.usageData.contextBreakdown} />
                                                         </>
                                                     )}
                                                     {isClaude && props.onThinkingLevelChange && (
-                                                        <View style={{ marginTop: props.usageData?.contextBreakdown ? 12 : 0 }}>
+                                                        <View style={{ paddingHorizontal: 12, paddingBottom: 12, marginTop: props.usageData?.contextBreakdown ? 12 : 0 }}>
                                                             <Text style={{ fontSize: 10, fontWeight: '600', color: theme.colors.textSecondary, marginBottom: 6, ...Typography.default('semiBold') }}>
                                                                 Thinking effort
                                                             </Text>
