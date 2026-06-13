@@ -185,6 +185,8 @@ export interface QueryOptions {
     resume?: string
     model?: string
     fallbackModel?: string
+    /** Claude Code effort level (--effort). Only passed when explicitly set. */
+    effort?: string
     strictMcpConfig?: boolean
     canCallTool?: CanCallToolCallback
     /** Path to a settings JSON file to pass to Claude via --settings */

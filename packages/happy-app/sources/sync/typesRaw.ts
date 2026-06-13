@@ -607,8 +607,22 @@ export type NormalizedMessage = ({
     isSidechain: boolean,
     meta?: MessageMeta,
     usage?: UsageData,
-    /** Latest /context snapshot from CLI background fetcher (carried in turn-end). */
-    contextUsage?: Record<string, any>,
+    /** Latest /context snapshot from CLI /context mini-turn (carried in turn-end envelope). */
+    contextUsage?: {
+        currentTokens: number;
+        maxTokens: number;
+        pct: number;
+        model?: string;
+        breakdown?: {
+            systemPrompt: number;
+            systemTools: number;
+            customAgents: number;
+            skills: number;
+            messages: number;
+            freeSpace: number;
+        };
+        fetchedAt?: number;
+    },
 };
 
 function normalizeSessionEnvelope(
