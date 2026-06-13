@@ -207,6 +207,13 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         return session.metadata?.currentMaxMode ?? false;
     }, [session.maxMode, session.metadata?.currentMaxMode]);
 
+    const thinkingLevel = React.useMemo((): 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null => {
+        if (session.thinkingLevel !== undefined && session.thinkingLevel !== null) {
+            return session.thinkingLevel;
+        }
+        return null;
+    }, [session.thinkingLevel]);
+
     const sessionStatus = useSessionStatus(session);
     const sessionUsage = useSessionUsage(sessionId);
     const maxContextSize = React.useMemo(() => {
@@ -252,6 +259,10 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
 
     const updateMaxMode = React.useCallback((enabled: boolean) => {
         storage.getState().updateSessionMaxMode(sessionId, enabled);
+    }, [sessionId]);
+
+    const updateThinkingLevel = React.useCallback((level: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null) => {
+        storage.getState().updateSessionThinkingLevel(sessionId, level);
     }, [sessionId]);
 
     const sessionProfileId = session.profileId ?? null;
@@ -354,6 +365,8 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             onModelModeChange={updateModelMode}
             maxMode={maxMode}
             onMaxModeChange={updateMaxMode}
+            thinkingLevel={thinkingLevel}
+            onThinkingLevelChange={updateThinkingLevel}
             agentType={agentTypeForProfile}
             profileId={sessionProfileId}
             onProfileChange={updateProfileId}

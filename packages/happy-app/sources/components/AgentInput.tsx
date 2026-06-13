@@ -42,6 +42,8 @@ interface AgentInputProps {
     modelMode?: ModelMode | null;
     availableModels?: ModelMode[];
     onModelModeChange?: (mode: ModelMode) => void;
+    thinkingLevel?: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null;
+    onThinkingLevelChange?: (level: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null) => void;
     maxMode?: boolean;
     onMaxModeChange?: (enabled: boolean) => void;
     metadata?: Metadata | null;
@@ -354,6 +356,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     const hasText = props.value.trim().length > 0;
 
     // Use metadata.flavor for existing sessions, agentType prop for new sessions
+    const isClaude = props.metadata?.flavor === 'claude' || props.agentType === 'claude';
     const isCodex = props.metadata?.flavor === 'codex' || props.agentType === 'codex';
     const isCursor = props.metadata?.flavor === 'cursor' || props.metadata?.flavor === 'acp-cursor' || props.agentType === 'cursor' || props.agentType === 'cursor-acp';
     const isGemini = props.metadata?.flavor === 'gemini' || props.agentType === 'gemini';
@@ -978,19 +981,63 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                             </Text>
                                         </Pressable>
                                     </View>
-                                    {showContextBreakdown && props.usageData?.contextBreakdown && (
-                                        <View style={{
-                                            position: 'absolute',
-                                            bottom: '100%',
-                                            left: 0,
-                                            zIndex: 1001,
-                                            width: Math.min(screenWidth - 32, 300),
-                                            paddingBottom: 4,
-                                        }}>
-                                            <FloatingOverlay maxHeight={260}>
-                                                <ContextBreakdown breakdown={props.usageData.contextBreakdown} />
-                                            </FloatingOverlay>
-                                        </View>
+                                    {showContextBreakdown && (props.usageData?.contextBreakdown || (isClaude && props.onThinkingLevelChange)) && (
+                                        <>
+                                            <TouchableWithoutFeedback onPress={() => setShowContextBreakdown(false)}>
+                                                <View style={{
+                                                    position: 'absolute',
+                                                    top: -500, left: -200, right: -200, bottom: -500,
+                                                    zIndex: 1000,
+                                                }} />
+                                            </TouchableWithoutFeedback>
+                                            <View style={{
+                                                position: 'absolute',
+                                                bottom: '100%',
+                                                left: 0,
+                                                zIndex: 1001,
+                                                width: Math.min(screenWidth - 32, 320),
+                                                paddingBottom: 4,
+                                            }}>
+                                                <FloatingOverlay maxHeight={360}>
+                                                    {props.usageData?.contextBreakdown && (
+                                                        <ContextBreakdown breakdown={props.usageData.contextBreakdown} />
+                                                    )}
+                                                    {isClaude && props.onThinkingLevelChange && (
+                                                        <View style={{ marginTop: props.usageData?.contextBreakdown ? 12 : 0 }}>
+                                                            <Text style={{ fontSize: 10, fontWeight: '600', color: theme.colors.textSecondary, marginBottom: 6, ...Typography.default('semiBold') }}>
+                                                                Thinking effort
+                                                            </Text>
+                                                            <View style={{ flexDirection: 'row', gap: 4, flexWrap: 'wrap' }}>
+                                                                {(['auto', 'low', 'medium', 'high', 'xhigh', 'max'] as const).map((level) => {
+                                                                    const isActive = (props.thinkingLevel ?? null) === level || (props.thinkingLevel == null && level === 'auto');
+                                                                    return (
+                                                                        <Pressable
+                                                                            key={level}
+                                                                            onPress={() => props.onThinkingLevelChange?.(isActive ? null : level)}
+                                                                            style={{
+                                                                                paddingHorizontal: 10,
+                                                                                paddingVertical: 5,
+                                                                                borderRadius: 6,
+                                                                                backgroundColor: isActive ? theme.colors.button.primary.background : theme.colors.surfaceHigh,
+                                                                            }}
+                                                                        >
+                                                                            <Text style={{
+                                                                                fontSize: 11,
+                                                                                fontWeight: isActive ? '600' : '400',
+                                                                                color: isActive ? theme.colors.button.primary.tint : theme.colors.text,
+                                                                                ...Typography.default(isActive ? 'semiBold' : undefined),
+                                                                            }}>
+                                                                                {level}
+                                                                            </Text>
+                                                                        </Pressable>
+                                                                    );
+                                                                })}
+                                                            </View>
+                                                        </View>
+                                                    )}
+                                                </FloatingOverlay>
+                                            </View>
+                                        </>
                                     )}
                                     {showContextBreakdown && props.usageData?.contextBreakdown && Platform.OS !== 'web' && (
                                         <TouchableWithoutFeedback onPress={() => setShowContextBreakdown(false)}>

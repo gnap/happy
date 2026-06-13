@@ -159,6 +159,8 @@ interface StorageState {
     clearSessionModelMode: (sessionId: string) => void;
     updateSessionMaxMode: (sessionId: string, maxMode: boolean) => void;
     clearSessionMaxMode: (sessionId: string) => void;
+    updateSessionThinkingLevel: (sessionId: string, level: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null) => void;
+    clearSessionThinkingLevel: (sessionId: string) => void;
     updateSessionProfileId: (sessionId: string, profileId: string | null) => void;
     clearSessionProfileId: (sessionId: string) => void;
     /** Clear in-memory profileId override at turn end so remote metadata wins next resolution. MMKV is preserved for cold-start fallback. */
@@ -1295,6 +1297,33 @@ export const storage = create<StorageState>()((set, get) => {
                 sessions: {
                     ...state.sessions,
                     [sessionId]: { ...session, maxMode: undefined },
+                },
+            };
+        }),
+        updateSessionThinkingLevel: (sessionId: string, level: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null) => set((state) => {
+            const session = state.sessions[sessionId];
+            if (!session) return state;
+
+            return {
+                ...state,
+                sessions: {
+                    ...state.sessions,
+                    [sessionId]: {
+                        ...session,
+                        thinkingLevel: level ?? undefined,
+                    },
+                },
+            };
+        }),
+        clearSessionThinkingLevel: (sessionId: string) => set((state) => {
+            const session = state.sessions[sessionId];
+            if (!session) return state;
+
+            return {
+                ...state,
+                sessions: {
+                    ...state.sessions,
+                    [sessionId]: { ...session, thinkingLevel: undefined },
                 },
             };
         }),
