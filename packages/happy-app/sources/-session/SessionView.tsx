@@ -395,20 +395,18 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             autocompletePrefixes={['@', '/']}
             autocompleteSuggestions={(query) => getSuggestions(sessionId, query)}
             usageData={(() => {
-                // Reducer state (from turn-end envelope) + metadata (real-time during turn).
                 const base = sessionUsage ?? session.latestUsage;
-                const meta = session.metadata?.contextUsage;
-                if (!base && !meta) return undefined;
+                if (!base) return undefined;
                 return {
-                    inputTokens: base?.inputTokens,
-                    outputTokens: base?.outputTokens,
-                    cacheCreation: base?.cacheCreation,
-                    cacheRead: base?.cacheRead,
-                    contextSize: meta?.currentTokens ?? base?.contextSize,
-                    contextWindowTokens: meta?.maxTokens ?? base?.contextWindowTokens,
-                    contextPct: meta?.pct ?? base?.contextPct,
-                    contextModel: base?.contextModel,
-                    contextBreakdown: meta?.breakdown ?? base?.contextBreakdown,
+                    inputTokens: base.inputTokens,
+                    outputTokens: base.outputTokens,
+                    cacheCreation: base.cacheCreation,
+                    cacheRead: base.cacheRead,
+                    contextSize: base.contextSize,
+                    contextWindowTokens: base.contextWindowTokens,
+                    contextPct: base.contextPct,
+                    contextModel: base.contextModel,
+                    contextBreakdown: base.contextBreakdown,
                 };
             })()}
             alwaysShowContextSize={alwaysShowContextSize}
