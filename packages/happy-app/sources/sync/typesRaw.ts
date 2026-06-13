@@ -152,7 +152,7 @@ const sessionTurnEndEventSchema = z.object({
         }).optional(),
         fetchedAt: z.number().optional(),
     }).optional(),
-});
+}).passthrough();
 
 const sessionStopEventSchema = z.object({
     t: z.literal('stop'),
