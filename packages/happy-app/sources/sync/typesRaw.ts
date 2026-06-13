@@ -180,7 +180,7 @@ const sessionEnvelopeSchema = z.object({
     }).optional(),
     taskCall: z.string().optional(),
     ev: sessionEventSchema,
-}).superRefine((envelope, ctx) => {
+}).passthrough().superRefine((envelope, ctx) => {
     if (envelope.ev.t === 'service' && envelope.role !== 'agent') {
         ctx.addIssue({
             code: z.ZodIssueCode.custom,
