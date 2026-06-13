@@ -32,8 +32,8 @@ export function resolveMessageProfileEnv(
 }
 
 export function resolveMessageModeMeta(
-    session: Pick<Session, 'permissionMode' | 'modelMode' | 'maxMode' | 'metadata'>,
-): { permissionMode: PermissionModeKey; model: string | null; maxMode?: boolean } {
+    session: Pick<Session, 'permissionMode' | 'modelMode' | 'maxMode' | 'thinkingLevel' | 'metadata'>,
+): { permissionMode: PermissionModeKey; model: string | null; maxMode?: boolean; effort?: string } {
     const sandboxEnabled = isSandboxEnabled(session.metadata);
     const permissionMode: PermissionModeKey =
         session.permissionMode && session.permissionMode !== 'default'
@@ -52,9 +52,17 @@ export function resolveMessageModeMeta(
             ? session.maxMode
             : session.metadata?.currentMaxMode;
 
+    // Resolve effort from persistent local thinkingLevel (explicit user choice).
+    // 'auto' and null mean "let the CLI default" — don't send effort.
+    const effort =
+        session.thinkingLevel && session.thinkingLevel !== 'auto'
+            ? session.thinkingLevel
+            : undefined;
+
     return {
         permissionMode,
         model,
         ...(maxMode !== undefined ? { maxMode } : {}),
+        ...(effort !== undefined ? { effort } : {}),
     };
 }

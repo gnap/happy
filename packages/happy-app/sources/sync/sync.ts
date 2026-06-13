@@ -928,7 +928,7 @@ class Sync {
             return;
         }
 
-        const { permissionMode, model, maxMode } = resolveMessageModeMeta(session);
+        const { permissionMode, model, maxMode, effort } = resolveMessageModeMeta(session);
         const settings = storage.getState().settings;
         const environmentVariables = resolveMessageProfileEnv(session, settings.profiles ?? []);
 
@@ -979,6 +979,7 @@ class Sync {
                 fallbackModel,
                 appendSystemPrompt: systemPrompt,
                 ...(maxMode !== undefined ? { maxMode } : {}),
+                ...(effort !== undefined ? { effort } : {}),
                 profileId: session.profileId ?? null,
                 ...(environmentVariables ? { environmentVariables } : {}),
                 ...(displayText && { displayText }), // Add displayText if provided
