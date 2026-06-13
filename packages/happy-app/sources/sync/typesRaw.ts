@@ -136,7 +136,23 @@ const sessionTurnEndEventSchema = z.object({
         context_window_tokens: z.number().optional(),
         contextWindowTokens: z.number().optional(),
     }).optional(),
-});
+    // /context snapshot from backgroundContextFetcher — authoritative context usage
+    contextUsage: z.object({
+        currentTokens: z.number(),
+        maxTokens: z.number(),
+        pct: z.number(),
+        model: z.string().optional(),
+        breakdown: z.object({
+            systemPrompt: z.number(),
+            systemTools: z.number(),
+            customAgents: z.number(),
+            skills: z.number(),
+            messages: z.number(),
+            freeSpace: z.number(),
+        }).optional(),
+        fetchedAt: z.number().optional(),
+    }).optional(),
+}).passthrough();
 
 const sessionStopEventSchema = z.object({
     t: z.literal('stop'),
@@ -164,7 +180,7 @@ const sessionEnvelopeSchema = z.object({
     }).optional(),
     taskCall: z.string().optional(),
     ev: sessionEventSchema,
-}).superRefine((envelope, ctx) => {
+}).passthrough().superRefine((envelope, ctx) => {
     if (envelope.ev.t === 'service' && envelope.role !== 'agent') {
         ctx.addIssue({
             code: z.ZodIssueCode.custom,
@@ -591,6 +607,8 @@ export type NormalizedMessage = ({
     isSidechain: boolean,
     meta?: MessageMeta,
     usage?: UsageData,
+    /** Latest /context snapshot from CLI background fetcher (carried in turn-end). */
+    contextUsage?: Record<string, any>,
 };
 
 function normalizeSessionEnvelope(
@@ -653,6 +671,7 @@ function normalizeSessionEnvelope(
             content: { type: 'ready' },
             meta,
             ...(normalizedUsage ? { usage: normalizedUsage } : {}),
+            ...(envelope.ev.contextUsage ? { contextUsage: envelope.ev.contextUsage } : {}),
         } satisfies NormalizedMessage;
     }
 

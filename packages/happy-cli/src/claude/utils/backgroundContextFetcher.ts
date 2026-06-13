@@ -153,25 +153,19 @@ export function startBackgroundContextFetcher(opts: {
         });
         if (!usage) return;
 
-        // Write to session metadata so the App can read context usage
-        try {
-            await opts.session.updateMetadata((currentMetadata) => ({
-                ...currentMetadata,
-                contextUsage: {
-                    currentTokens: usage.currentTokens,
-                    maxTokens: usage.maxTokens,
-                    pct: Math.round((usage.currentTokens / usage.maxTokens) * 100),
-                    model: usage.model,
-                    breakdown: usage.breakdown,
-                    fetchedAt: Date.now(),
-                },
-            }));
-            logger.debug(
-                `[contextFetch] updated metadata: ${usage.currentTokens} / ${usage.maxTokens} (${Math.round((usage.currentTokens / usage.maxTokens) * 100)}%)`,
-            );
-        } catch (err) {
-            logger.debug('[contextFetch] metadata update failed:', err);
-        }
+        const snapshot = {
+            currentTokens: usage.currentTokens,
+            maxTokens: usage.maxTokens,
+            pct: Math.round((usage.currentTokens / usage.maxTokens) * 100),
+            model: usage.model,
+            breakdown: usage.breakdown,
+            fetchedAt: Date.now(),
+        };
+        (opts.session as any)._lastContextUsage = snapshot;
+        logger.debug(
+            `[contextFetch] snapshot: ${usage.currentTokens} / ${usage.maxTokens} (${Math.round((usage.currentTokens / usage.maxTokens) * 100)}%)`,
+        );
+
     };
 
     // First fetch after a short delay (give the session time to initialise)

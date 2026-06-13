@@ -395,23 +395,19 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             autocompletePrefixes={['@', '/']}
             autocompleteSuggestions={(query) => getSuggestions(sessionId, query)}
             usageData={(() => {
-                // Primary: turn-end usage from reducer state (populated by processUsageData).
-                // Enrich with contextBreakdown from CLI background /context poll when available.
                 const base = sessionUsage ?? session.latestUsage;
-                const ctxMeta = session.metadata?.contextUsage;
-                if (base || ctxMeta) {
-                    return {
-                        inputTokens: base?.inputTokens,
-                        outputTokens: base?.outputTokens,
-                        cacheCreation: base?.cacheCreation,
-                        cacheRead: base?.cacheRead,
-                        contextSize: base?.contextSize ?? ctxMeta?.currentTokens,
-                        contextWindowTokens: ctxMeta?.maxTokens ?? base?.contextWindowTokens,
-                        contextPct: ctxMeta?.pct,
-                        contextBreakdown: ctxMeta?.breakdown,
-                    };
-                }
-                return undefined;
+                if (!base) return undefined;
+                return {
+                    inputTokens: base.inputTokens,
+                    outputTokens: base.outputTokens,
+                    cacheCreation: base.cacheCreation,
+                    cacheRead: base.cacheRead,
+                    contextSize: base.contextSize,
+                    contextWindowTokens: base.contextWindowTokens,
+                    contextPct: base.contextPct,
+                    contextModel: base.contextModel,
+                    contextBreakdown: base.contextBreakdown,
+                };
             })()}
             alwaysShowContextSize={alwaysShowContextSize}
             maxContextSize={maxContextSize}

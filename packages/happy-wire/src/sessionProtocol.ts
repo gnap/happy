@@ -69,10 +69,28 @@ export const sessionTurnEndUsageSchema = z.object({
 }).passthrough();
 export type SessionTurnEndUsage = z.infer<typeof sessionTurnEndUsageSchema>;
 
+/** /context snapshot (from backgroundContextFetcher) carried in turn-end. */
+export const sessionTurnEndContextUsageSchema = z.object({
+    currentTokens: z.number().int().nonnegative(),
+    maxTokens: z.number().int().nonnegative(),
+    pct: z.number().int().nonnegative(),
+    model: z.string().optional(),
+    breakdown: z.object({
+        systemPrompt: z.number().int().nonnegative(),
+        systemTools: z.number().int().nonnegative(),
+        customAgents: z.number().int().nonnegative(),
+        skills: z.number().int().nonnegative(),
+        messages: z.number().int().nonnegative(),
+        freeSpace: z.number().int().nonnegative(),
+    }).optional(),
+    fetchedAt: z.number().optional(),
+}).optional();
+
 export const sessionTurnEndEventSchema = z.object({
   t: z.literal('turn-end'),
   status: sessionTurnEndStatusSchema,
   usage: sessionTurnEndUsageSchema.optional(),
+  contextUsage: sessionTurnEndContextUsageSchema,
   costUsd: z.number().optional(),
   durationMs: z.number().int().nonnegative().optional(),
 });

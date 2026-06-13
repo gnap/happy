@@ -183,6 +183,18 @@ export type ReducerState = {
         cacheRead: number;
         contextSize: number;
         contextWindowTokens?: number;
+        /** /contextUsage snapshot — accurate display value (from turn-end, not estimated). */
+        contextPct?: number;
+        contextModel?: string;
+        contextBreakdown?: {
+            systemPrompt: number;
+            systemTools: number;
+            customAgents: number;
+            skills: number;
+            messages: number;
+            freeSpace: number;
+        };
+        contextFetchedAt?: number;
         timestamp: number;
     };
 };
@@ -282,9 +294,12 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             // Mark as processed to prevent duplication but don't add to messages
             state.messageIds.set(msg.id, msg.id);
             hasReadyEvent = true;
-            // Cursor turn-end carries usage; update latestUsage so contextSize is available in App
+            // Turn-end carries usage + contextUsage; update latestUsage so they're available in App
             if (msg.usage) {
                 processUsageData(state, msg.usage, msg.createdAt);
+            }
+            if (msg.contextUsage) {
+                processContextUsageData(state, msg.contextUsage, msg.createdAt);
             }
             continue;
         }
@@ -672,9 +687,12 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                 continue;
             }
 
-            // Process usage data if present
+            // Process usage data if present (turn-end carries both usage + contextUsage)
             if (msg.usage) {
                 processUsageData(state, msg.usage, msg.createdAt);
+            }
+            if (msg.contextUsage) {
+                processContextUsageData(state, msg.contextUsage, msg.createdAt);
             }
 
             // Process text and thinking content (tool calls handled in Phase 2)
@@ -1408,6 +1426,37 @@ function processUsageData(state: ReducerState, usage: UsageData, timestamp: numb
             contextSize: usage.contextSize ?? ((usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0) + usage.input_tokens),
             contextWindowTokens: usage.context_window_tokens ?? state.latestUsage?.contextWindowTokens,
             timestamp: timestamp
+        };
+    }
+}
+
+/** Process the /contextUsage snapshot from turn-end into latestUsage.
+ *  This is the authoritative source for context display (accurate /context output). */
+function processContextUsageData(state: ReducerState, cu: {
+    currentTokens: number;
+    maxTokens: number;
+    pct: number;
+    model?: string;
+    breakdown?: {
+        systemPrompt: number;
+        systemTools: number;
+        customAgents: number;
+        skills: number;
+        messages: number;
+        freeSpace: number;
+    };
+    fetchedAt?: number;
+}, timestamp: number) {
+    const ctxTimestamp = cu.fetchedAt ?? timestamp;
+    if (!state.latestUsage || ctxTimestamp > (state.latestUsage.contextFetchedAt ?? 0)) {
+        state.latestUsage = {
+            ...(state.latestUsage ?? { inputTokens: 0, outputTokens: 0, cacheCreation: 0, cacheRead: 0, timestamp }),
+            contextSize: cu.currentTokens,
+            contextWindowTokens: cu.maxTokens,
+            contextPct: cu.pct,
+            contextModel: cu.model,
+            contextBreakdown: cu.breakdown,
+            contextFetchedAt: ctxTimestamp,
         };
     }
 }
