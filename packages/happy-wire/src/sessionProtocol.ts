@@ -57,10 +57,22 @@ export const sessionStartEventSchema = z.object({
 export const sessionTurnEndStatusSchema = z.enum(['completed', 'failed', 'cancelled']);
 export type SessionTurnEndStatus = z.infer<typeof sessionTurnEndStatusSchema>;
 
+/** Per-turn usage payload attached to turn-end envelopes (Claude + Cursor). */
+export const sessionTurnEndUsageSchema = z.object({
+    input_tokens: z.number().int().nonnegative().optional(),
+    output_tokens: z.number().int().nonnegative().optional(),
+    cache_read_input_tokens: z.number().int().nonnegative().optional(),
+    cache_creation_input_tokens: z.number().int().nonnegative().optional(),
+    context_size: z.number().int().nonnegative().optional(),
+    context_window_tokens: z.number().int().nonnegative().optional(),
+    model: z.string().optional(),
+}).passthrough();
+export type SessionTurnEndUsage = z.infer<typeof sessionTurnEndUsageSchema>;
+
 export const sessionTurnEndEventSchema = z.object({
   t: z.literal('turn-end'),
   status: sessionTurnEndStatusSchema,
-  usage: z.record(z.string(), z.unknown()).optional(),
+  usage: sessionTurnEndUsageSchema.optional(),
   costUsd: z.number().optional(),
   durationMs: z.number().int().nonnegative().optional(),
 });
