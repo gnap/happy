@@ -591,6 +591,8 @@ export type NormalizedMessage = ({
     isSidechain: boolean,
     meta?: MessageMeta,
     usage?: UsageData,
+    /** Latest /context snapshot from CLI background fetcher (carried in turn-end). */
+    contextUsage?: z.infer<typeof sessionTurnEndContextUsageSchema>,
 };
 
 function normalizeSessionEnvelope(
@@ -653,6 +655,7 @@ function normalizeSessionEnvelope(
             content: { type: 'ready' },
             meta,
             ...(normalizedUsage ? { usage: normalizedUsage } : {}),
+            ...(envelope.ev.contextUsage ? { contextUsage: envelope.ev.contextUsage } : {}),
         } satisfies NormalizedMessage;
     }
 

@@ -490,6 +490,10 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         const usage = buildClaudeTurnUsagePayload(result);
                         const extras: Record<string, unknown> = {};
                         if (usage) extras.usage = usage;
+                        // Include the latest /context snapshot so the App maintains accurate
+                        // contextUsage state without relying on the estimated context_size.
+                        const ctxUsage = (session.client as any)._lastContextUsage;
+                        if (ctxUsage) extras.contextUsage = ctxUsage;
                         if (typeof result.total_cost_usd === 'number') extras.costUsd = result.total_cost_usd;
                         if (typeof result.duration_ms === 'number') extras.durationMs = result.duration_ms;
                         if (isError) {
