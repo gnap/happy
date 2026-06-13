@@ -416,6 +416,17 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             const inboxHooks = session.a2aInboxTurn;
                             const isInboxTurn = inboxHooks?.isInboxTurnMeta(msg.meta) ?? false;
                             if (isInboxTurn) {
+                                // If a turn is already in progress (modeHash set), the inputLoop
+                                // is running concurrently with the outputLoop. Injecting an inbox
+                                // turn mid-stream sends the inbox prompt to Claude while it is
+                                // still processing the previous task — Claude won't drain the
+                                // inbox, triggering false backoff. Defer to the next
+                                // claudeRemote() call so it starts as a fresh turn.
+                                if (modeHash !== null) {
+                                    logger.debug('[remote] nextMessage deferring inbox turn (turn in progress, modeHash set)');
+                                    pending = { message: msg.message, mode: msg.mode, meta: msg.meta };
+                                    return null;
+                                }
                                 inboxHooks?.setInboxTurnActive(true);
                                 const inboxPrompt = inboxHooks?.prepareInboxTurnPrompt();
                                 if (!inboxPrompt) {
