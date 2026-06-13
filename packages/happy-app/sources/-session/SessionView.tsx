@@ -394,25 +394,25 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             // Autocomplete configuration
             autocompletePrefixes={['@', '/']}
             autocompleteSuggestions={(query) => getSuggestions(sessionId, query)}
-            usageData={session.metadata?.contextUsage ? {
-                // CLI /context data is the authoritative real-time counter
-                contextSize: session.metadata.contextUsage.currentTokens,
-                contextWindowTokens: session.metadata.contextUsage.maxTokens,
-                contextPct: session.metadata.contextUsage.pct,
-                contextBreakdown: session.metadata.contextUsage.breakdown,
-            } : sessionUsage ? {
-                inputTokens: sessionUsage.inputTokens,
-                outputTokens: sessionUsage.outputTokens,
-                cacheCreation: sessionUsage.cacheCreation,
-                cacheRead: sessionUsage.cacheRead,
-                contextSize: sessionUsage.contextSize
-            } : session.latestUsage ? {
-                inputTokens: session.latestUsage.inputTokens,
-                outputTokens: session.latestUsage.outputTokens,
-                cacheCreation: session.latestUsage.cacheCreation,
-                cacheRead: session.latestUsage.cacheRead,
-                contextSize: session.latestUsage.contextSize
-            } : undefined}
+            usageData={(() => {
+                // Primary: turn-end usage from reducer state (populated by processUsageData).
+                // Enrich with contextBreakdown from CLI background /context poll when available.
+                const base = sessionUsage ?? session.latestUsage;
+                const ctxMeta = session.metadata?.contextUsage;
+                if (base || ctxMeta) {
+                    return {
+                        inputTokens: base?.inputTokens,
+                        outputTokens: base?.outputTokens,
+                        cacheCreation: base?.cacheCreation,
+                        cacheRead: base?.cacheRead,
+                        contextSize: base?.contextSize ?? ctxMeta?.currentTokens,
+                        contextWindowTokens: ctxMeta?.maxTokens ?? base?.contextWindowTokens,
+                        contextPct: ctxMeta?.pct,
+                        contextBreakdown: ctxMeta?.breakdown,
+                    };
+                }
+                return undefined;
+            })()}
             alwaysShowContextSize={alwaysShowContextSize}
             maxContextSize={maxContextSize}
         />
