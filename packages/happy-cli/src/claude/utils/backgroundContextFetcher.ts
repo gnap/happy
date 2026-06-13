@@ -130,25 +130,21 @@ export function startBackgroundContextFetcher(opts: {
         });
         if (!usage) return;
 
-        // Write to session metadata so the App can read context usage
-        try {
-            await opts.session.updateMetadata((currentMetadata) => ({
-                ...currentMetadata,
-                contextUsage: {
-                    currentTokens: usage.currentTokens,
-                    maxTokens: usage.maxTokens,
-                    pct: Math.round((usage.currentTokens / usage.maxTokens) * 100),
-                    model: usage.model,
-                    breakdown: usage.breakdown,
-                    fetchedAt: Date.now(),
-                },
-            }));
-            logger.debug(
-                `[contextFetch] updated metadata: ${usage.currentTokens} / ${usage.maxTokens} (${Math.round((usage.currentTokens / usage.maxTokens) * 100)}%)`,
-            );
-        } catch (err) {
-            logger.debug('[contextFetch] metadata update failed:', err);
-        }
+        // Store the latest snapshot locally so claudeRemoteLauncher can attach it
+        // to the turn-end envelope (which the App receives and maintains as state).
+        // No metadata update needed — the App holds the latest state from turn-end.
+        (opts.session as any)._lastContextUsage = {
+            currentTokens: usage.currentTokens,
+            maxTokens: usage.maxTokens,
+            pct: Math.round((usage.currentTokens / usage.maxTokens) * 100),
+            model: usage.model,
+            breakdown: usage.breakdown,
+            fetchedAt: Date.now(),
+        };
+        logger.debug(
+            `[contextFetch] snapshot: ${usage.currentTokens} / ${usage.maxTokens} (${Math.round((usage.currentTokens / usage.maxTokens) * 100)}%)`,
+        );
+
     };
 
     // First fetch after a short delay (give the session time to initialise)
