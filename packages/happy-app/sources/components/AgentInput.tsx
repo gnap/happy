@@ -950,12 +950,12 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                         } : {})}
                                     >
                                         <Pressable
-                                            onLongPress={Platform.OS !== 'web' && props.usageData?.contextBreakdown
+                                            onLongPress={Platform.OS !== 'web'
                                                 ? () => setShowContextBreakdown(true)
                                                 : undefined}
                                             delayLongPress={400}
                                             style={({ pressed }) => ({
-                                                opacity: props.usageData?.contextBreakdown && pressed ? 0.6 : 1,
+                                                opacity: pressed ? 0.6 : 1,
                                             })}
                                         >
                                             <Text style={{
