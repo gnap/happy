@@ -38,8 +38,10 @@ export const MetadataSchema = z.object({
     claudeSessionId: z.string().optional(), // Claude Code session ID
     sessionModel: z.string().optional(), // Model name from SDK init (e.g. "deepseek-v4-pro[1m]")
     sessionProvider: z.string().optional(), // Provider version from SDK init (e.g. "Claude Code 2.1.169")
-    projectPath: z.string().optional(), // Main repo path when running in a git worktree
-    worktreeBranch: z.string().optional(), // Git branch name when running in a worktree
+    projectPath: z.string().optional(), // Main repo path (worktree: main repo; main repo: own cwd)
+    branchName: z.string().optional(), // Current git branch name
+    isWorktree: z.boolean().optional(), // True for worktree sessions, false for main repo
+    worktreeBranch: z.string().optional(), // @deprecated — use branchName
     tools: z.array(z.string()).optional(),
     slashCommands: z.array(z.string()).optional(),
     homeDir: z.string().optional(), // User's home directory on the machine
@@ -49,6 +51,21 @@ export const MetadataSchema = z.object({
     sandbox: z.any().nullish(), // Sandbox config metadata from CLI (or null when disabled)
     dangerouslySkipPermissions: z.boolean().nullish(), // Claude --dangerously-skip-permissions mode (or null when unknown)
     profileId: z.string().nullish(), // Active environment profile ID, synced from CLI
+	    contextUsage: z.object({
+	        currentTokens: z.number(),
+	        maxTokens: z.number(),
+	        pct: z.number(),
+	        model: z.string(),
+	        breakdown: z.object({
+	            systemPrompt: z.number(),
+	            systemTools: z.number(),
+	            customAgents: z.number(),
+	            skills: z.number(),
+	            messages: z.number(),
+	            freeSpace: z.number(),
+	        }),
+	        fetchedAt: z.number(),
+	    }).optional(),
 });
 
 export type Metadata = z.infer<typeof MetadataSchema>;
@@ -109,6 +126,7 @@ export interface Session {
     permissionMode?: string | null; // Local permission mode key, not synced to server
     modelMode?: string | null; // Local model key, not synced to server
     maxMode?: boolean | null; // Local Cursor max mode override, not synced to server
+    thinkingLevel?: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null; // Local Claude thinking effort level
     profileId?: string | null; // Local env profile id (spawn + per-message override), not synced to server
     // IMPORTANT: latestUsage is extracted from reducerState.latestUsage after message processing.
     // We store it directly on Session to ensure it's available immediately on load.

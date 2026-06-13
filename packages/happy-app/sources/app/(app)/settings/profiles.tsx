@@ -37,6 +37,24 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
     const safeArea = useSafeAreaInsets();
     const screenWidth = useWindowDimensions().width;
 
+    // Seed built-in profiles on first load
+    const seedProfiles = React.useRef(false);
+    if (!seedProfiles.current && profiles.length === 0) {
+        seedProfiles.current = true;
+        const seeds = DEFAULT_PROFILES
+            .map(p => getBuiltInProfile(p.id))
+            .filter((p): p is AIBackendProfile => p != null);
+        for (const s of seeds) {
+            // Check not already present (by id)
+            if (!profiles.some(p => p.id === s.id)) {
+                profiles.push(s);
+            }
+        }
+        if (seeds.length > 0) {
+            setProfiles([...profiles]);
+        }
+    }
+
     const handleAddProfile = () => {
         setEditingProfile({
             id: randomUUID(),
@@ -58,6 +76,9 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
     };
 
     const handleDeleteProfile = async (profile: AIBackendProfile) => {
+        if (profile.id === 'no-profile') {
+            return;
+        }
         const ok = await Modal.confirm(
             t('profiles.delete.title'),
             t('profiles.delete.message', { name: profile.name }),
@@ -75,20 +96,36 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
         }
     };
 
+    const handleCloneProfile = (profile: AIBackendProfile) => {
+        const clone: AIBackendProfile = {
+            ...profile,
+            id: randomUUID(),
+            name: `${profile.name} (Copy)`,
+            isBuiltIn: false,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+        };
+        setProfiles([...profiles, clone]);
+    };
+
+    const handleLongPressProfile = (profile: AIBackendProfile) => {
+        Modal.alert(
+            profile.name,
+            undefined,
+            [
+                { text: t('profiles.copyProfile'), onPress: () => handleCloneProfile(profile) },
+                { text: t('profiles.editProfile'), onPress: () => handleEditProfile(profile) },
+                {
+                    text: t('profiles.deleteProfile'), style: 'destructive',
+                    onPress: () => handleDeleteProfile(profile),
+                },
+                { text: t('common.cancel'), style: 'cancel' },
+            ]
+        );
+    };
+
     const handleSelectProfile = (profileId: string | null) => {
-        let profile: AIBackendProfile | null = null;
-
-        if (profileId) {
-            // Check if it's a built-in profile
-            const builtInProfile = getBuiltInProfile(profileId);
-            if (builtInProfile) {
-                profile = builtInProfile;
-            } else {
-                // Check if it's a custom profile
-                profile = profiles.find(p => p.id === profileId) || null;
-            }
-        }
-
+        const profile = profileId ? profiles.find(p => p.id === profileId) || null : null;
         if (onProfileSelect) {
             onProfileSelect(profile);
         }
@@ -101,48 +138,30 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
             return;
         }
 
-        // Check if this is a built-in profile being edited
-        const isBuiltIn = DEFAULT_PROFILES.some(bp => bp.id === profile.id);
+        // Check for duplicate names (excluding current profile if editing)
+        const isDuplicate = profiles.some(p =>
+            p.id !== profile.id && p.name.trim() === profile.name.trim()
+        );
+        if (isDuplicate) return;
 
-        // For built-in profiles, create a new custom profile instead of modifying the built-in
-        if (isBuiltIn) {
+        if (profile.isBuiltIn) {
+            // Replace built-in template with custom copy
             const newProfile: AIBackendProfile = {
                 ...profile,
-                id: randomUUID(), // Generate new UUID for custom profile
+                id: randomUUID(),
+                isBuiltIn: false,
+                updatedAt: Date.now(),
             };
-
-            // Check for duplicate names (excluding the new profile)
-            const isDuplicate = profiles.some(p =>
-                p.name.trim() === newProfile.name.trim()
-            );
-            if (isDuplicate) {
-                return;
-            }
-
-            setProfiles([...profiles, newProfile]);
+            setProfiles(profiles.map(p => p.id === profile.id ? newProfile : p));
         } else {
-            // Handle custom profile updates
-            // Check for duplicate names (excluding current profile if editing)
-            const isDuplicate = profiles.some(p =>
-                p.id !== profile.id && p.name.trim() === profile.name.trim()
-            );
-            if (isDuplicate) {
-                return;
-            }
-
             const existingIndex = profiles.findIndex(p => p.id === profile.id);
-            let updatedProfiles: AIBackendProfile[];
-
             if (existingIndex >= 0) {
-                // Update existing profile
-                updatedProfiles = [...profiles];
-                updatedProfiles[existingIndex] = profile;
+                const updated = [...profiles];
+                updated[existingIndex] = profile;
+                setProfiles(updated);
             } else {
-                // Add new profile
-                updatedProfiles = [...profiles, profile];
+                setProfiles([...profiles, profile]);
             }
-
-            setProfiles(updatedProfiles);
         }
 
         setShowAddForm(false);
@@ -217,72 +236,7 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                         )}
                     </Pressable>
 
-                    {/* Built-in profiles */}
-                    {DEFAULT_PROFILES.map((profileDisplay) => {
-                        const profile = getBuiltInProfile(profileDisplay.id);
-                        if (!profile) return null;
-
-                        return (
-                            <Pressable
-                                key={profile.id}
-                                style={{
-                                    backgroundColor: theme.colors.input.background,
-                                    borderRadius: 12,
-                                    padding: 16,
-                                    marginBottom: 12,
-                                    flexDirection: 'row',
-                                    alignItems: 'center',
-                                    borderWidth: selectedProfileId === profile.id ? 2 : 0,
-                                    borderColor: theme.colors.text,
-                                }}
-                                onPress={() => handleSelectProfile(profile.id)}
-                            >
-                                <View style={{
-                                    width: 24,
-                                    height: 24,
-                                    borderRadius: 12,
-                                    backgroundColor: theme.colors.button.primary.background,
-                                    justifyContent: 'center',
-                                    alignItems: 'center',
-                                    marginRight: 12,
-                                }}>
-                                    <Ionicons name="star" size={16} color="white" />
-                                </View>
-                                <View style={{ flex: 1 }}>
-                                    <Text style={{
-                                        fontSize: 16,
-                                        fontWeight: '600',
-                                        color: theme.colors.text,
-                                        ...Typography.default('semiBold')
-                                    }}>
-                                        {profile.name}
-                                    </Text>
-                                    <Text style={{
-                                        fontSize: 14,
-                                        color: theme.colors.textSecondary,
-                                        marginTop: 2,
-                                        ...Typography.default()
-                                    }}>
-                                        {profile.anthropicConfig?.model || 'Default model'}
-                                        {profile.anthropicConfig?.baseUrl && ` • ${profile.anthropicConfig.baseUrl}`}
-                                    </Text>
-                                </View>
-                                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                                    {selectedProfileId === profile.id && (
-                                        <Ionicons name="checkmark-circle" size={20} color={theme.colors.text} style={{ marginRight: 12 }} />
-                                    )}
-                                    <Pressable
-                                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                                        onPress={() => handleEditProfile(profile)}
-                                    >
-                                        <Ionicons name="create-outline" size={20} color={theme.colors.button.secondary.tint} />
-                                    </Pressable>
-                                </View>
-                            </Pressable>
-                        );
-                    })}
-
-                    {/* Custom profiles */}
+                    {/* All profiles (seeded built-ins + user-created) */}
                     {profiles.map((profile) => (
                         <Pressable
                             key={profile.id}
@@ -297,17 +251,22 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                 borderColor: theme.colors.text,
                             }}
                             onPress={() => handleSelectProfile(profile.id)}
+                            onLongPress={() => handleLongPressProfile(profile)}
                         >
                             <View style={{
                                 width: 24,
                                 height: 24,
                                 borderRadius: 12,
-                                backgroundColor: theme.colors.button.secondary.tint,
+                                backgroundColor: profile.isBuiltIn
+                                    ? theme.colors.button.primary.background
+                                    : theme.colors.button.secondary.tint,
                                 justifyContent: 'center',
                                 alignItems: 'center',
                                 marginRight: 12,
                             }}>
-                                <Ionicons name="person" size={16} color="white" />
+                                <Ionicons
+                                    name={profile.isBuiltIn ? 'star' : 'person'}
+                                    size={16} color="white" />
                             </View>
                             <View style={{ flex: 1 }}>
                                 <Text style={{
@@ -324,29 +283,16 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                                     marginTop: 2,
                                     ...Typography.default()
                                 }}>
-                                    {profile.anthropicConfig?.model || t('profiles.defaultModel')}
-                                    {profile.tmuxConfig?.sessionName && ` • tmux: ${profile.tmuxConfig.sessionName}`}
-                                    {profile.tmuxConfig?.tmpDir && ` • dir: ${profile.tmuxConfig.tmpDir}`}
+                                    {profile.anthropicConfig?.baseUrl
+                                        || profile.openaiConfig?.baseUrl
+                                        || profile.azureOpenAIConfig?.endpoint
+                                        || profile.environmentVariables?.find(v => v.name.includes('URL') || v.name.includes('ENDPOINT'))?.value
+                                        || t('profiles.defaultModel')}
                                 </Text>
                             </View>
-                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                                {selectedProfileId === profile.id && (
-                                    <Ionicons name="checkmark-circle" size={20} color={theme.colors.text} style={{ marginRight: 12 }} />
-                                )}
-                                <Pressable
-                                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                                    onPress={() => handleEditProfile(profile)}
-                                >
-                                    <Ionicons name="create-outline" size={20} color={theme.colors.button.secondary.tint} />
-                                </Pressable>
-                                <Pressable
-                                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                                    onPress={() => handleDeleteProfile(profile)}
-                                    style={{ marginLeft: 16 }}
-                                >
-                                    <Ionicons name="trash-outline" size={20} color={theme.colors.deleteAction} />
-                                </Pressable>
-                            </View>
+                            {selectedProfileId === profile.id && (
+                                <Ionicons name="checkmark-circle" size={20} color={theme.colors.text} />
+                            )}
                         </Pressable>
                     ))}
 
@@ -391,7 +337,6 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
                         ]}>
                             <ProfileEditForm
                                 profile={editingProfile}
-                                machineId={null}
                                 onSave={handleSaveProfile}
                                 onCancel={() => {
                                     setShowAddForm(false);

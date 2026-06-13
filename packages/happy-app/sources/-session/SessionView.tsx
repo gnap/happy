@@ -207,6 +207,13 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         return session.metadata?.currentMaxMode ?? false;
     }, [session.maxMode, session.metadata?.currentMaxMode]);
 
+    const thinkingLevel = React.useMemo((): 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null => {
+        if (session.thinkingLevel !== undefined && session.thinkingLevel !== null) {
+            return session.thinkingLevel;
+        }
+        return null;
+    }, [session.thinkingLevel]);
+
     const sessionStatus = useSessionStatus(session);
     const sessionUsage = useSessionUsage(sessionId);
     const maxContextSize = React.useMemo(() => {
@@ -254,13 +261,13 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         storage.getState().updateSessionMaxMode(sessionId, enabled);
     }, [sessionId]);
 
+    const updateThinkingLevel = React.useCallback((level: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null) => {
+        storage.getState().updateSessionThinkingLevel(sessionId, level);
+    }, [sessionId]);
+
     const sessionProfileId = session.profileId ?? null;
     const updateProfileId = React.useCallback((profileId: string | null) => {
-        if (profileId) {
-            storage.getState().updateSessionProfileId(sessionId, profileId);
-        } else {
-            storage.getState().clearSessionProfileId(sessionId);
-        }
+        storage.getState().updateSessionProfileId(sessionId, profileId);
         sync.applySettings({ lastUsedProfile: profileId });
     }, [sessionId]);
 
@@ -358,6 +365,8 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             onModelModeChange={updateModelMode}
             maxMode={maxMode}
             onMaxModeChange={updateMaxMode}
+            thinkingLevel={thinkingLevel}
+            onThinkingLevelChange={updateThinkingLevel}
             agentType={agentTypeForProfile}
             profileId={sessionProfileId}
             onProfileChange={updateProfileId}
@@ -385,7 +394,13 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             // Autocomplete configuration
             autocompletePrefixes={['@', '/']}
             autocompleteSuggestions={(query) => getSuggestions(sessionId, query)}
-            usageData={sessionUsage ? {
+            usageData={session.metadata?.contextUsage ? {
+                // CLI /context data is the authoritative real-time counter
+                contextSize: session.metadata.contextUsage.currentTokens,
+                contextWindowTokens: session.metadata.contextUsage.maxTokens,
+                contextPct: session.metadata.contextUsage.pct,
+                contextBreakdown: session.metadata.contextUsage.breakdown,
+            } : sessionUsage ? {
                 inputTokens: sessionUsage.inputTokens,
                 outputTokens: sessionUsage.outputTokens,
                 cacheCreation: sessionUsage.cacheCreation,

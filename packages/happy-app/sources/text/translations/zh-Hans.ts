@@ -950,6 +950,9 @@ export const zhHans: TranslationStructure = {
         addProfile: '添加配置文件',
         addProfileTitle: '添加配置文件标题',
         editProfile: '编辑配置文件',
+        copyProfile: '复制配置文件',
+        deleteProfile: '删除配置文件',
+
         profileName: '配置文件名称',
         enterName: '输入配置文件名称',
         baseURL: '基础 URL',

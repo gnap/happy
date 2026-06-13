@@ -47,14 +47,14 @@ export async function loadSessionsListCache(): Promise<{ sessions: SessionListEn
         const db = getSessionCacheDB();
         const row = await db.getSessionsListCache();
         if (!row || !row.sessionsJson) {
-            log.log('📦 sessionsListCache: no cache row');
+            console.warn('📦 sessionsListCache: load — no cache row');
             return null;
         }
         const sessions = JSON.parse(row.sessionsJson) as SessionListEntry[];
-        log.log(`📦 sessionsListCache: loaded ${sessions.length} sessions (cachedAt=${row.cachedAt})`);
+        console.warn(`📦 sessionsListCache: loaded ${sessions.length} sessions (cachedAt=${row.cachedAt})`);
         return { sessions, cachedAt: row.cachedAt };
     } catch (err) {
-        log.log(`📦 sessionsListCache: load error: ${err}`);
+        console.warn(`📦 sessionsListCache: load error: ${err}`);
         return null;
     }
 }
@@ -73,9 +73,9 @@ export async function saveSessionsListCache(sessions: SessionListEntry[]): Promi
             sessionsJson: JSON.stringify(sessions),
             cachedAt: Date.now(),
         });
-        log.log(`📦 sessionsListCache: saved ${sessions.length} sessions`);
+        console.warn(`📦 sessionsListCache: saved ${sessions.length} sessions`);
     } catch (err) {
-        log.log(`📦 sessionsListCache: save error: ${err}`);
+        console.warn(`📦 sessionsListCache: save error: ${err}`);
     }
 }
 

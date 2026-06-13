@@ -91,6 +91,7 @@ export type SessionListViewItem =
     | { type: 'header'; title: string }
     | { type: 'active-sessions'; sessions: Session[] }
     | { type: 'project-group'; displayPath: string; machine: Machine }
+    | { type: 'worktree-group'; projectPath: string; homeDir?: string; branch?: string }
     | { type: 'session'; session: Session; variant?: 'default' | 'no-path' };
 
 // Legacy type for backward compatibility - to be removed
@@ -158,7 +159,9 @@ interface StorageState {
     clearSessionModelMode: (sessionId: string) => void;
     updateSessionMaxMode: (sessionId: string, maxMode: boolean) => void;
     clearSessionMaxMode: (sessionId: string) => void;
-    updateSessionProfileId: (sessionId: string, profileId: string) => void;
+    updateSessionThinkingLevel: (sessionId: string, level: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null) => void;
+    clearSessionThinkingLevel: (sessionId: string) => void;
+    updateSessionProfileId: (sessionId: string, profileId: string | null) => void;
     clearSessionProfileId: (sessionId: string) => void;
     /** Clear in-memory profileId override at turn end so remote metadata wins next resolution. MMKV is preserved for cold-start fallback. */
     releaseSessionProfileId: (sessionId: string) => void;
@@ -215,16 +218,103 @@ function buildSessionListViewData(
         }
     });
 
-    // Sort sessions by updated date (newest first)
-    activeSessions.sort((a, b) => b.updatedAt - a.updatedAt);
-    inactiveSessions.sort((a, b) => b.updatedAt - a.updatedAt);
+    // Sort sessions by creation date (newest first).  Using createdAt instead of
+    // updatedAt keeps relative ordering stable — project groups won't jump when a
+    // session inside gets an update (e.g. draft, metadata sync).
+    activeSessions.sort((a, b) => b.createdAt - a.createdAt);
+    inactiveSessions.sort((a, b) => b.createdAt - a.createdAt);
+
+    // Helper: emit a date group, inserting git-project-group headers for
+    // sessions that share the same projectPath (main repo + its worktrees).
+    const emitSessionGroup = (group: Session[]) => {
+        const wtByProject = new Map<string, Session[]>();
+        const standard: Session[] = [];
+
+        for (const s of group) {
+            const pp = s.metadata?.projectPath;
+            if (pp) {
+                const arr = wtByProject.get(pp) || [];
+                arr.push(s);
+                wtByProject.set(pp, arr);
+            } else {
+                standard.push(s);
+            }
+        }
+
+        // Sort standard sessions by createdAt (stable, no jumping)
+        standard.sort((a, b) => b.createdAt - a.createdAt);
+        for (const s of standard) {
+            listData.push({ type: 'session', session: s });
+        }
+        // Sort worktree groups by newest createdAt in each group (stable)
+        const sortedProjects = [...wtByProject.entries()].sort(([, a], [, b]) => {
+            const aMax = Math.max(...a.map(s => s.createdAt));
+            const bMax = Math.max(...b.map(s => s.createdAt));
+            return bMax - aMax;
+        });
+        for (const [projectPath, sessions] of sortedProjects) {
+            // Main repo first, then worktrees
+            sessions.sort((a, b) => {
+                const aWt = a.metadata?.isWorktree ?? true;
+                const bWt = b.metadata?.isWorktree ?? true;
+                if (aWt !== bWt) return aWt ? 1 : -1;
+                return b.createdAt - a.createdAt; // newest first within same type (stable, doesn't jump)
+            });
+            const homeDir = sessions[0]?.metadata?.homeDir;
+            const branch = sessions.find(s => !!s.metadata?.branchName)?.metadata?.branchName
+                        ?? sessions.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
+            listData.push({ type: 'worktree-group', projectPath, homeDir, branch });
+            for (const s of sessions) {
+                listData.push({ type: 'session', session: s });
+            }
+        }
+    };
 
     // Build unified list view data
     const listData: SessionListViewItem[] = [];
 
-    // Add active sessions as a single item at the top (if any)
-    if (activeSessions.length > 0) {
-        listData.push({ type: 'active-sessions', sessions: activeSessions });
+    // Emit active sessions grouped by projectPath. Main repo first, then worktrees.
+    // Sessions without projectPath stay in the active-sessions carousel.
+    const emitProjectGroups = (sessions: Session[], toList: SessionListViewItem[]) => {
+        const byProject = new Map<string, Session[]>();
+        const noProject: Session[] = [];
+        for (const s of sessions) {
+            const pp = s.metadata?.projectPath;
+            if (pp) {
+                const arr = byProject.get(pp) || [];
+                arr.push(s);
+                byProject.set(pp, arr);
+            } else {
+                noProject.push(s);
+            }
+        }
+        // Sort project groups by newest createdAt in each group (stable)
+        const sortedProjects = [...byProject.entries()].sort(([, a], [, b]) => {
+            const aMax = Math.max(...a.map(s => s.createdAt));
+            const bMax = Math.max(...b.map(s => s.createdAt));
+            return bMax - aMax;
+        });
+        for (const [projectPath, group] of sortedProjects) {
+            // Main repo first, then worktrees
+            group.sort((a, b) => {
+                const aWt = a.metadata?.isWorktree ?? true;
+                const bWt = b.metadata?.isWorktree ?? true;
+                if (aWt !== bWt) return aWt ? 1 : -1;
+                return b.createdAt - a.createdAt; // newest first within same type
+            });
+            const homeDir = group[0]?.metadata?.homeDir;
+            const branch = group.find(s => !!s.metadata?.branchName)?.metadata?.branchName
+                        ?? group.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
+            toList.push({ type: 'worktree-group', projectPath, homeDir, branch });
+            for (const s of group) {
+                toList.push({ type: 'session', session: s });
+            }
+        }
+        return noProject;
+    };
+    const activeNoProject = emitProjectGroups(activeSessions, listData);
+    if (activeNoProject.length > 0) {
+        listData.push({ type: 'active-sessions', sessions: activeNoProject });
     }
 
     // Group inactive sessions by date
@@ -257,9 +347,7 @@ function buildSessionListViewData(
                 }
 
                 listData.push({ type: 'header', title: headerTitle });
-                currentDateGroup.forEach(sess => {
-                    listData.push({ type: 'session', session: sess });
-                });
+                emitSessionGroup(currentDateGroup);
             }
 
             // Start new group
@@ -287,9 +375,7 @@ function buildSessionListViewData(
         }
 
         listData.push({ type: 'header', title: headerTitle });
-        currentDateGroup.forEach(sess => {
-            listData.push({ type: 'session', session: sess });
-        });
+        emitSessionGroup(currentDateGroup);
     }
 
     return listData;
@@ -513,8 +599,11 @@ export const storage = create<StorageState>()((set, get) => {
                                 : session.maxMode ?? undefined;
                 const existingProfileId = state.sessions[session.id]?.profileId;
                 const savedProfileId = savedProfileIds[session.id];
-                const metadataProfileId = session.metadata?.profileId ?? undefined;
-                const resolvedProfileId = existingProfileId ?? metadataProfileId ?? savedProfileId ?? session.profileId ?? undefined;
+                // '__none__' sentinel means user explicitly chose 'No Profile'.
+                // Do NOT fall back to metadata in that case.
+                const savedIsNone = savedProfileId === '__none__';
+                const metadataProfileId = savedIsNone ? undefined : (session.metadata?.profileId ?? undefined);
+                const resolvedProfileId = existingProfileId ?? metadataProfileId ?? (savedIsNone ? null : savedProfileId) ?? session.profileId ?? undefined;
                 // todos: derived by replay (reducer) when messages load; not synced to server. Preserve here so
                 // list fetches do not overwrite; replay will update session.todos when that session's messages load.
                 const existingTodos = state.sessions[session.id]?.todos;
@@ -685,7 +774,10 @@ export const storage = create<StorageState>()((set, get) => {
         }),
         applyReady: () => set((state) => ({
             ...state,
-            isDataReady: true
+            isDataReady: true,
+            // If the sessions list hasn't been populated yet (cold start, no cache),
+            // initialize to an empty array so the UI doesn't show the loading spinner.
+            sessionListViewData: state.sessionListViewData ?? [],
         })),
         applyMessages: (sessionId: string, messages: NormalizedMessage[]) => {
             let changed = new Set<string>();
@@ -1208,14 +1300,43 @@ export const storage = create<StorageState>()((set, get) => {
                 },
             };
         }),
-        updateSessionProfileId: (sessionId: string, profileId: string) => set((state) => {
+        updateSessionThinkingLevel: (sessionId: string, level: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null) => set((state) => {
+            const session = state.sessions[sessionId];
+            if (!session) return state;
+
+            return {
+                ...state,
+                sessions: {
+                    ...state.sessions,
+                    [sessionId]: {
+                        ...session,
+                        thinkingLevel: level ?? undefined,
+                    },
+                },
+            };
+        }),
+        clearSessionThinkingLevel: (sessionId: string) => set((state) => {
+            const session = state.sessions[sessionId];
+            if (!session) return state;
+
+            return {
+                ...state,
+                sessions: {
+                    ...state.sessions,
+                    [sessionId]: { ...session, thinkingLevel: undefined },
+                },
+            };
+        }),
+        updateSessionProfileId: (sessionId: string, profileId: string | null) => set((state) => {
             const session = state.sessions[sessionId];
 
-            // Always persist to MMKV so applySessions() can resolve the profileId
-            // from savedProfileIds fallback when the session arrives later (e.g.
-            // new session spawn where the session entry does not exist yet).
+            // Persist to MMKV. '__none__' sentinel for explicit "No Profile" choice.
             const profileIds = loadSessionProfileIds();
-            profileIds[sessionId] = profileId;
+            if (profileId !== null) {
+                profileIds[sessionId] = profileId;
+            } else {
+                profileIds[sessionId] = '__none__';
+            }
             saveSessionProfileIds(profileIds);
 
             if (!session) return state;
@@ -1226,7 +1347,7 @@ export const storage = create<StorageState>()((set, get) => {
                     ...state.sessions,
                     [sessionId]: {
                         ...session,
-                        profileId,
+                        profileId: profileId ?? undefined,
                     },
                 },
             };

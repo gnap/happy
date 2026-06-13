@@ -5,6 +5,7 @@
 
 import { apiSocket } from './apiSocket';
 import { sync } from './sync';
+import { storage } from './storage';
 import type { MachineMetadata } from './storageTypes';
 
 // Strict type definitions for all operations
@@ -537,17 +538,22 @@ export async function sessionDelete(sessionId: string): Promise<{ success: boole
         const response = await apiSocket.request(`/v1/sessions/${sessionId}`, {
             method: 'DELETE'
         });
-        
+
         if (response.ok) {
-            const result = await response.json();
             return { success: true };
-        } else {
-            const error = await response.text();
-            return {
-                success: false,
-                message: error || 'Failed to delete session'
-            };
         }
+
+        // Session already deleted on another device — silently remove from local state.
+        if (response.status === 404) {
+            storage.getState().deleteSession(sessionId);
+            return { success: true };
+        }
+
+        const error = await response.text();
+        return {
+            success: false,
+            message: error || 'Failed to delete session'
+        };
     } catch (error) {
         return {
             success: false,

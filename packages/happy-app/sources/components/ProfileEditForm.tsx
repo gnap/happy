@@ -6,12 +6,10 @@ import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
 import { AIBackendProfile } from '@/sync/settings';
 import { getBuiltInProfileDocumentation } from '@/sync/profileUtils';
-import { useEnvironmentVariables, extractEnvVarReferences } from '@/hooks/useEnvironmentVariables';
 import { EnvironmentVariablesList } from '@/components/EnvironmentVariablesList';
 
 export interface ProfileEditFormProps {
     profile: AIBackendProfile;
-    machineId: string | null;
     onSave: (profile: AIBackendProfile) => void;
     onCancel: () => void;
     containerStyle?: ViewStyle;
@@ -19,7 +17,6 @@ export interface ProfileEditFormProps {
 
 export function ProfileEditForm({
     profile,
-    machineId,
     onSave,
     onCancel,
     containerStyle
@@ -35,9 +32,6 @@ export function ProfileEditForm({
         profile.environmentVariables || []
     );
 
-    const envVarNames = React.useMemo(() => extractEnvVarReferences(environmentVariables), [environmentVariables]);
-    const { variables: actualEnvVars } = useEnvironmentVariables(machineId, envVarNames);
-
     const [name, setName] = React.useState(profile.name || '');
 
     const handleSave = () => {
@@ -45,17 +39,7 @@ export function ProfileEditForm({
         onSave({
             ...profile,
             name: name.trim(),
-            anthropicConfig: {},
-            openaiConfig: {},
-            azureOpenAIConfig: {},
-            togetherAIConfig: {},
             environmentVariables,
-            tmuxConfig: undefined,
-            startupBashScript: undefined,
-            defaultSessionType: undefined,
-            defaultPermissionMode: undefined,
-            defaultModelMode: undefined,
-            compatibility: { claude: true, codex: true, cursor: true, gemini: true },
             updatedAt: Date.now(),
         });
     };
@@ -111,7 +95,6 @@ export function ProfileEditForm({
                 {/* Environment Variables */}
                 <EnvironmentVariablesList
                     environmentVariables={environmentVariables}
-                    machineId={machineId}
                     profileDocs={profileDocs}
                     onChange={setEnvironmentVariables}
                 />

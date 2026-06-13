@@ -1,21 +1,20 @@
 import React from 'react';
-import { View, Text, Pressable, TextInput } from 'react-native';
+import { View, Text, Pressable, TextInput, Modal, ScrollView } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
 import { EnvironmentVariableCard } from './EnvironmentVariableCard';
+import * as Clipboard from 'expo-clipboard';
 import type { ProfileDocumentation } from '@/sync/profileUtils';
 
 export interface EnvironmentVariablesListProps {
     environmentVariables: Array<{ name: string; value: string }>;
-    machineId: string | null;
     profileDocs?: ProfileDocumentation | null;
     onChange: (newVariables: Array<{ name: string; value: string }>) => void;
 }
 
 export function EnvironmentVariablesList({
     environmentVariables,
-    machineId,
     profileDocs,
     onChange,
 }: EnvironmentVariablesListProps) {
@@ -35,10 +34,19 @@ export function EnvironmentVariablesList({
         };
     }, [profileDocs]);
 
-    const extractVarNameFromValue = React.useCallback((value: string): string | null => {
-        const match = value.match(/^\$\{([A-Z_][A-Z0-9_]*)/);
-        return match ? match[1] : null;
-    }, []);
+    // Auto-detect env vars from clipboard on mount
+    React.useEffect(() => {
+        void (async () => {
+            try {
+                const text = await Clipboard.getStringAsync();
+                if (!text) return;
+                const parsed = parseEnvVarsFromText(text);
+                if (parsed.length > 0) {
+                    setClipboardPreview(parsed);
+                }
+            } catch { /* clipboard unavailable */ }
+        })();
+    }, [parseEnvVarsFromText]);
 
     const handleUpdateVariable = React.useCallback((index: number, newValue: string) => {
         const updated = [...environmentVariables];
@@ -64,25 +72,73 @@ export function EnvironmentVariablesList({
         if (!newVarName.trim()) return;
         if (!/^[A-Z_][A-Z0-9_]*$/.test(newVarName.trim())) return;
         if (environmentVariables.some(v => v.name === newVarName.trim())) return;
-        onChange([...environmentVariables, { name: newVarName.trim(), value: newVarValue.trim() || '' }]);
+        onChange([...environmentVariables, { name: newVarName.trim(), value: newVarValue }]);
         setNewVarName('');
         setNewVarValue('');
         setShowAddForm(false);
     }, [newVarName, newVarValue, environmentVariables, onChange]);
 
-    return (
-        <View style={listStyles.container}>
-            <Text style={listStyles.sectionTitle}>Environment Variables</Text>
+    // Clipboard import
+    const [clipboardPreview, setClipboardPreview] = React.useState<Array<{ name: string; value: string }> | null>(null);
 
-            <Pressable style={listStyles.addButton} onPress={() => setShowAddForm(true)}>
+    const parseEnvVarsFromText = React.useCallback((text: string): Array<{ name: string; value: string }> => {
+        const result: Array<{ name: string; value: string }> = [];
+        const lines = text.split('\n');
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) continue;
+            // Match: export VAR=value, export VAR="value", VAR=value, VAR="value"
+            const m = trimmed.match(/^(?:export\s+)?([A-Z_][A-Z0-9_]*)=(?:"([^"]*)"|'([^']*)'|(.+))$/);
+            if (m) {
+                const name = m[1];
+                const value = m[2] ?? m[3] ?? m[4] ?? '';
+                if (!result.some(v => v.name === name)) {
+                    result.push({ name, value });
+                }
+            }
+        }
+        return result;
+    }, []);
+
+    const handlePasteFromClipboard = React.useCallback(async () => {
+        try {
+            const text = await Clipboard.getStringAsync();
+            if (!text) return;
+            const parsed = parseEnvVarsFromText(text);
+            if (parsed.length > 0) {
+                setClipboardPreview(parsed);
+            }
+        } catch { /* clipboard unavailable */ }
+    }, [parseEnvVarsFromText]);
+
+    const handleConfirmImport = React.useCallback(() => {
+        if (!clipboardPreview) return;
+        const merged = [...environmentVariables];
+        for (const v of clipboardPreview) {
+            const idx = merged.findIndex(e => e.name === v.name);
+            if (idx >= 0) {
+                merged[idx] = v; // update existing
+            } else {
+                merged.push(v);
+            }
+        }
+        onChange(merged);
+        setClipboardPreview(null);
+    }, [clipboardPreview, environmentVariables, onChange]);
+
+    return (
+        <View style={styles.container}>
+            <Text style={styles.sectionTitle}>Environment Variables</Text>
+
+            <Pressable style={styles.addButton} onPress={() => setShowAddForm(true)}>
                 <Ionicons name="add" size={14} color={theme.colors.button.primary.tint} />
-                <Text style={listStyles.addButtonText}>Add Variable</Text>
+                <Text style={styles.addButtonText}>Add Variable</Text>
             </Pressable>
 
             {showAddForm && (
-                <View style={listStyles.addForm}>
+                <View style={styles.addForm}>
                     <TextInput
-                        style={listStyles.addInput}
+                        style={styles.addInput}
                         placeholder="Variable name (e.g., MY_CUSTOM_VAR)"
                         placeholderTextColor={theme.colors.input.placeholder}
                         value={newVarName}
@@ -91,39 +147,37 @@ export function EnvironmentVariablesList({
                         autoCorrect={false}
                     />
                     <TextInput
-                        style={listStyles.addInput}
-                        placeholder="Value (e.g., my-value or ${VAR})"
+                        style={styles.addInput}
+                        placeholder="Value"
                         placeholderTextColor={theme.colors.input.placeholder}
                         value={newVarValue}
                         onChangeText={setNewVarValue}
                         autoCapitalize="none"
                         autoCorrect={false}
                     />
-                    <View style={listStyles.addFormActions}>
-                        <Pressable style={listStyles.addFormCancel} onPress={() => {
+                    <View style={styles.addFormActions}>
+                        <Pressable style={styles.addFormCancel} onPress={() => {
                             setShowAddForm(false);
                             setNewVarName('');
                             setNewVarValue('');
                         }}>
-                            <Text style={listStyles.addFormCancelText}>Cancel</Text>
+                            <Text style={styles.addFormCancelText}>Cancel</Text>
                         </Pressable>
-                        <Pressable style={listStyles.addFormSubmit} onPress={handleAddVariable}>
-                            <Text style={listStyles.addFormSubmitText}>Add</Text>
+                        <Pressable style={styles.addFormSubmit} onPress={handleAddVariable}>
+                            <Text style={styles.addFormSubmitText}>Add</Text>
                         </Pressable>
                     </View>
                 </View>
             )}
 
             {environmentVariables.map((envVar, index) => {
-                const varNameFromValue = extractVarNameFromValue(envVar.value);
-                const docs = getDocumentation(varNameFromValue || envVar.name);
-                const isSecret = docs.isSecret || /TOKEN|KEY|SECRET|AUTH/i.test(envVar.name) || /TOKEN|KEY|SECRET|AUTH/i.test(varNameFromValue || '');
+                const docs = getDocumentation(envVar.name);
+                const isSecret = docs.isSecret || /TOKEN|KEY|SECRET|AUTH/i.test(envVar.name);
 
                 return (
                     <EnvironmentVariableCard
                         key={index}
                         variable={envVar}
-                        machineId={machineId}
                         expectedValue={docs.expectedValue}
                         description={docs.description}
                         isSecret={isSecret}
@@ -133,11 +187,42 @@ export function EnvironmentVariablesList({
                     />
                 );
             })}
+            {/* Clipboard import preview modal */}
+            <Modal
+                visible={clipboardPreview !== null}
+                transparent
+                animationType="fade"
+                onRequestClose={() => setClipboardPreview(null)}
+            >
+                <View style={styles.modalOverlay}>
+                    <View style={styles.modalContent}>
+                        <Text style={styles.modalTitle}>
+                            {clipboardPreview ? `Found ${clipboardPreview.length} variable${clipboardPreview.length !== 1 ? 's' : ''}` : ''}
+                        </Text>
+                        <ScrollView style={styles.modalList}>
+                            {clipboardPreview?.map((v, i) => (
+                                <View key={i} style={styles.modalItem}>
+                                    <Text style={styles.modalItemName}>{v.name}</Text>
+                                    <Text style={styles.modalItemValue} numberOfLines={1}>{v.value || '(empty)'}</Text>
+                                </View>
+                            ))}
+                        </ScrollView>
+                        <View style={styles.modalActions}>
+                            <Pressable style={styles.modalCancel} onPress={() => setClipboardPreview(null)}>
+                                <Text style={styles.modalCancelText}>Cancel</Text>
+                            </Pressable>
+                            <Pressable style={styles.modalConfirm} onPress={handleConfirmImport}>
+                                <Text style={styles.modalConfirmText}>Import</Text>
+                            </Pressable>
+                        </View>
+                    </View>
+                </View>
+            </Modal>
         </View>
     );
 }
 
-const listStyles = StyleSheet.create((theme) => ({
+const styles = StyleSheet.create((theme) => ({
     container: {
         marginBottom: theme.margins.md,
     },
@@ -148,6 +233,11 @@ const listStyles = StyleSheet.create((theme) => ({
         marginBottom: 8,
         ...Typography.default('semiBold'),
     },
+    buttonRow: {
+        flexDirection: 'row',
+        gap: 8,
+        marginBottom: theme.margins.sm,
+    },
     addButton: {
         flexDirection: 'row',
         alignItems: 'center',
@@ -156,8 +246,15 @@ const listStyles = StyleSheet.create((theme) => ({
         paddingHorizontal: theme.margins.sm,
         paddingVertical: 5,
         gap: 4,
-        marginBottom: theme.margins.sm,
-        alignSelf: 'flex-start',
+    },
+    pasteButton: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: theme.colors.button.secondary.background,
+        borderRadius: theme.borderRadius.md,
+        paddingHorizontal: theme.margins.sm,
+        paddingVertical: 5,
+        gap: 4,
     },
     addButtonText: {
         fontSize: 12,
@@ -212,6 +309,82 @@ const listStyles = StyleSheet.create((theme) => ({
     },
     addFormSubmitText: {
         fontSize: 13,
+        fontWeight: '600',
+        color: theme.colors.button.primary.tint,
+        ...Typography.default('semiBold'),
+    },
+    modalOverlay: {
+        flex: 1,
+        backgroundColor: 'rgba(0,0,0,0.4)',
+        justifyContent: 'center',
+        alignItems: 'center',
+        padding: 24,
+    },
+    modalContent: {
+        backgroundColor: theme.colors.surface,
+        borderRadius: theme.borderRadius.xl,
+        padding: 20,
+        width: '100%',
+        maxWidth: 400,
+        maxHeight: '70%',
+    },
+    modalTitle: {
+        fontSize: 16,
+        fontWeight: '600',
+        color: theme.colors.text,
+        marginBottom: 12,
+        textAlign: 'center',
+        ...Typography.default('semiBold'),
+    },
+    modalList: {
+        maxHeight: 300,
+        marginBottom: 16,
+    },
+    modalItem: {
+        flexDirection: 'row',
+        paddingVertical: 8,
+        borderBottomWidth: 0.5,
+        borderBottomColor: theme.colors.textSecondary + '40',
+    },
+    modalItemName: {
+        fontSize: 13,
+        fontWeight: '600',
+        color: theme.colors.text,
+        width: 140,
+        ...Typography.default('semiBold'),
+    },
+    modalItemValue: {
+        fontSize: 13,
+        color: theme.colors.textSecondary,
+        flex: 1,
+        ...Typography.default(),
+    },
+    modalActions: {
+        flexDirection: 'row',
+        gap: 10,
+    },
+    modalCancel: {
+        flex: 1,
+        backgroundColor: theme.colors.surfaceHigh,
+        borderRadius: theme.borderRadius.sm,
+        paddingVertical: 10,
+        alignItems: 'center',
+    },
+    modalCancelText: {
+        fontSize: 15,
+        fontWeight: '600',
+        color: theme.colors.button.secondary.tint,
+        ...Typography.default('semiBold'),
+    },
+    modalConfirm: {
+        flex: 1,
+        backgroundColor: theme.colors.button.primary.background,
+        borderRadius: theme.borderRadius.sm,
+        paddingVertical: 10,
+        alignItems: 'center',
+    },
+    modalConfirmText: {
+        fontSize: 15,
         fontWeight: '600',
         color: theme.colors.button.primary.tint,
         ...Typography.default('semiBold'),

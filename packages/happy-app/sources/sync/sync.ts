@@ -78,6 +78,8 @@ class Sync {
     private static readonly SESSION_REFRESH_COOLDOWN_MS = 30_000;
     /** Periodic fallback refresh interval when no events arrive. */
     private static readonly SESSION_REFRESH_INTERVAL_MS = 300_000; // 5 min
+    /** Interval between full (non-delta) session list refreshes to clean up stale cache. */
+    private static readonly FULL_REFRESH_INTERVAL_MS = 600_000; // 10 min
     /** Ignore stale ephemeral thinking=false shortly after turn-start (debounced session-alive). */
     private static readonly TURN_START_EPHEMERAL_GRACE_MS = 8_000;
 
@@ -154,6 +156,8 @@ class Sync {
     private sendSync = new Map<string, InvalidateSync>();
     private sendAbortControllers = new Map<string, AbortController>();
     private sessionLastSeq = new Map<string, number>();
+    private sessionLastFetchTime = new Map<string, number>(); // debounce re-fetches
+    private sessionLastWsMessageAt = new Map<string, number>(); // track last WS delivery per session
     private pendingOutbox = new Map<string, OutboxMessage[]>();
     // In session-protocol mode user messages arrive back as session envelopes without localId.
     // We track sent message texts here so we can re-attach the localId when the echo arrives,
@@ -194,6 +198,7 @@ class Sync {
     private lastSessionRefreshAt = 0;
     /** Timestamp of the last successful session fetch; used as delta base. */
     private lastSessionRefreshNonDeltaAt = 0;
+    private lastFullRefreshAt = 0;
     /** Per-session cooldown for single-session fetches (15s). */
     private sessionRefreshCooldowns = new Map<string, number>();
     /** Last user interaction timestamp (desktop idle detection). */
@@ -207,6 +212,7 @@ class Sync {
     private backgroundSendTimeout: ReturnType<typeof setTimeout> | null = null;
     private backgroundSendNotificationId: string | null = null;
     private backgroundSendStartedAt: number | null = null;
+    private backgroundTaskId: number | null = null;
     private sessionsRefreshInterval: ReturnType<typeof setInterval> | null = null;
     revenueCatInitialized = false;
 
@@ -340,6 +346,22 @@ class Sync {
         this.feedSync.invalidate();
     }
 
+    /**
+     * Full (non-delta) session list refresh to clean up stale cached state.
+     * Delta fetches never remove sessions that were deleted or archived on another
+     * device — a periodic full fetch is needed to purge them from local cache.
+     */
+    #refreshSessionsFull() {
+        const now = Date.now();
+        if (now - this.lastFullRefreshAt < Sync.FULL_REFRESH_INTERVAL_MS) {
+            return;
+        }
+        this.lastFullRefreshAt = now;
+        log.log('🔄 Full sessions refresh — resetting delta base for cache cleanup');
+        this.lastSessionRefreshNonDeltaAt = 0;
+        this.sessionsSync.invalidate();
+    }
+
     #refreshSessionsAfterDesktopProbe() {
         const now = Date.now();
         if (now - this.lastDesktopSessionRefreshAt < Sync.DESKTOP_SESSION_REFRESH_COOLDOWN_MS) {
@@ -349,7 +371,7 @@ class Sync {
 
         this.lastDesktopSessionRefreshAt = now;
         log.log('🖥️ Desktop sessions refresh — invalidating sessions sync after confirmed connection');
-        this.sessionsSync.invalidate();
+        this.#refreshSessionsFull();
     }
 
     #refreshVisibleSessionAfterDesktopProbe() {
@@ -400,6 +422,9 @@ class Sync {
                 void apiSocket.resumeReconnection();
                 recoverDesktopPendingWork();
                 this.#invalidateAllSyncs();
+                // Full refresh after desktop wake to clean up stale cache.
+                const FULL_REFRESH_DESKTOP_WAKE_DELAY_MS = 3_000;
+                setTimeout(() => this.#refreshSessionsFull(), FULL_REFRESH_DESKTOP_WAKE_DELAY_MS);
             }
         });
 
@@ -565,6 +590,13 @@ class Sync {
             log.log(`🔄 #init: initial sync error, applying ready so UI can show: ${String(error)}`);
             storage.getState().applyReady();
         });
+
+        // Schedule a full refresh after startup settles to clean up stale cache entries.
+        const FULL_REFRESH_STARTUP_DELAY_MS = 10_000;
+        setTimeout(() => {
+            log.log('🔄 #init: scheduling full session refresh after startup settle');
+            this.#refreshSessionsFull();
+        }, FULL_REFRESH_STARTUP_DELAY_MS);
     }
 
 
@@ -677,6 +709,9 @@ class Sync {
             return;
         }
 
+        // Track last WS delivery so fetchSessions can skip redundant HTTP fetches
+        this.sessionLastWsMessageAt.set(sessionId, Date.now());
+
         let queue = this.sessionMessageQueue.get(sessionId);
         if (!queue) {
             queue = [];
@@ -742,12 +777,27 @@ class Sync {
         return false;
     }
 
-    private maybeStartBackgroundSendWatchdog() {
+    private async maybeStartBackgroundSendWatchdog() {
         if (Platform.OS === 'web' || this.appState === 'active') {
             return;
         }
         if (!this.hasPendingOutboxMessages() || this.backgroundSendTimeout) {
             return;
+        }
+
+        // Request iOS background execution time so the JS thread isn't
+        // suspended before messages are sent. Works with personal team profiles.
+        if (Platform.OS === 'ios' && this.backgroundTaskId === null) {
+            try {
+                const { beginBackgroundTask } = await import('./iosBackgroundTask');
+                const result = await beginBackgroundTask('Send pending messages');
+                if (result.success) {
+                    this.backgroundTaskId = result.taskId;
+                    log.log(`📨 Background task started (id=${result.taskId})`);
+                }
+            } catch (e) {
+                log.log(`📨 Failed to start background task: ${e}`);
+            }
         }
 
         log.log('📨 Pending messages detected in background. Starting 30s send watchdog.');
@@ -765,6 +815,10 @@ class Sync {
             this.backgroundSendTimeout = null;
         }
         this.backgroundSendStartedAt = null;
+        if (this.backgroundTaskId !== null) {
+            void import('./iosBackgroundTask').then(m => m.endBackgroundTask(this.backgroundTaskId!));
+            this.backgroundTaskId = null;
+        }
     }
 
     private async scheduleBackgroundSendTimeoutNotification() {
@@ -840,6 +894,12 @@ class Sync {
     }
 
     private async handleBackgroundSendTimeout() {
+        if (this.backgroundTaskId !== null) {
+            const { endBackgroundTask } = await import('./iosBackgroundTask');
+            await endBackgroundTask(this.backgroundTaskId);
+            this.backgroundTaskId = null;
+        }
+
         if (!this.hasPendingOutboxMessages()) {
             await this.cancelBackgroundSendTimeoutNotification();
             this.backgroundSendStartedAt = null;
@@ -1177,11 +1237,12 @@ class Sync {
             }
 
             const parseStart = performance.now();
-            const respText = await response.text();
-            const respSizeKb = Math.round(respText.length / 1024);
+            // response.json() uses the browser's native streaming parser (faster than
+            // text()+JSON.parse, especially on JSC engines like WebKitGTK and iOS).
+            const data = await response.json() as { sessions?: unknown };
+            const respSizeKb = Math.round(JSON.stringify(data).length / 1024);
             const contentLength = response.headers.get('content-length');
             const xferKb = contentLength ? Math.round(parseInt(contentLength) / 1024) : respSizeKb;
-            const data = JSON.parse(respText);
             const parseMs = Math.round(performance.now() - parseStart);
             const rawSessions = data.sessions;
             if (!Array.isArray(rawSessions)) {
@@ -1280,6 +1341,21 @@ class Sync {
                     try {
                         const cached = await getCachedLastSeq(session.id);
                         if (cached != null && cached < session.seq) {
+                            // Skip if WebSocket recently delivered messages — the WS path
+                            // already handles gap resolution via enqueueMessages, so an
+                            // additional HTTP fetch at this point would be redundant.
+                            const lastWsAt = this.sessionLastWsMessageAt.get(session.id) ?? 0;
+                            const wsGap = Date.now() - lastWsAt;
+                            if (wsGap < 5000) {
+                                log.log(`📥 fetchSessions: skipping redundant message fetch for ${session.id} (WS delivered ${wsGap}ms ago, cached=${cached} < seq=${session.seq})`);
+                                continue;
+                            }
+                            // Skip if encryption keys are not available — can never fetch
+                            // (e.g. session archived/deleted on another device).
+                            if (!this.encryption.getSessionEncryption(session.id)) {
+                                log.log(`📥 fetchSessions: skipping message sync for ${session.id} — encryption not ready`);
+                                continue;
+                            }
                             log.log(`📥 fetchSessions: cached lastSeq ${cached} < session.seq ${session.seq} for ${session.id}, invalidating message sync`);
                             this.getMessagesSync(session.id).invalidate();
                         }
@@ -2307,8 +2383,8 @@ class Sync {
             try {
                 const encryption = this.encryption.getSessionEncryption(sessionId);
                 if (!encryption) {
-                    log.log(`💬 fetchMessages: Session encryption not ready for ${sessionId}, will retry`);
-                    throw new Error(`Session encryption not ready for ${sessionId}`);
+                    log.log(`💬 fetchMessages: Session encryption not ready for ${sessionId}, skipping`);
+                    return;
                 }
 
                 // --- Cache: cold-start hydration (Cursor sessions only) ---
@@ -2419,12 +2495,19 @@ class Sync {
 
                 log.log(`💬 fetchMessages completed for ${sessionId}: ${normalizedMessages.length} messages, maxSeq=${maxSeq}, oldestSeq=${oldestSeq}, hasOlderMessages=${hasOlderMessages}, sessionSeq=${sessionSeq}`);
 
-                // If we're still behind session.seq, kick off another fetch immediately.
-                // This handles cases where new messages arrived during this fetch, or where
-                // the batch of 100 didn't reach the latest seq.
+                // If we're still behind session.seq, kick off another fetch — but only if
+                // the last re-invalidation wasn't too recent (debounce 2s) to avoid tight
+                // spin-loops when the agent produces messages faster than fetches return.
                 if (maxSeq < sessionSeq) {
-                    log.log(`💬 fetchMessages: still behind (maxSeq=${maxSeq} < sessionSeq=${sessionSeq}), re-invalidating`);
-                    this.getMessagesSync(sessionId).invalidate();
+                    const lastRevalidate = this.sessionLastFetchTime.get(sessionId) ?? 0;
+                    const elapsed = Date.now() - lastRevalidate;
+                    if (elapsed >= 2000) {
+                        this.sessionLastFetchTime.set(sessionId, Date.now());
+                        log.log(`💬 fetchMessages: still behind (maxSeq=${maxSeq} < sessionSeq=${sessionSeq}), re-invalidating`);
+                        this.getMessagesSync(sessionId).invalidate();
+                    } else {
+                        log.log(`💬 fetchMessages: still behind but debounced (maxSeq=${maxSeq} < sessionSeq=${sessionSeq}, elapsed=${elapsed}ms), skipping re-invalidate`);
+                    }
                 }
 
                 // Only patch store for cold-start path; incremental path already has correct values.

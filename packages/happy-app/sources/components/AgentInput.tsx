@@ -42,6 +42,8 @@ interface AgentInputProps {
     modelMode?: ModelMode | null;
     availableModels?: ModelMode[];
     onModelModeChange?: (mode: ModelMode) => void;
+    thinkingLevel?: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null;
+    onThinkingLevelChange?: (level: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null) => void;
     maxMode?: boolean;
     onMaxModeChange?: (enabled: boolean) => void;
     metadata?: Metadata | null;
@@ -62,11 +64,22 @@ interface AgentInputProps {
     autocompletePrefixes: string[];
     autocompleteSuggestions: (query: string) => Promise<{ key: string, text: string, component: React.ElementType }[]>;
     usageData?: {
-        inputTokens: number;
-        outputTokens: number;
-        cacheCreation: number;
-        cacheRead: number;
+        inputTokens?: number;
+        outputTokens?: number;
+        cacheCreation?: number;
+        cacheRead?: number;
         contextSize: number;
+        /** CLI /context counters — when present, display these instead of turn-end usage. */
+        contextWindowTokens?: number;
+        contextPct?: number;
+        contextBreakdown?: {
+            systemPrompt: number;
+            systemTools: number;
+            customAgents: number;
+            skills: number;
+            messages: number;
+            freeSpace: number;
+        };
     };
     alwaysShowContextSize?: boolean;
     maxContextSize?: number;
@@ -286,20 +299,54 @@ const stylesheet = StyleSheet.create((theme, runtime) => ({
     },
 }));
 
-const getContextWarning = (contextSize: number, maxContextSize: number, alwaysShow: boolean = false, theme: Theme) => {
-    const percentageUsed = (contextSize / maxContextSize) * 100;
-    const percentageRemaining = Math.max(0, Math.min(100, 100 - percentageUsed));
+const getContextWarning = (contextSize: number, maxContextSize: number, alwaysShow: boolean = false, theme: Theme, contextPct?: number) => {
+    const percentageRemaining = contextPct
+        ? Math.max(0, Math.min(100, 100 - contextPct))
+        : Math.max(0, Math.min(100, 100 - (contextSize / maxContextSize) * 100));
 
     if (percentageRemaining <= 5) {
         return { text: t('agentInput.context.remaining', { percent: Math.round(percentageRemaining) }), color: theme.colors.warningCritical };
     } else if (percentageRemaining <= 10) {
         return { text: t('agentInput.context.remaining', { percent: Math.round(percentageRemaining) }), color: theme.colors.warning };
     } else if (alwaysShow) {
-        // Show context remaining in neutral color when not near limit
         return { text: t('agentInput.context.remaining', { percent: Math.round(percentageRemaining) }), color: theme.colors.warning };
     }
-    return null; // No display needed
+    return null;
 };
+
+const formatTokens = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}K` : String(n);
+
+const BREAKDOWN_LABELS: Record<string, string> = {
+    systemPrompt: 'System Prompt',
+    systemTools: 'System Tools',
+    customAgents: 'Custom Agents',
+    skills: 'Skills',
+    messages: 'Messages',
+    freeSpace: 'Free Space',
+};
+
+const ContextBreakdown = React.memo(({ breakdown }: { breakdown: NonNullable<AgentInputProps['usageData']>['contextBreakdown'] }) => {
+    const { theme } = useUnistyles();
+    if (!breakdown) return null;
+    return (
+        <View style={{ padding: 12, gap: 5 }}>
+            {(Object.keys(BREAKDOWN_LABELS) as (keyof typeof BREAKDOWN_LABELS)[]).map((key) => {
+                const value = (breakdown as Record<string, number>)[key];
+                if (value === undefined) return null;
+                return (
+                    <View key={key} style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <Text style={{ fontSize: 12, color: theme.colors.textSecondary, ...Typography.default() }}>
+                            {BREAKDOWN_LABELS[key]}
+                        </Text>
+                        <Text style={{ fontSize: 12, color: theme.colors.text, ...Typography.mono(), marginLeft: 16 }}>
+                            {formatTokens(value)}
+                        </Text>
+                    </View>
+                );
+            })}
+        </View>
+    );
+});
 
 export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, AgentInputProps>((props, ref) => {
     const styles = stylesheet;
@@ -309,6 +356,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     const hasText = props.value.trim().length > 0;
 
     // Use metadata.flavor for existing sessions, agentType prop for new sessions
+    const isClaude = props.metadata?.flavor === 'claude' || props.agentType === 'claude';
     const isCodex = props.metadata?.flavor === 'codex' || props.agentType === 'codex';
     const isCursor = props.metadata?.flavor === 'cursor' || props.metadata?.flavor === 'acp-cursor' || props.agentType === 'cursor' || props.agentType === 'cursor-acp';
     const isGemini = props.metadata?.flavor === 'gemini' || props.agentType === 'gemini';
@@ -360,10 +408,22 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     const hasActiveProfile = !!props.profileId && !!currentProfile;
     const [showProfileOverlay, setShowProfileOverlay] = React.useState(false);
 
-    // Calculate context warning
+    // Calculate context warning - use CLI /context pct when available
+    const contextPct = props.usageData?.contextPct;
+    const effectiveMaxContext = props.usageData?.contextWindowTokens ?? props.maxContextSize ?? DEFAULT_MAX_CONTEXT_SIZE;
     const contextWarning = props.usageData?.contextSize
-        ? getContextWarning(props.usageData.contextSize, props.maxContextSize ?? DEFAULT_MAX_CONTEXT_SIZE, props.alwaysShowContextSize ?? false, theme)
+        ? getContextWarning(props.usageData.contextSize, effectiveMaxContext, props.alwaysShowContextSize ?? false, theme, contextPct)
         : null;
+
+    // Progress bar fill level: use contextPct from CLI, or calculate
+    const contextFillPct = contextPct ?? (props.usageData?.contextSize && effectiveMaxContext > 0
+        ? Math.min(100, (props.usageData.contextSize / effectiveMaxContext) * 100)
+        : 0);
+    const showContextBar = contextFillPct > 0 && (props.alwaysShowContextSize || contextFillPct >= 70);
+    const contextBarColor = contextFillPct >= 95 ? theme.colors.warningCritical
+        : contextFillPct >= 80 ? theme.colors.warning
+        : theme.colors.textSecondary;
+    const [showContextBreakdown, setShowContextBreakdown] = React.useState(false);
 
     const agentInputEnterToSend = useSetting('agentInputEnterToSend');
 
@@ -881,23 +941,117 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                 </>
                             )}
                             {(contextWarning || props.usageData?.contextSize) && (
-                                <Text style={{
-                                    fontSize: 11,
-                                    color: contextWarning?.color ?? theme.colors.textSecondary,
-                                    marginLeft: props.connectionStatus ? 8 : 0,
-                                    ...Typography.default()
-                                }}>
-                                    {!props.usageData?.contextSize && props.connectionStatus ? '• ' : ''}
-                                    {props.usageData?.contextSize
-                                        ? (props.usageData.contextSize >= 1_000_000
-                                            ? `${(props.usageData.contextSize / 1_000_000).toFixed(1)}M`
-                                            : props.usageData.contextSize >= 1000
-                                            ? `${Math.round(props.usageData.contextSize / 1000)}K`
-                                            : String(props.usageData.contextSize))
-                                        : ''}
-                                    {props.usageData?.contextSize && contextWarning ? ' • ' : ''}
-                                    {contextWarning?.text ?? ''}
-                                </Text>
+                                <>
+                                    <View
+                                        {...(Platform.OS === 'web' && props.usageData?.contextBreakdown ? {
+                                            // @ts-expect-error onMouseEnter/onMouseLeave work on RN Web View
+                                            onMouseEnter: () => setShowContextBreakdown(true),
+                                            onMouseLeave: () => setShowContextBreakdown(false),
+                                        } : {})}
+                                    >
+                                        <Pressable
+                                            onLongPress={Platform.OS !== 'web' && props.usageData?.contextBreakdown
+                                                ? () => setShowContextBreakdown(true)
+                                                : undefined}
+                                            delayLongPress={400}
+                                            style={({ pressed }) => ({
+                                                opacity: props.usageData?.contextBreakdown && pressed ? 0.6 : 1,
+                                            })}
+                                        >
+                                            <Text style={{
+                                                fontSize: 11,
+                                                color: contextWarning?.color ?? theme.colors.textSecondary,
+                                                marginLeft: props.connectionStatus ? 8 : 0,
+                                                ...Typography.default()
+                                            }}>
+                                                {!props.usageData?.contextSize && props.connectionStatus ? '• ' : ''}
+                                                {props.usageData?.contextSize
+                                                    ? (props.usageData.contextSize >= 1_000_000
+                                                        ? `${(props.usageData.contextSize / 1_000_000).toFixed(1)}M`
+                                                        : props.usageData.contextSize >= 1000
+                                                        ? `${Math.round(props.usageData.contextSize / 1000)}K`
+                                                        : String(props.usageData.contextSize))
+                                                    : ''}
+                                                {props.usageData?.contextSize && props.usageData?.contextWindowTokens
+                                                    ? ` / ${props.usageData.contextWindowTokens >= 1_000_000
+                                                        ? `${(props.usageData.contextWindowTokens / 1_000_000).toFixed(1)}M`
+                                                        : `${Math.round(props.usageData.contextWindowTokens / 1000)}K`}`
+                                                    : ''}
+                                                {props.usageData?.contextSize && contextPct ? ` (${contextPct}%)` : ''}
+                                            </Text>
+                                        </Pressable>
+                                    </View>
+                                    {showContextBreakdown && (props.usageData?.contextBreakdown || (isClaude && props.onThinkingLevelChange)) && (
+                                        <>
+                                            <TouchableWithoutFeedback onPress={() => setShowContextBreakdown(false)}>
+                                                <View style={{
+                                                    position: 'absolute',
+                                                    top: -500, left: -200, right: -200, bottom: -500,
+                                                    zIndex: 1000,
+                                                }} />
+                                            </TouchableWithoutFeedback>
+                                            <View style={{
+                                                position: 'absolute',
+                                                bottom: '100%',
+                                                left: 0,
+                                                zIndex: 1001,
+                                                width: Math.min(screenWidth - 32, 320),
+                                                paddingBottom: 4,
+                                            }}>
+                                                <FloatingOverlay maxHeight={360}>
+                                                    {props.usageData?.contextBreakdown && (
+                                                        <ContextBreakdown breakdown={props.usageData.contextBreakdown} />
+                                                    )}
+                                                    {isClaude && props.onThinkingLevelChange && (
+                                                        <View style={{ marginTop: props.usageData?.contextBreakdown ? 12 : 0 }}>
+                                                            <Text style={{ fontSize: 10, fontWeight: '600', color: theme.colors.textSecondary, marginBottom: 6, ...Typography.default('semiBold') }}>
+                                                                Thinking effort
+                                                            </Text>
+                                                            <View style={{ flexDirection: 'row', gap: 4, flexWrap: 'wrap' }}>
+                                                                {(['auto', 'low', 'medium', 'high', 'xhigh', 'max'] as const).map((level) => {
+                                                                    const isActive = (props.thinkingLevel ?? null) === level || (props.thinkingLevel == null && level === 'auto');
+                                                                    return (
+                                                                        <Pressable
+                                                                            key={level}
+                                                                            onPress={() => props.onThinkingLevelChange?.(isActive ? null : level)}
+                                                                            style={{
+                                                                                paddingHorizontal: 10,
+                                                                                paddingVertical: 5,
+                                                                                borderRadius: 6,
+                                                                                backgroundColor: isActive ? theme.colors.button.primary.background : theme.colors.surfaceHigh,
+                                                                            }}
+                                                                        >
+                                                                            <Text style={{
+                                                                                fontSize: 11,
+                                                                                fontWeight: isActive ? '600' : '400',
+                                                                                color: isActive ? theme.colors.button.primary.tint : theme.colors.text,
+                                                                                ...Typography.default(isActive ? 'semiBold' : undefined),
+                                                                            }}>
+                                                                                {level}
+                                                                            </Text>
+                                                                        </Pressable>
+                                                                    );
+                                                                })}
+                                                            </View>
+                                                        </View>
+                                                    )}
+                                                </FloatingOverlay>
+                                            </View>
+                                        </>
+                                    )}
+                                    {showContextBreakdown && props.usageData?.contextBreakdown && Platform.OS !== 'web' && (
+                                        <TouchableWithoutFeedback onPress={() => setShowContextBreakdown(false)}>
+                                            <View style={{
+                                                position: 'absolute',
+                                                top: -1000,
+                                                left: -1000,
+                                                right: -1000,
+                                                bottom: '100%',
+                                                zIndex: 1000,
+                                            }} />
+                                        </TouchableWithoutFeedback>
+                                    )}
+                                </>
                             )}
                         </View>
                         <View style={{
@@ -935,6 +1089,22 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                         </View>
                     </View>
                 )}
+
+                {/* Context usage progress bar */}
+                {showContextBar ? (
+                    <View style={{
+                        height: 2,
+                        backgroundColor: theme.colors.surfacePressed,
+                        marginHorizontal: 16,
+                        marginBottom: 2,
+                    }}>
+                        <View style={{
+                            height: 2,
+                            width: `${Math.min(100, contextFillPct)}%`,
+                            backgroundColor: contextBarColor,
+                        }} />
+                    </View>
+                ) : null}
 
                 {/* Env profile picker (opened from bottom chip only) */}
                 {showProfileOverlay && showProfileControls && (

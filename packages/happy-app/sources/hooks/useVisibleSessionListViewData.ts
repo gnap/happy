@@ -17,7 +17,7 @@ export function useVisibleSessionListViewData(): SessionListViewItem[] | null {
         let pendingProjectGroup: SessionListViewItem | null = null;
 
         for (const item of data) {
-            if (item.type === 'project-group') {
+            if (item.type === 'project-group' || item.type === 'worktree-group') {
                 pendingProjectGroup = item;
                 continue;
             }
