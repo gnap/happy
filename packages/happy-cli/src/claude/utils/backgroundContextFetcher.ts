@@ -130,10 +130,7 @@ export function startBackgroundContextFetcher(opts: {
         });
         if (!usage) return;
 
-        // Store the latest snapshot locally so claudeRemoteLauncher can attach it
-        // to the turn-end envelope (which the App receives and maintains as state).
-        // No metadata update needed — the App holds the latest state from turn-end.
-        (opts.session as any)._lastContextUsage = {
+        const snapshot = {
             currentTokens: usage.currentTokens,
             maxTokens: usage.maxTokens,
             pct: Math.round((usage.currentTokens / usage.maxTokens) * 100),
@@ -141,6 +138,18 @@ export function startBackgroundContextFetcher(opts: {
             breakdown: usage.breakdown,
             fetchedAt: Date.now(),
         };
+        // Store for turn-end envelope (App maintains from reducer)
+        (opts.session as any)._lastContextUsage = snapshot;
+        // Also write to metadata so the App can see contextUsage during the turn,
+        // before turn-end fires. The turn-end envelope is the durable record.
+        try {
+            await opts.session.updateMetadata((currentMetadata) => ({
+                ...currentMetadata,
+                contextUsage: snapshot,
+            }));
+        } catch (err) {
+            logger.debug('[contextFetch] metadata update failed:', err);
+        }
         logger.debug(
             `[contextFetch] snapshot: ${usage.currentTokens} / ${usage.maxTokens} (${Math.round((usage.currentTokens / usage.maxTokens) * 100)}%)`,
         );
