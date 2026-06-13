@@ -293,7 +293,12 @@ class ApiSocket {
 
             if (shouldUseTauriHttp(path, method)) {
                 const { fetch: tauriFetch } = await import('@tauri-apps/plugin-http');
-                return await tauriFetch(url, requestInit);
+                // reqwest has no default timeout; set connectTimeout as a backstop in case
+                // AbortSignal cancellation races on the IPC bridge.
+                return await tauriFetch(url, {
+                    ...requestInit,
+                    connectTimeout: REQUEST_TIMEOUT_MS,
+                } as RequestInit);
             }
 
             return await fetch(url, requestInit);

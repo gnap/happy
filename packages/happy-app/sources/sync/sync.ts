@@ -274,7 +274,7 @@ class Sync {
                 // Stop reconnection timers while suspended to avoid waking the
                 // JS thread unnecessarily. A live connected socket is preserved.
                 apiSocket.pauseReconnection();
-                this.maybeStartBackgroundSendWatchdog();
+                this.maybeStartSendWatchdog();
             }
         });
 
@@ -777,11 +777,16 @@ class Sync {
         return false;
     }
 
-    private async maybeStartBackgroundSendWatchdog() {
-        if (Platform.OS === 'web' || this.appState === 'active') {
+    private async maybeStartSendWatchdog() {
+        if (!this.hasPendingOutboxMessages() || this.backgroundSendTimeout) {
             return;
         }
-        if (!this.hasPendingOutboxMessages() || this.backgroundSendTimeout) {
+
+        const isDesktop = Platform.OS === 'web';
+        const isBackground = this.appState !== 'active';
+        // Mobile foreground relies on fetch timeout + echo recovery; desktop/Tauri
+        // needs an explicit fail path because plugin-http can hang without aborting.
+        if (!isDesktop && !isBackground) {
             return;
         }
 
@@ -800,13 +805,15 @@ class Sync {
             }
         }
 
-        log.log('📨 Pending messages detected in background. Starting 30s send watchdog.');
+        log.log(`📨 Pending messages detected${isBackground ? ' in background' : ' on desktop'}. Starting 30s send watchdog.`);
         this.backgroundSendStartedAt = Date.now();
         this.backgroundSendTimeout = setTimeout(() => {
             this.backgroundSendTimeout = null;
-            void this.handleBackgroundSendTimeout();
+            void this.handleSendTimeout();
         }, Sync.BACKGROUND_SEND_TIMEOUT_MS);
-        void this.scheduleBackgroundSendTimeoutNotification();
+        if (isBackground) {
+            void this.scheduleBackgroundSendTimeoutNotification();
+        }
     }
 
     private clearBackgroundSendWatchdog() {
@@ -893,7 +900,7 @@ class Sync {
         }
     }
 
-    private async handleBackgroundSendTimeout() {
+    private async handleSendTimeout() {
         if (this.backgroundTaskId !== null) {
             const { endBackgroundTask } = await import('./iosBackgroundTask');
             await endBackgroundTask(this.backgroundTaskId);
@@ -907,8 +914,13 @@ class Sync {
         }
 
         await this.cancelBackgroundSendTimeoutNotification();
-        await this.notifyMessageSendFailed();
-        this.failPendingOutboxMessages('Message failed to send in background after 30s. Please retry.');
+        if (Platform.OS !== 'web') {
+            await this.notifyMessageSendFailed();
+        }
+        const reason = Platform.OS === 'web'
+            ? 'Message failed to send after 30s. Please retry.'
+            : 'Message failed to send in background after 30s. Please retry.';
+        this.failPendingOutboxMessages(reason);
         this.backgroundSendStartedAt = null;
     }
 
@@ -1025,7 +1037,7 @@ class Sync {
         });
 
         this.getSendSync(sessionId).invalidate();
-        this.maybeStartBackgroundSendWatchdog();
+        this.maybeStartSendWatchdog();
     }
 
     applySettings = (delta: Partial<Settings>) => {
@@ -2218,7 +2230,7 @@ class Sync {
                 this.sessionLastSeq.set(sessionId, maxSeq);
             }
         } catch (error) {
-            this.maybeStartBackgroundSendWatchdog();
+            this.maybeStartSendWatchdog();
             throw error;
         } finally {
             this.sendAbortControllers.delete(sessionId);
@@ -2232,7 +2244,7 @@ class Sync {
             await this.cancelBackgroundSendTimeoutNotification();
             this.backgroundSendStartedAt = null;
         } else if (this.appState !== 'active') {
-            this.maybeStartBackgroundSendWatchdog();
+            this.maybeStartSendWatchdog();
         }
     }
 

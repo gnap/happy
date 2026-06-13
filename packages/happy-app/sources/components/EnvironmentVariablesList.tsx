@@ -23,6 +23,26 @@ export function EnvironmentVariablesList({
     const [showAddForm, setShowAddForm] = React.useState(false);
     const [newVarName, setNewVarName] = React.useState('');
     const [newVarValue, setNewVarValue] = React.useState('');
+    const [clipboardPreview, setClipboardPreview] = React.useState<Array<{ name: string; value: string }> | null>(null);
+
+    const parseEnvVarsFromText = React.useCallback((text: string): Array<{ name: string; value: string }> => {
+        const result: Array<{ name: string; value: string }> = [];
+        const lines = text.split('\n');
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) continue;
+            // Match: export VAR=value, export VAR="value", VAR=value, VAR="value"
+            const m = trimmed.match(/^(?:export\s+)?([A-Z_][A-Z0-9_]*)=(?:"([^"]*)"|'([^']*)'|(.+))$/);
+            if (m) {
+                const name = m[1];
+                const value = m[2] ?? m[3] ?? m[4] ?? '';
+                if (!result.some(v => v.name === name)) {
+                    result.push({ name, value });
+                }
+            }
+        }
+        return result;
+    }, []);
 
     const getDocumentation = React.useCallback((varName: string) => {
         if (!profileDocs) return { expectedValue: undefined, description: undefined, isSecret: false };
@@ -77,28 +97,6 @@ export function EnvironmentVariablesList({
         setNewVarValue('');
         setShowAddForm(false);
     }, [newVarName, newVarValue, environmentVariables, onChange]);
-
-    // Clipboard import
-    const [clipboardPreview, setClipboardPreview] = React.useState<Array<{ name: string; value: string }> | null>(null);
-
-    const parseEnvVarsFromText = React.useCallback((text: string): Array<{ name: string; value: string }> => {
-        const result: Array<{ name: string; value: string }> = [];
-        const lines = text.split('\n');
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed || trimmed.startsWith('#')) continue;
-            // Match: export VAR=value, export VAR="value", VAR=value, VAR="value"
-            const m = trimmed.match(/^(?:export\s+)?([A-Z_][A-Z0-9_]*)=(?:"([^"]*)"|'([^']*)'|(.+))$/);
-            if (m) {
-                const name = m[1];
-                const value = m[2] ?? m[3] ?? m[4] ?? '';
-                if (!result.some(v => v.name === name)) {
-                    result.push({ name, value });
-                }
-            }
-        }
-        return result;
-    }, []);
 
     const handlePasteFromClipboard = React.useCallback(async () => {
         try {
