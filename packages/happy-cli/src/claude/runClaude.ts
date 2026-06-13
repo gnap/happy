@@ -387,9 +387,12 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             const mode = currentEnhancedMode();
             if (mode.model) return mode;
             // currentModel not yet set (e.g., inbox fires before the first user
-            // message arrives). Fall back to ANTHROPIC_DEFAULT_SONNET_MODEL so
-            // the inbox turn doesn't inherit the profile's ANTHROPIC_MODEL
-            // (e.g. Opus) and accidentally run as a more expensive model.
+            // message arrives). Try fallbacks in priority order so inbox turns
+            // don't accidentally inherit the profile's ANTHROPIC_MODEL (Opus):
+            //   1. session metadata currentModelCode (persisted from last turn)
+            //   2. ANTHROPIC_DEFAULT_SONNET_MODEL (profile env)
+            const persistedModel = normalizeClaudeModelForSdk(session.getMetadata()?.currentModelCode);
+            if (persistedModel) return { ...mode, model: persistedModel };
             const defaultSonnet = process.env.ANTHROPIC_DEFAULT_SONNET_MODEL;
             return defaultSonnet ? { ...mode, model: defaultSonnet } : mode;
         },
