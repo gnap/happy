@@ -944,7 +944,6 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                 <>
                                     <View
                                         {...(Platform.OS === 'web' && props.usageData?.contextBreakdown ? {
-                                            // @ts-expect-error onMouseEnter/onMouseLeave work on RN Web View
                                             onMouseEnter: () => setShowContextBreakdown(true),
                                             onMouseLeave: () => setShowContextBreakdown(false),
                                         } : {})}
