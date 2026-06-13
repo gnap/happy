@@ -134,6 +134,7 @@ export async function claudeRemote(opts: {
         permissionMode: mapToClaudeMode(initial.mode.permissionMode),
         model,
         fallbackModel,
+        effort: initial.mode.effort,
         customSystemPrompt: initial.mode.customSystemPrompt ? initial.mode.customSystemPrompt + '\n\n' + systemPrompt : undefined,
         appendSystemPrompt: initial.mode.appendSystemPrompt ? initial.mode.appendSystemPrompt + '\n\n' + systemPrompt : systemPrompt,
         allowedTools: initial.mode.allowedTools ? initial.mode.allowedTools.concat(opts.allowedTools) : opts.allowedTools,

@@ -536,6 +536,11 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         }
                         // Inbox peek happens at the top of the while loop — no need to
                         // peek here inside claudeRemote's turn lifecycle.
+                        // Poke the background context fetcher after each successful turn.
+                        // It will debounce to at most once every 30 s.
+                        if (!isError) {
+                            session.contextFetchPoke?.();
+                        }
                         if (!isError && !pending && session.queue.size() === 0) {
                             session.api.push().sendToAllDevices(
                                 'It\'s ready!',

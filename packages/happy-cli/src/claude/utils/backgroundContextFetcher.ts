@@ -112,7 +112,10 @@ async function spawnContextFetch(opts: {
  * Start a periodic background timer that fetches /context from Claude.
  * The result is written to session metadata via `session.updateMetadata`.
  *
- * Returns a dispose function that stops the timer.
+ * Returns an object with:
+ * - dispose: stops the timer
+ * - poke:    call after a successful turn to trigger a fetch within 1 s
+ *            (respects the minimum interval between fetches).
  */
 export function startBackgroundContextFetcher(opts: {
     session: ApiSessionClient;
@@ -128,16 +131,14 @@ export function startBackgroundContextFetcher(opts: {
      * after a restart uses the last persisted model rather than the profile's ANTHROPIC_MODEL.
      */
     getModel?: () => string | undefined;
-}): () => void {
-    const intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
-    let timer: ReturnType<typeof setInterval> | null = null;
+}): { dispose: () => void; poke: () => void } {
+    const minIntervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
+    let pokeTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastFetchTime = 0;
 
     const resolveModel = (): string | undefined => {
         const explicit = opts.getModel?.();
         if (explicit) return explicit;
-        // Fallback: use the last model persisted to session metadata so restarts
-        // don't default back to the profile's ANTHROPIC_MODEL before the first
-        // user message arrives.
         const fromMeta = normalizeClaudeModelForSdk(opts.session.getMetadata()?.currentModelCode);
         return fromMeta;
     };
@@ -152,8 +153,8 @@ export function startBackgroundContextFetcher(opts: {
             model: resolveModel(),
         });
         if (!usage) return;
+        lastFetchTime = Date.now();
 
-        // Write to session metadata so the App can read context usage
         try {
             await opts.session.updateMetadata((currentMetadata) => ({
                 ...currentMetadata,
@@ -163,7 +164,7 @@ export function startBackgroundContextFetcher(opts: {
                     pct: Math.round((usage.currentTokens / usage.maxTokens) * 100),
                     model: usage.model,
                     breakdown: usage.breakdown,
-                    fetchedAt: Date.now(),
+                    fetchedAt: lastFetchTime,
                 },
             }));
             logger.debug(
@@ -174,14 +175,30 @@ export function startBackgroundContextFetcher(opts: {
         }
     };
 
-    // First fetch after a short delay (give the session time to initialise)
+    const poke = () => {
+        // Honour minimum interval between fetches.
+        const elapsed = Date.now() - lastFetchTime;
+        if (elapsed < minIntervalMs) {
+            logger.debug(`[contextFetch] poke ignored (last fetch ${Math.round(elapsed / 1000)}s ago, min ${Math.round(minIntervalMs / 1000)}s)`);
+            return;
+        }
+        if (pokeTimer !== null) return; // already scheduled
+        pokeTimer = setTimeout(() => {
+            pokeTimer = null;
+            tick();
+        }, 1000);
+        logger.debug('[contextFetch] poke scheduled (fetch in 1 s)');
+    };
+
+    // Initial fetch after a short delay (startup trigger)
     const initialTimer = setTimeout(() => {
         tick();
-        timer = setInterval(tick, intervalMs);
     }, 10_000);
 
-    return () => {
+    const dispose = () => {
         clearTimeout(initialTimer);
-        if (timer) clearInterval(timer);
+        if (pokeTimer) clearTimeout(pokeTimer);
     };
+
+    return { dispose, poke };
 }

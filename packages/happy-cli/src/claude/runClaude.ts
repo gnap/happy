@@ -280,6 +280,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     let handleUserMessage: ((message: UserMessage) => Promise<void>) | null = null;
     let isA2AInboxTurnActiveFn: () => boolean = () => false;
     let describeInboxMcpScopeFn: () => string = () => 'empty';
+    /** Poke the background context fetcher after a successful turn. */
+    let contextFetchPoke: () => void = () => {};
 
     // Start Happy MCP server
     const happyServer = await startHappyServer(() => session, {
@@ -368,10 +370,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         }
         return fromEnv;
     })();
-    let currentClaudeEnvVars: Record<string, string> = {
-        ...daemonClaudeEnvVars,
-        CLAUDE_CODE_EFFORT_LEVEL: options.effort ?? 'medium',
-    };
+    let currentClaudeEnvVars: Record<string, string> = { ...daemonClaudeEnvVars };
     const claudeTurnActiveRef = { current: false };
     const currentEnhancedMode = (): EnhancedMode => ({
         permissionMode: currentPermissionMode || 'default',
@@ -402,13 +401,15 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     // Start periodic background context-usage poller. Runs a lightweight
     // `claude --resume --print "/context"` child process every 30 s and
     // writes the real context usage to session metadata.
-    const disposeContextFetcher = startBackgroundContextFetcher({
+    const contextFetcher = startBackgroundContextFetcher({
         session,
         getClaudeSessionId: () => currentSession?.sessionId ?? initialClaudeSessionId,
         projectPath: workingDirectory,
         getEnvVars: () => currentClaudeEnvVars,
         getModel: () => currentModel,
     });
+    // Expose poke so the launcher can trigger a fetch after each turn.
+    contextFetchPoke = contextFetcher.poke;
 
     handleUserMessage = async (message) => {
 
@@ -461,9 +462,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             if (candidates.includes(candidate as EffortLevel)) {
                 messageEffort = candidate as EffortLevel;
                 currentEffort = messageEffort;
-                currentClaudeEnvVars = { ...currentClaudeEnvVars, CLAUDE_CODE_EFFORT_LEVEL: messageEffort };
+                // Bump generation so claudeRemote re-spawns with the new --effort flag.
                 if (currentSession) {
-                    currentSession.claudeEnvVars = currentClaudeEnvVars;
                     currentSession.claudeEnvVarsGeneration++;
                 }
                 logger.debug(`[loop] Effort updated from user message to: ${messageEffort}`);
@@ -687,7 +687,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             a2aInbox.dispose();
 
             // Stop background context fetcher
-            disposeContextFetcher();
+            contextFetcher.dispose();
 
             // Stop Happy MCP server
             happyServer.stop();
@@ -753,6 +753,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             currentSession = sessionInstance;
             sessionInstance.a2aInboxTurn = a2aInbox;
             sessionInstance.claudeTurnActiveRef = claudeTurnActiveRef;
+            sessionInstance.contextFetchPoke = contextFetchPoke;
         },
         mcpServers: {
             'happy': {
