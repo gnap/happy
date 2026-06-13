@@ -136,6 +136,22 @@ const sessionTurnEndEventSchema = z.object({
         context_window_tokens: z.number().optional(),
         contextWindowTokens: z.number().optional(),
     }).optional(),
+    // /context snapshot from backgroundContextFetcher — authoritative context usage
+    contextUsage: z.object({
+        currentTokens: z.number(),
+        maxTokens: z.number(),
+        pct: z.number(),
+        model: z.string().optional(),
+        breakdown: z.object({
+            systemPrompt: z.number(),
+            systemTools: z.number(),
+            customAgents: z.number(),
+            skills: z.number(),
+            messages: z.number(),
+            freeSpace: z.number(),
+        }).optional(),
+        fetchedAt: z.number().optional(),
+    }).optional(),
 });
 
 const sessionStopEventSchema = z.object({
@@ -592,7 +608,7 @@ export type NormalizedMessage = ({
     meta?: MessageMeta,
     usage?: UsageData,
     /** Latest /context snapshot from CLI background fetcher (carried in turn-end). */
-    contextUsage?: z.infer<typeof sessionTurnEndContextUsageSchema>,
+    contextUsage?: Record<string, any>,
 };
 
 function normalizeSessionEnvelope(
