@@ -358,6 +358,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             message: string;
             mode: EnhancedMode;
             meta?: unknown;
+            hash?: string | null;
         } | null = null;
         let wasInboxTurn = false;
         let turnSucceeded = false;
@@ -416,6 +417,27 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             // Suppress output from /context fetch mini-turns.
                             suppressContextOutput = !!(p.meta as any)?.contextFetch;
                             permissionHandler.handleModeChange(p.mode.permissionMode);
+                            // A deferred inbox turn needs the same setup that the inline
+                            // inbox path does: setInboxTurnActive + prepareInboxTurnPrompt
+                            // (which also resets a2aTurnQueued so peekInbox can re-fire).
+                            const inboxHooksP = session.a2aInboxTurn;
+                            if (inboxHooksP?.isInboxTurnMeta(p.meta)) {
+                                inboxHooksP.setInboxTurnActive(true);
+                                const inboxPrompt = inboxHooksP.prepareInboxTurnPrompt();
+                                if (!inboxPrompt) {
+                                    inboxHooksP.setInboxTurnActive(false);
+                                    return null;
+                                }
+                                wasInboxTurn = true;
+                                if (session.claudeTurnActiveRef) {
+                                    session.claudeTurnActiveRef.current = true;
+                                }
+                                modeHash = p.hash ?? null;
+                                mode = p.mode;
+                                session.client.suppressNextMapperUserText();
+                                session.onThinkingChange(true);
+                                return { message: inboxPrompt, mode: p.mode };
+                            }
                             return p;
                         }
 
@@ -438,7 +460,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 // claudeRemote() call so it starts as a fresh turn.
                                 if (modeHash !== null) {
                                     logger.debug('[remote] nextMessage deferring inbox turn (turn in progress, modeHash set)');
-                                    pending = { message: msg.message, mode: msg.mode, meta: msg.meta };
+                                    pending = { message: msg.message, mode: msg.mode, meta: msg.meta, hash: msg.hash };
                                     return null;
                                 }
                                 inboxHooks?.setInboxTurnActive(true);
