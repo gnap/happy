@@ -981,7 +981,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                             </Text>
                                         </Pressable>
                                     </View>
-                                    {showContextBreakdown && (props.usageData?.contextBreakdown || (isClaude && props.onThinkingLevelChange)) && (
+                                    {showContextBreakdown && (
                                         <>
                                             <TouchableWithoutFeedback onPress={() => setShowContextBreakdown(false)}>
                                                 <View style={{
@@ -998,9 +998,39 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                                 width: Math.min(screenWidth - 32, 320),
                                                 paddingBottom: 4,
                                             }}>
-                                                <FloatingOverlay maxHeight={360}>
+                                                <FloatingOverlay maxHeight={420}>
+                                                    {/* Per-turn usage stats */}
+                                                    {(props.usageData?.inputTokens != null || props.usageData?.outputTokens != null) && (
+                                                        <View style={{ marginBottom: (props.usageData?.contextBreakdown || (isClaude && props.onThinkingLevelChange)) ? 10 : 0 }}>
+                                                            <Text style={{ fontSize: 10, fontWeight: '600', color: theme.colors.textSecondary, marginBottom: 4, ...Typography.default('semiBold') }}>
+                                                                Turn usage
+                                                            </Text>
+                                                            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                                                                {props.usageData?.inputTokens != null && (
+                                                                    <Text style={{ fontSize: 10, color: theme.colors.text, ...Typography.default() }}>
+                                                                        in {formatTokens(props.usageData.inputTokens)}
+                                                                    </Text>
+                                                                )}
+                                                                {props.usageData?.outputTokens != null && (
+                                                                    <Text style={{ fontSize: 10, color: theme.colors.text, ...Typography.default() }}>
+                                                                        out {formatTokens(props.usageData.outputTokens)}
+                                                                    </Text>
+                                                                )}
+                                                                {props.usageData?.cacheRead != null && props.usageData.cacheRead > 0 && (
+                                                                    <Text style={{ fontSize: 10, color: theme.colors.textSecondary, ...Typography.default() }}>
+                                                                        cache {formatTokens(props.usageData.cacheRead)}
+                                                                    </Text>
+                                                                )}
+                                                            </View>
+                                                        </View>
+                                                    )}
                                                     {props.usageData?.contextBreakdown && (
-                                                        <ContextBreakdown breakdown={props.usageData.contextBreakdown} />
+                                                        <>
+                                                            {(props.usageData?.inputTokens != null) && (
+                                                                <View style={{ borderTopWidth: 0.5, borderTopColor: theme.colors.textSecondary + '40', marginBottom: 8 }} />
+                                                            )}
+                                                            <ContextBreakdown breakdown={props.usageData.contextBreakdown} />
+                                                        </>
                                                     )}
                                                     {isClaude && props.onThinkingLevelChange && (
                                                         <View style={{ marginTop: props.usageData?.contextBreakdown ? 12 : 0 }}>
