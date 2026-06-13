@@ -10,7 +10,7 @@ import { AgentState, Metadata } from '@/api/types';
 import type { UserMessage } from '@/api/types';
 import { BUILD_VERSION } from '../version';
 import { Credentials, readSettings, getProfileEnvironmentVariables, writeSessionPidFile, removeSessionPidFile } from '@/persistence';
-import { EnhancedMode, PermissionMode } from './loop';
+import { EnhancedMode, PermissionMode, EffortLevel } from './loop';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
 import { startCaffeinate, stopCaffeinate } from '@/utils/caffeinate';
@@ -82,6 +82,8 @@ function writeClaudeSessionEncryptionKey(sessionTag: string, key: Uint8Array): v
 export interface StartOptions {
     model?: string
     permissionMode?: PermissionMode
+    /** Claude Code effort level (low, medium, high, xhigh, max). Default: medium. */
+    effort?: EffortLevel
     startingMode?: 'local' | 'remote'
     shouldStartDaemon?: boolean
     claudeEnvVars?: Record<string, string>
@@ -336,6 +338,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         isPlan: mode.permissionMode === 'plan',
         model: mode.model,
         fallbackModel: mode.fallbackModel,
+        effort: mode.effort,
         customSystemPrompt: mode.customSystemPrompt,
         appendSystemPrompt: mode.appendSystemPrompt,
         allowedTools: mode.allowedTools,
@@ -347,6 +350,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     let currentPermissionMode: PermissionMode | undefined = initialPermissionMode;
     let currentModel = normalizeClaudeModelForSdk(options.model); // Track current model state
     let currentFallbackModel: string | undefined = undefined; // Track current fallback model
+    let currentEffort: EffortLevel = options.effort ?? 'medium';
     let currentCustomSystemPrompt: string | undefined = undefined; // Track current custom system prompt
     let currentAppendSystemPrompt: string | undefined = undefined; // Track current append system prompt
     let currentAllowedTools: string[] | undefined = undefined; // Track current allowed tools
@@ -364,12 +368,16 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         }
         return fromEnv;
     })();
-    let currentClaudeEnvVars: Record<string, string> = { ...daemonClaudeEnvVars };
+    let currentClaudeEnvVars: Record<string, string> = {
+        ...daemonClaudeEnvVars,
+        CLAUDE_CODE_EFFORT_LEVEL: options.effort ?? 'medium',
+    };
     const claudeTurnActiveRef = { current: false };
     const currentEnhancedMode = (): EnhancedMode => ({
         permissionMode: currentPermissionMode || 'default',
         model: currentModel,
         fallbackModel: currentFallbackModel,
+        effort: currentEffort,
         customSystemPrompt: currentCustomSystemPrompt,
         appendSystemPrompt: currentAppendSystemPrompt,
         allowedTools: currentAllowedTools,
@@ -398,6 +406,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         session,
         getClaudeSessionId: () => currentSession?.sessionId ?? initialClaudeSessionId,
         projectPath: workingDirectory,
+        getEnvVars: () => currentClaudeEnvVars,
+        getModel: () => currentModel,
     });
 
     handleUserMessage = async (message) => {
@@ -441,6 +451,27 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             logger.debug(`[loop] Fallback model updated from user message: ${messageFallbackModel || 'reset to none'}`);
         } else {
             logger.debug(`[loop] User message received with no fallback model override, using current: ${currentFallbackModel || 'none'}`);
+        }
+
+        // Resolve effort - use message.meta.effort if provided, otherwise use current effort
+        let messageEffort: EffortLevel = currentEffort;
+        if (message.meta?.hasOwnProperty('effort')) {
+            const candidates: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+            const candidate = message.meta.effort as string;
+            if (candidates.includes(candidate as EffortLevel)) {
+                messageEffort = candidate as EffortLevel;
+                currentEffort = messageEffort;
+                currentClaudeEnvVars = { ...currentClaudeEnvVars, CLAUDE_CODE_EFFORT_LEVEL: messageEffort };
+                if (currentSession) {
+                    currentSession.claudeEnvVars = currentClaudeEnvVars;
+                    currentSession.claudeEnvVarsGeneration++;
+                }
+                logger.debug(`[loop] Effort updated from user message to: ${messageEffort}`);
+            } else {
+                logger.debug(`[loop] Ignoring unknown effort from user message: ${candidate}`);
+            }
+        } else {
+            logger.debug(`[loop] User message received with no effort override, using current: ${currentEffort}`);
         }
 
         // Resolve append system prompt - use message.meta.appendSystemPrompt if provided, otherwise use current
@@ -535,6 +566,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 permissionMode: messagePermissionMode || 'default',
                 model: messageModel,
                 fallbackModel: messageFallbackModel,
+                effort: messageEffort,
                 customSystemPrompt: messageCustomSystemPrompt,
                 appendSystemPrompt: messageAppendSystemPrompt,
                 allowedTools: messageAllowedTools,
@@ -551,6 +583,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 permissionMode: messagePermissionMode || 'default',
                 model: messageModel,
                 fallbackModel: messageFallbackModel,
+                effort: messageEffort,
                 customSystemPrompt: messageCustomSystemPrompt,
                 appendSystemPrompt: messageAppendSystemPrompt,
                 allowedTools: messageAllowedTools,
@@ -566,6 +599,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             permissionMode: messagePermissionMode || 'default',
             model: messageModel,
             fallbackModel: messageFallbackModel,
+            effort: messageEffort,
             customSystemPrompt: messageCustomSystemPrompt,
             appendSystemPrompt: messageAppendSystemPrompt,
             allowedTools: messageAllowedTools,
@@ -573,15 +607,19 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         };
         const metaChanged =
             message.meta?.permissionMode !== undefined
-            || (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'model'));
+            || (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'model'))
+            || (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'effort'));
         if (metaChanged) {
             session.updateMetadata((m) => {
-                const patch: { currentOperatingModeCode?: string; currentModelCode?: string } = {};
+                const patch: Record<string, unknown> = {};
                 if (message.meta?.permissionMode !== undefined) {
                     patch.currentOperatingModeCode = messagePermissionMode || 'default';
                 }
                 if (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'model')) {
                     patch.currentModelCode = claudeModelCodeForMetadata(message.meta.model);
+                }
+                if (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'effort')) {
+                    patch.currentEffort = messageEffort;
                 }
                 return { ...m, ...patch };
             }).catch((err) => logger.debug('[loop] Failed to persist permission/model to session metadata', err));

@@ -153,7 +153,19 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     let ongoingToolCalls = new Map<string, { parentToolCallId: string | null }>();
     let pendingSkillSuppress = false;
 
+    // Pop echo: sent once on first SDK message, after Claude starts processing.
+    let pendingPopEcho: { echoedMessageId: string; text: string } | null = null;
+
     function onMessage(message: SDKMessage) {
+        // Send pop echo on first SDK message — Claude has started processing.
+        if (pendingPopEcho) {
+            const p = pendingPopEcho;
+            pendingPopEcho = null;
+            session.client.sendSessionProtocolMessage(
+                createEnvelope('user', { t: 'text', text: p.text }),
+                { echoedMessageId: p.echoedMessageId }
+            );
+        }
 
         // Write to message log
         formatClaudeMessageForInk(message, messageBuffer);
@@ -347,6 +359,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         // See: https://github.com/anthropics/happy-cli/issues/143
         let previousSessionId: string | null = null;
         while (!exitReason) {
+            // Before each turn, peek inbox: if there are unread messages,
+            // push an isolated inbox turn to the message queue.
             session.a2aInboxTurn?.peekInbox();
             logger.debug('[remote]: launch');
             messageBuffer.addMessage('═'.repeat(40), 'status');
@@ -441,13 +455,11 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             permissionHandler.handleModeChange(mode.permissionMode);
                             // Signal thinking immediately on message receipt, before SDK is invoked
                             session.onThinkingChange(true);
-                            // Echo the app messageId back via meta so the App can clear its outbox.
+                            // Save for pop echo on first SDK response. Deferring until
+                            // Claude starts processing shows green check on App.
                             const appMessageId = (msg.meta as any)?.appMessageId as string | undefined;
                             if (appMessageId) {
-                                session.client.sendSessionProtocolMessage(
-                                    createEnvelope('user', { t: 'text', text: msg.message }),
-                                    { echoedMessageId: appMessageId }
-                                );
+                                pendingPopEcho = { echoedMessageId: appMessageId, text: msg.message };
                             }
                             return {
                                 message: msg.message,
@@ -522,7 +534,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             wasInboxTurn = false;
                             turnSucceeded = false;
                         }
-                        session.a2aInboxTurn?.peekInbox();
+                        // Inbox peek happens at the top of the while loop — no need to
+                        // peek here inside claudeRemote's turn lifecycle.
                         if (!isError && !pending && session.queue.size() === 0) {
                             session.api.push().sendToAllDevices(
                                 'It\'s ready!',

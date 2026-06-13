@@ -291,7 +291,6 @@ export type Metadata = {
   profileId?: string | null
   sandbox?: SandboxConfig | null
   dangerouslySkipPermissions?: boolean | null
-  /** Periodic /context fetch result — provides real-time context window usage to the App. */
   contextUsage?: {
     currentTokens: number
     maxTokens: number

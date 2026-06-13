@@ -1,45 +1,36 @@
 {
-  "name": "monorepo",
-  "private": true,
-  "scripts": {
-    "cli": "yarn workspace happy-coder cli",
-    "release": "node ./scripts/release.cjs",
-    "web": "yarn workspace happy-app web",
-    "postinstall": "patch-package && node ./scripts/postinstall.cjs",
-    "install-pre-commit": "sh ./scripts/install-pre-commit.sh",
-    "android": "expo run:android",
-    "ios": "expo run:ios"
-  },
-  "workspaces": {
-    "packages": [
-      "packages/happy-app",
-      "packages/happy-agent",
-      "packages/happy-cli",
-      "packages/happy-server",
-      "packages/happy-wire"
-    ],
-    "nohoist": [
-      "**/zod",
-      "**/react",
-      "**/react-dom",
-      "**/react-native",
-      "**/react-native/**",
-      "**/react-native-edge-to-edge/**",
-      "**/react-native-incall-manager/**"
-    ]
-  },
-  "packageManager": "yarn@1.22.22",
-  "devDependencies": {
-    "patch-package": "^8.0.0"
-  },
-  "resolutions": {
-    "@tauri-apps/api": "2.10.1"
-  },
-  "version": "1.0.0",
-  "dependencies": {
-    "@types/react": "~19.1.10",
-    "expo": "~54.0.32",
-    "react": "19.1.0",
-    "react-native": "0.81.5"
-  }
+    "name": "monorepo",
+    "private": true,
+    "scripts": {
+        "cli": "yarn workspace happy-coder cli",
+        "release": "node ./scripts/release.cjs",
+        "web": "yarn workspace happy-app web",
+        "postinstall": "patch-package && node ./scripts/postinstall.cjs",
+        "install-pre-commit": "sh ./scripts/install-pre-commit.sh"
+    },
+    "workspaces": {
+        "packages": [
+            "packages/happy-app",
+            "packages/happy-agent",
+            "packages/happy-cli",
+            "packages/happy-server",
+            "packages/happy-wire"
+        ],
+        "nohoist": [
+            "**/zod",
+            "**/react",
+            "**/react-dom",
+            "**/react-native",
+            "**/react-native/**",
+            "**/react-native-edge-to-edge/**",
+            "**/react-native-incall-manager/**"
+        ]
+    },
+    "packageManager": "yarn@1.22.22",
+    "devDependencies": {
+        "patch-package": "^8.0.0"
+    },
+    "resolutions": {
+        "@tauri-apps/api": "^2.11"
+    }
 }

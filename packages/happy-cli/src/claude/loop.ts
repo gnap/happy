@@ -13,10 +13,13 @@ import type { SandboxConfig } from "@/persistence"
 export type { PermissionMode } from "@/api/types"
 import type { PermissionMode } from "@/api/types"
 
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
 export interface EnhancedMode {
     permissionMode: PermissionMode;
     model?: string;
     fallbackModel?: string;
+    effort?: EffortLevel;
     customSystemPrompt?: string;
     appendSystemPrompt?: string;
     allowedTools?: string[];
