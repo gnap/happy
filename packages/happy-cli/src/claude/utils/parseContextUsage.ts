@@ -87,17 +87,17 @@ export function parseContextUsageOutput(text: string): ParsedContextUsage | null
 export function buildContextUsagePayload(
     parsed: ParsedContextUsage,
 ): {
-    context_size: number;
-    context_window_tokens: number;
-    context_pct: number;
+    currentTokens: number;
+    maxTokens: number;
+    pct: number;
     model: string;
-    contextBreakdown: ParsedContextUsage['breakdown'];
+    breakdown: ParsedContextUsage['breakdown'];
 } {
     return {
-        context_size: parsed.currentTokens,
-        context_window_tokens: parsed.maxTokens,
-        context_pct: Math.round((parsed.currentTokens / parsed.maxTokens) * 100),
+        currentTokens: parsed.currentTokens,
+        maxTokens: parsed.maxTokens,
+        pct: Math.round((parsed.currentTokens / parsed.maxTokens) * 100),
         model: parsed.model,
-        contextBreakdown: parsed.breakdown,
+        breakdown: parsed.breakdown,
     };
 }
