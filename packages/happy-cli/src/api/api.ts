@@ -340,10 +340,14 @@ export class ApiClient {
    */
   async listChangedSessions(changedSince: number): Promise<Array<{ id: string; seq: number; active: boolean }>> {
     try {
+      const params: Record<string, string | number> = { limit: 200 };
+      if (changedSince > 0) {
+        params.changedSince = changedSince;
+      }
       const response = await axios.get(
         `${configuration.serverUrl}/v2/sessions`,
         {
-          params: { changedSince, limit: 200 },
+          params,
           headers: { Authorization: `Bearer ${this.credential.token}` },
           httpsAgent: serverHttpsAgent,
           timeout: 10000,
