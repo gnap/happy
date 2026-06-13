@@ -383,7 +383,16 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         logTag: 'claude',
         messageQueue,
         session,
-        getMode: currentEnhancedMode,
+        getMode: () => {
+            const mode = currentEnhancedMode();
+            if (mode.model) return mode;
+            // currentModel not yet set (e.g., inbox fires before the first user
+            // message arrives). Fall back to ANTHROPIC_DEFAULT_SONNET_MODEL so
+            // the inbox turn doesn't inherit the profile's ANTHROPIC_MODEL
+            // (e.g. Opus) and accidentally run as a more expensive model.
+            const defaultSonnet = process.env.ANTHROPIC_DEFAULT_SONNET_MODEL;
+            return defaultSonnet ? { ...mode, model: defaultSonnet } : mode;
+        },
         isAgentTurnActive: () => claudeTurnActiveRef.current,
         workspacePath: workingDirectory,
         sessionId: session.sessionId,
