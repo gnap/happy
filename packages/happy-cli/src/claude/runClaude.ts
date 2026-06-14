@@ -261,7 +261,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         session.updateMetadata((currentMetadata) => ({
             ...currentMetadata,
             tools: sdkMetadata.tools,
-            slashCommands: sdkMetadata.slashCommands
+            slashCommands: sdkMetadata.slashCommands,
         })).then(() => {
             logger.debug('[start] Session metadata updated with SDK capabilities');
         }).catch((err: unknown) => {
@@ -383,7 +383,17 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         logTag: 'claude',
         messageQueue,
         session,
-        getMode: currentEnhancedMode,
+        getMode: () => {
+            const mode = currentEnhancedMode();
+            if (mode.model) return mode;
+            // currentModel not yet set (e.g., inbox fires before the first user
+            // message arrives). Fall back to session metadata currentModelCode
+            // (persisted from the last turn) so inbox turns use the same model
+            // the session was already running rather than the profile's
+            // ANTHROPIC_MODEL default.
+            const persistedModel = normalizeClaudeModelForSdk(session.getMetadata()?.currentModelCode);
+            return persistedModel ? { ...mode, model: persistedModel } : mode;
+        },
         isAgentTurnActive: () => claudeTurnActiveRef.current,
         workspacePath: workingDirectory,
         sessionId: session.sessionId,
