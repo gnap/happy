@@ -38,11 +38,6 @@ export async function claudeRemote(opts: {
     // Dynamic parameters
     nextMessage: () => Promise<{ message: string, mode: EnhancedMode } | null>,
     onReady: (result: SDKResultMessage) => void,
-    /** When provided, /context is pushed to the same running process after each turn
-     *  and the result is delivered here instead of spawning a new --resume process. */
-    onContextReady?: (result: SDKResultMessage) => void,
-    /** When true, skip the inline /context push (e.g. for inbox turns). */
-    skipContextFetch?: boolean,
     isAborted: (toolCallId: string) => boolean,
 
     // Callbacks
@@ -217,15 +212,11 @@ export async function claudeRemote(opts: {
     // input-side actions. Normal results call onReady and continue;
     // the input loop handles fetching the next message.
     async function outputLoop(): Promise<void> {
-        let awaitingContextResult = false;
         try {
             for await (const message of response) {
                 logger.debugLargeJson(`[claudeRemote] Message ${message.type}`, message);
 
-                // Suppress streaming messages during context fetch — only the result matters.
-                if (!awaitingContextResult) {
-                    opts.onMessage(message);
-                }
+                opts.onMessage(message);
 
                 // System init
                 if (message.type === 'system' && message.subtype === 'init') {
@@ -280,36 +271,12 @@ export async function claudeRemote(opts: {
 
                     // Normal result (user-initiated turn)
                     logger.debug('[claudeRemote] Result received');
-
-                    // Context result: deliver to launcher, then exit.
-                    if (awaitingContextResult) {
-                        logger.debug('[claudeRemote] /context result received, stopping');
-                        opts.onContextReady?.(message as SDKResultMessage);
-                        stopSignal.resolve();
-                        continue;
-                    }
-
                     if (isCompactCommand) {
                         logger.debug('[claudeRemote] Compaction completed');
                         opts.onCompletionEvent?.('Compaction completed');
                         isCompactCommand = false;
                     }
                     opts.onReady(message as SDKResultMessage);
-
-                    // If the launcher registered onContextReady, push /context
-                    // to the same running process and wait for the second result
-                    // before signalling the inputLoop to exit. This avoids the
-                    // overhead of spawning a new --resume process just for /context.
-                    if (opts.onContextReady && !opts.skipContextFetch && !messages.done) {
-                        logger.debug('[claudeRemote] Pushing /context to same process');
-                        awaitingContextResult = true;
-                        messages.push({
-                            type: 'user',
-                            message: { role: 'user', content: '/context' },
-                        });
-                        continue;
-                    }
-
                     // Signal inputLoop to exit so claudeRemote() returns
                     // and the outer launcher loop can peek inbox / pick
                     // up the next queued message.
