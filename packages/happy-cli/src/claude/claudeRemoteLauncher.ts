@@ -609,7 +609,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         }
                     },
                     onContextUsage: (usage) => {
-                        const model = buildClaudeTurnUsagePayload(/* result not available here */ { usage: undefined, modelUsage: undefined, num_turns: 1 } as any)?.model;
                         lastContextUsage = {
                             currentTokens: usage.totalTokens,
                             maxTokens: usage.maxTokens,
@@ -617,11 +616,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             fetchedAt: Date.now(),
                         };
                         logger.debug(`[remote]: context via control_request: ${usage.totalTokens} / ${usage.maxTokens} (${Math.round((usage.totalTokens / usage.maxTokens) * 100)}%)`);
-                        // Push updated contextUsage to session metadata so App can read it.
-                        session.client.updateMetadata((m) => ({
-                            ...m,
-                            contextUsage: lastContextUsage as any,
-                        })).catch(() => {});
                     },
                     onContextOutput: undefined,
                     signal: abortController.signal,
