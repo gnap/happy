@@ -370,6 +370,12 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         let turnSucceeded = false;
         /** Extras from the real turn, waiting for /context output before closing. */
         let pendingExtras: Record<string, unknown> | undefined;
+        /** Breakdown from the last /context call; carried forward across turns. */
+        let lastContextBreakdown: ReturnType<typeof buildContextUsagePayload> | undefined;
+        /** Number of non-inbox, non-compact turns since last /context refresh. */
+        let turnsSinceContextRefresh = 0;
+        /** Refresh breakdown every N normal turns. */
+        const CONTEXT_REFRESH_INTERVAL = 5;
 
         // Track session ID to detect when it actually changes
         // This prevents context loss when mode changes (permission mode, model, etc.)
@@ -576,10 +582,26 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         } else if (wasInboxTurn || wasCompactTurn) {
                             session.client.closeClaudeSessionTurn('completed', extras);
                         } else {
-                            // Normal turn: queue /context as the next claudeRemote() call
-                            // so the SDK processes it as a local command (initial.message path).
-                            pendingExtras = extras;
-                            pending = { message: '/context', mode: mode!, meta: { contextFetch: true } };
+                            // Normal turn: decide whether to run /context now or use fast path.
+                            // Run /context on first turn (no baseline yet) or every N turns.
+                            const needsContextRefresh = !lastContextBreakdown || turnsSinceContextRefresh >= CONTEXT_REFRESH_INTERVAL;
+                            if (needsContextRefresh) {
+                                pendingExtras = extras;
+                                pending = { message: '/context', mode: mode!, meta: { contextFetch: true } };
+                            } else {
+                                // Fast path: update currentTokens from usage estimate, keep last breakdown.
+                                if (usage?.context_size != null && usage.context_window_tokens != null) {
+                                    extras.contextUsage = {
+                                        ...lastContextBreakdown,
+                                        currentTokens: usage.context_size,
+                                        maxTokens: usage.context_window_tokens,
+                                        pct: Math.round((usage.context_size / usage.context_window_tokens) * 100),
+                                        fetchedAt: Date.now(),
+                                    };
+                                }
+                                turnsSinceContextRefresh++;
+                                session.client.closeClaudeSessionTurn('completed', extras);
+                            }
                         }
                         if (session.claudeTurnActiveRef) {
                             session.claudeTurnActiveRef.current = false;
@@ -595,7 +617,11 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             turnSucceeded = false;
                         }
                         wasCompactTurn = false;
-                        if (isError || wasInboxTurn) {
+                        // For inbox/error/fast-path turns send "It's ready!" immediately.
+                        // For context-refresh turns it's deferred to onContextOutput.
+                        const sentToContextRefresh = !isError && !wasInboxTurn && !wasCompactTurn
+                            && pending != null && (pending as any).meta?.contextFetch;
+                        if (!sentToContextRefresh) {
                             if (!pending && session.queue.size() === 0) {
                                 session.api.push().sendToAllDevices(
                                     'It\'s ready!',
@@ -604,14 +630,16 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 );
                             }
                         }
-                        // For normal turns, "It's ready!" is sent after onContextOutput.
                     },
                     onContextOutput: isContextFetchPending ? (contextMarkdown) => {
                         const extras = pendingExtras ?? {};
                         pendingExtras = undefined;
                         const parsed = parseContextUsageOutput(contextMarkdown);
                         if (parsed) {
-                            extras.contextUsage = { ...buildContextUsagePayload(parsed), fetchedAt: Date.now() };
+                            const ctxUsage = { ...buildContextUsagePayload(parsed), fetchedAt: Date.now() };
+                            extras.contextUsage = ctxUsage;
+                            lastContextBreakdown = ctxUsage;
+                            turnsSinceContextRefresh = 0;
                             logger.debug(
                                 `[remote]: /context resolved: ${parsed.currentTokens} / ${parsed.maxTokens} (${Math.round((parsed.currentTokens / parsed.maxTokens) * 100)}%)`,
                             );
