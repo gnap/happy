@@ -124,7 +124,13 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     // When to abort
     session.client.rpcHandlerManager.registerHandler('abort', doAbort); // When abort clicked
     session.client.rpcHandlerManager.registerHandler('switch', doSwitch); // When switch clicked
-    // Removed catch-all stdin handler - now handled by RemoteModeDisplay keyboard handlers
+
+    // When a new A2A inbox message arrives while the session is idle (while-loop blocked
+    // in nextMessage()), the inbox peek in the loop head won't fire until the next message.
+    // Listen here and push a synthetic wakeup so the queue drains immediately.
+    session.client.on('a2aMessageReceived', () => {
+        session.a2aInboxTurn?.peekInbox();
+    });
 
     // Create permission handler
     const permissionHandler = new PermissionHandler(session);

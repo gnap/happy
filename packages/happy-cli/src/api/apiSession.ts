@@ -1032,6 +1032,9 @@ export class ApiSessionClient extends EventEmitter {
     recordA2AMessage(message: A2AInboxMessage): void {
         this.a2aInbox = upsertA2AInboxMessage(this.a2aInbox, message);
         this.scheduleA2AInboxAgentStateSync();
+        // Notify listeners so inbox turns can be scheduled even when the session
+        // is idle (i.e. the launcher while-loop is blocked in nextMessage()).
+        this.emit('a2aMessageReceived');
     }
 
     markA2AMessageRead(id: string): void {
