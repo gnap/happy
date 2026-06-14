@@ -155,17 +155,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     let ongoingToolCalls = new Map<string, { parentToolCallId: string | null }>();
     let pendingSkillSuppress = false;
 
-    // Tracks the usage from the most recent non-synthetic assistant message.
-    // This mirrors /context's getCurrentUsage() — it takes the last API response's
-    // usage (input + cache_creation + cache_read) as the accurate context size,
-    // rather than the cumulative total that result.usage accumulates across all
-    // tool round-trips in a multi-step turn.
-    let lastAssistantUsage: {
-        input_tokens?: number;
-        cache_creation_input_tokens?: number;
-        cache_read_input_tokens?: number;
-    } | null = null;
-
     // Pop echo: sent once on first SDK message, after Claude starts processing.
     let pendingPopEcho: { echoedMessageId: string; text: string } | null = null;
 
@@ -180,15 +169,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             ((message as SDKAssistantMessage).message as any).model === '<synthetic>'
         ) {
             return;
-        }
-
-        // Capture the usage from each real assistant message so onReady can use
-        // the LAST one (matching /context's getCurrentUsage() behaviour).
-        if (message.type === 'assistant') {
-            const msgUsage = ((message as SDKAssistantMessage).message as any)?.usage;
-            if (msgUsage) {
-                lastAssistantUsage = msgUsage;
-            }
         }
 
         // Send pop echo on first SDK message — Claude has started processing.
@@ -422,7 +402,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             wasInboxTurn = false;
             wasCompactTurn = false;
             turnSucceeded = false;
-            lastAssistantUsage = null;
             try {
                 const remoteResult = await claudeRemote({
                     sessionId: session.sessionId,
@@ -583,18 +562,13 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         if (typeof result.total_cost_usd === 'number') extras.costUsd = result.total_cost_usd;
                         if (typeof result.duration_ms === 'number') extras.durationMs = result.duration_ms;
 
-                        // Build contextUsage from the LAST assistant message's usage —
-                        // this mirrors /context's getCurrentUsage() which scans messages
-                        // for the most recent API response. Each assistant message carries
-                        // the snapshot for that single API call, so it's not inflated by
-                        // cumulative multi-step totals.
-                        if (!isError && usage?.context_window_tokens != null) {
-                            const src = lastAssistantUsage ?? result.usage;
-                            const rawInput = src?.input_tokens ?? 0;
-                            const rawCacheCreate = src?.cache_creation_input_tokens ?? 0;
-                            const rawCacheRead = src?.cache_read_input_tokens ?? 0;
+                        // Build contextUsage from usage — modelUsage (the per-model rollup)
+                        // is the only reliable source of context_size and context_window.
+                        // context_size is already back-calculated via cacheRead/num_turns
+                        // in buildClaudeTurnUsagePayload to approximate a single API call.
+                        if (!isError && usage?.context_size != null && usage.context_window_tokens != null) {
+                            const currentTokens = usage.context_size;
                             const maxTokens = usage.context_window_tokens;
-                            const currentTokens = rawInput + rawCacheCreate + rawCacheRead;
                             extras.contextUsage = {
                                 currentTokens,
                                 maxTokens,
@@ -603,7 +577,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 fetchedAt: Date.now(),
                             };
                             logger.debug(
-                                `[remote]: context usage from last assistant: ${currentTokens} / ${maxTokens} (${Math.round((currentTokens / maxTokens) * 100)}%)`,
+                                `[remote]: context usage from modelUsage: ${currentTokens} / ${maxTokens} (${Math.round((currentTokens / maxTokens) * 100)}%)`,
                             );
                         }
 
