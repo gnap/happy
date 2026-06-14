@@ -264,6 +264,20 @@ export async function claudeRemote(opts: {
                         const found = await awaitFileExist(join(projectDir, `${systemInit.session_id}.jsonl`));
                         logger.debug(`[claudeRemote] Session file found: ${systemInit.session_id} ${found}`);
                         opts.onSessionFound(systemInit.session_id);
+
+                        // Pre-warm context usage cache at init time so it is ready
+                        // (or nearly ready) by the time the turn result arrives.
+                        // Firing here instead of at turn-end avoids the 10-60s cold-start
+                        // delay on resume that would otherwise leave contextUsage blank
+                        // for the first turn.
+                        if (opts.onContextUsage) {
+                            response.getContextUsage().then(usage => {
+                                if (usage) {
+                                    logger.debug(`[claudeRemote] context usage via control (pre-warm): ${usage.totalTokens} / ${usage.maxTokens}`);
+                                    opts.onContextUsage!(usage);
+                                }
+                            }).catch(() => {/* ignore */});
+                        }
                     }
                 }
 
