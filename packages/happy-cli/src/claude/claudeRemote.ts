@@ -63,8 +63,6 @@ export async function claudeRemote(opts: {
     if (opts.sessionId && !claudeCheckSession(opts.sessionId, opts.path)) {
         startFrom = null;
     }
-    
-    // Extract --resume from claudeArgs if present (for first spawn)
     if (!startFrom && opts.claudeArgs) {
         for (let i = 0; i < opts.claudeArgs.length; i++) {
             if (opts.claudeArgs[i] === '--resume') {
@@ -101,6 +99,12 @@ export async function claudeRemote(opts: {
     const initial = await opts.nextMessage();
     if (!initial) { // No initial message - exit
         return;
+    }
+
+    // Inbox turns must not resume the main session — its history may be huge
+    // and contain many "No response requested." patterns that poison the model.
+    if (initial.mode.noResume) {
+        startFrom = null;
     }
 
     // Handle special commands
