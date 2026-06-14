@@ -405,6 +405,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             wasCompactTurn = false;
             turnSucceeded = false;
             try {
+                const isInboxPending = pending != null && !!(session.a2aInboxTurn?.isInboxTurnMeta((pending as any).meta));
                 const remoteResult = await claudeRemote({
                     sessionId: session.sessionId,
                     path: session.path,
@@ -612,6 +613,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         }
                         wasCompactTurn = false;
                     },
+                    skipContextFetch: isInboxPending,
                     onContextReady: (result) => {
                         // pendingExtras is only set for normal (non-inbox, non-error, non-compact) turns.
                         // If it's not set, onReady already closed the turn — nothing to do.
