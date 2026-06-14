@@ -55,7 +55,7 @@ export const MetadataSchema = z.object({
 	        currentTokens: z.number(),
 	        maxTokens: z.number(),
 	        pct: z.number(),
-	        model: z.string(),
+	        model: z.string().optional(),
 	        breakdown: z.object({
 	            systemPrompt: z.number(),
 	            systemTools: z.number(),
@@ -63,8 +63,8 @@ export const MetadataSchema = z.object({
 	            skills: z.number(),
 	            messages: z.number(),
 	            freeSpace: z.number(),
-	        }),
-	        fetchedAt: z.number(),
+	        }).optional(),
+	        fetchedAt: z.number().optional(),
 	    }).optional(),
 });
 
