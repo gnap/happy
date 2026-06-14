@@ -38,6 +38,8 @@ export async function claudeRemote(opts: {
     // Dynamic parameters
     nextMessage: () => Promise<{ message: string, mode: EnhancedMode } | null>,
     onReady: (result: SDKResultMessage) => void,
+    /** Called with raw markdown when the initial message is a /context local command. */
+    onContextOutput?: (contextMarkdown: string) => void,
     isAborted: (toolCallId: string) => boolean,
 
     // Callbacks
@@ -110,6 +112,16 @@ export async function claudeRemote(opts: {
         if (opts.onSessionReset) {
             opts.onSessionReset();
         }
+        return;
+    }
+
+    // /context is a local CLI command. When the caller provides onContextOutput,
+    // let the SDK process it (it emits system/local_command with the markdown),
+    // intercept that message in outputLoop and deliver it — never calling onReady.
+    const isContextCommand = specialCommand.type === 'compact' ? false
+        : initial.message.trim() === '/context';
+    if (isContextCommand && !opts.onContextOutput) {
+        // No handler — skip silently, don't send to model.
         return;
     }
 
@@ -215,6 +227,20 @@ export async function claudeRemote(opts: {
         try {
             for await (const message of response) {
                 logger.debugLargeJson(`[claudeRemote] Message ${message.type}`, message);
+
+                // /context local command: intercept system/local_command and deliver
+                // markdown via onContextOutput without letting it reach the App.
+                if (
+                    isContextCommand &&
+                    message.type === 'system' &&
+                    (message as any).subtype === 'local_command'
+                ) {
+                    const content: string = (message as any).content ?? '';
+                    logger.debug('[claudeRemote] /context local_command output intercepted');
+                    opts.onContextOutput?.(content);
+                    stopSignal.resolve();
+                    continue;
+                }
 
                 opts.onMessage(message);
 
