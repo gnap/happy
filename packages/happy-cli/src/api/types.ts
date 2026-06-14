@@ -296,8 +296,8 @@ export type Metadata = {
     currentTokens: number
     maxTokens: number
     pct: number
-    model: string
-    breakdown: {
+    model?: string
+    breakdown?: {
       systemPrompt: number
       systemTools: number
       customAgents: number
