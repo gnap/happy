@@ -607,7 +607,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 typeof result.result === 'string' ? result.result : '',
                             );
                             if (contextParsed) {
-                                const ctxUsage = buildContextUsagePayload(contextParsed);
+                                const ctxUsage = { ...buildContextUsagePayload(contextParsed), fetchedAt: Date.now() };
                                 const prevExtras = pendingTurnContext?.extras ?? {};
                                 // Persist so non-context turns can stamp it.
                                 (session.client as any)._lastContextUsage = ctxUsage;
