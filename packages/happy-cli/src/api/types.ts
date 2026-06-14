@@ -306,7 +306,7 @@ export type Metadata = {
       freeSpace: number
     }
     fetchedAt: number
-  }
+  } | null
 };
 
 export type A2AInboxMessage = {

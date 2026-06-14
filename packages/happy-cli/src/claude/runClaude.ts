@@ -261,7 +261,10 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         session.updateMetadata((currentMetadata) => ({
             ...currentMetadata,
             tools: sdkMetadata.tools,
-            slashCommands: sdkMetadata.slashCommands
+            slashCommands: sdkMetadata.slashCommands,
+            // Clear any stale contextUsage that may have been left by a previous
+            // bug (writing a non-conforming shape broke App metadata parsing).
+            contextUsage: null,
         })).then(() => {
             logger.debug('[start] Session metadata updated with SDK capabilities');
         }).catch((err: unknown) => {
