@@ -557,7 +557,13 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     onModelInit: (info) => {
                         session.onModelInit(info);
                     },
-                    onThinkingChange: session.onThinkingChange,
+                    onThinkingChange: (t) => {
+                        // Suppress thinking=true during /context mini-turns —
+                        // the App has no visible turn to anchor it to, so the
+                        // thinking timer would stay on after the fetch completes.
+                        if (t && contextFetchActive) return;
+                        session.onThinkingChange(t);
+                    },
                     claudeEnvVars: session.claudeEnvVars,
                     claudeEnvVarsGeneration: session.claudeEnvVarsGeneration,
                     getClaudeEnvVarsGeneration: () => session.claudeEnvVarsGeneration,
