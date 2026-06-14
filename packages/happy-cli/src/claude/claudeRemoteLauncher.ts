@@ -16,7 +16,6 @@ import { RawJSONLines } from "@/claude/types";
 import { OutgoingMessageQueue } from "./utils/OutgoingMessageQueue";
 import { getToolName } from "./utils/getToolName";
 import { buildClaudeTurnUsagePayload } from "./utils/claudeTurnUsage";
-import { parseContextUsageOutput, buildContextUsagePayload } from './utils/parseContextUsage';
 import { createEnvelope } from '@slopus/happy-wire';
 
 interface PermissionsField {
@@ -368,14 +367,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         let wasInboxTurn = false;
         let wasCompactTurn = false;
         let turnSucceeded = false;
-        /** Extras from the real turn, waiting for /context output before closing. */
-        let pendingExtras: Record<string, unknown> | undefined;
-        /** Breakdown from the last /context call; carried forward across turns. */
-        let lastContextBreakdown: ReturnType<typeof buildContextUsagePayload> | undefined;
-        /** Number of non-inbox, non-compact turns since last /context refresh. */
-        let turnsSinceContextRefresh = 0;
-        /** Refresh breakdown every N normal turns. */
-        const CONTEXT_REFRESH_INTERVAL = 5;
+        /** Last accurate contextUsage from get_context_usage control request. */
+        let lastContextUsage: { currentTokens: number; maxTokens: number; pct: number; fetchedAt: number } | undefined;
 
         // Track session ID to detect when it actually changes
         // This prevents context loss when mode changes (permission mode, model, etc.)
@@ -411,9 +404,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             wasInboxTurn = false;
             wasCompactTurn = false;
             turnSucceeded = false;
-            pendingExtras = undefined;
             try {
-                const isContextFetchPending = pending != null && !!(pending as any).meta?.contextFetch;
                 const remoteResult = await claudeRemote({
                     sessionId: session.sessionId,
                     path: session.path,
@@ -572,6 +563,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         if (usage) extras.usage = usage;
                         if (typeof result.total_cost_usd === 'number') extras.costUsd = result.total_cost_usd;
                         if (typeof result.duration_ms === 'number') extras.durationMs = result.duration_ms;
+                        // Attach last known contextUsage (will be updated by onContextUsage shortly after).
+                        if (lastContextUsage) extras.contextUsage = lastContextUsage as any;
 
                         if (isError) {
                             session.client.closeClaudeSessionTurn('failed');
@@ -579,29 +572,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 ? result.result.trim()
                                 : 'Claude exited with an error';
                             session.client.sendSessionEvent({ type: 'message', message: msg });
-                        } else if (wasInboxTurn || wasCompactTurn) {
-                            session.client.closeClaudeSessionTurn('completed', extras);
                         } else {
-                            // Normal turn: decide whether to run /context now or use fast path.
-                            // Run /context on first turn (no baseline yet) or every N turns.
-                            const needsContextRefresh = !lastContextBreakdown || turnsSinceContextRefresh >= CONTEXT_REFRESH_INTERVAL;
-                            if (needsContextRefresh) {
-                                pendingExtras = extras;
-                                pending = { message: '/context', mode: mode!, meta: { contextFetch: true } };
-                            } else {
-                                // Fast path: update currentTokens from usage estimate, keep last breakdown.
-                                if (usage?.context_size != null && usage.context_window_tokens != null) {
-                                    extras.contextUsage = {
-                                        ...lastContextBreakdown,
-                                        currentTokens: usage.context_size,
-                                        maxTokens: usage.context_window_tokens,
-                                        pct: Math.round((usage.context_size / usage.context_window_tokens) * 100),
-                                        fetchedAt: Date.now(),
-                                    };
-                                }
-                                turnsSinceContextRefresh++;
-                                session.client.closeClaudeSessionTurn('completed', extras);
-                            }
+                            session.client.closeClaudeSessionTurn('completed', extras);
                         }
                         if (session.claudeTurnActiveRef) {
                             session.claudeTurnActiveRef.current = false;
@@ -617,42 +589,30 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             turnSucceeded = false;
                         }
                         wasCompactTurn = false;
-                        // For inbox/error/fast-path turns send "It's ready!" immediately.
-                        // For context-refresh turns it's deferred to onContextOutput.
-                        const sentToContextRefresh = !isError && !wasInboxTurn && !wasCompactTurn
-                            && pending != null && (pending as any).meta?.contextFetch;
-                        if (!sentToContextRefresh) {
-                            if (!pending && session.queue.size() === 0) {
-                                session.api.push().sendToAllDevices(
-                                    'It\'s ready!',
-                                    `Claude is waiting for your command`,
-                                    { sessionId: session.client.sessionId }
-                                );
-                            }
-                        }
-                    },
-                    onContextOutput: isContextFetchPending ? (contextMarkdown) => {
-                        const extras = pendingExtras ?? {};
-                        pendingExtras = undefined;
-                        const parsed = parseContextUsageOutput(contextMarkdown);
-                        if (parsed) {
-                            const ctxUsage = { ...buildContextUsagePayload(parsed), fetchedAt: Date.now() };
-                            extras.contextUsage = ctxUsage;
-                            lastContextBreakdown = ctxUsage;
-                            turnsSinceContextRefresh = 0;
-                            logger.debug(
-                                `[remote]: /context resolved: ${parsed.currentTokens} / ${parsed.maxTokens} (${Math.round((parsed.currentTokens / parsed.maxTokens) * 100)}%)`,
-                            );
-                        }
-                        session.client.closeClaudeSessionTurn('completed', extras);
                         if (!pending && session.queue.size() === 0) {
                             session.api.push().sendToAllDevices(
                                 'It\'s ready!',
                                 `Claude is waiting for your command`,
-                                { sessionId: session.client.sessionId },
+                                { sessionId: session.client.sessionId }
                             );
                         }
-                    } : undefined,
+                    },
+                    onContextUsage: (usage) => {
+                        const model = buildClaudeTurnUsagePayload(/* result not available here */ { usage: undefined, modelUsage: undefined, num_turns: 1 } as any)?.model;
+                        lastContextUsage = {
+                            currentTokens: usage.totalTokens,
+                            maxTokens: usage.maxTokens,
+                            pct: Math.round((usage.totalTokens / usage.maxTokens) * 100),
+                            fetchedAt: Date.now(),
+                        };
+                        logger.debug(`[remote]: context via control_request: ${usage.totalTokens} / ${usage.maxTokens} (${Math.round((usage.totalTokens / usage.maxTokens) * 100)}%)`);
+                        // Push updated contextUsage to session metadata so App can read it.
+                        session.client.updateMetadata((m) => ({
+                            ...m,
+                            contextUsage: lastContextUsage as any,
+                        })).catch(() => {});
+                    },
+                    onContextOutput: undefined,
                     signal: abortController.signal,
                 });
                 

@@ -145,6 +145,26 @@ export class Query implements AsyncIterableIterator<SDKMessage> {
     }
 
     /**
+     * Request current context usage from the running Claude process via control_request.
+     * Returns totalTokens and maxTokens without spawning a new process or loading JSONL.
+     * Returns null if stdin is unavailable or the process doesn't support it.
+     */
+    async getContextUsage(): Promise<{ totalTokens: number; maxTokens: number } | null> {
+        if (!this.childStdin) return null
+        try {
+            const response = await this.request({ subtype: 'get_context_usage' }, this.childStdin)
+            const data = (response as any).response
+            if (!data) return null
+            const totalTokens: number = (data.totalTokens as number) ?? 0
+            const rawMaxTokens: number = (data.rawMaxTokens as number) ?? 0
+            if (!totalTokens || !rawMaxTokens) return null
+            return { totalTokens, maxTokens: rawMaxTokens }
+        } catch {
+            return null
+        }
+    }
+
+    /**
      * Send control request to Claude process
      */
     private request(request: ControlRequest, childStdin: Writable): Promise<SDKControlResponse['response']> {

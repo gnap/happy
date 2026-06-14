@@ -38,6 +38,8 @@ export async function claudeRemote(opts: {
     // Dynamic parameters
     nextMessage: () => Promise<{ message: string, mode: EnhancedMode } | null>,
     onReady: (result: SDKResultMessage) => void,
+    /** Called with accurate context size from the running process after each normal turn. */
+    onContextUsage?: (usage: { totalTokens: number; maxTokens: number }) => void,
     /** Called with raw markdown when the initial message is a /context local command. */
     onContextOutput?: (contextMarkdown: string) => void,
     isAborted: (toolCallId: string) => boolean,
@@ -303,6 +305,18 @@ export async function claudeRemote(opts: {
                         isCompactCommand = false;
                     }
                     opts.onReady(message as SDKResultMessage);
+
+                    // Fetch accurate context size from the live process via control_request.
+                    // This is zero-overhead: no spawn, no JSONL load, just a stdin/stdout ping.
+                    if (opts.onContextUsage) {
+                        response.getContextUsage().then(usage => {
+                            if (usage) {
+                                logger.debug(`[claudeRemote] context usage via control: ${usage.totalTokens} / ${usage.maxTokens}`);
+                                opts.onContextUsage!(usage);
+                            }
+                        }).catch(() => {/* ignore */});
+                    }
+
                     // Signal inputLoop to exit so claudeRemote() returns
                     // and the outer launcher loop can peek inbox / pick
                     // up the next queued message.
