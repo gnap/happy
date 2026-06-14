@@ -298,6 +298,9 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             if (msg.usage) {
                 processUsageData(state, msg.usage, msg.createdAt);
             }
+            if (msg.contextUsage) {
+                processContextUsageData(state, msg.contextUsage, msg.createdAt);
+            }
             continue;
         }
 
