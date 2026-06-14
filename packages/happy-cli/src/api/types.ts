@@ -296,8 +296,8 @@ export type Metadata = {
     currentTokens: number
     maxTokens: number
     pct: number
-    model: string
-    breakdown: {
+    model?: string
+    breakdown?: {
       systemPrompt: number
       systemTools: number
       customAgents: number
@@ -306,7 +306,7 @@ export type Metadata = {
       freeSpace: number
     }
     fetchedAt: number
-  }
+  } | null
 };
 
 export type A2AInboxMessage = {
@@ -398,7 +398,7 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
     ...(thoughtLevels !== undefined ? { thoughtLevels } : {}),
     ...(currentThoughtLevelCode !== undefined ? { currentThoughtLevelCode } : {}),
     ...(profileId !== undefined ? { profileId } : {}),
-    ...(contextUsage !== undefined ? { contextUsage } : {}),
+    ...(contextUsage != null ? { contextUsage } : {}),
     path,
     host,
     ...(version !== undefined ? { version } : {}),

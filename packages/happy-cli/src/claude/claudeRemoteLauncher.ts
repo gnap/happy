@@ -17,7 +17,6 @@ import { OutgoingMessageQueue } from "./utils/OutgoingMessageQueue";
 import { getToolName } from "./utils/getToolName";
 import { buildClaudeTurnUsagePayload } from "./utils/claudeTurnUsage";
 import { createEnvelope } from '@slopus/happy-wire';
-import { parseContextUsageOutput, buildContextUsagePayload } from './utils/parseContextUsage';
 
 interface PermissionsField {
     date: number;
@@ -131,13 +130,9 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     const permissionHandler = new PermissionHandler(session);
     session.syncPermissionMode = (mode) => permissionHandler.handleModeChange(mode);
 
-    // True while processing a /context fetch turn — suppress all output to the App.
-    let suppressContextOutput = false;
-
     // Create outgoing message queue
     const messageQueue = new OutgoingMessageQueue(
         (logMessage) => {
-            if (suppressContextOutput) return;
             session.client.sendClaudeSessionMessage(logMessage);
         }
     );
@@ -164,6 +159,18 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     let pendingPopEcho: { echoedMessageId: string; text: string } | null = null;
 
     function onMessage(message: SDKMessage) {
+        // Filter out <synthetic> assistant messages replayed from session history on resume.
+        // These are historical messages re-streamed by the SDK when --resume is used.
+        // Sending them to the App would duplicate conversation history, and /context
+        // results from previous runs would appear as new assistant messages.
+        if (
+            message.type === 'assistant' &&
+            (message as SDKAssistantMessage).message != null &&
+            ((message as SDKAssistantMessage).message as any).model === '<synthetic>'
+        ) {
+            return;
+        }
+
         // Send pop echo on first SDK message — Claude has started processing.
         if (pendingPopEcho) {
             const p = pendingPopEcho;
@@ -258,9 +265,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
 
         const logMessage = sdkToLogConverter.convert(msg);
         if (logMessage) {
-            // Suppress all output during /context fetch mini-turns so only the
-            // parsed contextUsage data reaches the App.
-            if (suppressContextOutput) return;
             // Suppress Skill-injected user messages
             if (pendingSkillSuppress && logMessage.type === 'user') {
                 logger.debug('[remote] Suppressing Skill user message, text: ' + JSON.stringify(logMessage.message?.content).slice(0,100));
@@ -363,8 +367,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         let wasInboxTurn = false;
         let wasCompactTurn = false;
         let turnSucceeded = false;
-        /** Carries the previous turn's extras across the /context fetch mini-turn. */
-        let pendingTurnContext: { extras: Record<string, unknown>; meta: Record<string, unknown> } | undefined;
+        /** Last accurate contextUsage from get_context_usage control request (includes breakdown). */
+        let lastContextUsage: { currentTokens: number; maxTokens: number; pct: number; fetchedAt: number; breakdown?: { systemPrompt: number; systemTools: number; customAgents: number; skills: number; messages: number; freeSpace: number } } | undefined;
 
         // Track session ID to detect when it actually changes
         // This prevents context loss when mode changes (permission mode, model, etc.)
@@ -416,15 +420,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         if (pending) {
                             let p = pending;
                             pending = null;
-                            // Suppress output from /context fetch mini-turns.
-                            // Only toggle ON for context; let the flag ride through
-                            // the queue flush (which runs on setTimeout(0)) and clear
-                            // it on the next non-context message.
-                            if ((p.meta as any)?.contextFetch) {
-                                suppressContextOutput = true;
-                            } else {
-                                suppressContextOutput = false;
-                            }
                             permissionHandler.handleModeChange(p.mode.permissionMode);
                             // A deferred inbox turn needs the same setup that the inline
                             // inbox path does: setInboxTurnActive + prepareInboxTurnPrompt
@@ -451,9 +446,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         }
 
                         let msg = await session.queue.waitForMessagesAndGetAsString(controller.signal);
-                        // Any message from the real queue (not a deferred pending context
-                        // fetch) means the suppress flag should be off.
-                        suppressContextOutput = false;
 
                         // Echo the app's messageId back via session protocol so the App
                         // can clear its outbox. The envelope id becomes the server localId,
@@ -537,7 +529,9 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     onModelInit: (info) => {
                         session.onModelInit(info);
                     },
-                    onThinkingChange: session.onThinkingChange,
+                    onThinkingChange: (t) => {
+                        session.onThinkingChange(t);
+                    },
                     claudeEnvVars: session.claudeEnvVars,
                     claudeEnvVarsGeneration: session.claudeEnvVarsGeneration,
                     getClaudeEnvVarsGeneration: () => session.claudeEnvVarsGeneration,
@@ -567,50 +561,15 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         const usage = buildClaudeTurnUsagePayload(result);
                         const extras: Record<string, unknown> = {};
                         if (usage) extras.usage = usage;
-                        // Stale /context snapshot for non-context turns (before the next
-                        // /context fetch resolves). Updated after context parsing below.
-                        const lastCtx = (session.client as any)._lastContextUsage;
-                        if (lastCtx) extras.contextUsage = lastCtx;
                         if (typeof result.total_cost_usd === 'number') extras.costUsd = result.total_cost_usd;
                         if (typeof result.duration_ms === 'number') extras.durationMs = result.duration_ms;
-
-                        // Context fetch response: parse and update metadata.
-                        const isContextFetch = !!(pendingTurnContext?.meta as any)?.contextFetch;
-                        if (isContextFetch && !isError) {
-                            const contextParsed = parseContextUsageOutput(
-                                typeof result.result === 'string' ? result.result : '',
-                            );
-                            if (contextParsed) {
-                                const ctxUsage = buildContextUsagePayload(contextParsed);
-                                const prevExtras = pendingTurnContext?.extras ?? {};
-                                // Persist so non-context turns can stamp it.
-                                (session.client as any)._lastContextUsage = ctxUsage;
-                                // contextUsage is a top-level property alongside costUsd/durationMs.
-                                extras.contextUsage = ctxUsage;
-                                // Carry forward the previous turn's usage (API data).
-                                if (prevExtras.usage) extras.usage = prevExtras.usage;
-                                logger.debug(
-                                    `[remote]: /context resolved: ${contextParsed.currentTokens} / ${contextParsed.maxTokens} tokens (${Math.round((contextParsed.currentTokens / contextParsed.maxTokens) * 100)}%)`,
-                                );
-                            }
-                            // Consume context fetch, close the PREVIOUS turn, then notify.
-                            pendingTurnContext = undefined;
-                            session.client.closeClaudeSessionTurn('completed', extras);
-                            session.api.push().sendToAllDevices(
-                                'It\'s ready!',
-                                `Claude is waiting for your command`,
-                                { sessionId: session.client.sessionId },
-                            );
-                            return;
-                        }
+                        // Attach contextUsage — use last known accurate value from get_context_usage.
+                        // Do not fall back to usage.context_size here: that value is an estimate
+                        // from cumulative cacheRead tokens which can exceed the context window for
+                        // long autoloop sessions. The control_request result will follow shortly.
+                        if (lastContextUsage) extras.contextUsage = lastContextUsage as any;
 
                         if (isError) {
-                            // If context fetch failed, still close the previous turn.
-                            if (pendingTurnContext) {
-                                session.client.closeClaudeSessionTurn('completed', pendingTurnContext.extras ?? {});
-                                pendingTurnContext = undefined;
-                                return;
-                            }
                             session.client.closeClaudeSessionTurn('failed');
                             const msg = typeof result.result === 'string' && result.result.trim().length > 0
                                 ? result.result.trim()
@@ -619,39 +578,21 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         } else {
                             session.client.closeClaudeSessionTurn('completed', extras);
                         }
-                        // Per-turn release (Cursor clears currentTurnIdRef before peekA2AInboxInLoop).
-                        // claudeTurnActiveRef stayed true across multi-turn claudeRemote() calls, which
-                        // blocked scheduleA2ATurnIfNeeded in onTurnEnd until process exit.
                         if (session.claudeTurnActiveRef) {
                             session.claudeTurnActiveRef.current = false;
                         }
                         if (wasInboxTurn) {
                             session.a2aInboxTurn?.setInboxTurnActive(false);
-                            // claudeRemote()'s for-await loop keeps iterating across turns, so the
-                            // launcher's finally-block onTurnEnd never runs between back-to-back
-                            // inbox turns. Settle the inbox turn here so backoff can arm and
-                            // unconsumed inbox messages don't tight-loop.
                             session.a2aInboxTurn?.onTurnEnd({
                                 succeeded: !isError,
                                 cancelled: false,
                                 wasInboxTurn: true,
                             });
-                            // Already accounted for; prevent the finally block from double-firing.
                             wasInboxTurn = false;
                             turnSucceeded = false;
                         }
-                        // Queue /context for the next turn so we get accurate context usage
-                        // before "It's ready". Only for successful non-inbox, non-compact turns.
-                        // Compact forks the session; the old extras are no longer valid and
-                        // the context fetch would leak its output into the App.
-                        if (!isError && !wasInboxTurn && !wasCompactTurn) {
-                            pendingTurnContext = { extras, meta: { contextFetch: true } };
-                            pending = { message: '/context', mode: mode!, meta: { contextFetch: true } };
-                            wasCompactTurn = false;
-                            return;
-                        }
                         wasCompactTurn = false;
-                        if (!isError && !pending && session.queue.size() === 0) {
+                        if (!pending && session.queue.size() === 0) {
                             session.api.push().sendToAllDevices(
                                 'It\'s ready!',
                                 `Claude is waiting for your command`,
@@ -659,6 +600,17 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             );
                         }
                     },
+                    onContextUsage: (usage) => {
+                        lastContextUsage = {
+                            currentTokens: usage.totalTokens,
+                            maxTokens: usage.maxTokens,
+                            pct: Math.round((usage.totalTokens / usage.maxTokens) * 100),
+                            fetchedAt: Date.now(),
+                            ...(usage.breakdown ? { breakdown: usage.breakdown } : {}),
+                        };
+                        logger.debug(`[remote]: context via control_request: ${usage.totalTokens} / ${usage.maxTokens} (${Math.round((usage.totalTokens / usage.maxTokens) * 100)}%)`);
+                    },
+                    onContextOutput: undefined,
                     signal: abortController.signal,
                 });
                 

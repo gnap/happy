@@ -247,6 +247,10 @@ export class ApiSessionClient extends EventEmitter {
     /** Resolves when the WebSocket first connects; used by updateMetadata to wait for initial connection. */
     private socketConnectedPromise: Promise<void>;
     private socketConnectedResolve: (() => void) | undefined;
+    /** True once we have received at least one metadata push from the server after connecting.
+     *  Static sync is deferred until then so we don't overwrite server-side fields with a
+     *  snapshot that was captured before the server's authoritative metadata arrived. */
+    private serverMetadataReceived = false;
     private routedMessageIds = new Set<string>();
     private routedA2ASessionEnvelopeIds = new Set<string>();
     /** Trigger ids already drained; blocks fetch/reconnect replay from re-opening the inbox. */
@@ -551,13 +555,19 @@ export class ApiSessionClient extends EventEmitter {
             }).catch((error) => {
                 logger.debug('[API] Failed to sync CLI version/git-info on connect:', error);
             });
-            if (this.requestedMetadata && shouldSyncSessionMetadata(this.metadata, this.requestedMetadata)) {
-                logger.debug('[API] Session metadata changed, syncing static metadata to server');
-                this.updateMetadata((currentMetadata) => buildSyncedSessionMetadata(currentMetadata, this.requestedMetadata as Metadata)).catch((error) => {
-                    logger.debug('[API] Failed to sync session metadata on connect:', error);
-                });
-            }
+            // Static sync (requestedMetadata) is deferred to after the first
+            // server metadata push so we don't overwrite App-side fields with
+            // a snapshot captured before the authoritative metadata arrived.
+            this.serverMetadataReceived = false;
             this.receiveSync.invalidate();
+            // Fallback: if no metadata push arrives within 3 s (e.g. brand-new session),
+            // run the static sync anyway so CLI version/git info reaches the server.
+            setTimeout(() => {
+                if (!this.serverMetadataReceived && this.requestedMetadata && shouldSyncSessionMetadata(this.metadata, this.requestedMetadata)) {
+                    logger.debug('[API] Session metadata fallback sync (no server push received)');
+                    this.updateMetadata((currentMetadata) => buildSyncedSessionMetadata(currentMetadata, this.requestedMetadata as Metadata)).catch(() => {});
+                }
+            }, 3000);
             this.startReceiveHealthPoll();
             if (this.a2aInboxNeedsServerUnreadSync) {
                 this.a2aInboxNeedsServerUnreadSync = false;
@@ -663,6 +673,17 @@ export class ApiSessionClient extends EventEmitter {
                         this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
                         this.metadataVersion = data.body.metadata.version;
                         this.emit('metadata-updated', this.metadata);
+                        // First metadata push after (re)connect: now safe to sync static fields
+                        // without clobbering App-side fields that arrived in this push.
+                        if (!this.serverMetadataReceived) {
+                            this.serverMetadataReceived = true;
+                            if (this.requestedMetadata && shouldSyncSessionMetadata(this.metadata, this.requestedMetadata)) {
+                                logger.debug('[API] Session metadata changed, syncing static metadata to server');
+                                this.updateMetadata((currentMetadata) => buildSyncedSessionMetadata(currentMetadata, this.requestedMetadata as Metadata)).catch((error) => {
+                                    logger.debug('[API] Failed to sync session metadata on connect:', error);
+                                });
+                            }
+                        }
                     }
                     if (data.body.agentState && data.body.agentState.version > this.agentStateVersion) {
                         this.agentState = data.body.agentState.value ? decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.agentState.value)) : null;
