@@ -16,7 +16,6 @@ import { RawJSONLines } from "@/claude/types";
 import { OutgoingMessageQueue } from "./utils/OutgoingMessageQueue";
 import { getToolName } from "./utils/getToolName";
 import { buildClaudeTurnUsagePayload } from "./utils/claudeTurnUsage";
-import { parseContextUsageOutput, buildContextUsagePayload } from './utils/parseContextUsage';
 import { createEnvelope } from '@slopus/happy-wire';
 
 interface PermissionsField {
@@ -368,8 +367,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         let wasInboxTurn = false;
         let wasCompactTurn = false;
         let turnSucceeded = false;
-        /** Extras from onReady, held until onContextOutput delivers accurate token count. */
-        let pendingExtras: Record<string, unknown> | undefined;
 
         // Track session ID to detect when it actually changes
         // This prevents context loss when mode changes (permission mode, model, etc.)
@@ -406,8 +403,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             wasCompactTurn = false;
             turnSucceeded = false;
             try {
-                const isInboxPending = pending != null && !!(session.a2aInboxTurn?.isInboxTurnMeta((pending as any).meta));
-                pendingExtras = undefined;
                 const remoteResult = await claudeRemote({
                     sessionId: session.sessionId,
                     path: session.path,
@@ -567,19 +562,33 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         if (typeof result.total_cost_usd === 'number') extras.costUsd = result.total_cost_usd;
                         if (typeof result.duration_ms === 'number') extras.durationMs = result.duration_ms;
 
+                        // Build contextUsage from usage — modelUsage (the per-model rollup)
+                        // is the only reliable source of context_size and context_window.
+                        // context_size is already back-calculated via cacheRead/num_turns
+                        // in buildClaudeTurnUsagePayload to approximate a single API call.
+                        if (!isError && usage?.context_size != null && usage.context_window_tokens != null) {
+                            const currentTokens = usage.context_size;
+                            const maxTokens = usage.context_window_tokens;
+                            extras.contextUsage = {
+                                currentTokens,
+                                maxTokens,
+                                pct: Math.round((currentTokens / maxTokens) * 100),
+                                model: usage.model,
+                                fetchedAt: Date.now(),
+                            };
+                            logger.debug(
+                                `[remote]: context usage from modelUsage: ${currentTokens} / ${maxTokens} (${Math.round((currentTokens / maxTokens) * 100)}%)`,
+                            );
+                        }
+
                         if (isError) {
                             session.client.closeClaudeSessionTurn('failed');
                             const msg = typeof result.result === 'string' && result.result.trim().length > 0
                                 ? result.result.trim()
                                 : 'Claude exited with an error';
                             session.client.sendSessionEvent({ type: 'message', message: msg });
-                        } else if (wasInboxTurn) {
-                            // Inbox turns skip /context — close immediately.
-                            session.client.closeClaudeSessionTurn('completed', extras);
                         } else {
-                            // Normal turns: defer close until onContextOutput has
-                            // the accurate token count to attach.
-                            pendingExtras = extras;
+                            session.client.closeClaudeSessionTurn('completed', extras);
                         }
                         if (session.claudeTurnActiveRef) {
                             session.claudeTurnActiveRef.current = false;
@@ -593,40 +602,13 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             });
                             wasInboxTurn = false;
                             turnSucceeded = false;
-                            if (!pending && session.queue.size() === 0) {
-                                session.api.push().sendToAllDevices(
-                                    'It\'s ready!',
-                                    `Claude is waiting for your command`,
-                                    { sessionId: session.client.sessionId },
-                                );
-                            }
-                        } else if (isError) {
-                            if (!pending && session.queue.size() === 0) {
-                                session.api.push().sendToAllDevices(
-                                    'It\'s ready!',
-                                    `Claude is waiting for your command`,
-                                    { sessionId: session.client.sessionId },
-                                );
-                            }
                         }
                         wasCompactTurn = false;
-                    },
-                    onContextOutput: isInboxPending ? undefined : (contextMarkdown) => {
-                        const extras = pendingExtras ?? {};
-                        pendingExtras = undefined;
-                        const parsed = parseContextUsageOutput(contextMarkdown);
-                        if (parsed) {
-                            extras.contextUsage = { ...buildContextUsagePayload(parsed), fetchedAt: Date.now() };
-                            logger.debug(
-                                `[remote]: /context resolved: ${parsed.currentTokens} / ${parsed.maxTokens} tokens (${Math.round((parsed.currentTokens / parsed.maxTokens) * 100)}%)`,
-                            );
-                        }
-                        session.client.closeClaudeSessionTurn('completed', extras);
-                        if (!pending && session.queue.size() === 0) {
+                        if (!isError && !pending && session.queue.size() === 0) {
                             session.api.push().sendToAllDevices(
                                 'It\'s ready!',
                                 `Claude is waiting for your command`,
-                                { sessionId: session.client.sessionId },
+                                { sessionId: session.client.sessionId }
                             );
                         }
                     },
