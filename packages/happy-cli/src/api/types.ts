@@ -398,7 +398,7 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
     ...(thoughtLevels !== undefined ? { thoughtLevels } : {}),
     ...(currentThoughtLevelCode !== undefined ? { currentThoughtLevelCode } : {}),
     ...(profileId !== undefined ? { profileId } : {}),
-    ...(contextUsage !== undefined ? { contextUsage } : {}),
+    ...(contextUsage != null ? { contextUsage } : {}),
     path,
     host,
     ...(version !== undefined ? { version } : {}),
