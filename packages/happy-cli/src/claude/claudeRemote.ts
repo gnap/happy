@@ -38,6 +38,8 @@ export async function claudeRemote(opts: {
     // Dynamic parameters
     nextMessage: () => Promise<{ message: string, mode: EnhancedMode } | null>,
     onReady: (result: SDKResultMessage) => void,
+    /** Called with the raw markdown string from a /context local command response. */
+    onContextOutput?: (contextMarkdown: string) => void,
     isAborted: (toolCallId: string) => boolean,
 
     // Callbacks
@@ -212,11 +214,31 @@ export async function claudeRemote(opts: {
     // input-side actions. Normal results call onReady and continue;
     // the input loop handles fetching the next message.
     async function outputLoop(): Promise<void> {
+        let awaitingContextResult = false;
         try {
             for await (const message of response) {
                 logger.debugLargeJson(`[claudeRemote] Message ${message.type}`, message);
 
-                opts.onMessage(message);
+                // When we've pushed /context and are waiting for its output,
+                // suppress all streaming messages from reaching the App.
+                if (!awaitingContextResult) {
+                    opts.onMessage(message);
+                }
+
+                // /context local command response — fired by the SDK when the user
+                // message is a slash command. Capture and deliver to onContextOutput.
+                if (
+                    awaitingContextResult &&
+                    message.type === 'system' &&
+                    (message as any).subtype === 'local_command'
+                ) {
+                    const content: string = (message as any).content ?? '';
+                    logger.debug('[claudeRemote] /context local_command output received');
+                    awaitingContextResult = false;
+                    opts.onContextOutput?.(content);
+                    stopSignal.resolve();
+                    continue;
+                }
 
                 // System init
                 if (message.type === 'system' && message.subtype === 'init') {
@@ -277,6 +299,20 @@ export async function claudeRemote(opts: {
                         isCompactCommand = false;
                     }
                     opts.onReady(message as SDKResultMessage);
+
+                    // If caller wants context data, push /context as the next user
+                    // message. The SDK treats it as a local slash command and emits a
+                    // system/local_command message (not a result) — caught above.
+                    if (opts.onContextOutput && !messages.done) {
+                        logger.debug('[claudeRemote] Pushing /context to get accurate token count');
+                        awaitingContextResult = true;
+                        messages.push({
+                            type: 'user',
+                            message: { role: 'user', content: '/context' },
+                        });
+                        continue;
+                    }
+
                     // Signal inputLoop to exit so claudeRemote() returns
                     // and the outer launcher loop can peek inbox / pick
                     // up the next queued message.
