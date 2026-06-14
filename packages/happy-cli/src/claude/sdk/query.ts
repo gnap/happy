@@ -197,7 +197,14 @@ export class Query implements AsyncIterableIterator<SDKMessage> {
         }
 
         return new Promise((resolve, reject) => {
+            const timeoutMs = 120_000
+            const timer = setTimeout(() => {
+                this.pendingControlResponses.delete(requestId)
+                reject(new Error(`control_request timed out after ${timeoutMs}ms`))
+            }, timeoutMs)
+
             this.pendingControlResponses.set(requestId, (response) => {
+                clearTimeout(timer)
                 if (response.subtype === 'success') {
                     resolve(response)
                 } else {
