@@ -633,6 +633,12 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 suppressContextOutput = false;
                                 session.client.closeClaudeSessionTurn('completed', pendingTurnContext.extras ?? {});
                                 pendingTurnContext = undefined;
+                                // Still notify the App so it exits thinking state.
+                                session.api.push().sendToAllDevices(
+                                    'It\'s ready!',
+                                    `Claude is waiting for your command`,
+                                    { sessionId: session.client.sessionId },
+                                );
                                 return;
                             }
                             session.client.closeClaudeSessionTurn('failed');
