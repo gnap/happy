@@ -563,19 +563,11 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         if (usage) extras.usage = usage;
                         if (typeof result.total_cost_usd === 'number') extras.costUsd = result.total_cost_usd;
                         if (typeof result.duration_ms === 'number') extras.durationMs = result.duration_ms;
-                        // Attach contextUsage — use last known accurate value or fall back to
-                        // usage estimate so turn-end always carries the required field.
-                        const ctxForTurnEnd = lastContextUsage ?? (
-                            usage?.context_size != null && usage.context_window_tokens != null
-                                ? {
-                                    currentTokens: usage.context_size,
-                                    maxTokens: usage.context_window_tokens,
-                                    pct: Math.round((usage.context_size / usage.context_window_tokens) * 100),
-                                    fetchedAt: Date.now(),
-                                }
-                                : undefined
-                        );
-                        if (ctxForTurnEnd) extras.contextUsage = ctxForTurnEnd as any;
+                        // Attach contextUsage — use last known accurate value from get_context_usage.
+                        // Do not fall back to usage.context_size here: that value is an estimate
+                        // from cumulative cacheRead tokens which can exceed the context window for
+                        // long autoloop sessions. The control_request result will follow shortly.
+                        if (lastContextUsage) extras.contextUsage = lastContextUsage as any;
 
                         if (isError) {
                             session.client.closeClaudeSessionTurn('failed');
