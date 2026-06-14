@@ -562,12 +562,20 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         if (typeof result.total_cost_usd === 'number') extras.costUsd = result.total_cost_usd;
                         if (typeof result.duration_ms === 'number') extras.durationMs = result.duration_ms;
 
-                        // Build contextUsage directly from the turn's API usage —
-                        // input_tokens + cache_creation + cache_read is the same value
-                        // /context uses for its total (no breakdown available).
-                        if (!isError && usage?.context_size != null && usage.context_window_tokens != null) {
-                            const currentTokens = usage.context_size;
+                        // Build contextUsage from the turn's API usage.
+                        // Use raw usage fields (input + cache_creation + cache_read) which
+                        // is the same formula /context uses for its total. Cap at the
+                        // context window to avoid > 100% display when cumulative values
+                        // are inflated by multi-step turns.
+                        if (!isError && usage?.context_window_tokens != null) {
+                            const rawInput = result.usage?.input_tokens ?? 0;
+                            const rawCacheCreate = result.usage?.cache_creation_input_tokens ?? 0;
+                            const rawCacheRead = result.usage?.cache_read_input_tokens ?? 0;
                             const maxTokens = usage.context_window_tokens;
+                            const currentTokens = Math.min(
+                                rawInput + rawCacheCreate + rawCacheRead,
+                                maxTokens,
+                            );
                             extras.contextUsage = {
                                 currentTokens,
                                 maxTokens,
