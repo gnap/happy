@@ -168,6 +168,18 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     let pendingPopEcho: { echoedMessageId: string; text: string } | null = null;
 
     function onMessage(message: SDKMessage) {
+        // Filter out <synthetic> assistant messages replayed from session history on resume.
+        // These are historical messages re-streamed by the SDK when --resume is used.
+        // Sending them to the App would duplicate conversation history, and /context
+        // results from previous runs would appear as new assistant messages.
+        if (
+            message.type === 'assistant' &&
+            (message as SDKAssistantMessage).message != null &&
+            ((message as SDKAssistantMessage).message as any).model === '<synthetic>'
+        ) {
+            return;
+        }
+
         // Send pop echo on first SDK message — Claude has started processing.
         if (pendingPopEcho) {
             const p = pendingPopEcho;
