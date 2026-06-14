@@ -367,8 +367,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         let wasInboxTurn = false;
         let wasCompactTurn = false;
         let turnSucceeded = false;
-        /** Last accurate contextUsage from get_context_usage control request. */
-        let lastContextUsage: { currentTokens: number; maxTokens: number; pct: number; fetchedAt: number } | undefined;
+        /** Last accurate contextUsage from get_context_usage control request (includes breakdown). */
+        let lastContextUsage: { currentTokens: number; maxTokens: number; pct: number; fetchedAt: number; breakdown?: { systemPrompt: number; systemTools: number; customAgents: number; skills: number; messages: number; freeSpace: number } } | undefined;
 
         // Track session ID to detect when it actually changes
         // This prevents context loss when mode changes (permission mode, model, etc.)
@@ -614,6 +614,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             maxTokens: usage.maxTokens,
                             pct: Math.round((usage.totalTokens / usage.maxTokens) * 100),
                             fetchedAt: Date.now(),
+                            ...(usage.breakdown ? { breakdown: usage.breakdown } : {}),
                         };
                         logger.debug(`[remote]: context via control_request: ${usage.totalTokens} / ${usage.maxTokens} (${Math.round((usage.totalTokens / usage.maxTokens) * 100)}%)`);
                     },
