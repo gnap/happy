@@ -126,7 +126,7 @@ export function createA2AInboxTurnController<TMode>(options: {
       return;
     }
     logger.debug(`[${logTag}] A2A inbox peek: scheduling turn for ${unreadCount} unread message(s)`);
-    messageQueue.pushIsolated('', { ...getMode(), noResume: true }, A2A_INBOX_TURN_META);
+    messageQueue.pushIsolated('', { ...getMode() }, A2A_INBOX_TURN_META);
   };
 
   return {

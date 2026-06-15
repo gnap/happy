@@ -618,6 +618,25 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     },
                     onContextOutput: undefined,
                     signal: abortController.signal,
+                    tryConsumeInboxTurn: () => {
+                        const inboxHooks = session.a2aInboxTurn;
+                        if (!inboxHooks) return null;
+                        const claimed = session.queue.tryConsumeIsolated();
+                        if (!claimed || !inboxHooks.isInboxTurnMeta(claimed.meta)) return null;
+                        inboxHooks.setInboxTurnActive(true);
+                        const inboxPrompt = inboxHooks.prepareInboxTurnPrompt();
+                        if (!inboxPrompt) {
+                            inboxHooks.setInboxTurnActive(false);
+                            return null;
+                        }
+                        wasInboxTurn = true;
+                        if (session.claudeTurnActiveRef) {
+                            session.claudeTurnActiveRef.current = true;
+                        }
+                        session.client.suppressNextMapperUserText();
+                        logger.debug('[remote]: processing A2A inbox turn in-process');
+                        return inboxPrompt;
+                    },
                 });
                 
                 // Consume one-time Claude flags after spawn

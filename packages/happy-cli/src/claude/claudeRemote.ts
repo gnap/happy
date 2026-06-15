@@ -44,6 +44,14 @@ export async function claudeRemote(opts: {
     /** Called with raw markdown when the initial message is a /context local command. */
     onContextOutput?: (contextMarkdown: string) => void,
     isAborted: (toolCallId: string) => boolean,
+    /**
+     * Called after a normal user-turn result to opportunistically claim a pending
+     * inbox turn. If one is available the launcher sets it up and returns the
+     * inbox prompt; claudeRemote then pushes it directly to the running SDK
+     * session (same process, no --resume) instead of spawning a new one.
+     * Returns null when no inbox turn is queued.
+     */
+    tryConsumeInboxTurn?: () => string | null,
 
     // Callbacks
     onSessionFound: (id: string) => void,
@@ -352,6 +360,22 @@ export async function claudeRemote(opts: {
                                 opts.onContextUsage!({ totalTokens: tokenCount, maxTokens });
                             }
                         }).catch(() => { /* ignore */ });
+                    }
+
+                    // Opportunistically continue in-process with a pending inbox turn.
+                    // Mirrors the interstitial task-notification path: push the inbox
+                    // prompt directly into the running SDK session so the agent can
+                    // handle it without a new --resume spawn. Falls back to the normal
+                    // stop path (new claudeRemote() + resume) when no inbox turn is queued.
+                    const inboxPrompt = opts.tryConsumeInboxTurn?.();
+                    if (inboxPrompt && !messages.done) {
+                        logger.debug('[claudeRemote] Continuing in-process with inbox turn');
+                        updateThinking(true);
+                        messages.push({
+                            type: 'user',
+                            message: { role: 'user', content: inboxPrompt },
+                        });
+                        continue;
                     }
 
                     // Signal inputLoop to exit so claudeRemote() returns
