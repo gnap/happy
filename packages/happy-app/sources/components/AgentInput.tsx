@@ -424,6 +424,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         : contextFillPct >= 80 ? theme.colors.warning
         : theme.colors.textSecondary;
     const [showContextBreakdown, setShowContextBreakdown] = React.useState(false);
+    const contextLeaveTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const agentInputEnterToSend = useSetting('agentInputEnterToSend');
 
@@ -943,9 +944,19 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                             {(contextWarning || props.usageData?.contextSize) && (
                                 <>
                                     <View
-                                        {...(Platform.OS === 'web' && props.usageData?.contextBreakdown ? {
-                                            onMouseEnter: () => setShowContextBreakdown(true),
-                                            onMouseLeave: () => setShowContextBreakdown(false),
+                                        {...(Platform.OS === 'web' ? {
+                                            onMouseEnter: () => {
+                                                if (contextLeaveTimer.current) {
+                                                    clearTimeout(contextLeaveTimer.current);
+                                                    contextLeaveTimer.current = null;
+                                                }
+                                                setShowContextBreakdown(true);
+                                            },
+                                            onMouseLeave: () => {
+                                                contextLeaveTimer.current = setTimeout(() => {
+                                                    setShowContextBreakdown(false);
+                                                }, 200);
+                                            },
                                         } : {})}
                                     >
                                         <Pressable
@@ -982,13 +993,15 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                     </View>
                                     {showContextBreakdown && (
                                         <>
-                                            <TouchableWithoutFeedback onPress={() => setShowContextBreakdown(false)}>
-                                                <View style={{
-                                                    position: 'absolute',
-                                                    top: -500, left: -200, right: -200, bottom: -500,
-                                                    zIndex: 1000,
-                                                }} />
-                                            </TouchableWithoutFeedback>
+                                            {Platform.OS !== 'web' && (
+                                                <TouchableWithoutFeedback onPress={() => setShowContextBreakdown(false)}>
+                                                    <View style={{
+                                                        position: 'absolute',
+                                                        top: -500, left: -200, right: -200, bottom: -500,
+                                                        zIndex: 1000,
+                                                    }} />
+                                                </TouchableWithoutFeedback>
+                                            )}
                                             <View style={{
                                                 position: 'absolute',
                                                 bottom: '100%',
@@ -996,7 +1009,21 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                                 zIndex: 1001,
                                                 width: Math.min(screenWidth - 32, 320),
                                                 paddingBottom: 4,
-                                            }}>
+                                            }}
+                                                {...(Platform.OS === 'web' ? {
+                                                    onMouseEnter: () => {
+                                                        if (contextLeaveTimer.current) {
+                                                            clearTimeout(contextLeaveTimer.current);
+                                                            contextLeaveTimer.current = null;
+                                                        }
+                                                    },
+                                                    onMouseLeave: () => {
+                                                        contextLeaveTimer.current = setTimeout(() => {
+                                                            setShowContextBreakdown(false);
+                                                        }, 200);
+                                                    },
+                                                } : {})}
+                                            >
                                                 <FloatingOverlay maxHeight={420}>
                                                     {/* Per-turn usage stats */}
                                                     {(props.usageData?.inputTokens != null || props.usageData?.outputTokens != null) && (
@@ -1067,18 +1094,6 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                                 </FloatingOverlay>
                                             </View>
                                         </>
-                                    )}
-                                    {showContextBreakdown && props.usageData?.contextBreakdown && Platform.OS !== 'web' && (
-                                        <TouchableWithoutFeedback onPress={() => setShowContextBreakdown(false)}>
-                                            <View style={{
-                                                position: 'absolute',
-                                                top: -1000,
-                                                left: -1000,
-                                                right: -1000,
-                                                bottom: '100%',
-                                                zIndex: 1000,
-                                            }} />
-                                        </TouchableWithoutFeedback>
                                     )}
                                 </>
                             )}
