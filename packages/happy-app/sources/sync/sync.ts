@@ -913,7 +913,7 @@ class Sync {
     }
 
     async sendMessage(sessionId: string, text: string, displayText?: string, existingLocalId?: string) {
-        log.log(`📤 sendMessage START: sid=${sessionId.slice(-8)} text="${text.slice(0, 40)}"`);
+        console.warn(`📤 sendMessage START: sid=${sessionId.slice(-8)} text="${text.slice(0, 40)}"`);
 
         // Get encryption
         const encryption = this.encryption.getSessionEncryption(sessionId);
@@ -2181,7 +2181,7 @@ class Sync {
         }
 
         const batch = pending.slice();
-        log.log(`📤 flushOutbox: sending ${batch.length} message(s) for ${sessionId.slice(-8)}`);
+        console.warn(`📤 flushOutbox: sending ${batch.length} message(s) for ${sessionId.slice(-8)}`);
         const controller = new AbortController();
         this.sendAbortControllers.set(sessionId, controller);
         try {
