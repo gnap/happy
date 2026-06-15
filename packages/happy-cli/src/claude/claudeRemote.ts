@@ -171,6 +171,8 @@ export async function claudeRemote(opts: {
     let thinking = false;
     /** Session ID assigned by Claude Code on system_init; used for countTokens calls. */
     let currentSessionId: string | null = null;
+    /** Set to false after a permanent countTokens failure (e.g. proxy returns 405). */
+    let countTokensEnabled = true;
     const updateThinking = (newThinking: boolean) => {
         if (thinking !== newThinking) {
             thinking = newThinking;
@@ -277,12 +279,13 @@ export async function claudeRemote(opts: {
                         // envelope already carries an accurate value. Replaces the former
                         // get_context_usage control_request which could hang 10+ minutes
                         // on large sessions.
-                        if (opts.onContextUsage) {
+                        if (opts.onContextUsage && countTokensEnabled) {
                             countTokensForSession({
                                 sessionId: systemInit.session_id,
                                 workspacePath: opts.path,
                                 model: mode.model ?? 'claude-sonnet-4-6',
                             }).then(tokenCount => {
+                                if (tokenCount === false) { countTokensEnabled = false; return; }
                                 if (tokenCount !== null) {
                                     const maxTokens = (mode.model ?? '').includes('[1m]') ? 1_000_000 : 200_000;
                                     logger.debug(`[claudeRemote] context usage via countTokens (pre-warm): ${tokenCount} / ${maxTokens}`);
@@ -336,12 +339,13 @@ export async function claudeRemote(opts: {
                     // Replaces the former get_context_usage control_request which could
                     // hang 10+ minutes on large (1M) sessions. Result is stored in
                     // lastContextUsage and attached to the NEXT turn-end envelope.
-                    if (opts.onContextUsage && currentSessionId) {
+                    if (opts.onContextUsage && currentSessionId && countTokensEnabled) {
                         countTokensForSession({
                             sessionId: currentSessionId,
                             workspacePath: opts.path,
                             model: mode.model ?? 'claude-sonnet-4-6',
                         }).then(tokenCount => {
+                            if (tokenCount === false) { countTokensEnabled = false; return; }
                             if (tokenCount !== null) {
                                 const maxTokens = (mode.model ?? '').includes('[1m]') ? 1_000_000 : 200_000;
                                 logger.debug(`[claudeRemote] context usage via countTokens: ${tokenCount} / ${maxTokens}`);
