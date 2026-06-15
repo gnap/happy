@@ -1012,18 +1012,24 @@ class Sync {
         // Serialize encryption + outbox-push per session so concurrent sendMessage calls
         // cannot reorder messages (encryption is async; whichever finishes first would otherwise
         // reach the outbox first, inverting the send order).
-        await this.getSessionSendLock(sessionId).inLock(async () => {
-            const encryptedRawRecord = await encryption.encryptRawRecord(content);
-            let pending = this.pendingOutbox.get(sessionId);
-            if (!pending) {
-                pending = [];
-                this.pendingOutbox.set(sessionId, pending);
-            }
-            pending.push({
-                localId,
-                content: encryptedRawRecord
+        try {
+            await this.getSessionSendLock(sessionId).inLock(async () => {
+                const encryptedRawRecord = await encryption.encryptRawRecord(content);
+                let pending = this.pendingOutbox.get(sessionId);
+                if (!pending) {
+                    pending = [];
+                    this.pendingOutbox.set(sessionId, pending);
+                }
+                pending.push({
+                    localId,
+                    content: encryptedRawRecord
+                });
             });
-        });
+        } catch (err) {
+            log.log(`📤 sendMessage encrypt failed for ${sessionId.slice(-8)}: ${err instanceof Error ? err.message : String(err)}`);
+            storage.getState().failOutboxEntries([localId], 'Encryption failed');
+            return;
+        }
 
         this.getSendSync(sessionId).invalidate();
         this.maybeStartBackgroundSendWatchdog();
@@ -2170,15 +2176,11 @@ class Sync {
     private flushOutbox = async (sessionId: string) => {
         const pending = this.pendingOutbox.get(sessionId);
         if (!pending || pending.length === 0) {
-            if (!this.hasPendingOutboxMessages()) {
-                this.clearBackgroundSendWatchdog();
-                await this.cancelBackgroundSendTimeoutNotification();
-                this.backgroundSendStartedAt = null;
-            }
             return;
         }
 
         const batch = pending.slice();
+        log.log(`📤 flushOutbox: sending ${batch.length} message(s) for ${sessionId.slice(-8)}`);
         const controller = new AbortController();
         this.sendAbortControllers.set(sessionId, controller);
         try {
@@ -2219,6 +2221,8 @@ class Sync {
                 this.sessionLastSeq.set(sessionId, maxSeq);
             }
         } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            log.log(`📤 flushOutbox FAILED for ${sessionId.slice(-8)}: ${msg}`);
             this.maybeStartBackgroundSendWatchdog();
             throw error;
         } finally {
