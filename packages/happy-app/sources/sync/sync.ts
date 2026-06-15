@@ -2847,6 +2847,13 @@ class Sync {
                     if (shouldClearThinking) {
                         gitStatusSync.invalidate(updateData.body.sid);
                     }
+
+                    // When the agent responds, clean up acked outbox entries for this session.
+                    // The server already received and processed our message(s) — any sending/acked
+                    // entries should be removed since the agent turn is now producing output.
+                    if (lastMessage && lastMessage.role !== 'user') {
+                        storage.getState().removeOutboxEntriesForSession(updateData.body.sid);
+                    }
                 }
             }
 
