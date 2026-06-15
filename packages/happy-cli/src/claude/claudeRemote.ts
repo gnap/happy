@@ -14,6 +14,7 @@ import { systemPrompt } from "./utils/systemPrompt";
 import { PermissionResult } from "./sdk/types";
 import type { JsRuntime } from "./runClaude";
 import { normalizeClaudeModelForSdk } from "./utils/model";
+import { countTokensForSession } from "./utils/countTokensForSession";
 
 export async function claudeRemote(opts: {
 
@@ -168,6 +169,8 @@ export async function claudeRemote(opts: {
 
     // Track thinking state
     let thinking = false;
+    /** Session ID assigned by Claude Code on system_init; used for countTokens calls. */
+    let currentSessionId: string | null = null;
     const updateThinking = (newThinking: boolean) => {
         if (thinking !== newThinking) {
             thinking = newThinking;
@@ -267,20 +270,25 @@ export async function claudeRemote(opts: {
                         const projectDir = getProjectPath(opts.path);
                         const found = await awaitFileExist(join(projectDir, `${systemInit.session_id}.jsonl`));
                         logger.debug(`[claudeRemote] Session file found: ${systemInit.session_id} ${found}`);
+                        currentSessionId = systemInit.session_id;
                         opts.onSessionFound(systemInit.session_id);
 
-                        // Pre-warm context usage cache at init time so it is ready
-                        // (or nearly ready) by the time the turn result arrives.
-                        // Firing here instead of at turn-end avoids the 10-60s cold-start
-                        // delay on resume that would otherwise leave contextUsage blank
-                        // for the first turn.
+                        // Pre-warm context usage via countTokens so the first turn-end
+                        // envelope already carries an accurate value. Replaces the former
+                        // get_context_usage control_request which could hang 10+ minutes
+                        // on large sessions.
                         if (opts.onContextUsage) {
-                            response.getContextUsage().then(usage => {
-                                if (usage) {
-                                    logger.debug(`[claudeRemote] context usage via control (pre-warm): ${usage.totalTokens} / ${usage.maxTokens}`);
-                                    opts.onContextUsage!(usage);
+                            countTokensForSession({
+                                sessionId: systemInit.session_id,
+                                workspacePath: opts.path,
+                                model: mode.model ?? 'claude-sonnet-4-6',
+                            }).then(tokenCount => {
+                                if (tokenCount !== null) {
+                                    const maxTokens = (mode.model ?? '').includes('[1m]') ? 1_000_000 : 200_000;
+                                    logger.debug(`[claudeRemote] context usage via countTokens (pre-warm): ${tokenCount} / ${maxTokens}`);
+                                    opts.onContextUsage!({ totalTokens: tokenCount, maxTokens });
                                 }
-                            }).catch(() => {/* ignore */});
+                            }).catch(() => { /* ignore */ });
                         }
                     }
                 }
@@ -324,15 +332,22 @@ export async function claudeRemote(opts: {
                     }
                     opts.onReady(message as SDKResultMessage);
 
-                    // Fetch accurate context size from the live process via control_request.
-                    // This is zero-overhead: no spawn, no JSONL load, just a stdin/stdout ping.
-                    if (opts.onContextUsage) {
-                        response.getContextUsage().then(usage => {
-                            if (usage) {
-                                logger.debug(`[claudeRemote] context usage via control: ${usage.totalTokens} / ${usage.maxTokens}`);
-                                opts.onContextUsage!(usage);
+                    // Fetch accurate context size via countTokens after each turn.
+                    // Replaces the former get_context_usage control_request which could
+                    // hang 10+ minutes on large (1M) sessions. Result is stored in
+                    // lastContextUsage and attached to the NEXT turn-end envelope.
+                    if (opts.onContextUsage && currentSessionId) {
+                        countTokensForSession({
+                            sessionId: currentSessionId,
+                            workspacePath: opts.path,
+                            model: mode.model ?? 'claude-sonnet-4-6',
+                        }).then(tokenCount => {
+                            if (tokenCount !== null) {
+                                const maxTokens = (mode.model ?? '').includes('[1m]') ? 1_000_000 : 200_000;
+                                logger.debug(`[claudeRemote] context usage via countTokens: ${tokenCount} / ${maxTokens}`);
+                                opts.onContextUsage!({ totalTokens: tokenCount, maxTokens });
                             }
-                        }).catch(() => {/* ignore */});
+                        }).catch(() => { /* ignore */ });
                     }
 
                     // Signal inputLoop to exit so claudeRemote() returns
