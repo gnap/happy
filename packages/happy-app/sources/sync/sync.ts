@@ -913,7 +913,6 @@ class Sync {
     }
 
     async sendMessage(sessionId: string, text: string, displayText?: string, existingLocalId?: string) {
-        console.warn(`📤 sendMessage: sid=${sessionId.slice(-8)} text="${text.slice(0, 30)}"`);
 
         // Get encryption
         const encryption = this.encryption.getSessionEncryption(sessionId);
