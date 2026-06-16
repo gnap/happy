@@ -128,6 +128,7 @@ type ReducerMessage = {
     event: AgentEvent | null;
     tool: ToolCall | null;
     meta?: MessageMeta;
+    files?: { name: string; size: number; mimeType: string; data: string; width?: number; height?: number }[];
 }
 
 type StoredPermission = {
@@ -669,6 +670,16 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             const userText = msg.content.type === 'content'
                 ? (msg.content.blocks.find((b): b is { type: 'text'; text: string } => b.type === 'text')?.text ?? '')
                 : msg.content.text;
+            const userFiles = msg.content.type === 'content'
+                ? (msg.content.blocks.filter((b): b is { type: 'file'; name: string; size: number; mimeType: string; data: string; width?: number; height?: number } => b.type === 'file').map(f => ({
+                    name: f.name,
+                    size: f.size,
+                    mimeType: f.mimeType,
+                    data: f.data,
+                    width: f.width as number | undefined,
+                    height: f.height as number | undefined,
+                })))
+                : undefined;
             state.messages.set(mid, {
                 id: mid,
                 realID: msg.id,
@@ -679,6 +690,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                 tool: null,
                 event: null,
                 meta: msg.meta,
+                files: userFiles,
             });
 
             // Track both localId and messageId
@@ -1480,6 +1492,7 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
             kind: 'user-text',
             text: reducerMsg.text || '',
             ...(reducerMsg.meta?.displayText && { displayText: reducerMsg.meta.displayText }),
+            ...(reducerMsg.files && reducerMsg.files.length > 0 ? { files: reducerMsg.files } : {}),
             meta: reducerMsg.meta
         };
     } else if (reducerMsg.role === 'agent' && reducerMsg.text !== null) {
