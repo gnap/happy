@@ -95,6 +95,9 @@ interface AgentInputProps {
     minHeight?: number;
     profileId?: string | null;
     onProfileChange?: (profileId: string | null) => void;
+    onAttach?: () => void;
+    attachments?: { name: string; width?: number; height?: number; data: string; mimeType: string; size: number }[];
+    onRemoveAttachment?: (index: number) => void;
 }
 
 const DEFAULT_MAX_CONTEXT_SIZE = 200000;
@@ -1364,6 +1367,49 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                 <View style={styles.unifiedPanel}>
                     {/* Input field */}
                     <View style={[styles.inputContainer, props.minHeight ? { minHeight: props.minHeight } : undefined]}>
+                        {/* Attachment thumbnails */}
+                        {props.attachments && props.attachments.length > 0 && (
+                            <View style={{
+                                flexDirection: 'row',
+                                paddingHorizontal: 8,
+                                paddingTop: 4,
+                                gap: 8,
+                            }}>
+                                {props.attachments.map((att, i) => (
+                                    <View key={i} style={{
+                                        width: 56,
+                                        height: 56,
+                                        borderRadius: 8,
+                                        overflow: 'hidden',
+                                        backgroundColor: theme.colors.surfacePressed,
+                                    }}>
+                                        <Image
+                                            source={{ uri: `data:${att.mimeType};base64,${att.data}` }}
+                                            style={{ width: 56, height: 56, borderRadius: 8 }}
+                                            contentFit="cover"
+                                        />
+                                        {props.onRemoveAttachment && (
+                                            <Pressable
+                                                onPress={() => props.onRemoveAttachment?.(i)}
+                                                style={{
+                                                    position: 'absolute',
+                                                    top: 2,
+                                                    right: 2,
+                                                    width: 18,
+                                                    height: 18,
+                                                    borderRadius: 9,
+                                                    backgroundColor: 'rgba(0,0,0,0.5)',
+                                                    alignItems: 'center',
+                                                    justifyContent: 'center',
+                                                }}
+                                            >
+                                                <Ionicons name="close" size={12} color="#fff" />
+                                            </Pressable>
+                                        )}
+                                    </View>
+                                ))}
+                            </View>
+                        )}
                         <MultiTextInput
                             ref={inputRef}
                             value={props.value}
@@ -1516,6 +1562,25 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
 
                                 {/* Git Status Badge */}
                                 <GitStatusButton sessionId={props.sessionId} onPress={props.onFileViewerPress} />
+
+                                {/* Image attachment button */}
+                                {props.onAttach && (
+                                    <Pressable
+                                        onPress={props.onAttach}
+                                        hitSlop={{ top: 5, bottom: 10, left: 4, right: 4 }}
+                                        style={(p) => ({
+                                            flexDirection: 'row',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            height: 32,
+                                            width: 32,
+                                            borderRadius: Platform.select({ default: 16, android: 20 }),
+                                            opacity: p.pressed ? 0.7 : 1,
+                                        })}
+                                    >
+                                        <Ionicons name="image-outline" size={18} color={theme.colors.button.secondary.tint} />
+                                    </Pressable>
+                                )}
                                 </View>
 
                                 {/* Send/Voice button - aligned with first row */}
