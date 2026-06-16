@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { ApiClient } from '@/api/api';
 import { logger } from '@/ui/logger';
 import { loop } from '@/claude/loop';
-import { AgentState, Metadata } from '@/api/types';
+import { AgentState, Metadata, getUserMessageText, getUserMessageFiles } from '@/api/types';
 import type { UserMessage } from '@/api/types';
 import { BUILD_VERSION } from '../version';
 import { Credentials, readSettings, getProfileEnvironmentVariables, writeSessionPidFile, removeSessionPidFile } from '@/persistence';
@@ -553,7 +553,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         }
 
         // Check for special commands before processing
-        const specialCommand = parseSpecialCommand(message.content.text);
+        const specialCommand = parseSpecialCommand(getUserMessageText(message));
 
         if (specialCommand.type === 'compact') {
             logger.debug('[start] Detected /compact command');
@@ -567,7 +567,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 allowedTools: messageAllowedTools,
                 disallowedTools: messageDisallowedTools
             };
-            messageQueue.pushIsolateAndClear(specialCommand.originalMessage || message.content.text, enhancedMode, message.meta);
+            messageQueue.pushIsolateAndClear(specialCommand.originalMessage || getUserMessageText(message), enhancedMode, message.meta);
             logger.debugLargeJson('[start] /compact command pushed to queue:', message);
             return;
         }
@@ -584,7 +584,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 allowedTools: messageAllowedTools,
                 disallowedTools: messageDisallowedTools
             };
-            messageQueue.pushIsolateAndClear(specialCommand.originalMessage || message.content.text, enhancedMode, message.meta);
+            messageQueue.pushIsolateAndClear(specialCommand.originalMessage || getUserMessageText(message), enhancedMode, message.meta);
             logger.debugLargeJson('[start] /compact command pushed to queue:', message);
             return;
         }
@@ -631,7 +631,9 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         // the seq gap caused by a separate envelope round-trip.
         // Pass message.meta so claudeRemoteLauncher can read appMessageId
         // and echo it back for outbox cleanup.
-        messageQueue.push(message.content.text, enhancedMode, message.meta);
+        const msgText = getUserMessageText(message);
+        const files = getUserMessageFiles(message);
+        messageQueue.push(msgText, enhancedMode, { meta: message.meta, files });
         logger.debugLargeJson('User message pushed to queue:', message)
     };
     session.onUserMessage(handleUserMessage);

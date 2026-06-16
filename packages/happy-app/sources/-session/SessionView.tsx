@@ -24,6 +24,7 @@ import { useSession } from '@/sync/storage';
 import { Session } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
 import { t } from '@/text';
+import { useImagePicker, PickedImage } from '@/hooks/useImagePicker';
 import { tracking, trackMessageSent } from '@/track';
 import { isRunningOnMac } from '@/utils/platform';
 import { useDeviceType, useHeaderHeight, useIsLandscape, useIsTablet } from '@/utils/responsive';
@@ -166,6 +167,8 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const isLandscape = useIsLandscape();
     const deviceType = useDeviceType();
     const [message, setMessage] = React.useState('');
+    const [attachments, setAttachments] = React.useState<PickedImage[]>([]);
+    const { pickImage } = useImagePicker();
     const realtimeStatus = useRealtimeStatus();
     const { messages, isLoaded } = useSessionMessages(sessionId);
     const acknowledgedCliVersions = useLocalSetting('acknowledgedCliVersions');
@@ -395,16 +398,29 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                 };
             })()}
             onSend={() => {
-                if (message.trim()) {
+                if (message.trim() || attachments.length > 0) {
                     setMessage('');
+                    setAttachments([]);
                     clearDraft();
-                    sync.sendMessage(sessionId, message);
-                    // Model/maxMode overrides are released on turn-end; profileId persists for the session.
+                    sync.sendMessage(sessionId, message, undefined, undefined, attachments.length > 0 ? attachments.map(a => ({
+                        name: a.name,
+                        size: a.size,
+                        mimeType: a.mimeType,
+                        data: a.data,
+                        width: a.width,
+                        height: a.height,
+                    })) : undefined);
                     trackMessageSent();
                 }
             }}
             onMicPress={micButtonState.onMicPress}
             isMicActive={micButtonState.isMicActive}
+            onAttach={async () => {
+                const img = await pickImage();
+                if (img) setAttachments(prev => [...prev, img]);
+            }}
+            attachments={attachments}
+            onRemoveAttachment={(i) => setAttachments(prev => prev.filter((_, idx) => idx !== i))}
             onAbort={() => sessionAbort(sessionId)}
             showAbortButton={sessionStatus.state === 'thinking' || sessionStatus.state === 'waiting'}
             onFileViewerPress={experiments ? () => router.push(`/session/${sessionId}/files`) : undefined}

@@ -176,11 +176,15 @@ export async function claudeRemote(opts: {
 
     // Push initial message
     let messages = new PushableAsyncIterable<SDKUserMessage>();
+    const initialFiles = (initial as any).files;
     messages.push({
         type: 'user',
         message: {
             role: 'user',
-            content: initial.message,
+            content: initialFiles && initialFiles.length > 0
+                ? [{ type: 'text', text: initial.message },
+                   ...initialFiles.map((f: any) => ({ type: 'image', source: { type: 'base64', media_type: f.mimeType, data: f.data } }))]
+                : initial.message,
         },
     });
 
@@ -213,9 +217,16 @@ export async function claudeRemote(opts: {
             currentGeneration = latestGeneration;
             mode = next.mode;
             updateThinking(true);
+            const nextFiles = (next as any).files;
             messages.push({
                 type: 'user',
-                message: { role: 'user', content: next.message },
+                message: {
+                    role: 'user',
+                    content: nextFiles && nextFiles.length > 0
+                        ? [{ type: 'text', text: next.message },
+                           ...nextFiles.map((f: any) => ({ type: 'image', source: { type: 'base64', media_type: f.mimeType, data: f.data } }))]
+                        : next.message,
+                },
             });
         }
         messages.end();

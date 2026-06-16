@@ -939,7 +939,7 @@ class Sync {
         this.backgroundSendStartedAt = null;
     }
 
-    async sendMessage(sessionId: string, text: string, displayText?: string, existingLocalId?: string) {
+    async sendMessage(sessionId: string, text: string, displayText?: string, existingLocalId?: string, files?: { name: string; size: number; mimeType: string; data: string; width?: number; height?: number }[]) {
 
         // Get encryption
         const encryption = this.encryption.getSessionEncryption(sessionId);
@@ -993,9 +993,24 @@ class Sync {
         const fallbackModel: string | null = null;
 
         // Create user message content with metadata
+        const hasFiles = files && files.length > 0;
         const content: RawRecord = {
             role: 'user',
-            content: {
+            content: hasFiles ? {
+                type: 'content',
+                blocks: [
+                    ...(text.trim() ? [{ type: 'text' as const, text }] : []),
+                    ...(files ?? []).map((f) => ({
+                        type: 'file' as const,
+                        name: f.name,
+                        size: f.size,
+                        mimeType: f.mimeType,
+                        data: f.data,
+                        ...(f.width ? { width: f.width } : {}),
+                        ...(f.height ? { height: f.height } : {}),
+                    })),
+                ],
+            } : {
                 type: 'text',
                 text
             },
@@ -1024,7 +1039,21 @@ class Sync {
             localId,
             createdAt,
             role: 'user',
-            content: { type: 'text', text },
+            content: hasFiles ? {
+                type: 'content',
+                blocks: [
+                    ...(text.trim() ? [{ type: 'text' as const, text }] : []),
+                    ...(files ?? []).map((f) => ({
+                        type: 'file' as const,
+                        name: f.name,
+                        size: f.size,
+                        mimeType: f.mimeType,
+                        data: f.data,
+                        ...(f.width ? { width: f.width } : {}),
+                        ...(f.height ? { height: f.height } : {}),
+                    })),
+                ],
+            } : { type: 'text', text },
             isSidechain: false,
             meta: content.meta as MessageMeta | undefined,
         };

@@ -1,5 +1,14 @@
-import { AgentEvent } from "./typesRaw";
+import { AgentEvent, NormalizedFileBlock } from "./typesRaw";
 import { MessageMeta } from "./typesMessageMeta";
+
+export type MessageFile = {
+    name: string;
+    size: number;
+    mimeType: string;
+    data: string;
+    width?: number;
+    height?: number;
+};
 
 export type ToolCall = {
     name: string;
@@ -35,6 +44,7 @@ export type UserTextMessage = {
     createdAt: number;
     text: string;
     displayText?: string; // Optional text to display in UI instead of actual text
+    files?: MessageFile[]; // Image/file attachments
     meta?: MessageMeta;
 }
 

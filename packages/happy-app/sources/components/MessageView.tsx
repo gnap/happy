@@ -1,9 +1,10 @@
 import * as React from "react";
 import { View, Text, ActivityIndicator, Pressable } from "react-native";
 import { StyleSheet } from 'react-native-unistyles';
+import { Image } from 'expo-image';
 import { MarkdownView } from "./markdown/MarkdownView";
 import { t } from '@/text';
-import { Message, UserTextMessage, AgentTextMessage, ToolCallMessage } from "@/sync/typesMessage";
+import { Message, UserTextMessage, AgentTextMessage, ToolCallMessage, MessageFile } from "@/sync/typesMessage";
 import { Metadata } from "@/sync/storageTypes";
 import { layout } from "./layout";
 import { ToolView } from "./tools/ToolView";
@@ -121,7 +122,19 @@ function UserTextBlock(props: {
           </Pressable>
         )}
         <View style={[styles.userMessageBubble, isSending && styles.userMessageBubbleSending, (isAcked || isDelivered) && styles.userMessageBubbleAcked]}>
-          <MarkdownView markdown={props.message.displayText || props.message.text} onOptionPress={handleOptionPress} />
+          {props.message.files && props.message.files.length > 0 && (
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginBottom: 4 }}>
+              {props.message.files.map((file, i) => (
+                <Image
+                  key={i}
+                  source={{ uri: `data:${file.mimeType};base64,${file.data}` }}
+                  style={{ width: 120, height: 120, borderRadius: 8 }}
+                  contentFit="cover"
+                />
+              ))}
+            </View>
+          )}
+          <MarkdownView markdown={props.message.displayText || props.message.text || ''} onOptionPress={handleOptionPress} />
         </View>
       </View>
     </View>

@@ -515,10 +515,30 @@ const rawRecordSchema = z.preprocess(
         }),
         z.object({
             role: z.literal('user'),
-            content: z.object({
-                type: z.literal('text'),
-                text: z.string()
-            }),
+            content: z.union([
+                z.object({
+                    type: z.literal('text'),
+                    text: z.string()
+                }),
+                z.object({
+                    type: z.literal('content'),
+                    blocks: z.array(z.discriminatedUnion('type', [
+                        z.object({
+                            type: z.literal('text'),
+                            text: z.string(),
+                        }),
+                        z.object({
+                            type: z.literal('file'),
+                            name: z.string(),
+                            size: z.number(),
+                            mimeType: z.string(),
+                            data: z.string(),
+                            width: z.number().optional(),
+                            height: z.number().optional(),
+                        }),
+                    ]))
+                }),
+            ]),
             meta: MessageMetaSchema.optional()
         }),
         z.object({
@@ -588,11 +608,27 @@ type NormalizedAgentContent =
         prompt: string
     };
 
+export type NormalizedFileBlock = {
+    type: 'file';
+    name: string;
+    size: number;
+    mimeType: string;
+    data: string;
+    width?: number;
+    height?: number;
+};
+
 export type NormalizedMessage = ({
     role: 'user'
     content: {
         type: 'text';
         text: string;
+    } | {
+        type: 'content';
+        blocks: Array<
+            { type: 'text'; text: string }
+            | NormalizedFileBlock
+        >;
     }
 } | {
     role: 'agent'

@@ -27,6 +27,7 @@ import { stopCaffeinate } from "@/utils/caffeinate";
 import { connectionState } from '@/utils/serverConnectionErrors';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
 import type { ApiSessionClient } from '@/api/apiSession';
+import { getUserMessageText } from '@/api/types';
 import type { UserMessage } from '@/api/types';
 import { resolveCodexExecutionPolicy } from './executionPolicy';
 import { mapCodexMcpMessageToSessionEnvelopes, mapCodexProcessorMessageToSessionEnvelopes } from './utils/sessionProtocolMapper';
@@ -198,9 +199,9 @@ export async function runCodex(opts: {
         };
         const isA2A = (message.meta as { origin?: string } | undefined)?.origin === 'a2a';
         if (isA2A) {
-            messageQueue.pushIsolated(message.content.text, enhancedMode);
+            messageQueue.pushIsolated(getUserMessageText(message), enhancedMode);
         } else {
-            messageQueue.push(message.content.text, enhancedMode);
+            messageQueue.push(getUserMessageText(message), enhancedMode);
         }
     };
     session.onUserMessage(handleUserMessage);

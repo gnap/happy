@@ -51,6 +51,7 @@ import { a2aInboxBackoffDelayMs, isA2AInboxBackoffActive, resolveA2AInboxBackoff
 import { A2AInboxMcpScopeStack } from '@/a2a/inboxMcpScopeStack';
 import type { ApiSessionClient } from '@/api/apiSession';
 import type { PermissionMode } from '@/api/types';
+import { getUserMessageText, getUserMessageFiles } from '@/api/types';
 import type { UserMessage } from '@/api/types';
 import { parseSpecialCommand } from '@/parsers/specialCommands';
 
@@ -570,7 +571,8 @@ export async function runCursor(opts: {
         dangerouslySkipPermissions,
       })).catch((err) => logger.debug('[Cursor] Failed to persist permission/model/maxMode to session metadata', err));
     }
-    const specialCommand = parseSpecialCommand(message.content.text);
+    const msgText = getUserMessageText(message);
+    const specialCommand = parseSpecialCommand(msgText);
     if (specialCommand.type === 'compact') {
       logger.debug('[cursor] Detected /compact command; scheduling interactive compression turn');
       messageQueue.pushIsolateAndClear('', mode, { cursorCompactTurn: true });
@@ -590,8 +592,9 @@ export async function runCursor(opts: {
       messageQueue.poke();
       return;
     }
-    logger.debug(`[cursor] User message queued (length: ${message.content.text.length})`);
-    messageQueue.pushIsolated(message.content.text, mode);
+    logger.debug(`[cursor] User message queued (length: ${msgText.length})`);
+    const msgFiles = getUserMessageFiles(message);
+    messageQueue.pushIsolated(msgText, mode, { meta: message.meta, files: msgFiles });
   };
 
   // Handle server unreachable - offline stub with hot reconnection
