@@ -446,10 +446,13 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                     session.claudeTurnActiveRef.current = true;
                                 }
                                 modeHash = p.hash ?? null;
-                                mode = p.mode;
+                                // Inbox turns must not change the model — use the current
+                                // session mode so the agent keeps running on the same model.
+                                const inboxMode = mode ?? p.mode;
+                                mode = inboxMode;
                                 session.client.suppressNextMapperUserText();
                                 session.onThinkingChange(true);
-                                return { message: inboxPrompt, mode: p.mode };
+                                return { message: inboxPrompt, mode: inboxMode };
                             }
                             return p;
                         }
@@ -496,8 +499,11 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                     session.claudeTurnActiveRef.current = true;
                                 }
                                 modeHash = msg.hash;
-                                mode = msg.mode;
-                                permissionHandler.handleModeChange(mode.permissionMode);
+                                // Inbox turns must not change the model — use the current
+                                // session mode so the agent keeps running on the same model.
+                                const inboxMode = mode ?? msg.mode;
+                                mode = inboxMode;
+                                permissionHandler.handleModeChange(inboxMode.permissionMode);
                                 logger.debug('[remote]: processing A2A inbox turn');
                                 // Suppress the inbox notification prompt from appearing as a
                                 // user bubble in the App — it is an internal CLI-injected turn.
@@ -506,7 +512,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 session.onThinkingChange(true);
                                 return {
                                     message: inboxPrompt,
-                                    mode: msg.mode,
+                                    mode: inboxMode,
                                 };
                             }
                             wasInboxTurn = false;
