@@ -14,6 +14,9 @@ import { log } from '@/log';
 
 type SessionListEntry = Omit<Session, 'presence'> & { presence?: Session['presence'] };
 
+/** Cached encryption keys: sessionId → dataEncryptionKey (base64). Keys are immutable per session. */
+export type CachedEncryptionKeys = Record<string, string>;
+
 // ---------------------------------------------------------------------------
 // Preload
 // ---------------------------------------------------------------------------
@@ -42,7 +45,7 @@ export async function preloadSessionsListCache(): Promise<void> {
 /**
  * Try to load the cached session list. Returns null if empty or unavailable.
  */
-export async function loadSessionsListCache(): Promise<{ sessions: SessionListEntry[]; cachedAt: number } | null> {
+export async function loadSessionsListCache(): Promise<{ sessions: SessionListEntry[]; cachedAt: number; encryptionKeys: CachedEncryptionKeys } | null> {
     try {
         const db = getSessionCacheDB();
         const row = await db.getSessionsListCache();
@@ -51,8 +54,14 @@ export async function loadSessionsListCache(): Promise<{ sessions: SessionListEn
             return null;
         }
         const sessions = JSON.parse(row.sessionsJson) as SessionListEntry[];
-        console.warn(`📦 sessionsListCache: loaded ${sessions.length} sessions (cachedAt=${row.cachedAt})`);
-        return { sessions, cachedAt: row.cachedAt };
+        let encryptionKeys: CachedEncryptionKeys = {};
+        if (row.encryptionKeysJson) {
+            try {
+                encryptionKeys = JSON.parse(row.encryptionKeysJson);
+            } catch { /* ignore corrupt keys */ }
+        }
+        console.warn(`📦 sessionsListCache: loaded ${sessions.length} sessions (cachedAt=${row.cachedAt}, keys=${Object.keys(encryptionKeys).length})`);
+        return { sessions, cachedAt: row.cachedAt, encryptionKeys };
     } catch (err) {
         console.warn(`📦 sessionsListCache: load error: ${err}`);
         return null;
@@ -66,14 +75,17 @@ export async function loadSessionsListCache(): Promise<{ sessions: SessionListEn
 /**
  * Persist the decrypted session list after a successful fetch.
  */
-export async function saveSessionsListCache(sessions: SessionListEntry[]): Promise<void> {
+export async function saveSessionsListCache(sessions: SessionListEntry[], encryptionKeys?: CachedEncryptionKeys): Promise<void> {
     try {
         const db = getSessionCacheDB();
+        const keysJson = encryptionKeys && Object.keys(encryptionKeys).length > 0
+            ? JSON.stringify(encryptionKeys) : undefined;
         await db.saveSessionsListCache({
             sessionsJson: JSON.stringify(sessions),
             cachedAt: Date.now(),
+            encryptionKeysJson: keysJson,
         });
-        console.warn(`📦 sessionsListCache: saved ${sessions.length} sessions`);
+        console.warn(`📦 sessionsListCache: saved ${sessions.length} sessions (keys=${encryptionKeys ? Object.keys(encryptionKeys).length : 0})`);
     } catch (err) {
         console.warn(`📦 sessionsListCache: save error: ${err}`);
     }
