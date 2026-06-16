@@ -913,7 +913,6 @@ class Sync {
     }
 
     async sendMessage(sessionId: string, text: string, displayText?: string, existingLocalId?: string) {
-        console.warn(`📤 sendMessage START: sid=${sessionId.slice(-8)} text="${text.slice(0, 40)}"`);
 
         // Get encryption
         const encryption = this.encryption.getSessionEncryption(sessionId);
@@ -1027,7 +1026,7 @@ class Sync {
                 });
             });
         } catch (err) {
-            log.log(`📤 sendMessage encrypt failed for ${sessionId.slice(-8)}: ${err instanceof Error ? err.message : String(err)}`);
+            console.warn(`📤 sendMessage encrypt failed for ${sessionId.slice(-8)}: ${err instanceof Error ? err.message : String(err)}`);
             storage.getState().failOutboxEntries([localId], 'Encryption failed');
             return;
         }
@@ -2181,7 +2180,6 @@ class Sync {
         }
 
         const batch = pending.slice();
-        console.warn(`📤 flushOutbox: sending ${batch.length} message(s) for ${sessionId.slice(-8)}`);
         const controller = new AbortController();
         this.sendAbortControllers.set(sessionId, controller);
         try {
@@ -2222,8 +2220,6 @@ class Sync {
                 this.sessionLastSeq.set(sessionId, maxSeq);
             }
         } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            log.log(`📤 flushOutbox FAILED for ${sessionId.slice(-8)}: ${msg}`);
             this.maybeStartBackgroundSendWatchdog();
             throw error;
         } finally {
