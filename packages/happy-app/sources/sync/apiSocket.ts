@@ -25,9 +25,12 @@ const RETRYABLE_ERROR_HINTS = ['ECONNREFUSED', 'ETIMEDOUT', 'ECONNRESET', 'ENETU
 function shouldUseTauriHttp(path: string, method: string): boolean {
     // Tauri plugin-http is more reliable for the hung foreground send we see on Linux,
     // but large GET /messages payloads are noticeably slower over the IPC bridge.
-    return isRunningInTauri()
-        && method === 'POST'
-        && /^\/v3\/sessions\/[^/]+\/messages$/.test(path);
+    // Temporarily disabled for POST /messages — browser fetch may resolve the spinner
+    // issue where sends appear to succeed server-side but response handling fails.
+    return false;
+    // return isRunningInTauri()
+    //     && method === 'POST'
+    //     && /^\/v3\/sessions\/[^/]+\/messages$/.test(path);
 }
 
 //
