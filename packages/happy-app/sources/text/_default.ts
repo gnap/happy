@@ -303,7 +303,7 @@ export const en = {
 
     session: {
         inputPlaceholder: 'Type a message ...',
-        encrypting: 'Connecting…',
+        encrypting: 'handshaking…',
     },
 
     commandPalette: {
