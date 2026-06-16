@@ -544,6 +544,17 @@ class Sync {
                 if (!this.lastSessionRefreshNonDeltaAt) {
                     this.lastSessionRefreshNonDeltaAt = cached.cachedAt;
                 }
+                // Restore encryption keys from cache if available.
+                const keyCount = Object.keys(cached.encryptionKeys).length;
+                if (keyCount > 0) {
+                    const keyMap = new Map<string, Uint8Array | null>();
+                    for (const [sid, encKey] of Object.entries(cached.encryptionKeys)) {
+                        const decrypted = await this.encryption.decryptEncryptionKey(encKey);
+                        keyMap.set(sid, decrypted);
+                    }
+                    await this.encryption.initializeSessions(keyMap);
+                    log.log(`📦 sessionsListCache: restored ${keyCount} encryption keys from cache`);
+                }
                 // Restore encryption keys from cache — dataEncryptionKey is immutable
                 // per session so we can decrypt immediately without waiting for fetchSessions.
                 const ek = cached.encryptionKeys;
@@ -1368,7 +1379,7 @@ class Sync {
                     encryptionKeys[s.id] = s.dataEncryptionKey;
                 }
             }
-            void saveSessionsListCache(allValues, encryptionKeys);
+            void saveSessionsListCache(allValues, cachedKeys);
             this._loggedMissingSessionForSid.clear();
 
             // Only eagerly catch up messages for active sessions (agent is running).
