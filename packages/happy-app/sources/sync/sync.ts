@@ -2408,13 +2408,9 @@ class Sync {
             await this.acquireMessageFetchSlot();
             log.log(`💬 fetchMessages: got lock for ${sessionId}`);
             try {
-                const encryption = this.encryption.getSessionEncryption(sessionId);
-                if (!encryption) {
-                    log.log(`💬 fetchMessages: Session encryption not ready for ${sessionId}, skipping`);
-                    return;
-                }
-
                 // --- Cache: cold-start hydration (Cursor sessions only) ---
+                // Load cache first — even if encryption isn't ready yet, cached
+                // messages provide instant display while the network fetch waits.
                 const session = storage.getState().sessions[sessionId];
                 const existingSessionMessages = storage.getState().sessionMessages[sessionId];
                 if (!existingSessionMessages?.isLoaded) {
@@ -2433,6 +2429,12 @@ class Sync {
                     } else {
                         log.log(`💬 fetchMessages: no cache for ${sessionId} (will fetch from server)`);
                     }
+                }
+
+                const encryption = this.encryption.getSessionEncryption(sessionId);
+                if (!encryption) {
+                    log.log(`💬 fetchMessages: Session encryption not ready for ${sessionId}, skipping`);
+                    return;
                 }
 
                 const cachedLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
