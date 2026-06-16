@@ -87,6 +87,10 @@ export class Encryption {
      * Get session encryption if it has been initialized
      * Returns null if not initialized (should never happen in normal flow)
      */
+    get hasAnySessionEncryption(): boolean {
+        return this.sessionEncryptions.size > 0;
+    }
+
     getSessionEncryption(sessionId: string): SessionEncryption | null {
         return this.sessionEncryptions.get(sessionId) || null;
     }

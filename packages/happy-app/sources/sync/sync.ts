@@ -540,6 +540,10 @@ class Sync {
             if (cached && cached.sessions.length > 0) {
                 log.log(`📦 sessionsListCache: applying ${cached.sessions.length} cached sessions (cachedAt=${cached.cachedAt})`);
                 this.applySessions(cached.sessions);
+                // Use the cache timestamp as the base for delta fetches.
+                if (!this.lastSessionRefreshNonDeltaAt) {
+                    this.lastSessionRefreshNonDeltaAt = cached.cachedAt;
+                }
             }
         } catch (e) {
             log.log(`📦 sessionsListCache: error applying cached list: ${e}`);
@@ -1217,7 +1221,7 @@ class Sync {
             const t0 = performance.now();
             const API_ENDPOINT = getServerUrl();
             const params = new URLSearchParams();
-            if (this.lastSessionRefreshNonDeltaAt) {
+            if (this.lastSessionRefreshNonDeltaAt && this.encryption.hasAnySessionEncryption) {
                 params.set('changedSince', String(this.lastSessionRefreshNonDeltaAt));
             }
             params.set('limit', '200');
