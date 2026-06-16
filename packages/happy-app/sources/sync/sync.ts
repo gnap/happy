@@ -1026,6 +1026,13 @@ class Sync {
                 ...(environmentVariables ? { environmentVariables } : {}),
                 ...(displayText && { displayText }), // Add displayText if provided
                 appMessageId: localId, // Carried through CLI round-trip for O(1) dedup
+                // File attachments survive session-protocol wrapping via meta passthrough.
+                // The CLI extracts them to construct image content blocks.
+                ...(hasFiles ? { _files: files!.map(f => ({
+                    name: f.name, size: f.size, mimeType: f.mimeType, data: f.data,
+                    ...(f.width ? { width: f.width } : {}),
+                    ...(f.height ? { height: f.height } : {}),
+                })) } : {}),
             }
         };
 
