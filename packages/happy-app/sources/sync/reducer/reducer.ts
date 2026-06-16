@@ -660,13 +660,16 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
 
             // Create a new message
             let mid = allocateId();
+            const userText = msg.content.type === 'content'
+                ? (msg.content.blocks.find((b): b is { type: 'text'; text: string } => b.type === 'text')?.text ?? '')
+                : msg.content.text;
             state.messages.set(mid, {
                 id: mid,
                 realID: msg.id,
                 localId: msg.localId ?? null,
                 role: 'user',
                 createdAt: msg.createdAt,
-                text: msg.content.text,
+                text: userText,
                 tool: null,
                 event: null,
                 meta: msg.meta,
@@ -1469,7 +1472,7 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
             localId: reducerMsg.localId ?? null,
             createdAt: reducerMsg.createdAt,
             kind: 'user-text',
-            text: reducerMsg.text,
+            text: reducerMsg.text || '',
             ...(reducerMsg.meta?.displayText && { displayText: reducerMsg.meta.displayText }),
             meta: reducerMsg.meta
         };
