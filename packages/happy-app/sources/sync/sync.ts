@@ -540,10 +540,6 @@ class Sync {
             if (cached && cached.sessions.length > 0) {
                 log.log(`📦 sessionsListCache: applying ${cached.sessions.length} cached sessions (cachedAt=${cached.cachedAt})`);
                 this.applySessions(cached.sessions);
-                // Use the cache timestamp as the base for delta fetches.
-                if (!this.lastSessionRefreshNonDeltaAt) {
-                    this.lastSessionRefreshNonDeltaAt = cached.cachedAt;
-                }
             }
         } catch (e) {
             log.log(`📦 sessionsListCache: error applying cached list: ${e}`);
