@@ -657,6 +657,12 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             if (state.messageIds.has(msg.id)) {
                 continue;
             }
+            // If this localId already maps to an existing message (optimistic insert),
+            // skip creating a duplicate. The existing message preserves file attachments
+            // that the echo may not include.
+            if (msg.localId && state.localIds.has(msg.localId)) {
+                continue;
+            }
 
             // Create a new message
             let mid = allocateId();
