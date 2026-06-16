@@ -407,6 +407,9 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             abortFuture = new Future<void>();
             let modeHash: string | null = null;
             let mode: EnhancedMode | null = null;
+            /** Set by onBeforeStop just before stopSignal resolves; prevents nextMessage
+             *  from consuming another queue item that would then be lost by the inputLoop. */
+            let turnStopping = false;
             wasInboxTurn = false;
             wasCompactTurn = false;
             turnSucceeded = false;
@@ -452,6 +455,15 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         }
 
                         let msg = await session.queue.waitForMessagesAndGetAsString(controller.signal);
+
+                        // If the turn is stopping (stopSignal about to resolve), the inputLoop
+                        // will discard our return value. Stash the message in pending so
+                        // the next claudeRemote() call picks it up rather than losing it.
+                        if (msg && turnStopping) {
+                            logger.debug(`[remote] nextMessage stashing msg to pending (turn stopping): msgHash=${msg.hash?.slice(0,8)}`);
+                            pending = { message: msg.message, mode: msg.mode, meta: msg.meta, hash: msg.hash };
+                            return null;
+                        }
 
                         // Echo the app's messageId back via session protocol so the App
                         // can clear its outbox. The envelope id becomes the server localId,
@@ -617,7 +629,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         logger.debug(`[remote]: context via control_request: ${usage.totalTokens} / ${usage.maxTokens} (${Math.round((usage.totalTokens / usage.maxTokens) * 100)}%)`);
                     },
                     onContextOutput: undefined,
-                    signal: abortController.signal,
+                    onBeforeStop: () => { turnStopping = true; },
                     tryConsumeInboxTurn: () => {
                         const inboxHooks = session.a2aInboxTurn;
                         if (!inboxHooks) return null;

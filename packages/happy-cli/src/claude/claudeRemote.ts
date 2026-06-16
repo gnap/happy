@@ -14,7 +14,6 @@ import { systemPrompt } from "./utils/systemPrompt";
 import { PermissionResult } from "./sdk/types";
 import type { JsRuntime } from "./runClaude";
 import { normalizeClaudeModelForSdk } from "./utils/model";
-import { countTokensForSession } from "./utils/countTokensForSession";
 
 export async function claudeRemote(opts: {
 
@@ -44,6 +43,10 @@ export async function claudeRemote(opts: {
     /** Called with raw markdown when the initial message is a /context local command. */
     onContextOutput?: (contextMarkdown: string) => void,
     isAborted: (toolCallId: string) => boolean,
+    /** Called immediately before stopSignal is resolved on a normal result, so the
+     *  launcher can mark itself as "stopping" and avoid fetching a new message from
+     *  the queue that would then be discarded by the inputLoop race. */
+    onBeforeStop?: () => void,
     /**
      * Called after a normal user-turn result to opportunistically claim a pending
      * inbox turn. If one is available the launcher sets it up and returns the
@@ -179,8 +182,6 @@ export async function claudeRemote(opts: {
     let thinking = false;
     /** Session ID assigned by Claude Code on system_init; used for countTokens calls. */
     let currentSessionId: string | null = null;
-    /** Set to false after a permanent countTokens failure (e.g. proxy returns 405). */
-    let countTokensEnabled = true;
     const updateThinking = (newThinking: boolean) => {
         if (thinking !== newThinking) {
             thinking = newThinking;
@@ -283,24 +284,6 @@ export async function claudeRemote(opts: {
                         currentSessionId = systemInit.session_id;
                         opts.onSessionFound(systemInit.session_id);
 
-                        // Pre-warm context usage via countTokens so the first turn-end
-                        // envelope already carries an accurate value. Replaces the former
-                        // get_context_usage control_request which could hang 10+ minutes
-                        // on large sessions.
-                        if (opts.onContextUsage && countTokensEnabled) {
-                            countTokensForSession({
-                                sessionId: systemInit.session_id,
-                                workspacePath: opts.path,
-                                model: mode.model ?? 'claude-sonnet-4-6',
-                            }).then(tokenCount => {
-                                if (tokenCount === false) { countTokensEnabled = false; return; }
-                                if (tokenCount !== null) {
-                                    const maxTokens = (mode.model ?? '').includes('[1m]') ? 1_000_000 : 200_000;
-                                    logger.debug(`[claudeRemote] context usage via countTokens (pre-warm): ${tokenCount} / ${maxTokens}`);
-                                    opts.onContextUsage!({ totalTokens: tokenCount, maxTokens });
-                                }
-                            }).catch(() => { /* ignore */ });
-                        }
                     }
                 }
 
@@ -343,25 +326,6 @@ export async function claudeRemote(opts: {
                     }
                     opts.onReady(message as SDKResultMessage);
 
-                    // Fetch accurate context size via countTokens after each turn.
-                    // Replaces the former get_context_usage control_request which could
-                    // hang 10+ minutes on large (1M) sessions. Result is stored in
-                    // lastContextUsage and attached to the NEXT turn-end envelope.
-                    if (opts.onContextUsage && currentSessionId && countTokensEnabled) {
-                        countTokensForSession({
-                            sessionId: currentSessionId,
-                            workspacePath: opts.path,
-                            model: mode.model ?? 'claude-sonnet-4-6',
-                        }).then(tokenCount => {
-                            if (tokenCount === false) { countTokensEnabled = false; return; }
-                            if (tokenCount !== null) {
-                                const maxTokens = (mode.model ?? '').includes('[1m]') ? 1_000_000 : 200_000;
-                                logger.debug(`[claudeRemote] context usage via countTokens: ${tokenCount} / ${maxTokens}`);
-                                opts.onContextUsage!({ totalTokens: tokenCount, maxTokens });
-                            }
-                        }).catch(() => { /* ignore */ });
-                    }
-
                     // Opportunistically continue in-process with a pending inbox turn.
                     // Mirrors the interstitial task-notification path: push the inbox
                     // prompt directly into the running SDK session so the agent can
@@ -381,6 +345,7 @@ export async function claudeRemote(opts: {
                     // Signal inputLoop to exit so claudeRemote() returns
                     // and the outer launcher loop can peek inbox / pick
                     // up the next queued message.
+                    opts.onBeforeStop?.();
                     stopSignal.resolve();
                 }
 
