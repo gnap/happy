@@ -1026,7 +1026,7 @@ class Sync {
                 });
             });
         } catch (err) {
-            log.log(`📤 sendMessage encrypt failed for ${sessionId.slice(-8)}: ${err instanceof Error ? err.message : String(err)}`);
+            console.warn(`📤 sendMessage encrypt failed for ${sessionId.slice(-8)}: ${err instanceof Error ? err.message : String(err)}`);
             storage.getState().failOutboxEntries([localId], 'Encryption failed');
             return;
         }
@@ -2180,7 +2180,31 @@ class Sync {
         }
 
         const batch = pending.slice();
-        log.log(`📤 flushOutbox: sending ${batch.length} message(s) for ${sessionId.slice(-8)}`);
+
+        // Prefer WebSocket send — same path as CLI. No HTTP round-trip, no
+        // Tauri HTTP plugin issues. Server echoes back via new-message WS
+        // event, which handleUpdate already fast-acks.
+        if (apiSocket.isConnected) {
+            try {
+                for (const msg of batch) {
+                    apiSocket.send('message', {
+                        sid: sessionId,
+                        message: msg.content,
+                        localId: msg.localId,
+                    });
+                }
+                pending.splice(0, batch.length);
+                for (const msg of batch) {
+                    storage.getState().markOutboxMessageAcked(msg.localId);
+                }
+                // WS send has no seq ack — pull receive cursor forward via HTTP.
+                this.getMessagesSync(sessionId).invalidate();
+                return;
+            } catch (_err) {
+                // WS send failed — fall through to HTTP POST below.
+            }
+        }
+
         const controller = new AbortController();
         this.sendAbortControllers.set(sessionId, controller);
         try {
@@ -2221,8 +2245,6 @@ class Sync {
                 this.sessionLastSeq.set(sessionId, maxSeq);
             }
         } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            log.log(`📤 flushOutbox FAILED for ${sessionId.slice(-8)}: ${msg}`);
             this.maybeStartBackgroundSendWatchdog();
             throw error;
         } finally {
