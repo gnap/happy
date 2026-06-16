@@ -848,7 +848,9 @@ export class ApiSessionClient extends EventEmitter {
             ? content
             : isRecord(content) && typeof content.text === 'string'
                 ? content.text
-                : extractA2ATextFromParts(content)
+                : isRecord(content) && content.type === 'content' && Array.isArray(content.blocks)
+                    ? content.blocks.filter((b: any) => b?.type === 'text').map((b: any) => b.text).join('\n')
+                    : extractA2ATextFromParts(content)
                 ?? (isRecord(content) && 'parts' in content ? extractA2ATextFromParts(content.parts) : null)
                 ?? extractA2ATextFromParts(raw.parts);
 
