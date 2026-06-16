@@ -1221,7 +1221,7 @@ class Sync {
             const t0 = performance.now();
             const API_ENDPOINT = getServerUrl();
             const params = new URLSearchParams();
-            if (this.lastSessionRefreshNonDeltaAt) {
+            if (this.lastSessionRefreshNonDeltaAt && this.encryption.hasAnySessionEncryption) {
                 params.set('changedSince', String(this.lastSessionRefreshNonDeltaAt));
             }
             params.set('limit', '200');
