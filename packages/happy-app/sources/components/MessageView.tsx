@@ -134,7 +134,7 @@ function UserTextBlock(props: {
               ))}
             </View>
           )}
-          <MarkdownView markdown={props.message.displayText || props.message.text} onOptionPress={handleOptionPress} />
+          <MarkdownView markdown={props.message.displayText || props.message.text || ''} onOptionPress={handleOptionPress} />
         </View>
       </View>
     </View>
