@@ -27,3 +27,7 @@ tauri-plugin-http = "2"
 tauri-plugin-websocket = "2"
 tauri-plugin-connector = "0.12"
 tauri-plugin-pilot = { git = "https://github.com/mpiton/tauri-pilot" }
+
+[profile.release]
+strip = "none"
+debug = 1
