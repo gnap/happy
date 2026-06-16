@@ -376,12 +376,24 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             profileId={sessionProfileId}
             onProfileChange={updateProfileId}
             metadata={session.metadata}
-            connectionStatus={{
-                text: sessionStatus.statusText,
-                color: sessionStatus.statusColor,
-                dotColor: sessionStatus.statusDotColor,
-                isPulsing: sessionStatus.isPulsing
-            }}
+            isSendDisabled={!sync.encryption.getSessionEncryption(sessionId)}
+            connectionStatus={(() => {
+                const hasEncryption = sync.encryption.getSessionEncryption(sessionId);
+                if (!hasEncryption) {
+                    return {
+                        text: t('session.encrypting'),
+                        color: theme.colors.warning,
+                        dotColor: theme.colors.warning,
+                        isPulsing: true,
+                    };
+                }
+                return {
+                    text: sessionStatus.statusText,
+                    color: sessionStatus.statusColor,
+                    dotColor: sessionStatus.statusDotColor,
+                    isPulsing: sessionStatus.isPulsing,
+                };
+            })()}
             onSend={() => {
                 if (message.trim()) {
                     setMessage('');

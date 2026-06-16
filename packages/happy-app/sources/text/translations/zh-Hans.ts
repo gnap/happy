@@ -306,6 +306,7 @@ export const zhHans: TranslationStructure = {
 
     session: {
         inputPlaceholder: '输入消息...',
+        encrypting: '连接中…',
     },
 
     commandPalette: {
