@@ -18,6 +18,18 @@ const ICON_TODO = (size: number = 24, color: string = '#000') => <Ionicons name=
 const ICON_REASONING = (size: number = 24, color: string = '#000') => <Octicons name="light-bulb" size={size} color={color} />;
 const ICON_QUESTION = (size: number = 24, color: string = '#000') => <Ionicons name="help-circle-outline" size={size} color={color} />;
 
+/** Map a full model slug to a short human-readable display name. */
+function modelSlugToDisplay(slug: string): string {
+    const m = slug.toLowerCase();
+    if (m.includes('opus')) return 'Opus';
+    if (m.includes('sonnet')) return 'Sonnet';
+    if (m.includes('haiku')) return 'Haiku';
+    if (m.includes('deepseek')) return 'DeepSeek';
+    // Return the last segment (e.g. "claude-sonnet-4-6" → "sonnet-4-6")
+    const parts = slug.split(/[/-]/);
+    return parts[parts.length - 1] || slug;
+}
+
 const ICON_SKILL = (size: number = 24, color: string = '#000') => <Ionicons name="flash-outline" size={size} color={color} />;
     const ICON_SCHEDULE = (size: number = 24, color: string = '#000') => <Ionicons name="time-outline" size={size} color={color} />;
     const ICON_MONITOR = (size: number = 24, color: string = '#000') => <Ionicons name="pulse-outline" size={size} color={color} />;
@@ -35,6 +47,14 @@ export const knownTools = {
                 return description;
             }
             return t('tools.names.task');
+        },
+        extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const input = opts.tool.input as Record<string, unknown> | undefined;
+            const model = input?.model;
+            if (model && typeof model === 'string' && model.trim()) {
+                return modelSlugToDisplay(model);
+            }
+            return null;
         },
         icon: ICON_TASK,
         isMutable: true,
@@ -67,6 +87,14 @@ export const knownTools = {
                 return subagentType;
             }
             return t('tools.names.agent');
+        },
+        extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const input = opts.tool.input as Record<string, unknown> | undefined;
+            const model = input?.model;
+            if (model && typeof model === 'string' && model.trim()) {
+                return modelSlugToDisplay(model);
+            }
+            return null;
         },
         icon: ICON_TASK,
         isMutable: true,
