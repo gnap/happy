@@ -512,9 +512,11 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             if (appMessageId) {
                                 pendingPopEcho = { echoedMessageId: appMessageId, text: msg.message };
                             }
+                            const wrapperMeta = msg.meta as { meta?: unknown; files?: unknown[] } | undefined;
                             return {
                                 message: msg.message,
-                                mode: msg.mode
+                                mode: msg.mode,
+                                files: wrapperMeta?.files as any[] | undefined,
                             }
                         }
 

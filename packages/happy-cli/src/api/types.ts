@@ -214,15 +214,38 @@ export type CreateSessionResponse = z.infer<typeof CreateSessionResponseSchema>
 
 export const UserMessageSchema = z.object({
   role: z.literal('user'),
-  content: z.object({
-    type: z.literal('text'),
-    text: z.string()
-  }),
-  localKey: z.string().optional(), // Mobile messages include this
+  content: z.union([
+    z.object({
+      type: z.literal('text'),
+      text: z.string()
+    }),
+    z.object({
+      type: z.literal('content'),
+      blocks: z.array(z.discriminatedUnion('type', [
+        z.object({ type: z.literal('text'), text: z.string() }),
+        z.object({ type: z.literal('file'), name: z.string(), size: z.number(), mimeType: z.string(), data: z.string(), width: z.number().optional(), height: z.number().optional() }),
+      ]))
+    }),
+  ]),
+  localKey: z.string().optional(),
   meta: MessageMetaSchema.optional()
 })
 
 export type UserMessage = z.infer<typeof UserMessageSchema>
+
+/** Extract plain text from a UserMessage regardless of content format. */
+export function getUserMessageText(msg: UserMessage): string {
+    if (msg.content.type === 'text') return msg.content.text;
+    return msg.content.blocks
+        .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+        .map(b => b.text)
+        .join('\n');
+}
+/** Extract file blocks from a UserMessage (empty array for plain text messages). */
+export function getUserMessageFiles(msg: UserMessage) {
+    if (msg.content.type === 'text') return undefined;
+    return msg.content.blocks.filter(b => b.type === 'file');
+}
 
 export const AgentMessageSchema = z.object({
   role: z.literal('agent'),

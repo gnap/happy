@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { ApiClient } from '@/api/api';
 import type { ApiSessionClient } from '@/api/apiSession';
+import { getUserMessageText } from '@/api/types';
 import type { UserMessage, Metadata } from '@/api/types';
 import type { AgentMessage } from '@/agent/core';
 import { AcpBackend, type AcpPermissionHandler } from './AcpBackend';
@@ -1045,13 +1046,13 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
   backend.onMessage(onBackendMessage);
 
   userMessageHandler = (message) => {
-    if (!message.content.text) {
+    if (!getUserMessageText(message)) {
       const keys = message?.content && typeof message.content === 'object' ? Object.keys(message.content).join(',') : 'n/a';
       logger.debug(`[${opts.agentName}] onUserMessage skipped: no text (keys: ${keys})`);
       return;
     }
 
-    logger.debug(`[${opts.agentName}] User message received from app, pushing to queue (len=${message.content.text.length})`);
+    logger.debug(`[${opts.agentName}] User message received from app, pushing to queue (len=${getUserMessageText(message).length})`);
     if (typeof message.meta?.permissionMode === 'string') {
       currentPermissionMode = message.meta.permissionMode;
       logger.debug(`[${opts.agentName}] Requested ACP permission mode: ${currentPermissionMode}`);
@@ -1068,9 +1069,9 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     };
     const isA2A = (message.meta as { origin?: string } | undefined)?.origin === 'a2a';
     if (isA2A) {
-      messageQueue.pushIsolated(message.content.text, mode, message.meta);
+      messageQueue.pushIsolated(getUserMessageText(message), mode, message.meta);
     } else {
-      messageQueue.push(message.content.text, mode, message.meta);
+      messageQueue.push(getUserMessageText(message), mode, message.meta);
     }
   };
   session.onUserMessage(userMessageHandler);
