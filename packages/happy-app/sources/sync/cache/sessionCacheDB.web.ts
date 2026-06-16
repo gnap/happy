@@ -35,6 +35,7 @@ export interface CachedMessageRow {
 export interface CachedSessionListRow {
     sessionsJson: string;
     cachedAt: number;
+    encryptionKeysJson?: string;
 }
 
 export interface ISessionCacheDB {

@@ -544,6 +544,22 @@ class Sync {
                 if (!this.lastSessionRefreshNonDeltaAt) {
                     this.lastSessionRefreshNonDeltaAt = cached.cachedAt;
                 }
+                // Restore encryption keys from cache — dataEncryptionKey is immutable
+                // per session so we can decrypt immediately without waiting for fetchSessions.
+                const ek = cached.encryptionKeys;
+                if (ek && Object.keys(ek).length > 0) {
+                    const sessionKeys = new Map<string, Uint8Array | null>();
+                    for (const [sid, encryptedKey] of Object.entries(ek)) {
+                        const decrypted = await this.encryption.decryptEncryptionKey(encryptedKey);
+                        if (decrypted) {
+                            sessionKeys.set(sid, decrypted);
+                        }
+                    }
+                    if (sessionKeys.size > 0) {
+                        await this.encryption.initializeSessions(sessionKeys);
+                        log.log(`📦 sessionsListCache: restored ${sessionKeys.size} encryption keys from cache`);
+                    }
+                }
             }
         } catch (e) {
             log.log(`📦 sessionsListCache: error applying cached list: ${e}`);
@@ -1271,6 +1287,14 @@ class Sync {
                 lastMessage: ApiMessage | null;
             }>;
 
+            // --- Cache: collect encryption keys for persistence ---
+            const cachedKeys: Record<string, string> = {};
+            for (const session of sessions) {
+                if (session.dataEncryptionKey) {
+                    cachedKeys[session.id] = session.dataEncryptionKey;
+                }
+            }
+
             // Initialize all session encryptions first
             const keyDecryptStart = performance.now();
             const sessionKeys = new Map<string, Uint8Array | null>();
@@ -1336,7 +1360,15 @@ class Sync {
             // Save full merged state (cached + delta), not just the delta results.
             const fullState = storage.getState().sessions;
             const allValues = Object.values(fullState).map(({ presence, ...s }) => s);
-            void saveSessionsListCache(allValues);
+            // Gather encryption keys from the API response so they can be cached
+            // and used on next cold start without waiting for the network fetch.
+            const encryptionKeys: Record<string, string> = {};
+            for (const s of sessions) {
+                if (s.dataEncryptionKey) {
+                    encryptionKeys[s.id] = s.dataEncryptionKey;
+                }
+            }
+            void saveSessionsListCache(allValues, encryptionKeys);
             this._loggedMissingSessionForSid.clear();
 
             // Only eagerly catch up messages for active sessions (agent is running).
