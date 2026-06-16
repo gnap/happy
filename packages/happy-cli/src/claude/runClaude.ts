@@ -632,11 +632,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         // Pass message.meta so claudeRemoteLauncher can read appMessageId
         // and echo it back for outbox cleanup.
         const msgText = getUserMessageText(message);
-        const contentFiles = getUserMessageFiles(message);
-        // Session-protocol wrapping may strip file blocks from content;
-        // fall back to _files in meta (added by App's sendMessage).
-        const metaFiles = (message.meta as any)?._files;
-        const files = (contentFiles && contentFiles.length > 0) ? contentFiles : metaFiles;
+        const files = getUserMessageFiles(message);
         messageQueue.push(msgText, enhancedMode, { meta: message.meta, files });
         logger.debugLargeJson('User message pushed to queue:', message)
     };
