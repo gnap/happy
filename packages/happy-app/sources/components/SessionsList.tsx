@@ -79,6 +79,7 @@ const stylesheet = StyleSheet.create((theme) => ({
         paddingVertical: 3,
         backgroundColor: theme.colors.surface,
         flexDirection: 'row',
+        justifyContent: 'center',
         alignItems: 'center',
         borderTopWidth: 0.5,
         borderTopColor: theme.colors.divider,
@@ -88,6 +89,8 @@ const stylesheet = StyleSheet.create((theme) => ({
     hostGroupText: {
         fontSize: 10,
         color: theme.colors.textSecondary,
+        flex: 1,
+        textAlign: 'center',
         ...Typography.default('semiBold'),
     },
     hostGroupCount: {
