@@ -74,6 +74,28 @@ const stylesheet = StyleSheet.create((theme) => ({
         marginTop: 2,
         ...Typography.default(),
     },
+    hostGroup: {
+        paddingHorizontal: 16,
+        paddingTop: 6,
+        paddingBottom: 2,
+        backgroundColor: theme.colors.groupped.background,
+        flexDirection: 'row',
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    hostGroupText: {
+        fontSize: 10,
+        color: theme.colors.textSecondary,
+        flex: 1,
+        textAlign: 'center',
+        ...Typography.default('semiBold'),
+    },
+    hostGroupCount: {
+        fontSize: 9,
+        color: theme.colors.textSecondary,
+        marginLeft: 6,
+        ...Typography.default(),
+    },
     sessionItem: {
         height: 88,
         flexDirection: 'row',
@@ -243,6 +265,7 @@ export function SessionsList() {
             case 'header': return `header-${item.title}-${index}`;
             case 'active-sessions': return 'active-sessions';
             case 'project-group': return `project-group-${item.machine.id}-${item.displayPath}-${index}`;
+            case 'host-group': return `host-group-${item.projectPath}-${item.host}-${index}`;
             case 'worktree-group': return `worktree-group-${item.projectPath}-${index}`;
             case 'session': return `session-${item.session.id}-${index}`;
         }
@@ -284,6 +307,20 @@ export function SessionsList() {
                         <Text style={styles.projectGroupSubtitle}>
                             {item.machine.metadata?.displayName || item.machine.metadata?.host || item.machine.id}
                         </Text>
+                    </View>
+                );
+
+            case 'host-group':
+                return (
+                    <View style={styles.hostGroup}>
+                        <Text style={styles.hostGroupText} numberOfLines={1}>
+                            {item.host}
+                        </Text>
+                        {item.totalCount > 0 && (
+                            <Text style={styles.hostGroupCount}>
+                                {item.onlineCount}/{item.totalCount}
+                            </Text>
+                        )}
                     </View>
                 );
 

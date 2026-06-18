@@ -349,7 +349,7 @@ function buildSessionListViewData(
                     return b.createdAt - a.createdAt;
                 });
                 const onlineCount = hostSessions.filter(s => s.active).length;
-                toList.push({ type: 'host-group', host, onlineCount, totalCount: hostSessions.length });
+                toList.push({ type: 'host-group', projectPath, host, onlineCount, totalCount: hostSessions.length });
                 for (const s of hostSessions) {
                     toList.push({ type: 'session', session: s });
                 }
