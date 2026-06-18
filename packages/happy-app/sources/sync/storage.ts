@@ -91,7 +91,7 @@ export type SessionListViewItem =
     | { type: 'header'; title: string }
     | { type: 'active-sessions'; sessions: Session[] }
     | { type: 'project-group'; displayPath: string; machine: Machine }
-    | { type: 'worktree-group'; projectPath: string; homeDir?: string; branch?: string }
+    | { type: 'worktree-group'; projectPath: string; homeDir?: string; branch?: string; host?: string }
     | { type: 'session'; session: Session; variant?: 'default' | 'no-path' };
 
 // Legacy type for backward compatibility - to be removed
@@ -233,9 +233,12 @@ function buildSessionListViewData(
         for (const s of group) {
             const pp = s.metadata?.projectPath;
             if (pp) {
-                const arr = wtByProject.get(pp) || [];
+                // Group by projectPath + machineId so same path on different machines
+                // produce separate groups. machineId is always present for sessions with a path.
+                const key = pp + '|' + (s.metadata?.machineId ?? '');
+                const arr = wtByProject.get(key) || [];
                 arr.push(s);
-                wtByProject.set(pp, arr);
+                wtByProject.set(key, arr);
             } else {
                 standard.push(s);
             }
@@ -252,7 +255,7 @@ function buildSessionListViewData(
             const bMax = Math.max(...b.map(s => s.createdAt));
             return bMax - aMax;
         });
-        for (const [projectPath, sessions] of sortedProjects) {
+        for (const [, sessions] of sortedProjects) {
             // Main repo first, then worktrees
             sessions.sort((a, b) => {
                 const aWt = a.metadata?.isWorktree ?? true;
@@ -260,10 +263,12 @@ function buildSessionListViewData(
                 if (aWt !== bWt) return aWt ? 1 : -1;
                 return b.createdAt - a.createdAt; // newest first within same type (stable, doesn't jump)
             });
+            const projectPath = sessions[0]?.metadata?.projectPath ?? '';
             const homeDir = sessions[0]?.metadata?.homeDir;
+            const host = sessions[0]?.metadata?.host;
             const branch = sessions.find(s => !!s.metadata?.branchName)?.metadata?.branchName
                         ?? sessions.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
-            listData.push({ type: 'worktree-group', projectPath, homeDir, branch });
+            listData.push({ type: 'worktree-group', projectPath, homeDir, branch, host });
             for (const s of sessions) {
                 listData.push({ type: 'session', session: s });
             }
@@ -281,9 +286,10 @@ function buildSessionListViewData(
         for (const s of sessions) {
             const pp = s.metadata?.projectPath;
             if (pp) {
-                const arr = byProject.get(pp) || [];
+                const key = pp + '|' + (s.metadata?.machineId ?? '');
+                const arr = byProject.get(key) || [];
                 arr.push(s);
-                byProject.set(pp, arr);
+                byProject.set(key, arr);
             } else {
                 noProject.push(s);
             }
@@ -294,7 +300,7 @@ function buildSessionListViewData(
             const bMax = Math.max(...b.map(s => s.createdAt));
             return bMax - aMax;
         });
-        for (const [projectPath, group] of sortedProjects) {
+        for (const [, group] of sortedProjects) {
             // Main repo first, then worktrees
             group.sort((a, b) => {
                 const aWt = a.metadata?.isWorktree ?? true;
@@ -302,10 +308,12 @@ function buildSessionListViewData(
                 if (aWt !== bWt) return aWt ? 1 : -1;
                 return b.createdAt - a.createdAt; // newest first within same type
             });
+            const projectPath = group[0]?.metadata?.projectPath ?? '';
             const homeDir = group[0]?.metadata?.homeDir;
+            const host = group[0]?.metadata?.host;
             const branch = group.find(s => !!s.metadata?.branchName)?.metadata?.branchName
                         ?? group.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
-            toList.push({ type: 'worktree-group', projectPath, homeDir, branch });
+            toList.push({ type: 'worktree-group', projectPath, homeDir, branch, host });
             for (const s of group) {
                 toList.push({ type: 'session', session: s });
             }

@@ -288,11 +288,18 @@ export function SessionsList() {
 
             case 'worktree-group':
                 return (
-                    <View style={[styles.projectGroup, { flexDirection: 'row', alignItems: 'center' }]}>
-                        <Ionicons name="folder-outline" size={14} color="#8E8E93" style={{ marginRight: 8 }} />
-                        <Text style={styles.projectGroupTitle}>
-                            {formatPathRelativeToHome(item.projectPath, item.homeDir)}
-                        </Text>
+                    <View style={[styles.projectGroup, { flexDirection: 'column' }]}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                            <Ionicons name="folder-outline" size={14} color="#8E8E93" style={{ marginRight: 8 }} />
+                            <Text style={styles.projectGroupTitle}>
+                                {formatPathRelativeToHome(item.projectPath, item.homeDir)}
+                            </Text>
+                        </View>
+                        {item.host ? (
+                            <Text style={styles.projectGroupSubtitle}>
+                                {item.host}
+                            </Text>
+                        ) : null}
                     </View>
                 );
 
