@@ -73,6 +73,24 @@ const stylesheet = StyleSheet.create((theme) => ({
         marginTop: 2,
         ...Typography.default(),
     },
+    hostGroup: {
+        paddingHorizontal: 16,
+        paddingVertical: 4,
+        backgroundColor: theme.colors.surface,
+        flexDirection: 'row',
+        alignItems: 'center',
+    },
+    hostGroupText: {
+        fontSize: 11,
+        color: theme.colors.textSecondary,
+        ...Typography.default(),
+    },
+    hostGroupCount: {
+        fontSize: 10,
+        color: theme.colors.textSecondary,
+        marginLeft: 8,
+        ...Typography.default(),
+    },
     sessionItem: {
         height: 88,
         flexDirection: 'row',
@@ -223,6 +241,35 @@ export function SessionsList() {
     }, [selectable, data, pathname]);
     const dataWithSelected = selectable ? dataWithSelectedMemo : data;
 
+    // Track which project groups are collapsed
+    const [collapsedProjects, setCollapsedProjects] = React.useState<Set<string>>(new Set());
+
+    // Filter out items inside collapsed project groups
+    const visibleData = React.useMemo(() => {
+        if (!dataWithSelected) return null;
+        if (collapsedProjects.size === 0) return dataWithSelected;
+        let skipUntilNextProject = false;
+        const result: typeof dataWithSelected = [];
+        for (const item of dataWithSelected) {
+            if (item.type === 'worktree-group') {
+                skipUntilNextProject = collapsedProjects.has(item.projectPath);
+                result.push(item); // always show the project header itself
+                continue;
+            }
+            if (skipUntilNextProject) continue;
+            result.push(item);
+        }
+        return result;
+    }, [dataWithSelected, collapsedProjects]);
+
+    // Recalculate sticky header indices after collapse changes
+    const stickyIndices = React.useMemo(() => {
+        if (!visibleData) return [];
+        return visibleData
+            .map((item, i) => item.type === 'worktree-group' ? i : -1)
+            .filter(i => i >= 0);
+    }, [visibleData]);
+
     // Request review
     React.useEffect(() => {
         if (data && data.length > 0) {
@@ -243,6 +290,7 @@ export function SessionsList() {
             case 'active-sessions': return 'active-sessions';
             case 'project-group': return `project-group-${item.machine.id}-${item.displayPath}-${index}`;
             case 'worktree-group': return `worktree-group-${item.projectPath}-${index}`;
+            case 'host-group': return `host-group-${item.host}-${index}`;
             case 'session': return `session-${item.session.id}-${index}`;
         }
     }, []);
@@ -287,26 +335,47 @@ export function SessionsList() {
                 );
 
             case 'worktree-group':
+                const isCollapsed = collapsedProjects.has(item.projectPath);
                 return (
-                    <View style={[styles.projectGroup, { flexDirection: 'column' }]}>
-                        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                            <Ionicons name="folder-outline" size={14} color="#8E8E93" style={{ marginRight: 8 }} />
-                            <Text style={styles.projectGroupTitle}>
-                                {formatPathRelativeToHome(item.projectPath, item.homeDir)}
+                    <Pressable
+                        onPress={() => setCollapsedProjects(prev => {
+                            const next = new Set(prev);
+                            if (next.has(item.projectPath)) next.delete(item.projectPath);
+                            else next.add(item.projectPath);
+                            return next;
+                        })}
+                        style={({ pressed }) => [
+                            styles.projectGroup,
+                            { flexDirection: 'row', alignItems: 'center', opacity: pressed ? 0.7 : 1 },
+                        ]}
+                    >
+                        <Ionicons name={isCollapsed ? "chevron-forward" : "chevron-down"} size={14} color="#8E8E93" style={{ marginRight: 6 }} />
+                        <Ionicons name="folder-outline" size={14} color="#8E8E93" style={{ marginRight: 8 }} />
+                        <Text style={styles.projectGroupTitle} numberOfLines={1}>
+                            {formatPathRelativeToHome(item.projectPath, item.homeDir)}
+                        </Text>
+                    </Pressable>
+                );
+
+            case 'host-group':
+                return (
+                    <View style={styles.hostGroup}>
+                        <Ionicons name="desktop-outline" size={12} color="#8E8E93" style={{ marginRight: 6 }} />
+                        <Text style={styles.hostGroupText}>
+                            {item.host || 'Unknown'}
+                        </Text>
+                        {item.onlineCount > 0 && (
+                            <Text style={styles.hostGroupCount}>
+                                {item.onlineCount}/{item.totalCount} online
                             </Text>
-                        </View>
-                        {item.host ? (
-                            <Text style={styles.projectGroupSubtitle}>
-                                {item.host}
-                            </Text>
-                        ) : null}
+                        )}
                     </View>
                 );
 
             case 'session':
                 // Determine card styling based on position within date group
-                const prevItem = index > 0 && dataWithSelected ? dataWithSelected[index - 1] : null;
-                const nextItem = index < (dataWithSelected?.length || 0) - 1 && dataWithSelected ? dataWithSelected[index + 1] : null;
+                const prevItem = index > 0 && visibleData ? visibleData[index - 1] : null;
+                const nextItem = index < (visibleData?.length || 0) - 1 && visibleData ? visibleData[index + 1] : null;
 
                 const isFirst = prevItem?.type === 'header';
                 const isLast = nextItem?.type === 'header' || nextItem == null || nextItem?.type === 'active-sessions';
@@ -340,11 +409,12 @@ export function SessionsList() {
         <View style={styles.container}>
             <View style={styles.contentContainer}>
                 <FlatList
-                    data={dataWithSelected}
+                    data={visibleData}
                     renderItem={renderItem}
                     keyExtractor={keyExtractor}
                     contentContainerStyle={{ paddingBottom: safeArea.bottom + 128, maxWidth: layout.maxWidth }}
                     ListHeaderComponent={HeaderComponent}
+                    stickyHeaderIndices={stickyIndices}
                 />
             </View>
         </View>
