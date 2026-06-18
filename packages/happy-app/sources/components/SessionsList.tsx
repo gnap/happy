@@ -280,33 +280,12 @@ export function SessionsList() {
         return result;
     }, [dataWithSelected, collapsedProjects, expandedHosts]);
 
-    // Track which project headers are currently stacked as sticky
-    const [stickyHeaders, setStickyHeaders] = React.useState<SessionListViewItem[]>([]);
-    const stickyHeaderHeight = 38; // approximate height of a project header row
-
-    const handleScroll = React.useCallback((event: any) => {
-        const offsetY = event.nativeEvent.contentOffset.y;
-        if (!visibleData) return;
-        // Find all project headers whose position has scrolled past the stack area
-        const stacked: SessionListViewItem[] = [];
-        let accumulatedY = 0;
-        for (const item of visibleData) {
-            if (item.type === 'worktree-group') {
-                const headerY = accumulatedY;
-                const stackIndex = stacked.length;
-                if (headerY <= offsetY + stackIndex * stickyHeaderHeight) {
-                    stacked.push(item);
-                }
-                accumulatedY += stickyHeaderHeight;
-            } else {
-                accumulatedY += item.type === 'host-group' ? 22 : 88; // approximate heights
-            }
-        }
-        setStickyHeaders(prev => {
-            if (prev.length !== stacked.length) return stacked;
-            if (prev.some((h, i) => h !== stacked[i])) return stacked;
-            return prev;
-        });
+    // Sticky project headers: use FlatList built-in stickyHeaderIndices
+    const stickyIndices = React.useMemo(() => {
+        if (!visibleData) return [];
+        return visibleData
+            .map((item, i) => item.type === 'worktree-group' ? i : -1)
+            .filter(i => i >= 0);
     }, [visibleData]);
 
     // Request review
@@ -463,23 +442,8 @@ export function SessionsList() {
                     keyExtractor={keyExtractor}
                     contentContainerStyle={{ paddingBottom: safeArea.bottom + 128, maxWidth: layout.maxWidth }}
                     ListHeaderComponent={HeaderComponent}
-                    onScroll={handleScroll}
-                    scrollEventThrottle={16}
+                    stickyHeaderIndices={stickyIndices}
                 />
-                {/* Stacking sticky project headers */}
-                {stickyHeaders.length > 0 && (
-                    <View style={{
-                        position: 'absolute',
-                        top: 0,
-                        left: 0,
-                        right: 0,
-                        zIndex: 10,
-                    }}>
-                        {stickyHeaders.map((header, i) => (
-                            renderItem({ item: header, index: -1 - i })
-                        ))}
-                    </View>
-                )}
             </View>
         </View>
     );
