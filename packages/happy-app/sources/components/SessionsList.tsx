@@ -269,7 +269,7 @@ export function SessionsList() {
             if (item.type === 'host-group') {
                 currentHost = item.host;
                 hideOffline = !expandedHosts.has(currentProjectPath + '|' + item.host);
-                result.push(item);
+                if (!skipUntilNextProject) result.push(item);
                 continue;
             }
             if (skipUntilNextProject) continue;
