@@ -77,9 +77,8 @@ const stylesheet = StyleSheet.create((theme) => ({
     hostGroup: {
         paddingLeft: 28,
         paddingRight: 16,
-        paddingTop: 6,
-        paddingBottom: 6,
-        minHeight: 28,
+        paddingVertical: 5,
+        height: 26,
         backgroundColor: theme.colors.surface,
         flexDirection: 'row',
         alignItems: 'center',
