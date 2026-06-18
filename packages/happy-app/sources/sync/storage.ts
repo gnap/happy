@@ -92,7 +92,7 @@ export type SessionListViewItem =
     | { type: 'active-sessions'; sessions: Session[] }
     | { type: 'project-group'; displayPath: string; machine: Machine }
     | { type: 'worktree-group'; projectPath: string; homeDir?: string; branch?: string }
-    | { type: 'host-group'; host: string; onlineCount: number; totalCount: number }
+    | { type: 'host-group'; projectPath: string; host: string; onlineCount: number; totalCount: number }
     | { type: 'session'; session: Session; variant?: 'default' | 'no-path' };
 
 // Legacy type for backward compatibility - to be removed
@@ -280,7 +280,7 @@ function buildSessionListViewData(
                     return b.createdAt - a.createdAt;
                 });
                 const onlineCount = hostSessions.filter(s => s.active).length;
-                listData.push({ type: 'host-group', host, onlineCount, totalCount: hostSessions.length });
+                listData.push({ type: 'host-group', projectPath, host, onlineCount, totalCount: hostSessions.length });
                 for (const s of hostSessions) {
                     listData.push({ type: 'session', session: s });
                 }

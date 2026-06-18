@@ -247,24 +247,37 @@ export function SessionsList() {
 
     // Track which project groups are collapsed
     const [collapsedProjects, setCollapsedProjects] = React.useState<Set<string>>(new Set());
+    // Track which host groups have offline sessions visible (key: "projectPath|host")
+    const [expandedHosts, setExpandedHosts] = React.useState<Set<string>>(new Set());
 
-    // Filter out items inside collapsed project groups
+    // Filter out items inside collapsed project groups and hidden offline sessions
     const visibleData = React.useMemo(() => {
         if (!dataWithSelected) return null;
-        if (collapsedProjects.size === 0) return dataWithSelected;
-        let skipUntilNextProject = false;
         const result: typeof dataWithSelected = [];
+        let skipUntilNextProject = false;
+        let currentProjectPath = '';
+        let currentHost = '';
+        let hideOffline = false;
+
         for (const item of dataWithSelected) {
             if (item.type === 'worktree-group') {
+                currentProjectPath = item.projectPath;
                 skipUntilNextProject = collapsedProjects.has(item.projectPath);
-                result.push(item); // always show the project header itself
+                result.push(item);
+                continue;
+            }
+            if (item.type === 'host-group') {
+                currentHost = item.host;
+                hideOffline = !expandedHosts.has(currentProjectPath + '|' + item.host);
+                result.push(item);
                 continue;
             }
             if (skipUntilNextProject) continue;
+            if (item.type === 'session' && hideOffline && !item.session.active) continue;
             result.push(item);
         }
         return result;
-    }, [dataWithSelected, collapsedProjects]);
+    }, [dataWithSelected, collapsedProjects, expandedHosts]);
 
     // Track which project headers are currently stacked as sticky
     const [stickyHeaders, setStickyHeaders] = React.useState<SessionListViewItem[]>([]);
@@ -382,20 +395,36 @@ export function SessionsList() {
                     </Pressable>
                 );
 
-            case 'host-group':
+            case 'host-group': {
+                const hostKey = item.projectPath + '|' + item.host;
+                const isExpanded = expandedHosts.has(hostKey);
+                const hasOffline = item.totalCount > item.onlineCount;
                 return (
-                    <View style={styles.hostGroup}>
+                    <Pressable
+                        onPress={hasOffline ? () => setExpandedHosts(prev => {
+                            const next = new Set(prev);
+                            if (next.has(hostKey)) next.delete(hostKey);
+                            else next.add(hostKey);
+                            return next;
+                        }) : undefined}
+                        style={({ pressed }) => [
+                            styles.hostGroup,
+                            { opacity: hasOffline && pressed ? 0.7 : 1 },
+                        ]}
+                    >
+                        {hasOffline && (
+                            <Ionicons name={isExpanded ? "chevron-down" : "chevron-forward"} size={10} color="#8E8E93" style={{ marginRight: 4 }} />
+                        )}
                         <Ionicons name="desktop-outline" size={12} color="#8E8E93" style={{ marginRight: 6 }} />
                         <Text style={styles.hostGroupText}>
                             {item.host || 'Unknown'}
                         </Text>
-                        {item.onlineCount > 0 && (
-                            <Text style={styles.hostGroupCount}>
-                                {item.onlineCount}/{item.totalCount} online
-                            </Text>
-                        )}
-                    </View>
+                        <Text style={styles.hostGroupCount}>
+                            {item.onlineCount}/{item.totalCount} online
+                        </Text>
+                    </Pressable>
                 );
+            }
 
             case 'session':
                 // Determine card styling based on position within date group
