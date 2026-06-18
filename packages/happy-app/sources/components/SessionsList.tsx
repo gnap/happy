@@ -76,15 +76,12 @@ const stylesheet = StyleSheet.create((theme) => ({
     },
     hostGroup: {
         paddingHorizontal: 16,
-        paddingVertical: 3,
-        backgroundColor: theme.colors.surface,
+        paddingTop: 6,
+        paddingBottom: 2,
+        backgroundColor: theme.colors.groupped.background,
         flexDirection: 'row',
         justifyContent: 'center',
         alignItems: 'center',
-        borderTopWidth: 0.5,
-        borderTopColor: theme.colors.divider,
-        borderBottomWidth: 0.5,
-        borderBottomColor: theme.colors.divider,
     },
     hostGroupText: {
         fontSize: 10,
