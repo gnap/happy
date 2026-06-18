@@ -60,7 +60,6 @@ const stylesheet = StyleSheet.create((theme) => ({
         paddingLeft: 4,
         paddingRight: 16,
         paddingVertical: 10,
-        height: 38,
         backgroundColor: theme.colors.groupped.background,
     },
     projectGroupTitle: {
@@ -79,7 +78,6 @@ const stylesheet = StyleSheet.create((theme) => ({
         paddingHorizontal: 16,
         paddingTop: 6,
         paddingBottom: 2,
-        height: 24,
         backgroundColor: theme.colors.groupped.background,
         flexDirection: 'row',
         justifyContent: 'center',
@@ -453,29 +451,6 @@ export function SessionsList() {
     // Remove this section as we'll use FlatList for all items now
 
 
-    const ITEM_HEIGHTS: Record<string, number> = {
-        'header': 32,
-        'worktree-group': 38,
-        'host-group': 24,
-        'session': 88,
-        'project-group': 38,
-        'active-sessions': 144,
-    };
-    const getItemLayout = React.useCallback((_data: any, index: number) => {
-        const sectionData = _data as Array<{ type: string }>;
-        if (!Array.isArray(sectionData) || sectionData.length === 0) {
-            return { length: 0, offset: 0, index };
-        }
-        let offset = 0;
-        for (let i = 0; i < index && i < sectionData.length; i++) {
-            offset += ITEM_HEIGHTS[sectionData[i]?.type] || 88;
-        }
-        const length = index < sectionData.length
-            ? (ITEM_HEIGHTS[sectionData[index]?.type] || 88)
-            : 0;
-        return { length, offset, index };
-    }, []);
-
     const HeaderComponent = React.useCallback(() => {
         return (
             <UpdateBanner />
@@ -493,7 +468,6 @@ export function SessionsList() {
                         renderItem={renderItem}
                         renderSectionHeader={renderSectionHeader}
                         keyExtractor={keyExtractor}
-                        getItemLayout={getItemLayout}
                         contentContainerStyle={{ paddingBottom: safeArea.bottom + 128, maxWidth: layout.maxWidth }}
                         ListHeaderComponent={HeaderComponent}
                         stickySectionHeadersEnabled={true}
