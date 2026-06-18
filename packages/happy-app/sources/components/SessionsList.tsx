@@ -416,17 +416,9 @@ export function SessionsList() {
                             { opacity: hasOffline && pressed ? 0.7 : 1 },
                         ]}
                     >
-                        <Text style={styles.hostGroupText}>
-                            {item.host || 'Unknown'}
+                        <Text style={styles.hostGroupText} numberOfLines={1}>
+                            {item.host || 'Unknown'}{' · '}{item.onlineCount}/{item.totalCount} online{hasOffline ? (isExpanded ? ' ▾' : ' ▸') : ''}
                         </Text>
-                        <Text style={styles.hostGroupCount}>
-                            {' '}{item.onlineCount}/{item.totalCount} online
-                        </Text>
-                        {hasOffline && (
-                            <Text style={styles.hostGroupCount}>
-                                {isExpanded ? '▾' : '▸'}
-                            </Text>
-                        )}
                     </Pressable>
                 );
             }
