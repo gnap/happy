@@ -60,7 +60,7 @@ const stylesheet = StyleSheet.create((theme) => ({
         paddingLeft: 4,
         paddingRight: 16,
         paddingVertical: 10,
-        backgroundColor: theme.colors.surface,
+        backgroundColor: theme.colors.groupped.background,
     },
     projectGroupTitle: {
         fontSize: 13,
