@@ -327,13 +327,10 @@ function buildSessionListViewData(
     // Build unified list view data
     const listData: SessionListViewItem[] = [];
 
-    // Active sessions: project-grouped get worktree headers.
-    const allUngrouped: Session[] = emitProjectGrouped(activeSessions);
-
-    // Inactive sessions: project-grouped go directly into worktree-groups;
-    // ungrouped merge into the shared "Other" section.
-    const inactiveUngrouped = emitProjectGrouped(inactiveSessions);
-    allUngrouped.push(...inactiveUngrouped);
+    // Merge active + inactive session arrays so each project path appears once
+    // with all sessions together (active first, then inactive).
+    const allSessions = [...activeSessions, ...inactiveSessions];
+    const allUngrouped: Session[] = emitProjectGrouped(allSessions);
 
     // Emit all ungrouped sessions (active + inactive) into a single "Other"
     // worktree-group, host-sub-grouped with online sessions first.
