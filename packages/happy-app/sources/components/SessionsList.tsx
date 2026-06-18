@@ -425,8 +425,9 @@ export function SessionsList() {
                 const prevItem = index > 0 && visibleData ? visibleData[index - 1] : null;
                 const nextItem = index < (visibleData?.length || 0) - 1 && visibleData ? visibleData[index + 1] : null;
 
-                const isFirst = prevItem?.type === 'header';
-                const isLast = nextItem?.type === 'header' || nextItem == null || nextItem?.type === 'active-sessions';
+                const isGroupBoundary = (type: string) => type === 'header' || type === 'host-group' || type === 'worktree-group' || type === 'active-sessions';
+                const isFirst = prevItem ? isGroupBoundary(prevItem.type) : true;
+                const isLast = nextItem ? isGroupBoundary(nextItem.type) : true;
                 const isSingle = isFirst && isLast;
 
                 return (
