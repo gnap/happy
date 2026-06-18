@@ -223,7 +223,8 @@ function buildSessionListViewData(
     // updatedAt keeps relative ordering stable — project groups won't jump when a
     // session inside gets an update (e.g. draft, metadata sync).
     activeSessions.sort((a, b) => b.createdAt - a.createdAt);
-    inactiveSessions.sort((a, b) => b.createdAt - a.createdAt);
+    // Inactive sessions sort by last activity so the date headers make sense.
+    inactiveSessions.sort((a, b) => b.updatedAt - a.updatedAt);
 
     // Helper: emit a date group, inserting project-group headers with host sub-groups.
     const emitSessionGroup = (group: Session[]) => {
@@ -231,8 +232,14 @@ function buildSessionListViewData(
         const standard: Session[] = [];
 
         for (const s of group) {
-            const pp = s.metadata?.projectPath;
+            let pp = s.metadata?.projectPath;
             if (pp) {
+                // Normalize path: replace home dir with ~ so same projects
+                // on different machines group together.
+                const hd = s.metadata?.homeDir;
+                if (hd && pp.startsWith(hd)) {
+                    pp = '~' + pp.slice(hd.length);
+                }
                 const arr = byProject.get(pp) || [];
                 arr.push(s);
                 byProject.set(pp, arr);
@@ -241,8 +248,8 @@ function buildSessionListViewData(
             }
         }
 
-        // Sort standard sessions by createdAt (stable, no jumping)
-        standard.sort((a, b) => b.createdAt - a.createdAt);
+        // Standard sessions sort by last activity for the date headers.
+        standard.sort((a, b) => b.updatedAt - a.updatedAt);
         for (const s of standard) {
             listData.push({ type: 'session', session: s });
         }
@@ -297,8 +304,12 @@ function buildSessionListViewData(
         const byProject = new Map<string, Session[]>();
         const noProject: Session[] = [];
         for (const s of sessions) {
-            const pp = s.metadata?.projectPath;
+            let pp = s.metadata?.projectPath;
             if (pp) {
+                const hd = s.metadata?.homeDir;
+                if (hd && pp.startsWith(hd)) {
+                    pp = '~' + pp.slice(hd.length);
+                }
                 const arr = byProject.get(pp) || [];
                 arr.push(s);
                 byProject.set(pp, arr);

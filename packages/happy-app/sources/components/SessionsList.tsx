@@ -248,8 +248,8 @@ export function SessionsList() {
 
     // Track which project groups are collapsed
     const [collapsedProjects, setCollapsedProjects] = React.useState<Set<string>>(new Set());
-    // Track which host groups have offline sessions visible (key: "projectPath|host")
-    const [expandedHosts, setExpandedHosts] = React.useState<Set<string>>(new Set());
+    // Track which host groups have offline sessions hidden (key: "projectPath|host")
+    const [hiddenOfflineHosts, setHiddenOfflineHosts] = React.useState<Set<string>>(new Set());
 
     // Filter out items inside collapsed project groups and hidden offline sessions
     const visibleData = React.useMemo(() => {
@@ -269,44 +269,23 @@ export function SessionsList() {
             }
             if (item.type === 'host-group') {
                 currentHost = item.host;
-                hideOffline = !expandedHosts.has(currentProjectPath + '|' + item.host);
+                hideOffline = hiddenOfflineHosts.has(currentProjectPath + '|' + item.host);
                 if (!skipUntilNextProject) result.push(item);
                 continue;
             }
             if (skipUntilNextProject) continue;
-            if (item.type === 'session' && hideOffline && !item.session.active) continue;
+            if (item.type === 'session' && hideOffline && currentHost && !item.session.active) continue;
             result.push(item);
         }
         return result;
-    }, [dataWithSelected, collapsedProjects, expandedHosts]);
+    }, [dataWithSelected, collapsedProjects, hiddenOfflineHosts]);
 
-    // Track which project headers are currently stacked as sticky
-    const [stickyHeaders, setStickyHeaders] = React.useState<SessionListViewItem[]>([]);
-    const stickyHeaderHeight = 38; // approximate height of a project header row
-
-    const handleScroll = React.useCallback((event: any) => {
-        const offsetY = event.nativeEvent.contentOffset.y;
-        if (!visibleData) return;
-        // Find all project headers whose position has scrolled past the stack area
-        const stacked: SessionListViewItem[] = [];
-        let accumulatedY = 0;
-        for (const item of visibleData) {
-            if (item.type === 'worktree-group') {
-                const headerY = accumulatedY;
-                const stackIndex = stacked.length;
-                if (headerY <= offsetY + stackIndex * stickyHeaderHeight) {
-                    stacked.push(item);
-                }
-                accumulatedY += stickyHeaderHeight;
-            } else {
-                accumulatedY += item.type === 'host-group' ? 22 : 88; // approximate heights
-            }
-        }
-        setStickyHeaders(prev => {
-            if (prev.length !== stacked.length) return stacked;
-            if (prev.some((h, i) => h !== stacked[i])) return stacked;
-            return prev;
-        });
+    // Sticky project headers: use FlatList built-in stickyHeaderIndices
+    const stickyIndices = React.useMemo(() => {
+        if (!visibleData) return [];
+        return visibleData
+            .map((item, i) => item.type === 'worktree-group' ? i : -1)
+            .filter(i => i >= 0);
     }, [visibleData]);
 
     // Request review
@@ -398,11 +377,11 @@ export function SessionsList() {
 
             case 'host-group': {
                 const hostKey = item.projectPath + '|' + item.host;
-                const isExpanded = expandedHosts.has(hostKey);
+                const isHidingOffline = hiddenOfflineHosts.has(hostKey);
                 const hasOffline = item.totalCount > item.onlineCount;
                 return (
                     <Pressable
-                        onPress={hasOffline ? () => setExpandedHosts(prev => {
+                        onPress={hasOffline ? () => setHiddenOfflineHosts(prev => {
                             const next = new Set(prev);
                             if (next.has(hostKey)) next.delete(hostKey);
                             else next.add(hostKey);
@@ -414,7 +393,7 @@ export function SessionsList() {
                         ]}
                     >
                         <Text style={styles.hostGroupText} numberOfLines={1}>
-                            {item.host || 'Unknown'}{' · '}{item.onlineCount}/{item.totalCount} online{hasOffline ? (isExpanded ? ' ▾' : ' ▸') : ''}
+                            {item.host || 'Unknown'}{' · '}{item.onlineCount}/{item.totalCount} online{hasOffline ? (isHidingOffline ? ' ▸' : ' ▾') : ''}
                         </Text>
                     </Pressable>
                 );
@@ -463,23 +442,8 @@ export function SessionsList() {
                     keyExtractor={keyExtractor}
                     contentContainerStyle={{ paddingBottom: safeArea.bottom + 128, maxWidth: layout.maxWidth }}
                     ListHeaderComponent={HeaderComponent}
-                    onScroll={handleScroll}
-                    scrollEventThrottle={16}
+                    stickyHeaderIndices={stickyIndices}
                 />
-                {/* Stacking sticky project headers */}
-                {stickyHeaders.length > 0 && (
-                    <View style={{
-                        position: 'absolute',
-                        top: 0,
-                        left: 0,
-                        right: 0,
-                        zIndex: 10,
-                    }}>
-                        {stickyHeaders.map((header, i) => (
-                            renderItem({ item: header, index: -1 - i })
-                        ))}
-                    </View>
-                )}
             </View>
         </View>
     );
