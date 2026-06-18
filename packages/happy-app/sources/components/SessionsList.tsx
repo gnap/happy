@@ -75,11 +75,11 @@ const stylesheet = StyleSheet.create((theme) => ({
         ...Typography.default(),
     },
     hostGroup: {
-        paddingLeft: 28,
-        paddingRight: 16,
+        paddingHorizontal: 16,
         height: 24,
         backgroundColor: theme.colors.surface,
         flexDirection: 'row',
+        justifyContent: 'center',
         alignItems: 'center',
     },
     hostGroupText: {
