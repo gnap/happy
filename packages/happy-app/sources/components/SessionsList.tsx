@@ -57,7 +57,7 @@ const stylesheet = StyleSheet.create((theme) => ({
         ...Typography.default('semiBold'),
     },
     projectGroup: {
-        paddingLeft: 8,
+        paddingLeft: 4,
         paddingRight: 16,
         paddingVertical: 10,
         backgroundColor: theme.colors.surface,
@@ -75,7 +75,7 @@ const stylesheet = StyleSheet.create((theme) => ({
         ...Typography.default(),
     },
     hostGroup: {
-        paddingLeft: 32,
+        paddingLeft: 28,
         paddingRight: 16,
         paddingTop: 6,
         paddingBottom: 6,
