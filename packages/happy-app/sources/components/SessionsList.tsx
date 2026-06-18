@@ -279,53 +279,17 @@ export function SessionsList() {
         return result;
     }, [dataWithSelected, collapsedProjects, hiddenOfflineHosts]);
 
-    // Sticky project headers: custom overlay positioned to stack naturally,
-    // pushing previous headers down as new ones reach the top.
-    const [stickyTop, setStickyTop] = React.useState<number>(0);
-    const [stickyIndices, setStickyIndices] = React.useState<number[]>([]);
-
-    // Pre-compute worktree-group positions for fast lookup during scroll.
-    const projectPositions = React.useMemo(() => {
+    // Compute indices of worktree-group items for FlatList.stickyHeaderIndices.
+    const stickyHeaderIndices: number[] = React.useMemo(() => {
         if (!visibleData) return [];
-        const positions: { index: number; y: number; projectPath: string }[] = [];
-        let y = 0;
+        const indices: number[] = [];
         for (let i = 0; i < visibleData.length; i++) {
-            const item = visibleData[i];
-            if (item.type === 'worktree-group') {
-                positions.push({ index: i, y, projectPath: item.projectPath });
+            if (visibleData[i].type === 'worktree-group') {
+                indices.push(i);
             }
-            y += item.type === 'header' ? 32
-                : item.type === 'worktree-group' ? 38
-                : item.type === 'host-group' ? 24
-                : item.type === 'session' ? 88
-                : item.type === 'active-sessions' ? 144
-                : 0;
         }
-        return positions;
+        return indices;
     }, [visibleData]);
-
-    const handleScroll = React.useCallback((event: any) => {
-        const offsetY = event.nativeEvent.contentOffset.y;
-        setStickyTop(offsetY);
-    }, []);
-
-    const stickyHeaders = React.useMemo(() => {
-        if (projectPositions.length === 0) return [];
-        const result: { index: number; projectPath: string }[] = [];
-        for (let i = 0; i < projectPositions.length; i++) {
-            const headerY = projectPositions[i].y;
-            // Header becomes sticky when it has scrolled above the area occupied
-            // by previous sticky headers (each 38px). The first (topmost) header
-            // sticks when headerY < stickyTop; subsequent headers stick when their
-            // original Y is within the stacked header zone.
-            if (headerY < stickyTop + result.length * 38) {
-                result.push({ index: projectPositions[i].index, projectPath: projectPositions[i].projectPath });
-            } else {
-                break;
-            }
-        }
-        return result;
-    }, [projectPositions, stickyTop]);
 
     // Request review
     React.useEffect(() => {
@@ -484,23 +448,8 @@ export function SessionsList() {
                         keyExtractor={keyExtractor}
                         contentContainerStyle={{ paddingBottom: safeArea.bottom + 128, maxWidth: layout.maxWidth }}
                         ListHeaderComponent={HeaderComponent}
-                        onScroll={handleScroll}
-                        scrollEventThrottle={16}
+                        stickyHeaderIndices={stickyHeaderIndices}
                     />
-                    {stickyHeaders.length > 0 && (
-                        <View style={{
-                            position: 'absolute',
-                            top: 0, left: 0, right: 0,
-                            maxWidth: layout.maxWidth,
-                            alignSelf: 'center',
-                        }} pointerEvents="box-none">
-                            {stickyHeaders.length > 0 && (
-                                <View key={`sticky-${stickyHeaders[stickyHeaders.length - 1].projectPath}-${stickyHeaders.length}`}>
-                                    {renderItem({ item: visibleData![stickyHeaders[stickyHeaders.length - 1].index], index: stickyHeaders[stickyHeaders.length - 1].index })}
-                                </View>
-                            )}
-                        </View>
-                    )}
                 </View>
             </View>
         </View>
