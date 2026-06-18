@@ -248,10 +248,27 @@ function buildSessionListViewData(
             }
         }
 
-        // Standard sessions sort by last activity for the date headers.
+        // Standard sessions (no projectPath): sort by last activity, group by host.
         standard.sort((a, b) => b.updatedAt - a.updatedAt);
+        const standardByHost = new Map<string, Session[]>();
         for (const s of standard) {
-            listData.push({ type: 'session', session: s });
+            const host = s.metadata?.host ?? '';
+            const arr = standardByHost.get(host) || [];
+            arr.push(s);
+            standardByHost.set(host, arr);
+        }
+        const sortedStandardHosts = [...standardByHost.entries()].sort(([, a], [, b]) => {
+            const aMax = Math.max(...a.map(s => s.createdAt));
+            const bMax = Math.max(...b.map(s => s.createdAt));
+            return bMax - aMax;
+        });
+        for (const [host, hostSessions] of sortedStandardHosts) {
+            hostSessions.sort((a, b) => b.createdAt - a.createdAt);
+            const onlineCount = hostSessions.filter(s => s.active).length;
+            listData.push({ type: 'host-group', projectPath: '', host, onlineCount, totalCount: hostSessions.length });
+            for (const s of hostSessions) {
+                listData.push({ type: 'session', session: s });
+            }
         }
         // Sort project groups by newest createdAt in each group (stable)
         const sortedProjects = [...byProject.entries()].sort(([, a], [, b]) => {
@@ -358,8 +375,32 @@ function buildSessionListViewData(
         return noProject;
     };
     const activeNoProject = emitProjectGroups(activeSessions, listData);
+    // Ungrouped sessions (no projectPath): sub-group by host, keeping online first then offline.
     if (activeNoProject.length > 0) {
-        listData.push({ type: 'active-sessions', sessions: activeNoProject });
+        activeNoProject.sort((a, b) => {
+            if (a.active !== b.active) return a.active ? -1 : 1;
+            return b.createdAt - a.createdAt;
+        });
+        const noProjByHost = new Map<string, Session[]>();
+        for (const s of activeNoProject) {
+            const host = s.metadata?.host ?? '';
+            const arr = noProjByHost.get(host) || [];
+            arr.push(s);
+            noProjByHost.set(host, arr);
+        }
+        const sortedNoProjHosts = [...noProjByHost.entries()].sort(([, a], [, b]) => {
+            const aMax = Math.max(...a.map(s => s.createdAt));
+            const bMax = Math.max(...b.map(s => s.createdAt));
+            return bMax - aMax;
+        });
+        for (const [host, hostSessions] of sortedNoProjHosts) {
+            hostSessions.sort((a, b) => b.createdAt - a.createdAt);
+            const onlineCount = hostSessions.filter(s => s.active).length;
+            listData.push({ type: 'host-group', projectPath: '', host, onlineCount, totalCount: hostSessions.length });
+            for (const s of hostSessions) {
+                listData.push({ type: 'session', session: s });
+            }
+        }
     }
 
     // Group inactive sessions by date
