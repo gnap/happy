@@ -266,12 +266,16 @@ function buildSessionListViewData(
                         ?? sessions.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
             listData.push({ type: 'worktree-group', projectPath, homeDir, branch });
             const sortedHosts = [...byHost.entries()].sort(([, a], [, b]) => {
+                const aOnline = a.some(s => s.active);
+                const bOnline = b.some(s => s.active);
+                if (aOnline !== bOnline) return aOnline ? -1 : 1;
                 const aMax = Math.max(...a.map(s => s.createdAt));
                 const bMax = Math.max(...b.map(s => s.createdAt));
                 return bMax - aMax;
             });
             for (const [host, hostSessions] of sortedHosts) {
                 hostSessions.sort((a, b) => {
+                    if (a.active !== b.active) return a.active ? -1 : 1;
                     const aWt = a.metadata?.isWorktree ?? true;
                     const bWt = b.metadata?.isWorktree ?? true;
                     if (aWt !== bWt) return aWt ? 1 : -1;
