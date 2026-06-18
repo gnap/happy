@@ -223,7 +223,7 @@ function buildSessionListViewData(
     // updatedAt keeps relative ordering stable — project groups won't jump when a
     // session inside gets an update (e.g. draft, metadata sync).
     activeSessions.sort((a, b) => b.createdAt - a.createdAt);
-    // Inactive sessions sort by last activity so the date headers make sense.
+    // Inactive sessions sort by last activity.
     inactiveSessions.sort((a, b) => b.updatedAt - a.updatedAt);
 
     // Helper: emit project-grouped sessions with host sub-groups.
@@ -320,79 +320,18 @@ function buildSessionListViewData(
     // Build unified list view data
     const listData: SessionListViewItem[] = [];
 
-    // Active sessions: project-grouped get worktree headers; ungrouped
-    // (no projectPath) go to a shared "Other" section with host sub-groups.
-    const activeNoProjectFromActive = emitProjectGrouped(activeSessions);
-    emitUngroupedHostGroups(activeNoProjectFromActive, 'Other');
+    // Active sessions: project-grouped get worktree headers.
+    const allUngrouped: Session[] = emitProjectGrouped(activeSessions);
 
-    // Collect inactive ungrouped sessions — they join "Other" too.
-    const inactiveUngrouped: Session[] = [];
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
+    // Inactive sessions: project-grouped go directly into worktree-groups;
+    // ungrouped merge into the shared "Other" section.
+    const inactiveUngrouped = emitProjectGrouped(inactiveSessions);
+    allUngrouped.push(...inactiveUngrouped);
 
-    let currentDateGroup: Session[] = [];
-    let currentDateString: string | null = null;
-
-    for (const session of inactiveSessions) {
-        const sessionDate = new Date(session.updatedAt);
-        const dateString = sessionDate.toDateString();
-
-        if (currentDateString !== dateString) {
-            // Process previous group
-            if (currentDateGroup.length > 0 && currentDateString) {
-                const groupDate = new Date(currentDateString);
-                const sessionDateOnly = new Date(groupDate.getFullYear(), groupDate.getMonth(), groupDate.getDate());
-
-                let headerTitle: string;
-                if (sessionDateOnly.getTime() === today.getTime()) {
-                    headerTitle = 'Today';
-                } else if (sessionDateOnly.getTime() === yesterday.getTime()) {
-                    headerTitle = 'Yesterday';
-                } else {
-                    const diffTime = today.getTime() - sessionDateOnly.getTime();
-                    const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-                    headerTitle = `${diffDays} days ago`;
-                }
-
-                listData.push({ type: 'header', title: headerTitle });
-                const sgStandard = emitProjectGrouped(currentDateGroup);
-                inactiveUngrouped.push(...sgStandard);
-            }
-
-            // Start new group
-            currentDateString = dateString;
-            currentDateGroup = [session];
-        } else {
-            currentDateGroup.push(session);
-        }
-    }
-
-    // Process final group
-    if (currentDateGroup.length > 0 && currentDateString) {
-        const groupDate = new Date(currentDateString);
-        const sessionDateOnly = new Date(groupDate.getFullYear(), groupDate.getMonth(), groupDate.getDate());
-
-        let headerTitle: string;
-        if (sessionDateOnly.getTime() === today.getTime()) {
-            headerTitle = 'Today';
-        } else if (sessionDateOnly.getTime() === yesterday.getTime()) {
-            headerTitle = 'Yesterday';
-        } else {
-            const diffTime = today.getTime() - sessionDateOnly.getTime();
-            const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-            headerTitle = `${diffDays} days ago`;
-        }
-
-        listData.push({ type: 'header', title: headerTitle });
-        const sgStandard = emitProjectGrouped(currentDateGroup);
-        inactiveUngrouped.push(...sgStandard);
-    }
-
-    // Merge inactive ungrouped sessions into the "Other" worktree-group
-    // (after active ones: sorted online-first within each host).
-    if (inactiveUngrouped.length > 0) {
-        emitUngroupedHostGroups(inactiveUngrouped, 'Other');
+    // Emit all ungrouped sessions (active + inactive) into a single "Other"
+    // worktree-group, host-sub-grouped with online sessions first.
+    if (allUngrouped.length > 0) {
+        emitUngroupedHostGroups(allUngrouped, 'Other');
     }
 
     return listData;
