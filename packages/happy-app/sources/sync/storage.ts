@@ -370,7 +370,7 @@ function buildSessionListViewData(
     let currentDateString: string | null = null;
 
     for (const session of inactiveSessions) {
-        const sessionDate = new Date(session.updatedAt);
+        const sessionDate = new Date(session.createdAt);
         const dateString = sessionDate.toDateString();
 
         if (currentDateString !== dateString) {
