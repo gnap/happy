@@ -447,7 +447,6 @@ export function SessionsList() {
                         left: 0,
                         right: 0,
                         zIndex: 10,
-                        backgroundColor: theme.colors.surface,
                     }}>
                         {stickyHeaders.map((header, i) => (
                             renderItem({ item: header, index: -1 - i })
