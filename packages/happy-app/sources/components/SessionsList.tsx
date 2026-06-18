@@ -446,7 +446,7 @@ export function SessionsList() {
                     />
                 );
         }
-    }, [pathname, dataWithSelected, compactSessionView]);
+    }, [pathname, visibleData, compactSessionView, collapsedProjects, hiddenOfflineHosts]);
 
 
     // Remove this section as we'll use FlatList for all items now
