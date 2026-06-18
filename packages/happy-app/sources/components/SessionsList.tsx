@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Pressable, FlatList, Platform, ActivityIndicator } from 'react-native';
+import { View, Pressable, SectionList, Platform, ActivityIndicator } from 'react-native';
 import { Swipeable } from 'react-native-gesture-handler';
 import { Text } from '@/components/StyledText';
 import { usePathname } from 'expo-router';
@@ -279,52 +279,64 @@ export function SessionsList() {
         return result;
     }, [dataWithSelected, collapsedProjects, hiddenOfflineHosts]);
 
-    // Sticky project headers: custom overlay positioned to stack naturally,
-    // pushing previous headers down as new ones reach the top.
-    const [stickyTop, setStickyTop] = React.useState<number>(0);
-    const [stickyIndices, setStickyIndices] = React.useState<number[]>([]);
-
-    // Pre-compute worktree-group positions for fast lookup during scroll.
-    const projectPositions = React.useMemo(() => {
+    // Convert visibleData into sections for SectionList. Each worktree-group
+    // becomes a section header; items before the first worktree-group go into a
+    // preamble section with an invisible header.
+    interface Section {
+        header: SessionListViewItem & { selected?: boolean } | null;
+        data: (SessionListViewItem & { selected?: boolean })[];
+    }
+    const sections: Section[] = React.useMemo(() => {
         if (!visibleData) return [];
-        const positions: { index: number; y: number; projectPath: string }[] = [];
-        let y = 0;
-        for (let i = 0; i < visibleData.length; i++) {
-            const item = visibleData[i];
+        const result: Section[] = [];
+        let current: Section = { header: null, data: [] };
+        for (const item of visibleData) {
             if (item.type === 'worktree-group') {
-                positions.push({ index: i, y, projectPath: item.projectPath });
-            }
-            y += item.type === 'header' ? 32
-                : item.type === 'worktree-group' ? 38
-                : item.type === 'host-group' ? 24
-                : item.type === 'session' ? 88
-                : item.type === 'active-sessions' ? 144
-                : 0;
-        }
-        return positions;
-    }, [visibleData]);
-
-    const handleScroll = React.useCallback((event: any) => {
-        const offsetY = event.nativeEvent.contentOffset.y;
-        setStickyTop(offsetY);
-    }, []);
-
-    const stickyHeaders = React.useMemo(() => {
-        if (projectPositions.length === 0) return [];
-        const result: { index: number; projectPath: string }[] = [];
-        for (let i = 0; i < projectPositions.length; i++) {
-            const headerY = projectPositions[i].y;
-            const pushedY = headerY - result.length * 38;
-            if (pushedY < stickyTop + result.length * 38) {
-                result.push({ index: projectPositions[i].index, projectPath: projectPositions[i].projectPath });
+                if (current.header !== null || current.data.length > 0) {
+                    result.push(current);
+                }
+                current = { header: item, data: [] };
             } else {
-                break;
+                current.data.push(item);
             }
+        }
+        if (current.header !== null || current.data.length > 0) {
+            result.push(current);
         }
         return result;
-    }, [projectPositions, stickyTop]);
+    }, [visibleData]);
 
-    // Request review
+
+    const renderSectionHeader = React.useCallback(({ section }: { section: { header: SessionListViewItem & { selected?: boolean } | null } }) => {
+        if (!section.header) return null;
+        const item = section.header;
+        if (item.type !== 'worktree-group') return null;
+        const isCollapsed = collapsedProjects.has(item.projectPath);
+        return (
+            <Pressable
+                onPress={() => setCollapsedProjects(prev => {
+                    const next = new Set(prev);
+                    if (next.has(item.projectPath)) next.delete(item.projectPath);
+                    else next.add(item.projectPath);
+                    return next;
+                })}
+                style={({ pressed }) => [
+                    styles.projectGroup,
+                    { flexDirection: 'row', alignItems: 'center', opacity: pressed ? 0.7 : 1 },
+                ]}
+            >
+                <Ionicons name={isCollapsed ? "chevron-forward" : "chevron-down"} size={14} color="#8E8E93" style={{ marginRight: 6 }} />
+                <Ionicons name="folder-outline" size={14} color="#8E8E93" style={{ marginRight: 8 }} />
+                <Text style={styles.projectGroupTitle} numberOfLines={1}>
+                    {item.projectPath
+                        ? formatPathRelativeToHome(item.projectPath, item.homeDir)
+                        : item.branch || 'Other'}
+                </Text>
+            </Pressable>
+        );
+    }, [collapsedProjects, styles.projectGroup, styles.projectGroupTitle]);
+
+        // Request review
     React.useEffect(() => {
         if (data && data.length > 0) {
             requestReview();
@@ -343,9 +355,9 @@ export function SessionsList() {
             case 'header': return `header-${item.title}-${index}`;
             case 'active-sessions': return 'active-sessions';
             case 'project-group': return `project-group-${item.machine.id}-${item.displayPath}-${index}`;
-            case 'worktree-group': return `worktree-group-${item.projectPath}-${index}`;
             case 'host-group': return `host-group-${item.projectPath}-${item.host}-${index}`;
             case 'session': return `session-${item.session.id}-${index}`;
+            default: return `item-${index}`;
         }
     }, []);
 
@@ -388,30 +400,6 @@ export function SessionsList() {
                     </View>
                 );
 
-            case 'worktree-group':
-                const isCollapsed = collapsedProjects.has(item.projectPath);
-                return (
-                    <Pressable
-                        onPress={() => setCollapsedProjects(prev => {
-                            const next = new Set(prev);
-                            if (next.has(item.projectPath)) next.delete(item.projectPath);
-                            else next.add(item.projectPath);
-                            return next;
-                        })}
-                        style={({ pressed }) => [
-                            styles.projectGroup,
-                            { flexDirection: 'row', alignItems: 'center', opacity: pressed ? 0.7 : 1 },
-                        ]}
-                    >
-                        <Ionicons name={isCollapsed ? "chevron-forward" : "chevron-down"} size={14} color="#8E8E93" style={{ marginRight: 6 }} />
-                        <Ionicons name="folder-outline" size={14} color="#8E8E93" style={{ marginRight: 8 }} />
-                        <Text style={styles.projectGroupTitle} numberOfLines={1}>
-                            {item.projectPath
-                                ? formatPathRelativeToHome(item.projectPath, item.homeDir)
-                                : item.branch || 'Other'}
-                        </Text>
-                    </Pressable>
-                );
 
             case 'host-group': {
                 const hostKey = item.projectPath + '|' + item.host;
@@ -475,29 +463,15 @@ export function SessionsList() {
         <View style={styles.container}>
             <View style={styles.contentContainer}>
                 <View style={{ flex: 1 }}>
-                    <FlatList
-                        data={visibleData}
+                    <SectionList
+                        sections={sections}
                         renderItem={renderItem}
+                        renderSectionHeader={renderSectionHeader}
                         keyExtractor={keyExtractor}
                         contentContainerStyle={{ paddingBottom: safeArea.bottom + 128, maxWidth: layout.maxWidth }}
                         ListHeaderComponent={HeaderComponent}
-                        onScroll={handleScroll}
-                        scrollEventThrottle={16}
+                        stickySectionHeadersEnabled={true}
                     />
-                    {stickyHeaders.length > 0 && (
-                        <View style={{
-                            position: 'absolute',
-                            top: 0, left: 0, right: 0,
-                            maxWidth: layout.maxWidth,
-                            alignSelf: 'center',
-                        }} pointerEvents="box-none">
-                            {stickyHeaders.length > 0 && (
-                                <View key={`sticky-${stickyHeaders[stickyHeaders.length - 1].projectPath}-${stickyHeaders.length}`}>
-                                    {renderItem({ item: visibleData![stickyHeaders[stickyHeaders.length - 1].index], index: stickyHeaders[stickyHeaders.length - 1].index })}
-                                </View>
-                            )}
-                        </View>
-                    )}
                 </View>
             </View>
         </View>
