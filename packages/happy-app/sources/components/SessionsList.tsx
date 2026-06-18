@@ -406,7 +406,9 @@ export function SessionsList() {
                         <Ionicons name={isCollapsed ? "chevron-forward" : "chevron-down"} size={14} color="#8E8E93" style={{ marginRight: 6 }} />
                         <Ionicons name="folder-outline" size={14} color="#8E8E93" style={{ marginRight: 8 }} />
                         <Text style={styles.projectGroupTitle} numberOfLines={1}>
-                            {formatPathRelativeToHome(item.projectPath, item.homeDir)}
+                            {item.projectPath
+                                ? formatPathRelativeToHome(item.projectPath, item.homeDir)
+                                : item.branch || 'Other'}
                         </Text>
                     </Pressable>
                 );
@@ -489,11 +491,11 @@ export function SessionsList() {
                             maxWidth: layout.maxWidth,
                             alignSelf: 'center',
                         }} pointerEvents="box-none">
-                            {stickyHeaders.map((h) => (
-                                <View key={`sticky-${h.projectPath}`}>
-                                    {renderItem({ item: visibleData![h.index], index: h.index })}
+                            {stickyHeaders.length > 0 && (
+                                <View key={`sticky-${stickyHeaders[stickyHeaders.length - 1].projectPath}-${stickyHeaders.length}`}>
+                                    {renderItem({ item: visibleData![stickyHeaders[stickyHeaders.length - 1].index], index: stickyHeaders[stickyHeaders.length - 1].index })}
                                 </View>
-                            ))}
+                            )}
                         </View>
                     )}
                 </View>

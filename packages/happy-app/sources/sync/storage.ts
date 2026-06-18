@@ -375,7 +375,8 @@ function buildSessionListViewData(
         return noProject;
     };
     const activeNoProject = emitProjectGroups(activeSessions, listData);
-    // Ungrouped sessions (no projectPath): sub-group by host, keeping online first then offline.
+    // Ungrouped sessions (no projectPath): sub-group by host with a worktree-group
+    // header so they are visually distinct from project-grouped sessions below.
     if (activeNoProject.length > 0) {
         activeNoProject.sort((a, b) => {
             if (a.active !== b.active) return a.active ? -1 : 1;
@@ -393,6 +394,10 @@ function buildSessionListViewData(
             const bMax = Math.max(...b.map(s => s.createdAt));
             return bMax - aMax;
         });
+        // Use a sentinel worktree-group so these host-groups get the same
+        // chevron-toggle + sticky-header treatment as project sessions.
+        const homeDir = activeNoProject[0]?.metadata?.homeDir;
+        listData.push({ type: 'worktree-group', projectPath: '', homeDir });
         for (const [host, hostSessions] of sortedNoProjHosts) {
             hostSessions.sort((a, b) => b.createdAt - a.createdAt);
             const onlineCount = hostSessions.filter(s => s.active).length;
