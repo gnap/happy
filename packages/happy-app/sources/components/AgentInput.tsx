@@ -95,6 +95,9 @@ interface AgentInputProps {
     minHeight?: number;
     profileId?: string | null;
     onProfileChange?: (profileId: string | null) => void;
+    onAttach?: () => void;
+    attachments?: { name: string; width?: number; height?: number; data: string; mimeType: string; size: number }[];
+    onRemoveAttachment?: (index: number) => void;
 }
 
 const DEFAULT_MAX_CONTEXT_SIZE = 200000;
@@ -424,6 +427,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         : contextFillPct >= 80 ? theme.colors.warning
         : theme.colors.textSecondary;
     const [showContextBreakdown, setShowContextBreakdown] = React.useState(false);
+    const contextLeaveTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const agentInputEnterToSend = useSetting('agentInputEnterToSend');
 
@@ -943,10 +947,19 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                             {(contextWarning || props.usageData?.contextSize) && (
                                 <>
                                     <View
-                                        {...(Platform.OS === 'web' && props.usageData?.contextBreakdown ? {
-                                            // @ts-expect-error onMouseEnter/onMouseLeave work on RN Web View
-                                            onMouseEnter: () => setShowContextBreakdown(true),
-                                            onMouseLeave: () => setShowContextBreakdown(false),
+                                        {...(Platform.OS === 'web' ? {
+                                            onMouseEnter: () => {
+                                                if (contextLeaveTimer.current) {
+                                                    clearTimeout(contextLeaveTimer.current);
+                                                    contextLeaveTimer.current = null;
+                                                }
+                                                setShowContextBreakdown(true);
+                                            },
+                                            onMouseLeave: () => {
+                                                contextLeaveTimer.current = setTimeout(() => {
+                                                    setShowContextBreakdown(false);
+                                                }, 200);
+                                            },
                                         } : {})}
                                     >
                                         <Pressable
@@ -983,13 +996,15 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                     </View>
                                     {showContextBreakdown && (
                                         <>
-                                            <TouchableWithoutFeedback onPress={() => setShowContextBreakdown(false)}>
-                                                <View style={{
-                                                    position: 'absolute',
-                                                    top: -500, left: -200, right: -200, bottom: -500,
-                                                    zIndex: 1000,
-                                                }} />
-                                            </TouchableWithoutFeedback>
+                                            {Platform.OS !== 'web' && (
+                                                <TouchableWithoutFeedback onPress={() => setShowContextBreakdown(false)}>
+                                                    <View style={{
+                                                        position: 'absolute',
+                                                        top: -500, left: -200, right: -200, bottom: -500,
+                                                        zIndex: 1000,
+                                                    }} />
+                                                </TouchableWithoutFeedback>
+                                            )}
                                             <View style={{
                                                 position: 'absolute',
                                                 bottom: '100%',
@@ -997,11 +1012,25 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                                 zIndex: 1001,
                                                 width: Math.min(screenWidth - 32, 320),
                                                 paddingBottom: 4,
-                                            }}>
+                                            }}
+                                                {...(Platform.OS === 'web' ? {
+                                                    onMouseEnter: () => {
+                                                        if (contextLeaveTimer.current) {
+                                                            clearTimeout(contextLeaveTimer.current);
+                                                            contextLeaveTimer.current = null;
+                                                        }
+                                                    },
+                                                    onMouseLeave: () => {
+                                                        contextLeaveTimer.current = setTimeout(() => {
+                                                            setShowContextBreakdown(false);
+                                                        }, 200);
+                                                    },
+                                                } : {})}
+                                            >
                                                 <FloatingOverlay maxHeight={420}>
                                                     {/* Per-turn usage stats */}
                                                     {(props.usageData?.inputTokens != null || props.usageData?.outputTokens != null) && (
-                                                        <View style={{ marginBottom: (props.usageData?.contextBreakdown || (isClaude && props.onThinkingLevelChange)) ? 10 : 0 }}>
+                                                        <View style={{ paddingHorizontal: 12, paddingTop: 12, marginBottom: (props.usageData?.contextBreakdown || (isClaude && props.onThinkingLevelChange)) ? 2 : 0 }}>
                                                             <Text style={{ fontSize: 10, fontWeight: '600', color: theme.colors.textSecondary, marginBottom: 4, ...Typography.default('semiBold') }}>
                                                                 Turn usage
                                                             </Text>
@@ -1027,13 +1056,13 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                                     {props.usageData?.contextBreakdown && (
                                                         <>
                                                             {(props.usageData?.inputTokens != null) && (
-                                                                <View style={{ borderTopWidth: 0.5, borderTopColor: theme.colors.textSecondary + '40', marginBottom: 8 }} />
+                                                                <View style={{ borderTopWidth: 0.5, borderTopColor: theme.colors.textSecondary + '40', marginBottom: 8, marginHorizontal: 12 }} />
                                                             )}
                                                             <ContextBreakdown breakdown={props.usageData.contextBreakdown} />
                                                         </>
                                                     )}
                                                     {isClaude && props.onThinkingLevelChange && (
-                                                        <View style={{ marginTop: props.usageData?.contextBreakdown ? 12 : 0 }}>
+                                                        <View style={{ paddingHorizontal: 12, paddingBottom: 12, marginTop: props.usageData?.contextBreakdown ? 12 : 0 }}>
                                                             <Text style={{ fontSize: 10, fontWeight: '600', color: theme.colors.textSecondary, marginBottom: 6, ...Typography.default('semiBold') }}>
                                                                 Thinking effort
                                                             </Text>
@@ -1068,18 +1097,6 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                                 </FloatingOverlay>
                                             </View>
                                         </>
-                                    )}
-                                    {showContextBreakdown && props.usageData?.contextBreakdown && Platform.OS !== 'web' && (
-                                        <TouchableWithoutFeedback onPress={() => setShowContextBreakdown(false)}>
-                                            <View style={{
-                                                position: 'absolute',
-                                                top: -1000,
-                                                left: -1000,
-                                                right: -1000,
-                                                bottom: '100%',
-                                                zIndex: 1000,
-                                            }} />
-                                        </TouchableWithoutFeedback>
                                     )}
                                 </>
                             )}
@@ -1350,6 +1367,49 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                 <View style={styles.unifiedPanel}>
                     {/* Input field */}
                     <View style={[styles.inputContainer, props.minHeight ? { minHeight: props.minHeight } : undefined]}>
+                        {/* Attachment thumbnails */}
+                        {props.attachments && props.attachments.length > 0 && (
+                            <View style={{
+                                flexDirection: 'row',
+                                paddingHorizontal: 8,
+                                paddingTop: 4,
+                                gap: 8,
+                            }}>
+                                {props.attachments.map((att, i) => (
+                                    <View key={i} style={{
+                                        width: 56,
+                                        height: 56,
+                                        borderRadius: 8,
+                                        overflow: 'hidden',
+                                        backgroundColor: theme.colors.surfacePressed,
+                                    }}>
+                                        <Image
+                                            source={{ uri: `data:${att.mimeType};base64,${att.data}` }}
+                                            style={{ width: 56, height: 56, borderRadius: 8 }}
+                                            contentFit="cover"
+                                        />
+                                        {props.onRemoveAttachment && (
+                                            <Pressable
+                                                onPress={() => props.onRemoveAttachment?.(i)}
+                                                style={{
+                                                    position: 'absolute',
+                                                    top: 2,
+                                                    right: 2,
+                                                    width: 18,
+                                                    height: 18,
+                                                    borderRadius: 9,
+                                                    backgroundColor: 'rgba(0,0,0,0.5)',
+                                                    alignItems: 'center',
+                                                    justifyContent: 'center',
+                                                }}
+                                            >
+                                                <Ionicons name="close" size={12} color="#fff" />
+                                            </Pressable>
+                                        )}
+                                    </View>
+                                ))}
+                            </View>
+                        )}
                         <MultiTextInput
                             ref={inputRef}
                             value={props.value}
@@ -1502,6 +1562,25 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
 
                                 {/* Git Status Badge */}
                                 <GitStatusButton sessionId={props.sessionId} onPress={props.onFileViewerPress} />
+
+                                {/* Image attachment button */}
+                                {props.onAttach && (
+                                    <Pressable
+                                        onPress={props.onAttach}
+                                        hitSlop={{ top: 5, bottom: 10, left: 4, right: 4 }}
+                                        style={(p) => ({
+                                            flexDirection: 'row',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            height: 32,
+                                            width: 32,
+                                            borderRadius: Platform.select({ default: 16, android: 20 }),
+                                            opacity: p.pressed ? 0.7 : 1,
+                                        })}
+                                    >
+                                        <Ionicons name="image-outline" size={18} color={theme.colors.button.secondary.tint} />
+                                    </Pressable>
+                                )}
                                 </View>
 
                                 {/* Send/Voice button - aligned with first row */}

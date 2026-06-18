@@ -544,6 +544,33 @@ class Sync {
                 if (!this.lastSessionRefreshNonDeltaAt) {
                     this.lastSessionRefreshNonDeltaAt = cached.cachedAt;
                 }
+                // Restore encryption keys from cache if available.
+                const keyCount = Object.keys(cached.encryptionKeys).length;
+                if (keyCount > 0) {
+                    const keyMap = new Map<string, Uint8Array | null>();
+                    for (const [sid, encKey] of Object.entries(cached.encryptionKeys)) {
+                        const decrypted = await this.encryption.decryptEncryptionKey(encKey);
+                        keyMap.set(sid, decrypted);
+                    }
+                    await this.encryption.initializeSessions(keyMap);
+                    log.log(`📦 sessionsListCache: restored ${keyCount} encryption keys from cache`);
+                }
+                // Restore encryption keys from cache — dataEncryptionKey is immutable
+                // per session so we can decrypt immediately without waiting for fetchSessions.
+                const ek = cached.encryptionKeys;
+                if (ek && Object.keys(ek).length > 0) {
+                    const sessionKeys = new Map<string, Uint8Array | null>();
+                    for (const [sid, encryptedKey] of Object.entries(ek)) {
+                        const decrypted = await this.encryption.decryptEncryptionKey(encryptedKey);
+                        if (decrypted) {
+                            sessionKeys.set(sid, decrypted);
+                        }
+                    }
+                    if (sessionKeys.size > 0) {
+                        await this.encryption.initializeSessions(sessionKeys);
+                        log.log(`📦 sessionsListCache: restored ${sessionKeys.size} encryption keys from cache`);
+                    }
+                }
             }
         } catch (e) {
             log.log(`📦 sessionsListCache: error applying cached list: ${e}`);
@@ -912,7 +939,7 @@ class Sync {
         this.backgroundSendStartedAt = null;
     }
 
-    async sendMessage(sessionId: string, text: string, displayText?: string, existingLocalId?: string) {
+    async sendMessage(sessionId: string, text: string, displayText?: string, existingLocalId?: string, files?: { name: string; size: number; mimeType: string; data: string; width?: number; height?: number }[]) {
 
         // Get encryption
         const encryption = this.encryption.getSessionEncryption(sessionId);
@@ -928,7 +955,7 @@ class Sync {
             return;
         }
 
-        const { permissionMode, model, maxMode } = resolveMessageModeMeta(session);
+        const { permissionMode, model, maxMode, effort } = resolveMessageModeMeta(session);
         const settings = storage.getState().settings;
         const environmentVariables = resolveMessageProfileEnv(session, settings.profiles ?? []);
 
@@ -966,9 +993,24 @@ class Sync {
         const fallbackModel: string | null = null;
 
         // Create user message content with metadata
+        const hasFiles = files && files.length > 0;
         const content: RawRecord = {
             role: 'user',
-            content: {
+            content: hasFiles ? {
+                type: 'content',
+                blocks: [
+                    ...(text.trim() ? [{ type: 'text' as const, text }] : []),
+                    ...(files ?? []).map((f) => ({
+                        type: 'file' as const,
+                        name: f.name,
+                        size: f.size,
+                        mimeType: f.mimeType,
+                        data: f.data,
+                        ...(f.width ? { width: f.width } : {}),
+                        ...(f.height ? { height: f.height } : {}),
+                    })),
+                ],
+            } : {
                 type: 'text',
                 text
             },
@@ -979,6 +1021,7 @@ class Sync {
                 fallbackModel,
                 appendSystemPrompt: systemPrompt,
                 ...(maxMode !== undefined ? { maxMode } : {}),
+                ...(effort !== undefined ? { effort } : {}),
                 profileId: session.profileId ?? null,
                 ...(environmentVariables ? { environmentVariables } : {}),
                 ...(displayText && { displayText }), // Add displayText if provided
@@ -996,7 +1039,21 @@ class Sync {
             localId,
             createdAt,
             role: 'user',
-            content: { type: 'text', text },
+            content: hasFiles ? {
+                type: 'content',
+                blocks: [
+                    ...(text.trim() ? [{ type: 'text' as const, text }] : []),
+                    ...(files ?? []).map((f) => ({
+                        type: 'file' as const,
+                        name: f.name,
+                        size: f.size,
+                        mimeType: f.mimeType,
+                        data: f.data,
+                        ...(f.width ? { width: f.width } : {}),
+                        ...(f.height ? { height: f.height } : {}),
+                    })),
+                ],
+            } : { type: 'text', text },
             isSidechain: false,
             meta: content.meta as MessageMeta | undefined,
         };
@@ -1011,18 +1068,24 @@ class Sync {
         // Serialize encryption + outbox-push per session so concurrent sendMessage calls
         // cannot reorder messages (encryption is async; whichever finishes first would otherwise
         // reach the outbox first, inverting the send order).
-        await this.getSessionSendLock(sessionId).inLock(async () => {
-            const encryptedRawRecord = await encryption.encryptRawRecord(content);
-            let pending = this.pendingOutbox.get(sessionId);
-            if (!pending) {
-                pending = [];
-                this.pendingOutbox.set(sessionId, pending);
-            }
-            pending.push({
-                localId,
-                content: encryptedRawRecord
+        try {
+            await this.getSessionSendLock(sessionId).inLock(async () => {
+                const encryptedRawRecord = await encryption.encryptRawRecord(content);
+                let pending = this.pendingOutbox.get(sessionId);
+                if (!pending) {
+                    pending = [];
+                    this.pendingOutbox.set(sessionId, pending);
+                }
+                pending.push({
+                    localId,
+                    content: encryptedRawRecord
+                });
             });
-        });
+        } catch (err) {
+            console.warn(`📤 sendMessage encrypt failed for ${sessionId.slice(-8)}: ${err instanceof Error ? err.message : String(err)}`);
+            storage.getState().failOutboxEntries([localId], 'Encryption failed');
+            return;
+        }
 
         this.getSendSync(sessionId).invalidate();
         this.maybeStartBackgroundSendWatchdog();
@@ -1214,7 +1277,7 @@ class Sync {
             const t0 = performance.now();
             const API_ENDPOINT = getServerUrl();
             const params = new URLSearchParams();
-            if (this.lastSessionRefreshNonDeltaAt) {
+            if (this.lastSessionRefreshNonDeltaAt && this.encryption.hasAnySessionEncryption) {
                 params.set('changedSince', String(this.lastSessionRefreshNonDeltaAt));
             }
             params.set('limit', '200');
@@ -1263,6 +1326,14 @@ class Sync {
                 updatedAt: number;
                 lastMessage: ApiMessage | null;
             }>;
+
+            // --- Cache: collect encryption keys for persistence ---
+            const cachedKeys: Record<string, string> = {};
+            for (const session of sessions) {
+                if (session.dataEncryptionKey) {
+                    cachedKeys[session.id] = session.dataEncryptionKey;
+                }
+            }
 
             // Initialize all session encryptions first
             const keyDecryptStart = performance.now();
@@ -1329,7 +1400,15 @@ class Sync {
             // Save full merged state (cached + delta), not just the delta results.
             const fullState = storage.getState().sessions;
             const allValues = Object.values(fullState).map(({ presence, ...s }) => s);
-            void saveSessionsListCache(allValues);
+            // Gather encryption keys from the API response so they can be cached
+            // and used on next cold start without waiting for the network fetch.
+            const encryptionKeys: Record<string, string> = {};
+            for (const s of sessions) {
+                if (s.dataEncryptionKey) {
+                    encryptionKeys[s.id] = s.dataEncryptionKey;
+                }
+            }
+            void saveSessionsListCache(allValues, cachedKeys);
             this._loggedMissingSessionForSid.clear();
 
             // Only eagerly catch up messages for active sessions (agent is running).
@@ -2169,15 +2248,35 @@ class Sync {
     private flushOutbox = async (sessionId: string) => {
         const pending = this.pendingOutbox.get(sessionId);
         if (!pending || pending.length === 0) {
-            if (!this.hasPendingOutboxMessages()) {
-                this.clearBackgroundSendWatchdog();
-                await this.cancelBackgroundSendTimeoutNotification();
-                this.backgroundSendStartedAt = null;
-            }
             return;
         }
 
         const batch = pending.slice();
+
+        // Prefer WebSocket send — same path as CLI. No HTTP round-trip, no
+        // Tauri HTTP plugin issues. Server echoes back via new-message WS
+        // event, which handleUpdate already fast-acks.
+        if (apiSocket.isConnected) {
+            try {
+                for (const msg of batch) {
+                    apiSocket.send('message', {
+                        sid: sessionId,
+                        message: msg.content,
+                        localId: msg.localId,
+                    });
+                }
+                pending.splice(0, batch.length);
+                for (const msg of batch) {
+                    storage.getState().markOutboxMessageAcked(msg.localId);
+                }
+                // WS send has no seq ack — pull receive cursor forward via HTTP.
+                this.getMessagesSync(sessionId).invalidate();
+                return;
+            } catch (_err) {
+                // WS send failed — fall through to HTTP POST below.
+            }
+        }
+
         const controller = new AbortController();
         this.sendAbortControllers.set(sessionId, controller);
         try {
@@ -2381,13 +2480,9 @@ class Sync {
             await this.acquireMessageFetchSlot();
             log.log(`💬 fetchMessages: got lock for ${sessionId}`);
             try {
-                const encryption = this.encryption.getSessionEncryption(sessionId);
-                if (!encryption) {
-                    log.log(`💬 fetchMessages: Session encryption not ready for ${sessionId}, skipping`);
-                    return;
-                }
-
                 // --- Cache: cold-start hydration (Cursor sessions only) ---
+                // Load cache first — even if encryption isn't ready yet, cached
+                // messages provide instant display while the network fetch waits.
                 const session = storage.getState().sessions[sessionId];
                 const existingSessionMessages = storage.getState().sessionMessages[sessionId];
                 if (!existingSessionMessages?.isLoaded) {
@@ -2406,6 +2501,12 @@ class Sync {
                     } else {
                         log.log(`💬 fetchMessages: no cache for ${sessionId} (will fetch from server)`);
                     }
+                }
+
+                const encryption = this.encryption.getSessionEncryption(sessionId);
+                if (!encryption) {
+                    log.log(`💬 fetchMessages: Session encryption not ready for ${sessionId}, skipping`);
+                    return;
                 }
 
                 const cachedLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
@@ -2845,6 +2946,13 @@ class Sync {
                     // Refresh git status only when turn is done (ready), not on every mutable tool result
                     if (shouldClearThinking) {
                         gitStatusSync.invalidate(updateData.body.sid);
+                    }
+
+                    // When the agent responds, clean up acked outbox entries for this session.
+                    // The server already received and processed our message(s) — any sending/acked
+                    // entries should be removed since the agent turn is now producing output.
+                    if (lastMessage && lastMessage.role !== 'user') {
+                        storage.getState().removeOutboxEntriesForSession(updateData.body.sid);
                     }
                 }
             }

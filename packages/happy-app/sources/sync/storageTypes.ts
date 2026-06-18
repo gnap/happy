@@ -13,6 +13,8 @@ export const MetadataSchema = z.object({
     })).optional(),
     currentModelCode: z.string().optional(),
     currentMaxMode: z.boolean().optional(),
+    /** Claude Code effort level (low, medium, high, xhigh, max). Written by CLI at turn start. */
+    currentEffort: z.string().optional(),
     operatingModes: z.array(z.object({
         code: z.string(),
         value: z.string(),
@@ -66,7 +68,7 @@ export const MetadataSchema = z.object({
 	        }).optional(),
 	        fetchedAt: z.number().optional(),
 	    }).optional(),
-});
+}).passthrough();
 
 export type Metadata = z.infer<typeof MetadataSchema>;
 

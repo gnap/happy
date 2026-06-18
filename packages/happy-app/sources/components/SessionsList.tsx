@@ -57,15 +57,16 @@ const stylesheet = StyleSheet.create((theme) => ({
         ...Typography.default('semiBold'),
     },
     projectGroup: {
+        marginHorizontal: 16,
         paddingHorizontal: 16,
         paddingVertical: 10,
-        backgroundColor: theme.colors.surface,
+        backgroundColor: 'transparent',
+        alignItems: 'center',
     },
     projectGroupTitle: {
         fontSize: 13,
-        fontWeight: '600',
         color: theme.colors.text,
-        ...Typography.default('semiBold'),
+        ...Typography.default(),
     },
     projectGroupSubtitle: {
         fontSize: 11,

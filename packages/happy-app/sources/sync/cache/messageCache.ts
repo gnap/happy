@@ -75,11 +75,11 @@ export async function preloadSessionCacheDB(): Promise<void> {
  */
 export async function loadMessageCache(session: Session): Promise<LoadedCache | null> {
     if (!session) {
-        log.log('📦 messageCache: skip load (no session)');
+        console.warn(`📦 messageCache: skip load (no session)`);
         return null;
     }
     if (!isCacheEnabled(session)) {
-        log.log(`📦 messageCache: skip load for ${session.id} (flavor=${session.metadata?.flavor ?? 'none'}, not cursor)`);
+        console.warn(`📦 messageCache: skip load for ${session.id.slice(-8)} (flavor=${session.metadata?.flavor ?? 'none'})`);
         return null;
     }
 

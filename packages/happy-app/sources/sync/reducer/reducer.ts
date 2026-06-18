@@ -128,6 +128,7 @@ type ReducerMessage = {
     event: AgentEvent | null;
     tool: ToolCall | null;
     meta?: MessageMeta;
+    files?: { name: string; size: number; mimeType: string; data: string; width?: number; height?: number }[];
 }
 
 type StoredPermission = {
@@ -294,7 +295,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             // Mark as processed to prevent duplication but don't add to messages
             state.messageIds.set(msg.id, msg.id);
             hasReadyEvent = true;
-            // Cursor turn-end carries usage; update latestUsage so contextSize is available in App
+            // Turn-end carries usage + contextUsage; update latestUsage so they're available in App
             if (msg.usage) {
                 processUsageData(state, msg.usage, msg.createdAt);
             }
@@ -657,19 +658,39 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             if (state.messageIds.has(msg.id)) {
                 continue;
             }
+            // If this localId already maps to an existing message (optimistic insert),
+            // skip creating a duplicate. The existing message preserves file attachments
+            // that the echo may not include.
+            if (msg.localId && state.localIds.has(msg.localId)) {
+                continue;
+            }
 
             // Create a new message
             let mid = allocateId();
+            const userText = msg.content.type === 'content'
+                ? (msg.content.blocks.find((b): b is { type: 'text'; text: string } => b.type === 'text')?.text ?? '')
+                : msg.content.text;
+            const userFiles = msg.content.type === 'content'
+                ? (msg.content.blocks.filter((b): b is { type: 'file'; name: string; size: number; mimeType: string; data: string; width?: number; height?: number } => b.type === 'file').map(f => ({
+                    name: f.name,
+                    size: f.size,
+                    mimeType: f.mimeType,
+                    data: f.data,
+                    width: f.width as number | undefined,
+                    height: f.height as number | undefined,
+                })))
+                : undefined;
             state.messages.set(mid, {
                 id: mid,
                 realID: msg.id,
                 localId: msg.localId ?? null,
                 role: 'user',
                 createdAt: msg.createdAt,
-                text: msg.content.text,
+                text: userText,
                 tool: null,
                 event: null,
                 meta: msg.meta,
+                files: userFiles,
             });
 
             // Track both localId and messageId
@@ -1469,8 +1490,9 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
             localId: reducerMsg.localId ?? null,
             createdAt: reducerMsg.createdAt,
             kind: 'user-text',
-            text: reducerMsg.text,
+            text: reducerMsg.text || '',
             ...(reducerMsg.meta?.displayText && { displayText: reducerMsg.meta.displayText }),
+            ...(reducerMsg.files && reducerMsg.files.length > 0 ? { files: reducerMsg.files } : {}),
             meta: reducerMsg.meta
         };
     } else if (reducerMsg.role === 'agent' && reducerMsg.text !== null) {

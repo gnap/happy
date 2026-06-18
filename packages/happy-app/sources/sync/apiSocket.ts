@@ -23,11 +23,10 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const RETRYABLE_ERROR_HINTS = ['ECONNREFUSED', 'ETIMEDOUT', 'ECONNRESET', 'ENETUNREACH', 'timeout', 'Network'];
 
 function shouldUseTauriHttp(path: string, method: string): boolean {
-    // Tauri plugin-http is more reliable for the hung foreground send we see on Linux,
-    // but large GET /messages payloads are noticeably slower over the IPC bridge.
-    return isRunningInTauri()
-        && method === 'POST'
-        && /^\/v3\/sessions\/[^/]+\/messages$/.test(path);
+    // Tauri plugin-http drops POST /messages responses on Linux, causing permanent
+    // spinner (outbox stuck in 'sending' despite the server receiving the message).
+    // Browser fetch works correctly for all request types.
+    return false;
 }
 
 //
