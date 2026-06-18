@@ -77,7 +77,7 @@ const stylesheet = StyleSheet.create((theme) => ({
     hostGroup: {
         paddingHorizontal: 16,
         paddingVertical: 3,
-        backgroundColor: theme.colors.background,
+        backgroundColor: theme.colors.surface,
         flexDirection: 'row',
         alignItems: 'center',
         borderTopWidth: 0.5,
@@ -417,7 +417,7 @@ export function SessionsList() {
                             {item.host || 'Unknown'}
                         </Text>
                         <Text style={styles.hostGroupCount}>
-                            {item.onlineCount}/{item.totalCount} online
+                            {' '}{item.onlineCount}/{item.totalCount} online
                         </Text>
                         {hasOffline && (
                             <Text style={styles.hostGroupCount}>
