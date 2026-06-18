@@ -223,7 +223,8 @@ function buildSessionListViewData(
     // updatedAt keeps relative ordering stable — project groups won't jump when a
     // session inside gets an update (e.g. draft, metadata sync).
     activeSessions.sort((a, b) => b.createdAt - a.createdAt);
-    inactiveSessions.sort((a, b) => b.createdAt - a.createdAt);
+    // Inactive sessions sort by last activity so the date headers make sense.
+    inactiveSessions.sort((a, b) => b.updatedAt - a.updatedAt);
 
     // Helper: emit a date group, inserting project-group headers with host sub-groups.
     const emitSessionGroup = (group: Session[]) => {
@@ -247,8 +248,8 @@ function buildSessionListViewData(
             }
         }
 
-        // Sort standard sessions by createdAt (stable, no jumping)
-        standard.sort((a, b) => b.createdAt - a.createdAt);
+        // Standard sessions sort by last activity for the date headers.
+        standard.sort((a, b) => b.updatedAt - a.updatedAt);
         for (const s of standard) {
             listData.push({ type: 'session', session: s });
         }
@@ -370,7 +371,7 @@ function buildSessionListViewData(
     let currentDateString: string | null = null;
 
     for (const session of inactiveSessions) {
-        const sessionDate = new Date(session.createdAt);
+        const sessionDate = new Date(session.updatedAt);
         const dateString = sessionDate.toDateString();
 
         if (currentDateString !== dateString) {
