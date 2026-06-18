@@ -298,6 +298,9 @@ function buildSessionListViewData(
             byHost.set(host, arr);
         }
         const sortedHosts = [...byHost.entries()].sort(([, a], [, b]) => {
+            const aOnline = a.some(s => s.active);
+            const bOnline = b.some(s => s.active);
+            if (aOnline !== bOnline) return aOnline ? -1 : 1;
             const aMax = Math.max(...a.map(s => s.createdAt));
             const bMax = Math.max(...b.map(s => s.createdAt));
             return bMax - aMax;
