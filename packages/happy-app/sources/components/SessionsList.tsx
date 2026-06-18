@@ -314,8 +314,11 @@ export function SessionsList() {
         const result: { index: number; projectPath: string }[] = [];
         for (let i = 0; i < projectPositions.length; i++) {
             const headerY = projectPositions[i].y;
-            const pushedY = headerY - result.length * 38;
-            if (pushedY < stickyTop + result.length * 38) {
+            // Header becomes sticky when it has scrolled above the area occupied
+            // by previous sticky headers (each 38px). The first (topmost) header
+            // sticks when headerY < stickyTop; subsequent headers stick when their
+            // original Y is within the stacked header zone.
+            if (headerY < stickyTop + result.length * 38) {
                 result.push({ index: projectPositions[i].index, projectPath: projectPositions[i].projectPath });
             } else {
                 break;
