@@ -279,40 +279,50 @@ export function SessionsList() {
         return result;
     }, [dataWithSelected, collapsedProjects, hiddenOfflineHosts]);
 
-    // Sticky project headers: custom overlay on web since RNW stickyHeaderIndices
-    // is unreliable. The overlay renders the same project header Pressable as the
-    // inline version, so collapse/expand taps work correctly.
-    const stickyOverlayRef = React.useRef<View>(null);
-    const [stickyTops, setStickyTops] = React.useState<number[]>([]);
+    // Sticky project headers: custom overlay positioned to stack naturally,
+    // pushing previous headers down as new ones reach the top.
+    const [stickyTop, setStickyTop] = React.useState<number>(0);
+    const [stickyIndices, setStickyIndices] = React.useState<number[]>([]);
+
+    // Pre-compute worktree-group positions for fast lookup during scroll.
+    const projectPositions = React.useMemo(() => {
+        if (!visibleData) return [];
+        const positions: { index: number; y: number; projectPath: string }[] = [];
+        let y = 0;
+        for (let i = 0; i < visibleData.length; i++) {
+            const item = visibleData[i];
+            if (item.type === 'worktree-group') {
+                positions.push({ index: i, y, projectPath: item.projectPath });
+            }
+            y += item.type === 'header' ? 32
+                : item.type === 'worktree-group' ? 38
+                : item.type === 'host-group' ? 24
+                : item.type === 'session' ? 88
+                : item.type === 'active-sessions' ? 144
+                : 0;
+        }
+        return positions;
+    }, [visibleData]);
 
     const handleScroll = React.useCallback((event: any) => {
         const offsetY = event.nativeEvent.contentOffset.y;
-        if (!visibleData) { setStickyTops([]); return; }
-        const tops: number[] = [];
-        let y = 0;
-        for (const item of visibleData) {
-            if (item.type === 'worktree-group') {
-                if (y < offsetY + tops.length * 38) {
-                    tops.push(y);
-                }
-                y += 38;
-            } else {
-                y += item.type === 'host-group' ? 24 : item.type === 'session' ? 88 : 0;
-            }
-        }
-        setStickyTops(tops);
-    }, [visibleData]);
+        setStickyTop(offsetY);
+    }, []);
 
     const stickyHeaders = React.useMemo(() => {
-        if (!visibleData || stickyTops.length === 0) return [];
-        let count = 0;
-        return visibleData.filter(item => {
-            if (item.type === 'worktree-group') {
-                return count++ < stickyTops.length;
+        if (projectPositions.length === 0) return [];
+        const result: { index: number; projectPath: string }[] = [];
+        for (let i = 0; i < projectPositions.length; i++) {
+            const headerY = projectPositions[i].y;
+            const pushedY = headerY - result.length * 38;
+            if (pushedY < stickyTop + result.length * 38) {
+                result.push({ index: projectPositions[i].index, projectPath: projectPositions[i].projectPath });
+            } else {
+                break;
             }
-            return false;
-        });
-    }, [visibleData, stickyTops]);
+        }
+        return result;
+    }, [projectPositions, stickyTop]);
 
     // Request review
     React.useEffect(() => {
@@ -479,9 +489,9 @@ export function SessionsList() {
                             maxWidth: layout.maxWidth,
                             alignSelf: 'center',
                         }} pointerEvents="box-none">
-                            {stickyHeaders.map((header, i) => (
-                                <View key={`sticky-${header.projectPath}-${i}`}>
-                                    {renderItem({ item: header, index: -1 - i })}
+                            {stickyHeaders.map((h) => (
+                                <View key={`sticky-${h.projectPath}`}>
+                                    {renderItem({ item: visibleData![h.index], index: h.index })}
                                 </View>
                             ))}
                         </View>
