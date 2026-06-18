@@ -274,7 +274,7 @@ export function SessionsList() {
                 continue;
             }
             if (skipUntilNextProject) continue;
-            if (item.type === 'session' && hideOffline && !item.session.active) continue;
+            if (item.type === 'session' && hideOffline && currentHost && !item.session.active) continue;
             result.push(item);
         }
         return result;

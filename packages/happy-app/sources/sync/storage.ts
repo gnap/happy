@@ -231,8 +231,14 @@ function buildSessionListViewData(
         const standard: Session[] = [];
 
         for (const s of group) {
-            const pp = s.metadata?.projectPath;
+            let pp = s.metadata?.projectPath;
             if (pp) {
+                // Normalize path: replace home dir with ~ so same projects
+                // on different machines group together.
+                const hd = s.metadata?.homeDir;
+                if (hd && pp.startsWith(hd)) {
+                    pp = '~' + pp.slice(hd.length);
+                }
                 const arr = byProject.get(pp) || [];
                 arr.push(s);
                 byProject.set(pp, arr);
@@ -297,8 +303,12 @@ function buildSessionListViewData(
         const byProject = new Map<string, Session[]>();
         const noProject: Session[] = [];
         for (const s of sessions) {
-            const pp = s.metadata?.projectPath;
+            let pp = s.metadata?.projectPath;
             if (pp) {
+                const hd = s.metadata?.homeDir;
+                if (hd && pp.startsWith(hd)) {
+                    pp = '~' + pp.slice(hd.length);
+                }
                 const arr = byProject.get(pp) || [];
                 arr.push(s);
                 byProject.set(pp, arr);
