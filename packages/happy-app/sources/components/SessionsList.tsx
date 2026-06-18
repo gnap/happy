@@ -280,13 +280,40 @@ export function SessionsList() {
         return result;
     }, [dataWithSelected, collapsedProjects, hiddenOfflineHosts]);
 
-    // Sticky project headers: use FlatList built-in stickyHeaderIndices
-    const stickyIndices = React.useMemo(() => {
-        if (!visibleData) return [];
-        return visibleData
-            .map((item, i) => item.type === 'worktree-group' ? i : -1)
-            .filter(i => i >= 0);
+    // Sticky project headers: custom overlay on web since RNW stickyHeaderIndices
+    // is unreliable. The overlay renders the same project header Pressable as the
+    // inline version, so collapse/expand taps work correctly.
+    const stickyOverlayRef = React.useRef<View>(null);
+    const [stickyTops, setStickyTops] = React.useState<number[]>([]);
+
+    const handleScroll = React.useCallback((event: any) => {
+        const offsetY = event.nativeEvent.contentOffset.y;
+        if (!visibleData) { setStickyTops([]); return; }
+        const tops: number[] = [];
+        let y = 0;
+        for (const item of visibleData) {
+            if (item.type === 'worktree-group') {
+                if (y < offsetY + tops.length * 38) {
+                    tops.push(y);
+                }
+                y += 38;
+            } else {
+                y += item.type === 'host-group' ? 24 : item.type === 'session' ? 88 : 0;
+            }
+        }
+        setStickyTops(tops);
     }, [visibleData]);
+
+    const stickyHeaders = React.useMemo(() => {
+        if (!visibleData || stickyTops.length === 0) return [];
+        let count = 0;
+        return visibleData.filter(item => {
+            if (item.type === 'worktree-group') {
+                return count++ < stickyTops.length;
+            }
+            return false;
+        });
+    }, [visibleData, stickyTops]);
 
     // Request review
     React.useEffect(() => {
@@ -419,7 +446,7 @@ export function SessionsList() {
                     />
                 );
         }
-    }, [pathname, dataWithSelected, compactSessionView]);
+    }, [pathname, visibleData, compactSessionView, collapsedProjects, hiddenOfflineHosts]);
 
 
     // Remove this section as we'll use FlatList for all items now
@@ -436,14 +463,31 @@ export function SessionsList() {
     return (
         <View style={styles.container}>
             <View style={styles.contentContainer}>
-                <FlatList
-                    data={visibleData}
-                    renderItem={renderItem}
-                    keyExtractor={keyExtractor}
-                    contentContainerStyle={{ paddingBottom: safeArea.bottom + 128, maxWidth: layout.maxWidth }}
-                    ListHeaderComponent={HeaderComponent}
-                    stickyHeaderIndices={stickyIndices}
-                />
+                <View style={{ flex: 1 }}>
+                    <FlatList
+                        data={visibleData}
+                        renderItem={renderItem}
+                        keyExtractor={keyExtractor}
+                        contentContainerStyle={{ paddingBottom: safeArea.bottom + 128, maxWidth: layout.maxWidth }}
+                        ListHeaderComponent={HeaderComponent}
+                        onScroll={handleScroll}
+                        scrollEventThrottle={16}
+                    />
+                    {stickyHeaders.length > 0 && (
+                        <View style={{
+                            position: 'absolute',
+                            top: 0, left: 0, right: 0,
+                            maxWidth: layout.maxWidth,
+                            alignSelf: 'center',
+                        }} pointerEvents="box-none">
+                            {stickyHeaders.map((header, i) => (
+                                <View key={`sticky-${header.projectPath}-${i}`}>
+                                    {renderItem({ item: header, index: -1 - i })}
+                                </View>
+                            ))}
+                        </View>
+                    )}
+                </View>
             </View>
         </View>
     );
