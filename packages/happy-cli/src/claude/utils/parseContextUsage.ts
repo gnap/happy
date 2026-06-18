@@ -92,7 +92,6 @@ export function buildContextUsagePayload(
     pct: number;
     model: string;
     breakdown: ParsedContextUsage['breakdown'];
-    fetchedAt: number;
 } {
     return {
         currentTokens: parsed.currentTokens,
@@ -100,6 +99,5 @@ export function buildContextUsagePayload(
         pct: Math.round((parsed.currentTokens / parsed.maxTokens) * 100),
         model: parsed.model,
         breakdown: parsed.breakdown,
-        fetchedAt: Date.now(),
     };
 }

@@ -499,18 +499,48 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             logger.debug(`[loop] User message received with no disallowed tools override, using current: ${currentDisallowedTools ? currentDisallowedTools.join(', ') : 'none'}`);
         }
 
-        // Profile env: only apply when profileId changes (detected via currentProfileId).
+        // Profile env: apply when profileId or environmentVariables change.
         // Missing meta.profileId means "no override, keep current"; explicit null means "clear".
-        // When changed, use pre-resolved environmentVariables from the App meta directly.
-        // Fall back to local settings lookup if environmentVariables is absent (backward compat).
+        // Uses pre-resolved environmentVariables from the App meta; falls back to local
+        // settings lookup if environmentVariables is absent (backward compat).
         const profileIdProvided =
             message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'profileId');
         if (profileIdProvided) {
             const messageProfileId = message.meta!.profileId ?? null;
-            if (messageProfileId !== currentProfileId) {
+            const messageEnv = message.meta?.environmentVariables;
+
+            // Detect env change even when profileId is the same (user edited env vars for the active profile).
+            let envChanged = false;
+            if (messageProfileId === currentProfileId && messageEnv && Object.keys(messageEnv).length > 0) {
+                // Compute what the merged env WOULD be and compare against current.
+                const candidateClaudeEnv = mergeProfileIntoEnv(
+                    currentClaudeEnvVars,
+                    messageEnv,
+                    process.env,
+                );
+                const envKeysNow = Object.keys(currentClaudeEnvVars)
+                    .filter((k) => (currentClaudeEnvVars as Record<string, string>)[k] !== undefined)
+                    .sort();
+                const envKeysNext = Object.keys(candidateClaudeEnv)
+                    .filter((k) => (candidateClaudeEnv as Record<string, string>)[k] !== undefined)
+                    .sort();
+                if (
+                    envKeysNow.length !== envKeysNext.length ||
+                    !envKeysNow.every(
+                        (k, i) =>
+                            k === envKeysNext[i] &&
+                            (currentClaudeEnvVars as Record<string, string>)[k] ===
+                                (candidateClaudeEnv as Record<string, string>)[k],
+                    )
+                ) {
+                    envChanged = true;
+                }
+            }
+
+            if (messageProfileId !== currentProfileId || envChanged) {
                 currentProfileId = messageProfileId;
                 if (messageProfileId) {
-                    const profileEnv = message.meta?.environmentVariables;
+                    const profileEnv = messageEnv;
                     if (profileEnv && Object.keys(profileEnv).length > 0) {
                         applyProfileEnvToProcess(profileEnv);
                         currentClaudeEnvVars = mergeProfileIntoEnv(currentClaudeEnvVars, profileEnv, process.env);
