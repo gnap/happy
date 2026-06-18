@@ -248,8 +248,8 @@ export function SessionsList() {
 
     // Track which project groups are collapsed
     const [collapsedProjects, setCollapsedProjects] = React.useState<Set<string>>(new Set());
-    // Track which host groups have offline sessions visible (key: "projectPath|host")
-    const [expandedHosts, setExpandedHosts] = React.useState<Set<string>>(new Set());
+    // Track which host groups have offline sessions hidden (key: "projectPath|host")
+    const [hiddenOfflineHosts, setHiddenOfflineHosts] = React.useState<Set<string>>(new Set());
 
     // Filter out items inside collapsed project groups and hidden offline sessions
     const visibleData = React.useMemo(() => {
@@ -269,7 +269,7 @@ export function SessionsList() {
             }
             if (item.type === 'host-group') {
                 currentHost = item.host;
-                hideOffline = !expandedHosts.has(currentProjectPath + '|' + item.host);
+                hideOffline = hiddenOfflineHosts.has(currentProjectPath + '|' + item.host);
                 if (!skipUntilNextProject) result.push(item);
                 continue;
             }
@@ -278,7 +278,7 @@ export function SessionsList() {
             result.push(item);
         }
         return result;
-    }, [dataWithSelected, collapsedProjects, expandedHosts]);
+    }, [dataWithSelected, collapsedProjects, hiddenOfflineHosts]);
 
     // Sticky project headers: use FlatList built-in stickyHeaderIndices
     const stickyIndices = React.useMemo(() => {
@@ -377,11 +377,11 @@ export function SessionsList() {
 
             case 'host-group': {
                 const hostKey = item.projectPath + '|' + item.host;
-                const isExpanded = expandedHosts.has(hostKey);
+                const isHidingOffline = hiddenOfflineHosts.has(hostKey);
                 const hasOffline = item.totalCount > item.onlineCount;
                 return (
                     <Pressable
-                        onPress={hasOffline ? () => setExpandedHosts(prev => {
+                        onPress={hasOffline ? () => setHiddenOfflineHosts(prev => {
                             const next = new Set(prev);
                             if (next.has(hostKey)) next.delete(hostKey);
                             else next.add(hostKey);
@@ -393,7 +393,7 @@ export function SessionsList() {
                         ]}
                     >
                         <Text style={styles.hostGroupText} numberOfLines={1}>
-                            {item.host || 'Unknown'}{' · '}{item.onlineCount}/{item.totalCount} online{hasOffline ? (isExpanded ? ' ▾' : ' ▸') : ''}
+                            {item.host || 'Unknown'}{' · '}{item.onlineCount}/{item.totalCount} online{hasOffline ? (isHidingOffline ? ' ▸' : ' ▾') : ''}
                         </Text>
                     </Pressable>
                 );
