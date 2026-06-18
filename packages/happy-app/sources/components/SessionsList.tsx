@@ -76,21 +76,24 @@ const stylesheet = StyleSheet.create((theme) => ({
     },
     hostGroup: {
         paddingHorizontal: 16,
-        height: 24,
-        backgroundColor: theme.colors.surface,
+        paddingVertical: 3,
+        backgroundColor: theme.colors.background,
         flexDirection: 'row',
-        justifyContent: 'center',
         alignItems: 'center',
+        borderTopWidth: 0.5,
+        borderTopColor: theme.colors.divider,
+        borderBottomWidth: 0.5,
+        borderBottomColor: theme.colors.divider,
     },
     hostGroupText: {
-        fontSize: 11,
-        color: theme.colors.textSecondary,
-        ...Typography.default(),
-    },
-    hostGroupCount: {
         fontSize: 10,
         color: theme.colors.textSecondary,
-        marginLeft: 8,
+        ...Typography.default('semiBold'),
+    },
+    hostGroupCount: {
+        fontSize: 9,
+        color: theme.colors.textSecondary,
+        marginLeft: 6,
         ...Typography.default(),
     },
     sessionItem: {
@@ -410,16 +413,17 @@ export function SessionsList() {
                             { opacity: hasOffline && pressed ? 0.7 : 1 },
                         ]}
                     >
-                        {hasOffline && (
-                            <Ionicons name={isExpanded ? "chevron-down" : "chevron-forward"} size={10} color="#8E8E93" style={{ marginRight: 4 }} />
-                        )}
-                        <Ionicons name="desktop-outline" size={12} color="#8E8E93" style={{ marginRight: 6 }} />
                         <Text style={styles.hostGroupText}>
                             {item.host || 'Unknown'}
                         </Text>
                         <Text style={styles.hostGroupCount}>
                             {item.onlineCount}/{item.totalCount} online
                         </Text>
+                        {hasOffline && (
+                            <Text style={styles.hostGroupCount}>
+                                {isExpanded ? '▾' : '▸'}
+                            </Text>
+                        )}
                     </Pressable>
                 );
             }
