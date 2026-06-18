@@ -92,6 +92,7 @@ export type SessionListViewItem =
     | { type: 'active-sessions'; sessions: Session[] }
     | { type: 'project-group'; displayPath: string; machine: Machine }
     | { type: 'worktree-group'; projectPath: string; homeDir?: string; branch?: string }
+    | { type: 'host-group'; projectPath: string; host: string; onlineCount: number; totalCount: number }
     | { type: 'session'; session: Session; variant?: 'default' | 'no-path' };
 
 // Legacy type for backward compatibility - to be removed
@@ -224,18 +225,17 @@ function buildSessionListViewData(
     activeSessions.sort((a, b) => b.createdAt - a.createdAt);
     inactiveSessions.sort((a, b) => b.createdAt - a.createdAt);
 
-    // Helper: emit a date group, inserting git-project-group headers for
-    // sessions that share the same projectPath (main repo + its worktrees).
+    // Helper: emit a date group, inserting project-group headers with host sub-groups.
     const emitSessionGroup = (group: Session[]) => {
-        const wtByProject = new Map<string, Session[]>();
+        const byProject = new Map<string, Session[]>();
         const standard: Session[] = [];
 
         for (const s of group) {
             const pp = s.metadata?.projectPath;
             if (pp) {
-                const arr = wtByProject.get(pp) || [];
+                const arr = byProject.get(pp) || [];
                 arr.push(s);
-                wtByProject.set(pp, arr);
+                byProject.set(pp, arr);
             } else {
                 standard.push(s);
             }
@@ -246,26 +246,44 @@ function buildSessionListViewData(
         for (const s of standard) {
             listData.push({ type: 'session', session: s });
         }
-        // Sort worktree groups by newest createdAt in each group (stable)
-        const sortedProjects = [...wtByProject.entries()].sort(([, a], [, b]) => {
+        // Sort project groups by newest createdAt in each group (stable)
+        const sortedProjects = [...byProject.entries()].sort(([, a], [, b]) => {
             const aMax = Math.max(...a.map(s => s.createdAt));
             const bMax = Math.max(...b.map(s => s.createdAt));
             return bMax - aMax;
         });
         for (const [projectPath, sessions] of sortedProjects) {
-            // Main repo first, then worktrees
-            sessions.sort((a, b) => {
-                const aWt = a.metadata?.isWorktree ?? true;
-                const bWt = b.metadata?.isWorktree ?? true;
-                if (aWt !== bWt) return aWt ? 1 : -1;
-                return b.createdAt - a.createdAt; // newest first within same type (stable, doesn't jump)
-            });
+            // Sub-group by host within this project
+            const byHost = new Map<string, Session[]>();
+            for (const s of sessions) {
+                const host = s.metadata?.host ?? '';
+                const arr = byHost.get(host) || [];
+                arr.push(s);
+                byHost.set(host, arr);
+            }
             const homeDir = sessions[0]?.metadata?.homeDir;
             const branch = sessions.find(s => !!s.metadata?.branchName)?.metadata?.branchName
                         ?? sessions.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
             listData.push({ type: 'worktree-group', projectPath, homeDir, branch });
-            for (const s of sessions) {
-                listData.push({ type: 'session', session: s });
+            // Emit host sub-groups (sorted by newest session in each host)
+            const sortedHosts = [...byHost.entries()].sort(([, a], [, b]) => {
+                const aMax = Math.max(...a.map(s => s.createdAt));
+                const bMax = Math.max(...b.map(s => s.createdAt));
+                return bMax - aMax;
+            });
+            for (const [host, hostSessions] of sortedHosts) {
+                // Main repo first, then worktrees
+                hostSessions.sort((a, b) => {
+                    const aWt = a.metadata?.isWorktree ?? true;
+                    const bWt = b.metadata?.isWorktree ?? true;
+                    if (aWt !== bWt) return aWt ? 1 : -1;
+                    return b.createdAt - a.createdAt;
+                });
+                const onlineCount = hostSessions.filter(s => s.active).length;
+                listData.push({ type: 'host-group', projectPath, host, onlineCount, totalCount: hostSessions.length });
+                for (const s of hostSessions) {
+                    listData.push({ type: 'session', session: s });
+                }
             }
         }
     };
@@ -294,20 +312,36 @@ function buildSessionListViewData(
             const bMax = Math.max(...b.map(s => s.createdAt));
             return bMax - aMax;
         });
-        for (const [projectPath, group] of sortedProjects) {
-            // Main repo first, then worktrees
-            group.sort((a, b) => {
-                const aWt = a.metadata?.isWorktree ?? true;
-                const bWt = b.metadata?.isWorktree ?? true;
-                if (aWt !== bWt) return aWt ? 1 : -1;
-                return b.createdAt - a.createdAt; // newest first within same type
-            });
-            const homeDir = group[0]?.metadata?.homeDir;
-            const branch = group.find(s => !!s.metadata?.branchName)?.metadata?.branchName
-                        ?? group.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
+        for (const [projectPath, projectSessions] of sortedProjects) {
+            const homeDir = projectSessions[0]?.metadata?.homeDir;
+            const branch = projectSessions.find(s => !!s.metadata?.branchName)?.metadata?.branchName
+                        ?? projectSessions.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
             toList.push({ type: 'worktree-group', projectPath, homeDir, branch });
-            for (const s of group) {
-                toList.push({ type: 'session', session: s });
+            // Sub-group by host
+            const byHost = new Map<string, Session[]>();
+            for (const s of projectSessions) {
+                const host = s.metadata?.host ?? '';
+                const arr = byHost.get(host) || [];
+                arr.push(s);
+                byHost.set(host, arr);
+            }
+            const sortedHosts = [...byHost.entries()].sort(([, a], [, b]) => {
+                const aMax = Math.max(...a.map(s => s.createdAt));
+                const bMax = Math.max(...b.map(s => s.createdAt));
+                return bMax - aMax;
+            });
+            for (const [host, hostSessions] of sortedHosts) {
+                hostSessions.sort((a, b) => {
+                    const aWt = a.metadata?.isWorktree ?? true;
+                    const bWt = b.metadata?.isWorktree ?? true;
+                    if (aWt !== bWt) return aWt ? 1 : -1;
+                    return b.createdAt - a.createdAt;
+                });
+                const onlineCount = hostSessions.filter(s => s.active).length;
+                toList.push({ type: 'host-group', host, onlineCount, totalCount: hostSessions.length });
+                for (const s of hostSessions) {
+                    toList.push({ type: 'session', session: s });
+                }
             }
         }
         return noProject;

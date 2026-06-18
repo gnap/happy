@@ -15,10 +15,17 @@ export function useVisibleSessionListViewData(): SessionListViewItem[] | null {
 
         const filtered: SessionListViewItem[] = [];
         let pendingProjectGroup: SessionListViewItem | null = null;
+        let pendingHostGroup: SessionListViewItem | null = null;
 
         for (const item of data) {
             if (item.type === 'project-group' || item.type === 'worktree-group') {
                 pendingProjectGroup = item;
+                pendingHostGroup = null;
+                continue;
+            }
+
+            if (item.type === 'host-group') {
+                pendingHostGroup = item;
                 continue;
             }
 
@@ -28,12 +35,17 @@ export function useVisibleSessionListViewData(): SessionListViewItem[] | null {
                         filtered.push(pendingProjectGroup);
                         pendingProjectGroup = null;
                     }
+                    if (pendingHostGroup) {
+                        filtered.push(pendingHostGroup);
+                        pendingHostGroup = null;
+                    }
                     filtered.push(item);
                 }
                 continue;
             }
 
             pendingProjectGroup = null;
+            pendingHostGroup = null;
 
             if (item.type === 'active-sessions') {
                 filtered.push(item);
