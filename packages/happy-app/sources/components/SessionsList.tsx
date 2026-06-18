@@ -57,43 +57,21 @@ const stylesheet = StyleSheet.create((theme) => ({
         ...Typography.default('semiBold'),
     },
     projectGroup: {
-        paddingLeft: 4,
-        paddingRight: 16,
+        marginHorizontal: 16,
+        paddingHorizontal: 16,
         paddingVertical: 10,
-        backgroundColor: theme.colors.groupped.background,
+        backgroundColor: 'transparent',
+        alignItems: 'center',
     },
     projectGroupTitle: {
         fontSize: 13,
-        fontWeight: '600',
         color: theme.colors.text,
-        ...Typography.default('semiBold'),
+        ...Typography.default(),
     },
     projectGroupSubtitle: {
         fontSize: 11,
         color: theme.colors.textSecondary,
         marginTop: 2,
-        ...Typography.default(),
-    },
-    hostGroup: {
-        paddingHorizontal: 16,
-        paddingTop: 6,
-        paddingBottom: 2,
-        backgroundColor: theme.colors.groupped.background,
-        flexDirection: 'row',
-        justifyContent: 'center',
-        alignItems: 'center',
-    },
-    hostGroupText: {
-        fontSize: 10,
-        color: theme.colors.textSecondary,
-        flex: 1,
-        textAlign: 'center',
-        ...Typography.default('semiBold'),
-    },
-    hostGroupCount: {
-        fontSize: 9,
-        color: theme.colors.textSecondary,
-        marginLeft: 6,
         ...Typography.default(),
     },
     sessionItem: {
@@ -246,75 +224,6 @@ export function SessionsList() {
     }, [selectable, data, pathname]);
     const dataWithSelected = selectable ? dataWithSelectedMemo : data;
 
-    // Track which project groups are collapsed
-    const [collapsedProjects, setCollapsedProjects] = React.useState<Set<string>>(new Set());
-    // Track which host groups have offline sessions hidden (key: "projectPath|host")
-    const [hiddenOfflineHosts, setHiddenOfflineHosts] = React.useState<Set<string>>(new Set());
-
-    // Filter out items inside collapsed project groups and hidden offline sessions
-    const visibleData = React.useMemo(() => {
-        if (!dataWithSelected) return null;
-        const result: typeof dataWithSelected = [];
-        let skipUntilNextProject = false;
-        let currentProjectPath = '';
-        let currentHost = '';
-        let hideOffline = false;
-
-        for (const item of dataWithSelected) {
-            if (item.type === 'worktree-group') {
-                currentProjectPath = item.projectPath;
-                skipUntilNextProject = collapsedProjects.has(item.projectPath);
-                result.push(item);
-                continue;
-            }
-            if (item.type === 'host-group') {
-                currentHost = item.host;
-                hideOffline = hiddenOfflineHosts.has(currentProjectPath + '|' + item.host);
-                if (!skipUntilNextProject) result.push(item);
-                continue;
-            }
-            if (skipUntilNextProject) continue;
-            if (item.type === 'session' && hideOffline && currentHost && !item.session.active) continue;
-            result.push(item);
-        }
-        return result;
-    }, [dataWithSelected, collapsedProjects, hiddenOfflineHosts]);
-
-    // Sticky project headers: custom overlay on web since RNW stickyHeaderIndices
-    // is unreliable. The overlay renders the same project header Pressable as the
-    // inline version, so collapse/expand taps work correctly.
-    const stickyOverlayRef = React.useRef<View>(null);
-    const [stickyTops, setStickyTops] = React.useState<number[]>([]);
-
-    const handleScroll = React.useCallback((event: any) => {
-        const offsetY = event.nativeEvent.contentOffset.y;
-        if (!visibleData) { setStickyTops([]); return; }
-        const tops: number[] = [];
-        let y = 0;
-        for (const item of visibleData) {
-            if (item.type === 'worktree-group') {
-                if (y < offsetY + tops.length * 38) {
-                    tops.push(y);
-                }
-                y += 38;
-            } else {
-                y += item.type === 'host-group' ? 24 : item.type === 'session' ? 88 : 0;
-            }
-        }
-        setStickyTops(tops);
-    }, [visibleData]);
-
-    const stickyHeaders = React.useMemo(() => {
-        if (!visibleData || stickyTops.length === 0) return [];
-        let count = 0;
-        return visibleData.filter(item => {
-            if (item.type === 'worktree-group') {
-                return count++ < stickyTops.length;
-            }
-            return false;
-        });
-    }, [visibleData, stickyTops]);
-
     // Request review
     React.useEffect(() => {
         if (data && data.length > 0) {
@@ -335,7 +244,6 @@ export function SessionsList() {
             case 'active-sessions': return 'active-sessions';
             case 'project-group': return `project-group-${item.machine.id}-${item.displayPath}-${index}`;
             case 'worktree-group': return `worktree-group-${item.projectPath}-${index}`;
-            case 'host-group': return `host-group-${item.host}-${index}`;
             case 'session': return `session-${item.session.id}-${index}`;
         }
     }, []);
@@ -380,60 +288,22 @@ export function SessionsList() {
                 );
 
             case 'worktree-group':
-                const isCollapsed = collapsedProjects.has(item.projectPath);
                 return (
-                    <Pressable
-                        onPress={() => setCollapsedProjects(prev => {
-                            const next = new Set(prev);
-                            if (next.has(item.projectPath)) next.delete(item.projectPath);
-                            else next.add(item.projectPath);
-                            return next;
-                        })}
-                        style={({ pressed }) => [
-                            styles.projectGroup,
-                            { flexDirection: 'row', alignItems: 'center', opacity: pressed ? 0.7 : 1 },
-                        ]}
-                    >
-                        <Ionicons name={isCollapsed ? "chevron-forward" : "chevron-down"} size={14} color="#8E8E93" style={{ marginRight: 6 }} />
+                    <View style={[styles.projectGroup, { flexDirection: 'row', alignItems: 'center' }]}>
                         <Ionicons name="folder-outline" size={14} color="#8E8E93" style={{ marginRight: 8 }} />
-                        <Text style={styles.projectGroupTitle} numberOfLines={1}>
+                        <Text style={styles.projectGroupTitle}>
                             {formatPathRelativeToHome(item.projectPath, item.homeDir)}
                         </Text>
-                    </Pressable>
+                    </View>
                 );
-
-            case 'host-group': {
-                const hostKey = item.projectPath + '|' + item.host;
-                const isHidingOffline = hiddenOfflineHosts.has(hostKey);
-                const hasOffline = item.totalCount > item.onlineCount;
-                return (
-                    <Pressable
-                        onPress={hasOffline ? () => setHiddenOfflineHosts(prev => {
-                            const next = new Set(prev);
-                            if (next.has(hostKey)) next.delete(hostKey);
-                            else next.add(hostKey);
-                            return next;
-                        }) : undefined}
-                        style={({ pressed }) => [
-                            styles.hostGroup,
-                            { opacity: hasOffline && pressed ? 0.7 : 1 },
-                        ]}
-                    >
-                        <Text style={styles.hostGroupText} numberOfLines={1}>
-                            {item.host || 'Unknown'}{' · '}{item.onlineCount}/{item.totalCount} online{hasOffline ? (isHidingOffline ? ' ▸' : ' ▾') : ''}
-                        </Text>
-                    </Pressable>
-                );
-            }
 
             case 'session':
                 // Determine card styling based on position within date group
-                const prevItem = index > 0 && visibleData ? visibleData[index - 1] : null;
-                const nextItem = index < (visibleData?.length || 0) - 1 && visibleData ? visibleData[index + 1] : null;
+                const prevItem = index > 0 && dataWithSelected ? dataWithSelected[index - 1] : null;
+                const nextItem = index < (dataWithSelected?.length || 0) - 1 && dataWithSelected ? dataWithSelected[index + 1] : null;
 
-                const isGroupBoundary = (type: string) => type === 'header' || type === 'host-group' || type === 'worktree-group' || type === 'active-sessions';
-                const isFirst = prevItem ? isGroupBoundary(prevItem.type) : true;
-                const isLast = nextItem ? isGroupBoundary(nextItem.type) : true;
+                const isFirst = prevItem?.type === 'header';
+                const isLast = nextItem?.type === 'header' || nextItem == null || nextItem?.type === 'active-sessions';
                 const isSingle = isFirst && isLast;
 
                 return (
@@ -446,7 +316,7 @@ export function SessionsList() {
                     />
                 );
         }
-    }, [pathname, visibleData, compactSessionView, collapsedProjects, hiddenOfflineHosts]);
+    }, [pathname, dataWithSelected, compactSessionView]);
 
 
     // Remove this section as we'll use FlatList for all items now
@@ -463,31 +333,13 @@ export function SessionsList() {
     return (
         <View style={styles.container}>
             <View style={styles.contentContainer}>
-                <View style={{ flex: 1 }}>
-                    <FlatList
-                        data={visibleData}
-                        renderItem={renderItem}
-                        keyExtractor={keyExtractor}
-                        contentContainerStyle={{ paddingBottom: safeArea.bottom + 128, maxWidth: layout.maxWidth }}
-                        ListHeaderComponent={HeaderComponent}
-                        onScroll={handleScroll}
-                        scrollEventThrottle={16}
-                    />
-                    {stickyHeaders.length > 0 && (
-                        <View style={{
-                            position: 'absolute',
-                            top: 0, left: 0, right: 0,
-                            maxWidth: layout.maxWidth,
-                            alignSelf: 'center',
-                        }} pointerEvents="box-none">
-                            {stickyHeaders.map((header, i) => (
-                                <View key={`sticky-${header.projectPath}-${i}`}>
-                                    {renderItem({ item: header, index: -1 - i })}
-                                </View>
-                            ))}
-                        </View>
-                    )}
-                </View>
+                <FlatList
+                    data={dataWithSelected}
+                    renderItem={renderItem}
+                    keyExtractor={keyExtractor}
+                    contentContainerStyle={{ paddingBottom: safeArea.bottom + 128, maxWidth: layout.maxWidth }}
+                    ListHeaderComponent={HeaderComponent}
+                />
             </View>
         </View>
     );
