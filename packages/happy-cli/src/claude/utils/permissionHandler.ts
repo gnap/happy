@@ -151,8 +151,9 @@ export class PermissionHandler {
         }
 
         // Plan mode: auto-approve read-only tools (Read, Glob, Grep, etc.)
-        // Dangerous tools (Bash, Edit, Write) still require approval
-        if (this.permissionMode === 'plan' && !descriptor.dangerous) {
+        // Dangerous tools (Bash, Edit, Write) still require approval.
+        // ExitPlanMode must always go through user approval — never auto-approve.
+        if (this.permissionMode === 'plan' && !descriptor.dangerous && !descriptor.exitPlan) {
             return { behavior: 'allow', updatedInput: input as Record<string, unknown> };
         }
 
