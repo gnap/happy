@@ -43,6 +43,8 @@ export class PermissionHandler {
     private allowedBashLiterals = new Set<string>();
     private allowedBashPrefixes = new Set<string>();
     private permissionMode: PermissionMode = 'default';
+    /** Mode before entering plan — restored when ExitPlanMode is approved without explicit mode. */
+    private previousMode: PermissionMode | null = null;
     private onPermissionRequestCallback?: (toolCallId: string) => void;
 
     constructor(session: Session) {
@@ -58,7 +60,13 @@ export class PermissionHandler {
     }
 
     handleModeChange(mode: PermissionMode) {
-        this.permissionMode = mapToClaudeMode(mode);
+        const mapped = mapToClaudeMode(mode);
+        // Push current mode onto stack before entering plan mode, so
+        // ExitPlanMode can restore it without requiring user choice.
+        if (mapped === 'plan' && this.permissionMode !== 'plan') {
+            this.previousMode = this.permissionMode;
+        }
+        this.permissionMode = mapped;
     }
 
     /**
@@ -84,8 +92,10 @@ export class PermissionHandler {
         if (response.mode) {
             this.permissionMode = response.mode;
         } else if (pending.toolName === 'exit_plan_mode' || pending.toolName === 'ExitPlanMode') {
-            // User approved ExitPlanMode without specifying a mode — default to 'default'
-            this.permissionMode = 'default';
+            // User approved ExitPlanMode without specifying a mode —
+            // restore the mode from before plan was entered.
+            this.permissionMode = this.previousMode || 'default';
+            this.previousMode = null;
         }
 
         // Handle
