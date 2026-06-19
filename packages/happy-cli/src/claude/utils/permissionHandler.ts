@@ -9,7 +9,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { logger } from "@/lib";
 import { SDKAssistantMessage, SDKMessage, SDKUserMessage } from "../sdk";
 import { PermissionResult } from "../sdk/types";
-import { PLAN_FAKE_REJECT, PLAN_FAKE_RESTART } from "../sdk/prompts";
+
 import { Session } from "../session";
 import { getToolName } from "./getToolName";
 import { EnhancedMode, PermissionMode } from "../loop";
@@ -24,6 +24,7 @@ interface PermissionResponse {
     mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
     allowTools?: string[];
     receivedAt?: number;
+    updatedInput?: Record<string, unknown>;
 }
 
 
@@ -43,6 +44,8 @@ export class PermissionHandler {
     private allowedBashLiterals = new Set<string>();
     private allowedBashPrefixes = new Set<string>();
     private permissionMode: PermissionMode = 'default';
+    /** Mode before entering plan — restored when ExitPlanMode is approved without explicit mode. */
+    private previousMode: PermissionMode | null = null;
     private onPermissionRequestCallback?: (toolCallId: string) => void;
 
     constructor(session: Session) {
@@ -58,7 +61,13 @@ export class PermissionHandler {
     }
 
     handleModeChange(mode: PermissionMode) {
-        this.permissionMode = mapToClaudeMode(mode);
+        const mapped = mapToClaudeMode(mode);
+        // Push current mode onto stack before entering plan mode, so
+        // ExitPlanMode can restore it without requiring user choice.
+        if (mapped === 'plan' && this.permissionMode !== 'plan') {
+            this.previousMode = this.permissionMode;
+        }
+        this.permissionMode = mapped;
     }
 
     /**
@@ -85,31 +94,14 @@ export class PermissionHandler {
             this.permissionMode = response.mode;
         }
 
-        // Handle 
-        if (pending.toolName === 'exit_plan_mode' || pending.toolName === 'ExitPlanMode') {
-            // Handle exit_plan_mode specially
-            logger.debug('Plan mode result received', response);
-            if (response.approved) {
-                logger.debug('Plan approved - injecting PLAN_FAKE_RESTART');
-                // Inject the approval message at the beginning of the queue
-                if (response.mode && ['default', 'acceptEdits', 'bypassPermissions'].includes(response.mode)) {
-                    this.session.queue.unshift(PLAN_FAKE_RESTART, { permissionMode: response.mode });
-                } else {
-                    this.session.queue.unshift(PLAN_FAKE_RESTART, { permissionMode: 'default' });
-                }
-                pending.resolve({ behavior: 'deny', message: PLAN_FAKE_REJECT });
-            } else {
-                pending.resolve({ behavior: 'deny', message: response.reason || 'Plan rejected' });
-            }
-        } else {
-            // Handle default case for all other tools
-            const result: PermissionResult = response.approved
-                ? { behavior: 'allow', updatedInput: (pending.input as Record<string, unknown>) || {} }
-                : { behavior: 'deny', message: response.reason || `The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.` };
+        // Handle default case for all other tools
+        const result: PermissionResult = response.approved
+            ? { behavior: 'allow', updatedInput: response.updatedInput ?? ((pending.input as Record<string, unknown>) || {}) }
+            : { behavior: 'deny', message: response.reason || `The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.` };
 
-            pending.resolve(result);
-        }
+        pending.resolve(result);
     }
+}
 
     /**
      * Creates the canCallTool callback for the SDK
@@ -138,6 +130,21 @@ export class PermissionHandler {
         // Calculate descriptor
         const descriptor = getToolDescriptor(toolName);
 
+        // AskUserQuestion requires user interaction — never auto-approve,
+        // even in bypassPermissions mode. The App's AskUserQuestionView
+        // sends the answer back through the permission response.
+        if (toolName === 'AskUserQuestion' || toolName === 'ask_user_question') {
+            let toolCallId = this.resolveToolCallId(toolName, input);
+            if (!toolCallId) {
+                await delay(1000);
+                toolCallId = this.resolveToolCallId(toolName, input);
+                if (!toolCallId) {
+                    throw new Error(`Could not resolve tool call ID for ${toolName}`);
+                }
+            }
+            return this.handlePermissionRequest(toolCallId, toolName, input, options.signal);
+        }
+
         //
         // Handle special cases
         //
@@ -147,6 +154,24 @@ export class PermissionHandler {
         }
 
         if (this.permissionMode === 'acceptEdits' && descriptor.edit) {
+            return { behavior: 'allow', updatedInput: input as Record<string, unknown> };
+        }
+
+        // ExitPlanMode: always allow. If we're tracking plan mode, restore
+        // the previous mode from the stack. Otherwise (Claude entered plan
+        // autonomously), the current permissionMode is already correct.
+        if (descriptor.exitPlan) {
+            if (this.permissionMode === 'plan') {
+                this.permissionMode = this.previousMode || 'default';
+                this.previousMode = null;
+                logger.debug(`Plan mode exited — restoring mode to ${this.permissionMode}`);
+            }
+            return { behavior: 'allow', updatedInput: input as Record<string, unknown> };
+        }
+
+        // Plan mode: auto-approve read-only tools (Read, Glob, Grep, etc.)
+        // Dangerous tools (Bash, Edit, Write) still require approval.
+        if (this.permissionMode === 'plan' && !descriptor.dangerous) {
             return { behavior: 'allow', updatedInput: input as Record<string, unknown> };
         }
 
@@ -324,12 +349,6 @@ export class PermissionHandler {
             return true;
         }
 
-        // Always abort exit_plan_mode
-        const toolCall = this.toolCalls.find(tc => tc.id === toolCallId);
-        if (toolCall && (toolCall.name === 'exit_plan_mode' || toolCall.name === 'ExitPlanMode')) {
-            return true;
-        }
-
         // Tool call is not aborted
         return false;
     }
@@ -343,6 +362,7 @@ export class PermissionHandler {
         this.allowedTools.clear();
         this.allowedBashLiterals.clear();
         this.allowedBashPrefixes.clear();
+        this.permissionMode = 'default';
 
         // Cancel all pending requests
         for (const [, pending] of this.pendingRequests.entries()) {
