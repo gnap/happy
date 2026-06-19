@@ -128,6 +128,20 @@ export class PermissionHandler {
         // Calculate descriptor
         const descriptor = getToolDescriptor(toolName);
 
+        // AskUserQuestion requires user interaction — never auto-approve,
+        // even in bypassPermissions mode. Must send to App for answer.
+        if (toolName === 'AskUserQuestion' || toolName === 'ask_user_question') {
+            let toolCallId = this.resolveToolCallId(toolName, input);
+            if (!toolCallId) {
+                await delay(1000);
+                toolCallId = this.resolveToolCallId(toolName, input);
+                if (!toolCallId) {
+                    throw new Error(`Could not resolve tool call ID for ${toolName}`);
+                }
+            }
+            return this.handlePermissionRequest(toolCallId, toolName, input, options.signal);
+        }
+
         //
         // Handle special cases
         //
@@ -154,9 +168,7 @@ export class PermissionHandler {
 
         // Plan mode: auto-approve read-only tools (Read, Glob, Grep, etc.)
         // Dangerous tools (Bash, Edit, Write) still require approval.
-        // AskUserQuestion is interactive — never auto-approve, the user needs to answer.
-        if (this.permissionMode === 'plan' && !descriptor.dangerous
-            && toolName !== 'AskUserQuestion' && toolName !== 'ask_user_question') {
+        if (this.permissionMode === 'plan' && !descriptor.dangerous) {
             return { behavior: 'allow', updatedInput: input as Record<string, unknown> };
         }
 
