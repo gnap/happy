@@ -100,14 +100,17 @@ export class PermissionHandler {
                 } else {
                     this.session.queue.unshift(PLAN_FAKE_RESTART, { permissionMode: 'default' });
                 }
-                // Clear old tool calls so the next Claude process doesn't match
-                // stale exit_plan_mode entries in resolveToolCallId, which would
-                // cause isAborted to return true and loop forever.
-                this.toolCalls = [];
-                pending.resolve({ behavior: 'deny', message: PLAN_FAKE_REJECT });
             } else {
-                pending.resolve({ behavior: 'deny', message: response.reason || 'Plan rejected' });
+                // User rejected — stay in plan mode but restart Claude so the deny
+                // takes effect cleanly instead of looping.
+                logger.debug('Plan rejected - re-spawning in plan mode');
+                this.session.queue.unshift(PLAN_FAKE_RESTART, { permissionMode: 'plan' });
             }
+            // Clear old tool calls so the next Claude process doesn't match
+            // stale exit_plan_mode entries in resolveToolCallId, which would
+            // cause isAborted to return true and loop forever.
+            this.toolCalls = [];
+            pending.resolve({ behavior: 'deny', message: PLAN_FAKE_REJECT });
         } else {
             // Handle default case for all other tools
             const result: PermissionResult = response.approved
