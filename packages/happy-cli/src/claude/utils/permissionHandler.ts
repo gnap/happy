@@ -140,14 +140,15 @@ export class PermissionHandler {
             return { behavior: 'allow', updatedInput: input as Record<string, unknown> };
         }
 
-        // ExitPlanMode: auto-exit plan mode without user approval.
-        // The plan itself doesn't need confirmation — what needs approval are
-        // the dangerous tools (Bash, Edit, Write) executed during planning.
-        // The plan proposal still renders as a tool card (ExitPlanToolView).
-        if (this.permissionMode === 'plan' && descriptor.exitPlan) {
-            this.permissionMode = this.previousMode || 'default';
-            this.previousMode = null;
-            logger.debug(`Plan mode exited — restoring mode to ${this.permissionMode}`);
+        // ExitPlanMode: always allow. If we're tracking plan mode, restore
+        // the previous mode from the stack. Otherwise (Claude entered plan
+        // autonomously), the current permissionMode is already correct.
+        if (descriptor.exitPlan) {
+            if (this.permissionMode === 'plan') {
+                this.permissionMode = this.previousMode || 'default';
+                this.previousMode = null;
+                logger.debug(`Plan mode exited — restoring mode to ${this.permissionMode}`);
+            }
             return { behavior: 'allow', updatedInput: input as Record<string, unknown> };
         }
 
