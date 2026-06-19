@@ -24,6 +24,7 @@ interface PermissionResponse {
     mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
     allowTools?: string[];
     receivedAt?: number;
+    updatedInput?: Record<string, unknown>;
 }
 
 
@@ -95,7 +96,7 @@ export class PermissionHandler {
 
         // Handle default case for all other tools
         const result: PermissionResult = response.approved
-            ? { behavior: 'allow', updatedInput: (pending.input as Record<string, unknown>) || {} }
+            ? { behavior: 'allow', updatedInput: response.updatedInput ?? ((pending.input as Record<string, unknown>) || {}) }
             : { behavior: 'deny', message: response.reason || `The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.` };
 
         pending.resolve(result);
