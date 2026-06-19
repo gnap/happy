@@ -9,7 +9,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { logger } from "@/lib";
 import { SDKAssistantMessage, SDKMessage, SDKUserMessage } from "../sdk";
 import { PermissionResult } from "../sdk/types";
-import { PLAN_FAKE_REJECT, PLAN_FAKE_RESTART } from "../sdk/prompts";
+
 import { Session } from "../session";
 import { getToolName } from "./getToolName";
 import { EnhancedMode, PermissionMode } from "../loop";
@@ -90,27 +90,18 @@ export class PermissionHandler {
 
         // Handle
         if (pending.toolName === 'exit_plan_mode' || pending.toolName === 'ExitPlanMode') {
-            // Handle exit_plan_mode specially
+            // ExitPlanMode is a native Claude SDK tool. Let the SDK handle the
+            // transition naturally — no need to kill/restart the process. The
+            // PermissionHandler's canCallTool callback already uses this.permissionMode
+            // for all subsequent tool calls, so updating it above is sufficient.
             logger.debug('Plan mode result received', response);
             if (response.approved) {
-                logger.debug('Plan approved - injecting PLAN_FAKE_RESTART');
-                // Inject the approval message at the beginning of the queue
-                if (response.mode && ['default', 'acceptEdits', 'bypassPermissions'].includes(response.mode)) {
-                    this.session.queue.unshift(PLAN_FAKE_RESTART, { permissionMode: response.mode });
-                } else {
-                    this.session.queue.unshift(PLAN_FAKE_RESTART, { permissionMode: 'default' });
-                }
+                logger.debug('Plan approved — switching mode without process restart');
+                pending.resolve({ behavior: 'allow', updatedInput: pending.input as Record<string, unknown> });
             } else {
-                // User rejected — stay in plan mode but restart Claude so the deny
-                // takes effect cleanly instead of looping.
-                logger.debug('Plan rejected - re-spawning in plan mode');
-                this.session.queue.unshift(PLAN_FAKE_RESTART, { permissionMode: 'plan' });
+                logger.debug('Plan rejected — staying in plan mode');
+                pending.resolve({ behavior: 'deny', message: response.reason || 'Plan rejected' });
             }
-            // Clear old tool calls so the next Claude process doesn't match
-            // stale exit_plan_mode entries in resolveToolCallId, which would
-            // cause isAborted to return true and loop forever.
-            this.toolCalls = [];
-            pending.resolve({ behavior: 'deny', message: PLAN_FAKE_REJECT });
         } else {
             // Handle default case for all other tools
             const result: PermissionResult = response.approved
@@ -338,12 +329,6 @@ export class PermissionHandler {
 
         // If tool not approved, it's aborted
         if (this.responses.get(toolCallId)?.approved === false) {
-            return true;
-        }
-
-        // Always abort exit_plan_mode
-        const toolCall = this.toolCalls.find(tc => tc.id === toolCallId);
-        if (toolCall && (toolCall.name === 'exit_plan_mode' || toolCall.name === 'ExitPlanMode')) {
             return true;
         }
 
