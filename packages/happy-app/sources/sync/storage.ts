@@ -247,8 +247,11 @@ function buildSessionListViewData(
             }
         }
 
-        // Sort project groups by newest createdAt in each group (stable)
+        // Sort project groups: online projects first, then fully offline, each tier by newest createdAt.
         const sortedProjects = [...byProject.entries()].sort(([, a], [, b]) => {
+            const aOnline = a.some(s => s.active);
+            const bOnline = b.some(s => s.active);
+            if (aOnline !== bOnline) return aOnline ? -1 : 1;
             const aMax = Math.max(...a.map(s => s.createdAt));
             const bMax = Math.max(...b.map(s => s.createdAt));
             return bMax - aMax;
