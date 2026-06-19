@@ -104,7 +104,6 @@ const stylesheet = StyleSheet.create((theme) => ({
     },
     sessionItemContainer: {
         marginHorizontal: 16,
-        marginBottom: 1,
         overflow: 'hidden',
     },
     sessionItemFirst: {
@@ -114,6 +113,7 @@ const stylesheet = StyleSheet.create((theme) => ({
     sessionItemLast: {
         borderBottomLeftRadius: 12,
         borderBottomRightRadius: 12,
+        marginBottom: 4,
     },
     sessionItemSingle: {
         borderRadius: 12,
@@ -125,11 +125,11 @@ const stylesheet = StyleSheet.create((theme) => ({
     sessionItemContainerLast: {
         borderBottomLeftRadius: 12,
         borderBottomRightRadius: 12,
-        marginBottom: 12,
+        marginBottom: 4,
     },
     sessionItemContainerSingle: {
         borderRadius: 12,
-        marginBottom: 12,
+        marginBottom: 4,
     },
     sessionItemSelected: {
         backgroundColor: theme.colors.surfaceSelected,
