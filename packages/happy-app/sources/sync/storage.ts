@@ -745,6 +745,24 @@ export const storage = create<StorageState>()((set, get) => {
         applyMessages: (sessionId: string, messages: NormalizedMessage[]) => {
             let changed = new Set<string>();
             let hasReadyEvent = false;
+
+            // Check if any incoming messages contain EnterPlanMode / ExitPlanMode tool calls
+            let shouldEnterPlanMode = false;
+            let shouldExitPlanMode = false;
+            for (const msg of messages) {
+                if (msg.role === 'agent') {
+                    for (const c of msg.content) {
+                        if (c.type === 'tool-call') {
+                            if (c.name === 'EnterPlanMode' || c.name === 'enter_plan_mode') {
+                                shouldEnterPlanMode = true;
+                            } else if (c.name === 'ExitPlanMode' || c.name === 'exit_plan_mode') {
+                                shouldExitPlanMode = true;
+                            }
+                        }
+                    }
+                }
+            }
+
             set((state) => {
 
                 // Resolve session messages state
@@ -793,7 +811,7 @@ export const storage = create<StorageState>()((set, get) => {
                 // IMPORTANT: We extract latestUsage from the mutable reducerState and copy it to the Session object
                 // This ensures latestUsage is available immediately on load, even before messages are fully loaded
                 let updatedSessions = state.sessions;
-                const needsUpdate = (reducerResult.todos !== undefined || reducerResult.tasks !== undefined || existingSession.reducerState.latestUsage) && session;
+                const needsUpdate = (reducerResult.todos !== undefined || reducerResult.tasks !== undefined || existingSession.reducerState.latestUsage || shouldEnterPlanMode || shouldExitPlanMode) && session;
 
                 if (needsUpdate) {
                     updatedSessions = {
@@ -805,7 +823,11 @@ export const storage = create<StorageState>()((set, get) => {
                             // Copy latestUsage from reducerState to make it immediately available
                             latestUsage: existingSession.reducerState.latestUsage ? {
                                 ...existingSession.reducerState.latestUsage
-                            } : session.latestUsage
+                            } : session.latestUsage,
+                            // Auto-switch to plan mode when EnterPlanMode tool call is detected
+                            ...(shouldEnterPlanMode && { permissionMode: 'plan' }),
+                            // Auto-exit plan mode when ExitPlanMode tool call is detected
+                            ...(shouldExitPlanMode && { permissionMode: null })
                         }
                     };
                 }
@@ -825,6 +847,18 @@ export const storage = create<StorageState>()((set, get) => {
                     }
                 };
             });
+
+            // Persist plan mode change when EnterPlanMode / ExitPlanMode is detected
+            if (shouldEnterPlanMode || shouldExitPlanMode) {
+                const allModes: Record<string, string> = {};
+                const currentState = get();
+                Object.entries(currentState.sessions).forEach(([id, sess]) => {
+                    if (sess.permissionMode && sess.permissionMode !== 'default') {
+                        allModes[id] = sess.permissionMode;
+                    }
+                });
+                saveSessionPermissionModes(allModes);
+            }
 
             return { changed: Array.from(changed), hasReadyEvent };
         },

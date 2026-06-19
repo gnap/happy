@@ -218,34 +218,41 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
 
         setIsSubmitting(true);
 
-        // HACK: Disable the form immediately by switching to the submitted view.
-        // Without this, users could edit their selections while the network calls
-        // are in flight, but those edits would be ignored since we've already
-        // captured the values above. TODO: Revisit this logic.
+        // Capture selections immediately — subsequent changes are discarded.
         setIsSubmitted(true);
 
-        // Format answers as readable text
+        // Build the answer in AskUserQuestionOutput format:
+        // { answers: { "question text": "comma-separated labels" } }
+        // This is what the SDK expects as updatedInput.
         const responseLines: string[] = [];
+        const answers: Record<string, string> = {};
         questions.forEach((q, qIndex) => {
             const selected = selections.get(qIndex);
-            if (selected && selected.size > 0) {
-                const selectedLabels = Array.from(selected)
+            const selectedLabels = (selected && selected.size > 0)
+                ? Array.from(selected)
                     .map(optIndex => q.options[optIndex]?.label)
                     .filter(Boolean)
-                    .join(', ');
-                responseLines.push(`${q.header}: ${selectedLabels}`);
-            }
+                : [];
+            const answer = selectedLabels.join(', ');
+            answers[q.question] = answer;
+            responseLines.push(`${q.header}: ${answer || '-'}`);
         });
 
-        const responseText = responseLines.join('\n');
-
         try {
-            // 1. Approve the permission (like PermissionFooter.handleApprove does)
+            // Send the answers through the permission response so the SDK
+            // receives them as the tool result.
             if (tool.permission?.id) {
-                await sessionAllow(sessionId, tool.permission.id);
+                await sessionAllow(
+                    sessionId,
+                    tool.permission.id,
+                    undefined,  // mode
+                    undefined,  // allowedTools
+                    undefined,  // decision
+                    { questions, answers } as Record<string, unknown>,
+                );
+            } else {
+                await sync.sendMessage(sessionId, responseLines.join('\n'));
             }
-            // 2. Send the answer as a message
-            await sync.sendMessage(sessionId, responseText);
         } catch (error) {
             console.error('Failed to submit answer:', error);
         } finally {

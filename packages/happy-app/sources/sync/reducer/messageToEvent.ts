@@ -44,6 +44,14 @@ export function parseMessageAsEvent(msg: NormalizedMessage): AgentEvent | null {
                 
             }
             
+            // Check for EnterPlanMode tool calls
+            if (content.type === 'tool-call' && (content.name === 'EnterPlanMode' || content.name === 'enter_plan_mode')) {
+                return {
+                    type: 'message',
+                    message: 'Entering plan mode',
+                } as AgentEvent;
+            }
+
             // Check for mcp__happy__change_title tool calls
             if (content.type === 'tool-call' && content.name === 'mcp__happy__change_title') {
                 const title = content.input?.title;
