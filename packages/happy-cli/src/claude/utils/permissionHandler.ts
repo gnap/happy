@@ -128,20 +128,6 @@ export class PermissionHandler {
         // Calculate descriptor
         const descriptor = getToolDescriptor(toolName);
 
-        // AskUserQuestion requires user interaction — never auto-approve,
-        // even in bypassPermissions mode. Must send to App for answer.
-        if (toolName === 'AskUserQuestion' || toolName === 'ask_user_question') {
-            let toolCallId = this.resolveToolCallId(toolName, input);
-            if (!toolCallId) {
-                await delay(1000);
-                toolCallId = this.resolveToolCallId(toolName, input);
-                if (!toolCallId) {
-                    throw new Error(`Could not resolve tool call ID for ${toolName}`);
-                }
-            }
-            return this.handlePermissionRequest(toolCallId, toolName, input, options.signal);
-        }
-
         //
         // Handle special cases
         //
