@@ -154,7 +154,9 @@ export class PermissionHandler {
 
         // Plan mode: auto-approve read-only tools (Read, Glob, Grep, etc.)
         // Dangerous tools (Bash, Edit, Write) still require approval.
-        if (this.permissionMode === 'plan' && !descriptor.dangerous) {
+        // AskUserQuestion is interactive — never auto-approve, the user needs to answer.
+        if (this.permissionMode === 'plan' && !descriptor.dangerous
+            && toolName !== 'AskUserQuestion' && toolName !== 'ask_user_question') {
             return { behavior: 'allow', updatedInput: input as Record<string, unknown> };
         }
 
