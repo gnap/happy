@@ -91,35 +91,14 @@ export class PermissionHandler {
         // Update permission mode
         if (response.mode) {
             this.permissionMode = response.mode;
-        } else if (pending.toolName === 'exit_plan_mode' || pending.toolName === 'ExitPlanMode') {
-            // User approved ExitPlanMode without specifying a mode —
-            // restore the mode from before plan was entered.
-            this.permissionMode = this.previousMode || 'default';
-            this.previousMode = null;
         }
 
-        // Handle
-        if (pending.toolName === 'exit_plan_mode' || pending.toolName === 'ExitPlanMode') {
-            // ExitPlanMode is a native Claude SDK tool. Let the SDK handle the
-            // transition naturally — no need to kill/restart the process. The
-            // PermissionHandler's canCallTool callback already uses this.permissionMode
-            // for all subsequent tool calls, so updating it above is sufficient.
-            logger.debug('Plan mode result received', response);
-            if (response.approved) {
-                logger.debug('Plan approved — switching mode without process restart');
-                pending.resolve({ behavior: 'allow', updatedInput: pending.input as Record<string, unknown> });
-            } else {
-                logger.debug('Plan rejected — staying in plan mode');
-                pending.resolve({ behavior: 'deny', message: response.reason || 'Plan rejected' });
-            }
-        } else {
-            // Handle default case for all other tools
-            const result: PermissionResult = response.approved
-                ? { behavior: 'allow', updatedInput: (pending.input as Record<string, unknown>) || {} }
-                : { behavior: 'deny', message: response.reason || `The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.` };
+        // Handle default case for all other tools
+        const result: PermissionResult = response.approved
+            ? { behavior: 'allow', updatedInput: (pending.input as Record<string, unknown>) || {} }
+            : { behavior: 'deny', message: response.reason || `The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.` };
 
-            pending.resolve(result);
-        }
+        pending.resolve(result);
     }
 
     /**
@@ -161,10 +140,20 @@ export class PermissionHandler {
             return { behavior: 'allow', updatedInput: input as Record<string, unknown> };
         }
 
+        // ExitPlanMode: auto-exit plan mode without user approval.
+        // The plan itself doesn't need confirmation — what needs approval are
+        // the dangerous tools (Bash, Edit, Write) executed during planning.
+        // The plan proposal still renders as a tool card (ExitPlanToolView).
+        if (this.permissionMode === 'plan' && descriptor.exitPlan) {
+            this.permissionMode = this.previousMode || 'default';
+            this.previousMode = null;
+            logger.debug(`Plan mode exited — restoring mode to ${this.permissionMode}`);
+            return { behavior: 'allow', updatedInput: input as Record<string, unknown> };
+        }
+
         // Plan mode: auto-approve read-only tools (Read, Glob, Grep, etc.)
         // Dangerous tools (Bash, Edit, Write) still require approval.
-        // ExitPlanMode must always go through user approval — never auto-approve.
-        if (this.permissionMode === 'plan' && !descriptor.dangerous && !descriptor.exitPlan) {
+        if (this.permissionMode === 'plan' && !descriptor.dangerous) {
             return { behavior: 'allow', updatedInput: input as Record<string, unknown> };
         }
 
