@@ -951,10 +951,39 @@ export const storage = create<StorageState>()((set, get) => {
         }),
         applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState, oldestSeq: number, hasOlderMessages: boolean, lastSeq: number) => set((state) => {
             const messagesMap: Record<string, Message> = {};
+            // Self-heal: dedup messages with identical content (same kind + fingerprint)
+            // that may have been persisted with different internal IDs by a race.
+            const seenHashes = new Set<string>();
+            let deduped = 0;
             for (const msg of messages) {
                 messagesMap[msg.id] = msg;
+                // Build a content fingerprint: kind + key fields. Tool-call
+                // messages include tool name + input to distinguish different
+                // calls with the same tool.
+                const fingerprintParts: string[] = [msg.kind];
+                if (msg.kind === 'user-text') {
+                    fingerprintParts.push(msg.text);
+                } else if (msg.kind === 'agent-text') {
+                    fingerprintParts.push(msg.text);
+                } else if (msg.kind === 'tool-call') {
+                    fingerprintParts.push(msg.tool?.name ?? '?');
+                    fingerprintParts.push(JSON.stringify(msg.tool?.input ?? {}));
+                } else if (msg.kind === 'agent-event') {
+                    fingerprintParts.push(JSON.stringify(msg.event));
+                }
+                fingerprintParts.push(String(msg.createdAt));
+                const fp = fingerprintParts.join('|');
+                if (seenHashes.has(fp)) {
+                    delete messagesMap[msg.id];
+                    deduped++;
+                } else {
+                    seenHashes.add(fp);
+                }
             }
-            const sorted = [...messages].sort((a, b) => b.createdAt - a.createdAt);
+            if (deduped > 0) {
+                console.warn(`[CACHE-DEDUP] applyHydratedCache: removed ${deduped} duplicate messages for session ${sessionId.slice(-8)}`);
+            }
+            const sorted = Object.values(messagesMap).sort((a, b) => b.createdAt - a.createdAt);
             const totalSeq = state.sessions[sessionId]?.seq ?? 0;
             const cachedBitmap = computeBitmap(oldestSeq, lastSeq, totalSeq);
 

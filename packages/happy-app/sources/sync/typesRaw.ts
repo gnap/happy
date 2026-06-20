@@ -640,6 +640,8 @@ export type NormalizedMessage = ({
     id: string,
     localId: string | null,
     createdAt: number,
+    /** Server-assigned seq — unique per message. Used for cache dedup. */
+    seq?: number,
     isSidechain: boolean,
     meta?: MessageMeta,
     usage?: UsageData,

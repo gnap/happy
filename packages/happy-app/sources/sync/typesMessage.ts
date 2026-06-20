@@ -42,6 +42,8 @@ export type UserTextMessage = {
     id: string;
     localId: string | null;
     createdAt: number;
+    /** Server-assigned seq — unique per message. Used for cache dedup. */
+    seq?: number;
     text: string;
     displayText?: string; // Optional text to display in UI instead of actual text
     files?: MessageFile[]; // Image/file attachments
@@ -52,6 +54,8 @@ export type ModeSwitchMessage = {
     kind: 'agent-event';
     id: string;
     createdAt: number;
+    /** Server-assigned seq — unique per message. Used for cache dedup. */
+    seq?: number;
     event: AgentEvent;
     meta?: MessageMeta;
 }
@@ -61,6 +65,8 @@ export type AgentTextMessage = {
     id: string;
     localId: string | null;
     createdAt: number;
+    /** Server-assigned seq — unique per message. Used for cache dedup. */
+    seq?: number;
     text: string;
     isThinking?: boolean;
     meta?: MessageMeta;
@@ -71,6 +77,8 @@ export type ToolCallMessage = {
     id: string;
     localId: string | null;
     createdAt: number;
+    /** Server-assigned seq — unique per message. Used for cache dedup. */
+    seq?: number;
     tool: ToolCall;
     children: Message[];
     meta?: MessageMeta;

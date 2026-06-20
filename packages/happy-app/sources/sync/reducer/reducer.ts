@@ -123,6 +123,8 @@ type ReducerMessage = {
     localId?: string | null;
     createdAt: number;
     role: 'user' | 'agent';
+    /** Server-assigned seq — unique per message. Used for cache dedup. */
+    seq?: number;
     text: string | null;
     isThinking?: boolean;
     event: AgentEvent | null;
