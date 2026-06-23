@@ -223,18 +223,19 @@ function buildSessionListViewData(
     // updatedAt keeps relative ordering stable — project groups won't jump when a
     // session inside gets an update (e.g. draft, metadata sync).
     activeSessions.sort((a, b) => b.createdAt - a.createdAt);
-    // Inactive sessions sort by last activity.
+    // Inactive sessions sort by last activity so the date headers make sense.
     inactiveSessions.sort((a, b) => b.updatedAt - a.updatedAt);
 
-    // Helper: emit project-grouped sessions with host sub-groups.
-    // Returns standard (no projectPath) sessions for separate handling.
-    const emitProjectGrouped = (group: Session[]): Session[] => {
+    // Helper: emit a date group, inserting project-group headers with host sub-groups.
+    const emitSessionGroup = (group: Session[]) => {
         const byProject = new Map<string, Session[]>();
         const standard: Session[] = [];
 
         for (const s of group) {
             let pp = s.metadata?.projectPath;
             if (pp) {
+                // Normalize path: replace home dir with ~ so same projects
+                // on different machines group together.
                 const hd = s.metadata?.homeDir;
                 if (hd && pp.startsWith(hd)) {
                     pp = '~' + pp.slice(hd.length);
@@ -247,7 +248,12 @@ function buildSessionListViewData(
             }
         }
 
-        // Sort project groups: online projects first, then fully offline, each tier by newest createdAt.
+        // Standard sessions sort by last activity for the date headers.
+        standard.sort((a, b) => b.updatedAt - a.updatedAt);
+        for (const s of standard) {
+            listData.push({ type: 'session', session: s });
+        }
+        // Sort project groups by newest createdAt in each group (stable)
         const sortedProjects = [...byProject.entries()].sort(([, a], [, b]) => {
             const aOnline = a.some(s => s.active);
             const bOnline = b.some(s => s.active);
@@ -257,6 +263,7 @@ function buildSessionListViewData(
             return bMax - aMax;
         });
         for (const [projectPath, sessions] of sortedProjects) {
+            // Sub-group by host within this project
             const byHost = new Map<string, Session[]>();
             for (const s of sessions) {
                 const host = s.metadata?.host ?? '';
@@ -268,17 +275,15 @@ function buildSessionListViewData(
             const branch = sessions.find(s => !!s.metadata?.branchName)?.metadata?.branchName
                         ?? sessions.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
             listData.push({ type: 'worktree-group', projectPath, homeDir, branch });
+            // Emit host sub-groups (sorted by newest session in each host)
             const sortedHosts = [...byHost.entries()].sort(([, a], [, b]) => {
-                const aOnline = a.some(s => s.active);
-                const bOnline = b.some(s => s.active);
-                if (aOnline !== bOnline) return aOnline ? -1 : 1;
                 const aMax = Math.max(...a.map(s => s.createdAt));
                 const bMax = Math.max(...b.map(s => s.createdAt));
                 return bMax - aMax;
             });
             for (const [host, hostSessions] of sortedHosts) {
+                // Main repo first, then worktrees
                 hostSessions.sort((a, b) => {
-                    if (a.active !== b.active) return a.active ? -1 : 1;
                     const aWt = a.metadata?.isWorktree ?? true;
                     const bWt = b.metadata?.isWorktree ?? true;
                     if (aWt !== bWt) return aWt ? 1 : -1;
@@ -291,20 +296,32 @@ function buildSessionListViewData(
                 }
             }
         }
-        return standard;
     };
 
-    // Emit host-grouped ungrouped sessions under a worktree-group header.
-    const emitUngroupedHostGroups = (sessions: Session[], worktreeLabel?: string) => {
-        if (sessions.length === 0) return;
-        const byHost = new Map<string, Session[]>();
+    // Build unified list view data
+    const listData: SessionListViewItem[] = [];
+
+    // Emit active sessions grouped by projectPath. Main repo first, then worktrees.
+    // Sessions without projectPath stay in the active-sessions carousel.
+    const emitProjectGroups = (sessions: Session[], toList: SessionListViewItem[]) => {
+        const byProject = new Map<string, Session[]>();
+        const noProject: Session[] = [];
         for (const s of sessions) {
-            const host = s.metadata?.host ?? '';
-            const arr = byHost.get(host) || [];
-            arr.push(s);
-            byHost.set(host, arr);
+            let pp = s.metadata?.projectPath;
+            if (pp) {
+                const hd = s.metadata?.homeDir;
+                if (hd && pp.startsWith(hd)) {
+                    pp = '~' + pp.slice(hd.length);
+                }
+                const arr = byProject.get(pp) || [];
+                arr.push(s);
+                byProject.set(pp, arr);
+            } else {
+                noProject.push(s);
+            }
         }
-        const sortedHosts = [...byHost.entries()].sort(([, a], [, b]) => {
+        // Sort project groups by newest createdAt in each group (stable)
+        const sortedProjects = [...byProject.entries()].sort(([, a], [, b]) => {
             const aOnline = a.some(s => s.active);
             const bOnline = b.some(s => s.active);
             if (aOnline !== bOnline) return aOnline ? -1 : 1;
@@ -312,33 +329,104 @@ function buildSessionListViewData(
             const bMax = Math.max(...b.map(s => s.createdAt));
             return bMax - aMax;
         });
-        const homeDir = sessions[0]?.metadata?.homeDir;
-        listData.push({ type: 'worktree-group', projectPath: '', homeDir, branch: worktreeLabel });
-        for (const [host, hostSessions] of sortedHosts) {
-            hostSessions.sort((a, b) => {
-                if (a.active !== b.active) return a.active ? -1 : 1;
-                return b.createdAt - a.createdAt;
+        for (const [projectPath, projectSessions] of sortedProjects) {
+            const homeDir = projectSessions[0]?.metadata?.homeDir;
+            const branch = projectSessions.find(s => !!s.metadata?.branchName)?.metadata?.branchName
+                        ?? projectSessions.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
+            toList.push({ type: 'worktree-group', projectPath, homeDir, branch });
+            // Sub-group by host
+            const byHost = new Map<string, Session[]>();
+            for (const s of projectSessions) {
+                const host = s.metadata?.host ?? '';
+                const arr = byHost.get(host) || [];
+                arr.push(s);
+                byHost.set(host, arr);
+            }
+            const sortedHosts = [...byHost.entries()].sort(([, a], [, b]) => {
+                const aMax = Math.max(...a.map(s => s.createdAt));
+                const bMax = Math.max(...b.map(s => s.createdAt));
+                return bMax - aMax;
             });
-            const onlineCount = hostSessions.filter(s => s.active).length;
-            listData.push({ type: 'host-group', projectPath: '', host, onlineCount, totalCount: hostSessions.length });
-            for (const s of hostSessions) {
-                listData.push({ type: 'session', session: s });
+            for (const [host, hostSessions] of sortedHosts) {
+                hostSessions.sort((a, b) => {
+                    const aWt = a.metadata?.isWorktree ?? true;
+                    const bWt = b.metadata?.isWorktree ?? true;
+                    if (aWt !== bWt) return aWt ? 1 : -1;
+                    return b.createdAt - a.createdAt;
+                });
+                const onlineCount = hostSessions.filter(s => s.active).length;
+                toList.push({ type: 'host-group', host, onlineCount, totalCount: hostSessions.length });
+                for (const s of hostSessions) {
+                    toList.push({ type: 'session', session: s });
+                }
             }
         }
+        return noProject;
     };
+    const activeNoProject = emitProjectGroups(activeSessions, listData);
+    if (activeNoProject.length > 0) {
+        listData.push({ type: 'active-sessions', sessions: activeNoProject });
+    }
 
-    // Build unified list view data
-    const listData: SessionListViewItem[] = [];
+    // Group inactive sessions by date
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
 
-    // Merge active + inactive session arrays so each project path appears once
-    // with all sessions together (active first, then inactive).
-    const allSessions = [...activeSessions, ...inactiveSessions];
-    const allUngrouped: Session[] = emitProjectGrouped(allSessions);
+    let currentDateGroup: Session[] = [];
+    let currentDateString: string | null = null;
 
-    // Emit all ungrouped sessions (active + inactive) into a single "Other"
-    // worktree-group, host-sub-grouped with online sessions first.
-    if (allUngrouped.length > 0) {
-        emitUngroupedHostGroups(allUngrouped, 'Other');
+    for (const session of inactiveSessions) {
+        const sessionDate = new Date(session.updatedAt);
+        const dateString = sessionDate.toDateString();
+
+        if (currentDateString !== dateString) {
+            // Process previous group
+            if (currentDateGroup.length > 0 && currentDateString) {
+                const groupDate = new Date(currentDateString);
+                const sessionDateOnly = new Date(groupDate.getFullYear(), groupDate.getMonth(), groupDate.getDate());
+
+                let headerTitle: string;
+                if (sessionDateOnly.getTime() === today.getTime()) {
+                    headerTitle = 'Today';
+                } else if (sessionDateOnly.getTime() === yesterday.getTime()) {
+                    headerTitle = 'Yesterday';
+                } else {
+                    const diffTime = today.getTime() - sessionDateOnly.getTime();
+                    const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+                    headerTitle = `${diffDays} days ago`;
+                }
+
+                listData.push({ type: 'header', title: headerTitle });
+                emitSessionGroup(currentDateGroup);
+            }
+
+            // Start new group
+            currentDateString = dateString;
+            currentDateGroup = [session];
+        } else {
+            currentDateGroup.push(session);
+        }
+    }
+
+    // Process final group
+    if (currentDateGroup.length > 0 && currentDateString) {
+        const groupDate = new Date(currentDateString);
+        const sessionDateOnly = new Date(groupDate.getFullYear(), groupDate.getMonth(), groupDate.getDate());
+
+        let headerTitle: string;
+        if (sessionDateOnly.getTime() === today.getTime()) {
+            headerTitle = 'Today';
+        } else if (sessionDateOnly.getTime() === yesterday.getTime()) {
+            headerTitle = 'Yesterday';
+        } else {
+            const diffTime = today.getTime() - sessionDateOnly.getTime();
+            const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+            headerTitle = `${diffDays} days ago`;
+        }
+
+        listData.push({ type: 'header', title: headerTitle });
+        emitSessionGroup(currentDateGroup);
     }
 
     return listData;

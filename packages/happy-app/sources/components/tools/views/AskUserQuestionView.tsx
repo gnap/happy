@@ -167,7 +167,33 @@ const styles = StyleSheet.create((theme) => ({
 
 export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId }) => {
     const { theme } = useUnistyles();
-    const [selections, setSelections] = React.useState<Map<number, Set<number>>>(new Map());
+    const [selections, setSelections] = React.useState<Map<number, Set<number>>>(() => {
+        // Restore selections from persisted tool.result when reloading from cache.
+        // The SDK's AskUserQuestionOutput contains { answers: { question: "label" } }.
+        if (tool.state === 'completed') {
+            const result = tool.result as Record<string, unknown> | undefined;
+            const answers = result?.answers as Record<string, string> | undefined;
+            const input = tool.input as AskUserQuestionInput | undefined;
+            const questions = input?.questions;
+            if (answers && questions) {
+                const map = new Map<number, Set<number>>();
+                questions.forEach((q, qIndex) => {
+                    const answer = answers[q.question];
+                    if (answer) {
+                        const labels = answer.split(', ').map(s => s.trim());
+                        const indices = new Set<number>();
+                        labels.forEach(label => {
+                            const optIdx = q.options.findIndex(o => o.label === label);
+                            if (optIdx >= 0) indices.add(optIdx);
+                        });
+                        if (indices.size > 0) map.set(qIndex, indices);
+                    }
+                });
+                return map;
+            }
+        }
+        return new Map();
+    });
     const [isSubmitting, setIsSubmitting] = React.useState(false);
     const [isSubmitted, setIsSubmitted] = React.useState(false);
 
@@ -218,34 +244,41 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
 
         setIsSubmitting(true);
 
-        // HACK: Disable the form immediately by switching to the submitted view.
-        // Without this, users could edit their selections while the network calls
-        // are in flight, but those edits would be ignored since we've already
-        // captured the values above. TODO: Revisit this logic.
+        // Capture selections immediately — subsequent changes are discarded.
         setIsSubmitted(true);
 
-        // Format answers as readable text
+        // Build the answer in AskUserQuestionOutput format:
+        // { answers: { "question text": "comma-separated labels" } }
+        // This is what the SDK expects as updatedInput.
         const responseLines: string[] = [];
+        const answers: Record<string, string> = {};
         questions.forEach((q, qIndex) => {
             const selected = selections.get(qIndex);
-            if (selected && selected.size > 0) {
-                const selectedLabels = Array.from(selected)
+            const selectedLabels = (selected && selected.size > 0)
+                ? Array.from(selected)
                     .map(optIndex => q.options[optIndex]?.label)
                     .filter(Boolean)
-                    .join(', ');
-                responseLines.push(`${q.header}: ${selectedLabels}`);
-            }
+                : [];
+            const answer = selectedLabels.join(', ');
+            answers[q.question] = answer;
+            responseLines.push(`${q.header}: ${answer || '-'}`);
         });
 
-        const responseText = responseLines.join('\n');
-
         try {
-            // 1. Approve the permission (like PermissionFooter.handleApprove does)
+            // Send the answers through the permission response so the SDK
+            // receives them as the tool result.
             if (tool.permission?.id) {
-                await sessionAllow(sessionId, tool.permission.id);
+                await sessionAllow(
+                    sessionId,
+                    tool.permission.id,
+                    undefined,  // mode
+                    undefined,  // allowedTools
+                    undefined,  // decision
+                    { questions, answers } as Record<string, unknown>,
+                );
+            } else {
+                await sync.sendMessage(sessionId, responseLines.join('\n'));
             }
-            // 2. Send the answer as a message
-            await sync.sendMessage(sessionId, responseText);
         } catch (error) {
             console.error('Failed to submit answer:', error);
         } finally {

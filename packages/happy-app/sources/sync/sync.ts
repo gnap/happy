@@ -2555,10 +2555,13 @@ class Sync {
 
                 const decryptedMessages = await encryption.decryptMessages(messages);
                 const normalizedMessages: NormalizedMessage[] = [];
-                for (const decrypted of decryptedMessages) {
+                for (let i = 0; i < decryptedMessages.length; i++) {
+                    const decrypted = decryptedMessages[i];
                     if (!decrypted) continue;
                     let normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
                     if (!normalized) continue;
+                    // Carry the server-assigned seq for cache dedup.
+                    normalized = { ...normalized, seq: messages[i]?.seq };
                     // Session envelopes carry their own server-assigned localId (different from
                     // the original user message localId), so resolve by text for ALL user messages.
                     if (normalized.role === 'user') {
