@@ -167,7 +167,33 @@ const styles = StyleSheet.create((theme) => ({
 
 export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId }) => {
     const { theme } = useUnistyles();
-    const [selections, setSelections] = React.useState<Map<number, Set<number>>>(new Map());
+    const [selections, setSelections] = React.useState<Map<number, Set<number>>>(() => {
+        // Restore selections from persisted tool.result when reloading from cache.
+        // The SDK's AskUserQuestionOutput contains { answers: { question: "label" } }.
+        if (tool.state === 'completed') {
+            const result = tool.result as Record<string, unknown> | undefined;
+            const answers = result?.answers as Record<string, string> | undefined;
+            const input = tool.input as AskUserQuestionInput | undefined;
+            const questions = input?.questions;
+            if (answers && questions) {
+                const map = new Map<number, Set<number>>();
+                questions.forEach((q, qIndex) => {
+                    const answer = answers[q.question];
+                    if (answer) {
+                        const labels = answer.split(', ').map(s => s.trim());
+                        const indices = new Set<number>();
+                        labels.forEach(label => {
+                            const optIdx = q.options.findIndex(o => o.label === label);
+                            if (optIdx >= 0) indices.add(optIdx);
+                        });
+                        if (indices.size > 0) map.set(qIndex, indices);
+                    }
+                });
+                return map;
+            }
+        }
+        return new Map();
+    });
     const [isSubmitting, setIsSubmitting] = React.useState(false);
     const [isSubmitted, setIsSubmitted] = React.useState(false);
 
