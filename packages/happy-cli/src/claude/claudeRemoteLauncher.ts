@@ -518,7 +518,18 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             wasInboxTurn = false;
                             if ((modeHash && msg.hash !== modeHash) || msg.isolate) {
                                 logger.info(`[remote] nextMessage returning null (mode changed): modeHash=${modeHash?.slice(0,8)} msgHash=${msg.hash?.slice(0,8)} isolate=${msg.isolate}`);
-                                pending = { message: msg.message, mode: msg.mode, meta: msg.meta };
+                                pending = { message: msg.message, mode: msg.mode, meta: msg.meta, hash: msg.hash };
+                                return null;
+                            }
+                            // When a permission request is pending (e.g. AskUserQuestion),
+                            // the SDK is blocked on canCallTool.  The input loop pushes
+                            // messages into the SDK's input stream, but the SDK won't
+                            // consume them until canCallTool resolves.  If the turn fails,
+                            // those messages are permanently lost.  Defer to the next turn
+                            // so they are safely re-processed via the pending path above.
+                            if (permissionHandler.hasPendingRequests()) {
+                                logger.debug('[remote] nextMessage deferring message (permission request pending)');
+                                pending = { message: msg.message, mode: msg.mode, meta: msg.meta, hash: msg.hash };
                                 return null;
                             }
                             if (session.claudeTurnActiveRef) {

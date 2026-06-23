@@ -440,6 +440,16 @@ export class PermissionHandler {
     }
 
     /**
+     * Returns true when there are unresolved permission requests.
+     * The SDK is blocked on canCallTool while any request is pending,
+     * so the input loop should not dequeue user messages during this time —
+     * they would be pushed to the SDK's input stream but never consumed.
+     */
+    hasPendingRequests(): boolean {
+        return this.pendingRequests.size > 0;
+    }
+
+    /**
      * Gets the responses map (for compatibility with existing code)
      */
     getResponses(): Map<string, PermissionResponse> {
