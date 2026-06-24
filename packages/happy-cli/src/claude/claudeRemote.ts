@@ -3,8 +3,8 @@ import { query, type QueryOptions, type SDKMessage, type SDKSystemMessage, Abort
 import type { Options as SdkOptions, CanUseTool } from '@anthropic-ai/claude-agent-sdk';
 import { mapToClaudeMode } from "./utils/permissionMode";
 import { claudeCheckSession } from "./utils/claudeCheckSession";
-import { join, resolve } from 'node:path';
-import { projectPath } from "@/projectPath";
+import { join } from 'node:path';
+import { execSync } from 'node:child_process';
 import { parseSpecialCommand } from "@/parsers/specialCommands";
 import { logger } from "@/lib";
 import { PushableAsyncIterable } from "@/utils/PushableAsyncIterable";
@@ -15,6 +15,40 @@ import { systemPrompt } from "./utils/systemPrompt";
 import { PermissionResult } from "./sdk/types";
 import type { JsRuntime } from "./runClaude";
 import { normalizeClaudeModelForSdk } from "./utils/model";
+
+/** Find the system Claude binary for use with the Agent SDK. */
+function resolveClaudeBinaryPath(): string {
+    // 1. Explicit override
+    if (process.env.HAPPY_CLAUDE_PATH) {
+        logger.debug('[claudeRemote] Using HAPPY_CLAUDE_PATH:', process.env.HAPPY_CLAUDE_PATH);
+        return process.env.HAPPY_CLAUDE_PATH;
+    }
+    // 2. Find via PATH
+    try {
+        const fromPath = execSync('which claude', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+        if (fromPath) {
+            logger.debug('[claudeRemote] Found claude via PATH:', fromPath);
+            return fromPath;
+        }
+    } catch { /* not in PATH */ }
+    // 3. Common fallback locations
+    const fallbacks = [
+        '/home/linuxbrew/.linuxbrew/bin/claude',
+        '/opt/homebrew/bin/claude',
+        '/usr/local/bin/claude',
+        `${process.env.HOME}/.local/bin/claude`,
+    ];
+    for (const p of fallbacks) {
+        try {
+            execSync(`"${p}" --version`, { stdio: ['pipe', 'pipe', 'pipe'] });
+            logger.debug('[claudeRemote] Found claude at fallback:', p);
+            return p;
+        } catch { /* not there */ }
+    }
+    // 4. Last resort: hope 'claude' is on PATH
+    logger.debug('[claudeRemote] No claude binary found, falling back to "claude"');
+    return 'claude';
+}
 
 export async function claudeRemote(opts: {
 
@@ -189,7 +223,7 @@ export async function claudeRemote(opts: {
         canUseTool: ((toolName: string, input: Record<string, unknown>, o: { signal: AbortSignal }) =>
             opts.canCallTool(toolName, input, mode, o)) as CanUseTool,
         executable: (opts.jsRuntime ?? 'node') as SdkOptions['executable'],
-        pathToClaudeCodeExecutable: '/home/linuxbrew/.linuxbrew/bin/claude',
+        pathToClaudeCodeExecutable: resolveClaudeBinaryPath(),
         abortController,
         extraArgs: opts.hookSettingsPath ? { settings: opts.hookSettingsPath } : undefined,
         env: { ...process.env },
