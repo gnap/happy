@@ -189,6 +189,7 @@ export async function claudeRemote(opts: {
         canUseTool: ((toolName: string, input: Record<string, unknown>, o: { signal: AbortSignal }) =>
             opts.canCallTool(toolName, input, mode, o)) as CanUseTool,
         executable: (opts.jsRuntime ?? 'node') as SdkOptions['executable'],
+        pathToClaudeCodeExecutable: '/home/linuxbrew/.linuxbrew/bin/claude',
         abortController,
         extraArgs: opts.hookSettingsPath ? { settings: opts.hookSettingsPath } : undefined,
         env: { ...process.env },
