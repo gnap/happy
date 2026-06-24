@@ -10,7 +10,7 @@ import { SDKAssistantMessage, SDKMessage, SDKUserMessage } from "./sdk";
 import { formatClaudeMessageForInk } from "@/ui/messageFormatterInk";
 import { logger } from "@/ui/logger";
 import { SDKToLogConverter } from "./utils/sdkToLogConverter";
-import { PLAN_FAKE_REJECT } from "./sdk/prompts";
+import { PLAN_FAKE_REJECT } from "./constants";
 import { EnhancedMode } from "./loop";
 import { RawJSONLines } from "@/claude/types";
 import { OutgoingMessageQueue } from "./utils/OutgoingMessageQueue";

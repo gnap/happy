@@ -1,5 +1,6 @@
 import { EnhancedMode } from "./loop";
 import { query, type QueryOptions, type SDKMessage, type SDKSystemMessage, AbortError, SDKUserMessage, type SDKResultMessage } from '@/claude/sdk'
+import type { Options as SdkOptions, CanUseTool } from '@anthropic-ai/claude-agent-sdk';
 import { mapToClaudeMode } from "./utils/permissionMode";
 import { claudeCheckSession } from "./utils/claudeCheckSession";
 import { join, resolve } from 'node:path';
@@ -153,30 +154,46 @@ export async function claudeRemote(opts: {
         }
     }
 
-    // Prepare SDK options
+    // Prepare SDK options — build against @anthropic-ai/claude-agent-sdk Options type.
     let mode = initial.mode;
     const model = normalizeClaudeModelForSdk(initial.mode.model);
     const fallbackModel = normalizeClaudeModelForSdk(initial.mode.fallbackModel);
-    const sdkOptions: QueryOptions = {
+
+    // Build system prompt: customPrompt → use it + our additions, otherwise our additions as plain string.
+    const effectiveSystemPrompt = initial.mode.customSystemPrompt
+        ? initial.mode.customSystemPrompt + '\n\n' + systemPrompt
+        : initial.mode.appendSystemPrompt
+            ? initial.mode.appendSystemPrompt + '\n\n' + systemPrompt
+            : systemPrompt;
+
+    // Build abort controller from the caller's signal.
+    const abortController = new AbortController();
+    if (opts.signal) {
+        if (opts.signal.aborted) abortController.abort();
+        else opts.signal.addEventListener('abort', () => abortController.abort(), { once: true });
+    }
+
+    const sdkOptions: SdkOptions = {
         cwd: opts.path,
         resume: startFrom ?? undefined,
-        mcpServers: opts.mcpServers,
+        mcpServers: opts.mcpServers as SdkOptions['mcpServers'],
         permissionMode: mapToClaudeMode(initial.mode.permissionMode),
         model,
         fallbackModel,
         effort: initial.mode.effort,
-        customSystemPrompt: initial.mode.customSystemPrompt ? initial.mode.customSystemPrompt + '\n\n' + systemPrompt : undefined,
-        appendSystemPrompt: initial.mode.appendSystemPrompt ? initial.mode.appendSystemPrompt + '\n\n' + systemPrompt : systemPrompt,
-        allowedTools: initial.mode.allowedTools ? initial.mode.allowedTools.concat(opts.allowedTools) : opts.allowedTools,
+        systemPrompt: effectiveSystemPrompt,
+        allowedTools: initial.mode.allowedTools
+            ? initial.mode.allowedTools.concat(opts.allowedTools)
+            : opts.allowedTools,
         disallowedTools: initial.mode.disallowedTools,
-        canCallTool: (toolName: string, input: unknown, options: { signal: AbortSignal }) => opts.canCallTool(toolName, input, mode, options),
-        executable: opts.jsRuntime ?? 'node',
-        abort: opts.signal,
-        pathToClaudeCodeExecutable: (() => {
-            return resolve(join(projectPath(), 'scripts', 'claude_remote_launcher.cjs'));
-        })(),
-        settingsPath: opts.hookSettingsPath,
-    }
+        canUseTool: ((toolName: string, input: Record<string, unknown>, o: { signal: AbortSignal }) =>
+            opts.canCallTool(toolName, input, mode, o)) as CanUseTool,
+        executable: (opts.jsRuntime ?? 'node') as SdkOptions['executable'],
+        pathToClaudeCodeExecutable: resolve(join(projectPath(), 'scripts', 'claude_remote_launcher.cjs')),
+        abortController,
+        extraArgs: opts.hookSettingsPath ? { settings: opts.hookSettingsPath } : undefined,
+        env: { ...process.env },
+    };
 
     // Track thinking state
     let thinking = false;
@@ -206,9 +223,11 @@ export async function claudeRemote(opts: {
         },
     });
 
-    // Start the SDK query
+    // Start the SDK query.
+    // Cast through any because our permissive SDKUserMessage type differs from the
+    // SDK's strict ContentBlockParam[] type. At runtime the formats are compatible.
     const response = query({
-        prompt: messages,
+        prompt: messages as any,
         options: sdkOptions,
     });
 
@@ -309,7 +328,7 @@ export async function claudeRemote(opts: {
                     // Interstitial: feed result back to Claude, continue draining
                     if (isTaskNotification && !hasTerminalReason) {
                         logger.debug('[claudeRemote] Task-notification (interstitial) — feeding result back to Claude');
-                        const taskResult = (message as SDKResultMessage).result || '';
+                        const taskResult = (message as unknown as SDKResultMessage).result || '';
                         updateThinking(true);
                         if (!messages.done) {
                             messages.push({
@@ -324,7 +343,7 @@ export async function claudeRemote(opts: {
                     // Notify App but leave the input loop alone.
                     if (isTaskNotification && hasTerminalReason) {
                         logger.debug('[claudeRemote] Task-notification (terminal) — reporting, not touching input loop');
-                        opts.onReady(message as SDKResultMessage);
+                        opts.onReady(message as unknown as SDKResultMessage);
                         continue;
                     }
 
@@ -335,7 +354,7 @@ export async function claudeRemote(opts: {
                         opts.onCompletionEvent?.('Compaction completed');
                         isCompactCommand = false;
                     }
-                    opts.onReady(message as SDKResultMessage);
+                    opts.onReady(message as unknown as SDKResultMessage);
 
                     // Opportunistically continue in-process with a pending inbox turn.
                     // Mirrors the interstitial task-notification path: push the inbox

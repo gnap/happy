@@ -1,10 +1,11 @@
 /**
- * Claude Code SDK integration for Happy CLI
- * Provides clean TypeScript implementation without Bun support
+ * Re-exports @anthropic-ai/claude-agent-sdk's query() + our own type definitions.
+ * Previously this directory contained a spawn-based query() wrapper (~1,100 lines),
+ * now replaced by the official Agent SDK.
  */
+export { query, AbortError } from '@anthropic-ai/claude-agent-sdk';
 
-export { query } from './query'
-export { AbortError } from './types'
+// Keep our own type definitions for backward compatibility.
 export type {
     QueryOptions,
     QueryPrompt,
@@ -18,5 +19,5 @@ export type {
     InterruptRequest,
     SDKControlRequest,
     CanCallToolCallback,
-    PermissionResult
-} from './types'
+    PermissionResult,
+} from './types';
