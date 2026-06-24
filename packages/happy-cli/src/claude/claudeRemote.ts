@@ -214,6 +214,14 @@ export async function claudeRemote(opts: {
 
     updateThinking(true);
 
+    // When the caller aborts (user clicked stop), send an interrupt to Claude Code
+    // so it stops the current turn immediately rather than finishing the tool call.
+    if (opts.signal) {
+        opts.signal.addEventListener('abort', () => {
+            response.interrupt().catch(() => { /* ignore if process already exited */ });
+        }, { once: true });
+    }
+
     const stopSignal = new Future<void>();
 
     // Input Loop: continuously reads user messages from the queue
