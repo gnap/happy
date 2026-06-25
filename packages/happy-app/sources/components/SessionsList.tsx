@@ -439,6 +439,7 @@ export function SessionsList() {
                         isFirst={isFirst}
                         isLast={isLast}
                         isSingle={isSingle}
+                        needsRestart={item.needsRestart}
                     />
                 );
         }
@@ -476,12 +477,13 @@ export function SessionsList() {
 }
 
 // Sub-component that handles session message logic
-const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }: {
+const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle, needsRestart }: {
     session: Session;
     selected?: boolean;
     isFirst?: boolean;
     isLast?: boolean;
     isSingle?: boolean;
+    needsRestart?: boolean;
 }) => {
     const styles = stylesheet;
     const sessionStatus = useSessionStatus(session);
@@ -564,7 +566,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
                     ]} numberOfLines={1}>
                         {sessionName}
                     </Text>
-                    <SessionRowStatusIndicators session={session} />
+                    <SessionRowStatusIndicators session={session} needsRestart={needsRestart} />
                     {isFetching && (
                         <ActivityIndicator size="small" style={styles.fetchingIndicator} />
                     )}

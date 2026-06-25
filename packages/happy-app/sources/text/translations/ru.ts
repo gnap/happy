@@ -306,6 +306,11 @@ export const ru: TranslationStructure = {
         killSessionConfirm: 'Вы уверены, что хотите завершить эту сессию?',
         archiveSession: 'Архивировать сессию',
         archiveSessionConfirm: 'Вы уверены, что хотите архивировать эту сессию?',
+        restartSession: 'Перезапустить сессию',
+        restartSessionSubtitle: 'Доступна новая версия CLI. Перезапустите для обновления.',
+        restartSessionConfirm: 'Сессия будет перезапущена с новой версией CLI.',
+        noMachineId: 'ID машины недоступен для этой сессии',
+        failedToRestartSession: 'Не удалось перезапустить сессию',
         happySessionIdCopied: 'ID сессии Happy скопирован в буфер обмена',
         failedToCopySessionId: 'Не удалось скопировать ID сессии Happy',
         happySessionId: 'ID сессии Happy',
@@ -407,6 +412,7 @@ export const ru: TranslationStructure = {
 
     session: {
         inputPlaceholder: 'Введите сообщение...',
+        encrypting: 'установка соединения…',
     },
 
     commandPalette: {

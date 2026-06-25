@@ -25,7 +25,7 @@ const stylesheet = StyleSheet.create((theme) => ({
     },
 }));
 
-export const SessionRowStatusIndicators = React.memo(({ session }: { session: Session }) => {
+export const SessionRowStatusIndicators = React.memo(({ session, needsRestart }: { session: Session; needsRestart?: boolean }) => {
     const styles = stylesheet;
     const a2aUnread = getSessionA2AUnreadCount(session);
 
@@ -38,7 +38,7 @@ export const SessionRowStatusIndicators = React.memo(({ session }: { session: Se
         }
     }
 
-    if (a2aUnread === 0 && !todoLabel) {
+    if (a2aUnread === 0 && !todoLabel && !needsRestart) {
         return null;
     }
 
@@ -63,6 +63,9 @@ export const SessionRowStatusIndicators = React.memo(({ session }: { session: Se
                     <Ionicons name="mail-unread-outline" size={10} color={styles.badgeText.color} />
                     <Text style={styles.badgeText}>{a2aUnread}</Text>
                 </View>
+            ) : null}
+            {needsRestart ? (
+                <Ionicons name="sync-circle-outline" size={16} color="#FF9500" />
             ) : null}
         </View>
     );

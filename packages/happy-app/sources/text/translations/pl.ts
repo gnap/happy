@@ -315,6 +315,7 @@ export const pl: TranslationStructure = {
 
     session: {
         inputPlaceholder: 'Wpisz wiadomość...',
+        encrypting: 'nawiązywanie połączenia…',
     },
 
     commandPalette: {
@@ -345,6 +346,11 @@ export const pl: TranslationStructure = {
         killSessionConfirm: 'Czy na pewno chcesz zakończyć tę sesję?',
         archiveSession: 'Zarchiwizuj sesję',
         archiveSessionConfirm: 'Czy na pewno chcesz zarchiwizować tę sesję?',
+        restartSession: 'Uruchom ponownie sesję',
+        restartSessionSubtitle: 'Dostępna jest nowsza wersja CLI. Uruchom ponownie, aby zaktualizować.',
+        restartSessionConfirm: 'Sesja zostanie uruchomiona ponownie z nowszą wersją CLI.',
+        noMachineId: 'ID maszyny niedostępne dla tej sesji',
+        failedToRestartSession: 'Nie udało się uruchomić ponownie sesji',
         happySessionIdCopied: 'ID sesji Happy skopiowane do schowka',
         failedToCopySessionId: 'Nie udało się skopiować ID sesji Happy',
         happySessionId: 'ID sesji Happy',

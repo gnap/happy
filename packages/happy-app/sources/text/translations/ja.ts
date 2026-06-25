@@ -339,6 +339,7 @@ export const ja: TranslationStructure = {
 
     session: {
         inputPlaceholder: 'メッセージを入力...',
+        encrypting: '接続を確立中…',
     },
 
     commandPalette: {
@@ -369,6 +370,11 @@ export const ja: TranslationStructure = {
         killSessionConfirm: 'このセッションを終了してもよろしいですか？',
         archiveSession: 'セッションをアーカイブ',
         archiveSessionConfirm: 'このセッションをアーカイブしてもよろしいですか？',
+        restartSession: 'セッションを再起動',
+        restartSessionSubtitle: '新しいCLIバージョンが利用可能です。再起動してアップグレードしてください。',
+        restartSessionConfirm: 'セッションは新しいCLIバージョンで再起動されます。',
+        noMachineId: 'このセッションではマシンIDが利用できません',
+        failedToRestartSession: 'セッションの再起動に失敗しました',
         happySessionIdCopied: 'Happy Session IDがクリップボードにコピーされました',
         failedToCopySessionId: 'Happy Session IDのコピーに失敗しました',
         happySessionId: 'Happy Session ID',
