@@ -46,7 +46,7 @@ function isRunningUnderSystemdService(): boolean {
 export const initialMachineMetadata: MachineMetadata = {
   host: os.hostname(),
   platform: os.platform(),
-  happyCliVersion: packageJson.version,
+  happyCliVersion: configuration.currentCliVersion,
   homeDir: os.homedir(),
   happyHomeDir: configuration.happyHomeDir,
   happyLibDir: projectPath()
@@ -1318,6 +1318,7 @@ export async function startDaemon(): Promise<void> {
       spawnSession,
       stopSession,
       archiveSession,
+      restartSession,
       requestShutdown: () => requestShutdown('happy-app')
     });
 

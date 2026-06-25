@@ -109,6 +109,7 @@ type MachineRpcHandlers = {
     spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
     stopSession: (sessionId: string) => boolean;
     archiveSession: (sessionId: string) => boolean;
+    restartSession: (sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
     requestShutdown: () => void;
 }
 
@@ -137,6 +138,7 @@ export class ApiMachineClient {
         spawnSession,
         stopSession,
         archiveSession,
+        restartSession,
         requestShutdown
     }: MachineRpcHandlers) {
         // Register spawn session handler
@@ -196,6 +198,17 @@ export class ApiMachineClient {
             const archived = archiveSession(sessionId);
             logger.debug(`[API MACHINE] killSession: ${sessionId} — stopped=${archived}`);
             return { success: true, message: archived ? 'Session archived' : 'Session stopped' };
+        });
+
+        // Register restart session handler
+        this.rpcHandlerManager.registerHandler('restartSession', async (params: any) => {
+            const { sessionId } = params || {};
+            if (!sessionId) {
+                throw new Error('Session ID is required');
+            }
+            const result = await restartSession(sessionId);
+            logger.debug(`[API MACHINE] restartSession: ${sessionId} — success=${result.success}`);
+            return result;
         });
 
         // Register stop daemon handler
