@@ -49,6 +49,25 @@ export function isVersionSupported(version: string | undefined, minimumVersion: 
 }
 
 /**
+ * Compare two version strings for exact equality (including pre-release/commit hash).
+ * Use this to detect when a session was spanwed by a different CLI build than the
+ * currently-running daemon — even if the semver parts match.
+ */
+export function versionsExactMatch(a?: string, b?: string): boolean {
+    if (!a || !b) return false;
+    return a === b;
+}
+
+/**
+ * Check whether a session should be restarted to pick up the newer CLI version
+ * running on its machine.  Returns true when both versions are known and differ.
+ */
+export function isSessionRestartRecommended(sessionVersion?: string, machineVersion?: string): boolean {
+    if (!sessionVersion || !machineVersion) return false;
+    return sessionVersion !== machineVersion;
+}
+
+/**
  * Parse version string to extract major, minor, and patch numbers
  * @param version Version string to parse
  * @returns Object with major, minor, and patch numbers, or null if invalid

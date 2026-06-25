@@ -477,6 +477,33 @@ export async function sessionRipgrep(
 /**
  * Kill the session process immediately via daemon RPC.
  */
+// Types for session restart
+interface SessionRestartResponse {
+    success: boolean;
+    newSessionId?: string;
+    error?: string;
+}
+
+/**
+ * Restart a session via daemon RPC, reconnecting to the same server session
+ * with the newer CLI version.  Returns the new session ID on success.
+ */
+export async function sessionRestart(sessionId: string, machineId: string): Promise<SessionRestartResponse> {
+    try {
+        const response = await apiSocket.machineRPC<SessionRestartResponse, { sessionId: string }>(
+            machineId,
+            'restartSession',
+            { sessionId }
+        );
+        return response;
+    } catch (error) {
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error'
+        };
+    }
+}
+
 export async function sessionKill(sessionId: string, machineId: string): Promise<SessionKillResponse> {
     try {
         const response = await apiSocket.machineRPC<SessionKillResponse, { sessionId: string }>(

@@ -7,16 +7,16 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Avatar } from '@/components/Avatar';
-import { useSession, useIsDataReady, useSessionMessages } from '@/sync/storage';
+import { useSession, useIsDataReady, useSessionMessages, useMachine } from '@/sync/storage';
 import { sync } from '@/sync/sync';
 import { getSessionName, useSessionStatus, formatOSPlatform, formatPathRelativeToHome, getSessionAvatarId } from '@/utils/sessionUtils';
 import * as Clipboard from 'expo-clipboard';
 import { Modal } from '@/modal';
-import { sessionKill, sessionDelete } from '@/sync/ops';
+import { sessionKill, sessionDelete, sessionRestart } from '@/sync/ops';
 import { useUnistyles } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
 import { t } from '@/text';
-import { isVersionSupported, MINIMUM_CLI_VERSION } from '@/utils/versionUtils';
+import { isVersionSupported, MINIMUM_CLI_VERSION, isSessionRestartRecommended } from '@/utils/versionUtils';
 import { CodeView } from '@/components/CodeView';
 import { Session } from '@/sync/storageTypes';
 import { useHappyAction } from '@/hooks/useHappyAction';
@@ -215,6 +215,43 @@ function SessionInfoContent({ session }: { session: Session }) {
         );
     }, [performArchive]);
 
+    // Check if the session was spanwed by an older CLI than the machine currently runs.
+    const machine = useMachine(session.metadata?.machineId ?? '');
+    const sessionNeedsRestart = isSessionRestartRecommended(
+        session.metadata?.version,
+        machine?.metadata?.happyCliVersion,
+    );
+
+    // Use HappyAction for restart — it handles errors automatically
+    const [restartingSession, performRestart] = useHappyAction(async () => {
+        if (!session.metadata?.machineId) {
+            throw new HappyError(t('sessionInfo.noMachineId'), false);
+        }
+        const result = await sessionRestart(session.id, session.metadata.machineId);
+        if (!result.success) {
+            throw new HappyError(result.error || t('sessionInfo.failedToRestartSession'), false);
+        }
+        // Navigate to the new session
+        if (result.newSessionId) {
+            router.replace(`/(app)/session/${result.newSessionId}`);
+        }
+    });
+
+    const handleRestartSession = useCallback(() => {
+        Modal.alert(
+            t('sessionInfo.restartSession'),
+            t('sessionInfo.restartSessionConfirm'),
+            [
+                { text: t('common.cancel'), style: 'cancel' },
+                {
+                    text: t('sessionInfo.restartSession'),
+                    style: 'destructive',
+                    onPress: performRestart
+                }
+            ]
+        );
+    }, [performRestart]);
+
     // Use HappyAction for deletion - it handles errors automatically
     const [deletingSession, performDelete] = useHappyAction(async () => {
         const result = await sessionDelete(session.id);
@@ -399,6 +436,14 @@ function SessionInfoContent({ session }: { session: Session }) {
                             subtitle={t('sessionInfo.viewMachineSubtitle')}
                             icon={<Ionicons name="server-outline" size={29} color="#007AFF" />}
                             onPress={() => router.push(`/machine/${session.metadata?.machineId}`)}
+                        />
+                    )}
+                    {sessionStatus.isConnected && sessionNeedsRestart && (
+                        <Item
+                            title={t('sessionInfo.restartSession')}
+                            subtitle={t('sessionInfo.restartSessionSubtitle')}
+                            icon={<Ionicons name="sync-circle-outline" size={29} color="#FF9500" />}
+                            onPress={handleRestartSession}
                         />
                     )}
                     {sessionStatus.isConnected && (
