@@ -757,6 +757,17 @@ export const storage = create<StorageState>()((set, get) => {
                         }
                     }
 
+                    // If the agent state cleared all requests (turn end / mode switch),
+                    // cancel any stale pending-permission messages that are no longer tracked.
+                    const activeRequestIds = new Set(Object.keys(newSession.agentState?.requests ?? {}));
+                    if (activeRequestIds.size === 0) {
+                        for (const msg of Object.values(existingSessionMessages.messagesMap)) {
+                            if (msg.kind === 'tool-call' && msg.tool?.permission?.status === 'pending') {
+                                msg.tool.permission.status = 'canceled';
+                            }
+                        }
+                    }
+
                     // Process new AgentState through reducer
                     const reducerResult = reducer(existingSessionMessages.reducerState, [], newSession.agentState);
                     const processedMessages = reducerResult.messages;
