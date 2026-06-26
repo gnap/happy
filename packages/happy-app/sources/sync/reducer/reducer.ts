@@ -533,11 +533,16 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             hasChanged = true;
                         }
 
-                        // Update tool state based on permission status
+                        // Update tool state based on permission status.
+                        // Approval means the tool is done from the App's
+                        // perspective — the CLI received permission to proceed.
+                        // For tools like AskUserQuestion the permission IS the
+                        // answer; for Bash/Edit the tool-call-end will update
+                        // the state again anyway.
                         if (completed.status === 'approved') {
-                            if (message.tool.state !== 'completed' && message.tool.state !== 'error' && message.tool.state !== 'running') {
-                                message.tool.state = 'running';
-                                hasChanged = true;
+                            if (message.tool.state !== 'completed' && message.tool.state !== 'error') {
+                                message.tool.state = 'completed';
+                                message.tool.completedAt = completed.completedAt || Date.now();
                             }
                         } else {
                             // denied or canceled
