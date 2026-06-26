@@ -533,7 +533,16 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
 
                         // Update tool state based on permission status
                         if (completed.status === 'approved') {
-                            if (message.tool.state !== 'completed' && message.tool.state !== 'error' && message.tool.state !== 'running') {
+                            // AskUserQuestion is done once the user answers — mark completed immediately.
+                            // Other tools (shell, file edits, etc.) still need to execute after approval
+                            // so they stay in 'running' until the SDK sends their result.
+                            if (completed.tool === 'AskUserQuestion') {
+                                if (message.tool.state !== 'completed' && message.tool.state !== 'error') {
+                                    message.tool.state = 'completed';
+                                    message.tool.completedAt = completed.completedAt || Date.now();
+                                    hasChanged = true;
+                                }
+                            } else if (message.tool.state !== 'completed' && message.tool.state !== 'error' && message.tool.state !== 'running') {
                                 message.tool.state = 'running';
                                 hasChanged = true;
                             }
