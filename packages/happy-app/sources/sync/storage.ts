@@ -769,9 +769,11 @@ export const storage = create<StorageState>()((set, get) => {
                     }
 
                     // If the agent state cleared all requests (turn end / mode switch),
-                    // cancel any stale pending-permission messages that are no longer tracked.
-                    const activeRequestIds = new Set(Object.keys(newSession.agentState?.requests ?? {}));
-                    if (activeRequestIds.size === 0) {
+                    // cancel any stale pending-permission messages. Only trigger on a
+                    // real transition: previously had requests → now empty.
+                    const oldRequestCnt = Object.keys(oldSession?.agentState?.requests ?? {}).length;
+                    const newRequestCnt = Object.keys(newSession.agentState?.requests ?? {}).length;
+                    if (oldRequestCnt > 0 && newRequestCnt === 0) {
                         for (const msg of Object.values(existingSessionMessages.messagesMap)) {
                             if (msg.kind === 'tool-call' && msg.tool?.permission?.status === 'pending') {
                                 msg.tool.permission.status = 'canceled';
