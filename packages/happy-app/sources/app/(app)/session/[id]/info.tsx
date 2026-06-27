@@ -438,7 +438,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                             onPress={() => router.push(`/machine/${session.metadata?.machineId}`)}
                         />
                     )}
-                    {sessionStatus.isConnected && sessionNeedsRestart && (
+                    {sessionStatus.isConnected && (
                         <Item
                             title={t('sessionInfo.restartSession')}
                             subtitle={t('sessionInfo.restartSessionSubtitle')}
