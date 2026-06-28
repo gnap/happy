@@ -462,6 +462,9 @@ export async function startDaemon(): Promise<void> {
       if (s?.happySessionId && s.sessionTag) lastSessionTagBySessionId[s.happySessionId] = s.sessionTag;
       if (s?.happySessionId && s.directory) lastDirectoryBySessionId[s.happySessionId] = s.directory;
       if (s?.happySessionId && s.agent) lastAgentBySessionId[s.happySessionId] = s.agent;
+      // Persist immediately so session maps survive unclean daemon kills (SIGKILL, OOM, etc.)
+      // Each session reports itself every 60s, so this is at most once-per-minute per session.
+      persistNow();
     };
 
     // Spawn a new session (sessionId reserved for future --resume functionality)
