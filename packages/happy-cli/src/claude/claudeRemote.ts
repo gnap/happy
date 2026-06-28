@@ -229,6 +229,7 @@ export async function claudeRemote(opts: {
         abortController,
         extraArgs: opts.hookSettingsPath ? { settings: opts.hookSettingsPath } : undefined,
         env: { ...process.env },
+        includeHookEvents: true,
         // Stop hook: collect pending crons so the launcher can schedule wakeups
         // and keep the session alive across turns.
         hooks: {
