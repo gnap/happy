@@ -648,6 +648,27 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         logger.debug(`[remote]: context via control_request: ${usage.totalTokens} / ${usage.maxTokens} (${Math.round((usage.totalTokens / usage.maxTokens) * 100)}%)`);
                     },
                     onContextOutput: undefined,
+                    onSessionCrons: (crons) => {
+                        // Update session's cron list from Stop hook.
+                        if (!session.pendingCrons) {
+                            session.pendingCrons = new Map();
+                        }
+                        for (const c of crons) {
+                            // Parse cron expression to estimate next fire time.
+                            // One-shot crons use a single fire time; recurring use cron pattern.
+                            const nextFire = c.recurring
+                                ? Date.now() + 60_000  // Approximate: assume ~1min for recurring
+                                : Date.now() + 60_000; // One-shot: fire within ~1min
+                            session.pendingCrons.set(c.id, {
+                                id: c.id,
+                                schedule: c.schedule,
+                                recurring: c.recurring,
+                                prompt: c.prompt,
+                                nextFireAt: nextFire,
+                            });
+                        }
+                        logger.debug(`[remote] stored ${crons.length} crons from Stop hook`);
+                    },
                     onBeforeStop: () => { turnStopping = true; },
                     tryConsumeInboxTurn: () => {
                         const inboxHooks = session.a2aInboxTurn;
@@ -728,6 +749,52 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                 });
                 modeHash = null;
                 mode = null;
+
+                // --- Cron wakeup: inject pending cron prompts into the queue ---
+                if (!exitReason && session.pendingCrons && session.pendingCrons.size > 0) {
+                    const now = Date.now();
+                    type CronEntry = { id: string; schedule: string; recurring: boolean; prompt: string; nextFireAt: number };
+                    let soonest: CronEntry | null = null;
+
+                    for (const [, c] of session.pendingCrons) {
+                        if (!soonest || c.nextFireAt < soonest.nextFireAt) {
+                            soonest = c;
+                        }
+                    }
+
+                    if (soonest && soonest.nextFireAt <= now + 5_000) {
+                        // Cron is due — inject its prompt as a user message with
+                        // auto-continuation metadata so the App knows it's a wakeup.
+                        session.pendingCrons.delete(soonest.id);
+                        logger.debug(`[remote] injecting cron wakeup: ${soonest.id} "${soonest.prompt.slice(0, 80)}"`);
+                        session.queue.push(soonest.prompt,
+                            (mode ?? { permissionMode: 'default', model: null as string | null, fallbackModel: null as string | null }) as EnhancedMode,
+                            { origin: 'auto-continuation', cronId: soonest.id });
+                        // Re-register recurring crons.
+                        if (soonest.recurring) {
+                            session.pendingCrons.set(soonest.id, {
+                                id: soonest.id,
+                                schedule: soonest.schedule,
+                                recurring: soonest.recurring,
+                                prompt: soonest.prompt,
+                                nextFireAt: now + 60_000, // approximate next cycle
+                            });
+                        }
+                    } else if (soonest) {
+                        // Next cron is further out — wait for it with a timer.
+                        const delay = soonest.nextFireAt - now;
+                        logger.debug(`[remote] waiting ${Math.round(delay / 1000)}s for next cron ${soonest.id}`);
+                        await new Promise<void>(resolve => {
+                            const timer = setTimeout(() => {
+                                resolve();
+                            }, Math.min(delay, 30_000)); // Check at most every 30s
+                            controller.signal?.addEventListener('abort', () => {
+                                clearTimeout(timer);
+                                resolve();
+                            }, { once: true });
+                        });
+                    }
+                }
             }
         }
     } finally {

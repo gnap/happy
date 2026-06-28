@@ -78,6 +78,8 @@ export async function claudeRemote(opts: {
     /** Called with raw markdown when the initial message is a /context local command. */
     onContextOutput?: (contextMarkdown: string) => void,
     isAborted: (toolCallId: string) => boolean,
+    /** Called with session_crons from the Stop hook so the launcher can schedule wakeups. */
+    onSessionCrons?: (crons: Array<{ id: string; schedule: string; recurring: boolean; prompt: string }>) => void,
     /** Called immediately before stopSignal is resolved on a normal result, so the
      *  launcher can mark itself as "stopping" and avoid fetching a new message from
      *  the queue that would then be discarded by the inputLoop race. */
@@ -227,6 +229,27 @@ export async function claudeRemote(opts: {
         abortController,
         extraArgs: opts.hookSettingsPath ? { settings: opts.hookSettingsPath } : undefined,
         env: { ...process.env },
+        // Stop hook: collect pending crons so the launcher can schedule wakeups
+        // and keep the session alive across turns.
+        hooks: {
+            Stop: [{
+                hooks: [async (input) => {
+                    if (input.hook_event_name !== 'Stop') return { continue: false };
+                    const crons = input.session_crons ?? [];
+                    if (crons.length > 0) {
+                        logger.debug(`[claudeRemote] Stop hook: ${crons.length} pending crons`);
+                        opts.onSessionCrons?.(crons.map((c: { id: string; schedule: string; recurring: boolean; prompt: string }) => ({
+                            id: c.id,
+                            schedule: c.schedule,
+                            recurring: c.recurring,
+                            prompt: c.prompt,
+                        })));
+                        return { continue: true };
+                    }
+                    return { continue: false };
+                }],
+            }],
+        },
     };
 
     // Track thinking state
