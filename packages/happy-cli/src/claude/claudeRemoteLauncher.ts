@@ -832,15 +832,21 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                 modeHash = null;
                 mode = null;
 
-                // --- Cron wakeup: read persisted crons and inject due prompts ---
+                // --- Cron wakeup: merge file-based + message-intercepted crons ---
                 if (!exitReason) {
-                    const crons = readScheduledTasks(session.path);
-                    if (crons.length > 0) {
+                    // Path 1: durable recurring crons from .claude/scheduled_tasks.json
+                    const fileCrons = readScheduledTasks(session.path);
+                    // Path 2: non-durable or one-shot crons intercepted from SDK stream
+                    const interceptedCrons = session.pendingCrons
+                        ? Array.from(session.pendingCrons.values())
+                        : [];
+                    const allCrons = [...fileCrons, ...interceptedCrons];
+                    if (allCrons.length > 0) {
                         const now = Date.now();
-                        for (const c of crons) {
+                        for (const c of allCrons) {
                             c.nextFireAt = nextCronFire(c.schedule, now);
                         }
-                        const soonest = crons.reduce((a, b) => a.nextFireAt < b.nextFireAt ? a : b);
+                        const soonest = allCrons.reduce((a, b) => a.nextFireAt < b.nextFireAt ? a : b);
                         if (soonest.nextFireAt <= now) {
                             // Cron is due — inject its prompt as a new turn.
                             removeScheduledTask(session.path, soonest.id, soonest.recurring);
