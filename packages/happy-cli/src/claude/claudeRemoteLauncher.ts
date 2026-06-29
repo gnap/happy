@@ -1,6 +1,8 @@
 import { render } from "ink";
 import { Session } from "./session";
 import { MessageBuffer } from "@/ui/ink/messageBuffer";
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 /** Parse a 5-field cron expression and return the next fire time (ms). */
 function nextCronFire(expr: string, from: number): number {
@@ -36,6 +38,33 @@ function nextCronFire(expr: string, from: number): number {
         return d.getTime();
     }
     return from + 3600_000; // fallback: 1h
+}
+
+/** Read .claude/scheduled_tasks.json from the session's project directory. */
+function readScheduledTasks(cwd: string): Array<{ id: string; schedule: string; recurring: boolean; prompt: string; nextFireAt: number }> {
+    try {
+        const file = join(cwd, '.claude', 'scheduled_tasks.json');
+        if (!existsSync(file)) return [];
+        const json = JSON.parse(readFileSync(file, 'utf8'));
+        return (json.tasks ?? []).map((t: any) => ({
+            id: t.id,
+            schedule: t.cron,
+            recurring: t.recurring ?? false,
+            prompt: t.prompt,
+            nextFireAt: 0,
+        }));
+    } catch { return []; }
+}
+
+/** Remove a fired cron task from .claude/scheduled_tasks.json. */
+function removeScheduledTask(cwd: string, id: string, recurring: boolean) {
+    try {
+        const file = join(cwd, '.claude', 'scheduled_tasks.json');
+        if (!existsSync(file)) return;
+        const json = JSON.parse(readFileSync(file, 'utf8'));
+        json.tasks = (json.tasks ?? []).filter((t: any) => t.id !== id || recurring);
+        writeFileSync(file, JSON.stringify(json, null, 2));
+    } catch { /* best effort */ }
 }
 
 function fieldMatch(pattern: string, value: number, _min: number, _max: number): boolean {
@@ -803,54 +832,31 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                 modeHash = null;
                 mode = null;
 
-                // --- Cron wakeup: inject pending cron prompts into the queue ---
-                if (!exitReason && session.pendingCrons && session.pendingCrons.size > 0) {
-                    const now = Date.now();
-                    type CronEntry = { id: string; schedule: string; recurring: boolean; prompt: string; nextFireAt: number };
-
-                    // Recalculate nextFireAt from actual cron expressions.
-                    for (const [, c] of session.pendingCrons) {
-                        c.nextFireAt = nextCronFire(c.schedule, now);
-                    }
-
-                    let soonest: CronEntry | null = null;
-                    for (const [, c] of session.pendingCrons) {
-                        if (!soonest || c.nextFireAt < soonest.nextFireAt) {
-                            soonest = c;
+                // --- Cron wakeup: read persisted crons and inject due prompts ---
+                if (!exitReason) {
+                    const crons = readScheduledTasks(session.path);
+                    if (crons.length > 0) {
+                        const now = Date.now();
+                        for (const c of crons) {
+                            c.nextFireAt = nextCronFire(c.schedule, now);
                         }
-                    }
-
-                    if (soonest && soonest.nextFireAt <= now + 5_000) {
-                        // Cron is due — inject its prompt as a user message with
-                        // auto-continuation metadata so the App knows it's a wakeup.
-                        session.pendingCrons.delete(soonest.id);
-                        logger.debug(`[remote] injecting cron wakeup: ${soonest.id} "${soonest.prompt.slice(0, 80)}"`);
-                        session.queue.push(soonest.prompt,
-                            (mode ?? { permissionMode: 'default', model: null as string | null, fallbackModel: null as string | null }) as EnhancedMode,
-                            { origin: 'auto-continuation', cronId: soonest.id });
-                        // Re-register recurring crons.
-                        if (soonest.recurring) {
-                            session.pendingCrons.set(soonest.id, {
-                                id: soonest.id,
-                                schedule: soonest.schedule,
-                                recurring: soonest.recurring,
-                                prompt: soonest.prompt,
-                                nextFireAt: now + 60_000, // approximate next cycle
+                        const soonest = crons.reduce((a, b) => a.nextFireAt < b.nextFireAt ? a : b);
+                        if (soonest.nextFireAt <= now) {
+                            // Cron is due — inject its prompt as a new turn.
+                            removeScheduledTask(session.path, soonest.id, soonest.recurring);
+                            logger.debug(`[remote] injecting cron wakeup: ${soonest.id} "${soonest.prompt.slice(0, 80)}"`);
+                            session.queue.push(soonest.prompt,
+                                (mode ?? { permissionMode: 'default', model: null as string | null, fallbackModel: null as string | null }) as EnhancedMode,
+                                { origin: 'auto-continuation', cronId: soonest.id });
+                        } else {
+                            // Wait for next cron.
+                            const delay = Math.min(soonest.nextFireAt - now, 30_000);
+                            logger.debug(`[remote] waiting ${Math.round(delay / 1000)}s for next cron ${soonest.id}`);
+                            await new Promise<void>(resolve => {
+                                const timer = setTimeout(resolve, delay);
+                                controller.signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
                             });
                         }
-                    } else if (soonest) {
-                        // Next cron is further out — wait for it with a timer.
-                        const delay = soonest.nextFireAt - now;
-                        logger.debug(`[remote] waiting ${Math.round(delay / 1000)}s for next cron ${soonest.id}`);
-                        await new Promise<void>(resolve => {
-                            const timer = setTimeout(() => {
-                                resolve();
-                            }, Math.min(delay, 30_000)); // Check at most every 30s
-                            controller.signal?.addEventListener('abort', () => {
-                                clearTimeout(timer);
-                                resolve();
-                            }, { once: true });
-                        });
                     }
                 }
             }
