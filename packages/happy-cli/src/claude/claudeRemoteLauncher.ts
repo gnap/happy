@@ -1,6 +1,54 @@
 import { render } from "ink";
 import { Session } from "./session";
 import { MessageBuffer } from "@/ui/ink/messageBuffer";
+
+/** Parse a 5-field cron expression and return the next fire time (ms). */
+function nextCronFire(expr: string, from: number): number {
+    const parts = expr.trim().split(/\s+/);
+    if (parts.length !== 5) return from + 60_000; // fallback: 1min
+    const [min, hour, dom, month, dow] = parts;
+
+    const now = new Date(from);
+    const candidates: Date[] = [];
+
+    // For one-shot (explicit fields like "52 22 28 6 0"):
+    if (/^\d+$/.test(min) && /^\d+$/.test(hour) && /^\d+$/.test(dom) && /^\d+$/.test(month)) {
+        const d = new Date(now.getFullYear(), parseInt(month) - 1, parseInt(dom), parseInt(hour), parseInt(min), 0);
+        if (d.getTime() <= from) return from + 60_000; // already past
+        return d.getTime();
+    }
+
+    // For patterns like "*/N" or "*": generate next few candidates.
+    for (let off = 0; off < 60; off++) {
+        const d = new Date(from + off * 60_000);
+        const m = d.getMinutes();
+        const h = d.getHours();
+        const D = d.getDate();
+        const M = d.getMonth() + 1;
+        const w = d.getDay();
+
+        if (!fieldMatch(min, m, 0, 59)) continue;
+        if (!fieldMatch(hour, h, 0, 23)) continue;
+        if (!fieldMatch(dom, D, 1, 31)) continue;
+        if (!fieldMatch(month, M, 1, 12)) continue;
+        if (!fieldMatch(dow, w, 0, 6)) continue;
+
+        return d.getTime();
+    }
+    return from + 3600_000; // fallback: 1h
+}
+
+function fieldMatch(pattern: string, value: number, _min: number, _max: number): boolean {
+    if (pattern === '*') return true;
+    const stepMatch = pattern.match(/^\*\/(\d+)$/);
+    if (stepMatch) return value % parseInt(stepMatch[1]) === 0;
+    if (/^\d+$/.test(pattern)) return parseInt(pattern) === value;
+    // comma-separated values
+    for (const p of pattern.split(',')) {
+        if (parseInt(p.trim()) === value) return true;
+    }
+    return false;
+}
 import { RemoteModeDisplay } from "@/ui/ink/RemoteModeDisplay";
 import React from "react";
 import { claudeRemote } from "./claudeRemote";
@@ -649,22 +697,16 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     },
                     onContextOutput: undefined,
                     onSessionCrons: (crons) => {
-                        // Update session's cron list from Stop hook.
                         if (!session.pendingCrons) {
                             session.pendingCrons = new Map();
                         }
                         for (const c of crons) {
-                            // Parse cron expression to estimate next fire time.
-                            // One-shot crons use a single fire time; recurring use cron pattern.
-                            const nextFire = c.recurring
-                                ? Date.now() + 60_000  // Approximate: assume ~1min for recurring
-                                : Date.now() + 60_000; // One-shot: fire within ~1min
                             session.pendingCrons.set(c.id, {
                                 id: c.id,
                                 schedule: c.schedule,
                                 recurring: c.recurring,
                                 prompt: c.prompt,
-                                nextFireAt: nextFire,
+                                nextFireAt: 0, // computed by nextCronFire on each loop iteration
                             });
                         }
                         logger.debug(`[remote] stored ${crons.length} crons from Stop hook`);
@@ -754,8 +796,13 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                 if (!exitReason && session.pendingCrons && session.pendingCrons.size > 0) {
                     const now = Date.now();
                     type CronEntry = { id: string; schedule: string; recurring: boolean; prompt: string; nextFireAt: number };
-                    let soonest: CronEntry | null = null;
 
+                    // Recalculate nextFireAt from actual cron expressions.
+                    for (const [, c] of session.pendingCrons) {
+                        c.nextFireAt = nextCronFire(c.schedule, now);
+                    }
+
+                    let soonest: CronEntry | null = null;
                     for (const [, c] of session.pendingCrons) {
                         if (!soonest || c.nextFireAt < soonest.nextFireAt) {
                             soonest = c;
