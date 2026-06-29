@@ -14,7 +14,7 @@ function nextCronFire(expr: string, from: number): number {
     // For one-shot (explicit fields like "52 22 28 6 0"):
     if (/^\d+$/.test(min) && /^\d+$/.test(hour) && /^\d+$/.test(dom) && /^\d+$/.test(month)) {
         const d = new Date(now.getFullYear(), parseInt(month) - 1, parseInt(dom), parseInt(hour), parseInt(min), 0);
-        if (d.getTime() <= from) return from + 60_000; // already past
+        if (d.getTime() <= from) return from; // already past — fire immediately
         return d.getTime();
     }
 
