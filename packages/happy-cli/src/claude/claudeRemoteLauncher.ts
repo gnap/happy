@@ -696,6 +696,17 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         logger.debug(`[remote]: context via control_request: ${usage.totalTokens} / ${usage.maxTokens} (${Math.round((usage.totalTokens / usage.maxTokens) * 100)}%)`);
                     },
                     onContextOutput: undefined,
+                    onCronCreated: (cron) => {
+                        if (!session.pendingCrons) session.pendingCrons = new Map();
+                        session.pendingCrons.set(cron.id, {
+                            id: cron.id,
+                            schedule: cron.schedule,
+                            recurring: cron.recurring,
+                            prompt: cron.prompt,
+                            nextFireAt: 0,
+                        });
+                        logger.debug(`[remote] CronCreate captured: ${cron.id} "${cron.prompt.slice(0, 60)}"`);
+                    },
                     onSessionCrons: (crons) => {
                         if (!session.pendingCrons) {
                             session.pendingCrons = new Map();

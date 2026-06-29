@@ -78,6 +78,8 @@ export async function claudeRemote(opts: {
     /** Called with raw markdown when the initial message is a /context local command. */
     onContextOutput?: (contextMarkdown: string) => void,
     isAborted: (toolCallId: string) => boolean,
+    /** Called when a CronCreate tool completes, with the parsed cron entry. */
+    onCronCreated?: (cron: { id: string; schedule: string; recurring: boolean; prompt: string }) => void,
     /** Called with session_crons from the Stop hook so the launcher can schedule wakeups. */
     onSessionCrons?: (crons: Array<{ id: string; schedule: string; recurring: boolean; prompt: string }>) => void,
     /** Called immediately before stopSignal is resolved on a normal result, so the
@@ -327,6 +329,9 @@ export async function claudeRemote(opts: {
         messages.end();
     }
 
+    // Track CronCreate tool calls to build complete cron entries when results arrive.
+    const cronCreateInputs = new Map<string, { schedule: string; recurring: boolean; prompt: string }>();
+
     // Output Loop: processes all SDK response messages.
     // Task-notifications are reported (onReady) but never trigger
     // input-side actions. Normal results call onReady and continue;
@@ -335,6 +340,47 @@ export async function claudeRemote(opts: {
         try {
             for await (const message of response) {
                 logger.debugLargeJson(`[claudeRemote] Message ${message.type}`, message);
+
+                // Intercept CronCreate tool calls to capture cron metadata for wakeup timers.
+                if (message.type === 'assistant') {
+                    const content = (message as any).message?.content;
+                    if (Array.isArray(content)) {
+                        for (const block of content) {
+                            if (block.type === 'tool_use' && block.name === 'CronCreate') {
+                                const input = block.input as Record<string, unknown> | undefined;
+                                if (input?.prompt && input?.cron) {
+                                    // Track this cron so we can match the result (which has the id).
+                                    cronCreateInputs.set(block.id, {
+                                        schedule: String(input.cron),
+                                        recurring: Boolean(input.recurring),
+                                        prompt: String(input.prompt),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                // Match CronCreate results to their inputs to build complete cron entries.
+                if (message.type === 'user') {
+                    const content = (message as any).message?.content;
+                    if (Array.isArray(content)) {
+                        for (const block of content) {
+                            if (block.type === 'tool_result' && block.tool_use_id && cronCreateInputs.has(block.tool_use_id)) {
+                                const result = block.content as Record<string, unknown> | undefined;
+                                if (result?.id) {
+                                    const input = cronCreateInputs.get(block.tool_use_id)!;
+                                    cronCreateInputs.delete(block.tool_use_id);
+                                    opts.onCronCreated?.({
+                                        id: String(result.id),
+                                        schedule: input.schedule,
+                                        recurring: input.recurring,
+                                        prompt: input.prompt,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // /context local command: intercept system/local_command and deliver
                 // markdown via onContextOutput without letting it reach the App.
