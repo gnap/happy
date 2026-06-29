@@ -122,8 +122,8 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
           console.log(`Sessions from server (${sessions.length}):`);
           for (const s of sessions) {
             const pathStr = s.path ?? '?';
-            const tagStr = s.tag ? s.tag.slice(0, 8) + '...' : '?';
-            const restartable = s.path && s.tag ? '  [restartable]' : '';
+            const tagStr = s.tag ? s.tag.slice(0, 8) + (s.tagReliable ? '...' : '...(ambiguous)') : '?';
+            const restartable = s.path && s.tag && s.tagReliable ? '  [restartable]' : '';
             console.log(`  ${s.id}  active=${s.active}  path=${pathStr}  tag=${tagStr}${restartable}`);
           }
         }
@@ -644,10 +644,16 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
             const serverSessions = await listServerSessions(credentials);
             const one = serverSessions.find((s) => s.id === sessionId);
             if (one?.path) {
+              if (!one.tagReliable || !one.tag) {
+                console.error('无法可靠确定该会话的 tag，拒绝自动重启以免接错会话。');
+                console.error('Cannot reliably determine this session’s tag (ambiguous or missing); refusing to auto-restart.');
+                console.error('请在 daemon 在线时重启该会话，让 daemon 使用其精确的内存映射。');
+                process.exit(1);
+              }
               const spawnResult = await spawnDaemonSession({
                 directory: one.path,
                 agent: (one.flavor === 'cursor' ? 'cursor' : one.flavor === 'claude' ? 'claude' : one.flavor === 'gemini' ? 'gemini' : 'cursor') as 'cursor' | 'claude' | 'gemini' | 'codex',
-                resumeSessionTag: one.tag ?? undefined
+                resumeSessionTag: one.tag
               });
               if (spawnResult.success) {
                 console.log(`Session restarted from server list (spawned in ${one.path})`);
