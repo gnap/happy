@@ -1188,6 +1188,25 @@ export const knownTools = {
     'TaskList':  { title: 'Task List',   icon: ICON_TODO,    minimal: true, noStatus: true, input: z.object({}).partial().passthrough() },
     'CronDelete':{ title: 'Delete Cron', icon: ICON_SCHEDULE, minimal: true, noStatus: true, input: z.object({ id: z.string() }).partial().passthrough() },
     'CronList': { title: 'Cron List',    icon: ICON_SCHEDULE, minimal: true, noStatus: true, input: z.object({}).partial().passthrough() },
+    'ScheduleWakeup': {
+        title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const reason = typeof opts.tool.input?.reason === 'string' ? opts.tool.input.reason : '';
+            return reason ? `Wakeup: ${reason}` : 'Scheduled Wakeup';
+        },
+        icon: ICON_SCHEDULE,
+        minimal: true,
+        noStatus: true,
+        input: z.object({
+            delaySeconds: z.number(),
+            reason: z.string(),
+            prompt: z.string(),
+        }).partial().passthrough(),
+        extractDescription: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const s = opts.tool.input?.delaySeconds;
+            if (typeof s === 'number') return `in ${s}s`;
+            return 'scheduled wakeup';
+        },
+    },
 } satisfies Record<string, {
     title?: string | ((opts: { metadata: Metadata | null, tool: ToolCall }) => string);
     icon: (size: number, color: string) => React.ReactNode;
