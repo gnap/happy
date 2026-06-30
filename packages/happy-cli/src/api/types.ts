@@ -500,4 +500,11 @@ export type AgentState = {
       allowTools?: string[]
     }
   }
+  /** Pending cron tasks — compact metadata for App display (no prompt payload). */
+  crons?: {
+    [id: string]: {
+      schedule: string
+      recurring: boolean
+    }
+  }
 }

@@ -481,6 +481,12 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 if (!session.firedCronIds) session.firedCronIds = new Set();
                                 session.firedCronIds.add(soonest.id);
                             }
+                            // Sync compact cron list to agentState after removal
+                            const remainingCrons: Record<string, { schedule: string; recurring: boolean }> = {};
+                            for (const c of session.pendingCrons?.values() ?? []) {
+                                remainingCrons[c.id] = { schedule: c.schedule, recurring: c.recurring };
+                            }
+                            session.client.updateAgentState(s => ({ ...s, crons: remainingCrons }));
                             logger.debug(`[remote] cron injecting: ${soonest.id} "${soonest.prompt.slice(0, 60)}"`);
                             session.queue.push(soonest.prompt,
                                 { permissionMode: 'default', model: null as string | null, fallbackModel: null as string | null } as EnhancedMode,
@@ -770,6 +776,14 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 nextFireAt: 0, // computed by nextCronFire on each loop iteration
                             });
                         }
+                        // Sync compact cron list to agentState so the App can show
+                        // a badge / count in the session list without downloading full prompts.
+                        const cronState: Record<string, { schedule: string; recurring: boolean }> = {};
+                        for (const c of crons) {
+                            if (session.firedCronIds?.has(c.id)) continue;
+                            cronState[c.id] = { schedule: c.schedule, recurring: c.recurring };
+                        }
+                        session.client.updateAgentState(s => ({ ...s, crons: cronState }));
                         logger.debug(`[remote] stored ${crons.length} crons from Stop hook`);
                     },
                     onBeforeStop: () => { turnStopping = true; },
