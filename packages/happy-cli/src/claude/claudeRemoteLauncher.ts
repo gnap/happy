@@ -438,6 +438,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         // actually changes (e.g., new session started or /clear command used).
         // See: https://github.com/anthropics/happy-cli/issues/143
         let previousSessionId: string | null = null;
+        let cronLoopPromise: Promise<void> | null = null;
         while (!exitReason) {
             // Before each turn, peek inbox: if there are unread messages,
             // push an isolated inbox turn to the message queue.
@@ -461,12 +462,49 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             const controller = new AbortController();
             abortController = controller;
             abortFuture = new Future<void>();
+            // Start the independent cron producer if not already running.
+            if (!cronLoopPromise) {
+                cronLoopPromise = (async () => {
+                    const sig = controller.signal;
+                    while (!sig.aborted) {
+                        const crons = session.pendingCrons
+                            ? Array.from(session.pendingCrons.values())
+                            : [];
+                        if (crons.length === 0) {
+                            await new Promise<void>(r => {
+                                const t = setTimeout(r, 5000);
+                                sig.addEventListener('abort', () => { clearTimeout(t); r(); }, { once: true });
+                            });
+                            continue;
+                        }
+                        const now = Date.now();
+                        for (const c of crons) c.nextFireAt = nextCronFire(c.schedule, now);
+                        const soonest = crons.reduce((a, b) => a.nextFireAt < b.nextFireAt ? a : b);
+                        if (soonest.nextFireAt <= now) {
+                            session.pendingCrons?.delete(soonest.id);
+                            if (!soonest.recurring) {
+                                if (!session.firedCronIds) session.firedCronIds = new Set();
+                                session.firedCronIds.add(soonest.id);
+                            }
+                            logger.debug(`[remote] cron injecting: ${soonest.id} "${soonest.prompt.slice(0, 60)}"`);
+                            session.queue.push(soonest.prompt,
+                                { permissionMode: 'default', model: null as string | null, fallbackModel: null as string | null } as EnhancedMode,
+                                { origin: 'auto-continuation', cronId: soonest.id });
+                        } else {
+                            const delay = soonest.nextFireAt - now;
+                            await new Promise<void>(r => {
+                                const t = setTimeout(r, delay);
+                                sig.addEventListener('abort', () => { clearTimeout(t); r(); }, { once: true });
+                            });
+                        }
+                    }
+                })();
+            }
             let modeHash: string | null = null;
             let mode: EnhancedMode | null = null;
             /** Set by onBeforeStop just before stopSignal resolves; prevents nextMessage
              *  from consuming another queue item that would then be lost by the inputLoop. */
             let turnStopping = false;
-            let cronDeadlineMs = 0;
             wasInboxTurn = false;
             wasCompactTurn = false;
             turnSucceeded = false;
@@ -515,23 +553,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             return p;
                         }
 
-                        // Race queue wait against cron deadline so idle sessions
-                        // wake up when a cron becomes due.
-                        let msg;
-                        if (cronDeadlineMs > 0) {
-                            const result = await Promise.race([
-                                session.queue.waitForMessagesAndGetAsString(controller.signal).then(m => ({ kind: 'msg' as const, msg: m })),
-                                new Promise<{ kind: 'timeout' }>(resolve =>
-                                    setTimeout(() => resolve({ kind: 'timeout' }), cronDeadlineMs)),
-                            ]);
-                            if (result.kind === 'timeout') {
-                                cronDeadlineMs = 0;
-                                return null; // cron wakeup — recheck in outer loop
-                            }
-                            msg = result.msg;
-                        } else {
-                            msg = await session.queue.waitForMessagesAndGetAsString(controller.signal);
-                        }
+                        const msg = await session.queue.waitForMessagesAndGetAsString(controller.signal);
 
                         // If the turn is stopping (stopSignal about to resolve), the inputLoop
                         // will discard our return value. Stash the message in pending so
@@ -823,38 +845,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                 });
                 modeHash = null;
                 mode = null;
-
-                // --- Cron wakeup: check once, inject if due. ---
-                // The nextMessage() call in claudeRemote races with cronDeadlineMs,
-                // so idle waits are interrupted when a cron becomes due.
-                if (!exitReason) {
-                    const crons = session.pendingCrons
-                        ? Array.from(session.pendingCrons.values())
-                        : [];
-                    if (crons.length > 0) {
-                        const now = Date.now();
-                        for (const c of crons) {
-                            c.nextFireAt = nextCronFire(c.schedule, now);
-                        }
-                        const soonest = crons.reduce((a, b) => a.nextFireAt < b.nextFireAt ? a : b);
-                        if (soonest.nextFireAt <= now) {
-                            session.pendingCrons?.delete(soonest.id);
-                            if (!soonest.recurring) {
-                                if (!session.firedCronIds) session.firedCronIds = new Set();
-                                session.firedCronIds.add(soonest.id);
-                            }
-                            logger.debug(`[remote] injecting cron wakeup: ${soonest.id} "${soonest.prompt.slice(0, 80)}"`);
-                            session.queue.push(soonest.prompt,
-                                (mode ?? { permissionMode: 'default', model: null as string | null, fallbackModel: null as string | null }) as EnhancedMode,
-                                { origin: 'auto-continuation', cronId: soonest.id });
-                        }
-                        // Set a deadline so claudeRemote's nextMessage() call doesn't
-                        // block past the next cron fire time.
-                        cronDeadlineMs = soonest.nextFireAt - Date.now();
-                    } else {
-                        cronDeadlineMs = 0;
-                    }
-                }
             }
         }
     } finally {
@@ -872,7 +862,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         }
         messageBuffer.clear();
 
-        // Resolve abort future
+        // Stop the cron loop and resolve abort future
+        cronLoopPromise.catch(() => {});
         if (abortFuture) { // Just in case of error
             abortFuture.resolve(undefined);
         }
