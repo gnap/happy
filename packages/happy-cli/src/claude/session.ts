@@ -39,6 +39,8 @@ export class Session {
     
     /** Pending cron entries from the last Stop hook, keyed by cron id. */
     pendingCrons?: Map<string, { id: string; schedule: string; recurring: boolean; prompt: string; nextFireAt: number }>;
+    /** Cron IDs that already fired (one-shot). Stop hook re-reports them — skip. */
+    firedCronIds?: Set<string>;
 
     /** Callbacks to be notified when session ID is found/changed */
     private sessionFoundCallbacks: ((sessionId: string) => void)[] = [];

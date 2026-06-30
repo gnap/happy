@@ -773,7 +773,13 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         if (!session.pendingCrons) {
                             session.pendingCrons = new Map();
                         }
+                        if (!session.firedCronIds) {
+                            session.firedCronIds = new Set();
+                        }
                         for (const c of crons) {
+                            // Skip one-shot crons that already fired — the Stop hook
+                            // re-reports them from Claude's in-memory state.
+                            if (session.firedCronIds.has(c.id)) continue;
                             session.pendingCrons.set(c.id, {
                                 id: c.id,
                                 schedule: c.schedule,
@@ -884,6 +890,11 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             // Cron is due — inject its prompt as a new turn.
                             removeScheduledTask(session.path, soonest.id, soonest.recurring);
                             session.pendingCrons?.delete(soonest.id);
+                            // Mark one-shot cron as fired so the Stop hook won't re-add it.
+                            if (!soonest.recurring) {
+                                if (!session.firedCronIds) session.firedCronIds = new Set();
+                                session.firedCronIds.add(soonest.id);
+                            }
                             logger.debug(`[remote] injecting cron wakeup: ${soonest.id} "${soonest.prompt.slice(0, 80)}"`);
                             session.queue.push(soonest.prompt,
                                 (mode ?? { permissionMode: 'default', model: null as string | null, fallbackModel: null as string | null }) as EnhancedMode,
