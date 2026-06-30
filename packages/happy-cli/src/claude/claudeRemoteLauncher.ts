@@ -10,9 +10,13 @@ function nextCronFire(expr: string, from: number): number {
 
     const now = new Date(from);
 
-    // For one-shot (explicit fields like "52 22 28 6 0"):
-    if (/^\d+$/.test(min) && /^\d+$/.test(hour) && /^\d+$/.test(dom) && /^\d+$/.test(month)) {
-        const d = new Date(now.getFullYear(), parseInt(month) - 1, parseInt(dom), parseInt(hour), parseInt(min), 0);
+    // For explicit or partially-explicit one-shot patterns: "52 22 28 6 0",
+    // "8 14 * * *" (ScheduleWakeup), etc. Treat numeric min+hour as an absolute
+    // time today; if it's in the past, fire immediately.
+    const minNum = /^\d+$/.test(min) ? parseInt(min) : -1;
+    const hourNum = /^\d+$/.test(hour) ? parseInt(hour) : -1;
+    if (minNum >= 0 && hourNum >= 0) {
+        const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hourNum, minNum, 0);
         if (d.getTime() <= from) return from; // already past — fire immediately
         return d.getTime();
     }
