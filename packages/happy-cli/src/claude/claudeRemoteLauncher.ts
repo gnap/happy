@@ -148,6 +148,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
 
     // Handle abort
     let exitReason: 'switch' | 'exit' | null = null;
+    let cronLoopPromise: Promise<void> | null = null;
     let abortController: AbortController | null = null;
     let abortFuture: Future<void> | null = null;
 
@@ -433,7 +434,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         // actually changes (e.g., new session started or /clear command used).
         // See: https://github.com/anthropics/happy-cli/issues/143
         let previousSessionId: string | null = null;
-        let cronLoopPromise: Promise<void> | null = null;
         while (!exitReason) {
             // Before each turn, peek inbox: if there are unread messages,
             // push an isolated inbox turn to the message queue.
@@ -884,7 +884,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         messageBuffer.clear();
 
         // Stop the cron loop and resolve abort future
-        cronLoopPromise.catch(() => {});
+        cronLoopPromise?.catch(() => {});
         if (abortFuture) { // Just in case of error
             abortFuture.resolve(undefined);
         }
