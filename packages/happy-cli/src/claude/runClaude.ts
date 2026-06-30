@@ -299,24 +299,6 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         onSessionHook: (sessionId, data) => {
             logger.debug(`[START] Session hook received: ${sessionId}`, data);
 
-            // Stop hook: capture pending crons for self-managed wakeup timers.
-            if (data.hook_event_name === 'Stop' && currentSession) {
-                const crons = (data as any).session_crons as Array<{ id: string; schedule: string; recurring: boolean; prompt: string }> | undefined;
-                if (crons && crons.length > 0) {
-                    if (!currentSession.pendingCrons) currentSession.pendingCrons = new Map();
-                    for (const c of crons) {
-                        currentSession.pendingCrons.set(c.id, {
-                            id: c.id,
-                            schedule: c.schedule,
-                            recurring: c.recurring,
-                            prompt: c.prompt,
-                            nextFireAt: 0,
-                        });
-                    }
-                    logger.debug(`[START] Stop hook: stored ${crons.length} crons for wakeup`);
-                }
-            }
-
             // Update session ID in the Session instance
             if (currentSession) {
                 const previousSessionId = currentSession.sessionId;
