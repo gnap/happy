@@ -484,6 +484,14 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             session.queue.push(soonest.prompt,
                                 { permissionMode: 'default', model: null as string | null, fallbackModel: null as string | null } as EnhancedMode,
                                 { origin: 'auto-continuation', cronId: soonest.id });
+                            // Send the cron wakeup user message directly as a session
+                            // protocol envelope so the App sees it. (SDK does not write
+                            // `origin` to JSONL so the mapper can't rely on it.)
+                            session.client.sendSessionProtocolMessage(
+                                createEnvelope('user', { t: 'text', text: soonest.prompt }, {
+                                    meta: { origin: 'auto-continuation', cronId: soonest.id },
+                                }),
+                            );
                         } else {
                             const delay = soonest.nextFireAt - now;
                             await new Promise<void>(r => {
