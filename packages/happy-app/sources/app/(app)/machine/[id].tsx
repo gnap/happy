@@ -472,10 +472,10 @@ export default function MachineDetailScreen() {
                                         subtitle={new Date(machine.daemonState.startTime).toLocaleString()}
                                     />
                                 )}
-                                {machine.daemonState.startedWithCliVersion && (
+                                {(machine.metadata?.happyCliVersion || machine.daemonState.startedWithCliVersion) && (
                                     <Item
                                         title={t('machine.cliVersion')}
-                                        subtitle={machine.daemonState.startedWithCliVersion}
+                                        subtitle={machine.metadata?.happyCliVersion || machine.daemonState.startedWithCliVersion || ''}
                                         subtitleStyle={{ fontFamily: 'Menlo', fontSize: 13 }}
                                     />
                                 )}
