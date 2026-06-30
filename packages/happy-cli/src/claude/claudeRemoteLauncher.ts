@@ -17,8 +17,10 @@ function nextCronFire(expr: string, from: number): number {
         return d.getTime();
     }
 
-    // For patterns like "*/N" or "*": generate next few candidates.
-    for (let off = 0; off < 60; off++) {
+    // For patterns like "*/N" or "*": skip off=0 when ALL fields are wildcards
+    // so "* * * * *" fires at the next minute boundary, not immediately.
+    const startOff = (min === '*' && hour === '*' && dom === '*' && month === '*' && dow === '*') ? 1 : 0;
+    for (let off = startOff; off < 60; off++) {
         const d = new Date(from + off * 60_000);
         const m = d.getMinutes();
         const h = d.getHours();
