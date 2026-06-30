@@ -143,6 +143,10 @@ export interface Session {
         outputTokens: number;
         cacheCreation: number;
         cacheRead: number;
+        cacheCreationBreakdown?: {
+            ephemeral5m: number;
+            ephemeral1h: number;
+        };
         contextSize: number;
         contextWindowTokens?: number;
         timestamp: number;

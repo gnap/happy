@@ -68,6 +68,11 @@ interface AgentInputProps {
         outputTokens?: number;
         cacheCreation?: number;
         cacheRead?: number;
+        /** Cache creation breakdown by TTL tier from Claude API. */
+        cacheCreationBreakdown?: {
+            ephemeral5m: number;
+            ephemeral1h: number;
+        };
         contextSize: number;
         /** CLI /context counters — when present, display these instead of turn-end usage. */
         contextWindowTokens?: number;
@@ -1051,6 +1056,16 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                                                     </Text>
                                                                 )}
                                                             </View>
+                                                            {props.usageData?.cacheCreationBreakdown && (
+                                                                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                                                                    <Text style={{ fontSize: 10, color: theme.colors.textSecondary, ...Typography.default() }}>
+                                                                        5m {formatTokens(props.usageData.cacheCreationBreakdown.ephemeral5m)}
+                                                                    </Text>
+                                                                    <Text style={{ fontSize: 10, color: theme.colors.textSecondary, ...Typography.default() }}>
+                                                                        1h {formatTokens(props.usageData.cacheCreationBreakdown.ephemeral1h)}
+                                                                    </Text>
+                                                                </View>
+                                                            )}
                                                         </View>
                                                     )}
                                                     {props.usageData?.contextBreakdown && (

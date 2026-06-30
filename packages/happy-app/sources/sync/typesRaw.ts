@@ -18,6 +18,11 @@ const usageDataSchema = z.object({
     contextSize: z.number().optional(),
     // Max context window from cursor-agent init model name (turn-end denominator).
     context_window_tokens: z.number().optional(),
+    // Cache creation breakdown by TTL tier from Claude API.
+    cache_creation: z.object({
+        ephemeral_5m_input_tokens: z.number(),
+        ephemeral_1h_input_tokens: z.number(),
+    }).optional(),
 });
 
 export type UsageData = z.infer<typeof usageDataSchema>;
@@ -135,6 +140,11 @@ const sessionTurnEndEventSchema = z.object({
         // Max context window parsed from init model display name (denominator)
         context_window_tokens: z.number().optional(),
         contextWindowTokens: z.number().optional(),
+        // Cache creation breakdown by TTL tier from Claude API
+        cache_creation: z.object({
+            ephemeral_5m_input_tokens: z.number(),
+            ephemeral_1h_input_tokens: z.number(),
+        }).optional(),
     }).optional(),
     // /context snapshot from backgroundContextFetcher — authoritative context usage
     contextUsage: z.object({
@@ -712,6 +722,7 @@ function normalizeSessionEnvelope(
                 // incomplete (e.g. cursor-agent only reports per-turn incremental tokens).
                 contextSize,
                 context_window_tokens: contextWindowTokens,
+                cache_creation: (rawUsage as any)?.cache_creation,
             }
             : undefined;
         return {

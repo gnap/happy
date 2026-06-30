@@ -17,6 +17,11 @@ export interface ClaudeTurnUsagePayload {
     output_tokens?: number;
     cache_read_input_tokens?: number;
     cache_creation_input_tokens?: number;
+    /** Breakdown of cache creation by TTL tier (from Claude API). */
+    cache_creation?: {
+        ephemeral_5m_input_tokens: number;
+        ephemeral_1h_input_tokens: number;
+    };
     /** Effective prompt size against the model's context window at the end of this turn. */
     context_size?: number;
     /** Max context window for the primary model that ran the turn. */
@@ -80,11 +85,15 @@ export function buildClaudeTurnUsagePayload(
     const rawContextSize = total > 0 ? Math.round(total / n) : 0;
     const contextSize = rawContextSize > 0 ? rawContextSize : undefined;
 
+    // Extract cache_creation breakdown from flat usage (not available in modelUsage).
+    const cacheCreation = result.usage?.cache_creation;
+
     return {
         input_tokens: inputTokens,
         output_tokens: outputTokens,
         cache_read_input_tokens: cacheRead,
         cache_creation_input_tokens: cacheCreate,
+        cache_creation: cacheCreation,
         context_size: contextSize,
         context_window_tokens: contextWindow,
         model: primary?.name,

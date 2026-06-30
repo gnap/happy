@@ -184,6 +184,11 @@ export type ReducerState = {
         outputTokens: number;
         cacheCreation: number;
         cacheRead: number;
+        /** Cache creation breakdown by TTL tier from Claude API. */
+        cacheCreationBreakdown?: {
+            ephemeral5m: number;
+            ephemeral1h: number;
+        };
         contextSize: number;
         contextWindowTokens?: number;
         /** /contextUsage snapshot — accurate display value (from turn-end, not estimated). */
@@ -1460,6 +1465,10 @@ function processUsageData(state: ReducerState, usage: UsageData, timestamp: numb
             outputTokens: usage.output_tokens,
             cacheCreation: usage.cache_creation_input_tokens || 0,
             cacheRead: usage.cache_read_input_tokens || 0,
+            cacheCreationBreakdown: usage.cache_creation ? {
+                ephemeral5m: usage.cache_creation.ephemeral_5m_input_tokens,
+                ephemeral1h: usage.cache_creation.ephemeral_1h_input_tokens,
+            } : state.latestUsage?.cacheCreationBreakdown,
             contextSize: usage.contextSize ?? ((usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0) + usage.input_tokens),
             contextWindowTokens: usage.context_window_tokens ?? state.latestUsage?.contextWindowTokens,
             timestamp: timestamp

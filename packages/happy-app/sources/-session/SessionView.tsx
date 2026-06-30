@@ -435,6 +435,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                     outputTokens: base.outputTokens,
                     cacheCreation: base.cacheCreation,
                     cacheRead: base.cacheRead,
+                    cacheCreationBreakdown: base.cacheCreationBreakdown,
                     contextSize: base.contextSize,
                     contextWindowTokens: base.contextWindowTokens,
                     contextPct: base.contextPct,
