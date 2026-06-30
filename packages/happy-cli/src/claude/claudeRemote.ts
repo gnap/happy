@@ -339,6 +339,14 @@ export async function claudeRemote(opts: {
     async function outputLoop(): Promise<void> {
         try {
             for await (const message of response) {
+                // Force-verbose: log every assistant message block type for debugging.
+                if (message.type === 'assistant') {
+                    const ac = (message as any).message?.content;
+                    if (Array.isArray(ac)) {
+                        const names = ac.map((b: any) => `${b.type}:${b.name ?? '?'}`).join(', ');
+                        logger.debug(`[claudeRemote] ASSISTANT blocks: ${names}`);
+                    }
+                }
                 logger.debugLargeJson(`[claudeRemote] Message ${message.type}`, message);
 
                 // Intercept CronCreate tool calls to capture cron metadata for wakeup timers.
@@ -348,8 +356,8 @@ export async function claudeRemote(opts: {
                         for (const block of content) {
                             if (block.type === 'tool_use' && block.name === 'CronCreate') {
                                 const input = block.input as Record<string, unknown> | undefined;
+                                logger.debug(`[claudeRemote] CronCreate tool_use: prompt=${String(input?.prompt ?? '').slice(0, 60)} cron=${input?.cron}`);
                                 if (input?.prompt && input?.cron) {
-                                    // Track this cron so we can match the result (which has the id).
                                     cronCreateInputs.set(block.id, {
                                         schedule: String(input.cron),
                                         recurring: Boolean(input.recurring),

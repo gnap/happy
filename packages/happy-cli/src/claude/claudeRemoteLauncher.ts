@@ -237,6 +237,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     let planModeToolCalls = new Set<string>();
     let ongoingToolCalls = new Map<string, { parentToolCallId: string | null }>();
     let pendingSkillSuppress = false;
+    // Non-durable CronCreate tracking: match tool_use input with tool_result output.
+    const cronCreateInputs = new Map<string, { schedule: string; recurring: boolean; prompt: string }>();
 
     // Pop echo: sent once on first SDK message, after Claude starts processing.
     let pendingPopEcho: { echoedMessageId: string; text: string } | null = null;
@@ -289,8 +291,20 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             if (umessage.message.content && Array.isArray(umessage.message.content)) {
                 for (let c of umessage.message.content) {
                     if (c.type === 'tool_use') {
-                        logger.debug('[remote]: detected tool use ' + c.id! + ' parent: ' + umessage.parent_tool_use_id);
+                        logger.debug('[remote] V2 detected tool use ' + c.name + ' ' + c.id! + ' parent: ' + umessage.parent_tool_use_id);
                         ongoingToolCalls.set(c.id!, { parentToolCallId: umessage.parent_tool_use_id ?? null });
+                        if (c.name === 'CronCreate') {
+                            const input = c.input as Record<string, unknown> | undefined;
+                            logger.debug(`[remote] CronCreate tool_use: cron=${input?.cron} prompt=${String(input?.prompt ?? '').slice(0, 60)}`);
+                            // Track for matching with tool_result below.
+                            if (input?.prompt && input?.cron) {
+                                cronCreateInputs.set(c.id!, {
+                                    schedule: String(input.cron),
+                                    recurring: Boolean(input.recurring),
+                                    prompt: String(input.prompt),
+                                });
+                            }
+                        }
                         if (c.name === 'Skill') {
                             logger.debug('[remote] Skill tool_use detected: ' + JSON.stringify(c.input).slice(0, 100));
                             pendingSkillSuppress = true;
@@ -305,6 +319,24 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                 for (let c of umessage.message.content) {
                     if (c.type === 'tool_result' && c.tool_use_id) {
                         ongoingToolCalls.delete(c.tool_use_id);
+
+                        // Match CronCreate results to build complete cron entries.
+                        if (cronCreateInputs.has(c.tool_use_id)) {
+                            const input = cronCreateInputs.get(c.tool_use_id)!;
+                            cronCreateInputs.delete(c.tool_use_id);
+                            const result = (c as any).content as Record<string, unknown> | undefined;
+                            if (result?.id) {
+                                if (!session.pendingCrons) session.pendingCrons = new Map();
+                                session.pendingCrons.set(String(result.id), {
+                                    id: String(result.id),
+                                    schedule: input.schedule,
+                                    recurring: input.recurring,
+                                    prompt: input.prompt,
+                                    nextFireAt: 0,
+                                });
+                                logger.debug(`[remote] CronCreate captured: ${result.id} "${input.prompt.slice(0, 60)}"`);
+                            }
+                        }
 
                         // When tool result received, release any delayed messages for this tool call
                         messageQueue.releaseToolCall(c.tool_use_id);
@@ -850,6 +882,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         if (soonest.nextFireAt <= now) {
                             // Cron is due — inject its prompt as a new turn.
                             removeScheduledTask(session.path, soonest.id, soonest.recurring);
+                            session.pendingCrons?.delete(soonest.id);
                             logger.debug(`[remote] injecting cron wakeup: ${soonest.id} "${soonest.prompt.slice(0, 80)}"`);
                             session.queue.push(soonest.prompt,
                                 (mode ?? { permissionMode: 'default', model: null as string | null, fallbackModel: null as string | null }) as EnhancedMode,
