@@ -359,6 +359,9 @@ export async function claudeRemote(opts: {
                     }
                 }
                 logger.debugLargeJson(`[claudeRemote] Message ${message.type}`, message);
+                if (message.type === 'user') {
+                    logger.debug(`[claudeRemote] USER echo origin=${JSON.stringify((message as any).origin)} cronId=${(message as any).cronId} content=${JSON.stringify((message as any).message?.content)?.slice(0, 120)}`);
+                }
 
                 // /context local command: intercept system/local_command and deliver
                 // markdown via onContextOutput without letting it reach the App.
