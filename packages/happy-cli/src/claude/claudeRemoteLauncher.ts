@@ -798,39 +798,37 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                 modeHash = null;
                 mode = null;
 
-                // --- Cron wakeup: crons reported by Stop hook ---
-                if (!exitReason) {
+                // --- Cron wakeup: keep checking crons until none are pending ---
+                while (!exitReason) {
                     const crons = session.pendingCrons
                         ? Array.from(session.pendingCrons.values())
                         : [];
-                    if (crons.length > 0) {
-                        const now = Date.now();
-                        for (const c of crons) {
-                            c.nextFireAt = nextCronFire(c.schedule, now);
-                        }
-                        const soonest = crons.reduce((a, b) => a.nextFireAt < b.nextFireAt ? a : b);
-                        if (soonest.nextFireAt <= now) {
-                            // Cron is due — inject its prompt as a new turn.
-                            session.pendingCrons?.delete(soonest.id);
-                            // Mark one-shot cron as fired so the Stop hook won't re-add it.
-                            if (!soonest.recurring) {
-                                if (!session.firedCronIds) session.firedCronIds = new Set();
-                                session.firedCronIds.add(soonest.id);
-                            }
-                            logger.debug(`[remote] injecting cron wakeup: ${soonest.id} "${soonest.prompt.slice(0, 80)}"`);
-                            session.queue.push(soonest.prompt,
-                                (mode ?? { permissionMode: 'default', model: null as string | null, fallbackModel: null as string | null }) as EnhancedMode,
-                                { origin: 'auto-continuation', cronId: soonest.id });
-                        } else {
-                            // Wait for next cron.
-                            const delay = Math.min(soonest.nextFireAt - now, 30_000);
-                            logger.debug(`[remote] waiting ${Math.round(delay / 1000)}s for next cron ${soonest.id}`);
-                            await new Promise<void>(resolve => {
-                                const timer = setTimeout(resolve, delay);
-                                controller.signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
-                            });
-                        }
+                    if (crons.length === 0) break;
+                    const now = Date.now();
+                    for (const c of crons) {
+                        c.nextFireAt = nextCronFire(c.schedule, now);
                     }
+                    const soonest = crons.reduce((a, b) => a.nextFireAt < b.nextFireAt ? a : b);
+                    if (soonest.nextFireAt <= now) {
+                        // Cron is due — inject its prompt as a new turn.
+                        session.pendingCrons?.delete(soonest.id);
+                        if (!soonest.recurring) {
+                            if (!session.firedCronIds) session.firedCronIds = new Set();
+                            session.firedCronIds.add(soonest.id);
+                        }
+                        logger.debug(`[remote] injecting cron wakeup: ${soonest.id} "${soonest.prompt.slice(0, 80)}"`);
+                        session.queue.push(soonest.prompt,
+                            (mode ?? { permissionMode: 'default', model: null as string | null, fallbackModel: null as string | null }) as EnhancedMode,
+                            { origin: 'auto-continuation', cronId: soonest.id });
+                        break; // go process the injected turn
+                    }
+                    // Wait for next cron, then re-check (don't jump to claudeRemote yet).
+                    const delay = Math.min(soonest.nextFireAt - now, 30_000);
+                    logger.debug(`[remote] waiting ${Math.round(delay / 1000)}s for next cron ${soonest.id}`);
+                    await new Promise<void>(resolve => {
+                        const timer = setTimeout(resolve, delay);
+                        controller.signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+                    });
                 }
             }
         }
