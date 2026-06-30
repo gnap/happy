@@ -711,6 +711,16 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                     maybeEmitSubagentStart(state, turnId, subagent, envelopes);
                     envelopes.push(createEnvelope('agent', { t: 'text', text: message.message.content }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
                 }
+            } else if (
+                (message as any).origin?.kind === 'auto-continuation' ||
+                (message as any).origin === 'auto-continuation'
+            ) {
+                // Cron/loop wakeup — show as a user message with origin metadata
+                // so the App can render it as an auto-continuation marker.
+                closeTurn(state, 'completed', envelopes);
+                envelopes.push(createEnvelope('user', { t: 'text', text: message.message.content }, {
+                    meta: { origin: 'auto-continuation', cronId: (message as any).cronId },
+                }));
             } else if (message.isMeta || message.isSynthetic) {
                 // isMeta: internal prompts (e.g. inbox turn notifications)
                 // isSynthetic: SDK-injected prompts (e.g. Skill invocations)

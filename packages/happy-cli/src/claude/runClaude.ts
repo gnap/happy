@@ -298,7 +298,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     const hookServer = await startHookServer({
         onSessionHook: (sessionId, data) => {
             logger.debug(`[START] Session hook received: ${sessionId}`, data);
-            
+
             // Update session ID in the Session instance
             if (currentSession) {
                 const previousSessionId = currentSession.sessionId;

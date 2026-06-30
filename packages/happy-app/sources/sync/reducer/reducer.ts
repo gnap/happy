@@ -540,9 +540,18 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         // answer; for Bash/Edit the tool-call-end will update
                         // the state again anyway.
                         if (completed.status === 'approved') {
-                            if (message.tool.state !== 'completed' && message.tool.state !== 'error') {
-                                message.tool.state = 'completed';
-                                message.tool.completedAt = completed.completedAt || Date.now();
+                            // AskUserQuestion is done once the user answers — mark completed immediately.
+                            // Other tools (shell, file edits, etc.) still need to execute after approval
+                            // so they stay in 'running' until the SDK sends their result.
+                            if (completed.tool === 'AskUserQuestion') {
+                                if (message.tool.state !== 'completed' && message.tool.state !== 'error') {
+                                    message.tool.state = 'completed';
+                                    message.tool.completedAt = completed.completedAt || Date.now();
+                                    hasChanged = true;
+                                }
+                            } else if (message.tool.state !== 'completed' && message.tool.state !== 'error' && message.tool.state !== 'running') {
+                                message.tool.state = 'running';
+                                hasChanged = true;
                             }
                         } else {
                             // denied or canceled

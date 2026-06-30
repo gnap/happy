@@ -3,9 +3,8 @@
  * Captures available tools and slash commands from Claude SDK initialization
  */
 
-import { query } from './query'
-import type { SDKSystemMessage } from './types'
-import { logger } from '@/ui/logger'
+import { query, AbortError, type SDKSystemMessage } from '@anthropic-ai/claude-agent-sdk';
+import { logger } from '@/ui/logger';
 
 export interface SDKMetadata {
     tools?: string[]
@@ -28,7 +27,7 @@ export async function extractSDKMetadata(): Promise<SDKMetadata> {
             options: {
                 allowedTools: ['Bash(echo)'],
                 maxTurns: 1,
-                abort: abortController.signal
+                abortController,
             }
         })
 
@@ -56,7 +55,7 @@ export async function extractSDKMetadata(): Promise<SDKMetadata> {
         
     } catch (error) {
         // Check if it's an abort error (expected)
-        if (error instanceof Error && error.name === 'AbortError') {
+        if (error instanceof AbortError || (error instanceof Error && error.name === 'AbortError')) {
             logger.debug('[metadataExtractor] SDK query aborted after capturing metadata')
             return {}
         }
