@@ -485,13 +485,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             session.queue.push(soonest.prompt,
                                 { permissionMode: 'default', model: null as string | null, fallbackModel: null as string | null } as EnhancedMode,
                                 { origin: 'auto-continuation', cronId: soonest.id });
-                            // Send cron wakeup user message to the App. The SDK does not
-                            // echo user text messages back, so we send the envelope directly.
-                            session.client.sendSessionProtocolMessage(
-                                createEnvelope('user', { t: 'text', text: soonest.prompt }, {
-                                    meta: { origin: 'auto-continuation', cronId: soonest.id },
-                                }),
-                            );
                         } else {
                             const delay = soonest.nextFireAt - now;
                             await new Promise<void>(r => {
@@ -639,12 +632,22 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             permissionHandler.handleModeChange(mode.permissionMode);
                             // Signal thinking immediately on message receipt, before SDK is invoked
                             session.onThinkingChange(true);
-                            // Save for pop echo on first SDK response. Deferring until
-                            // Claude starts processing shows green check on App.
+                            // Cron/auto-continuation: send user message envelope at dequeue time.
+                            // No echoedMessageId — there's no App outbox to clear.
+                            if ((msg.meta as any)?.origin === 'auto-continuation') {
+                                session.client.sendSessionProtocolMessage(
+                                    createEnvelope('user', { t: 'text', text: msg.message }, {
+                                        meta: { origin: 'auto-continuation', cronId: (msg.meta as any).cronId },
+                                    }),
+                                );
+                                logger.debug(`[remote] cron envelope sent for ${(msg.meta as any).cronId}`);
+                            }
+                            // Pop echo for App messages: deferred to first SDK response so the
+                            // App sees the green check when Claude starts processing.
                             const appMessageId = (msg.meta as any)?.appMessageId as string | undefined;
                             if (appMessageId) {
                                 pendingPopEcho = { echoedMessageId: appMessageId, text: msg.message };
-                                logger.debug(`[remote] popEcho pending for appMessageId=${appMessageId} origin=${(msg.meta as any)?.origin}`);
+                                logger.debug(`[remote] popEcho pending for appMessageId=${appMessageId}`);
                             }
                             const wrapperMeta = msg.meta as { meta?: unknown; files?: unknown[] } | undefined;
                             return {
