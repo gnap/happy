@@ -357,7 +357,7 @@ function clusterSegment(
             }
             applyTaskUpdate(tid, status);
             hideSet.add(i); allHidden.add(i);
-        } else if (m.kind === 'tool-call' && activeCount > 0) {
+        } else if (m.kind === 'tool-call' && activeCount > 0 && m.tool?.name !== 'ExitPlanMode' && m.tool?.name !== 'exit_plan_mode') {
             if (currentTaskIdx >= 0 && currentTaskIdx < taskItems.length) {
                 taskItems[currentTaskIdx].collapsedCount = (taskItems[currentTaskIdx].collapsedCount ?? 0) + 1;
             }
