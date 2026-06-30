@@ -438,14 +438,6 @@ function SessionInfoContent({ session }: { session: Session }) {
                             onPress={() => router.push(`/machine/${session.metadata?.machineId}`)}
                         />
                     )}
-                    {sessionStatus.isConnected && sessionNeedsRestart && (
-                        <Item
-                            title={t('sessionInfo.restartSession')}
-                            subtitle={t('sessionInfo.restartSessionSubtitle')}
-                            icon={<Ionicons name="sync-circle-outline" size={29} color="#FF9500" />}
-                            onPress={handleRestartSession}
-                        />
-                    )}
                     {sessionStatus.isConnected && (
                         <Item
                             title={t('sessionInfo.restartSession')}
