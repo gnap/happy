@@ -711,7 +711,10 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                     maybeEmitSubagentStart(state, turnId, subagent, envelopes);
                     envelopes.push(createEnvelope('agent', { t: 'text', text: message.message.content }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
                 }
-            } else if ((message as any).origin === 'auto-continuation') {
+            } else if (
+                (message as any).origin?.kind === 'auto-continuation' ||
+                (message as any).origin === 'auto-continuation'
+            ) {
                 // Cron/loop wakeup — show as a user message with origin metadata
                 // so the App can render it as an auto-continuation marker.
                 closeTurn(state, 'completed', envelopes);
