@@ -12,6 +12,10 @@ export const UsageSchema = z.object({
   cache_read_input_tokens: z.number().int().nonnegative().optional(),
   output_tokens: z.number().int().nonnegative(),
   service_tier: z.string().optional(),
+  cache_creation: z.object({
+    ephemeral_5m_input_tokens: z.number().int().nonnegative(),
+    ephemeral_1h_input_tokens: z.number().int().nonnegative(),
+  }).optional(),
 }).passthrough();
 
 // Main schema with minimal validation for only the fields we use
