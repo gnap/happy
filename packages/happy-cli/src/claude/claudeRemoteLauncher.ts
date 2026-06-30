@@ -21,9 +21,6 @@ function nextCronFire(expr: string, from: number): number {
         return d.getTime();
     }
 
-    // Find the next match strictly after `from`. Patterns like "* * * * *"
-    // always match the current minute (off=0) which would fire immediately;
-    // the caller wants the NEXT occurrence, not "right now".
     for (let off = 0; off < 60; off++) {
         const d = new Date(from + off * 60_000);
         const m = d.getMinutes();
@@ -38,9 +35,6 @@ function nextCronFire(expr: string, from: number): number {
         if (!fieldMatch(month, M, 1, 12)) continue;
         if (!fieldMatch(dow, w, 0, 6)) continue;
 
-        // Never return `from` itself — the caller looks for the next match,
-        // not a match at the exact moment of creation.
-        if (d.getTime() <= from) continue;
         return d.getTime();
     }
     return from + 3600_000; // fallback: 1h
