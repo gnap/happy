@@ -231,6 +231,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         if (pendingPopEcho) {
             const p = pendingPopEcho;
             pendingPopEcho = null;
+            logger.debug(`[remote] popEcho firing: echoedMessageId=${p.echoedMessageId} text=${p.text.slice(0, 60)}`);
             session.client.sendSessionProtocolMessage(
                 createEnvelope('user', { t: 'text', text: p.text }),
                 { echoedMessageId: p.echoedMessageId }
@@ -483,7 +484,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             logger.debug(`[remote] cron injecting: ${soonest.id} "${soonest.prompt.slice(0, 60)}"`);
                             session.queue.push(soonest.prompt,
                                 { permissionMode: 'default', model: null as string | null, fallbackModel: null as string | null } as EnhancedMode,
-                                { origin: 'auto-continuation', cronId: soonest.id });
+                                { origin: 'auto-continuation', cronId: soonest.id, appMessageId: soonest.id });
                         } else {
                             const delay = soonest.nextFireAt - now;
                             await new Promise<void>(r => {
@@ -626,7 +627,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 session.claudeTurnActiveRef.current = true;
                             }
                             modeHash = msg.hash;
-                            logger.info(`[remote] nextMessage kept in-process: msgHash=${msg.hash?.slice(0,8)}`);
+                            logger.info(`[remote] nextMessage kept in-process: msgHash=${msg.hash?.slice(0,8)} appMessageId=${(msg.meta as any)?.appMessageId ?? 'none'} origin=${(msg.meta as any)?.origin ?? 'none'}`);
                             mode = msg.mode;
                             permissionHandler.handleModeChange(mode.permissionMode);
                             // Signal thinking immediately on message receipt, before SDK is invoked
@@ -636,6 +637,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             const appMessageId = (msg.meta as any)?.appMessageId as string | undefined;
                             if (appMessageId) {
                                 pendingPopEcho = { echoedMessageId: appMessageId, text: msg.message };
+                                logger.debug(`[remote] popEcho pending for appMessageId=${appMessageId} origin=${(msg.meta as any)?.origin}`);
                             }
                             const wrapperMeta = msg.meta as { meta?: unknown; files?: unknown[] } | undefined;
                             return {
