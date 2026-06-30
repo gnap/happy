@@ -94,6 +94,11 @@ export const AgentStateSchema = z.object({
     a2aInbox: z.object({
         unreadCount: z.number(),
     }).optional(),
+    /** Pending cron tasks — compact metadata synced from CLI agentState. */
+    crons: z.record(z.string(), z.object({
+        schedule: z.string(),
+        recurring: z.boolean(),
+    })).optional(),
 });
 
 export type AgentState = z.infer<typeof AgentStateSchema>;
