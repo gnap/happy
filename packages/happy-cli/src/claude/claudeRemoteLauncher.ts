@@ -17,10 +17,10 @@ function nextCronFire(expr: string, from: number): number {
         return d.getTime();
     }
 
-    // For patterns like "*/N" or "*": skip off=0 when ALL fields are wildcards
-    // so "* * * * *" fires at the next minute boundary, not immediately.
-    const startOff = (min === '*' && hour === '*' && dom === '*' && month === '*' && dow === '*') ? 1 : 0;
-    for (let off = startOff; off < 60; off++) {
+    // Find the next match strictly after `from`. Patterns like "* * * * *"
+    // always match the current minute (off=0) which would fire immediately;
+    // the caller wants the NEXT occurrence, not "right now".
+    for (let off = 0; off < 60; off++) {
         const d = new Date(from + off * 60_000);
         const m = d.getMinutes();
         const h = d.getHours();
@@ -34,6 +34,9 @@ function nextCronFire(expr: string, from: number): number {
         if (!fieldMatch(month, M, 1, 12)) continue;
         if (!fieldMatch(dow, w, 0, 6)) continue;
 
+        // Never return `from` itself — the caller looks for the next match,
+        // not a match at the exact moment of creation.
+        if (d.getTime() <= from) continue;
         return d.getTime();
     }
     return from + 3600_000; // fallback: 1h
