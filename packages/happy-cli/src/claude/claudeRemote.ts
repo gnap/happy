@@ -1,9 +1,10 @@
 import { EnhancedMode } from "./loop";
 import { query, type QueryOptions, type SDKMessage, type SDKSystemMessage, AbortError, SDKUserMessage, type SDKResultMessage } from '@/claude/sdk'
+import type { Options as SdkOptions, CanUseTool } from '@anthropic-ai/claude-agent-sdk';
 import { mapToClaudeMode } from "./utils/permissionMode";
 import { claudeCheckSession } from "./utils/claudeCheckSession";
-import { join, resolve } from 'node:path';
-import { projectPath } from "@/projectPath";
+import { join } from 'node:path';
+import { execSync } from 'node:child_process';
 import { parseSpecialCommand } from "@/parsers/specialCommands";
 import { logger } from "@/lib";
 import { PushableAsyncIterable } from "@/utils/PushableAsyncIterable";
@@ -14,6 +15,40 @@ import { systemPrompt } from "./utils/systemPrompt";
 import { PermissionResult } from "./sdk/types";
 import type { JsRuntime } from "./runClaude";
 import { normalizeClaudeModelForSdk } from "./utils/model";
+
+/** Find the system Claude binary for use with the Agent SDK. */
+function resolveClaudeBinaryPath(): string {
+    // 1. Explicit override
+    if (process.env.HAPPY_CLAUDE_PATH) {
+        logger.debug('[claudeRemote] Using HAPPY_CLAUDE_PATH:', process.env.HAPPY_CLAUDE_PATH);
+        return process.env.HAPPY_CLAUDE_PATH;
+    }
+    // 2. Find via PATH
+    try {
+        const fromPath = execSync('which claude', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+        if (fromPath) {
+            logger.debug('[claudeRemote] Found claude via PATH:', fromPath);
+            return fromPath;
+        }
+    } catch { /* not in PATH */ }
+    // 3. Common fallback locations
+    const fallbacks = [
+        '/home/linuxbrew/.linuxbrew/bin/claude',
+        '/opt/homebrew/bin/claude',
+        '/usr/local/bin/claude',
+        `${process.env.HOME}/.local/bin/claude`,
+    ];
+    for (const p of fallbacks) {
+        try {
+            execSync(`"${p}" --version`, { stdio: ['pipe', 'pipe', 'pipe'] });
+            logger.debug('[claudeRemote] Found claude at fallback:', p);
+            return p;
+        } catch { /* not there */ }
+    }
+    // 4. Last resort: hope 'claude' is on PATH
+    logger.debug('[claudeRemote] No claude binary found, falling back to "claude"');
+    return 'claude';
+}
 
 export async function claudeRemote(opts: {
 
@@ -43,6 +78,10 @@ export async function claudeRemote(opts: {
     /** Called with raw markdown when the initial message is a /context local command. */
     onContextOutput?: (contextMarkdown: string) => void,
     isAborted: (toolCallId: string) => boolean,
+    /** Called when a CronCreate tool completes, with the parsed cron entry. */
+    onCronCreated?: (cron: { id: string; schedule: string; recurring: boolean; prompt: string }) => void,
+    /** Called with session_crons from the Stop hook so the launcher can schedule wakeups. */
+    onSessionCrons?: (crons: Array<{ id: string; schedule: string; recurring: boolean; prompt: string }>) => void,
     /** Called immediately before stopSignal is resolved on a normal result, so the
      *  launcher can mark itself as "stopping" and avoid fetching a new message from
      *  the queue that would then be discarded by the inputLoop race. */
@@ -153,30 +192,68 @@ export async function claudeRemote(opts: {
         }
     }
 
-    // Prepare SDK options
+    // Prepare SDK options — build against @anthropic-ai/claude-agent-sdk Options type.
     let mode = initial.mode;
     const model = normalizeClaudeModelForSdk(initial.mode.model);
     const fallbackModel = normalizeClaudeModelForSdk(initial.mode.fallbackModel);
-    const sdkOptions: QueryOptions = {
+
+    // Build system prompt: customPrompt → use it + our additions, otherwise our additions as plain string.
+    const effectiveSystemPrompt = initial.mode.customSystemPrompt
+        ? initial.mode.customSystemPrompt + '\n\n' + systemPrompt
+        : initial.mode.appendSystemPrompt
+            ? initial.mode.appendSystemPrompt + '\n\n' + systemPrompt
+            : systemPrompt;
+
+    // Build abort controller from the caller's signal.
+    const abortController = new AbortController();
+    if (opts.signal) {
+        if (opts.signal.aborted) abortController.abort();
+        else opts.signal.addEventListener('abort', () => abortController.abort(), { once: true });
+    }
+
+    const sdkOptions: SdkOptions = {
         cwd: opts.path,
         resume: startFrom ?? undefined,
-        mcpServers: opts.mcpServers,
+        mcpServers: opts.mcpServers as SdkOptions['mcpServers'],
         permissionMode: mapToClaudeMode(initial.mode.permissionMode),
         model,
         fallbackModel,
         effort: initial.mode.effort,
-        customSystemPrompt: initial.mode.customSystemPrompt ? initial.mode.customSystemPrompt + '\n\n' + systemPrompt : undefined,
-        appendSystemPrompt: initial.mode.appendSystemPrompt ? initial.mode.appendSystemPrompt + '\n\n' + systemPrompt : systemPrompt,
-        allowedTools: initial.mode.allowedTools ? initial.mode.allowedTools.concat(opts.allowedTools) : opts.allowedTools,
+        systemPrompt: effectiveSystemPrompt,
+        allowedTools: initial.mode.allowedTools
+            ? initial.mode.allowedTools.concat(opts.allowedTools)
+            : opts.allowedTools,
         disallowedTools: initial.mode.disallowedTools,
-        canCallTool: (toolName: string, input: unknown, options: { signal: AbortSignal }) => opts.canCallTool(toolName, input, mode, options),
-        executable: opts.jsRuntime ?? 'node',
-        abort: opts.signal,
-        pathToClaudeCodeExecutable: (() => {
-            return resolve(join(projectPath(), 'scripts', 'claude_remote_launcher.cjs'));
-        })(),
-        settingsPath: opts.hookSettingsPath,
-    }
+        canUseTool: ((toolName: string, input: Record<string, unknown>, o: { signal: AbortSignal }) =>
+            opts.canCallTool(toolName, input, mode, o)) as CanUseTool,
+        executable: (opts.jsRuntime ?? 'node') as SdkOptions['executable'],
+        pathToClaudeCodeExecutable: resolveClaudeBinaryPath(),
+        abortController,
+        extraArgs: opts.hookSettingsPath ? { settings: opts.hookSettingsPath } : undefined,
+        env: { ...process.env },
+        includeHookEvents: true,
+        // Stop hook: collect pending crons so the launcher can schedule wakeups
+        // and keep the session alive across turns.
+        hooks: {
+            Stop: [{
+                hooks: [async (input) => {
+                    if (input.hook_event_name !== 'Stop') return { continue: false };
+                    const crons = input.session_crons ?? [];
+                    if (crons.length > 0) {
+                        logger.debug(`[claudeRemote] Stop hook: ${crons.length} pending crons`);
+                        opts.onSessionCrons?.(crons.map((c: { id: string; schedule: string; recurring: boolean; prompt: string }) => ({
+                            id: c.id,
+                            schedule: c.schedule,
+                            recurring: c.recurring,
+                            prompt: c.prompt,
+                        })));
+                        return { continue: true };
+                    }
+                    return { continue: false };
+                }],
+            }],
+        },
+    };
 
     // Track thinking state
     let thinking = false;
@@ -206,9 +283,11 @@ export async function claudeRemote(opts: {
         },
     });
 
-    // Start the SDK query
+    // Start the SDK query.
+    // Cast through any because our permissive SDKUserMessage type differs from the
+    // SDK's strict ContentBlockParam[] type. At runtime the formats are compatible.
     const response = query({
-        prompt: messages,
+        prompt: messages as any,
         options: sdkOptions,
     });
 
@@ -258,6 +337,9 @@ export async function claudeRemote(opts: {
         messages.end();
     }
 
+    // Track CronCreate tool calls to build complete cron entries when results arrive.
+    const cronCreateInputs = new Map<string, { schedule: string; recurring: boolean; prompt: string }>();
+
     // Output Loop: processes all SDK response messages.
     // Task-notifications are reported (onReady) but never trigger
     // input-side actions. Normal results call onReady and continue;
@@ -265,7 +347,56 @@ export async function claudeRemote(opts: {
     async function outputLoop(): Promise<void> {
         try {
             for await (const message of response) {
+                // Force-verbose: log every assistant message block type for debugging.
+                if (message.type === 'assistant') {
+                    const ac = (message as any).message?.content;
+                    if (Array.isArray(ac)) {
+                        const names = ac.map((b: any) => `${b.type}:${b.name ?? '?'}`).join(', ');
+                        logger.debug(`[claudeRemote] ASSISTANT blocks: ${names}`);
+                    }
+                }
                 logger.debugLargeJson(`[claudeRemote] Message ${message.type}`, message);
+
+                // Intercept CronCreate tool calls to capture cron metadata for wakeup timers.
+                if (message.type === 'assistant') {
+                    const content = (message as any).message?.content;
+                    if (Array.isArray(content)) {
+                        for (const block of content) {
+                            if (block.type === 'tool_use' && block.name === 'CronCreate') {
+                                const input = block.input as Record<string, unknown> | undefined;
+                                logger.debug(`[claudeRemote] CronCreate tool_use: prompt=${String(input?.prompt ?? '').slice(0, 60)} cron=${input?.cron}`);
+                                if (input?.prompt && input?.cron) {
+                                    cronCreateInputs.set(block.id, {
+                                        schedule: String(input.cron),
+                                        recurring: Boolean(input.recurring),
+                                        prompt: String(input.prompt),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                // Match CronCreate results to their inputs to build complete cron entries.
+                if (message.type === 'user') {
+                    const content = (message as any).message?.content;
+                    if (Array.isArray(content)) {
+                        for (const block of content) {
+                            if (block.type === 'tool_result' && block.tool_use_id && cronCreateInputs.has(block.tool_use_id)) {
+                                const result = block.content as Record<string, unknown> | undefined;
+                                if (result?.id) {
+                                    const input = cronCreateInputs.get(block.tool_use_id)!;
+                                    cronCreateInputs.delete(block.tool_use_id);
+                                    opts.onCronCreated?.({
+                                        id: String(result.id),
+                                        schedule: input.schedule,
+                                        recurring: input.recurring,
+                                        prompt: input.prompt,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // /context local command: intercept system/local_command and deliver
                 // markdown via onContextOutput without letting it reach the App.
@@ -317,7 +448,7 @@ export async function claudeRemote(opts: {
                     // Interstitial: feed result back to Claude, continue draining
                     if (isTaskNotification && !hasTerminalReason) {
                         logger.debug('[claudeRemote] Task-notification (interstitial) — feeding result back to Claude');
-                        const taskResult = (message as SDKResultMessage).result || '';
+                        const taskResult = (message as unknown as SDKResultMessage).result || '';
                         updateThinking(true);
                         if (!messages.done) {
                             messages.push({
@@ -332,7 +463,7 @@ export async function claudeRemote(opts: {
                     // Notify App but leave the input loop alone.
                     if (isTaskNotification && hasTerminalReason) {
                         logger.debug('[claudeRemote] Task-notification (terminal) — reporting, not touching input loop');
-                        opts.onReady(message as SDKResultMessage);
+                        opts.onReady(message as unknown as SDKResultMessage);
                         continue;
                     }
 
@@ -343,7 +474,7 @@ export async function claudeRemote(opts: {
                         opts.onCompletionEvent?.('Compaction completed');
                         isCompactCommand = false;
                     }
-                    opts.onReady(message as SDKResultMessage);
+                    opts.onReady(message as unknown as SDKResultMessage);
 
                     // Opportunistically continue in-process with a pending inbox turn.
                     // Mirrors the interstitial task-notification path: push the inbox

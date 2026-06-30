@@ -153,6 +153,8 @@ export type CreateEnvelopeOptions = {
   turn?: string;
   subagent?: string;
   taskCall?: string;
+  /** Passthrough metadata for the envelope (origin, cronId, etc.). */
+  meta?: Record<string, unknown>;
 };
 
 export function createEnvelope(role: SessionRole, ev: SessionEvent, opts: CreateEnvelopeOptions = {}): SessionEnvelope {
@@ -164,5 +166,6 @@ export function createEnvelope(role: SessionRole, ev: SessionEvent, opts: Create
     ...(opts.subagent ? { subagent: opts.subagent } : {}),
     ...(opts.taskCall ? { taskCall: opts.taskCall } : {}),
     ev,
+    ...(opts.meta ?? {}),
   });
 }

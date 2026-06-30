@@ -67,3 +67,4 @@ progress*.txt
 # Happy local cache
 .happy/
 .memory/
+/node_modules

@@ -37,6 +37,9 @@ export class Session {
     mode: 'local' | 'remote' = 'local';
     thinking: boolean = false;
     
+    /** Pending cron entries from the last Stop hook, keyed by cron id. */
+    pendingCrons?: Map<string, { id: string; schedule: string; recurring: boolean; prompt: string; nextFireAt: number }>;
+
     /** Callbacks to be notified when session ID is found/changed */
     private sessionFoundCallbacks: ((sessionId: string) => void)[] = [];
     
