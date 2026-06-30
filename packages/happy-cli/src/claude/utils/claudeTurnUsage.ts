@@ -17,6 +17,11 @@ export interface ClaudeTurnUsagePayload {
     output_tokens?: number;
     cache_read_input_tokens?: number;
     cache_creation_input_tokens?: number;
+    /** Breakdown of cache creation by TTL tier (from Claude API). */
+    cache_creation?: {
+        ephemeral_5m_input_tokens: number;
+        ephemeral_1h_input_tokens: number;
+    };
     /** Effective prompt size against the model's context window at the end of this turn. */
     context_size?: number;
     /** Max context window for the primary model that ran the turn. */
@@ -72,23 +77,23 @@ export function buildClaudeTurnUsagePayload(
     // cacheRead + cacheCreate + input across the turn balloons way past the model's
     // contextWindow and makes the App's progress gauge read > 100%.
     //
-    // Cursor solves this by treating per-call cacheRead as ≈ accumulated / N (N = round
-    // trips). Claude's `result.num_turns` is exactly that round-trip count. When num_turns
-    // is unavailable (e.g. the synthetic "Not logged in" result is num_turns=1 but with
-    // zero tokens), the formula degenerates safely.
+    // All three fields accumulate identically across N round-trips — including
+    // cacheCreation, which is re-written on every call when the 5m cache tier
+    // refreshes. Dividing the total by N recovers the per-call (≈ actual) context size.
     const n = Math.max(result.num_turns ?? 1, 1);
-    const perCallCacheRead = cacheRead !== undefined ? Math.round(cacheRead / n) : undefined;
-    // cacheCreation is written only by the final API call this turn (cache is written
-    // once and read N times), so it's NOT divided. inputTokens is the freshly-billed
-    // user-side delta and likewise stays as-is.
-    const rawContextSize = (perCallCacheRead ?? 0) + (cacheCreate ?? 0) + (inputTokens ?? 0);
+    const total = (cacheRead ?? 0) + (cacheCreate ?? 0) + (inputTokens ?? 0);
+    const rawContextSize = total > 0 ? Math.round(total / n) : 0;
     const contextSize = rawContextSize > 0 ? rawContextSize : undefined;
+
+    // Extract cache_creation breakdown from flat usage (not available in modelUsage).
+    const cacheCreation = result.usage?.cache_creation;
 
     return {
         input_tokens: inputTokens,
         output_tokens: outputTokens,
         cache_read_input_tokens: cacheRead,
         cache_creation_input_tokens: cacheCreate,
+        cache_creation: cacheCreation,
         context_size: contextSize,
         context_window_tokens: contextWindow,
         model: primary?.name,

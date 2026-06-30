@@ -15,7 +15,11 @@
  *     in that case we brute-force every locally-cached per-session key. AES-GCM
  *     auth tags make wrong-key decryption return null cleanly, so there are no
  *     false positives, and the work scales with the number of locally cached
- *     keys (typically a few hundred at most).
+ *     keys (typically a few hundred at most). The scan does not stop at the
+ *     first hit: if the same dataKey is cached under more than one tag filename
+ *     (a corruption mode), several distinct tags decrypt the same row and the
+ *     recovered tag is ambiguous — we then flag the row `tagReliable: false`
+ *     and withhold the guessed tag so callers won't resume the wrong session.
  */
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
@@ -37,6 +41,15 @@ export interface ServerSessionRow {
   path?: string;
   /** Flavor from decrypted metadata (cursor/claude/etc). */
   flavor?: string;
+  /**
+   * Whether `tag` reliably identifies this session. True when the server
+   * returned the tag directly, or exactly one cached dataKey could decrypt the
+   * row. False when the recovered tag was ambiguous — the same dataKey lives
+   * under more than one tag filename, so we cannot tell which session it is.
+   * Callers that resume by tag (e.g. restart-session fallback) MUST refuse to
+   * act on an unreliable tag to avoid attaching to the wrong session.
+   */
+  tagReliable: boolean;
 }
 
 const SESSION_KEY_PREFIXES = ['cursor', 'claude'] as const;
@@ -72,6 +85,14 @@ interface DecryptedRow {
    * so callers can use it to re-attach to the same session on resume.
    */
   recoveredTag?: string;
+  /**
+   * Whether `recoveredTag` can be trusted to identify the session. True for
+   * legacy rows and for dataKey rows where exactly one distinct tag could
+   * decrypt the bundle. False when two or more different tags decrypt it
+   * (a dataKey duplicated across tag files): the recovered tag is then a guess
+   * and `recoveredTag` is left undefined.
+   */
+  tagReliable: boolean;
 }
 
 /** Per-session key with the tag recovered from its filename (null for the un-suffixed file). */
@@ -135,7 +156,7 @@ function makeMetadataDecryptor(credentials: Credentials) {
 
     if (credentials.encryption.type === 'legacy') {
       const meta = tryDecrypt(bundle, credentials.encryption.secret, 'legacy');
-      return meta ? { metadata: meta } : null;
+      return meta ? { metadata: meta, tagReliable: true } : null;
     }
 
     // dataKey: prefer the per-tag file when the server told us the tag.
@@ -143,25 +164,33 @@ function makeMetadataDecryptor(credentials: Credentials) {
       const keyed = loadByTag(tag);
       if (keyed) {
         const meta = tryDecrypt(bundle, keyed, 'dataKey');
-        if (meta) return { metadata: meta, recoveredTag: tag };
+        if (meta) return { metadata: meta, recoveredTag: tag, tagReliable: true };
       }
     }
 
     // Fallback: server omitted the tag (or its named key file is missing).
     // Brute-force every locally cached per-session key. AES-GCM rejects wrong
-    // keys cleanly, so there are no false positives. When a key matches we
-    // recover the original tag from the file name so the caller can resume the
-    // session under its real tag instead of minting a new one.
+    // keys cleanly, so any key that decrypts genuinely holds the right dataKey.
+    // We must NOT return on first hit: if a dataKey is duplicated across several
+    // tag files (a known corruption mode), more than one *distinct* tag will
+    // decrypt this row and the recovered tag is then ambiguous — picking one
+    // would attach a caller to the wrong session. Scan all, collect distinct
+    // tags, and only trust the result when exactly one tag matched.
+    const matchingTags = new Set<string | null>();
+    let firstMeta: Metadata | null = null;
     for (const candidate of loadAllDataKeys()) {
       const meta = tryDecrypt(bundle, candidate.key, 'dataKey');
       if (meta) {
-        return {
-          metadata: meta,
-          recoveredTag: candidate.tag ?? undefined,
-        };
+        if (!firstMeta) firstMeta = meta;
+        matchingTags.add(candidate.tag);
       }
     }
-    return null;
+    if (!firstMeta) return null;
+    if (matchingTags.size === 1) {
+      const only = [...matchingTags][0];
+      return { metadata: firstMeta, recoveredTag: only ?? undefined, tagReliable: true };
+    }
+    return { metadata: firstMeta, recoveredTag: undefined, tagReliable: false };
   };
 }
 
@@ -193,8 +222,9 @@ export async function listServerSessions(credentials: Credentials): Promise<Serv
     // matching per-session key file — callers (e.g. restart-session fallback)
     // need it to resume the same session instead of forging a new one.
     const tag = serverTag || decoded?.recoveredTag || '';
+    const tagReliable = serverTag ? true : (decoded?.tagReliable ?? false);
     const path = typeof decoded?.metadata.path === 'string' ? decoded.metadata.path : undefined;
     const flavor = typeof decoded?.metadata.flavor === 'string' ? decoded.metadata.flavor : undefined;
-    return { id, tag, active, activeAt, createdAt, updatedAt, path, flavor };
+    return { id, tag, active, activeAt, createdAt, updatedAt, path, flavor, tagReliable };
   });
 }

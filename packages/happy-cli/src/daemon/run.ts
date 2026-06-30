@@ -46,7 +46,7 @@ function isRunningUnderSystemdService(): boolean {
 export const initialMachineMetadata: MachineMetadata = {
   host: os.hostname(),
   platform: os.platform(),
-  happyCliVersion: packageJson.version,
+  happyCliVersion: configuration.currentCliVersion,
   homeDir: os.homedir(),
   happyHomeDir: configuration.happyHomeDir,
   happyLibDir: projectPath()
@@ -462,6 +462,9 @@ export async function startDaemon(): Promise<void> {
       if (s?.happySessionId && s.sessionTag) lastSessionTagBySessionId[s.happySessionId] = s.sessionTag;
       if (s?.happySessionId && s.directory) lastDirectoryBySessionId[s.happySessionId] = s.directory;
       if (s?.happySessionId && s.agent) lastAgentBySessionId[s.happySessionId] = s.agent;
+      // Persist immediately so session maps survive unclean daemon kills (SIGKILL, OOM, etc.)
+      // Each session reports itself every 60s, so this is at most once-per-minute per session.
+      persistNow();
     };
 
     // Spawn a new session (sessionId reserved for future --resume functionality)
@@ -1318,6 +1321,7 @@ export async function startDaemon(): Promise<void> {
       spawnSession,
       stopSession,
       archiveSession,
+      restartSession,
       requestShutdown: () => requestShutdown('happy-app')
     });
 

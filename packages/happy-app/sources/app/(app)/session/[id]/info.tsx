@@ -448,6 +448,14 @@ function SessionInfoContent({ session }: { session: Session }) {
                     )}
                     {sessionStatus.isConnected && (
                         <Item
+                            title={t('sessionInfo.restartSession')}
+                            subtitle={t('sessionInfo.restartSessionSubtitle')}
+                            icon={<Ionicons name="sync-circle-outline" size={29} color="#FF9500" />}
+                            onPress={handleRestartSession}
+                        />
+                    )}
+                    {sessionStatus.isConnected && (
+                        <Item
                             title={t('sessionInfo.archiveSession')}
                             subtitle={t('sessionInfo.archiveSessionSubtitle')}
                             icon={<Ionicons name="archive-outline" size={29} color="#FF3B30" />}

@@ -115,6 +115,8 @@ export class SDKToLogConverter {
                     message: userMsg.message,
                     ...(userMsg.parent_tool_use_id ? { parent_tool_use_id: userMsg.parent_tool_use_id } : {}),
                     ...((sdkMessage as any).isSynthetic === true ? { isSynthetic: true } : {}),
+                    ...((sdkMessage as any).origin != null ? { origin: (sdkMessage as any).origin } : {}),
+                    ...((sdkMessage as any).cronId != null ? { cronId: (sdkMessage as any).cronId } : {}),
                 }
 
                 // Check if this is a tool result and add mode if available

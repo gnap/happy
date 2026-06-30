@@ -184,6 +184,11 @@ export type ReducerState = {
         outputTokens: number;
         cacheCreation: number;
         cacheRead: number;
+        /** Cache creation breakdown by TTL tier from Claude API. */
+        cacheCreationBreakdown?: {
+            ephemeral5m: number;
+            ephemeral1h: number;
+        };
         contextSize: number;
         contextWindowTokens?: number;
         /** /contextUsage snapshot — accurate display value (from turn-end, not estimated). */
@@ -533,9 +538,23 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             hasChanged = true;
                         }
 
-                        // Update tool state based on permission status
+                        // Update tool state based on permission status.
+                        // Approval means the tool is done from the App's
+                        // perspective — the CLI received permission to proceed.
+                        // For tools like AskUserQuestion the permission IS the
+                        // answer; for Bash/Edit the tool-call-end will update
+                        // the state again anyway.
                         if (completed.status === 'approved') {
-                            if (message.tool.state !== 'completed' && message.tool.state !== 'error' && message.tool.state !== 'running') {
+                            // AskUserQuestion is done once the user answers — mark completed immediately.
+                            // Other tools (shell, file edits, etc.) still need to execute after approval
+                            // so they stay in 'running' until the SDK sends their result.
+                            if (completed.tool === 'AskUserQuestion') {
+                                if (message.tool.state !== 'completed' && message.tool.state !== 'error') {
+                                    message.tool.state = 'completed';
+                                    message.tool.completedAt = completed.completedAt || Date.now();
+                                    hasChanged = true;
+                                }
+                            } else if (message.tool.state !== 'completed' && message.tool.state !== 'error' && message.tool.state !== 'running') {
                                 message.tool.state = 'running';
                                 hasChanged = true;
                             }
@@ -1446,6 +1465,10 @@ function processUsageData(state: ReducerState, usage: UsageData, timestamp: numb
             outputTokens: usage.output_tokens,
             cacheCreation: usage.cache_creation_input_tokens || 0,
             cacheRead: usage.cache_read_input_tokens || 0,
+            cacheCreationBreakdown: usage.cache_creation ? {
+                ephemeral5m: usage.cache_creation.ephemeral_5m_input_tokens,
+                ephemeral1h: usage.cache_creation.ephemeral_1h_input_tokens,
+            } : state.latestUsage?.cacheCreationBreakdown,
             contextSize: usage.contextSize ?? ((usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0) + usage.input_tokens),
             contextWindowTokens: usage.context_window_tokens ?? state.latestUsage?.contextWindowTokens,
             timestamp: timestamp

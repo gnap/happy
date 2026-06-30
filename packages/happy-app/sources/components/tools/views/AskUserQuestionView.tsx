@@ -208,6 +208,11 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
     const isRunning = tool.state === 'running';
     const canInteract = isRunning && !isSubmitted;
 
+    // Diagnostic: log when form is non-interactive
+    if (!canInteract && !isSubmitted) {
+        console.warn(`[AskUserQuestion] form non-interactive: tool.state=${tool.state}, permission.status=${tool.permission?.status}, isSubmitted=${isSubmitted}`);
+    }
+
     // Check if all questions have at least one selection
     const allQuestionsAnswered = questions.every((_, qIndex) => {
         const selected = selections.get(qIndex);

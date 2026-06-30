@@ -95,6 +95,11 @@ export const AgentStateSchema = z.object({
     a2aInbox: z.object({
         unreadCount: z.number(),
     }).optional(),
+    /** Pending cron tasks — compact metadata synced from CLI agentState. */
+    crons: z.record(z.string(), z.object({
+        schedule: z.string(),
+        recurring: z.boolean(),
+    })).optional(),
 });
 
 export type AgentState = z.infer<typeof AgentStateSchema>;
@@ -139,6 +144,10 @@ export interface Session {
         outputTokens: number;
         cacheCreation: number;
         cacheRead: number;
+        cacheCreationBreakdown?: {
+            ephemeral5m: number;
+            ephemeral1h: number;
+        };
         contextSize: number;
         contextWindowTokens?: number;
         timestamp: number;

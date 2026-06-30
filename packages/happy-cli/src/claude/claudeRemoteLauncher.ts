@@ -1,6 +1,56 @@
 import { render } from "ink";
 import { Session } from "./session";
 import { MessageBuffer } from "@/ui/ink/messageBuffer";
+
+/** Parse a 5-field cron expression and return the next fire time (ms). */
+function nextCronFire(expr: string, from: number): number {
+    const parts = expr.trim().split(/\s+/);
+    if (parts.length !== 5) return from + 60_000; // fallback: 1min
+    const [min, hour, dom, month, dow] = parts;
+
+    const now = new Date(from);
+
+    // For explicit or partially-explicit one-shot patterns: "52 22 28 6 0",
+    // "8 14 * * *" (ScheduleWakeup), etc. Treat numeric min+hour as an absolute
+    // time today; if it's in the past, fire immediately.
+    const minNum = /^\d+$/.test(min) ? parseInt(min) : -1;
+    const hourNum = /^\d+$/.test(hour) ? parseInt(hour) : -1;
+    if (minNum >= 0 && hourNum >= 0) {
+        const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hourNum, minNum, 0);
+        if (d.getTime() <= from) return from; // already past — fire immediately
+        return d.getTime();
+    }
+
+    for (let off = 0; off < 60; off++) {
+        const d = new Date(from + off * 60_000);
+        const m = d.getMinutes();
+        const h = d.getHours();
+        const D = d.getDate();
+        const M = d.getMonth() + 1;
+        const w = d.getDay();
+
+        if (!fieldMatch(min, m, 0, 59)) continue;
+        if (!fieldMatch(hour, h, 0, 23)) continue;
+        if (!fieldMatch(dom, D, 1, 31)) continue;
+        if (!fieldMatch(month, M, 1, 12)) continue;
+        if (!fieldMatch(dow, w, 0, 6)) continue;
+
+        return d.getTime();
+    }
+    return from + 3600_000; // fallback: 1h
+}
+
+function fieldMatch(pattern: string, value: number, _min: number, _max: number): boolean {
+    if (pattern === '*') return true;
+    const stepMatch = pattern.match(/^\*\/(\d+)$/);
+    if (stepMatch) return value % parseInt(stepMatch[1]) === 0;
+    if (/^\d+$/.test(pattern)) return parseInt(pattern) === value;
+    // comma-separated values
+    for (const p of pattern.split(',')) {
+        if (parseInt(p.trim()) === value) return true;
+    }
+    return false;
+}
 import { RemoteModeDisplay } from "@/ui/ink/RemoteModeDisplay";
 import React from "react";
 import { claudeRemote } from "./claudeRemote";
@@ -10,7 +60,7 @@ import { SDKAssistantMessage, SDKMessage, SDKUserMessage } from "./sdk";
 import { formatClaudeMessageForInk } from "@/ui/messageFormatterInk";
 import { logger } from "@/ui/logger";
 import { SDKToLogConverter } from "./utils/sdkToLogConverter";
-import { PLAN_FAKE_REJECT } from "./sdk/prompts";
+import { PLAN_FAKE_REJECT } from "./constants";
 import { EnhancedMode } from "./loop";
 import { RawJSONLines } from "@/claude/types";
 import { OutgoingMessageQueue } from "./utils/OutgoingMessageQueue";
@@ -124,7 +174,13 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     // When to abort
     session.client.rpcHandlerManager.registerHandler('abort', doAbort); // When abort clicked
     session.client.rpcHandlerManager.registerHandler('switch', doSwitch); // When switch clicked
-    // Removed catch-all stdin handler - now handled by RemoteModeDisplay keyboard handlers
+
+    // When a new A2A inbox message arrives while the session is idle (while-loop blocked
+    // in nextMessage()), the inbox peek in the loop head won't fire until the next message.
+    // Listen here and push a synthetic wakeup so the queue drains immediately.
+    session.client.on('a2aMessageReceived', () => {
+        session.a2aInboxTurn?.peekInbox();
+    });
 
     // Create permission handler
     const permissionHandler = new PermissionHandler(session);
@@ -175,6 +231,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         if (pendingPopEcho) {
             const p = pendingPopEcho;
             pendingPopEcho = null;
+            logger.debug(`[remote] popEcho firing: echoedMessageId=${p.echoedMessageId} text=${p.text.slice(0, 60)}`);
             session.client.sendSessionProtocolMessage(
                 createEnvelope('user', { t: 'text', text: p.text }),
                 { echoedMessageId: p.echoedMessageId }
@@ -206,7 +263,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             if (umessage.message.content && Array.isArray(umessage.message.content)) {
                 for (let c of umessage.message.content) {
                     if (c.type === 'tool_use') {
-                        logger.debug('[remote]: detected tool use ' + c.id! + ' parent: ' + umessage.parent_tool_use_id);
+                        logger.debug('[remote] V2 detected tool use ' + c.name + ' ' + c.id! + ' parent: ' + umessage.parent_tool_use_id);
                         ongoingToolCalls.set(c.id!, { parentToolCallId: umessage.parent_tool_use_id ?? null });
                         if (c.name === 'Skill') {
                             logger.debug('[remote] Skill tool_use detected: ' + JSON.stringify(c.input).slice(0, 100));
@@ -376,6 +433,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         // actually changes (e.g., new session started or /clear command used).
         // See: https://github.com/anthropics/happy-cli/issues/143
         let previousSessionId: string | null = null;
+        let cronLoopPromise: Promise<void> | null = null;
         while (!exitReason) {
             // Before each turn, peek inbox: if there are unread messages,
             // push an isolated inbox turn to the message queue.
@@ -399,8 +457,55 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             const controller = new AbortController();
             abortController = controller;
             abortFuture = new Future<void>();
+            // Start the independent cron producer if not already running.
+            if (!cronLoopPromise) {
+                cronLoopPromise = (async () => {
+                    const sig = controller.signal;
+                    while (!sig.aborted) {
+                        const crons = session.pendingCrons
+                            ? Array.from(session.pendingCrons.values())
+                            : [];
+                        if (crons.length === 0) {
+                            await new Promise<void>(r => {
+                                const t = setTimeout(r, 5000);
+                                sig.addEventListener('abort', () => { clearTimeout(t); r(); }, { once: true });
+                            });
+                            continue;
+                        }
+                        const now = Date.now();
+                        for (const c of crons) c.nextFireAt = nextCronFire(c.schedule, now);
+                        const soonest = crons.reduce((a, b) => a.nextFireAt < b.nextFireAt ? a : b);
+                        if (soonest.nextFireAt <= now) {
+                            session.pendingCrons?.delete(soonest.id);
+                            if (!soonest.recurring) {
+                                if (!session.firedCronIds) session.firedCronIds = new Set();
+                                session.firedCronIds.add(soonest.id);
+                            }
+                            // Sync compact cron list to agentState after removal
+                            const remainingCrons: Record<string, { schedule: string; recurring: boolean }> = {};
+                            for (const c of session.pendingCrons?.values() ?? []) {
+                                remainingCrons[c.id] = { schedule: c.schedule, recurring: c.recurring };
+                            }
+                            session.client.updateAgentState(s => ({ ...s, crons: remainingCrons }));
+                            logger.debug(`[remote] cron injecting: ${soonest.id} "${soonest.prompt.slice(0, 60)}"`);
+                            session.queue.push(soonest.prompt,
+                                { permissionMode: 'default', model: null as string | null, fallbackModel: null as string | null } as EnhancedMode,
+                                { origin: 'auto-continuation', cronId: soonest.id });
+                        } else {
+                            const delay = soonest.nextFireAt - now;
+                            await new Promise<void>(r => {
+                                const t = setTimeout(r, delay);
+                                sig.addEventListener('abort', () => { clearTimeout(t); r(); }, { once: true });
+                            });
+                        }
+                    }
+                })();
+            }
             let modeHash: string | null = null;
             let mode: EnhancedMode | null = null;
+            /** Set by onBeforeStop just before stopSignal resolves; prevents nextMessage
+             *  from consuming another queue item that would then be lost by the inputLoop. */
+            let turnStopping = false;
             wasInboxTurn = false;
             wasCompactTurn = false;
             turnSucceeded = false;
@@ -412,6 +517,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     mcpServers: session.mcpServers,
                     hookSettingsPath: session.hookSettingsPath,
                     jsRuntime: session.jsRuntime,
+                    signal: controller.signal,
                     canCallTool: permissionHandler.handleToolCall,
                     isAborted: (toolCallId: string) => {
                         return permissionHandler.isAborted(toolCallId);
@@ -437,15 +543,27 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                     session.claudeTurnActiveRef.current = true;
                                 }
                                 modeHash = p.hash ?? null;
-                                mode = p.mode;
+                                // Inbox turns must not change the model — use the current
+                                // session mode so the agent keeps running on the same model.
+                                const inboxMode = mode ?? p.mode;
+                                mode = inboxMode;
                                 session.client.suppressNextMapperUserText();
                                 session.onThinkingChange(true);
-                                return { message: inboxPrompt, mode: p.mode };
+                                return { message: inboxPrompt, mode: inboxMode };
                             }
                             return p;
                         }
 
-                        let msg = await session.queue.waitForMessagesAndGetAsString(controller.signal);
+                        const msg = await session.queue.waitForMessagesAndGetAsString(controller.signal);
+
+                        // If the turn is stopping (stopSignal about to resolve), the inputLoop
+                        // will discard our return value. Stash the message in pending so
+                        // the next claudeRemote() call picks it up rather than losing it.
+                        if (msg && turnStopping) {
+                            logger.debug(`[remote] nextMessage stashing msg to pending (turn stopping): msgHash=${msg.hash?.slice(0,8)}`);
+                            pending = { message: msg.message, mode: msg.mode, meta: msg.meta, hash: msg.hash };
+                            return null;
+                        }
 
                         // Echo the app's messageId back via session protocol so the App
                         // can clear its outbox. The envelope id becomes the server localId,
@@ -478,8 +596,11 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                     session.claudeTurnActiveRef.current = true;
                                 }
                                 modeHash = msg.hash;
-                                mode = msg.mode;
-                                permissionHandler.handleModeChange(mode.permissionMode);
+                                // Inbox turns must not change the model — use the current
+                                // session mode so the agent keeps running on the same model.
+                                const inboxMode = mode ?? msg.mode;
+                                mode = inboxMode;
+                                permissionHandler.handleModeChange(inboxMode.permissionMode);
                                 logger.debug('[remote]: processing A2A inbox turn');
                                 // Suppress the inbox notification prompt from appearing as a
                                 // user bubble in the App — it is an internal CLI-injected turn.
@@ -488,34 +609,57 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 session.onThinkingChange(true);
                                 return {
                                     message: inboxPrompt,
-                                    mode: msg.mode,
+                                    mode: inboxMode,
                                 };
                             }
                             wasInboxTurn = false;
                             if ((modeHash && msg.hash !== modeHash) || msg.isolate) {
                                 logger.info(`[remote] nextMessage returning null (mode changed): modeHash=${modeHash?.slice(0,8)} msgHash=${msg.hash?.slice(0,8)} isolate=${msg.isolate}`);
-                                pending = { message: msg.message, mode: msg.mode, meta: msg.meta };
+                                pending = { message: msg.message, mode: msg.mode, meta: msg.meta, hash: msg.hash };
+                                return null;
+                            }
+                            // When a permission request is pending (e.g. AskUserQuestion),
+                            // the SDK is blocked on canCallTool.  The input loop pushes
+                            // messages into the SDK's input stream, but the SDK won't
+                            // consume them until canCallTool resolves.  If the turn fails,
+                            // those messages are permanently lost.  Defer to the next turn
+                            // so they are safely re-processed via the pending path above.
+                            if (permissionHandler.hasPendingRequests()) {
+                                logger.debug('[remote] nextMessage deferring message (permission request pending)');
+                                pending = { message: msg.message, mode: msg.mode, meta: msg.meta, hash: msg.hash };
                                 return null;
                             }
                             if (session.claudeTurnActiveRef) {
                                 session.claudeTurnActiveRef.current = true;
                             }
                             modeHash = msg.hash;
-                            logger.info(`[remote] nextMessage kept in-process: msgHash=${msg.hash?.slice(0,8)}`);
+                            logger.info(`[remote] nextMessage kept in-process: msgHash=${msg.hash?.slice(0,8)} appMessageId=${(msg.meta as any)?.appMessageId ?? 'none'} origin=${(msg.meta as any)?.origin ?? 'none'}`);
                             mode = msg.mode;
                             permissionHandler.handleModeChange(mode.permissionMode);
                             // Signal thinking immediately on message receipt, before SDK is invoked
                             session.onThinkingChange(true);
-                            // Save for pop echo on first SDK response. Deferring until
-                            // Claude starts processing shows green check on App.
+                            // Cron/auto-continuation: send user message envelope at dequeue time.
+                            // No echoedMessageId — there's no App outbox to clear.
+                            if ((msg.meta as any)?.origin === 'auto-continuation') {
+                                session.client.sendSessionProtocolMessage(
+                                    createEnvelope('user', { t: 'text', text: msg.message }, {
+                                        meta: { origin: 'auto-continuation', cronId: (msg.meta as any).cronId },
+                                    }),
+                                );
+                                logger.debug(`[remote] cron envelope sent for ${(msg.meta as any).cronId}`);
+                            }
+                            // Pop echo for App messages: deferred to first SDK response so the
+                            // App sees the green check when Claude starts processing.
                             const appMessageId = (msg.meta as any)?.appMessageId as string | undefined;
                             if (appMessageId) {
                                 pendingPopEcho = { echoedMessageId: appMessageId, text: msg.message };
+                                logger.debug(`[remote] popEcho pending for appMessageId=${appMessageId}`);
                             }
                             const wrapperMeta = msg.meta as { meta?: unknown; files?: unknown[] } | undefined;
                             return {
                                 message: msg.message,
                                 mode: msg.mode,
+                                meta: msg.meta,
                                 files: wrapperMeta?.files as any[] | undefined,
                             }
                         }
@@ -613,7 +757,55 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         logger.debug(`[remote]: context via control_request: ${usage.totalTokens} / ${usage.maxTokens} (${Math.round((usage.totalTokens / usage.maxTokens) * 100)}%)`);
                     },
                     onContextOutput: undefined,
-                    signal: abortController.signal,
+                    onSessionCrons: (crons) => {
+                        if (!session.pendingCrons) {
+                            session.pendingCrons = new Map();
+                        }
+                        if (!session.firedCronIds) {
+                            session.firedCronIds = new Set();
+                        }
+                        for (const c of crons) {
+                            // Skip one-shot crons that already fired — the Stop hook
+                            // re-reports them from Claude's in-memory state.
+                            if (session.firedCronIds.has(c.id)) continue;
+                            session.pendingCrons.set(c.id, {
+                                id: c.id,
+                                schedule: c.schedule,
+                                recurring: c.recurring,
+                                prompt: c.prompt,
+                                nextFireAt: 0, // computed by nextCronFire on each loop iteration
+                            });
+                        }
+                        // Sync compact cron list to agentState so the App can show
+                        // a badge / count in the session list without downloading full prompts.
+                        const cronState: Record<string, { schedule: string; recurring: boolean }> = {};
+                        for (const c of crons) {
+                            if (session.firedCronIds?.has(c.id)) continue;
+                            cronState[c.id] = { schedule: c.schedule, recurring: c.recurring };
+                        }
+                        session.client.updateAgentState(s => ({ ...s, crons: cronState }));
+                        logger.debug(`[remote] stored ${crons.length} crons from Stop hook`);
+                    },
+                    onBeforeStop: () => { turnStopping = true; },
+                    tryConsumeInboxTurn: () => {
+                        const inboxHooks = session.a2aInboxTurn;
+                        if (!inboxHooks) return null;
+                        const claimed = session.queue.tryConsumeIsolated();
+                        if (!claimed || !inboxHooks.isInboxTurnMeta(claimed.meta)) return null;
+                        inboxHooks.setInboxTurnActive(true);
+                        const inboxPrompt = inboxHooks.prepareInboxTurnPrompt();
+                        if (!inboxPrompt) {
+                            inboxHooks.setInboxTurnActive(false);
+                            return null;
+                        }
+                        wasInboxTurn = true;
+                        if (session.claudeTurnActiveRef) {
+                            session.claudeTurnActiveRef.current = true;
+                        }
+                        session.client.suppressNextMapperUserText();
+                        logger.debug('[remote]: processing A2A inbox turn in-process');
+                        return inboxPrompt;
+                    },
                 });
                 
                 // Consume one-time Claude flags after spawn
@@ -691,7 +883,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         }
         messageBuffer.clear();
 
-        // Resolve abort future
+        // Stop the cron loop and resolve abort future
+        cronLoopPromise.catch(() => {});
         if (abortFuture) { // Just in case of error
             abortFuture.resolve(undefined);
         }

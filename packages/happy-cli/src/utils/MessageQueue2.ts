@@ -355,6 +355,32 @@ export class MessageQueue2<T> {
     }
 
     /**
+     * Synchronously consume the front of the queue if it is an isolated message.
+     * Returns null without blocking if the queue is empty or the front is not isolated.
+     * Used by outputLoop to claim a pending inbox turn immediately after a result so
+     * it can be fed to the SDK in-process rather than requiring a new --resume spawn.
+     */
+    tryConsumeIsolated(): { message: string; mode: T; hash: string; meta?: unknown } | null {
+        if (this.queue.length === 0 || !this.queue[0].isolate) {
+            return null;
+        }
+        const first = this.queue[0];
+        const item = this.queue.shift()!;
+        const messages = [item.message];
+        // Coalesce consecutive isolated inbox turns (same pattern as collectBatch)
+        if (isA2AInboxTurnMeta(first.meta)) {
+            while (this.queue.length > 0
+                && this.queue[0].isolate
+                && this.queue[0].modeHash === first.modeHash
+                && isA2AInboxTurnMeta(this.queue[0].meta)) {
+                messages.push(this.queue.shift()!.message);
+            }
+        }
+        logger.debug(`[MessageQueue2] tryConsumeIsolated: consumed ${messages.length} inbox turn(s)`);
+        return { message: messages.join('\n'), mode: item.mode, hash: item.modeHash, meta: item.meta };
+    }
+
+    /**
      * Wait for messages to arrive
      */
     private waitForMessages(abortSignal?: AbortSignal): Promise<boolean> {

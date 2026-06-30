@@ -540,7 +540,16 @@ export class ApiSessionClient extends EventEmitter {
             this.rpcHandlerManager.onSocketConnect(this.socket);
             // Sync CLI version and git info (projectPath, branchName, isWorktree) on every connect.
             this.updateMetadata((metadata) => {
-                const git = detectWorktree(metadata.path ?? process.cwd());
+                // Detect git info from the process's real cwd — the daemon pins
+                // it to the session directory at spawn (run.ts `cwd: directory`)
+                // and it never changes for the life of the process. Do NOT derive
+                // it from metadata.path: when resuming an existing server session
+                // the server pushes back its stored (possibly stale) metadata, so
+                // metadata.path can still point at the session's previous directory.
+                // Using it would stamp the wrong branch/worktree — e.g. a session
+                // relocated to a new repo kept reporting its old worktree branch
+                // even though the process was already running in the new directory.
+                const git = detectWorktree(process.cwd());
                 // Strip previous git fields so stale values don't persist.
                 const { projectPath: _pp, branchName: _bn, isWorktree: _iw, worktreeBranch: _wb, ...rest } = metadata as any;
                 return {
@@ -1034,6 +1043,9 @@ export class ApiSessionClient extends EventEmitter {
     recordA2AMessage(message: A2AInboxMessage): void {
         this.a2aInbox = upsertA2AInboxMessage(this.a2aInbox, message);
         this.scheduleA2AInboxAgentStateSync();
+        // Notify listeners so inbox turns can be scheduled even when the session
+        // is idle (i.e. the launcher while-loop is blocked in nextMessage()).
+        this.emit('a2aMessageReceived');
     }
 
     markA2AMessageRead(id: string): void {
