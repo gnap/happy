@@ -1,8 +1,6 @@
 import { render } from "ink";
 import { Session } from "./session";
 import { MessageBuffer } from "@/ui/ink/messageBuffer";
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 
 /** Parse a 5-field cron expression and return the next fire time (ms). */
 function nextCronFire(expr: string, from: number): number {
@@ -11,7 +9,6 @@ function nextCronFire(expr: string, from: number): number {
     const [min, hour, dom, month, dow] = parts;
 
     const now = new Date(from);
-    const candidates: Date[] = [];
 
     // For one-shot (explicit fields like "52 22 28 6 0"):
     if (/^\d+$/.test(min) && /^\d+$/.test(hour) && /^\d+$/.test(dom) && /^\d+$/.test(month)) {
@@ -38,33 +35,6 @@ function nextCronFire(expr: string, from: number): number {
         return d.getTime();
     }
     return from + 3600_000; // fallback: 1h
-}
-
-/** Read .claude/scheduled_tasks.json from the session's project directory. */
-function readScheduledTasks(cwd: string): Array<{ id: string; schedule: string; recurring: boolean; prompt: string; nextFireAt: number }> {
-    try {
-        const file = join(cwd, '.claude', 'scheduled_tasks.json');
-        if (!existsSync(file)) return [];
-        const json = JSON.parse(readFileSync(file, 'utf8'));
-        return (json.tasks ?? []).map((t: any) => ({
-            id: t.id,
-            schedule: t.cron,
-            recurring: t.recurring ?? false,
-            prompt: t.prompt,
-            nextFireAt: 0,
-        }));
-    } catch { return []; }
-}
-
-/** Remove a fired cron task from .claude/scheduled_tasks.json. */
-function removeScheduledTask(cwd: string, id: string, recurring: boolean) {
-    try {
-        const file = join(cwd, '.claude', 'scheduled_tasks.json');
-        if (!existsSync(file)) return;
-        const json = JSON.parse(readFileSync(file, 'utf8'));
-        json.tasks = (json.tasks ?? []).filter((t: any) => t.id !== id || recurring);
-        writeFileSync(file, JSON.stringify(json, null, 2));
-    } catch { /* best effort */ }
 }
 
 function fieldMatch(pattern: string, value: number, _min: number, _max: number): boolean {
@@ -237,8 +207,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     let planModeToolCalls = new Set<string>();
     let ongoingToolCalls = new Map<string, { parentToolCallId: string | null }>();
     let pendingSkillSuppress = false;
-    // Non-durable CronCreate tracking: match tool_use input with tool_result output.
-    const cronCreateInputs = new Map<string, { schedule: string; recurring: boolean; prompt: string }>();
 
     // Pop echo: sent once on first SDK message, after Claude starts processing.
     let pendingPopEcho: { echoedMessageId: string; text: string } | null = null;
@@ -293,18 +261,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     if (c.type === 'tool_use') {
                         logger.debug('[remote] V2 detected tool use ' + c.name + ' ' + c.id! + ' parent: ' + umessage.parent_tool_use_id);
                         ongoingToolCalls.set(c.id!, { parentToolCallId: umessage.parent_tool_use_id ?? null });
-                        if (c.name === 'CronCreate') {
-                            const input = c.input as Record<string, unknown> | undefined;
-                            logger.debug(`[remote] CronCreate tool_use: cron=${input?.cron} prompt=${String(input?.prompt ?? '').slice(0, 60)}`);
-                            // Track for matching with tool_result below.
-                            if (input?.prompt && input?.cron) {
-                                cronCreateInputs.set(c.id!, {
-                                    schedule: String(input.cron),
-                                    recurring: Boolean(input.recurring),
-                                    prompt: String(input.prompt),
-                                });
-                            }
-                        }
                         if (c.name === 'Skill') {
                             logger.debug('[remote] Skill tool_use detected: ' + JSON.stringify(c.input).slice(0, 100));
                             pendingSkillSuppress = true;
@@ -319,24 +275,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                 for (let c of umessage.message.content) {
                     if (c.type === 'tool_result' && c.tool_use_id) {
                         ongoingToolCalls.delete(c.tool_use_id);
-
-                        // Match CronCreate results to build complete cron entries.
-                        if (cronCreateInputs.has(c.tool_use_id)) {
-                            const input = cronCreateInputs.get(c.tool_use_id)!;
-                            cronCreateInputs.delete(c.tool_use_id);
-                            const result = (c as any).content as Record<string, unknown> | undefined;
-                            if (result?.id) {
-                                if (!session.pendingCrons) session.pendingCrons = new Map();
-                                session.pendingCrons.set(String(result.id), {
-                                    id: String(result.id),
-                                    schedule: input.schedule,
-                                    recurring: input.recurring,
-                                    prompt: input.prompt,
-                                    nextFireAt: 0,
-                                });
-                                logger.debug(`[remote] CronCreate captured: ${result.id} "${input.prompt.slice(0, 60)}"`);
-                            }
-                        }
 
                         // When tool result received, release any delayed messages for this tool call
                         messageQueue.releaseToolCall(c.tool_use_id);
@@ -758,17 +696,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         logger.debug(`[remote]: context via control_request: ${usage.totalTokens} / ${usage.maxTokens} (${Math.round((usage.totalTokens / usage.maxTokens) * 100)}%)`);
                     },
                     onContextOutput: undefined,
-                    onCronCreated: (cron) => {
-                        if (!session.pendingCrons) session.pendingCrons = new Map();
-                        session.pendingCrons.set(cron.id, {
-                            id: cron.id,
-                            schedule: cron.schedule,
-                            recurring: cron.recurring,
-                            prompt: cron.prompt,
-                            nextFireAt: 0,
-                        });
-                        logger.debug(`[remote] CronCreate captured: ${cron.id} "${cron.prompt.slice(0, 60)}"`);
-                    },
                     onSessionCrons: (crons) => {
                         if (!session.pendingCrons) {
                             session.pendingCrons = new Map();
@@ -871,24 +798,19 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                 modeHash = null;
                 mode = null;
 
-                // --- Cron wakeup: merge file-based + message-intercepted crons ---
+                // --- Cron wakeup: crons reported by Stop hook ---
                 if (!exitReason) {
-                    // Path 1: durable recurring crons from .claude/scheduled_tasks.json
-                    const fileCrons = readScheduledTasks(session.path);
-                    // Path 2: non-durable or one-shot crons intercepted from SDK stream
-                    const interceptedCrons = session.pendingCrons
+                    const crons = session.pendingCrons
                         ? Array.from(session.pendingCrons.values())
                         : [];
-                    const allCrons = [...fileCrons, ...interceptedCrons];
-                    if (allCrons.length > 0) {
+                    if (crons.length > 0) {
                         const now = Date.now();
-                        for (const c of allCrons) {
+                        for (const c of crons) {
                             c.nextFireAt = nextCronFire(c.schedule, now);
                         }
-                        const soonest = allCrons.reduce((a, b) => a.nextFireAt < b.nextFireAt ? a : b);
+                        const soonest = crons.reduce((a, b) => a.nextFireAt < b.nextFireAt ? a : b);
                         if (soonest.nextFireAt <= now) {
                             // Cron is due — inject its prompt as a new turn.
-                            removeScheduledTask(session.path, soonest.id, soonest.recurring);
                             session.pendingCrons?.delete(soonest.id);
                             // Mark one-shot cron as fired so the Stop hook won't re-add it.
                             if (!soonest.recurring) {
