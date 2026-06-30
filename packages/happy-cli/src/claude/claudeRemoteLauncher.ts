@@ -641,6 +641,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             return {
                                 message: msg.message,
                                 mode: msg.mode,
+                                meta: msg.meta,
                                 files: wrapperMeta?.files as any[] | undefined,
                             }
                         }

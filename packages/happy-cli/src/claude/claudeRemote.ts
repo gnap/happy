@@ -71,7 +71,7 @@ export async function claudeRemote(opts: {
     jsRuntime?: JsRuntime,
 
     // Dynamic parameters
-    nextMessage: () => Promise<{ message: string, mode: EnhancedMode } | null>,
+    nextMessage: () => Promise<{ message: string, mode: EnhancedMode, meta?: unknown } | null>,
     onReady: (result: SDKResultMessage) => void,
     /** Called with accurate context size (and optional breakdown) from the running process after each normal turn. */
     onContextUsage?: (usage: { totalTokens: number; maxTokens: number; breakdown?: { systemPrompt: number; systemTools: number; customAgents: number; skills: number; messages: number; freeSpace: number } }) => void,
@@ -321,7 +321,8 @@ export async function claudeRemote(opts: {
             mode = next.mode;
             updateThinking(true);
             const nextFiles = (next as any).files;
-            messages.push({
+            const meta = next.meta as Record<string, unknown> | undefined;
+            const msg: Record<string, unknown> = {
                 type: 'user',
                 message: {
                     role: 'user',
@@ -330,7 +331,14 @@ export async function claudeRemote(opts: {
                            ...nextFiles.map((f: any) => ({ type: 'image', source: { type: 'base64', media_type: f.mimeType, data: f.data } }))]
                         : next.message,
                 },
-            });
+            };
+            // Plumb cron metadata through so the SDK and the session protocol
+            // mapper recognise auto-continuation messages.
+            if (meta?.origin === 'auto-continuation') {
+                msg.origin = { kind: 'auto-continuation' };
+                if (meta.cronId) (msg as any).cronId = meta.cronId;
+            }
+            messages.push(msg as any);
         }
         messages.end();
     }
