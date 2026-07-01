@@ -746,15 +746,17 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             session.client.sendSessionEvent({ type: 'message', message: msg });
                         } else {
                             session.client.closeClaudeSessionTurn('completed', extras);
-                            // Update metadata's contextUsage.model with the real provider-reported
-                            // model name (cheap — just captured from assistant messages). Only
-                            // patches into existing contextUsage so we don't create a dummy entry
-                            // with zero tokens that would show a broken 0% progress bar in the App.
+                            // Update metadata's contextUsage.model — the unified source for
+                            // the App's session header model display. Always writes, using
+                            // zero tokens as placeholder when no /context fetch has run yet.
                             if (lastRealModel) {
-                                void session.client.updateMetadata((m) => {
-                                    if (!m.contextUsage) return m;
-                                    return { ...m, contextUsage: { ...m.contextUsage, model: lastRealModel } };
-                                });
+                                void session.client.updateMetadata((m) => ({
+                                    ...m,
+                                    contextUsage: {
+                                        ...(m.contextUsage ?? { currentTokens: 0, maxTokens: 0, pct: 0, fetchedAt: Date.now() }),
+                                        model: lastRealModel,
+                                    },
+                                }));
                             }
                         }
                         if (session.claudeTurnActiveRef) {
