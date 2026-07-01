@@ -103,6 +103,8 @@ export interface ClientToServerEvents {
       total: number
       [key: string]: number
     }
+    /** Real provider-reported model (from the assistant message), best-effort. */
+    model?: string
   }, callback?: (ack: { success?: boolean; error?: string }) => void) => void
 }
 

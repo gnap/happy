@@ -1688,7 +1688,11 @@ export class ApiSessionClient extends EventEmitter {
                 total: costs.total,
                 input: costs.input,
                 output: costs.output
-            }
+            },
+            // Real provider-reported model (from the assistant message itself), for
+            // debugging/attribution. Best-effort: current server schema doesn't persist
+            // this field yet, but the CLI should still report it.
+            ...(model ? { model } : {}),
         }
         logger.debugLargeJson('[SOCKET] Sending usage data:', usageReport)
         this.socket.emit('usage-report', usageReport, (ack: { success?: boolean; error?: string }) => {
