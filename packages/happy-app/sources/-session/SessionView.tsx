@@ -369,6 +369,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             onPermissionModeChange={updatePermissionMode}
             availableModes={availableModes}
             modelMode={modelMode}
+            realModelName={sessionUsage?.model}
             availableModels={availableModels}
             onModelModeChange={updateModelMode}
             maxMode={maxMode}

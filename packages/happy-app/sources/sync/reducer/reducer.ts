@@ -191,6 +191,8 @@ export type ReducerState = {
         };
         contextSize: number;
         contextWindowTokens?: number;
+        /** Real provider-reported model from the assistant message (e.g. "claude-sonnet-5"). */
+        model?: string;
         /** /contextUsage snapshot — accurate display value (from turn-end, not estimated). */
         contextPct?: number;
         contextModel?: string;
@@ -1471,6 +1473,9 @@ function processUsageData(state: ReducerState, usage: UsageData, timestamp: numb
             } : state.latestUsage?.cacheCreationBreakdown,
             contextSize: usage.contextSize ?? ((usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0) + usage.input_tokens),
             contextWindowTokens: usage.context_window_tokens ?? state.latestUsage?.contextWindowTokens,
+            // Carry forward the real provider-reported model from prior turns
+            // so it persists until a new turn reports a different model.
+            model: usage.model ?? state.latestUsage?.model,
             timestamp: timestamp
         };
     }

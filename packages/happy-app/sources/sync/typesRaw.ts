@@ -23,6 +23,9 @@ const usageDataSchema = z.object({
         ephemeral_5m_input_tokens: z.number(),
         ephemeral_1h_input_tokens: z.number(),
     }).optional(),
+    // Real provider-reported model from assistant message (e.g. "claude-sonnet-5").
+    // Unlike the configured model code, this reflects what the provider actually used.
+    model: z.string().optional(),
 });
 
 export type UsageData = z.infer<typeof usageDataSchema>;
@@ -145,6 +148,8 @@ const sessionTurnEndEventSchema = z.object({
             ephemeral_5m_input_tokens: z.number(),
             ephemeral_1h_input_tokens: z.number(),
         }).optional(),
+        // Real provider-reported model from assistant message (e.g. "claude-sonnet-5").
+        model: z.string().optional(),
     }).optional(),
     // /context snapshot from backgroundContextFetcher — authoritative context usage
     contextUsage: z.object({
@@ -711,6 +716,7 @@ function normalizeSessionEnvelope(
             || contextSize !== undefined
             || contextWindowTokens !== undefined
         );
+        const rawModel = (rawUsage as any)?.model as string | undefined;
         const normalizedUsage: UsageData | undefined = hasUsage
             ? {
                 input_tokens: inputTokens ?? 0,
@@ -723,6 +729,7 @@ function normalizeSessionEnvelope(
                 contextSize,
                 context_window_tokens: contextWindowTokens,
                 cache_creation: (rawUsage as any)?.cache_creation,
+                ...(rawModel ? { model: rawModel } : {}),
             }
             : undefined;
         return {

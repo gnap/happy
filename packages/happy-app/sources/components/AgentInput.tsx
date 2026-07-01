@@ -42,6 +42,8 @@ interface AgentInputProps {
     modelMode?: ModelMode | null;
     availableModels?: ModelMode[];
     onModelModeChange?: (mode: ModelMode) => void;
+    /** Real provider-reported model name from the last turn (e.g. "claude-sonnet-5"), takes priority over modelMode.name for display. */
+    realModelName?: string;
     thinkingLevel?: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null;
     onThinkingLevelChange?: (level: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null) => void;
     maxMode?: boolean;
@@ -1139,13 +1141,13 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                     {withSandboxSuffix(displayPermissionMode.name, permissionModeKey)}
                                 </Text>
                             )}
-                            {props.modelMode && (
+                            {(props.realModelName || props.modelMode) && (
                                 <Text style={{
                                     fontSize: 11,
                                     color: theme.colors.textSecondary,
                                     ...Typography.default()
                                 }}>
-                                    {props.modelMode.name}
+                                    {props.realModelName || props.modelMode!.name}
                                 </Text>
                             )}
                         </View>
