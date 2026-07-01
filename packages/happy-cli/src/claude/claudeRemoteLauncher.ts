@@ -148,6 +148,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
 
     // Handle abort
     let exitReason: 'switch' | 'exit' | null = null;
+    let cronLoopPromise: Promise<void> | null = null;
     let abortController: AbortController | null = null;
     let abortFuture: Future<void> | null = null;
 
@@ -210,6 +211,13 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     let planModeToolCalls = new Set<string>();
     let ongoingToolCalls = new Map<string, { parentToolCallId: string | null }>();
     let pendingSkillSuppress = false;
+    // Real model name as reported by the assistant message itself (e.g. "claude-sonnet-5").
+    // Unlike the configured model code (ANTHROPIC_MODEL / ANTHROPIC_DEFAULT_*_MODEL, which can
+    // be any operator-chosen string), this reflects what the provider actually routed the turn to.
+    // Seeded from metadata.contextUsage.model (persisted by a prior process) so a freshly
+    // resumed/restarted process doesn't fall back to the configured model code for the turns
+    // before its first real assistant message arrives.
+    let lastRealModel: string | undefined = session.client.getMetadata()?.contextUsage?.model;
 
     // Pop echo: sent once on first SDK message, after Claude starts processing.
     let pendingPopEcho: { echoedMessageId: string; text: string } | null = null;
@@ -225,6 +233,19 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             ((message as SDKAssistantMessage).message as any).model === '<synthetic>'
         ) {
             return;
+        }
+
+        // Track the real provider-reported model from assistant messages (e.g. "claude-sonnet-5").
+        // This is the authoritative model name — unlike the configured model code from
+        // system init / ANTHROPIC_DEFAULT_*_MODEL, which is just an operator-chosen string.
+        // Only track the main agent's model (parent_tool_use_id == null) — subagent Task calls
+        // (e.g. Agent tool_use with model: "sonnet") can run a different model than the main
+        // agent, and we don't want their model to override what the App shows for the session.
+        if (message.type === 'assistant' && (message as SDKAssistantMessage).parent_tool_use_id == null) {
+            const realModel = ((message as SDKAssistantMessage).message as any)?.model;
+            if (typeof realModel === 'string' && realModel.length > 0) {
+                lastRealModel = realModel;
+            }
         }
 
         // Send pop echo on first SDK message — Claude has started processing.
@@ -433,7 +454,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         // actually changes (e.g., new session started or /clear command used).
         // See: https://github.com/anthropics/happy-cli/issues/143
         let previousSessionId: string | null = null;
-        let cronLoopPromise: Promise<void> | null = null;
         while (!exitReason) {
             // Before each turn, peek inbox: if there are unread messages,
             // push an isolated inbox turn to the message queue.
@@ -706,7 +726,10 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         turnSucceeded = !isError;
                         const usage = buildClaudeTurnUsagePayload(result);
                         const extras: Record<string, unknown> = {};
-                        if (usage) extras.usage = usage;
+                        // Prefer the real provider-reported model (from assistant messages) over
+                        // modelUsage's key, which is just the configured model code and can be
+                        // any operator-chosen string (e.g. a custom ANTHROPIC_DEFAULT_*_MODEL).
+                        if (usage) extras.usage = lastRealModel ? { ...usage, model: lastRealModel } : usage;
                         if (typeof result.total_cost_usd === 'number') extras.costUsd = result.total_cost_usd;
                         if (typeof result.duration_ms === 'number') extras.durationMs = result.duration_ms;
                         // Attach contextUsage — use last known accurate value from get_context_usage.
@@ -723,6 +746,18 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             session.client.sendSessionEvent({ type: 'message', message: msg });
                         } else {
                             session.client.closeClaudeSessionTurn('completed', extras);
+                            // Update metadata's contextUsage.model — the unified source for
+                            // the App's session header model display. Always writes, using
+                            // zero tokens as placeholder when no /context fetch has run yet.
+                            if (lastRealModel) {
+                                void session.client.updateMetadata((m) => ({
+                                    ...m,
+                                    contextUsage: {
+                                        ...(m.contextUsage ?? { currentTokens: 0, maxTokens: 0, pct: 0, fetchedAt: Date.now() }),
+                                        model: lastRealModel,
+                                    },
+                                }));
+                            }
                         }
                         if (session.claudeTurnActiveRef) {
                             session.claudeTurnActiveRef.current = false;
@@ -884,7 +919,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         messageBuffer.clear();
 
         // Stop the cron loop and resolve abort future
-        cronLoopPromise.catch(() => {});
+        cronLoopPromise?.catch(() => {});
         if (abortFuture) { // Just in case of error
             abortFuture.resolve(undefined);
         }

@@ -150,6 +150,8 @@ export interface Session {
         };
         contextSize: number;
         contextWindowTokens?: number;
+        /** Real provider-reported model from the assistant message (e.g. "claude-sonnet-5"). */
+        model?: string;
         timestamp: number;
     } | null;
 }
