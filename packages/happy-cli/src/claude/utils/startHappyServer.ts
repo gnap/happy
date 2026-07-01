@@ -439,11 +439,20 @@ export async function startHappyServer(getSession: GetSessionClient, options?: S
         toolNames.push('stop_subagent');
     }
 
-    const transport = new StreamableHTTPServerTransport({
-        // NOTE: Returning session id here will result in claude
-        // sdk spawn to fail with `Invalid Request: Server already initialized`
-        sessionIdGenerator: undefined
-    });
+    // Stateless transport (sessionIdGenerator: undefined): the underlying MCP SDK
+    // (>=1.29.0) only allows a single request per transport instance in this mode
+    // (internal `_hasHandledRequest` guard — see webStandardStreamableHttp.js). A
+    // transport created once and reused across the process lifetime would 500 on
+    // every request after the first. So we create a fresh transport per HTTP
+    // request and (re)connect `mcp` to it, closing the previous transport first
+    // (Protocol.connect throws if already connected to a transport). We track
+    // "has this transport served a request yet" ourselves rather than reaching
+    // into the SDK's private field.
+    // NOTE: Returning session id here will result in claude
+    // sdk spawn to fail with `Invalid Request: Server already initialized`
+    const makeTransport = () => new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    let transport = makeTransport();
+    let transportHandledRequest = false;
     await mcp.connect(transport);
 
     let a2aServer: ReturnType<typeof createServer> | null = null;
@@ -535,6 +544,14 @@ export async function startHappyServer(getSession: GetSessionClient, options?: S
         res.once('finish', closeSocket);
         res.once('close', closeSocket);
         try {
+            // Reconnect a fresh transport for every request after the first (see
+            // stateless-mode note above).
+            if (transportHandledRequest) {
+                await mcp.close();
+                transport = makeTransport();
+                await mcp.connect(transport);
+            }
+            transportHandledRequest = true;
             await transport.handleRequest(req, res);
         } catch (error) {
             logger.debug("Error handling request:", error);
