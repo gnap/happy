@@ -84,7 +84,7 @@ export const SessionView = React.memo((props: { id: string }) => {
         return {
             title: getSessionName(session),
             subtitle: session.metadata?.path ? formatPathRelativeToHome(session.metadata.path, session.metadata?.homeDir) : undefined,
-            rightSubtitle: session.metadata?.sessionModel || undefined,
+            rightSubtitle: session.latestUsage?.model || session.metadata?.sessionModel || undefined,
             avatarId: getSessionAvatarId(session),
             onAvatarPress: () => router.push(`/session/${sessionId}/info`),
             isConnected: isConnected,
@@ -369,7 +369,6 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             onPermissionModeChange={updatePermissionMode}
             availableModes={availableModes}
             modelMode={modelMode}
-            realModelName={sessionUsage?.model}
             availableModels={availableModels}
             onModelModeChange={updateModelMode}
             maxMode={maxMode}
