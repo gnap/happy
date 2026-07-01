@@ -238,7 +238,10 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         // Track the real provider-reported model from assistant messages (e.g. "claude-sonnet-5").
         // This is the authoritative model name — unlike the configured model code from
         // system init / ANTHROPIC_DEFAULT_*_MODEL, which is just an operator-chosen string.
-        if (message.type === 'assistant') {
+        // Only track the main agent's model (parent_tool_use_id == null) — subagent Task calls
+        // (e.g. Agent tool_use with model: "sonnet") can run a different model than the main
+        // agent, and we don't want their model to override what the App shows for the session.
+        if (message.type === 'assistant' && (message as SDKAssistantMessage).parent_tool_use_id == null) {
             const realModel = ((message as SDKAssistantMessage).message as any)?.model;
             if (typeof realModel === 'string' && realModel.length > 0) {
                 lastRealModel = realModel;
