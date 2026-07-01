@@ -214,7 +214,10 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     // Real model name as reported by the assistant message itself (e.g. "claude-sonnet-5").
     // Unlike the configured model code (ANTHROPIC_MODEL / ANTHROPIC_DEFAULT_*_MODEL, which can
     // be any operator-chosen string), this reflects what the provider actually routed the turn to.
-    let lastRealModel: string | undefined;
+    // Seeded from metadata.contextUsage.model (persisted by a prior process) so a freshly
+    // resumed/restarted process doesn't fall back to the configured model code for the turns
+    // before its first real assistant message arrives.
+    let lastRealModel: string | undefined = session.client.getMetadata()?.contextUsage?.model;
 
     // Pop echo: sent once on first SDK message, after Claude starts processing.
     let pendingPopEcho: { echoedMessageId: string; text: string } | null = null;
