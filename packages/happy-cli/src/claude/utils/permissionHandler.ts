@@ -101,7 +101,6 @@ export class PermissionHandler {
 
         pending.resolve(result);
     }
-}
 
     /**
      * Creates the canCallTool callback for the SDK
