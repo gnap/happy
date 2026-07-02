@@ -26,7 +26,7 @@ export function isA2AInboxTurnMeta(meta: unknown): boolean {
   return (meta as { a2aInboxTurn?: boolean }).a2aInboxTurn === true;
 }
 
-export type A2AInboxTurnHooks = {
+export type A2AInboxTurnHooks<TMode = unknown> = {
   isInboxTurnMeta: (meta: unknown) => boolean;
   setInboxTurnActive: (active: boolean) => void;
   isInboxTurnActive: () => boolean;
@@ -37,6 +37,11 @@ export type A2AInboxTurnHooks = {
   onTurnEnd: (result: { succeeded: boolean; cancelled: boolean; wasInboxTurn: boolean }) => void;
   peekInbox: () => void;
   dispose: () => void;
+  /** Current mode (model/permissionMode/effort/…), inheriting session state with
+   *  fallback to persisted currentModelCode when no model is set yet. Reused by
+   *  non-inbox producers (e.g. cron wakeups) that need the same "continue current
+   *  session state" semantics instead of hardcoding a fresh/empty mode. */
+  getMode: () => TMode;
 };
 
 export function createA2AInboxTurnController<TMode>(options: {
@@ -50,7 +55,7 @@ export function createA2AInboxTurnController<TMode>(options: {
   buildTurnPrompt: (notification: string, snapshotPath: string | undefined, unreadCount: number) => string;
   /** Optional: schedule /compact from inbox via pushIsolateAndClear */
   scheduleCompactTurn?: (mode: TMode) => void;
-}): A2AInboxTurnHooks {
+}): A2AInboxTurnHooks<TMode> {
   const {
     logTag,
     messageQueue,
@@ -131,6 +136,7 @@ export function createA2AInboxTurnController<TMode>(options: {
 
   return {
     isInboxTurnMeta: isA2AInboxTurnMeta,
+    getMode,
     setInboxTurnActive: (active: boolean) => {
       if (active) {
         inboxMcpScopeStack.push('inbox-turn');
