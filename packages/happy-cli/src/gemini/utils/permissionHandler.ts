@@ -13,6 +13,7 @@ import {
     PermissionResult,
     PendingRequest
 } from '@/utils/BasePermissionHandler';
+import { createEnvelope } from '@slopus/happy-wire';
 
 // Re-export types for backwards compatibility
 export type { PermissionResult, PendingRequest };
@@ -107,20 +108,29 @@ export class GeminiPermissionHandler extends BasePermissionHandler {
         if (this.shouldAutoApprove(toolName, toolCallId, input)) {
             logger.debug(`${this.getLogPrefix()} Auto-approving tool ${toolName} (${toolCallId}) in ${this.currentPermissionMode} mode`);
 
-            // Update agent state with auto-approved request
+            // Emit permission-result envelope for replayability.
+            this.session.client.sendSessionProtocolMessage(
+                createEnvelope('agent', {
+                    t: 'permission-result',
+                    call: toolCallId,
+                    status: 'approved',
+                    decision: this.currentPermissionMode === 'yolo' ? 'approved_for_session' : 'approved',
+                }),
+            );
+
+            // Update agent state with auto-approved request, trimmed to last 20.
             this.session.updateAgentState((currentState) => ({
                 ...currentState,
-                completedRequests: {
-                    ...currentState.completedRequests,
-                    [toolCallId]: {
+                completedRequests: Object.fromEntries(
+                    Object.entries({ ...currentState.completedRequests, [toolCallId]: {
                         tool: toolName,
                         arguments: input,
                         createdAt: Date.now(),
                         completedAt: Date.now(),
                         status: 'approved',
-                        decision: this.currentPermissionMode === 'yolo' ? 'approved_for_session' : 'approved'
-                    }
-                }
+                        decision: this.currentPermissionMode === 'yolo' ? 'approved_for_session' : 'approved',
+                    } }).slice(-20),
+                ),
             }));
 
             return {
