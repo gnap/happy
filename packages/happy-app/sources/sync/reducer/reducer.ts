@@ -358,6 +358,41 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             // Don't continue - let the event be processed normally to create a message
         }
 
+        // Process permission-result events — update tool message permission fields
+        // directly from the replayable message stream, no visible message created.
+        if (msg.role === 'event' && msg.content.type === 'permission-result') {
+            state.messageIds.set(msg.id, msg.id);
+            const permEv = msg.content;
+            const messageId = state.toolIdToMessageId.get(permEv.call);
+            if (messageId) {
+                const message = state.messages.get(messageId);
+                if (message?.tool) {
+                    if (!message.tool.permission) {
+                        message.tool.permission = { id: permEv.call, status: 'pending' };
+                    }
+                    message.tool.permission.status = permEv.status;
+                    if (permEv.decision) message.tool.permission.decision = permEv.decision;
+                    if (permEv.mode) message.tool.permission.mode = permEv.mode;
+                    if (permEv.allowedTools) message.tool.permission.allowedTools = permEv.allowedTools;
+                    if (permEv.reason) message.tool.permission.reason = permEv.reason;
+                    hasChanged = true;
+                }
+            } else {
+                // Tool message not yet arrived — store permission for Phase 2.
+                state.permissions.set(permEv.call, {
+                    tool: '',
+                    arguments: null,
+                    createdAt: msg.createdAt,
+                    status: permEv.status,
+                    decision: permEv.decision,
+                    mode: permEv.mode,
+                    allowedTools: permEv.allowedTools,
+                    reason: permEv.reason,
+                } satisfies StoredPermission);
+            }
+            continue;
+        }
+
         // Try to parse message as event
         const event = parseMessageAsEvent(msg);
         if (event) {
