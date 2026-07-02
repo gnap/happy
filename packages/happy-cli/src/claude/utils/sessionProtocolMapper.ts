@@ -748,6 +748,28 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
             };
         }
 
+        // For synthetic/meta user messages (e.g. Skill invocations, resolved
+        // permission results like AskUserQuestion), the user text is suppressed
+        // but tool_result blocks must be emitted as tool-call-end so the App
+        // can replay the result (e.g. display the selected answer).
+        if (message.isMeta || message.isSynthetic) {
+            const turnId = ensureTurn(state, envelopes);
+            for (const block of blocks) {
+                if (block.type === 'tool_result' && typeof block.tool_use_id === 'string' && block.tool_use_id.length > 0) {
+                    const bgTaskId = extractBackgroundTaskId(block, message);
+                    if (bgTaskId) {
+                        ensureBgTaskIdToCallId(state).set(bgTaskId, block.tool_use_id);
+                    }
+                    const sessionSubagentForToolResult = getSessionSubagentIdForProviderSubagent(state, block.tool_use_id);
+                    envelopes.push(createEnvelope('agent', {
+                        t: 'tool-call-end',
+                        call: block.tool_use_id,
+                        result: block.content,
+                    }, { turn: turnId, ...(sessionSubagentForToolResult ? { subagent: sessionSubagentForToolResult } : {}) }));
+                }
+            }
+        }
+
         // Suppress meta / synthetic / CLI-injected user text prompts.
         // Only suppress user-type messages — sub-agent output
         // (assistant messages with tool_use blocks) must pass.
