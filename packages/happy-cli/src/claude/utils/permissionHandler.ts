@@ -435,6 +435,7 @@ export class PermissionHandler {
                     ...(message.mode ? { mode: message.mode } : {}),
                     ...(message.allowTools ? { allowedTools: message.allowTools } : {}),
                     ...(message.reason ? { reason: message.reason } : {}),
+                    ...(message.updatedInput ? { updatedInput: message.updatedInput } : {}),
                 }),
             );
 
