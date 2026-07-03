@@ -99,6 +99,19 @@ export const sessionStopEventSchema = z.object({
   t: z.literal('stop'),
 });
 
+/** Permission result event — embeds permission decisions into the replayable message stream. */
+export const sessionPermissionResultEventSchema = z.object({
+  t: z.literal('permission-result'),
+  call: z.string(),
+  status: z.enum(['approved', 'denied', 'canceled']),
+  decision: z.enum(['approved', 'approved_for_session', 'denied', 'abort']).optional(),
+  mode: z.string().optional(),
+  allowedTools: z.array(z.string()).optional(),
+  reason: z.string().optional(),
+  /** The tool's updated input from the permission response (e.g. AskUserQuestion answers). */
+  updatedInput: z.unknown().optional(),
+});
+
 export const sessionEventSchema = z.discriminatedUnion('t', [
   sessionTextEventSchema,
   sessionServiceMessageEventSchema,
@@ -109,6 +122,7 @@ export const sessionEventSchema = z.discriminatedUnion('t', [
   sessionStartEventSchema,
   sessionTurnEndEventSchema,
   sessionStopEventSchema,
+  sessionPermissionResultEventSchema,
 ]);
 
 export type SessionEvent = z.infer<typeof sessionEventSchema>;
@@ -133,6 +147,13 @@ export const sessionEnvelopeSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: 'service events must use role "agent"',
+        path: ['role'],
+      });
+    }
+    if (envelope.ev.t === 'permission-result' && envelope.role !== 'agent') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'permission-result events must use role "agent"',
         path: ['role'],
       });
     }

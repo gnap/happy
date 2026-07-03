@@ -16,6 +16,7 @@ import { EnhancedMode, PermissionMode } from "../loop";
 import { getToolDescriptor } from "./getToolDescriptor";
 import { delay } from "@/utils/time";
 import { mapToClaudeMode } from "./permissionMode";
+import { createEnvelope } from '@slopus/happy-wire';
 
 interface PermissionResponse {
     id: string;
@@ -363,31 +364,42 @@ export class PermissionHandler {
         this.allowedBashPrefixes.clear();
         this.permissionMode = 'default';
 
+        // Capture pending IDs before rejecting (needed for envelope emission)
+        const pendingIds = Array.from(this.pendingRequests.keys());
+
         // Cancel all pending requests
         for (const [, pending] of this.pendingRequests.entries()) {
             pending.reject(new Error('Session reset'));
         }
         this.pendingRequests.clear();
 
-        // Move all pending requests to completedRequests with canceled status
+        // Move all pending requests to completedRequests with canceled status, trimmed.
         this.session.client.updateAgentState((currentState) => {
             const pendingRequests = currentState.requests || {};
-            const completedRequests = { ...currentState.completedRequests };
+            const completedEntries = Object.entries({ ...currentState.completedRequests });
 
-            // Move each pending request to completed with canceled status
+            // Emit canceled envelopes + add to completed
             for (const [id, request] of Object.entries(pendingRequests)) {
-                completedRequests[id] = {
+                this.session.client.sendSessionProtocolMessage(
+                    createEnvelope('agent', {
+                        t: 'permission-result',
+                        call: id,
+                        status: 'canceled',
+                        reason: 'Session switched to local mode',
+                    }),
+                );
+                completedEntries.push([id, {
                     ...request,
                     completedAt: Date.now(),
-                    status: 'canceled',
-                    reason: 'Session switched to local mode'
-                };
+                    status: 'canceled' as const,
+                    reason: 'Session switched to local mode',
+                }]);
             }
 
             return {
                 ...currentState,
-                requests: {}, // Clear all pending requests
-                completedRequests
+                requests: {},
+                completedRequests: Object.fromEntries(completedEntries.slice(-20)),
             };
         });
     }
@@ -414,26 +426,38 @@ export class PermissionHandler {
             // Handle the permission response based on tool type
             this.handlePermissionResponse(message, pending);
 
-            // Move processed request to completedRequests
+            // Emit permission-result as a replayable session protocol envelope.
+            this.session.client.sendSessionProtocolMessage(
+                createEnvelope('agent', {
+                    t: 'permission-result',
+                    call: id,
+                    status: message.approved ? 'approved' : 'denied',
+                    ...(message.mode ? { mode: message.mode } : {}),
+                    ...(message.allowTools ? { allowedTools: message.allowTools } : {}),
+                    ...(message.reason ? { reason: message.reason } : {}),
+                    ...(message.updatedInput ? { updatedInput: message.updatedInput } : {}),
+                }),
+            );
+
+            // Move processed request to completedRequests, trimmed to last 20.
             this.session.client.updateAgentState((currentState) => {
                 const request = currentState.requests?.[id];
                 if (!request) return currentState;
                 let r = { ...currentState.requests };
                 delete r[id];
+                const entries = Object.entries({ ...currentState.completedRequests, [id]: {
+                    ...request,
+                    completedAt: Date.now(),
+                    status: message.approved ? 'approved' : 'denied',
+                    reason: message.reason,
+                    mode: message.mode,
+                    allowTools: message.allowTools,
+                    updatedInput: message.updatedInput,
+                } }).slice(-20);
                 return {
                     ...currentState,
                     requests: r,
-                    completedRequests: {
-                        ...currentState.completedRequests,
-                        [id]: {
-                            ...request,
-                            completedAt: Date.now(),
-                            status: message.approved ? 'approved' : 'denied',
-                            reason: message.reason,
-                            mode: message.mode,
-                            allowTools: message.allowTools
-                        }
-                    }
+                    completedRequests: Object.fromEntries(entries),
                 };
             });
         });

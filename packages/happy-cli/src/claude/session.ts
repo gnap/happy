@@ -27,7 +27,7 @@ export class Session {
     readonly jsRuntime: JsRuntime;
 
     /** A2A inbox scheduling (set by runClaude). */
-    a2aInboxTurn?: A2AInboxTurnHooks;
+    a2aInboxTurn?: A2AInboxTurnHooks<EnhancedMode>;
     /** Remote loop sets true while a Claude turn is in flight. */
     claudeTurnActiveRef?: { current: boolean };
     /** Sync App permission mode changes to the active PermissionHandler (remote mode). */

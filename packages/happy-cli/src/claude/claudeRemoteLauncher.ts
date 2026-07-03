@@ -508,8 +508,13 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             }
                             session.client.updateAgentState(s => ({ ...s, crons: remainingCrons }));
                             logger.debug(`[remote] cron injecting: ${soonest.id} "${soonest.prompt.slice(0, 60)}"`);
+                            // Inherit the session's current mode (model/permissionMode/effort/…)
+                            // instead of hardcoding fresh/empty values — cron wakeups are
+                            // unattended, so they must continue running on whatever model and
+                            // permission mode the session was already using (e.g. bypassPermissions
+                            // for AutoLoopHarness), not silently fall back to profile defaults.
                             session.queue.push(soonest.prompt,
-                                { permissionMode: 'default', model: null as string | null, fallbackModel: null as string | null } as EnhancedMode,
+                                (session.a2aInboxTurn?.getMode() ?? { permissionMode: 'default' }) as EnhancedMode,
                                 { origin: 'auto-continuation', cronId: soonest.id });
                         } else {
                             const delay = soonest.nextFireAt - now;

@@ -10,6 +10,7 @@
 import { logger } from "@/ui/logger";
 import { ApiSessionClient } from "@/api/apiSession";
 import { AgentState } from "@/api/types";
+import { createEnvelope } from '@slopus/happy-wire';
 
 /**
  * Permission response from the mobile app.
@@ -18,6 +19,7 @@ export interface PermissionResponse {
     id: string;
     approved: boolean;
     decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort';
+    updatedInput?: Record<string, unknown>;
 }
 
 /**
@@ -92,25 +94,42 @@ export abstract class BasePermissionHandler {
 
                 pending.resolve(result);
 
-                // Move request to completed in agent state
+                // Emit permission-result as a replayable session protocol envelope.
+                // This embeds the permission decision into the message stream so the
+                // App reducer can replay it from cached messages rather than relying
+                // solely on agentState.completedRequests.
+                this.session.client.sendSessionProtocolMessage(
+                    createEnvelope('agent', {
+                        t: 'permission-result',
+                        call: response.id,
+                        status: response.approved ? 'approved' : 'denied',
+                        decision: result.decision,
+                        ...(response.mode ? { mode: response.mode } : {}),
+                        ...(response.allowTools ? { allowedTools: response.allowTools } : {}),
+                        ...(response.reason ? { reason: response.reason } : {}),
+                        ...(response.updatedInput ? { updatedInput: response.updatedInput } : {}),
+                    }),
+                );
+
+                // Move request to completed in agent state, trimmed to last 20.
                 this.session.updateAgentState((currentState) => {
                     const request = currentState.requests?.[response.id];
                     if (!request) return currentState;
 
                     const { [response.id]: _, ...remainingRequests } = currentState.requests || {};
 
+                    const entries = Object.entries({ ...currentState.completedRequests, [response.id]: {
+                        ...request,
+                        completedAt: Date.now(),
+                        status: response.approved ? 'approved' : 'denied',
+                        decision: result.decision,
+                        updatedInput: response.updatedInput,
+                    } }).slice(-20);
+
                     let res = {
                         ...currentState,
                         requests: remainingRequests,
-                        completedRequests: {
-                            ...currentState.completedRequests,
-                            [response.id]: {
-                                ...request,
-                                completedAt: Date.now(),
-                                status: response.approved ? 'approved' : 'denied',
-                                decision: result.decision
-                            }
-                        }
+                        completedRequests: Object.fromEntries(entries),
                     } satisfies AgentState;
                     return res;
                 });
@@ -163,25 +182,39 @@ export abstract class BasePermissionHandler {
                 }
             }
 
-            // Clear requests in agent state
+            // Clear requests in agent state, emit canceled envelopes.
             this.session.updateAgentState((currentState) => {
                 const pendingRequests = currentState.requests || {};
-                const completedRequests = { ...currentState.completedRequests };
 
-                // Move all pending to completed as canceled
+                // Emit canceled permission-result envelopes for each pending request
+                // so the App reducer can replay them from the message stream.
+                for (const [id] of Object.entries(pendingRequests)) {
+                    this.session.client.sendSessionProtocolMessage(
+                        createEnvelope('agent', {
+                            t: 'permission-result',
+                            call: id,
+                            status: 'canceled',
+                            reason: 'Session reset',
+                        }),
+                    );
+                }
+
+                // Trim completedRequests to last 20
+                const completedEntries = Object.entries({ ...currentState.completedRequests });
                 for (const [id, request] of Object.entries(pendingRequests)) {
-                    completedRequests[id] = {
+                    completedEntries.push([id, {
                         ...request,
                         completedAt: Date.now(),
-                        status: 'canceled',
-                        reason: 'Session reset'
-                    };
+                        status: 'canceled' as const,
+                        reason: 'Session reset',
+                    }]);
                 }
+                const trimmed = completedEntries.slice(-20);
 
                 return {
                     ...currentState,
                     requests: {},
-                    completedRequests
+                    completedRequests: Object.fromEntries(trimmed),
                 };
             });
 
