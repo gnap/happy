@@ -452,6 +452,7 @@ export class PermissionHandler {
                     reason: message.reason,
                     mode: message.mode,
                     allowTools: message.allowTools,
+                    updatedInput: message.updatedInput,
                 } }).slice(-20);
                 return {
                     ...currentState,

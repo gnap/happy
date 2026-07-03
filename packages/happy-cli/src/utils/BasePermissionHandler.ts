@@ -123,6 +123,7 @@ export abstract class BasePermissionHandler {
                         completedAt: Date.now(),
                         status: response.approved ? 'approved' : 'denied',
                         decision: result.decision,
+                        updatedInput: response.updatedInput,
                     } }).slice(-20);
 
                     let res = {
