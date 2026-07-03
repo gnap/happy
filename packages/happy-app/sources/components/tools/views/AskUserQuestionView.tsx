@@ -167,14 +167,20 @@ const styles = StyleSheet.create((theme) => ({
 
 export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId }) => {
     const { theme } = useUnistyles();
-    const [selections, setSelections] = React.useState<Map<number, Set<number>>>(() => {
-        // Restore selections from persisted tool.result when reloading from cache.
-        // The SDK's AskUserQuestionOutput contains { answers: { question: "label" } }.
-        if (tool.state === 'completed') {
+    const [selections, setSelections] = React.useState<Map<number, Set<number>>>(() => new Map());
+    const [isSubmitting, setIsSubmitting] = React.useState(false);
+    const [isSubmitted, setIsSubmitted] = React.useState(false);
+
+    // Parse input
+    const input = tool.input as AskUserQuestionInput | undefined;
+    const questions = input?.questions;
+
+    // When tool.result arrives after mount (e.g. from synced message stream),
+    // restore selections so the submitted view shows the answer.
+    React.useEffect(() => {
+        if (tool.state === 'completed' || tool.state === 'error') {
             const result = tool.result as Record<string, unknown> | undefined;
             const answers = result?.answers as Record<string, string> | undefined;
-            const input = tool.input as AskUserQuestionInput | undefined;
-            const questions = input?.questions;
             if (answers && questions) {
                 const map = new Map<number, Set<number>>();
                 questions.forEach((q, qIndex) => {
@@ -189,17 +195,10 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
                         if (indices.size > 0) map.set(qIndex, indices);
                     }
                 });
-                return map;
+                if (map.size > 0) setSelections(map);
             }
         }
-        return new Map();
-    });
-    const [isSubmitting, setIsSubmitting] = React.useState(false);
-    const [isSubmitted, setIsSubmitted] = React.useState(false);
-
-    // Parse input
-    const input = tool.input as AskUserQuestionInput | undefined;
-    const questions = input?.questions;
+    }, [tool.result, tool.state, questions]);
 
     if (!questions || !Array.isArray(questions) || questions.length === 0) {
         return null;

@@ -535,6 +535,14 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                 if (messageId) {
                     const message = state.messages.get(messageId);
                     if (message?.tool) {
+                        // Apply updatedInput from completedRequests even when other
+                        // skip conditions would otherwise drop it. For AskUserQuestion
+                        // this is the structured answer ({ questions, answers }).
+                        if (completed.updatedInput && !message.tool.result) {
+                            message.tool.result = completed.updatedInput;
+                            changed.add(messageId);
+                        }
+
                         // Skip if tool has already started actual execution with approval
                         if (message.tool.startedAt && message.tool.permission?.status === 'approved') {
                             continue;
@@ -647,7 +655,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             createdAt: completed.createdAt || Date.now(),
                             completedAt: completed.completedAt || undefined,
                             status: completed.status,
-                            reason: completed.reason || undefined
+                            reason: completed.reason || undefined,
+                            updatedInput: completed.updatedInput,
                         });
                         continue;
                     }
@@ -667,9 +676,11 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         startedAt: null,
                         completedAt: completed.completedAt || Date.now(),
                         description: null,
-                        result: completed.status === 'approved'
-                            ? 'Approved'
-                            : (completed.reason ? { error: completed.reason } : undefined),
+                        result: completed.updatedInput
+                            ? completed.updatedInput
+                            : completed.status === 'approved'
+                                ? 'Approved'
+                                : (completed.reason ? { error: completed.reason } : undefined),
                         permission: {
                             id: permId,
                             status: completed.status,
@@ -702,7 +713,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         reason: completed.reason || undefined,
                         mode: completed.mode || undefined,
                         allowedTools: completed.allowedTools || undefined,
-                        decision: completed.decision || undefined
+                        decision: completed.decision || undefined,
+                        updatedInput: completed.updatedInput,
                     });
 
                     changed.add(mid);
@@ -1028,7 +1040,13 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
 
                     // Update tool state and result
                     message.tool.state = c.is_error ? 'error' : 'completed';
-                    message.tool.result = c.content;
+                    // For AskUserQuestion, the SDK's tool_result is a text summary string
+                    // ("Your questions have been answered..."), not structured answers.
+                    // Keep the structured result from permission-result / completedRequests
+                    // if already set (it contains { questions, answers }).
+                    if (message.tool.name !== 'AskUserQuestion' || !message.tool.result) {
+                        message.tool.result = c.content;
+                    }
                     message.tool.completedAt = msg.createdAt;
 
                     // TodoWrite result carries the authoritative list (including completed); session list counts from this

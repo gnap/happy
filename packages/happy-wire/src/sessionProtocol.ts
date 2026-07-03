@@ -108,6 +108,8 @@ export const sessionPermissionResultEventSchema = z.object({
   mode: z.string().optional(),
   allowedTools: z.array(z.string()).optional(),
   reason: z.string().optional(),
+  /** The tool's updated input from the permission response (e.g. AskUserQuestion answers). */
+  updatedInput: z.unknown().optional(),
 });
 
 export const sessionEventSchema = z.discriminatedUnion('t', [
