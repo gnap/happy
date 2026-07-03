@@ -58,9 +58,9 @@
   "scripts": {
     "why do we need to build before running tests / dev?": "We need the binary to be built so we run daemon commands which directly run the binary - we don't want them to go out of sync or have custom spawn logic depending how we started happy",
     "typecheck": "tsc --noEmit",
-    "prebuild": "node -e \"const{execSync}=require('child_process'),{readFileSync,writeFileSync}=require('fs'),p=JSON.parse(readFileSync('package.json'));let c;try{c=execSync('git rev-parse --short HEAD',{encoding:'utf8'}).trim()}catch{c='unknown'}writeFileSync('src/version.ts','export const BUILD_VERSION = '+JSON.stringify(p.version.replace(/-0\\$/,'')+'-'+c)+';\\n')\"",
-    "build": "yarn workspace @slopus/happy-wire build && npx tsc --noEmit && tsup && bun build ./src/index.ts --outfile ./dist/index.bun.mjs --target bun --packages external",
-    "build:bun": "bun build ./src/index.ts --outfile ./dist/index.bun.mjs --target bun --packages external",
+    "prebuild": "bun -e \"const{execSync}=require('child_process'),{readFileSync,writeFileSync}=require('fs'),p=JSON.parse(readFileSync('package.json'));let c;try{c=execSync('git rev-parse --short HEAD',{encoding:'utf8'}).trim()}catch{c='unknown'}writeFileSync('src/version.ts','export const BUILD_VERSION = '+JSON.stringify(p.version.replace(/-0\\$/,'')+'-'+c)+';\\n')\"",
+    "build": "bun x --bun tsc --noEmit -p ../happy-wire/tsconfig.json 2>/dev/null; bun run prebuild && bun x --bun tsc --noEmit && tsup && bun build ./src/index.ts --outfile ./dist/index.bun.mjs --target bun --packages external",
+    "build:bun": "bun run prebuild && bun build ./src/index.ts --outfile ./dist/index.bun.mjs --target bun --packages external",
     "test": "$npm_execpath run build && vitest run",
     "start": "$npm_execpath run build && node ./bin/happy.mjs",
     "cli": "tsx src/index.ts",
