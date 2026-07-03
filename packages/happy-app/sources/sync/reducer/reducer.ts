@@ -529,7 +529,10 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
 
         // Process completed permission requests
         if (agentState.completedRequests) {
+            (window as any).__reducerDebug = (window as any).__reducerDebug || { entries: 0, withUpdatedInput: 0, lastPermId: null };
+            (window as any).__reducerDebug.entries += Object.keys(agentState.completedRequests).length;
             for (const [permId, completed] of Object.entries(agentState.completedRequests)) {
+                (window as any).__reducerDebug.lastPermId = permId;
                 // Check if we have a message for this permission ID
                 const messageId = state.toolIdToMessageId.get(permId);
                 if (messageId) {
@@ -538,7 +541,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         // Apply updatedInput from completedRequests even when other
                         // skip conditions would otherwise drop it. For AskUserQuestion
                         // this is the structured answer ({ questions, answers }).
-                        if (completed.updatedInput && !message.tool.result) {
+                        if (completed.updatedInput) {
+                            (window as any).__reducerDebug.withUpdatedInput = ((window as any).__reducerDebug.withUpdatedInput || 0) + 1;
                             message.tool.result = completed.updatedInput;
                             changed.add(messageId);
                         }
