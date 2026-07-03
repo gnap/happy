@@ -435,6 +435,7 @@ export class PermissionHandler {
                     ...(message.mode ? { mode: message.mode } : {}),
                     ...(message.allowTools ? { allowedTools: message.allowTools } : {}),
                     ...(message.reason ? { reason: message.reason } : {}),
+                    ...(message.updatedInput ? { updatedInput: message.updatedInput } : {}),
                 }),
             );
 
@@ -451,6 +452,7 @@ export class PermissionHandler {
                     reason: message.reason,
                     mode: message.mode,
                     allowTools: message.allowTools,
+                    updatedInput: message.updatedInput,
                 } }).slice(-20);
                 return {
                     ...currentState,

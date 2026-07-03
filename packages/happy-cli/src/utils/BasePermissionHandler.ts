@@ -19,6 +19,7 @@ export interface PermissionResponse {
     id: string;
     approved: boolean;
     decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort';
+    updatedInput?: Record<string, unknown>;
 }
 
 /**
@@ -106,6 +107,7 @@ export abstract class BasePermissionHandler {
                         ...(response.mode ? { mode: response.mode } : {}),
                         ...(response.allowTools ? { allowedTools: response.allowTools } : {}),
                         ...(response.reason ? { reason: response.reason } : {}),
+                        ...(response.updatedInput ? { updatedInput: response.updatedInput } : {}),
                     }),
                 );
 
@@ -121,6 +123,7 @@ export abstract class BasePermissionHandler {
                         completedAt: Date.now(),
                         status: response.approved ? 'approved' : 'denied',
                         decision: result.decision,
+                        updatedInput: response.updatedInput,
                     } }).slice(-20);
 
                     let res = {

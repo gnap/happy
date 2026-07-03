@@ -143,6 +143,7 @@ type StoredPermission = {
     mode?: string;
     allowedTools?: string[];
     decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort';
+    updatedInput?: unknown;
 };
 
 export type ReducerState = {
@@ -375,7 +376,12 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     if (permEv.mode) message.tool.permission.mode = permEv.mode;
                     if (permEv.allowedTools) message.tool.permission.allowedTools = permEv.allowedTools;
                     if (permEv.reason) message.tool.permission.reason = permEv.reason;
-                    hasChanged = true;
+                    // Store the answer (updatedInput) as the tool result for replayability.
+                    // For AskUserQuestion, this carries the user's selected options.
+                    if (permEv.updatedInput) {
+                        message.tool.result = permEv.updatedInput;
+                    }
+                    changed.add(messageId);
                 }
             } else {
                 // Tool message not yet arrived — store permission for Phase 2.
@@ -388,6 +394,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     mode: permEv.mode,
                     allowedTools: permEv.allowedTools,
                     reason: permEv.reason,
+                    updatedInput: permEv.updatedInput,
                 } satisfies StoredPermission);
             }
             continue;
@@ -589,6 +596,9 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                                 if (message.tool.state !== 'completed' && message.tool.state !== 'error') {
                                     message.tool.state = 'completed';
                                     message.tool.completedAt = completed.completedAt || Date.now();
+                                    if (completed.updatedInput) {
+                                        message.tool.result = completed.updatedInput;
+                                    }
                                     hasChanged = true;
                                 }
                             } else if (message.tool.state !== 'completed' && message.tool.state !== 'error' && message.tool.state !== 'running') {
@@ -936,6 +946,10 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                                 if (permission.reason) {
                                     toolCall.result = { error: permission.reason };
                                 }
+                            }
+                            // Apply permission's updatedInput as tool result (e.g. AskUserQuestion answers).
+                            if (permission.updatedInput) {
+                                toolCall.result = permission.updatedInput;
                             }
                         }
 
