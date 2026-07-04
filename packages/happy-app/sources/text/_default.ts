@@ -488,6 +488,13 @@ export const en = {
             folderLabel: 'FOLDER',
         },
         noMachinesAvailable: 'No machines',
+        sandbox: {
+            isolationTitle: 'Sandbox Isolation',
+            off: 'Off',
+            strict: 'Strict (project only)',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
     },
 
     machineLauncher: {
