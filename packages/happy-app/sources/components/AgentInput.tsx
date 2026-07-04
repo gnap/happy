@@ -27,6 +27,9 @@ import { AIBackendProfile, getProfileEnvironmentVariables, validateProfileForAge
 import { getBuiltInProfile, getProfilesForAgent } from '@/sync/profileUtils';
 import { useRouter } from 'expo-router';
 
+/** Sandbox isolation level — controls OS-level file system and network sandboxing per-session. */
+export type SandboxIsolationLevel = 'off' | 'strict' | 'workspace' | 'custom';
+
 interface AgentInputProps {
     value: string;
     placeholder: string;
@@ -103,6 +106,10 @@ interface AgentInputProps {
     onAttach?: () => void;
     attachments?: { name: string; width?: number; height?: number; data: string; mimeType: string; size: number }[];
     onRemoveAttachment?: (index: number) => void;
+    /** Current sandbox isolation level (per-session). Default: 'off'. */
+    sandboxIsolation?: SandboxIsolationLevel;
+    /** Called when user selects a sandbox isolation level. */
+    onSandboxIsolationChange?: (level: SandboxIsolationLevel) => void;
 }
 
 const DEFAULT_MAX_CONTEXT_SIZE = 200000;
@@ -515,6 +522,20 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         hapticsLight();
         setShowProfileOverlay(true);
     }, []);
+
+    // Sandbox isolation picker state
+    const [showSandboxIsolation, setShowSandboxIsolation] = React.useState(false);
+
+    const handleSandboxIsolationPress = React.useCallback(() => {
+        hapticsLight();
+        setShowSandboxIsolation(prev => !prev);
+    }, []);
+
+    const handleSandboxIsolationSelect = React.useCallback((level: SandboxIsolationLevel) => {
+        hapticsLight();
+        props.onSandboxIsolationChange?.(level);
+        setShowSandboxIsolation(false);
+    }, [props.onSandboxIsolationChange]);
 
     // Handle settings selection
     const handleSettingsSelect = React.useCallback((mode: PermissionMode) => {
@@ -1297,6 +1318,71 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                     </>
                 )}
 
+                {/* Sandbox isolation picker overlay */}
+                {showSandboxIsolation && (
+                    <>
+                        <TouchableWithoutFeedback onPress={() => setShowSandboxIsolation(false)}>
+                            <View style={styles.overlayBackdrop} />
+                        </TouchableWithoutFeedback>
+                        <View style={[
+                            styles.settingsOverlay,
+                            { paddingHorizontal: screenWidth > 700 ? 0 : 8 }
+                        ]}>
+                            <FloatingOverlay maxHeight={300} keyboardShouldPersistTaps="always">
+                                <View style={styles.overlaySection}>
+                                    <Text style={styles.overlaySectionTitle}>
+                                        {t('sandbox.isolationTitle') ?? 'Sandbox Isolation'}
+                                    </Text>
+                                    {(Object.entries(SANDBOX_ISOLATION_LABELS) as [SandboxIsolationLevel, string][]).map(([level, label]) => {
+                                        const isSelected = (props.sandboxIsolation ?? 'off') === level;
+                                        return (
+                                            <Pressable
+                                                key={level}
+                                                onPress={() => handleSandboxIsolationSelect(level)}
+                                                style={({ pressed }) => ({
+                                                    flexDirection: 'row',
+                                                    alignItems: 'center',
+                                                    paddingHorizontal: 16,
+                                                    paddingVertical: 10,
+                                                    backgroundColor: pressed ? theme.colors.surfacePressed : 'transparent',
+                                                    borderRadius: 8,
+                                                })}
+                                            >
+                                                <View style={{
+                                                    width: 16,
+                                                    height: 16,
+                                                    borderRadius: 8,
+                                                    borderWidth: 2,
+                                                    borderColor: isSelected ? theme.colors.radio.active : theme.colors.radio.inactive,
+                                                    alignItems: 'center',
+                                                    justifyContent: 'center',
+                                                    marginRight: 12,
+                                                }}>
+                                                    {isSelected && (
+                                                        <View style={{
+                                                            width: 8,
+                                                            height: 8,
+                                                            borderRadius: 4,
+                                                            backgroundColor: theme.colors.radio.active,
+                                                        }} />
+                                                    )}
+                                                </View>
+                                                <Text style={{
+                                                    fontSize: 15,
+                                                    fontWeight: isSelected ? '600' : '400',
+                                                    color: isSelected ? theme.colors.textPrimary : theme.colors.textSecondary,
+                                                }}>
+                                                    {label}
+                                                </Text>
+                                            </Pressable>
+                                        );
+                                    })}
+                                </View>
+                            </FloatingOverlay>
+                        </View>
+                    </>
+                )}
+
                 {/* Box 1: Context Information (Machine + Path) - Only show if either exists */}
                 {(props.machineName !== undefined || props.currentPath) && (
                     <View style={{
@@ -1575,6 +1661,14 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                     </Shaker>
                                 )}
 
+                                {/* Sandbox isolation selector */}
+                                {props.onSandboxIsolationChange && (
+                                    <SandboxIsolationButton
+                                        isolation={props.sandboxIsolation ?? 'off'}
+                                        onPress={handleSandboxIsolationPress}
+                                    />
+                                )}
+
                                 {/* Git Status Badge */}
                                 <GitStatusButton sessionId={props.sessionId} onPress={props.onFileViewerPress} />
 
@@ -1710,6 +1804,44 @@ function GitStatusButton({ sessionId, onPress }: { sessionId?: string, onPress?:
                     color={theme.colors.button.secondary.tint}
                 />
             )}
+        </Pressable>
+    );
+}
+
+const SANDBOX_ISOLATION_LABELS: Record<SandboxIsolationLevel, string> = {
+    'off': 'Off',
+    'strict': 'Strict (project only)',
+    'workspace': 'Workspace',
+    'custom': 'Custom',
+};
+
+function SandboxIsolationButton({ isolation, onPress }: { isolation: SandboxIsolationLevel; onPress: () => void }) {
+    const { theme } = useUnistyles();
+    const isActive = isolation !== 'off';
+
+    return (
+        <Pressable
+            style={(p) => ({
+                flexDirection: 'row',
+                alignItems: 'center',
+                borderRadius: Platform.select({ default: 16, android: 20 }),
+                paddingHorizontal: 8,
+                paddingVertical: 6,
+                height: 32,
+                opacity: p.pressed ? 0.7 : 1,
+                gap: 4,
+            })}
+            hitSlop={{ top: 5, bottom: 10, left: 0, right: 0 }}
+            onPress={() => {
+                hapticsLight();
+                onPress();
+            }}
+        >
+            <Octicons
+                name={isActive ? "shield-check" : "shield"}
+                size={16}
+                color={isActive ? theme.colors.gitAdded : theme.colors.button.secondary.tint}
+            />
         </Pressable>
     );
 }

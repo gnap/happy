@@ -152,6 +152,8 @@ export interface SpawnSessionOptions {
     // - API_TIMEOUT_MS, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
     // - Custom variables (DEEPSEEK_*, Z_AI_*, etc.)
     environmentVariables?: Record<string, string>;
+    /** Per-session sandbox config override (falls back to machine-global settings.json). */
+    sandboxConfig?: { enabled?: boolean; sessionIsolation?: 'strict' | 'workspace' | 'custom'; workspaceRoot?: string; networkMode?: 'blocked' | 'allowed' | 'custom' };
 }
 
 // Exported session operation functions
@@ -161,7 +163,7 @@ export interface SpawnSessionOptions {
  */
 export async function machineSpawnNewSession(options: SpawnSessionOptions): Promise<SpawnSessionResult> {
 
-    const { machineId, directory, approvedNewDirectoryCreation = false, token, agent, environmentVariables } = options;
+    const { machineId, directory, approvedNewDirectoryCreation = false, token, agent, environmentVariables, sandboxConfig } = options;
 
     try {
         const result = await apiSocket.machineRPC<SpawnSessionResult, {
@@ -171,10 +173,11 @@ export async function machineSpawnNewSession(options: SpawnSessionOptions): Prom
             token?: string,
             agent?: 'codex' | 'claude' | 'cursor' | 'cursor-acp' | 'gemini',
             environmentVariables?: Record<string, string>;
+            sandboxConfig?: typeof sandboxConfig;
         }>(
             machineId,
             'spawn-happy-session',
-            { type: 'spawn-in-directory', directory, approvedNewDirectoryCreation, token, agent, environmentVariables }
+            { type: 'spawn-in-directory', directory, approvedNewDirectoryCreation, token, agent, environmentVariables, sandboxConfig }
         );
         return result;
     } catch (error) {

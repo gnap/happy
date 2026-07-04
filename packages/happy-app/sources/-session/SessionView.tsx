@@ -1,5 +1,5 @@
 import { AgentContentView } from '@/components/AgentContentView';
-import { AgentInput } from '@/components/AgentInput';
+import { AgentInput, SandboxIsolationLevel } from '@/components/AgentInput';
 import {
     getAvailableModels,
     getAvailablePermissionModes,
@@ -279,6 +279,18 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         sync.applySettings({ lastUsedProfile: profileId });
     }, [sessionId]);
 
+    // Sandbox isolation level — derived from session metadata, kept as local for spawn-time override
+    const sandboxIsolationLevel = React.useMemo(() => {
+        const sandbox = session.metadata?.sandbox;
+        if (!sandbox || !sandbox.enabled) return 'off' as const;
+        return (sandbox.sessionIsolation ?? 'workspace') as 'strict' | 'workspace' | 'custom';
+    }, [session.metadata?.sandbox]);
+
+    const handleSandboxIsolationChange = React.useCallback((level: 'off' | 'strict' | 'workspace' | 'custom') => {
+        // TODO: send sandbox override in session restart/spawn RPC
+        // For now, store locally — effective on next session restart
+    }, []);
+
     const agentTypeForProfile = React.useMemo((): 'claude' | 'codex' | 'cursor' | 'cursor-acp' | 'gemini' | undefined => {
         if (flavor === 'codex') return 'codex';
         if (flavor === 'gemini') return 'gemini';
@@ -445,6 +457,8 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             })()}
             alwaysShowContextSize={alwaysShowContextSize}
             maxContextSize={maxContextSize}
+            sandboxIsolation={sandboxIsolationLevel}
+            onSandboxIsolationChange={handleSandboxIsolationChange}
         />
     );
 

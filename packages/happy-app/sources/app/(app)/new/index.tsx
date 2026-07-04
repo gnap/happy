@@ -384,6 +384,9 @@ function NewSessionWizard() {
     });
     const [maxMode, setMaxMode] = React.useState(() => lastUsedMaxMode);
 
+    // Sandbox isolation level — session-level, defaults to off
+    const [sandboxIsolation, setSandboxIsolation] = React.useState<'off' | 'strict' | 'workspace' | 'custom'>('off');
+
     // Session details state
     const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(() => {
         if (machines.length > 0) {
@@ -1025,13 +1028,20 @@ function NewSessionWizard() {
                 };
             }
 
+            // Build sandbox config from isolation level
+            const sandboxConfig = sandboxIsolation !== 'off' ? {
+                enabled: true,
+                sessionIsolation: sandboxIsolation as 'strict' | 'workspace' | 'custom',
+            } : undefined;
+
             // Fire spawn in background; navigate back to list immediately so user is not blocked
             const spawnPromise = machineSpawnNewSession({
                 machineId: selectedMachineId,
                 directory: actualPath,
                 approvedNewDirectoryCreation: true,
                 agent: agentType,
-                environmentVariables
+                environmentVariables,
+                sandboxConfig,
             });
 
             setIsCreating(false);
@@ -1094,7 +1104,7 @@ function NewSessionWizard() {
             Modal.alert(t('common.error'), errorMessage);
             setIsCreating(false);
         }
-    }, [selectedMachineId, selectedPath, sessionPrompt, sessionType, experimentsEnabled, agentType, selectedProfileId, permissionMode, modelMode, maxMode, recentMachinePaths, profileMap, router]);
+    }, [selectedMachineId, selectedPath, sessionPrompt, sessionType, experimentsEnabled, agentType, selectedProfileId, permissionMode, modelMode, maxMode, sandboxIsolation, recentMachinePaths, profileMap, router]);
 
     const screenWidth = useWindowDimensions().width;
 
@@ -1198,6 +1208,8 @@ function NewSessionWizard() {
                                 onPathClick={handlePathClick}
                                 profileId={selectedProfileId}
                                 onProfileChange={selectProfile}
+                                sandboxIsolation={sandboxIsolation}
+                                onSandboxIsolationChange={setSandboxIsolation}
                             />
                         </View>
                     </View>
@@ -2033,6 +2045,8 @@ function NewSessionWizard() {
                             onPathClick={handleAgentInputPathClick}
                             profileId={selectedProfileId}
                             onProfileChange={selectProfile}
+                            sandboxIsolation={sandboxIsolation}
+                            onSandboxIsolationChange={setSandboxIsolation}
                         />
                     </View>
                 </View>

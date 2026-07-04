@@ -143,6 +143,7 @@ type StoredPermission = {
     mode?: string;
     allowedTools?: string[];
     decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort';
+    updatedInput?: unknown;
 };
 
 export type ReducerState = {
@@ -358,6 +359,47 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             // Don't continue - let the event be processed normally to create a message
         }
 
+        // Process permission-result events — update tool message permission fields
+        // directly from the replayable message stream, no visible message created.
+        if (msg.role === 'event' && msg.content.type === 'permission-result') {
+            state.messageIds.set(msg.id, msg.id);
+            const permEv = msg.content;
+            const messageId = state.toolIdToMessageId.get(permEv.call);
+            if (messageId) {
+                const message = state.messages.get(messageId);
+                if (message?.tool) {
+                    if (!message.tool.permission) {
+                        message.tool.permission = { id: permEv.call, status: 'pending' };
+                    }
+                    message.tool.permission.status = permEv.status;
+                    if (permEv.decision) message.tool.permission.decision = permEv.decision;
+                    if (permEv.mode) message.tool.permission.mode = permEv.mode;
+                    if (permEv.allowedTools) message.tool.permission.allowedTools = permEv.allowedTools;
+                    if (permEv.reason) message.tool.permission.reason = permEv.reason;
+                    // Store the answer (updatedInput) as the tool result for replayability.
+                    // For AskUserQuestion, this carries the user's selected options.
+                    if (permEv.updatedInput) {
+                        message.tool.result = permEv.updatedInput;
+                    }
+                    changed.add(messageId);
+                }
+            } else {
+                // Tool message not yet arrived — store permission for Phase 2.
+                state.permissions.set(permEv.call, {
+                    tool: '',
+                    arguments: null,
+                    createdAt: msg.createdAt,
+                    status: permEv.status,
+                    decision: permEv.decision,
+                    mode: permEv.mode,
+                    allowedTools: permEv.allowedTools,
+                    reason: permEv.reason,
+                    updatedInput: permEv.updatedInput,
+                } satisfies StoredPermission);
+            }
+            continue;
+        }
+
         // Try to parse message as event
         const event = parseMessageAsEvent(msg);
         if (event) {
@@ -487,12 +529,24 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
 
         // Process completed permission requests
         if (agentState.completedRequests) {
+            (window as any).__reducerDebug = (window as any).__reducerDebug || { entries: 0, withUpdatedInput: 0, lastPermId: null };
+            (window as any).__reducerDebug.entries += Object.keys(agentState.completedRequests).length;
             for (const [permId, completed] of Object.entries(agentState.completedRequests)) {
+                (window as any).__reducerDebug.lastPermId = permId;
                 // Check if we have a message for this permission ID
                 const messageId = state.toolIdToMessageId.get(permId);
                 if (messageId) {
                     const message = state.messages.get(messageId);
                     if (message?.tool) {
+                        // Apply updatedInput from completedRequests even when other
+                        // skip conditions would otherwise drop it. For AskUserQuestion
+                        // this is the structured answer ({ questions, answers }).
+                        if (completed.updatedInput) {
+                            (window as any).__reducerDebug.withUpdatedInput = ((window as any).__reducerDebug.withUpdatedInput || 0) + 1;
+                            message.tool.result = completed.updatedInput;
+                            changed.add(messageId);
+                        }
+
                         // Skip if tool has already started actual execution with approval
                         if (message.tool.startedAt && message.tool.permission?.status === 'approved') {
                             continue;
@@ -554,6 +608,9 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                                 if (message.tool.state !== 'completed' && message.tool.state !== 'error') {
                                     message.tool.state = 'completed';
                                     message.tool.completedAt = completed.completedAt || Date.now();
+                                    if (completed.updatedInput) {
+                                        message.tool.result = completed.updatedInput;
+                                    }
                                     hasChanged = true;
                                 }
                             } else if (message.tool.state !== 'completed' && message.tool.state !== 'error' && message.tool.state !== 'running') {
@@ -602,7 +659,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             createdAt: completed.createdAt || Date.now(),
                             completedAt: completed.completedAt || undefined,
                             status: completed.status,
-                            reason: completed.reason || undefined
+                            reason: completed.reason || undefined,
+                            updatedInput: completed.updatedInput,
                         });
                         continue;
                     }
@@ -622,9 +680,11 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         startedAt: null,
                         completedAt: completed.completedAt || Date.now(),
                         description: null,
-                        result: completed.status === 'approved'
-                            ? 'Approved'
-                            : (completed.reason ? { error: completed.reason } : undefined),
+                        result: completed.updatedInput
+                            ? completed.updatedInput
+                            : completed.status === 'approved'
+                                ? 'Approved'
+                                : (completed.reason ? { error: completed.reason } : undefined),
                         permission: {
                             id: permId,
                             status: completed.status,
@@ -657,7 +717,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         reason: completed.reason || undefined,
                         mode: completed.mode || undefined,
                         allowedTools: completed.allowedTools || undefined,
-                        decision: completed.decision || undefined
+                        decision: completed.decision || undefined,
+                        updatedInput: completed.updatedInput,
                     });
 
                     changed.add(mid);
@@ -902,6 +963,10 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                                     toolCall.result = { error: permission.reason };
                                 }
                             }
+                            // Apply permission's updatedInput as tool result (e.g. AskUserQuestion answers).
+                            if (permission.updatedInput) {
+                                toolCall.result = permission.updatedInput;
+                            }
                         }
 
                         let mid = allocateId();
@@ -979,7 +1044,13 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
 
                     // Update tool state and result
                     message.tool.state = c.is_error ? 'error' : 'completed';
-                    message.tool.result = c.content;
+                    // For AskUserQuestion, the SDK's tool_result is a text summary string
+                    // ("Your questions have been answered..."), not structured answers.
+                    // Keep the structured result from permission-result / completedRequests
+                    // if already set (it contains { questions, answers }).
+                    if (message.tool.name !== 'AskUserQuestion' || !message.tool.result) {
+                        message.tool.result = c.content;
+                    }
                     message.tool.completedAt = msg.createdAt;
 
                     // TodoWrite result carries the authoritative list (including completed); session list counts from this

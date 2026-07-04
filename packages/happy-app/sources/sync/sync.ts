@@ -327,6 +327,12 @@ class Sync {
                 log.log(`🕐 Skipping periodic session refresh — idle for ${Math.round(idleMs / 1000)}s`);
                 return;
             }
+            // Every FULL_REFRESH_INTERVAL, do a full fetch to purge stale sessions
+            // that were deleted/archived on the server and won't appear in deltas.
+            if (Date.now() - this.lastFullRefreshAt >= Sync.FULL_REFRESH_INTERVAL_MS) {
+                this.#refreshSessionsFull();
+                return; // refreshSessionsFull already invalidates
+            }
             this.sessionsSync.invalidate();
         }, Sync.SESSION_REFRESH_INTERVAL_MS);
     }
@@ -1324,6 +1330,7 @@ class Sync {
                 activeAt: number;
                 createdAt: number;
                 updatedAt: number;
+                lifecycleState?: string | null;
                 lastMessage: ApiMessage | null;
             }>;
 

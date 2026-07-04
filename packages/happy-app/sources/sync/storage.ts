@@ -683,6 +683,21 @@ export const storage = create<StorageState>()((set, get) => {
                 };
             });
 
+            // Remove sessions that have been archived or scheduled for archival on the server.
+            // These come back through delta fetches with lifecycleState: 'archived' /
+            // 'archiveRequested' but would otherwise stick around because applySessions
+            // merges rather than replaces.
+            const archivedIds = new Set<string>();
+            for (const [id, s] of Object.entries(mergedSessions)) {
+                const ls = (s as any).lifecycleState as string | undefined;
+                if (ls === 'archived' || ls === 'archiveRequested') {
+                    archivedIds.add(id);
+                }
+            }
+            for (const id of archivedIds) {
+                delete mergedSessions[id];
+            }
+
             // Build active set from all sessions (including existing ones)
             const activeSet = new Set<string>();
             Object.values(mergedSessions).forEach(session => {

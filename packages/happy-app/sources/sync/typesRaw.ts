@@ -74,6 +74,14 @@ const agentEventSchema = z.discriminatedUnion('type', [z.object({
     endsAt: z.number(),
 }), z.object({
     type: z.literal('ready'),
+}), z.object({
+    type: z.literal('permission-result'),
+    call: z.string(),
+    status: z.enum(['approved', 'denied', 'canceled']),
+    decision: z.enum(['approved', 'approved_for_session', 'denied', 'abort']).optional(),
+    mode: z.string().optional(),
+    allowedTools: z.array(z.string()).optional(),
+    reason: z.string().optional(),
 })]);
 export type AgentEvent = z.infer<typeof agentEventSchema>;
 
@@ -173,6 +181,17 @@ const sessionStopEventSchema = z.object({
     t: z.literal('stop'),
 });
 
+/** Permission result event — embeds permission decisions into the replayable message stream. */
+const sessionPermissionResultEventSchema = z.object({
+    t: z.literal('permission-result'),
+    call: z.string(),
+    status: z.enum(['approved', 'denied', 'canceled']),
+    decision: z.enum(['approved', 'approved_for_session', 'denied', 'abort']).optional(),
+    mode: z.string().optional(),
+    allowedTools: z.array(z.string()).optional(),
+    reason: z.string().optional(),
+});
+
 const sessionEventSchema = z.discriminatedUnion('t', [
     sessionTextEventSchema,
     sessionServiceMessageEventSchema,
@@ -183,6 +202,7 @@ const sessionEventSchema = z.discriminatedUnion('t', [
     sessionStartEventSchema,
     sessionTurnEndEventSchema,
     sessionStopEventSchema,
+    sessionPermissionResultEventSchema,
 ]);
 
 const sessionEnvelopeSchema = z.object({
@@ -904,6 +924,26 @@ function normalizeSessionEnvelope(
                 parentUUID
             }],
             meta
+        } satisfies NormalizedMessage;
+    }
+
+    if (envelope.ev.t === 'permission-result') {
+        return {
+            id: messageId,
+            localId,
+            createdAt: messageCreatedAt,
+            role: 'event',
+            isSidechain,
+            content: {
+                type: 'permission-result',
+                call: envelope.ev.call,
+                status: envelope.ev.status,
+                decision: envelope.ev.decision,
+                mode: envelope.ev.mode,
+                allowedTools: envelope.ev.allowedTools,
+                reason: envelope.ev.reason,
+            },
+            meta,
         } satisfies NormalizedMessage;
     }
 
