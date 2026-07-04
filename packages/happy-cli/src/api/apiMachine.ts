@@ -200,15 +200,23 @@ export class ApiMachineClient {
             return { success: true, message: archived ? 'Session archived' : 'Session stopped' };
         });
 
-        // Register restart session handler
-        this.rpcHandlerManager.registerHandler('restartSession', async (params: any) => {
+        // Register restart session handler.
+        // Returns immediately (fire-and-forget) to avoid server-side RPC timeout.
+        // The actual restart runs asynchronously; the App will see the session come
+        // back online through normal session update events.
+        this.rpcHandlerManager.registerHandler('restartSession', (params: any) => {
             const { sessionId, sandboxConfig } = params || {};
             if (!sessionId) {
                 throw new Error('Session ID is required');
             }
-            const result = await restartSession(sessionId, sandboxConfig);
-            logger.debug(`[API MACHINE] restartSession: ${sessionId} — success=${result.success}`);
-            return result;
+            logger.debug(`[API MACHINE] restartSession requested: ${sessionId}`);
+            // Fire-and-forget — don't await, don't block the RPC response
+            restartSession(sessionId, sandboxConfig).then(r => {
+                logger.debug(`[API MACHINE] restartSession: ${sessionId} — success=${r.success}`);
+            }).catch(err => {
+                logger.debug(`[API MACHINE] restartSession: ${sessionId} — error:`, err);
+            });
+            return { success: true };
         });
 
         // Register stop daemon handler

@@ -20,6 +20,7 @@ import { getEnvironmentInfo } from '@/ui/doctor';
 import { configuration } from '@/configuration';
 import { createEnvelope } from '@slopus/happy-wire';
 import { notifyDaemonSessionStarted, notifyDaemonSessionEnding } from '@/daemon/controlClient';
+import { startUnixSocketClient } from '@/daemon/unixSocketClient';
 import { initialMachineMetadata } from '@/daemon/run';
 import { startHappyServer } from '@/claude/utils/startHappyServer';
 import { startHookServer } from '@/claude/utils/startHookServer';
@@ -255,6 +256,18 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     };
     reportToDaemon();
     setInterval(reportToDaemon, 60_000);
+
+    // Connect to daemon's Unix socket for real-time IPC (registration + heartbeat).
+    // Falls back to HTTP webhook (above) when socket is unavailable.
+    const stopSocketClient = startUnixSocketClient({
+        sessionId: response.id,
+        pid: process.pid,
+        sessionTag,
+        metadata,
+    }, reportToDaemon);
+    // Cleanup socket on graceful exit
+    process.on('beforeExit', () => stopSocketClient());
+    process.on('exit', () => stopSocketClient());
 
     // Extract SDK metadata in background and update session when ready.
     // The callback fires asynchronously after extractSDKMetadata completes, so `session`

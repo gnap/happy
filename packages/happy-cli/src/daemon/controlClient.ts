@@ -239,8 +239,9 @@ export async function isDaemonRunningCurrentlyInstalledHappyVersion(): Promise<b
     // Read package.json on demand from disk - so we are guaranteed to get the latest version
     const packageJsonPath = join(projectPath(), 'package.json');
     const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
-    const currentCliVersion = packageJson.version;
-    
+    // Use the compiled BUILD_VERSION (with commit hash) to match the daemon state format
+    const currentCliVersion = configuration.currentCliVersion;
+
     logger.debug(`[DAEMON CONTROL] Current CLI version: ${currentCliVersion}, Daemon started with version: ${state.startedWithCliVersion}`);
     return currentCliVersion === state.startedWithCliVersion;
     

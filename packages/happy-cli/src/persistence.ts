@@ -289,6 +289,8 @@ export interface DaemonLocallyPersistedState {
   lastDirectoryBySessionId?: Record<string, string>;
   /** Server session ID -> agent type. Enables correct agent selection when auto-respawning. */
   lastAgentBySessionId?: Record<string, string>;
+  /** Server session ID -> sandbox config. Persists per-session sandbox across daemon restarts. */
+  lastSandboxBySessionId?: Record<string, any>;
   /**
    * Stopped sessions that have not been archived. Persisted so they survive daemon restart
    * and can still be restarted or trigger auto-respawn on new messages.
