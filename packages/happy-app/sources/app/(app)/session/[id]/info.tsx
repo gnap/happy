@@ -13,6 +13,7 @@ import { getSessionName, useSessionStatus, formatOSPlatform, formatPathRelativeT
 import * as Clipboard from 'expo-clipboard';
 import { Modal } from '@/modal';
 import { sessionKill, sessionDelete, sessionRestart } from '@/sync/ops';
+import { SandboxIsolationLevel } from '@/components/AgentInput';
 import { useUnistyles } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
 import { t } from '@/text';
@@ -222,35 +223,65 @@ function SessionInfoContent({ session }: { session: Session }) {
         machine?.metadata?.happyCliVersion,
     );
 
-    // Use HappyAction for restart — it handles errors automatically
-    const [restartingSession, performRestart] = useHappyAction(async () => {
+    // Use HappyAction for restart — accepts optional sandbox override
+    const [restartingSession, restartWithSandbox] = useHappyAction(async (sandboxLevel: SandboxIsolationLevel) => {
         if (!session.metadata?.machineId) {
             throw new HappyError(t('sessionInfo.noMachineId'), false);
         }
-        const result = await sessionRestart(session.id, session.metadata.machineId);
+        const sandboxConfig = sandboxLevel !== 'off' ? {
+            enabled: true,
+            sessionIsolation: sandboxLevel as 'strict' | 'workspace' | 'custom',
+        } : undefined;
+        const result = await sessionRestart(session.id, session.metadata.machineId, sandboxConfig);
         if (!result.success) {
             throw new HappyError(result.error || t('sessionInfo.failedToRestartSession'), false);
         }
-        // Navigate to the new session
         if (result.newSessionId) {
             router.replace(`/(app)/session/${result.newSessionId}`);
         }
     });
 
+    const LABELS: Record<SandboxIsolationLevel, string> = {
+        'off': t('sandbox.off') ?? 'Off',
+        'strict': t('sandbox.strict') ?? 'Strict (project only)',
+        'workspace': t('sandbox.workspace') ?? 'Workspace',
+        'custom': t('sandbox.custom') ?? 'Custom',
+    };
+    const LEVELS: SandboxIsolationLevel[] = ['off', 'strict', 'workspace', 'custom'];
+
+    // Preselect current sandbox level from session metadata
+    const currentSandboxLevel: SandboxIsolationLevel = session.metadata?.sandbox?.enabled
+        ? (session.metadata.sandbox.sessionIsolation ?? 'workspace') as SandboxIsolationLevel
+        : 'off';
+
     const handleRestartSession = useCallback(() => {
+        // Step 1: pick sandbox level
         Modal.alert(
-            t('sessionInfo.restartSession'),
-            t('sessionInfo.restartSessionConfirm'),
+            t('sandbox.isolationTitle') ?? 'Sandbox Isolation',
+            undefined,
             [
+                ...LEVELS.map(level => ({
+                    text: `${currentSandboxLevel === level ? '✓ ' : '  '}${LABELS[level]}`,
+                    onPress: () => {
+                        // Step 2: confirm restart with selected level
+                        Modal.alert(
+                            t('sessionInfo.restartSession'),
+                            `${t('sessionInfo.restartSessionConfirm')}\n\n${t('sandbox.isolationTitle') ?? 'Sandbox'}: ${LABELS[level]}`,
+                            [
+                                { text: t('common.cancel'), style: 'cancel' },
+                                {
+                                    text: t('sessionInfo.restartSession'),
+                                    style: 'destructive',
+                                    onPress: () => restartWithSandbox(level),
+                                }
+                            ]
+                        );
+                    },
+                })),
                 { text: t('common.cancel'), style: 'cancel' },
-                {
-                    text: t('sessionInfo.restartSession'),
-                    style: 'destructive',
-                    onPress: performRestart
-                }
             ]
         );
-    }, [performRestart]);
+    }, [restartWithSandbox, currentSandboxLevel]);
 
     // Use HappyAction for deletion - it handles errors automatically
     const [deletingSession, performDelete] = useHappyAction(async () => {

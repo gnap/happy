@@ -458,7 +458,6 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             alwaysShowContextSize={alwaysShowContextSize}
             maxContextSize={maxContextSize}
             sandboxIsolation={sandboxIsolationLevel}
-            onSandboxIsolationChange={handleSandboxIsolationChange}
         />
     );
 

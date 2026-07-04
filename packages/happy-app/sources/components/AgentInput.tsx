@@ -401,8 +401,9 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         if (!isSandboxEnabled) {
             return label;
         }
+        // Blue color on the yolo label itself replaces the "(sandboxed)" suffix
         if (modeKey === 'bypassPermissions' || modeKey === 'yolo') {
-            return `${label} (sandboxed)`;
+            return label;
         }
         return label;
     }, [isSandboxEnabled]);
@@ -1142,24 +1143,31 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                             alignItems: 'flex-end',
                             minWidth: 150, // Fixed minimum width to prevent layout shift
                         }}>
-                            {displayPermissionMode && (
-                                <Text style={{
-                                    fontSize: 11,
-                                    color: isSandboxedYoloMode ? '#4169E1' :
-                                        permissionModeKey === 'acceptEdits' ? theme.colors.permission.acceptEdits :
-                                            permissionModeKey === 'bypassPermissions' ? theme.colors.permission.bypass :
-                                                permissionModeKey === 'plan' ? theme.colors.permission.plan :
-                                                    permissionModeKey === 'ask' ? theme.colors.permission.ask :
-                                                        permissionModeKey === 'read-only' ? theme.colors.permission.readOnly :
-                                                            permissionModeKey === 'safe-yolo' ? theme.colors.permission.safeYolo :
-                                                                permissionModeKey === 'yolo' ? theme.colors.permission.yolo :
-                                                                    permissionModeKey === 'force' ? theme.colors.permission.force :
-                                                                        theme.colors.textSecondary, // Use secondary text color for default
-                                    ...Typography.default()
-                                }}>
-                                    {withSandboxSuffix(displayPermissionMode.name, permissionModeKey)}
-                                </Text>
-                            )}
+                            {/* Sandbox shield + permission mode in one row */}
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
+                                <SandboxIndicatorButton
+                                    isolation={props.sandboxIsolation ?? 'off'}
+                                    onPress={props.onSandboxIsolationChange ? handleSandboxIsolationPress : undefined}
+                                />
+                                {displayPermissionMode && (
+                                    <Text style={{
+                                        fontSize: 11,
+                                        color: isSandboxedYoloMode ? '#4169E1' :
+                                            permissionModeKey === 'acceptEdits' ? theme.colors.permission.acceptEdits :
+                                                permissionModeKey === 'bypassPermissions' ? theme.colors.permission.bypass :
+                                                    permissionModeKey === 'plan' ? theme.colors.permission.plan :
+                                                        permissionModeKey === 'ask' ? theme.colors.permission.ask :
+                                                            permissionModeKey === 'read-only' ? theme.colors.permission.readOnly :
+                                                                permissionModeKey === 'safe-yolo' ? theme.colors.permission.safeYolo :
+                                                                    permissionModeKey === 'yolo' ? theme.colors.permission.yolo :
+                                                                        permissionModeKey === 'force' ? theme.colors.permission.force :
+                                                                            theme.colors.textSecondary, // Use secondary text color for default
+                                        ...Typography.default()
+                                    }}>
+                                        {withSandboxSuffix(displayPermissionMode.name, permissionModeKey)}
+                                    </Text>
+                                )}
+                            </View>
                             {props.modelMode && (
                                 <Text style={{
                                     fontSize: 11,
@@ -1661,14 +1669,6 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                     </Shaker>
                                 )}
 
-                                {/* Sandbox isolation selector */}
-                                {props.onSandboxIsolationChange && (
-                                    <SandboxIsolationButton
-                                        isolation={props.sandboxIsolation ?? 'off'}
-                                        onPress={handleSandboxIsolationPress}
-                                    />
-                                )}
-
                                 {/* Git Status Badge */}
                                 <GitStatusButton sessionId={props.sessionId} onPress={props.onFileViewerPress} />
 
@@ -1815,31 +1815,34 @@ const SANDBOX_ISOLATION_LABELS: Record<SandboxIsolationLevel, string> = {
     'custom': 'Custom',
 };
 
-function SandboxIsolationButton({ isolation, onPress }: { isolation: SandboxIsolationLevel; onPress: () => void }) {
+/** Sandbox indicator button — green shield-check when active, grey outline when off.
+ *  In wizard mode (onPress provided), it opens the isolation picker.
+ *  In session view (no onPress), it's a read-only status indicator. */
+function SandboxIndicatorButton({ isolation, onPress }: { isolation: SandboxIsolationLevel; onPress?: () => void }) {
     const { theme } = useUnistyles();
     const isActive = isolation !== 'off';
+    const interactive = !!onPress;
 
     return (
         <Pressable
             style={(p) => ({
                 flexDirection: 'row',
                 alignItems: 'center',
-                borderRadius: Platform.select({ default: 16, android: 20 }),
-                paddingHorizontal: 8,
-                paddingVertical: 6,
-                height: 32,
+                paddingHorizontal: 2,
+                paddingVertical: 0,
+                height: 14,
                 opacity: p.pressed ? 0.7 : 1,
-                gap: 4,
             })}
-            hitSlop={{ top: 5, bottom: 10, left: 0, right: 0 }}
-            onPress={() => {
+            hitSlop={{ top: 5, bottom: 5, left: 2, right: 2 }}
+            disabled={!interactive}
+            onPress={interactive ? () => {
                 hapticsLight();
                 onPress();
-            }}
+            } : undefined}
         >
             <Octicons
                 name={isActive ? "shield-check" : "shield"}
-                size={16}
+                size={12}
                 color={isActive ? theme.colors.gitAdded : theme.colors.button.secondary.tint}
             />
         </Pressable>
