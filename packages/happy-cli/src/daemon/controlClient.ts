@@ -149,12 +149,14 @@ export async function spawnDaemonSession(opts: {
   agent?: 'claude' | 'codex' | 'cursor' | 'gemini';
   environmentVariables?: Record<string, string>;
   resumeSessionTag?: string;
+  sandboxConfig?: unknown;
 }): Promise<{ success: boolean; sessionId?: string; error?: string }> {
   const result = await daemonPost('/spawn-session', {
     directory: opts.directory,
     agent: opts.agent,
     environmentVariables: opts.environmentVariables,
-    resumeSessionTag: opts.resumeSessionTag
+    resumeSessionTag: opts.resumeSessionTag,
+    sandboxConfig: opts.sandboxConfig,
   });
   if (result.error) return { success: false, error: result.error };
   if (result.success && result.sessionId) return { success: true, sessionId: result.sessionId };

@@ -109,7 +109,7 @@ type MachineRpcHandlers = {
     spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
     stopSession: (sessionId: string) => boolean;
     archiveSession: (sessionId: string) => boolean;
-    restartSession: (sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
+    restartSession: (sessionId: string, sandboxConfig?: any) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
     requestShutdown: () => void;
 }
 
@@ -143,14 +143,14 @@ export class ApiMachineClient {
     }: MachineRpcHandlers) {
         // Register spawn session handler
         this.rpcHandlerManager.registerHandler('spawn-happy-session', async (params: any) => {
-            const { directory, sessionId, machineId, approvedNewDirectoryCreation, agent, token, environmentVariables } = params || {};
+            const { directory, sessionId, machineId, approvedNewDirectoryCreation, agent, token, environmentVariables, sandboxConfig } = params || {};
             logger.debug(`[API MACHINE] Spawning session with params: ${JSON.stringify(params)}`);
 
             if (!directory) {
                 throw new Error('Directory is required');
             }
 
-            const result = await spawnSession({ directory, sessionId, machineId, approvedNewDirectoryCreation, agent, token, environmentVariables });
+            const result = await spawnSession({ directory, sessionId, machineId, approvedNewDirectoryCreation, agent, token, environmentVariables, sandboxConfig });
 
             switch (result.type) {
                 case 'success':
@@ -202,11 +202,11 @@ export class ApiMachineClient {
 
         // Register restart session handler
         this.rpcHandlerManager.registerHandler('restartSession', async (params: any) => {
-            const { sessionId } = params || {};
+            const { sessionId, sandboxConfig } = params || {};
             if (!sessionId) {
                 throw new Error('Session ID is required');
             }
-            const result = await restartSession(sessionId);
+            const result = await restartSession(sessionId, sandboxConfig);
             logger.debug(`[API MACHINE] restartSession: ${sessionId} — success=${result.success}`);
             return result;
         });

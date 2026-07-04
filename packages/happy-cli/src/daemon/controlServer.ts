@@ -193,7 +193,8 @@ export function startDaemonControlServer({
           sessionId: z.string().optional(),
           agent: z.enum(['claude', 'codex', 'cursor', 'cursor-acp', 'gemini']).optional(),
           environmentVariables: z.record(z.string()).optional(),
-          resumeSessionTag: z.string().optional()
+          resumeSessionTag: z.string().optional(),
+          sandboxConfig: z.any().optional()
         }),
         response: {
           200: z.object({
@@ -214,10 +215,10 @@ export function startDaemonControlServer({
         }
       }
     }, async (request, reply) => {
-      const { directory, sessionId, agent, environmentVariables, resumeSessionTag } = request.body;
+      const { directory, sessionId, agent, environmentVariables, resumeSessionTag, sandboxConfig } = request.body;
 
-      logger.debug(`[CONTROL SERVER] Spawn session request: dir=${directory}, sessionId=${sessionId || 'new'}, agent=${agent ?? 'default'}`);
-      const result = await spawnSession({ directory, sessionId, agent, environmentVariables, resumeSessionTag });
+      logger.debug(`[CONTROL SERVER] Spawn session request: dir=${directory}, sessionId=${sessionId || 'new'}, agent=${agent ?? 'default'}, sandbox=${sandboxConfig ? 'yes' : 'no'}`);
+      const result = await spawnSession({ directory, sessionId, agent, environmentVariables, resumeSessionTag, sandboxConfig });
 
       switch (result.type) {
         case 'success':

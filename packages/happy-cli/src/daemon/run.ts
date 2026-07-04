@@ -14,7 +14,10 @@ import { startCaffeinate, stopCaffeinate } from '@/utils/caffeinate';
 import packageJson from '../../package.json';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { getHappyCliLaunchSpec, spawnHappyCLI } from '@/utils/spawnHappyCLI';
-import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquireDaemonLock, releaseDaemonLock, readSettings, validateProfileForAgent, getProfileEnvironmentVariables } from '@/persistence';
+import { buildSandboxRuntimeConfig } from '@/sandbox/config';
+import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
+import { spawn } from 'child_process';
+import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquireDaemonLock, releaseDaemonLock, readSettings, validateProfileForAgent, getProfileEnvironmentVariables, SandboxConfigSchema } from '@/persistence';
 
 import { cleanupDaemonState, isDaemonRunningCurrentlyInstalledHappyVersion, stopDaemon } from './controlClient';
 import { startDaemonControlServer } from './controlServer';
@@ -794,6 +797,14 @@ export async function startDaemon(): Promise<void> {
           if (typeof options.resumeAfterSeq === 'number' && options.resumeAfterSeq >= 0) {
             logger.debug(`[DAEMON RUN] Passing --resume-after-seq ${options.resumeAfterSeq} to CLI`);
           }
+          // Per-session sandbox override — base64-encoded JSON for CLI arg safety.
+          // Parse through schema first so the child gets a complete config with defaults.
+          if (options.sandboxConfig) {
+            const parsedSandbox = SandboxConfigSchema.parse(options.sandboxConfig);
+            const sandboxB64 = Buffer.from(JSON.stringify(parsedSandbox)).toString('base64');
+            args.push('--sandbox-config', sandboxB64);
+            logger.debug(`[DAEMON RUN] Passing --sandbox-config to CLI (sessionIsolation: ${parsedSandbox.sessionIsolation})`);
+          }
           if (options.agent === 'cursor') {
             args.push(cursorCliMaxModeArg(extraEnv));
           }
@@ -803,12 +814,34 @@ export async function startDaemon(): Promise<void> {
           const spawnEnv = hasGuiProfileEnv
             ? { ...stripProfileManagedEnv(process.env), ...extraEnv }
             : { ...process.env, ...extraEnv };
-          const happyProcess = spawnHappyCLI(args, {
-            cwd: directory,
-            detached: true,  // Sessions stay alive when daemon stops
-            stdio: ['ignore', 'pipe', 'pipe'],  // Capture stdout/stderr for debugging
-            env: spawnEnv,
-          });
+
+          // When sandbox is configured, wrap the entire child process with sandbox-exec.
+          // The parsedSandbox variable is already set above (from the --sandbox-config block).
+          let happyProcess;
+          if (options.sandboxConfig) {
+            const sandboxConfig = SandboxConfigSchema.parse(options.sandboxConfig);
+            const runtimeConfig = buildSandboxRuntimeConfig(sandboxConfig, directory);
+            await SandboxManager.initialize(runtimeConfig);
+            const spec = getHappyCliLaunchSpec();
+            const fullCmd = [spec.executable, ...spec.argsPrefix, ...args]
+              .map(a => a.includes(' ') ? `'${a}'` : a).join(' ');
+            const wrappedCmd = await SandboxManager.wrapWithSandbox(fullCmd);
+            await SandboxManager.reset();
+            logger.debug(`[DAEMON RUN] Spawning sandboxed session (${sandboxConfig.sessionIsolation}): sandbox-exec wrapped`);
+            happyProcess = spawn('sh', ['-c', wrappedCmd], {
+              cwd: directory,
+              detached: true,
+              stdio: ['ignore', 'pipe', 'pipe'],
+              env: spawnEnv,
+            });
+          } else {
+            happyProcess = spawnHappyCLI(args, {
+              cwd: directory,
+              detached: true,  // Sessions stay alive when daemon stops
+              stdio: ['ignore', 'pipe', 'pipe'],  // Capture stdout/stderr for debugging
+              env: spawnEnv,
+            });
+          }
 
           // Log output for debugging
           if (process.env.DEBUG) {
@@ -1029,7 +1062,7 @@ export async function startDaemon(): Promise<void> {
     };
 
     // Restart a session: kill existing process and spawn a new one reconnecting to the same server session
-    const restartSession = async (sessionId: string): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
+    const restartSession = async (sessionId: string, sandboxConfig?: any): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
       logger.debug(`[DAEMON RUN] Restart session: ${sessionId}`);
       const persistedState = await readDaemonState();
 
@@ -1123,11 +1156,14 @@ export async function startDaemon(): Promise<void> {
       // restart. The offline-wake auto-respawn path still passes resumeAfterSeq because
       // that flow is meant to catch up missed messages while the PID was dead.
       const recoveredProfile = await fetchSessionProfileMeta(sessionId);
+      // RPC-provided sandboxConfig takes priority; falls back to session metadata
+      const perSessionSandbox = sandboxConfig ?? found.happySessionMetadataFromLocalWebhook?.sandbox ?? undefined;
       const result = await spawnSession({
         directory,
         agent,
         resumeSessionTag: sessionTag,
         environmentVariables: recoveredProfile?.environmentVariables ?? undefined,
+        sandboxConfig: perSessionSandbox,
       });
 
       if (result.type === 'success') {

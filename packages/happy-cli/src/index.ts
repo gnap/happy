@@ -32,7 +32,7 @@ import { parseResumeAfterSeqValue } from '@/utils/resumeAfterSeq'
 import { spawnHappyCLI } from './utils/spawnHappyCLI'
 import { claudeCliPath } from './claude/claudeLocal'
 import { execFileSync } from 'node:child_process'
-import { extractNoSandboxFlag } from './utils/sandboxFlags'
+import { extractNoSandboxFlag, extractSandboxConfigFlag } from './utils/sandboxFlags'
 import { sendA2aMessage } from './daemon/sendA2aMessage'
 
 
@@ -163,7 +163,8 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
       const {
         credentials
       } = await authAndSetupMachineIfNeeded();
-      await runCodex({ credentials, startedBy, noSandbox: codexArgs.noSandbox, resumeSessionTag, resumeAfterSeq });
+      const sandboxConfig = extractSandboxConfigFlag(codexArgs.args);
+      await runCodex({ credentials, startedBy, noSandbox: codexArgs.noSandbox, sandboxOverride: sandboxConfig.sandboxConfig, resumeSessionTag, resumeAfterSeq });
       // Do not force exit here; allow instrumentation to show lingering handles
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
@@ -447,7 +448,8 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
         await new Promise(resolve => setTimeout(resolve, 200));
       }
 
-      await runGemini({ credentials, startedBy, resumeSessionTag, resumeAfterSeq });
+      const geminiSandbox = extractSandboxConfigFlag(args);
+      await runGemini({ credentials, startedBy, sandboxOverride: geminiSandbox.sandboxConfig, resumeSessionTag, resumeAfterSeq });
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
       if (process.env.DEBUG) {
@@ -824,6 +826,12 @@ ${chalk.bold('To clean up runaway processes:')} Use ${chalk.cyan('happy doctor c
     options.noSandbox = parsedSandboxFlag.noSandbox
     args.length = 0
     args.push(...parsedSandboxFlag.args)
+
+    // Parse per-session sandbox override (from daemon spawn)
+    const parsedSandboxConfig = extractSandboxConfigFlag(args)
+    options.sandboxOverride = parsedSandboxConfig.sandboxConfig
+    args.length = 0
+    args.push(...parsedSandboxConfig.args)
 
     for (let i = 0; i < args.length; i++) {
       const arg = args[i]

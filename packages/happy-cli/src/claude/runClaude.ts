@@ -9,7 +9,7 @@ import { loop } from '@/claude/loop';
 import { AgentState, Metadata, getUserMessageText, getUserMessageFiles } from '@/api/types';
 import type { UserMessage } from '@/api/types';
 import { BUILD_VERSION } from '../version';
-import { Credentials, readSettings, getProfileEnvironmentVariables, writeSessionPidFile, removeSessionPidFile } from '@/persistence';
+import { Credentials, readSettings, getProfileEnvironmentVariables, writeSessionPidFile, removeSessionPidFile, SandboxConfig } from '@/persistence';
 import { EnhancedMode, PermissionMode, EffortLevel } from './loop';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
@@ -89,6 +89,8 @@ export interface StartOptions {
     claudeArgs?: string[]
     startedBy?: 'daemon' | 'terminal'
     noSandbox?: boolean
+    /** Per-session sandbox config override (from daemon --sandbox-config flag). Takes priority over settings.json. */
+    sandboxOverride?: SandboxConfig
     /** Explicit session tag to resume when daemon respawns this Claude process. */
     resumeSessionTag?: string
     /** Pre-wake server seq from daemon poll (fetch messages with seq > this value). */
@@ -126,7 +128,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     // Get machine ID from settings (should already be set up)
     const settings = await readSettings();
     let machineId = settings?.machineId
-    const sandboxConfig = options.noSandbox ? undefined : settings?.sandboxConfig;
+    // Priority: --no-sandbox > --sandbox-config (per-session from daemon) > settings.json
+    const sandboxConfig = options.noSandbox ? undefined : (options.sandboxOverride ?? settings?.sandboxConfig);
     const sandboxEnabled = Boolean(sandboxConfig?.enabled);
     let initialPermissionMode = applySandboxPermissionPolicy(
         resolveInitialClaudePermissionMode(options.permissionMode, options.claudeArgs),
