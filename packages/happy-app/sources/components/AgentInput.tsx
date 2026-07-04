@@ -1838,19 +1838,10 @@ function SandboxIsolationButton({ isolation, onPress }: { isolation: SandboxIsol
             }}
         >
             <Octicons
-                name="shield"
+                name={isActive ? "shield-check" : "shield"}
                 size={16}
-                color={isActive ? theme.colors.accent : theme.colors.button.secondary.tint}
+                color={isActive ? theme.colors.gitAdded : theme.colors.button.secondary.tint}
             />
-            {isActive && (
-                <Text style={{
-                    fontSize: 11,
-                    fontWeight: '600',
-                    color: theme.colors.accent,
-                }}>
-                    {isolation === 'strict' ? 'S' : isolation === 'workspace' ? 'W' : 'C'}
-                </Text>
-            )}
         </Pressable>
     );
 }
