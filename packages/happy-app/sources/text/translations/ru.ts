@@ -501,6 +501,14 @@ export const ru: TranslationStructure = {
         noMachinesAvailable: 'Нет машин',
     },
 
+        sandbox: {
+            isolationTitle: 'Sandbox Isolation',
+            off: 'Off',
+            strict: 'Strict (project only)',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
+
     machineLauncher: {
         showLess: 'Показать меньше',
         showAll: ({ count }: { count: number }) => `Показать все (${count} ${plural({ count, one: 'путь', few: 'пути', many: 'путей' })})`,

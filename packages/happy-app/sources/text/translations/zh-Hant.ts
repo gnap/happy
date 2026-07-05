@@ -492,6 +492,14 @@ export const zhHant: TranslationStructure = {
         noMachinesAvailable: '無裝置',
     },
 
+        sandbox: {
+            isolationTitle: 'Sandbox Isolation',
+            off: 'Off',
+            strict: 'Strict (project only)',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
+
     machineLauncher: {
         showLess: '顯示更少',
         showAll: ({ count }: { count: number }) => `顯示全部 (${count} 個路徑)`,

@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Pressable, SectionList, Platform, ActivityIndicator } from 'react-native';
+import { View, Pressable, SectionList, Platform, ActivityIndicator, RefreshControl } from 'react-native';
 import { Swipeable } from 'react-native-gesture-handler';
 import { Text } from '@/components/StyledText';
 import { usePathname } from 'expo-router';
@@ -27,6 +27,7 @@ import { Item } from './Item';
 import { ItemGroup } from './ItemGroup';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { sessionDelete } from '@/sync/ops';
+import { sync } from '@/sync/sync';
 import { HappyError } from '@/utils/errors';
 import { Modal } from '@/modal';
 import { SessionRowStatusIndicators } from './SessionRowStatusIndicators';
@@ -246,6 +247,16 @@ export function SessionsList() {
     const [collapsedProjects, setCollapsedProjects] = React.useState<Set<string>>(new Set());
     // Track which host groups have offline sessions hidden (key: "projectPath|host")
     const [hiddenOfflineHosts, setHiddenOfflineHosts] = React.useState<Set<string>>(new Set());
+    const [isRefreshing, setIsRefreshing] = React.useState(false);
+
+    const handleRefresh = React.useCallback(async () => {
+        setIsRefreshing(true);
+        try {
+            await sync.refreshSessions();
+        } finally {
+            setIsRefreshing(false);
+        }
+    }, []);
 
     // Filter out items inside collapsed project groups and hidden offline sessions
     const visibleData = React.useMemo(() => {
@@ -469,6 +480,9 @@ export function SessionsList() {
                         contentContainerStyle={{ paddingBottom: safeArea.bottom + 128, maxWidth: layout.maxWidth }}
                         ListHeaderComponent={HeaderComponent}
                         stickySectionHeadersEnabled={true}
+                        refreshControl={
+                            <RefreshControl refreshing={isRefreshing} onRefresh={handleRefresh} />
+                        }
                     />
                 </View>
             </View>

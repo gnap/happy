@@ -113,8 +113,6 @@ export interface Session {
     updatedAt: number,
     active: boolean,
     activeAt: number,
-    /** Server-side lifecycle state — filtered out when 'archived' or 'archiveRequested'. */
-    lifecycleState?: string | null,
     metadata: Metadata | null,
     metadataVersion: number,
     agentState: AgentState | null,

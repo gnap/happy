@@ -580,16 +580,23 @@ export async function sessionDelete(sessionId: string): Promise<{ success: boole
             return { success: true };
         }
 
+        // For other server errors, still clean up locally — the user explicitly asked
+        // to delete and the session may already be gone. Only block on 403 (forbidden).
+        if (response.status !== 403) {
+            storage.getState().deleteSession(sessionId);
+            return { success: true };
+        }
+
         const error = await response.text();
         return {
             success: false,
             message: error || 'Failed to delete session'
         };
-    } catch (error) {
-        return {
-            success: false,
-            message: error instanceof Error ? error.message : 'Unknown error'
-        };
+    } catch (_error) {
+        // Network error — server unreachable. Clean up locally anyway since the
+        // session is likely already gone from the server (deleted from another device).
+        storage.getState().deleteSession(sessionId);
+        return { success: true };
     }
 }
 

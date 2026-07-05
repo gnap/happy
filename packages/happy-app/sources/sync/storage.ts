@@ -127,7 +127,7 @@ interface StorageState {
     socketLastDisconnectedAt: number | null;
     isDataReady: boolean;
     nativeUpdateStatus: { available: boolean; updateUrl?: string } | null;
-    applySessions: (sessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[]) => void;
+    applySessions: (sessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[], fullRefresh?: boolean) => void;
     applyMachines: (machines: Machine[], replace?: boolean) => void;
     applyLoaded: () => void;
     applyReady: () => void;
@@ -609,7 +609,7 @@ export const storage = create<StorageState>()((set, get) => {
             const state = get();
             return Object.values(state.sessions).filter(s => s.active);
         },
-        applySessions: (sessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[]) => set((state) => {
+        applySessions: (sessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[], fullRefresh?: boolean) => set((state) => {
             // Drafts: only from MMKV on initial load. Permission/model: read MMKV every time so restart/refresh keeps selection (metadata first, then existing, then MMKV, then server).
             const savedDrafts = Object.keys(state.sessions).length === 0 ? sessionDrafts : {};
             const savedPermissionModes = loadSessionPermissionModes();
@@ -617,8 +617,9 @@ export const storage = create<StorageState>()((set, get) => {
             const savedMaxModes = loadSessionMaxModes();
             const savedProfileIds = loadSessionProfileIds();
 
-            // Merge new sessions with existing ones
-            const mergedSessions: Record<string, Session> = { ...state.sessions };
+            // Full refresh: replace, don't merge — purges stale sessions deleted on server.
+            // Delta refresh: merge new sessions into existing ones (current behavior).
+            const mergedSessions: Record<string, Session> = fullRefresh ? {} : { ...state.sessions };
 
             // Update sessions with calculated presence using centralized resolver
             sessions.forEach(session => {
@@ -628,9 +629,9 @@ export const storage = create<StorageState>()((set, get) => {
                 // Draft: existing || saved || session. Permission: same as model — user's explicit local choice
                 // (existing/saved) takes priority over server-pushed metadata so an ACP permission change in the UI
                 // is not immediately overwritten by config_options_update / current_mode_update from the agent.
-                const existingDraft = state.sessions[session.id]?.draft;
+                const existingDraft = fullRefresh ? undefined : state.sessions[session.id]?.draft;
                 const savedDraft = savedDrafts[session.id];
-                const existingPermissionMode = state.sessions[session.id]?.permissionMode;
+                const existingPermissionMode = fullRefresh ? undefined : state.sessions[session.id]?.permissionMode;
                 const savedPermissionMode = savedPermissionModes[session.id];
                 const defaultPermissionMode: PermissionModeKey = isSandboxEnabled(session.metadata) ? 'bypassPermissions' : 'default';
                 const metadataPermission = session.metadata?.currentOperatingModeCode?.trim();
@@ -641,14 +642,15 @@ export const storage = create<StorageState>()((set, get) => {
                     (session.permissionMode && session.permissionMode !== 'default' ? session.permissionMode : undefined) ??
                     (metadataPermission ? metadataPermission : undefined) ??
                     defaultPermissionMode;
+                const existing = fullRefresh ? undefined : state.sessions[session.id];
                 const metadataModel = session.metadata?.currentModelCode?.trim();
-                const existingModelMode = state.sessions[session.id]?.modelMode;
+                const existingModelMode = existing?.modelMode;
                 const savedModelMode = savedModelModes[session.id];
                 // User's explicit local choice (existingModelMode / savedModelMode) takes priority over
                 // server-pushed metadata so a model change in the UI is not immediately overwritten.
                 // metadataModel (what the agent is currently running) is used only as a fallback.
                 const resolvedModelMode = existingModelMode ?? savedModelMode ?? (metadataModel && metadataModel !== '' ? metadataModel : undefined) ?? session.modelMode ?? undefined;
-                const existingMaxMode = state.sessions[session.id]?.maxMode;
+                const existingMaxMode = existing?.maxMode;
                 const savedMaxMode = savedMaxModes[session.id];
                 const metadataMaxMode = session.metadata?.currentMaxMode;
                 const resolvedMaxMode =
@@ -659,7 +661,7 @@ export const storage = create<StorageState>()((set, get) => {
                             : metadataMaxMode !== undefined
                                 ? metadataMaxMode
                                 : session.maxMode ?? undefined;
-                const existingProfileId = state.sessions[session.id]?.profileId;
+                const existingProfileId = existing?.profileId;
                 const savedProfileId = savedProfileIds[session.id];
                 // '__none__' sentinel means user explicitly chose 'No Profile'.
                 // Do NOT fall back to metadata in that case.
@@ -668,7 +670,7 @@ export const storage = create<StorageState>()((set, get) => {
                 const resolvedProfileId = existingProfileId ?? metadataProfileId ?? (savedIsNone ? null : savedProfileId) ?? session.profileId ?? undefined;
                 // todos: derived by replay (reducer) when messages load; not synced to server. Preserve here so
                 // list fetches do not overwrite; replay will update session.todos when that session's messages load.
-                const existingTodos = state.sessions[session.id]?.todos;
+                const existingTodos = existing?.todos;
                 const resolvedTodos = existingTodos ?? session.todos ?? undefined;
 
                 mergedSessions[session.id] = {
@@ -682,21 +684,6 @@ export const storage = create<StorageState>()((set, get) => {
                     todos: resolvedTodos
                 };
             });
-
-            // Remove sessions that have been archived or scheduled for archival on the server.
-            // These come back through delta fetches with lifecycleState: 'archived' /
-            // 'archiveRequested' but would otherwise stick around because applySessions
-            // merges rather than replaces.
-            const archivedIds = new Set<string>();
-            for (const [id, s] of Object.entries(mergedSessions)) {
-                const ls = (s as any).lifecycleState as string | undefined;
-                if (ls === 'archived' || ls === 'archiveRequested') {
-                    archivedIds.add(id);
-                }
-            }
-            for (const id of archivedIds) {
-                delete mergedSessions[id];
-            }
 
             // Build active set from all sessions (including existing ones)
             const activeSet = new Set<string>();
@@ -745,7 +732,8 @@ export const storage = create<StorageState>()((set, get) => {
             const updatedSessionMessages = { ...state.sessionMessages };
 
             sessions.forEach(session => {
-                const oldSession = state.sessions[session.id];
+                // On full refresh, old state doesn't exist; skip AgentState diff.
+                const oldSession = fullRefresh ? undefined : state.sessions[session.id];
                 const newSession = mergedSessions[session.id];
 
                 // Check if sessionMessages exists AND agentStateVersion is newer

@@ -198,6 +198,9 @@ class Sync {
     private lastSessionRefreshAt = 0;
     /** Timestamp of the last successful session fetch; used as delta base. */
     private lastSessionRefreshNonDeltaAt = 0;
+    /** When true, the next fetchSessions must NOT overwrite lastSessionRefreshNonDeltaAt
+     *  with Date.now() — the pending full refresh still needs to run on the double-invalidation cycle. */
+    private _forceFullRefreshPending = false;
     private lastFullRefreshAt = 0;
     /** Per-session cooldown for single-session fetches (15s). */
     private sessionRefreshCooldowns = new Map<string, number>();
@@ -357,14 +360,18 @@ class Sync {
      * Delta fetches never remove sessions that were deleted or archived on another
      * device — a periodic full fetch is needed to purge them from local cache.
      */
-    #refreshSessionsFull() {
+    #refreshSessionsFull(force = false) {
         const now = Date.now();
-        if (now - this.lastFullRefreshAt < Sync.FULL_REFRESH_INTERVAL_MS) {
+        if (!force && now - this.lastFullRefreshAt < Sync.FULL_REFRESH_INTERVAL_MS) {
             return;
         }
         this.lastFullRefreshAt = now;
         log.log('🔄 Full sessions refresh — resetting delta base for cache cleanup');
         this.lastSessionRefreshNonDeltaAt = 0;
+        this._forceFullRefreshPending = true; // prevent fetchSessions from overwriting with Date.now()
+        if (force) {
+            this.lastSessionRefreshAt = 0; // bypass fetch cooldown for user-triggered refresh
+        }
         this.sessionsSync.invalidate();
     }
 
@@ -1273,11 +1280,14 @@ class Sync {
 
         // Rate-limit: don't fetch more than once per cooldown period.
         const now = Date.now();
-        if (now - this.lastSessionRefreshAt < Sync.SESSION_REFRESH_COOLDOWN_MS) {
+        if (!this._forceFullRefreshPending && now - this.lastSessionRefreshAt < Sync.SESSION_REFRESH_COOLDOWN_MS) {
             log.log(`⏱️ fetchSessions: skipped — cooldown (${now - this.lastSessionRefreshAt}ms since last)`);
             return;
         }
         this.lastSessionRefreshAt = now;
+
+        // Full refresh when delta base is 0 (either first fetch or reset by #refreshSessionsFull).
+        const fullRefresh = this.lastSessionRefreshNonDeltaAt === 0;
 
         try {
             const t0 = performance.now();
@@ -1330,7 +1340,6 @@ class Sync {
                 activeAt: number;
                 createdAt: number;
                 updatedAt: number;
-                lifecycleState?: string | null;
                 lastMessage: ApiMessage | null;
             }>;
 
@@ -1388,11 +1397,17 @@ class Sync {
                 decryptedSessions.push(processedSession);
             }
 
-            // Apply to storage
+            // Apply to storage — full refresh replaces stale cache, delta merges.
             const applyStart = performance.now();
-            this.applySessions(decryptedSessions);
-            // Record timestamp for next delta fetch. Moves forward every successful fetch
-            // so subsequent deltas only request sessions changed since THIS fetch.
+            this.applySessions(decryptedSessions, fullRefresh);
+            // Record timestamp for next delta fetch.
+            // During forceFullRefresh, only the actual full fetch (fullRefresh=true)
+            // should clear the flag — the stale in-flight fetch must not overwrite
+            // the delta base or the flag.
+            if (this._forceFullRefreshPending) {
+                if (!fullRefresh) return; // stale fetch: don't overwrite anything
+                this._forceFullRefreshPending = false; // real full refresh succeeded
+            }
             this.lastSessionRefreshNonDeltaAt = Date.now();
             const applyMs = Math.round(performance.now() - applyStart);
             const metadataDecryptMs = Math.round(performance.now() - metadataDecryptStart);
@@ -1492,6 +1507,8 @@ class Sync {
     }
 
     public refreshSessions = async () => {
+        // User-triggered refresh → force full fetch to purge stale sessions
+        this.#refreshSessionsFull(true);
         return this.sessionsSync.invalidateAndAwait();
     }
 
@@ -3491,9 +3508,9 @@ class Sync {
 
     private applySessions = (sessions: (Omit<Session, "presence"> & {
         presence?: "online" | number;
-    })[]) => {
+    })[], fullRefresh?: boolean) => {
         const active = storage.getState().getActiveSessions();
-        storage.getState().applySessions(sessions);
+        storage.getState().applySessions(sessions, fullRefresh);
         const newActive = storage.getState().getActiveSessions();
         this.applySessionDiff(active, newActive);
     }
