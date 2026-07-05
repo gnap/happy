@@ -1284,6 +1284,7 @@ class Sync {
 
         // Full refresh when delta base is 0 (either first fetch or reset by #refreshSessionsFull).
         const fullRefresh = this.lastSessionRefreshNonDeltaAt === 0;
+        log.log(`📥 fetchSessions: fullRefresh=${fullRefresh} nonDeltaAt=${this.lastSessionRefreshNonDeltaAt}`);
 
         try {
             const t0 = performance.now();
