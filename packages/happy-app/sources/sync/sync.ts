@@ -1494,6 +1494,8 @@ class Sync {
     }
 
     public refreshSessions = async () => {
+        // User-triggered refresh → full fetch to purge stale sessions
+        this.#refreshSessionsFull();
         return this.sessionsSync.invalidateAndAwait();
     }
 
