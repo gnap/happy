@@ -209,7 +209,7 @@ export class ApiMachineClient {
             if (!sessionId) {
                 throw new Error('Session ID is required');
             }
-            logger.debug(`[API MACHINE] restartSession requested: ${sessionId}`);
+            logger.debug(`[API MACHINE] restartSession params: sessionId=${sessionId}, sandboxConfig=${JSON.stringify(sandboxConfig)}`);
             // Fire-and-forget — don't await, don't block the RPC response
             restartSession(sessionId, sandboxConfig).then(r => {
                 logger.debug(`[API MACHINE] restartSession: ${sessionId} — success=${r.success}`);
