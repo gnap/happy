@@ -1402,13 +1402,15 @@ class Sync {
             const applyStart = performance.now();
             console.log(`[fetchSessions] applying — fullRefresh=${fullRefresh} decryptedCount=${decryptedSessions.length}`);
             this.applySessions(decryptedSessions, fullRefresh);
-            // Record timestamp for next delta fetch — unless a forceFullRefresh was requested
-            // and this is the stale in-flight fetch (double-invalidation will run the real one).
+            // Record timestamp for next delta fetch.
+            // During forceFullRefresh, only the actual full fetch (fullRefresh=true)
+            // should clear the flag — the stale in-flight fetch must not overwrite
+            // the delta base or the flag.
             if (this._forceFullRefreshPending) {
-                this._forceFullRefreshPending = false; // let the double-invalidation run do the full fetch
-            } else {
-                this.lastSessionRefreshNonDeltaAt = Date.now();
+                if (!fullRefresh) return; // stale fetch: don't overwrite anything
+                this._forceFullRefreshPending = false; // real full refresh succeeded
             }
+            this.lastSessionRefreshNonDeltaAt = Date.now();
             const applyMs = Math.round(performance.now() - applyStart);
             const metadataDecryptMs = Math.round(performance.now() - metadataDecryptStart);
             const totalMs = Math.round(performance.now() - t0);
