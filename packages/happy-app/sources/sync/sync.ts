@@ -1280,7 +1280,7 @@ class Sync {
 
         // Rate-limit: don't fetch more than once per cooldown period.
         const now = Date.now();
-        if (now - this.lastSessionRefreshAt < Sync.SESSION_REFRESH_COOLDOWN_MS) {
+        if (!this._forceFullRefreshPending && now - this.lastSessionRefreshAt < Sync.SESSION_REFRESH_COOLDOWN_MS) {
             log.log(`⏱️ fetchSessions: skipped — cooldown (${now - this.lastSessionRefreshAt}ms since last)`);
             return;
         }
