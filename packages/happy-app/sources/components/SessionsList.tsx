@@ -250,7 +250,6 @@ export function SessionsList() {
     const [isRefreshing, setIsRefreshing] = React.useState(false);
 
     const handleRefresh = React.useCallback(async () => {
-        console.log('[handleRefresh] pull-to-refresh triggered');
         setIsRefreshing(true);
         try {
             await sync.refreshSessions();
@@ -463,14 +462,9 @@ export function SessionsList() {
 
     const HeaderComponent = React.useCallback(() => {
         return (
-            <>
-                <UpdateBanner />
-                <Pressable onPress={handleRefresh} style={{ alignSelf: 'center', padding: 8 }}>
-                    <Text style={{ color: '#007AFF', fontSize: 13 }}>⟳ Refresh sessions</Text>
-                </Pressable>
-            </>
+            <UpdateBanner />
         );
-    }, [handleRefresh]);
+    }, []);
 
     // Footer removed - all sessions now shown inline
 

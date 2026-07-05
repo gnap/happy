@@ -1288,7 +1288,6 @@ class Sync {
 
         // Full refresh when delta base is 0 (either first fetch or reset by #refreshSessionsFull).
         const fullRefresh = this.lastSessionRefreshNonDeltaAt === 0;
-        console.log(`[fetchSessions] fullRefresh=${fullRefresh} deltaBase=${this.lastSessionRefreshNonDeltaAt} forcePending=${this._forceFullRefreshPending}`);
 
         try {
             const t0 = performance.now();
@@ -1400,7 +1399,6 @@ class Sync {
 
             // Apply to storage — full refresh replaces stale cache, delta merges.
             const applyStart = performance.now();
-            console.log(`[fetchSessions] applying — fullRefresh=${fullRefresh} decryptedCount=${decryptedSessions.length}`);
             this.applySessions(decryptedSessions, fullRefresh);
             // Record timestamp for next delta fetch.
             // During forceFullRefresh, only the actual full fetch (fullRefresh=true)
@@ -3588,4 +3586,3 @@ async function syncInit(credentials: AuthCredentials, restore: boolean) {
         await sync.create(credentials, encryption);
     }
 }
-window.__SYNC_TS_TEST__ = 1;
