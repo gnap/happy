@@ -250,6 +250,7 @@ export function SessionsList() {
     const [isRefreshing, setIsRefreshing] = React.useState(false);
 
     const handleRefresh = React.useCallback(async () => {
+        console.log('[handleRefresh] pull-to-refresh triggered');
         setIsRefreshing(true);
         try {
             await sync.refreshSessions();
