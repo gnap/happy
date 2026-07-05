@@ -198,6 +198,9 @@ class Sync {
     private lastSessionRefreshAt = 0;
     /** Timestamp of the last successful session fetch; used as delta base. */
     private lastSessionRefreshNonDeltaAt = 0;
+    /** When true, the next fetchSessions must NOT overwrite lastSessionRefreshNonDeltaAt
+     *  with Date.now() — the pending full refresh still needs to run on the double-invalidation cycle. */
+    private _forceFullRefreshPending = false;
     private lastFullRefreshAt = 0;
     /** Per-session cooldown for single-session fetches (15s). */
     private sessionRefreshCooldowns = new Map<string, number>();
@@ -365,6 +368,7 @@ class Sync {
         this.lastFullRefreshAt = now;
         log.log('🔄 Full sessions refresh — resetting delta base for cache cleanup');
         this.lastSessionRefreshNonDeltaAt = 0;
+        this._forceFullRefreshPending = true; // prevent fetchSessions from overwriting with Date.now()
         if (force) {
             this.lastSessionRefreshAt = 0; // bypass fetch cooldown for user-triggered refresh
         }
@@ -1284,7 +1288,6 @@ class Sync {
 
         // Full refresh when delta base is 0 (either first fetch or reset by #refreshSessionsFull).
         const fullRefresh = this.lastSessionRefreshNonDeltaAt === 0;
-        log.log(`📥 fetchSessions: fullRefresh=${fullRefresh} nonDeltaAt=${this.lastSessionRefreshNonDeltaAt}`);
 
         try {
             const t0 = performance.now();
@@ -1397,9 +1400,13 @@ class Sync {
             // Apply to storage — full refresh replaces stale cache, delta merges
             const applyStart = performance.now();
             this.applySessions(decryptedSessions, fullRefresh);
-            // Record timestamp for next delta fetch. Moves forward every successful fetch
-            // so subsequent deltas only request sessions changed since THIS fetch.
-            this.lastSessionRefreshNonDeltaAt = Date.now();
+            // Record timestamp for next delta fetch — unless a forceFullRefresh was requested
+            // and this is the stale in-flight fetch (double-invalidation will run the real one).
+            if (this._forceFullRefreshPending) {
+                this._forceFullRefreshPending = false; // let the double-invalidation run do the full fetch
+            } else {
+                this.lastSessionRefreshNonDeltaAt = Date.now();
+            }
             const applyMs = Math.round(performance.now() - applyStart);
             const metadataDecryptMs = Math.round(performance.now() - metadataDecryptStart);
             const totalMs = Math.round(performance.now() - t0);
