@@ -357,14 +357,17 @@ class Sync {
      * Delta fetches never remove sessions that were deleted or archived on another
      * device — a periodic full fetch is needed to purge them from local cache.
      */
-    #refreshSessionsFull() {
+    #refreshSessionsFull(force = false) {
         const now = Date.now();
-        if (now - this.lastFullRefreshAt < Sync.FULL_REFRESH_INTERVAL_MS) {
+        if (!force && now - this.lastFullRefreshAt < Sync.FULL_REFRESH_INTERVAL_MS) {
             return;
         }
         this.lastFullRefreshAt = now;
         log.log('🔄 Full sessions refresh — resetting delta base for cache cleanup');
         this.lastSessionRefreshNonDeltaAt = 0;
+        if (force) {
+            this.lastSessionRefreshAt = 0; // bypass fetch cooldown for user-triggered refresh
+        }
         this.sessionsSync.invalidate();
     }
 
@@ -1494,8 +1497,8 @@ class Sync {
     }
 
     public refreshSessions = async () => {
-        // User-triggered refresh → full fetch to purge stale sessions
-        this.#refreshSessionsFull();
+        // User-triggered refresh → force full fetch to purge stale sessions
+        this.#refreshSessionsFull(true);
         return this.sessionsSync.invalidateAndAwait();
     }
 
