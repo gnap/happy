@@ -292,6 +292,13 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     const session = api.sessionSyncClient(response, true, sessionClientOpts);
     writeSessionPidFile(session.sessionId);
 
+    // Resume ignores new metadata (server returns stored). Explicitly sync sandbox
+    // so restart-with-sandbox correctly updates the session's isolation level.
+    if (sandboxConfig?.enabled) {
+        session.updateMetadata((current) => ({ ...current, sandbox: sandboxConfig }))
+            .catch((err: unknown) => logger.debug('[START] Failed to sync sandbox to session metadata:', err));
+    }
+
     let handleUserMessage: ((message: UserMessage) => Promise<void>) | null = null;
     let isA2AInboxTurnActiveFn: () => boolean = () => false;
     let describeInboxMcpScopeFn: () => string = () => 'empty';

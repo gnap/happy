@@ -1199,19 +1199,20 @@ export async function startDaemon(): Promise<void> {
         const { sessionId, pid, sessionTag, metadata } = msg;
         if (!sessionId || !pid) return;
         logger.debug(`[DAEMON RUN] Socket session registered: ${sessionId} (pid=${pid})`);
-        // Reuse the same HTTP webhook handler for consistent tracking
-        onHappySessionWebhook(sessionId, pid, {
-          ...(metadata as any ?? {}),
-          path: (metadata as any)?.path ?? '',
+        // Build sessionMetadata — must match Metadata type. hostPid is required by the handler.
+        const sessionMetadata: any = {
+          ...(metadata ?? {}),
+          path: metadata?.path ?? '',
           sessionTag: sessionTag ?? '',
-          flavor: (metadata as any)?.flavor ?? 'claude',
-          startedBy: (metadata as any)?.startedBy ?? 'daemon',
+          flavor: metadata?.flavor ?? 'claude',
+          startedBy: metadata?.startedBy ?? 'daemon',
           hostPid: pid,
           lifecycleState: 'running',
           lifecycleStateSince: Date.now(),
-          sandbox: (metadata as any)?.sandbox ?? null,
-          dangerouslySkipPermissions: (metadata as any)?.dangerouslySkipPermissions ?? false,
-        });
+          sandbox: metadata?.sandbox ?? null,
+          dangerouslySkipPermissions: metadata?.dangerouslySkipPermissions ?? false,
+        };
+        onHappySessionWebhook(sessionId, sessionMetadata);
       },
       onSessionDisconnect(sessionId) {
         if (!sessionId) return;
