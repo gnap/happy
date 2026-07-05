@@ -26,6 +26,11 @@ function getPlatformTempPaths(): string[] {
     paths.push('/tmp');                  // always allow /tmp
     paths.push('/private/tmp');          // macOS /tmp -> /private/tmp symlink
 
+    // Xcode build artifacts (DerivedData, Archives, simulators etc.)
+    if (platform() === 'darwin') {
+        paths.push(join(home, 'Library/Developer'));
+    }
+
     // Cache dirs (platform-specific)
     if (platform() === 'darwin') {
         paths.push(join(home, 'Library/Caches'));
