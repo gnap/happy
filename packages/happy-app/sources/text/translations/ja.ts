@@ -526,6 +526,14 @@ export const ja: TranslationStructure = {
         noMachinesAvailable: 'マシンなし',
     },
 
+        sandbox: {
+            isolationTitle: 'Sandbox Isolation',
+            off: 'Off',
+            strict: 'Strict (project only)',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
+
     machineLauncher: {
         showLess: '折りたたむ',
         showAll: ({ count }: { count: number }) => `すべて表示 (${count}パス)`,

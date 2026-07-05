@@ -493,6 +493,14 @@ export const zhHans: TranslationStructure = {
         noMachinesAvailable: '无设备',
     },
 
+        sandbox: {
+            isolationTitle: 'Sandbox Isolation',
+            off: 'Off',
+            strict: 'Strict (project only)',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
+
     machineLauncher: {
         showLess: '显示更少',
         showAll: ({ count }: { count: number }) => `显示全部 (${count} 个路径)`,

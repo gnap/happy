@@ -491,6 +491,14 @@ export const pt: TranslationStructure = {
         noMachinesAvailable: 'Sem máquinas',
     },
 
+        sandbox: {
+            isolationTitle: 'Sandbox Isolation',
+            off: 'Off',
+            strict: 'Strict (project only)',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
+
     machineLauncher: {
         showLess: 'Mostrar menos',
         showAll: ({ count }: { count: number }) => `Mostrar todos (${count} caminhos)`,

@@ -497,6 +497,14 @@ export const en = {
         },
     },
 
+    sandbox: {
+        isolationTitle: 'Sandbox Isolation',
+        off: 'Off',
+        strict: 'Strict (project only)',
+        workspace: 'Workspace',
+        custom: 'Custom',
+    },
+
     machineLauncher: {
         showLess: 'Show less',
         showAll: ({ count }: { count: number }) => `Show all (${count} paths)`,

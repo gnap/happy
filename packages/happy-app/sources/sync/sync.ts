@@ -1279,6 +1279,9 @@ class Sync {
         }
         this.lastSessionRefreshAt = now;
 
+        // Full refresh when delta base is 0 (either first fetch or reset by #refreshSessionsFull).
+        const fullRefresh = this.lastSessionRefreshNonDeltaAt === 0;
+
         try {
             const t0 = performance.now();
             const API_ENDPOINT = getServerUrl();
@@ -1330,7 +1333,6 @@ class Sync {
                 activeAt: number;
                 createdAt: number;
                 updatedAt: number;
-                lifecycleState?: string | null;
                 lastMessage: ApiMessage | null;
             }>;
 
@@ -1388,9 +1390,9 @@ class Sync {
                 decryptedSessions.push(processedSession);
             }
 
-            // Apply to storage
+            // Apply to storage — full refresh replaces stale cache, delta merges
             const applyStart = performance.now();
-            this.applySessions(decryptedSessions);
+            this.applySessions(decryptedSessions, fullRefresh);
             // Record timestamp for next delta fetch. Moves forward every successful fetch
             // so subsequent deltas only request sessions changed since THIS fetch.
             this.lastSessionRefreshNonDeltaAt = Date.now();

@@ -236,9 +236,8 @@ function SessionInfoContent({ session }: { session: Session }) {
         if (!result.success) {
             throw new HappyError(result.error || t('sessionInfo.failedToRestartSession'), false);
         }
-        if (result.newSessionId) {
-            router.replace(`/(app)/session/${result.newSessionId}`);
-        }
+        // restart is fire-and-forget on the daemon side — the session reconnects
+        // with the same ID. Just go back to the session list and wait for it.
     });
 
     const LABELS: Record<SandboxIsolationLevel, string> = {
@@ -469,14 +468,13 @@ function SessionInfoContent({ session }: { session: Session }) {
                             onPress={() => router.push(`/machine/${session.metadata?.machineId}`)}
                         />
                     )}
-                    {sessionStatus.isConnected && (
-                        <Item
-                            title={t('sessionInfo.restartSession')}
-                            subtitle={t('sessionInfo.restartSessionSubtitle')}
-                            icon={<Ionicons name="sync-circle-outline" size={29} color="#FF9500" />}
-                            onPress={handleRestartSession}
-                        />
-                    )}
+                    {/* Restart: always available regardless of connection status */}
+                    <Item
+                        title={t('sessionInfo.restartSession')}
+                        subtitle={t('sessionInfo.restartSessionSubtitle')}
+                        icon={<Ionicons name="sync-circle-outline" size={29} color="#FF9500" />}
+                        onPress={handleRestartSession}
+                    />
                     {sessionStatus.isConnected && (
                         <Item
                             title={t('sessionInfo.archiveSession')}
