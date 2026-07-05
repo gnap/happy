@@ -463,9 +463,14 @@ export function SessionsList() {
 
     const HeaderComponent = React.useCallback(() => {
         return (
-            <UpdateBanner />
+            <>
+                <UpdateBanner />
+                <Pressable onPress={handleRefresh} style={{ alignSelf: 'center', padding: 8 }}>
+                    <Text style={{ color: '#007AFF', fontSize: 13 }}>⟳ Refresh sessions</Text>
+                </Pressable>
+            </>
         );
-    }, []);
+    }, [handleRefresh]);
 
     // Footer removed - all sessions now shown inline
 
