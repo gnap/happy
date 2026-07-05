@@ -2000,3 +2000,6 @@ export function useRequestedFriends() {
         return Object.values(state.friends).filter(friend => friend.status === 'requested');
     }));
 }
+
+window.__STORAGE_TS_UPDATED__ = '1783253605';
+window.__STORAGE_TS_V2__1783253643 = true;

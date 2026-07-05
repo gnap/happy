@@ -1398,7 +1398,7 @@ class Sync {
                 decryptedSessions.push(processedSession);
             }
 
-            // Apply to storage — full refresh replaces stale cache, delta merges
+            // Apply to storage — full refresh replaces stale cache, delta merges.
             const applyStart = performance.now();
             console.log(`[fetchSessions] applying — fullRefresh=${fullRefresh} decryptedCount=${decryptedSessions.length}`);
             this.applySessions(decryptedSessions, fullRefresh);
@@ -3510,9 +3510,9 @@ class Sync {
 
     private applySessions = (sessions: (Omit<Session, "presence"> & {
         presence?: "online" | number;
-    })[]) => {
+    })[], fullRefresh?: boolean) => {
         const active = storage.getState().getActiveSessions();
-        storage.getState().applySessions(sessions);
+        storage.getState().applySessions(sessions, fullRefresh);
         const newActive = storage.getState().getActiveSessions();
         this.applySessionDiff(active, newActive);
     }
@@ -3588,3 +3588,4 @@ async function syncInit(credentials: AuthCredentials, restore: boolean) {
         await sync.create(credentials, encryption);
     }
 }
+window.__SYNC_TS_TEST__ = 1;
