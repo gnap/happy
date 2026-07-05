@@ -619,7 +619,9 @@ export const storage = create<StorageState>()((set, get) => {
 
             // Full refresh: replace, don't merge — purges stale sessions deleted on server.
             // Delta refresh: merge new sessions into existing ones (current behavior).
+            const oldCount = Object.keys(state.sessions).length;
             const mergedSessions: Record<string, Session> = fullRefresh ? {} : { ...state.sessions };
+            if (fullRefresh) console.log(`[applySessions] fullRefresh — old=${oldCount} incoming=${sessions.length}`);
 
             // Update sessions with calculated presence using centralized resolver
             sessions.forEach(session => {
