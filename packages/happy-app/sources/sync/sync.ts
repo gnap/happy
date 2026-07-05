@@ -1288,6 +1288,7 @@ class Sync {
 
         // Full refresh when delta base is 0 (either first fetch or reset by #refreshSessionsFull).
         const fullRefresh = this.lastSessionRefreshNonDeltaAt === 0;
+        console.log(`[fetchSessions] fullRefresh=${fullRefresh} deltaBase=${this.lastSessionRefreshNonDeltaAt} forcePending=${this._forceFullRefreshPending}`);
 
         try {
             const t0 = performance.now();
@@ -1399,6 +1400,7 @@ class Sync {
 
             // Apply to storage — full refresh replaces stale cache, delta merges
             const applyStart = performance.now();
+            console.log(`[fetchSessions] applying — fullRefresh=${fullRefresh} decryptedCount=${decryptedSessions.length}`);
             this.applySessions(decryptedSessions, fullRefresh);
             // Record timestamp for next delta fetch — unless a forceFullRefresh was requested
             // and this is the stale in-flight fetch (double-invalidation will run the real one).
