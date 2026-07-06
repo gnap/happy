@@ -455,37 +455,11 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             logger.debug(`[loop] User message received with no model override, using current: ${currentModel || 'default'}`);
         }
 
-        // Resolve sandbox isolation — runtime switchable like model/permission mode, no restart needed.
+        // Sandbox isolation is processed AFTER the queue push so the enhancedMode
+        // retains the old sandboxIsolation value. The hash change on the NEXT message
+        // triggers a respawn with the updated sandbox settings — same pattern as model changes.
         let sandboxIsolationChanged = false;
         let messageSandboxIsolation: string | undefined;
-        if (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'sandboxIsolation')) {
-            messageSandboxIsolation = message.meta.sandboxIsolation as string;
-            if (messageSandboxIsolation === 'off') {
-                sandboxEnabled = false;
-                sandboxConfig = undefined;
-            } else {
-                sandboxEnabled = true;
-                sandboxConfig = {
-                    enabled: true,
-                    sessionIsolation: (messageSandboxIsolation as 'strict' | 'workspace' | 'custom') || 'workspace',
-                    workspaceRoot: sandboxConfig?.workspaceRoot,
-                    customWritePaths: sandboxConfig?.customWritePaths ?? [],
-                    denyReadPaths: sandboxConfig?.denyReadPaths ?? ['~/.ssh', '~/.aws', '~/.gnupg'],
-                    extraWritePaths: sandboxConfig?.extraWritePaths ?? ['/tmp'],
-                    denyWritePaths: sandboxConfig?.denyWritePaths ?? ['.env'],
-                    networkMode: sandboxConfig?.networkMode ?? 'allowed',
-                    allowedDomains: sandboxConfig?.allowedDomains ?? [],
-                    deniedDomains: sandboxConfig?.deniedDomains ?? [],
-                    allowLocalBinding: sandboxConfig?.allowLocalBinding ?? true,
-                };
-            }
-            sandboxIsolationChanged = true;
-            logger.debug(`[loop] Sandbox isolation updated from user message: ${messageSandboxIsolation} (enabled=${sandboxEnabled})`);
-            // Update the session's reference so claudeRemote picks up the change next query
-            if (currentSession) {
-                currentSession.sandboxConfig = sandboxConfig;
-            }
-        }
 
         // Resolve custom system prompt - use message.meta.customSystemPrompt if provided, otherwise use current
         let messageCustomSystemPrompt = currentCustomSystemPrompt;
@@ -694,8 +668,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         const metaChanged =
             message.meta?.permissionMode !== undefined
             || (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'model'))
-            || (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'effort'))
-            || sandboxIsolationChanged;
+            || (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'effort'));
         if (metaChanged) {
             session.updateMetadata((m) => {
                 const patch: Record<string, unknown> = {};
@@ -707,10 +680,6 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 }
                 if (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'effort')) {
                     patch.currentEffort = messageEffort;
-                }
-                if (sandboxIsolationChanged) {
-                    patch.sandbox = sandboxConfig?.enabled ? sandboxConfig : null;
-                    patch.currentSandboxIsolation = messageSandboxIsolation ?? 'off';
                 }
                 return { ...m, ...patch };
             }).catch((err) => logger.debug('[loop] Failed to persist permission/model to session metadata', err));
@@ -731,6 +700,45 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         const files = getUserMessageFiles(message);
         messageQueue.push(msgText, enhancedMode, { meta: message.meta, files });
         logger.debugLargeJson('User message pushed to queue:', message)
+
+        // Process sandbox isolation change AFTER the queue push.
+        // The enhancedMode above was built with the OLD sandbox state, so the
+        // launcher keeps the current SDK process for this turn. The in-memory
+        // sandboxEnabled/sandboxConfig update takes effect on the NEXT turn
+        // when the enhancedMode hash changes, triggering a respawn.
+        if (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'sandboxIsolation')) {
+            messageSandboxIsolation = message.meta.sandboxIsolation as string;
+            if (messageSandboxIsolation === 'off') {
+                sandboxEnabled = false;
+                sandboxConfig = undefined;
+            } else {
+                sandboxEnabled = true;
+                sandboxConfig = {
+                    enabled: true,
+                    sessionIsolation: (messageSandboxIsolation as 'strict' | 'workspace' | 'custom') || 'workspace',
+                    workspaceRoot: sandboxConfig?.workspaceRoot,
+                    customWritePaths: sandboxConfig?.customWritePaths ?? [],
+                    denyReadPaths: sandboxConfig?.denyReadPaths ?? ['~/.ssh', '~/.aws', '~/.gnupg'],
+                    extraWritePaths: sandboxConfig?.extraWritePaths ?? ['/tmp'],
+                    denyWritePaths: sandboxConfig?.denyWritePaths ?? ['.env'],
+                    networkMode: sandboxConfig?.networkMode ?? 'allowed',
+                    allowedDomains: sandboxConfig?.allowedDomains ?? [],
+                    deniedDomains: sandboxConfig?.deniedDomains ?? [],
+                    allowLocalBinding: sandboxConfig?.allowLocalBinding ?? true,
+                };
+            }
+            sandboxIsolationChanged = true;
+            logger.debug(`[loop] Sandbox isolation updated from user message: ${messageSandboxIsolation} (enabled=${sandboxEnabled})`);
+            if (currentSession) {
+                currentSession.sandboxConfig = sandboxConfig;
+            }
+            // Persist sandbox change to session metadata so the App sees the update.
+            session.updateMetadata((m) => ({
+                ...m,
+                sandbox: sandboxConfig?.enabled ? sandboxConfig : null,
+                currentSandboxIsolation: messageSandboxIsolation ?? 'off',
+            })).catch((err) => logger.debug('[loop] Failed to persist sandbox to session metadata', err));
+        }
     };
     session.onUserMessage(handleUserMessage);
 
