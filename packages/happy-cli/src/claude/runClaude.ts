@@ -455,11 +455,36 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             logger.debug(`[loop] User message received with no model override, using current: ${currentModel || 'default'}`);
         }
 
-        // Sandbox isolation is processed AFTER the queue push so the enhancedMode
-        // retains the old sandboxIsolation value. The hash change on the NEXT message
-        // triggers a respawn with the updated sandbox settings — same pattern as model changes.
-        let sandboxIsolationChanged = false;
+        // Resolve sandbox isolation — runtime switchable like model/permission mode, no restart needed.
         let messageSandboxIsolation: string | undefined;
+        let sandboxIsolationChanged = false;
+        if (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'sandboxIsolation')) {
+            messageSandboxIsolation = message.meta.sandboxIsolation as string;
+            if (messageSandboxIsolation === 'off') {
+                sandboxEnabled = false;
+                sandboxConfig = undefined;
+            } else {
+                sandboxEnabled = true;
+                sandboxConfig = {
+                    enabled: true,
+                    sessionIsolation: (messageSandboxIsolation as 'strict' | 'workspace' | 'custom') || 'workspace',
+                    workspaceRoot: sandboxConfig?.workspaceRoot,
+                    customWritePaths: sandboxConfig?.customWritePaths ?? [],
+                    denyReadPaths: sandboxConfig?.denyReadPaths ?? ['~/.ssh', '~/.aws', '~/.gnupg'],
+                    extraWritePaths: sandboxConfig?.extraWritePaths ?? ['/tmp'],
+                    denyWritePaths: sandboxConfig?.denyWritePaths ?? ['.env'],
+                    networkMode: sandboxConfig?.networkMode ?? 'allowed',
+                    allowedDomains: sandboxConfig?.allowedDomains ?? [],
+                    deniedDomains: sandboxConfig?.deniedDomains ?? [],
+                    allowLocalBinding: sandboxConfig?.allowLocalBinding ?? true,
+                };
+            }
+            sandboxIsolationChanged = true;
+            logger.debug(`[loop] Sandbox isolation updated from user message: ${messageSandboxIsolation} (enabled=${sandboxEnabled})`);
+            if (currentSession) {
+                currentSession.sandboxConfig = sandboxConfig;
+            }
+        }
 
         // Resolve custom system prompt - use message.meta.customSystemPrompt if provided, otherwise use current
         let messageCustomSystemPrompt = currentCustomSystemPrompt;
@@ -698,47 +723,22 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         // and echo it back for outbox cleanup.
         const msgText = getUserMessageText(message);
         const files = getUserMessageFiles(message);
-        messageQueue.push(msgText, enhancedMode, { meta: message.meta, files });
-        logger.debugLargeJson('User message pushed to queue:', message)
-
-        // Process sandbox isolation change AFTER the queue push.
-        // The enhancedMode above was built with the OLD sandbox state, so the
-        // launcher keeps the current SDK process for this turn. The in-memory
-        // sandboxEnabled/sandboxConfig update takes effect on the NEXT turn
-        // when the enhancedMode hash changes, triggering a respawn.
-        if (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'sandboxIsolation')) {
-            messageSandboxIsolation = message.meta.sandboxIsolation as string;
-            if (messageSandboxIsolation === 'off') {
-                sandboxEnabled = false;
-                sandboxConfig = undefined;
-            } else {
-                sandboxEnabled = true;
-                sandboxConfig = {
-                    enabled: true,
-                    sessionIsolation: (messageSandboxIsolation as 'strict' | 'workspace' | 'custom') || 'workspace',
-                    workspaceRoot: sandboxConfig?.workspaceRoot,
-                    customWritePaths: sandboxConfig?.customWritePaths ?? [],
-                    denyReadPaths: sandboxConfig?.denyReadPaths ?? ['~/.ssh', '~/.aws', '~/.gnupg'],
-                    extraWritePaths: sandboxConfig?.extraWritePaths ?? ['/tmp'],
-                    denyWritePaths: sandboxConfig?.denyWritePaths ?? ['.env'],
-                    networkMode: sandboxConfig?.networkMode ?? 'allowed',
-                    allowedDomains: sandboxConfig?.allowedDomains ?? [],
-                    deniedDomains: sandboxConfig?.deniedDomains ?? [],
-                    allowLocalBinding: sandboxConfig?.allowLocalBinding ?? true,
-                };
-            }
-            sandboxIsolationChanged = true;
-            logger.debug(`[loop] Sandbox isolation updated from user message: ${messageSandboxIsolation} (enabled=${sandboxEnabled})`);
-            if (currentSession) {
-                currentSession.sandboxConfig = sandboxConfig;
-            }
+        // Sandbox isolation changes trigger an isolated push so the launcher
+        // resets the mode hash and respawns the SDK process immediately, rather
+        // than waiting until the next turn.
+        if (sandboxIsolationChanged) {
+            messageQueue.pushIsolated(msgText, enhancedMode, { meta: message.meta, files });
+            logger.debug('[loop] Sandbox changed — pushing with isolate for immediate respawn');
             // Persist sandbox change to session metadata so the App sees the update.
             session.updateMetadata((m) => ({
                 ...m,
                 sandbox: sandboxConfig?.enabled ? sandboxConfig : null,
                 currentSandboxIsolation: messageSandboxIsolation ?? 'off',
             })).catch((err) => logger.debug('[loop] Failed to persist sandbox to session metadata', err));
+        } else {
+            messageQueue.push(msgText, enhancedMode, { meta: message.meta, files });
         }
+        logger.debugLargeJson('User message pushed to queue:', message)
     };
     session.onUserMessage(handleUserMessage);
 
