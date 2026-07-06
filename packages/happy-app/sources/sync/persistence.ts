@@ -242,6 +242,24 @@ export function saveSessionProfileIds(ids: Record<string, string>) {
     mmkv.set('session-profile-ids', JSON.stringify(ids));
 }
 
+/** Session id -> sandbox isolation level. Sent with each user message (like permissionMode). */
+export function loadSessionSandboxIsolations(): Record<string, string> {
+    const raw = mmkv.getString('session-sandbox-isolations');
+    if (raw) {
+        try {
+            return JSON.parse(raw);
+        } catch (e) {
+            console.error('Failed to parse session sandbox isolations', e);
+            return {};
+        }
+    }
+    return {};
+}
+
+export function saveSessionSandboxIsolations(isolations: Record<string, string>) {
+    mmkv.set('session-sandbox-isolations', JSON.stringify(isolations));
+}
+
 export function loadProfile(): Profile {
     const profile = mmkv.getString('profile');
     if (profile) {

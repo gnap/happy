@@ -11,7 +11,7 @@ import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
 import { Profile } from "./profile";
 import { UserProfile, RelationshipUpdatedEvent } from "./friendTypes";
-import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionMaxModes, saveSessionMaxModes, loadSessionProfileIds, saveSessionProfileIds } from "./persistence";
+import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionMaxModes, saveSessionMaxModes, loadSessionProfileIds, saveSessionProfileIds, loadSessionSandboxIsolations, saveSessionSandboxIsolations } from "./persistence";
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 import type { CustomerInfo } from './revenueCat/types';
 import React from "react";
@@ -166,6 +166,10 @@ interface StorageState {
     clearSessionProfileId: (sessionId: string) => void;
     /** Clear in-memory profileId override at turn end so remote metadata wins next resolution. MMKV is preserved for cold-start fallback. */
     releaseSessionProfileId: (sessionId: string) => void;
+    updateSessionSandboxIsolation: (sessionId: string, isolation: string) => void;
+    clearSessionSandboxIsolation: (sessionId: string) => void;
+    /** Clear in-memory sandboxIsolation at turn end so remote metadata wins next resolution. MMKV is preserved for cold-start fallback. */
+    releaseSessionSandboxIsolation: (sessionId: string) => void;
     // Artifact methods
     applyArtifacts: (artifacts: DecryptedArtifact[]) => void;
     addArtifact: (artifact: DecryptedArtifact) => void;
@@ -616,6 +620,7 @@ export const storage = create<StorageState>()((set, get) => {
             const savedModelModes = loadSessionModelModes();
             const savedMaxModes = loadSessionMaxModes();
             const savedProfileIds = loadSessionProfileIds();
+            const savedSandboxIsolations = loadSessionSandboxIsolations();
 
             // Full refresh: replace, don't merge — purges stale sessions deleted on server.
             // Delta refresh: merge new sessions into existing ones (current behavior).
@@ -668,6 +673,14 @@ export const storage = create<StorageState>()((set, get) => {
                 const savedIsNone = savedProfileId === '__none__';
                 const metadataProfileId = savedIsNone ? undefined : (session.metadata?.profileId ?? undefined);
                 const resolvedProfileId = existingProfileId ?? metadataProfileId ?? (savedIsNone ? null : savedProfileId) ?? session.profileId ?? undefined;
+                // Sandbox isolation: local preference > metadata
+                const existingSandboxIsolation = state.sessions[session.id]?.sandboxIsolation;
+                const savedSandboxIsolation = savedSandboxIsolations[session.id];
+                const metadataSandboxIsolation = session.metadata?.currentSandboxIsolation
+                    ?? (isSandboxEnabled(session.metadata)
+                        ? (session.metadata?.sandbox as Record<string, unknown> | null)?.sessionIsolation as string | undefined
+                        : undefined);
+                const resolvedSandboxIsolation = existingSandboxIsolation ?? savedSandboxIsolation ?? metadataSandboxIsolation ?? undefined;
                 // todos: derived by replay (reducer) when messages load; not synced to server. Preserve here so
                 // list fetches do not overwrite; replay will update session.todos when that session's messages load.
                 const existingTodos = existing?.todos;
@@ -681,6 +694,7 @@ export const storage = create<StorageState>()((set, get) => {
                     modelMode: resolvedModelMode,
                     maxMode: resolvedMaxMode,
                     profileId: resolvedProfileId,
+                    sandboxIsolation: resolvedSandboxIsolation,
                     todos: resolvedTodos
                 };
             });
@@ -1461,6 +1475,69 @@ export const storage = create<StorageState>()((set, get) => {
                 sessions: {
                     ...state.sessions,
                     [sessionId]: { ...session, profileId: undefined },
+                },
+            };
+        }),
+        updateSessionSandboxIsolation: (sessionId: string, isolation: string) => set((state) => {
+            const session = state.sessions[sessionId];
+            if (!session) return state;
+
+            const updatedSessions = {
+                ...state.sessions,
+                [sessionId]: {
+                    ...session,
+                    sandboxIsolation: isolation
+                }
+            };
+            const allIsolations: Record<string, string> = {};
+            Object.entries(updatedSessions).forEach(([id, sess]) => {
+                if (sess.sandboxIsolation && sess.sandboxIsolation !== 'off') {
+                    allIsolations[id] = sess.sandboxIsolation;
+                }
+            });
+            saveSessionSandboxIsolations(allIsolations);
+
+            return {
+                ...state,
+                sessions: updatedSessions
+            };
+        }),
+        clearSessionSandboxIsolation: (sessionId: string) => set((state) => {
+            const session = state.sessions[sessionId];
+            if (!session) return state;
+
+            // Clear in-memory and MMKV
+            const updatedSessions = {
+                ...state.sessions,
+                [sessionId]: {
+                    ...session,
+                    sandboxIsolation: undefined
+                }
+            };
+            const allIsolations: Record<string, string> = {};
+            Object.entries(updatedSessions).forEach(([id, sess]) => {
+                if (sess.sandboxIsolation && sess.sandboxIsolation !== 'off') {
+                    allIsolations[id] = sess.sandboxIsolation;
+                }
+            });
+            saveSessionSandboxIsolations(allIsolations);
+
+            return {
+                ...state,
+                sessions: updatedSessions
+            };
+        }),
+        releaseSessionSandboxIsolation: (sessionId: string) => set((state) => {
+            const session = state.sessions[sessionId];
+            if (!session) return state;
+
+            // Only clear in-memory — keep MMKV for cold-start fallback.
+            // remote (metadata.currentSandboxIsolation) will win on next applySessions resolution.
+            return {
+                ...state,
+                sessions: {
+                    ...state.sessions,
+                    [sessionId]: { ...session, sandboxIsolation: undefined },
                 },
             };
         }),

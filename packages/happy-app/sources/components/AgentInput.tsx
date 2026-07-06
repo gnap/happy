@@ -23,6 +23,7 @@ import { hackMode, hackModes } from '@/sync/modeHacks';
 import { Theme } from '@/theme';
 import { t } from '@/text';
 import { Metadata } from '@/sync/storageTypes';
+
 import { AIBackendProfile, getProfileEnvironmentVariables, validateProfileForAgent } from '@/sync/settings';
 import { getBuiltInProfile, getProfilesForAgent } from '@/sync/profileUtils';
 import { useRouter } from 'expo-router';
@@ -103,13 +104,11 @@ interface AgentInputProps {
     minHeight?: number;
     profileId?: string | null;
     onProfileChange?: (profileId: string | null) => void;
+    sandboxIsolation?: SandboxIsolationLevel;
+    onSandboxIsolationChange?: (level: SandboxIsolationLevel) => void;
     onAttach?: () => void;
     attachments?: { name: string; width?: number; height?: number; data: string; mimeType: string; size: number }[];
     onRemoveAttachment?: (index: number) => void;
-    /** Current sandbox isolation level (per-session). Default: 'off'. */
-    sandboxIsolation?: SandboxIsolationLevel;
-    /** Called when user selects a sandbox isolation level. */
-    onSandboxIsolationChange?: (level: SandboxIsolationLevel) => void;
 }
 
 const DEFAULT_MAX_CONTEXT_SIZE = 200000;

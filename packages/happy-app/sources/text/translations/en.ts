@@ -424,6 +424,20 @@ export const en: TranslationStructure = {
         },
     },
 
+    sandbox: {
+        isolationTitle: 'Sandbox Isolation',
+        isolation: {
+            off: 'Off',
+            strict: 'Strict',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
+        isolationOffDesc: 'No sandbox restrictions',
+        isolationStrictDesc: 'Full filesystem and network isolation',
+        isolationWorkspaceDesc: 'Sandbox limited to workspace directory',
+        isolationCustomDesc: 'Custom sandbox rules',
+    },
+
     agentInput: {
         permissionMode: {
             title: 'PERMISSION MODE',
