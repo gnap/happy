@@ -688,7 +688,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             customSystemPrompt: messageCustomSystemPrompt,
             appendSystemPrompt: messageAppendSystemPrompt,
             allowedTools: messageAllowedTools,
-            disallowedTools: messageDisallowedTools
+            disallowedTools: messageDisallowedTools,
+            sandboxIsolation: sandboxEnabled ? (sandboxConfig?.sessionIsolation ?? 'workspace') : 'off',
         };
         const metaChanged =
             message.meta?.permissionMode !== undefined
