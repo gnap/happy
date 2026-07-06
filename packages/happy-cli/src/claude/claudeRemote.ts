@@ -241,6 +241,10 @@ export async function claudeRemote(opts: {
             autoAllowBashIfSandboxed: true,
             failIfUnavailable: false,
             enableWeakerNetworkIsolation: opts.sandboxConfig.networkMode === 'allowed',
+            // Never let the model escape the sandbox via dangerouslyDisableSandbox.
+            // This is a security-sensitive setting — the model must not be able to
+            // override the user's sandbox choice on a per-command basis.
+            allowUnsandboxedCommands: false,
         } : undefined,
         env: { ...process.env },
         includeHookEvents: true,
