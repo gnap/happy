@@ -813,6 +813,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         claudeArgs: options.claudeArgs,
         sandboxConfig,
         hookSettingsPath,
+        hookServerPort: hookServer.port,
         jsRuntime: options.jsRuntime
     });
 

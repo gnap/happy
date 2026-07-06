@@ -67,6 +67,8 @@ export async function claudeRemote(opts: {
     canCallTool: (toolName: string, input: unknown, mode: EnhancedMode, options: { signal: AbortSignal }) => Promise<PermissionResult>,
     /** Path to temporary settings file with SessionStart hook (required for session tracking) */
     hookSettingsPath: string,
+    /** Port of the hook server. Used to inline SessionStart hook when sandbox prevents --settings. */
+    hookServerPort: number,
     /** JavaScript runtime to use for spawning Claude Code (default: 'node') */
     jsRuntime?: JsRuntime,
 
@@ -229,9 +231,11 @@ export async function claudeRemote(opts: {
         executable: (opts.jsRuntime ?? 'node') as SdkOptions['executable'],
         pathToClaudeCodeExecutable: resolveClaudeBinaryPath(),
         abortController,
-        extraArgs: opts.hookSettingsPath ? { settings: opts.hookSettingsPath } : undefined,
+        extraArgs: (!opts.sandboxConfig?.enabled && opts.hookSettingsPath) ? { settings: opts.hookSettingsPath } : undefined,
         // Pass sandbox config to the SDK so it wraps Bash commands with sandbox-exec
         // rather than the entire Happy process. Much more resilient.
+        // When sandbox is enabled, we skip extraArgs (--settings) and use inline
+        // hooks instead, because the SDK rejects using both together.
         sandbox: opts.sandboxConfig?.enabled ? {
             enabled: true,
             autoAllowBashIfSandboxed: true,
@@ -240,9 +244,30 @@ export async function claudeRemote(opts: {
         } : undefined,
         env: { ...process.env },
         includeHookEvents: true,
-        // Stop hook: collect pending crons so the launcher can schedule wakeups
-        // and keep the session alive across turns.
         hooks: {
+            // SessionStart hook: forwarded inline when sandbox is enabled (can't
+            // use --settings + sandbox together). Mirrors session_hook_forwarder.cjs.
+            SessionStart: opts.sandboxConfig?.enabled ? [{
+                hooks: [async (input) => {
+                    if (input.hook_event_name !== 'SessionStart') return { continue: false };
+                    const body = JSON.stringify({
+                        session_id: input.session_id,
+                        transcript_path: input.transcript_path,
+                        cwd: input.cwd,
+                        hook_event_name: input.hook_event_name,
+                        source: input.source,
+                    });
+                    fetch(`http://127.0.0.1:${opts.hookServerPort}/hook/session-start`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body,
+                        signal: AbortSignal.timeout(5000),
+                    }).catch(() => {}); // silently ignore — don't break Claude
+                    return { continue: false };
+                }],
+            }] : undefined,
+            // Stop hook: collect pending crons so the launcher can schedule wakeups
+            // and keep the session alive across turns.
             Stop: [{
                 hooks: [async (input) => {
                     if (input.hook_event_name !== 'Stop') return { continue: false };
