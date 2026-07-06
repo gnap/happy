@@ -51,6 +51,7 @@ export const MetadataSchema = z.object({
     hostPid: z.number().optional(), // Process ID of the session
     flavor: z.string().nullish(), // Session flavor/variant identifier
     sandbox: z.any().nullish(), // Sandbox config metadata from CLI (or null when disabled)
+    currentSandboxIsolation: z.string().optional(), // Current sandbox isolation level written by CLI ('off' | 'strict' | 'workspace' | 'custom')
     dangerouslySkipPermissions: z.boolean().nullish(), // Claude --dangerously-skip-permissions mode (or null when unknown)
     profileId: z.string().nullish(), // Active environment profile ID, synced from CLI
 	    contextUsage: z.object({
@@ -136,6 +137,7 @@ export interface Session {
     maxMode?: boolean | null; // Local Cursor max mode override, not synced to server
     thinkingLevel?: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null; // Local Claude thinking effort level
     profileId?: string | null; // Local env profile id (spawn + per-message override), not synced to server
+    sandboxIsolation?: string | null; // Local sandbox isolation level ('off' | 'strict' | 'workspace' | 'custom'), sent with message, synced via metadata
     // IMPORTANT: latestUsage is extracted from reducerState.latestUsage after message processing.
     // We store it directly on Session to ensure it's available immediately on load.
     // Do NOT store reducerState itself on Session - it's mutable and should only exist in SessionMessages.

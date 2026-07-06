@@ -968,7 +968,7 @@ class Sync {
             return;
         }
 
-        const { permissionMode, model, maxMode, effort } = resolveMessageModeMeta(session);
+        const { permissionMode, model, maxMode, effort, sandboxIsolation } = resolveMessageModeMeta(session);
         const settings = storage.getState().settings;
         const environmentVariables = resolveMessageProfileEnv(session, settings.profiles ?? []);
 
@@ -1035,6 +1035,7 @@ class Sync {
                 appendSystemPrompt: systemPrompt,
                 ...(maxMode !== undefined ? { maxMode } : {}),
                 ...(effort !== undefined ? { effort } : {}),
+                ...(sandboxIsolation !== undefined ? { sandboxIsolation } : {}),
                 profileId: session.profileId ?? null,
                 ...(environmentVariables ? { environmentVariables } : {}),
                 ...(displayText && { displayText }), // Add displayText if provided
@@ -3484,6 +3485,8 @@ class Sync {
                 // consistent with model/maxMode. CLI now syncs profileId to metadata
                 // via updateMetadata on every message, so the remote value is current.
                 storage.getState().releaseSessionProfileId(sessionId);
+                // Release local sandbox isolation so remote metadata wins next turn.
+                storage.getState().releaseSessionSandboxIsolation(sessionId);
             }
         }
 

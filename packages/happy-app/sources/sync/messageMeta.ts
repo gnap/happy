@@ -32,9 +32,10 @@ export function resolveMessageProfileEnv(
 }
 
 export function resolveMessageModeMeta(
-    session: Pick<Session, 'permissionMode' | 'modelMode' | 'maxMode' | 'thinkingLevel' | 'metadata'>,
-): { permissionMode: PermissionModeKey; model: string | null; maxMode?: boolean; effort?: string } {
-    const sandboxEnabled = isSandboxEnabled(session.metadata);
+    session: Pick<Session, 'permissionMode' | 'modelMode' | 'maxMode' | 'thinkingLevel' | 'metadata' | 'sandboxIsolation'>,
+): { permissionMode: PermissionModeKey; model: string | null; maxMode?: boolean; effort?: string; sandboxIsolation?: string } {
+    const sandboxEnabled = isSandboxEnabled(session.metadata)
+        || (session.sandboxIsolation !== undefined && session.sandboxIsolation !== null && session.sandboxIsolation !== 'off');
     const permissionMode: PermissionModeKey =
         session.permissionMode && session.permissionMode !== 'default'
             ? session.permissionMode
@@ -59,10 +60,19 @@ export function resolveMessageModeMeta(
             ? session.thinkingLevel
             : undefined;
 
+    // Sandbox isolation: explicit local choice only (not metadata fallback).
+    // Local preference is sent with the message; CLI updates metadata,
+    // which becomes the source of truth after the turn ends.
+    const sandboxIsolation =
+        session.sandboxIsolation && session.sandboxIsolation !== 'off'
+            ? session.sandboxIsolation
+            : undefined;
+
     return {
         permissionMode,
         model,
         ...(maxMode !== undefined ? { maxMode } : {}),
         ...(effort !== undefined ? { effort } : {}),
+        ...(sandboxIsolation !== undefined ? { sandboxIsolation } : {}),
     };
 }

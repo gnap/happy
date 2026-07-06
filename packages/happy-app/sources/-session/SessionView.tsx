@@ -1,5 +1,5 @@
 import { AgentContentView } from '@/components/AgentContentView';
-import { AgentInput, SandboxIsolationLevel } from '@/components/AgentInput';
+import { AgentInput } from '@/components/AgentInput';
 import {
     getAvailableModels,
     getAvailablePermissionModes,
@@ -279,17 +279,10 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         sync.applySettings({ lastUsedProfile: profileId });
     }, [sessionId]);
 
-    // Sandbox isolation level — derived from session metadata, kept as local for spawn-time override
-    const sandboxIsolationLevel = React.useMemo(() => {
-        const sandbox = session.metadata?.sandbox;
-        if (!sandbox || !sandbox.enabled) return 'off' as const;
-        return (sandbox.sessionIsolation ?? 'workspace') as 'strict' | 'workspace' | 'custom';
-    }, [session.metadata?.sandbox]);
-
-    const handleSandboxIsolationChange = React.useCallback((level: 'off' | 'strict' | 'workspace' | 'custom') => {
-        // TODO: send sandbox override in session restart/spawn RPC
-        // For now, store locally — effective on next session restart
-    }, []);
+    const sandboxIsolation = session.sandboxIsolation ?? 'off';
+    const updateSandboxIsolation = React.useCallback((isolation: string) => {
+        storage.getState().updateSessionSandboxIsolation(sessionId, isolation);
+    }, [sessionId]);
 
     const agentTypeForProfile = React.useMemo((): 'claude' | 'codex' | 'cursor' | 'cursor-acp' | 'gemini' | undefined => {
         if (flavor === 'codex') return 'codex';
@@ -390,6 +383,8 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             agentType={agentTypeForProfile}
             profileId={sessionProfileId}
             onProfileChange={updateProfileId}
+            sandboxIsolation={sandboxIsolation}
+            onSandboxIsolationChange={updateSandboxIsolation}
             metadata={session.metadata}
             isSendDisabled={!sync.encryption.getSessionEncryption(sessionId)}
             connectionStatus={(() => {
@@ -457,7 +452,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             })()}
             alwaysShowContextSize={alwaysShowContextSize}
             maxContextSize={maxContextSize}
-            sandboxIsolation={sandboxIsolationLevel}
+            sandboxIsolation={sandboxIsolation}
         />
     );
 
