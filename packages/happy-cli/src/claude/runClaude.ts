@@ -484,6 +484,9 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             if (currentSession) {
                 currentSession.sandboxConfig = sandboxConfig;
             }
+            // Update local metadata and notify daemon so restart preserves the new sandbox.
+            metadata.sandbox = sandboxConfig?.enabled ? sandboxConfig : null;
+            notifyDaemonSessionStarted(session.sessionId, metadata).catch(() => {});
         }
 
         // Resolve custom system prompt - use message.meta.customSystemPrompt if provided, otherwise use current
