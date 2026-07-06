@@ -29,7 +29,7 @@ export type SessionDisconnectHandler = (
 
 const SOCKET_BASE = process.env.HAPPY_HOME_DIR || join(homedir(), '.happy');
 const SOCKET_PATH = join(SOCKET_BASE, 'daemon.sock');
-const HEARTBEAT_TIMEOUT_MS = 15_000; // 15s without heartbeat = dead
+const HEARTBEAT_TIMEOUT_MS = 12_000; // 12s without heartbeat = dead (2x heartbeat interval)
 
 /**
  * Start Unix Domain Socket server for daemon ↔ session IPC.
@@ -39,7 +39,9 @@ const HEARTBEAT_TIMEOUT_MS = 15_000; // 15s without heartbeat = dead
 export function startUnixSocketServer(callbacks: {
     onSessionHello: SessionRegistrationHandler;
     onSessionDisconnect: SessionDisconnectHandler;
-}): { stop: () => Promise<void>; socketPath: string } {
+}): { stop: () => Promise<void>; socketPath: string; isSessionConnected: (sessionId: string) => boolean } {
+    /** Set of session IDs with active socket connections. Survives daemon restart gaps. */
+    const connectedSessions = new Set<string>();
     // Clean up stale socket file from previous daemon run
     if (existsSync(SOCKET_PATH)) {
         try { unlinkSync(SOCKET_PATH); } catch { /* ignore */ }
@@ -72,6 +74,7 @@ export function startUnixSocketServer(callbacks: {
                             state.sessionId = msg.sessionId ?? null;
                             state.sessionTag = msg.sessionTag ?? null;
                             state.pid = msg.pid ?? null;
+                            if (state.sessionId) connectedSessions.add(state.sessionId);
                             logger.debug(`[UNIX SOCKET] Session ${msg.sessionId} registered (pid=${msg.pid})`);
                             callbacks.onSessionHello(socket, msg);
                             resetHeartbeat();
@@ -93,6 +96,7 @@ export function startUnixSocketServer(callbacks: {
 
         socket.on('close', () => {
             if (heartbeatTimer) clearTimeout(heartbeatTimer);
+            if (state.sessionId) connectedSessions.delete(state.sessionId);
             logger.debug(`[UNIX SOCKET] Session ${state.sessionId} disconnected`);
             callbacks.onSessionDisconnect(state.sessionId);
         });
@@ -113,6 +117,7 @@ export function startUnixSocketServer(callbacks: {
 
     return {
         socketPath: SOCKET_PATH,
+        isSessionConnected: (sessionId: string) => connectedSessions.has(sessionId),
         stop: async () => {
             return new Promise<void>((resolve) => {
                 server.close(() => {

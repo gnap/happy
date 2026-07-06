@@ -5,7 +5,7 @@ import { logger } from '@/ui/logger';
 
 const SOCKET_BASE = process.env.HAPPY_HOME_DIR || join(homedir(), '.happy');
 const SOCKET_PATH = join(SOCKET_BASE, 'daemon.sock');
-const RECONNECT_DELAY_MS = 5_000;
+const RECONNECT_DELAY_MS = 1_000;
 const HEARTBEAT_INTERVAL_MS = 5_000;
 
 interface SessionSocketState {

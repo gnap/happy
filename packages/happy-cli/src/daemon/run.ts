@@ -14,10 +14,7 @@ import { startCaffeinate, stopCaffeinate } from '@/utils/caffeinate';
 import packageJson from '../../package.json';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { getHappyCliLaunchSpec, spawnHappyCLI } from '@/utils/spawnHappyCLI';
-import { buildSandboxRuntimeConfig } from '@/sandbox/config';
-import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
-import { spawn } from 'child_process';
-import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquireDaemonLock, releaseDaemonLock, readSettings, validateProfileForAgent, getProfileEnvironmentVariables, SandboxConfigSchema } from '@/persistence';
+import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquireDaemonLock, releaseDaemonLock, readSettings, validateProfileForAgent, getProfileEnvironmentVariables, SandboxConfigSchema, PersistedSession, migrateLegacySessionState } from '@/persistence';
 
 import { cleanupDaemonState, checkIfDaemonRunningAndCleanupStaleState } from './controlClient';
 import { startDaemonControlServer } from './controlServer';
@@ -245,24 +242,16 @@ export async function startDaemon(): Promise<void> {
     ];
     const getRecentlyExited = () => [...recentlyExited];
 
-    /** Persist session tag by directory so restart can reuse same server session after process/daemon restart. */
-    let lastSessionTagByDirectory: Record<string, string> = {};
-    /** Persist server session ID -> session tag for reliable resume regardless of how many sessions share a directory. */
-    let lastSessionTagBySessionId: Record<string, string> = {};
-    /** Persist server session ID -> directory so heartbeat polling can find the directory for sessions with new messages. */
-    let lastDirectoryBySessionId: Record<string, string> = {};
-    /** Persist server session ID -> agent type for correct agent selection on auto-respawn. */
-    let lastAgentBySessionId: Record<string, string> = {};
-    /** Persist server session ID -> sandbox config for reliable restore on auto-respawn. */
-    let lastSandboxBySessionId: Record<string, any> = {};
+    /** Canonical session store: sessionId → all attributes. Single source of truth.
+     *  Persisted to daemon.state.json and restored on restart.
+     *  `pidToTrackedSession` is the runtime-only active-process index. */
+    let sessions: Record<string, PersistedSession> = {};
     /** In-memory cooldown: session ID -> last spawn attempt timestamp. Prevents rapid re-spawn loops. */
     const lastSpawnAttemptBySessionId: Record<string, number> = {};
     /** Timestamp used as changedSince for next /v2/sessions poll. */
     let sessionPollSince = Date.now();
     /** True after first poll completes; first poll only records seq baselines without spawning. */
     let initialPollDone = false;
-    /** Last known seq per session ID (in-memory only; not written to daemon state file). */
-    const lastSeqBySessionId: Record<string, number> = {};
     /** Pre-wake seq for restart-session in this daemon lifetime; passed to CLI via spawn args/env. */
     const resumeAfterSeqBySessionId: Record<string, number> = {};
     let wakePollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -271,15 +260,28 @@ export async function startDaemon(): Promise<void> {
     let scheduleSessionWakePoll: () => void = () => {};
     const noteDaemonManagedLocalStop = (session: TrackedSession) => {
       if (session.startedBy !== 'daemon' || !session.happySessionId) return;
-      const knownSeq = lastSeqBySessionId[session.happySessionId];
+      const knownSeq = sessions[session.happySessionId]?.lastSeq;
       if (knownSeq !== undefined && knownSeq >= 0) {
         resumeAfterSeqBySessionId[session.happySessionId] = knownSeq;
       }
       scheduleSessionWakePoll();
     };
     const persistSessionTagBeforeRemove = (session: TrackedSession) => {
-      if (session.directory && session.sessionTag) lastSessionTagByDirectory[session.directory] = session.sessionTag;
-      if (session.happySessionId && session.sessionTag) lastSessionTagBySessionId[session.happySessionId] = session.sessionTag;
+      if (session.happySessionId && session.sessionTag) {
+        const existing = sessions[session.happySessionId];
+        sessions[session.happySessionId] = {
+          sessionId: session.happySessionId,
+          directory: session.directory ?? existing?.directory ?? '',
+          sessionTag: session.sessionTag,
+          agent: session.agent ?? existing?.agent ?? 'cursor',
+          sandbox: existing?.sandbox,
+          pid: session.pid ?? existing?.pid ?? -1,
+          status: 'stopped',
+          lastSeq: existing?.lastSeq ?? -1,
+          exitReason: session.exitReason ?? existing?.exitReason,
+          exitTime: session.exitTime ?? existing?.exitTime,
+        };
+      }
     };
     const markSessionArchived = (sessionId: string) => {
       archivedSessionIds[sessionId] = Date.now();
@@ -455,11 +457,20 @@ export async function startDaemon(): Promise<void> {
         if (!existingSession.agent && sessionMetadata.flavor) existingSession.agent = sessionMetadata.flavor as TrackedSession['agent'];
       }
       const s = pidToTrackedSession.get(pid);
-      if (s?.directory && s.sessionTag) lastSessionTagByDirectory[s.directory] = s.sessionTag;
-      if (s?.happySessionId && s.sessionTag) lastSessionTagBySessionId[s.happySessionId] = s.sessionTag;
-      if (s?.happySessionId && s.directory) lastDirectoryBySessionId[s.happySessionId] = s.directory;
-      if (s?.happySessionId && s.agent) lastAgentBySessionId[s.happySessionId] = s.agent;
-      if (s?.happySessionId && sessionMetadata.sandbox) lastSandboxBySessionId[s.happySessionId] = sessionMetadata.sandbox;
+      if (s?.happySessionId) {
+        const existing = sessions[s.happySessionId];
+        sessions[s.happySessionId] = {
+          sessionId: s.happySessionId,
+          directory: s.directory ?? existing?.directory ?? '',
+          sessionTag: s.sessionTag ?? existing?.sessionTag ?? '',
+          agent: s.agent ?? existing?.agent ?? 'cursor',
+          sandbox: sessionMetadata.sandbox ?? existing?.sandbox,
+          pid: pid,
+          status: 'running',
+          lastSeq: existing?.lastSeq ?? -1,
+          lastHeartbeat: Date.now(),
+        };
+      }
       // Persist immediately so session maps survive unclean daemon kills (SIGKILL, OOM, etc.)
       // Each session reports itself every 60s, so this is at most once-per-minute per session.
       persistNow();
@@ -585,7 +596,7 @@ export async function startDaemon(): Promise<void> {
 
         const resumeSessionTag =
           explicitResumeSessionTag?.trim() ||
-          (sessionId ? lastSessionTagBySessionId[sessionId] : undefined);
+          (sessionId ? sessions[sessionId]?.sessionTag : undefined);
         const shouldPassResumeSessionTag =
           options.agent === 'cursor' ||
           options.agent === 'cursor-acp' ||
@@ -810,33 +821,15 @@ export async function startDaemon(): Promise<void> {
             ? { ...stripProfileManagedEnv(process.env), ...extraEnv }
             : { ...process.env, ...extraEnv };
 
-          // When sandbox is configured, wrap the entire child process with sandbox-exec.
-          // The parsedSandbox variable is already set above (from the --sandbox-config block).
-          let happyProcess;
-          if (options.sandboxConfig) {
-            const sandboxConfig = SandboxConfigSchema.parse(options.sandboxConfig);
-            const runtimeConfig = buildSandboxRuntimeConfig(sandboxConfig, directory);
-            await SandboxManager.initialize(runtimeConfig);
-            const spec = getHappyCliLaunchSpec();
-            const fullCmd = [spec.executable, ...spec.argsPrefix, ...args]
-              .map(a => a.includes(' ') ? `'${a}'` : a).join(' ');
-            const wrappedCmd = await SandboxManager.wrapWithSandbox(fullCmd);
-            await SandboxManager.reset();
-            logger.debug(`[DAEMON RUN] Spawning sandboxed session (${sandboxConfig.sessionIsolation}): sandbox-exec wrapped`);
-            happyProcess = spawn('sh', ['-c', wrappedCmd], {
-              cwd: directory,
-              detached: true,
-              stdio: ['ignore', 'pipe', 'pipe'],
-              env: spawnEnv,
-            });
-          } else {
-            happyProcess = spawnHappyCLI(args, {
-              cwd: directory,
-              detached: true,  // Sessions stay alive when daemon stops
-              stdio: ['ignore', 'pipe', 'pipe'],  // Capture stdout/stderr for debugging
-              env: spawnEnv,
-            });
-          }
+          // Sandbox is now handled at the SDK level (claudeRemote.ts passes
+          // sandbox settings to query()). The daemon just passes --sandbox-config
+          // for metadata purposes; no more sandbox-exec wrapping needed here.
+          const happyProcess = spawnHappyCLI(args, {
+            cwd: directory,
+            detached: true,  // Sessions stay alive when daemon stops
+            stdio: ['ignore', 'pipe', 'pipe'],  // Capture stdout/stderr for debugging
+            env: spawnEnv,
+          });
 
           // Log output for debugging
           if (process.env.DEBUG) {
@@ -1083,7 +1076,8 @@ export async function startDaemon(): Promise<void> {
       }
 
       if (!found) {
-        const persistedDirectory = lastDirectoryBySessionId[sessionId];
+        const persisted = sessions[sessionId] ?? persistedState?.sessions?.[sessionId];
+        const persistedDirectory = persisted?.directory;
         if (persistedDirectory) {
           if (archivedSessionIds[sessionId]) {
             logger.debug(`[DAEMON RUN] Restart: refusing archived session ${sessionId}`);
@@ -1094,23 +1088,22 @@ export async function startDaemon(): Promise<void> {
             logger.debug(`[DAEMON RUN] Restart: refusing persisted restore for ${sessionId}; ${unexpectedActiveMatches.length} active process(es) still exist`);
             return { success: false, error: 'Session has active process(es); cannot restore from persisted mapping' };
           }
-          const persistedAgentRaw = lastAgentBySessionId[sessionId];
-          const persistedAgent = (
-            persistedAgentRaw === 'claude' ||
-            persistedAgentRaw === 'codex' ||
-            persistedAgentRaw === 'cursor' ||
-            persistedAgentRaw === 'gemini' ||
-            persistedAgentRaw === 'acp-cursor'
-          ) ? persistedAgentRaw : 'cursor';
+          const persistedAgent = persisted?.agent ?? 'cursor';
           found = {
             startedBy: 'daemon',
             happySessionId: sessionId,
-            pid: -1,
+            pid: persisted?.pid ?? -1,
             directory: persistedDirectory,
-            sessionTag: lastSessionTagBySessionId[sessionId] ?? persistedState?.lastSessionTagBySessionId?.[sessionId],
-            agent: persistedAgent,
+            sessionTag: persisted?.sessionTag,
+            agent: (
+              persistedAgent === 'claude' ||
+              persistedAgent === 'codex' ||
+              persistedAgent === 'cursor' ||
+              persistedAgent === 'gemini' ||
+              persistedAgent === 'acp-cursor'
+            ) ? persistedAgent : 'cursor',
           };
-          logger.debug(`[DAEMON RUN] Restart: session ${sessionId} restored from persisted directory/tag mapping`);
+          logger.debug(`[DAEMON RUN] Restart: session ${sessionId} restored from persisted session record`);
         } else {
           logger.debug(`[DAEMON RUN] Restart: session ${sessionId} not found`);
           return { success: false, error: 'Session not found' };
@@ -1125,14 +1118,16 @@ export async function startDaemon(): Promise<void> {
       const { directory, agent } = found;
       const sessionTag =
         found.sessionTag ??
-        lastSessionTagBySessionId[sessionId] ??
-        persistedState?.lastSessionTagBySessionId?.[sessionId];
+        sessions[sessionId]?.sessionTag ??
+        persistedState?.sessions?.[sessionId]?.sessionTag;
 
       if (!sessionTag) {
         logger.debug(`[DAEMON RUN] Restart: session ${sessionId} is missing its own session tag`);
         return { success: false, error: 'Session tag unknown for this session; cannot safely restart' };
       }
 
+      // Kill tracked processes. Unix socket's isSessionConnected prevents
+      // daemon from respawning if old sessions are still connected.
       const activePids = activeSessionsBySessionId(sessionId);
       if (activePids.length > 0) {
         logger.debug(`[DAEMON RUN] Restart: terminating ${activePids.length} active process(es) for ${sessionId} before respawn`);
@@ -1194,7 +1189,7 @@ export async function startDaemon(): Promise<void> {
     // Start Unix Domain Socket server for real-time daemon ↔ session IPC.
     // Sessions connect on startup and register via { type: 'hello' }.
     // Replaces the periodic HTTP webhook for registration and heartbeat.
-    const { stop: stopSocketServer, socketPath } = startUnixSocketServer({
+    const { stop: stopSocketServer, socketPath, isSessionConnected } = startUnixSocketServer({
       onSessionHello(_sock, msg) {
         const { sessionId, pid, sessionTag, metadata } = msg;
         if (!sessionId || !pid) return;
@@ -1266,74 +1261,164 @@ export async function startDaemon(): Promise<void> {
     }, 30_000);
     ttlCleanupInterval.unref(); // don't prevent daemon from exiting
 
-    // Write initial daemon state (no lock needed for state file). Load persisted maps so we don't drop them on restart.
+    // Write initial daemon state (no lock needed for state file).
+    // Load the canonical `sessions` map from disk — migrates legacy format automatically.
     const prevState = await readDaemonState();
-    if (prevState?.lastSessionTagByDirectory) Object.assign(lastSessionTagByDirectory, prevState.lastSessionTagByDirectory);
-    if (prevState?.lastSessionTagBySessionId) Object.assign(lastSessionTagBySessionId, prevState.lastSessionTagBySessionId);
-    if (prevState?.lastDirectoryBySessionId) Object.assign(lastDirectoryBySessionId, prevState.lastDirectoryBySessionId);
-    if (prevState?.lastAgentBySessionId) Object.assign(lastAgentBySessionId, prevState.lastAgentBySessionId);
-    if (prevState?.lastSandboxBySessionId) Object.assign(lastSandboxBySessionId, prevState.lastSandboxBySessionId);
     if (prevState?.archivedSessionIds) Object.assign(archivedSessionIds, prevState.archivedSessionIds);
-    if (prevState?.lastSeqBySessionId) Object.assign(lastSeqBySessionId, prevState.lastSeqBySessionId);
-    // Restore stopped sessions from previous daemon state (tombstone survives clean shutdown)
-    const persistedStopped = prevState?.stoppedSessions;
-    if (persistedStopped) {
+
+    // Load unified sessions — migrate from legacy parallel-map format if needed.
+    if (prevState?.sessions) {
+      sessions = { ...prevState.sessions };
+    } else if (prevState) {
+      // Legacy format detected — migrate once, then persist new format.
+      sessions = migrateLegacySessionState(prevState);
+      logger.debug(`[DAEMON RUN] Migrated ${Object.keys(sessions).length} session(s) from legacy parallel-map format`);
+    }
+
+    // Verify PIDs from persisted sessions are actually dead. If a PID survived the
+    // daemon restart (detached child), mark it running — the session will reconnect
+    // via Unix socket and re-register properly.
+    {
       const MAX_STOPPED_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
       const now = Date.now();
-      let stoppedFallbackCount = 0;
-      for (const s of persistedStopped) {
-        if (archivedSessionIds[s.happySessionId]) continue;
-        if (s.exitTime && now - s.exitTime > MAX_STOPPED_AGE_MS) continue;
-        stoppedSessions.set(s.happySessionId, {
-          startedBy: 'daemon',
-          happySessionId: s.happySessionId,
-          pid: s.pid ?? -1,
-          directory: s.directory,
-          sessionTag: s.sessionTag,
-          agent: s.agent as any,
-          exitReason: s.exitReason,
-          exitTime: s.exitTime,
-          lastHeartbeat: s.lastHeartbeat,
-          sandbox: (s as any).sandbox ?? (s as any).happySessionMetadataFromLocalWebhook?.sandbox,
-        });
-      }
-      // Also restore sessions from persisted metadata maps that aren't in stoppedSessions.
-      // This covers the case where daemon was killed before serializing stoppedSessions
-      // (e.g., version self-restart), but metadata maps (directory, tag, agent) survived.
-      for (const [id, directory] of Object.entries(lastDirectoryBySessionId)) {
-        if (!id || !directory) continue;
-        if (stoppedSessions.has(id)) continue;
+      let pidCheckRevived = 0;
+      let expiredCount = 0;
+
+      for (const [id, entry] of Object.entries(sessions)) {
+        // Skip archived
         if (archivedSessionIds[id]) continue;
-        if (Array.from(pidToTrackedSession.values()).some(s => s.happySessionId === id)) continue;
-        const tag = lastSessionTagBySessionId[id];
-        const agent = lastAgentBySessionId[id];
-        if (!tag || !agent) continue;
+        // Purge entries older than 7 days with no directory (orphaned)
+        if (!entry.directory && entry.exitTime && now - entry.exitTime > MAX_STOPPED_AGE_MS) {
+          delete sessions[id];
+          expiredCount++;
+          continue;
+        }
+        // Check PID liveness
+        if (entry.pid > 0 && await isPidRunningAndNotZombie(entry.pid)) {
+          logger.debug(`[DAEMON RUN] Session ${id} PID ${entry.pid} still alive after daemon restart — marking running`);
+          sessions[id] = { ...entry, status: 'running', lastHeartbeat: Date.now() };
+          pidCheckRevived++;
+        }
+      }
+
+      if (pidCheckRevived > 0 || expiredCount > 0) {
+        logger.debug(`[DAEMON RUN] PID check: ${pidCheckRevived} alive, ${expiredCount} expired (cleaned)`);
+      }
+    }
+
+    // Populate stoppedSessions runtime map from sessions entries with status 'stopped'.
+    // pidToTrackedSession is populated later when sessions reconnect via socket/webhook.
+    for (const [id, entry] of Object.entries(sessions)) {
+      if (entry.status === 'stopped' && entry.directory && entry.sessionTag) {
         stoppedSessions.set(id, {
           startedBy: 'daemon',
           happySessionId: id,
-          pid: -1,
-          directory,
-          sessionTag: tag,
-          agent: agent as any,
+          pid: entry.pid,
+          directory: entry.directory,
+          sessionTag: entry.sessionTag,
+          agent: entry.agent as any,
+          exitReason: entry.exitReason,
+          exitTime: entry.exitTime,
+          lastHeartbeat: entry.lastHeartbeat,
+          sandbox: entry.sandbox,
+        });
+      }
+    }
+
+    // Also catch sessions from metadata-only maps that aren't in stoppedSessions
+    // This covers the case where daemon was killed before serializing stoppedSessions
+    // (e.g., version self-restart), but metadata maps survived.
+    {
+      let stoppedFallbackCount = 0;
+      for (const [id, entry] of Object.entries(sessions)) {
+        if (!id || !entry.directory) continue;
+        if (stoppedSessions.has(id)) continue;
+        if (archivedSessionIds[id]) continue;
+        if (Array.from(pidToTrackedSession.values()).some(s => s.happySessionId === id)) continue;
+        if (!entry.sessionTag || !entry.agent) continue;
+        stoppedSessions.set(id, {
+          startedBy: 'daemon',
+          happySessionId: id,
+          pid: entry.pid,
+          directory: entry.directory,
+          sessionTag: entry.sessionTag,
+          agent: entry.agent as any,
         });
         stoppedFallbackCount++;
       }
       logger.debug(`[DAEMON RUN] Restored ${stoppedSessions.size} stopped session(s) from persisted state (${stoppedFallbackCount} from metadata fallback)`);
     }
-    const serializeStoppedSessions = () =>
-      Array.from(stoppedSessions.values()).map(s => ({
-        happySessionId: s.happySessionId!,
-        pid: s.pid,
-        directory: s.directory,
-        sessionTag: s.sessionTag,
-        agent: s.agent,
-        exitReason: s.exitReason,
-        exitTime: s.exitTime,
-        lastHeartbeat: s.lastHeartbeat,
-      }));
+
+    /** Serialize the runtime stoppedSessions map into the sessions record for disk persistence. */
+    const syncStoppedToSessions = () => {
+      for (const [id, s] of stoppedSessions) {
+        const existing = sessions[id];
+        sessions[id] = {
+          sessionId: id,
+          directory: s.directory ?? existing?.directory ?? '',
+          sessionTag: s.sessionTag ?? existing?.sessionTag ?? '',
+          agent: s.agent ?? existing?.agent ?? 'cursor',
+          sandbox: (s as any).sandbox ?? existing?.sandbox,
+          pid: s.pid ?? existing?.pid ?? -1,
+          status: 'stopped',
+          lastSeq: existing?.lastSeq ?? -1,
+          exitReason: s.exitReason ?? existing?.exitReason,
+          exitTime: s.exitTime ?? existing?.exitTime,
+          lastHeartbeat: s.lastHeartbeat ?? existing?.lastHeartbeat,
+        };
+      }
+    };
+
+    /** Derive legacy parallel-map fields from the unified sessions record for backward compat. */
+    const buildLegacyFields = () => {
+      const lastSessionTagByDirectory: Record<string, string> = {};
+      const lastSessionTagBySessionId: Record<string, string> = {};
+      const lastDirectoryBySessionId: Record<string, string> = {};
+      const lastAgentBySessionId: Record<string, string> = {};
+      const lastSandboxBySessionId: Record<string, any> = {};
+      const lastSeqBySessionId: Record<string, number> = {};
+      const stoppedSessions: Array<{
+        happySessionId: string; pid: number; directory?: string; sessionTag?: string;
+        agent?: string; exitReason?: string; exitTime?: number; lastHeartbeat?: number;
+      }> = [];
+
+      for (const [, entry] of Object.entries(sessions)) {
+        if (!entry.sessionId || entry.sessionId.startsWith('dir:')) continue;
+        if (entry.directory && entry.sessionTag) lastSessionTagByDirectory[entry.directory] = entry.sessionTag;
+        if (entry.sessionTag) lastSessionTagBySessionId[entry.sessionId] = entry.sessionTag;
+        if (entry.directory) lastDirectoryBySessionId[entry.sessionId] = entry.directory;
+        if (entry.agent) lastAgentBySessionId[entry.sessionId] = entry.agent;
+        if (entry.sandbox) lastSandboxBySessionId[entry.sessionId] = entry.sandbox;
+        if (entry.lastSeq >= 0) lastSeqBySessionId[entry.sessionId] = entry.lastSeq;
+        if (entry.status === 'stopped') {
+          stoppedSessions.push({
+            happySessionId: entry.sessionId, pid: entry.pid, directory: entry.directory,
+            sessionTag: entry.sessionTag, agent: entry.agent,
+            exitReason: entry.exitReason, exitTime: entry.exitTime, lastHeartbeat: entry.lastHeartbeat,
+          });
+        }
+      }
+
+      return { lastSessionTagByDirectory, lastSessionTagBySessionId, lastDirectoryBySessionId, lastAgentBySessionId, lastSandboxBySessionId, lastSeqBySessionId, stoppedSessions };
+    };
 
     /** Write the full daemon state snapshot to disk immediately. */
     const persistNow = () => {
+      syncStoppedToSessions();
+      // Update running sessions' PIDs into sessions record
+      for (const [, tracked] of pidToTrackedSession) {
+        const id = tracked.happySessionId;
+        if (!id || !sessions[id]) continue;
+        sessions[id] = {
+          ...sessions[id],
+          directory: tracked.directory ?? sessions[id].directory,
+          sessionTag: tracked.sessionTag ?? sessions[id].sessionTag,
+          agent: tracked.agent ?? sessions[id].agent,
+          pid: tracked.pid,
+          status: 'running',
+          lastHeartbeat: tracked.lastHeartbeat ?? sessions[id].lastHeartbeat,
+        };
+      }
       writeDaemonState({
         pid: process.pid,
         httpPort: controlPort,
@@ -1341,15 +1426,10 @@ export async function startDaemon(): Promise<void> {
         startedWithCliVersion: configuration.currentCliVersion,
         lastHeartbeat: fileState.lastHeartbeat,
         daemonLogPath: fileState.daemonLogPath,
-        lastSessionTagByDirectory: { ...lastSessionTagByDirectory },
-        lastSessionTagBySessionId: { ...lastSessionTagBySessionId },
-        lastDirectoryBySessionId: { ...lastDirectoryBySessionId },
-        lastAgentBySessionId: { ...lastAgentBySessionId },
-        lastSandboxBySessionId: { ...lastSandboxBySessionId },
-          archivedSessionIds: { ...archivedSessionIds },
-          lastSeqBySessionId: { ...lastSeqBySessionId },
-          stoppedSessions: serializeStoppedSessions(),
-        });
+        sessions: { ...sessions },
+        archivedSessionIds: { ...archivedSessionIds },
+        ...buildLegacyFields(),
+      });
     };
     const fileState: DaemonLocallyPersistedState = {
       pid: process.pid,
@@ -1357,14 +1437,9 @@ export async function startDaemon(): Promise<void> {
       startTime: new Date().toLocaleString(),
       startedWithCliVersion: configuration.currentCliVersion,
       daemonLogPath: logger.logFilePath,
-      lastSessionTagByDirectory: { ...lastSessionTagByDirectory },
-      lastSessionTagBySessionId: { ...lastSessionTagBySessionId },
-      lastDirectoryBySessionId: { ...lastDirectoryBySessionId },
-      lastAgentBySessionId: { ...lastAgentBySessionId },
-        lastSandboxBySessionId: { ...lastSandboxBySessionId },
+      sessions: { ...sessions },
       archivedSessionIds: { ...archivedSessionIds },
-      lastSeqBySessionId: { ...lastSeqBySessionId },
-      stoppedSessions: serializeStoppedSessions(),
+      ...buildLegacyFields(),
     };
     writeDaemonState(fileState);
     logger.debug('[DAEMON RUN] Daemon state written');
@@ -1409,9 +1484,13 @@ export async function startDaemon(): Promise<void> {
       let seeded = 0;
       for (const { id, seq } of bootstrapSessions) {
         if (!id || seq < 0) continue;
-        const prior = lastSeqBySessionId[id];
+        const prior = sessions[id]?.lastSeq;
         if (prior === undefined || seq > prior) {
-          lastSeqBySessionId[id] = seq;
+          if (!sessions[id]) {
+            sessions[id] = { sessionId: id, directory: '', sessionTag: '', agent: 'cursor', pid: -1, status: 'stopped', lastSeq: seq };
+          } else {
+            sessions[id].lastSeq = seq;
+          }
           seeded++;
         }
       }
@@ -1441,13 +1520,17 @@ export async function startDaemon(): Promise<void> {
 
         const now = Date.now();
         for (const { id, seq, active } of changedSessions) {
-          const prevSeq = lastSeqBySessionId[id] ?? -1;
+          const prevSeq = sessions[id]?.lastSeq ?? -1;
 
           if (seq > prevSeq) {
             if (prevSeq >= 0) {
               resumeAfterSeqBySessionId[id] = prevSeq;
             }
-            lastSeqBySessionId[id] = seq;
+            if (!sessions[id]) {
+              sessions[id] = { sessionId: id, directory: '', sessionTag: '', agent: 'cursor', pid: -1, status: 'stopped', lastSeq: seq };
+            } else {
+              sessions[id].lastSeq = seq;
+            }
           }
 
           if (!initialPollDone) continue;
@@ -1467,20 +1550,22 @@ export async function startDaemon(): Promise<void> {
             continue;
           }
 
-          // Check both in-memory tracking AND pid from stoppedSessions (persisted).
-          // pidToTrackedSession is empty after daemon restart.
+          // Liveness check, fastest to slowest:
+          // 1. pidToTrackedSession (in-memory, instant)
+          // 2. PID still running? (process.kill(pid, 0), instant) — catches sessions
+          //    whose socket hasn't reconnected yet after daemon restart.
+          // 3. Unix socket connected? (in-memory set, instant) — ground truth once
+          //    the old session binary reconnects.
           const inMemory = Array.from(pidToTrackedSession.values()).some(s => s.happySessionId === id);
-          if (inMemory) continue;
-          const stoppedPid = stoppedSessions.get(id)?.pid;
-          if (stoppedPid && stoppedPid > 0) {
-            try {
-              process.kill(stoppedPid, 0); // signal 0 = existence check
-              logger.debug(`[DAEMON RUN] Auto-respawn skipped for ${id}: PID ${stoppedPid} still alive`);
-              continue;
-            } catch { /* PID not found */ }
+          if (inMemory || isSessionConnected(id)) continue;
+          const stoppedEntry = stoppedSessions.get(id);
+          if (stoppedEntry && stoppedEntry.pid > 0 && await isPidRunningAndNotZombie(stoppedEntry.pid)) {
+            logger.debug(`[DAEMON RUN] Auto-respawn skipped for ${id}: PID ${stoppedEntry.pid} still alive (awaiting socket reconnect)`);
+            continue;
           }
 
-          const directory = lastDirectoryBySessionId[id];
+          const sessionEntry = sessions[id];
+          const directory = sessionEntry?.directory;
           if (!directory) continue;
 
           const lastAttempt = lastSpawnAttemptBySessionId[id] ?? 0;
@@ -1489,13 +1574,13 @@ export async function startDaemon(): Promise<void> {
             continue;
           }
 
-          const tag = lastSessionTagBySessionId[id];
+          const tag = sessionEntry.sessionTag;
           if (!tag) {
             logger.debug(`[DAEMON RUN] Auto-respawn skipped for session ${id}: no session-specific tag is known`);
             continue;
           }
 
-          const agent = (lastAgentBySessionId[id] as 'cursor' | 'claude' | 'codex' | 'gemini' | 'acp-cursor') ?? 'cursor';
+          const agent = (sessionEntry.agent as 'cursor' | 'claude' | 'codex' | 'gemini' | 'acp-cursor') ?? 'cursor';
           // Avoid resumeAfterSeq=0 on first poll (prevSeq=-1, seq=1): tag-respawn often loads an older session.
           const resumeAfterSeq = prevSeq >= 0 ? prevSeq : (seq > 1 ? seq - 1 : undefined);
           logger.debug(
@@ -1503,7 +1588,7 @@ export async function startDaemon(): Promise<void> {
           );
 
           lastSpawnAttemptBySessionId[id] = now;
-          const autoSandbox = lastSandboxBySessionId[id];
+          const autoSandbox = sessionEntry.sandbox;
           spawnSession({
             directory,
             agent,
@@ -1606,25 +1691,9 @@ export async function startDaemon(): Promise<void> {
 
       // Heartbeat
       try {
-        const updatedState: DaemonLocallyPersistedState = {
-          pid: process.pid,
-          httpPort: controlPort,
-          startTime: fileState.startTime,
-          startedWithCliVersion: configuration.currentCliVersion,
-          lastHeartbeat: new Date().toLocaleString(),
-          daemonLogPath: fileState.daemonLogPath,
-          lastSessionTagByDirectory: { ...lastSessionTagByDirectory },
-          lastSessionTagBySessionId: { ...lastSessionTagBySessionId },
-          lastDirectoryBySessionId: { ...lastDirectoryBySessionId },
-          lastAgentBySessionId: { ...lastAgentBySessionId },
-        lastSandboxBySessionId: { ...lastSandboxBySessionId },
-          archivedSessionIds: { ...archivedSessionIds },
-          lastSeqBySessionId: { ...lastSeqBySessionId },
-          stoppedSessions: serializeStoppedSessions(),
-        };
-        writeDaemonState(updatedState);
+        persistNow();
         if (process.env.DEBUG) {
-          logger.debug(`[DAEMON RUN] Health check completed at ${updatedState.lastHeartbeat}`);
+          logger.debug(`[DAEMON RUN] Health check completed at ${new Date().toLocaleString()}`);
         }
       } catch (error) {
         logger.debug('[DAEMON RUN] Failed to write heartbeat', error);

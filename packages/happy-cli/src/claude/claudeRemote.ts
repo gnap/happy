@@ -103,6 +103,8 @@ export async function claudeRemote(opts: {
     onEnvChanged?: (msg: { message: string; mode: EnhancedMode }) => void;
     /** Called when the SDK emits the system init message with model/capability info. */
     onModelInit?: (info: { model: string; version: string; sessionId: string }) => void;
+    /** Per-session sandbox config. When enabled, passed to the SDK as sandbox settings. */
+    sandboxConfig?: import('@/persistence').SandboxConfig;
 }): Promise<void> {
 
     let currentGeneration = opts.claudeEnvVarsGeneration;
@@ -228,6 +230,14 @@ export async function claudeRemote(opts: {
         pathToClaudeCodeExecutable: resolveClaudeBinaryPath(),
         abortController,
         extraArgs: opts.hookSettingsPath ? { settings: opts.hookSettingsPath } : undefined,
+        // Pass sandbox config to the SDK so it wraps Bash commands with sandbox-exec
+        // rather than the entire Happy process. Much more resilient.
+        sandbox: opts.sandboxConfig?.enabled ? {
+            enabled: true,
+            autoAllowBashIfSandboxed: true,
+            failIfUnavailable: false,
+            enableWeakerNetworkIsolation: opts.sandboxConfig.networkMode === 'allowed',
+        } : undefined,
         env: { ...process.env },
         includeHookEvents: true,
         // Stop hook: collect pending crons so the launcher can schedule wakeups

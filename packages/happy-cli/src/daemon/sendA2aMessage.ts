@@ -19,13 +19,15 @@ function getSessionKeyPrefix(agent?: string): 'cursor' | 'claude' | null {
 
 export async function readDaemonSessionKey(sessionId: string): Promise<Uint8Array | null> {
   const state = await readDaemonState();
-  const agent = state?.lastAgentBySessionId?.[sessionId];
+  const sessionEntry = state?.sessions?.[sessionId];
+  const agent = sessionEntry?.agent;
   const knownPrefix = getSessionKeyPrefix(agent);
   const cursorTagFallback = existsSync(join(configuration.happyHomeDir, 'cursor-session-tag'))
     ? readFileSync(join(configuration.happyHomeDir, 'cursor-session-tag'), 'utf8').trim()
     : '';
-  const tag = state?.lastSessionTagBySessionId?.[sessionId]
-    ?? state?.lastSessionTagByDirectory?.[state?.lastDirectoryBySessionId?.[sessionId] ?? '']
+  // Primary: sessionId-keyed tag. Fallback: look up tag by directory from any session entry.
+  const tag = sessionEntry?.sessionTag
+    ?? Object.values(state?.sessions ?? {}).find(s => s.directory === sessionEntry?.directory)?.sessionTag
     ?? (knownPrefix !== 'claude' ? cursorTagFallback : '');
   const keyPrefixes = (() => {
     if (knownPrefix) return [knownPrefix];
@@ -71,7 +73,7 @@ export async function sendA2aMessage(sessionId: string, text: string, options: S
   const sessionKey = await readSessionKey(sessionId);
   if (!sessionKey) {
     const state = await readDaemonState();
-    const agent = state?.lastAgentBySessionId?.[sessionId];
+    const agent = state?.sessions?.[sessionId]?.agent;
     return {
       success: false,
       error: `No session key found for ${sessionId}${agent ? ` (agent=${agent})` : ''}`,
