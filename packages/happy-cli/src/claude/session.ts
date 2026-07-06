@@ -19,7 +19,7 @@ export class Session {
     claudeArgs?: string[];  // Made mutable to allow filtering
     readonly mcpServers: Record<string, any>;
     readonly allowedTools?: string[];
-    readonly sandboxConfig?: SandboxConfig;
+    sandboxConfig?: SandboxConfig; // Mutable: user messages may change sandbox isolation at runtime
     readonly _onModeChange: (mode: 'local' | 'remote') => void;
     /** Path to temporary settings file with SessionStart hook (required for session tracking) */
     readonly hookSettingsPath: string;

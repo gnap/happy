@@ -130,8 +130,9 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     const settings = await readSettings();
     let machineId = settings?.machineId
     // Priority: --no-sandbox > --sandbox-config (per-session from daemon) > settings.json
-    const sandboxConfig = options.noSandbox ? undefined : (options.sandboxOverride ?? settings?.sandboxConfig);
-    const sandboxEnabled = Boolean(sandboxConfig?.enabled);
+    // Mutable: user messages may change sandbox isolation at runtime without restart.
+    let sandboxConfig = options.noSandbox ? undefined : (options.sandboxOverride ?? settings?.sandboxConfig);
+    let sandboxEnabled = Boolean(sandboxConfig?.enabled);
     let initialPermissionMode = applySandboxPermissionPolicy(
         resolveInitialClaudePermissionMode(options.permissionMode, options.claudeArgs),
         sandboxEnabled,
@@ -364,7 +365,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         customSystemPrompt: mode.customSystemPrompt,
         appendSystemPrompt: mode.appendSystemPrompt,
         allowedTools: mode.allowedTools,
-        disallowedTools: mode.disallowedTools
+        disallowedTools: mode.disallowedTools,
+        sandboxIsolation: mode.sandboxIsolation,
     }));
 
     // Forward messages to the queue
@@ -401,6 +403,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         appendSystemPrompt: currentAppendSystemPrompt,
         allowedTools: currentAllowedTools,
         disallowedTools: currentDisallowedTools,
+        sandboxIsolation: sandboxEnabled ? (sandboxConfig?.sessionIsolation ?? 'workspace') : 'off',
     });
     const a2aInbox = createA2AInboxTurnController({
         logTag: 'claude',
@@ -450,6 +453,38 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             logger.debug(`[loop] Model updated from user message: ${messageModel || 'reset to default'}`);
         } else {
             logger.debug(`[loop] User message received with no model override, using current: ${currentModel || 'default'}`);
+        }
+
+        // Resolve sandbox isolation — runtime switchable like model/permission mode, no restart needed.
+        let sandboxIsolationChanged = false;
+        let messageSandboxIsolation: string | undefined;
+        if (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'sandboxIsolation')) {
+            messageSandboxIsolation = message.meta.sandboxIsolation as string;
+            if (messageSandboxIsolation === 'off') {
+                sandboxEnabled = false;
+                sandboxConfig = undefined;
+            } else {
+                sandboxEnabled = true;
+                sandboxConfig = {
+                    enabled: true,
+                    sessionIsolation: (messageSandboxIsolation as 'strict' | 'workspace' | 'custom') || 'workspace',
+                    workspaceRoot: sandboxConfig?.workspaceRoot,
+                    customWritePaths: sandboxConfig?.customWritePaths ?? [],
+                    denyReadPaths: sandboxConfig?.denyReadPaths ?? ['~/.ssh', '~/.aws', '~/.gnupg'],
+                    extraWritePaths: sandboxConfig?.extraWritePaths ?? ['/tmp'],
+                    denyWritePaths: sandboxConfig?.denyWritePaths ?? ['.env'],
+                    networkMode: sandboxConfig?.networkMode ?? 'allowed',
+                    allowedDomains: sandboxConfig?.allowedDomains ?? [],
+                    deniedDomains: sandboxConfig?.deniedDomains ?? [],
+                    allowLocalBinding: sandboxConfig?.allowLocalBinding ?? true,
+                };
+            }
+            sandboxIsolationChanged = true;
+            logger.debug(`[loop] Sandbox isolation updated from user message: ${messageSandboxIsolation} (enabled=${sandboxEnabled})`);
+            // Update the session's reference so claudeRemote picks up the change next query
+            if (currentSession) {
+                currentSession.sandboxConfig = sandboxConfig;
+            }
         }
 
         // Resolve custom system prompt - use message.meta.customSystemPrompt if provided, otherwise use current
@@ -618,7 +653,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 customSystemPrompt: messageCustomSystemPrompt,
                 appendSystemPrompt: messageAppendSystemPrompt,
                 allowedTools: messageAllowedTools,
-                disallowedTools: messageDisallowedTools
+                disallowedTools: messageDisallowedTools,
+                sandboxIsolation: sandboxEnabled ? (sandboxConfig?.sessionIsolation ?? 'workspace') : 'off',
             };
             messageQueue.pushIsolateAndClear(specialCommand.originalMessage || getUserMessageText(message), enhancedMode, message.meta);
             logger.debugLargeJson('[start] /compact command pushed to queue:', message);
@@ -635,7 +671,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 customSystemPrompt: messageCustomSystemPrompt,
                 appendSystemPrompt: messageAppendSystemPrompt,
                 allowedTools: messageAllowedTools,
-                disallowedTools: messageDisallowedTools
+                disallowedTools: messageDisallowedTools,
+                sandboxIsolation: sandboxEnabled ? (sandboxConfig?.sessionIsolation ?? 'workspace') : 'off',
             };
             messageQueue.pushIsolateAndClear(specialCommand.originalMessage || getUserMessageText(message), enhancedMode, message.meta);
             logger.debugLargeJson('[start] /compact command pushed to queue:', message);
@@ -656,7 +693,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         const metaChanged =
             message.meta?.permissionMode !== undefined
             || (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'model'))
-            || (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'effort'));
+            || (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'effort'))
+            || sandboxIsolationChanged;
         if (metaChanged) {
             session.updateMetadata((m) => {
                 const patch: Record<string, unknown> = {};
@@ -668,6 +706,10 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 }
                 if (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'effort')) {
                     patch.currentEffort = messageEffort;
+                }
+                if (sandboxIsolationChanged) {
+                    patch.sandbox = sandboxConfig?.enabled ? sandboxConfig : null;
+                    patch.currentSandboxIsolation = messageSandboxIsolation ?? 'off';
                 }
                 return { ...m, ...patch };
             }).catch((err) => logger.debug('[loop] Failed to persist permission/model to session metadata', err));
