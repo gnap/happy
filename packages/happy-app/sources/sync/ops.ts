@@ -491,12 +491,12 @@ interface SessionRestartResponse {
  * Restart a session via daemon RPC, reconnecting to the same server session
  * with the newer CLI version.  Returns the new session ID on success.
  */
-export async function sessionRestart(sessionId: string, machineId: string, sandboxConfig?: { enabled?: boolean; sessionIsolation?: 'strict' | 'workspace' | 'custom' }): Promise<SessionRestartResponse> {
+export async function sessionRestart(sessionId: string, machineId: string): Promise<SessionRestartResponse> {
     try {
-        const response = await apiSocket.machineRPC<SessionRestartResponse, { sessionId: string; sandboxConfig?: typeof sandboxConfig }>(
+        const response = await apiSocket.machineRPC<SessionRestartResponse, { sessionId: string }>(
             machineId,
             'restartSession',
-            { sessionId, sandboxConfig }
+            { sessionId }
         );
         return response;
     } catch (error) {
