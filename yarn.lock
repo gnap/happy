@@ -10018,6 +10018,13 @@ katex@^0.16.22:
   dependencies:
     commander "^8.3.0"
 
+katex@^0.17.0:
+  version "0.17.0"
+  resolved "https://registry.yarnpkg.com/katex/-/katex-0.17.0.tgz#536e25874ec9ac8728e3b4b7bf7fec6557b7dbf4"
+  integrity sha512-Vdw0ATsQ9V+LuegM/BTwQqV/6cTl5lbGcIrU+BCgLxyf6bo38ybOr372tuSIxir3CN720flu1meYR6XzNMwQnw==
+  dependencies:
+    commander "^8.3.0"
+
 keyv@^4.0.0, keyv@^4.5.4:
   version "4.5.4"
   resolved "https://registry.npmjs.org/keyv/-/keyv-4.5.4.tgz"
