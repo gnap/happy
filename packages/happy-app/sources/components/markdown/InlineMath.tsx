@@ -1,102 +1,109 @@
 import * as React from 'react';
 import { Platform } from 'react-native';
-import { StyleSheet } from 'react-native-unistyles';
-import { Text } from '../StyledText';
+import { WebView } from 'react-native-webview';
+import { useUnistyles } from 'react-native-unistyles';
 import katex from 'katex';
 import { injectKatexCss } from './MathRenderer';
-
-/**
- * Simple HTML-to-RN-Text parser for KaTeX output.
- * KaTeX renders to <span class="katex">...<span class="mord">text</span>...<span class="msupsub">...</span></span>
- * We flatten nested spans into Text components with approximate styling.
- */
-function renderKatexHtml(html: string, mathStyle: any): React.ReactNode[] {
-    const nodes: React.ReactNode[] = [];
-    const tagRegex = /<(\/?)(\w+)[^>]*>/g;
-    const entityRegex = /&([a-z]+);/g;
-    let lastIndex = 0;
-    let key = 0;
-
-    const entityMap: Record<string, string> = {
-        amp: '&', lt: '<', gt: '>', quot: '"', apos: "'",
-    };
-    const numEntities: Record<string, number> = { nbsp: 160, copy: 169, reg: 174, deg: 176, pm: 177, times: 215, divide: 247 };
-
-    const decodeEntities = (str: string) =>
-        str.replace(entityRegex, (_, name: string) => entityMap[name] || String.fromCharCode(numEntities[name] || 0));
-
-    // Collect text segments; we just extract text between tags
-    // For simplicity, render as a single Text with the math style.
-    // Full span-by-span rendering (with sup/sub) would be far more complex
-    // and isn't needed for basic readability.
-    let match: RegExpExecArray | null;
-    let textContent = '';
-    while ((match = tagRegex.exec(html)) !== null) {
-        if (match[1] === '') {
-            // Opening tag — get text before it
-            const before = html.slice(lastIndex, match.index);
-            textContent += decodeEntities(before);
-            lastIndex = tagRegex.lastIndex;
-        } else {
-            // Closing tag
-            const before = html.slice(lastIndex, match.index);
-            textContent += decodeEntities(before);
-            lastIndex = tagRegex.lastIndex;
-        }
-    }
-    // Remaining text
-    textContent += decodeEntities(html.slice(lastIndex));
-
-    if (textContent.trim()) {
-        nodes.push(<Text key={key++} style={mathStyle}>{textContent}</Text>);
-    }
-    return nodes;
-}
+import { KATEX_CSS_FULL } from './katex-css-full';
 
 export const InlineMath = React.memo((props: {
     expr: string;
 }) => {
-    let displayHtml: string;
-    try {
-        displayHtml = katex.renderToString(props.expr, {
-            displayMode: false,
-            throwOnError: false,
-        });
-    } catch {
-        return <Text style={style.fallback}>${props.expr}$</Text>;
-    }
+    const { theme } = useUnistyles();
 
-    // Web platform: override KaTeX's white-space:nowrap so long inline formulas can wrap
+    // Web: full KaTeX with dangerouslySetInnerHTML
     if (Platform.OS === 'web') {
         injectKatexCss();
+        let displayHtml: string;
+        try {
+            displayHtml = katex.renderToString(props.expr, { displayMode: false, throwOnError: false });
+        } catch {
+            return (
+                // @ts-ignore
+                <span style={{ color: theme.colors.textSecondary }}>${props.expr}$</span>
+            );
+        }
         const wrappedHtml = displayHtml.replace(
             /class="katex"/g,
             'class="katex" style="white-space:normal;overflow-wrap:anywhere"',
         );
         return (
-            // @ts-ignore - Web only
-            <span
-                style={{ display: 'inline' }}
-                dangerouslySetInnerHTML={{ __html: wrappedHtml }}
-            />
+            // @ts-ignore
+            <span style={{ display: 'inline' }} dangerouslySetInnerHTML={{ __html: wrappedHtml }} />
         );
     }
 
-    // iOS/Android: parse HTML to RN Text components
-    const nodes = React.useMemo(
-        () => renderKatexHtml(displayHtml, style.math),
-        [displayHtml],
+    //
+    // iOS/Android: tiny WebView rendered inside a flexWrap View (not Text).
+    // Font size matches body text (16px). Height auto-measured via JS.
+    //
+    const [dimensions, setDimensions] = React.useState({ width: 120, height: 26 });
+
+    let displayHtml: string;
+    try {
+        displayHtml = katex.renderToString(props.expr, { displayMode: false, throwOnError: false });
+    } catch {
+        displayHtml = `<span>${props.expr}</span>`;
+    }
+
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+    <style>
+        ${KATEX_CSS_FULL}
+        html, body {
+            margin: 0;
+            padding: 0 4px;
+            background-color: transparent;
+            color: ${theme.colors.text};
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            font-size: 16px;
+            line-height: 1.4;
+        }
+        #math-wrap {
+            display: inline-block;
+            white-space: nowrap;
+        }
+        .katex { font-size: 1em !important; }
+        .katex-html { display: inline !important; }
+    </style>
+</head>
+<body><span id="math-wrap">${displayHtml}</span></body>
+<script>
+    setTimeout(function() {
+        var el = document.getElementById('math-wrap');
+        var rect = el.getBoundingClientRect();
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'size',
+            w: Math.ceil(rect.width) + 8,
+            h: Math.ceil(rect.height)
+        }));
+    }, 400);
+</script>
+</html>`;
+
+    return (
+        <WebView
+            source={{ html }}
+            style={{
+                width: dimensions.width,
+                height: dimensions.height,
+                backgroundColor: 'transparent',
+            }}
+            scrollEnabled={false}
+            androidLayerType="software"
+            onMessage={(event) => {
+                try {
+                    const data = JSON.parse(event.nativeEvent.data);
+                    if (data.type === 'size' && typeof data.w === 'number' && typeof data.h === 'number') {
+                        if (data.w > 0 && data.h > 0) {
+                            setDimensions({ width: data.w, height: data.h });
+                        }
+                    }
+                } catch { /* ignore */ }
+            }}
+        />
     );
-
-    return <Text style={style.math}>{nodes}</Text>;
 });
-
-const style = StyleSheet.create((theme) => ({
-    math: {
-        fontStyle: 'italic',
-        color: theme.colors.text,
-    },
-    fallback: {
-        color: theme.colors.textSecondary,
-    },
-}));

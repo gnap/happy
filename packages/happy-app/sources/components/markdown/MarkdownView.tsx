@@ -117,14 +117,34 @@ export const MarkdownView = React.memo((props: {
     );
 });
 
+function hasMath(spans: MarkdownSpan[]): boolean {
+    return spans.some(s => s.styles.includes('math'));
+}
+
 function RenderTextBlock(props: { spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean }) {
-    return <Text selectable={props.selectable} style={[style.text, props.first && style.first, props.last && style.last]}><RenderSpans spans={props.spans} baseStyle={style.text} /></Text>;
+    const blockStyle = [style.text, props.first && style.first, props.last && style.last];
+    if (!hasMath(props.spans)) {
+        return <Text selectable={props.selectable} style={blockStyle}><RenderSpans spans={props.spans} baseStyle={style.text} /></Text>;
+    }
+    // With inline math: use View+flexWrap to avoid Text-nativeView nesting issues
+    return (
+        <View style={[blockStyle, style.mathRow]}>
+            <RenderSpans spans={props.spans} baseStyle={style.text} />
+        </View>
+    );
 }
 
 function RenderHeaderBlock(props: { level: 1 | 2 | 3 | 4 | 5 | 6, spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean }) {
     const s = (style as any)[`header${props.level}`];
     const headerStyle = [style.header, s, props.first && style.first, props.last && style.last];
-    return <Text selectable={props.selectable} style={headerStyle}><RenderSpans spans={props.spans} baseStyle={headerStyle} /></Text>;
+    if (!hasMath(props.spans)) {
+        return <Text selectable={props.selectable} style={headerStyle}><RenderSpans spans={props.spans} baseStyle={headerStyle} /></Text>;
+    }
+    return (
+        <View style={[headerStyle, style.mathRow]}>
+            <RenderSpans spans={props.spans} baseStyle={[...headerStyle]} />
+        </View>
+    );
 }
 
 function RenderListBlock(props: { items: MarkdownSpan[][], first: boolean, last: boolean, selectable: boolean }) {
@@ -236,7 +256,7 @@ function RenderOptionsBlock(props: {
 function RenderSpans(props: { spans: MarkdownSpan[], baseStyle?: any }) {
     return (<>
         {props.spans.map((span, index) => {
-            // Inline math: render with KaTeX
+            // Inline math: render with KaTeX WebView (iOS Text supports nested native Views inline)
             if (span.styles.includes('math')) {
                 return <InlineMath key={index} expr={span.text} />;
             }
@@ -432,6 +452,11 @@ const style = StyleSheet.create((theme) => ({
 
     first: {
         // marginTop: 0
+    },
+    mathRow: {
+        flexDirection: 'row' as const,
+        flexWrap: 'wrap' as const,
+        alignItems: 'flex-start' as const,
     },
     last: {
         // marginBottom: 0
