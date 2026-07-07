@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, Pressable, TextInput, Modal, ScrollView } from 'react-native';
+import { View, Text, Pressable, TextInput, Modal, ScrollView, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
@@ -34,8 +34,41 @@ export function EnvironmentVariablesList({
         };
     }, [profileDocs]);
 
-    // Auto-detect env vars from clipboard on mount (only when entering the edit page)
+    // Clipboard import
+    const [clipboardPreview, setClipboardPreview] = React.useState<Array<{ name: string; value: string }> | null>(null);
+
+    const parseEnvVarsFromText = React.useCallback((text: string): Array<{ name: string; value: string }> => {
+        const result: Array<{ name: string; value: string }> = [];
+        const lines = text.split(/\r?\n/);
+        for (const line of lines) {
+            let trimmed = line.trim();
+            if (!trimmed) continue;
+            // Strip leading # comment marker (fish/bash) and re-check
+            if (trimmed.startsWith('#')) {
+                trimmed = trimmed.slice(1).trim();
+                if (!trimmed || trimmed.startsWith('#')) continue;
+            }
+            // Match multiple formats:
+            //   export VAR=value / VAR=value / VAR: value
+            //   set -gx VAR "value" / set -x VAR value (fish shell)
+            let m = trimmed.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*[=:]\s*(?:"([^"]*)"|'([^']*)'|(.*))$/);
+            if (!m) {
+                m = trimmed.match(/^set\s+(?:-[gx]+\s+)?([A-Za-z_][A-Za-z0-9_]*)\s+(?:"([^"]*)"|'([^']*)'|(\S+))$/);
+            }
+            if (m) {
+                const name = m[1].toUpperCase();
+                const value = (m[2] ?? m[3] ?? m[4] ?? '').trim();
+                if (!result.some(v => v.name === name)) {
+                    result.push({ name, value });
+                }
+            }
+        }
+        return result;
+    }, []);
+
+    // Auto-detect env vars from clipboard on mount (skip on web — no clipboard permission)
     React.useEffect(() => {
+        if (Platform.OS === 'web') return;
         void (async () => {
             try {
                 const text = await Clipboard.getStringAsync();
@@ -44,8 +77,8 @@ export function EnvironmentVariablesList({
                 if (parsed.length > 0) {
                     setClipboardPreview(parsed);
                 }
-            } catch (e) {
-                console.warn('[clipboard] Failed to read clipboard:', e);
+            } catch {
+                // clipboard unavailable
             }
         })();
     }, [parseEnvVarsFromText]);
@@ -80,40 +113,41 @@ export function EnvironmentVariablesList({
         setShowAddForm(false);
     }, [newVarName, newVarValue, environmentVariables, onChange]);
 
-    // Clipboard import
-    const [clipboardPreview, setClipboardPreview] = React.useState<Array<{ name: string; value: string }> | null>(null);
-
-    const parseEnvVarsFromText = React.useCallback((text: string): Array<{ name: string; value: string }> => {
-        const result: Array<{ name: string; value: string }> = [];
-        const lines = text.split('\n');
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed || trimmed.startsWith('#')) continue;
-            // Match: export VAR=value, export VAR="value", VAR=value, VAR="value", VAR=value with spaces, VAR='value'
-            const m = trimmed.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"]*)"|'([^']*)'|(.+?))\s*$/);
-            if (m) {
-                const name = m[1].toUpperCase();
-                const value = m[2] ?? m[3] ?? (m[4] ?? '').trim();
-                if (!result.some(v => v.name === name)) {
-                    result.push({ name, value });
-                }
-            }
-        }
-        return result;
-    }, []);
+    const [showPasteModal, setShowPasteModal] = React.useState(false);
+    const [pasteText, setPasteText] = React.useState('');
 
     const handlePaste = React.useCallback(async () => {
-        try {
-            const text = await Clipboard.getStringAsync();
-            if (!text) return;
-            const parsed = parseEnvVarsFromText(text);
-            if (parsed.length > 0) {
-                setClipboardPreview(parsed);
-            }
-        } catch (e) {
-            console.warn('[clipboard] Paste failed:', e);
+        // Try clipboard first (works on native platforms)
+        if (Platform.OS !== 'web') {
+            try {
+                const text = await Clipboard.getStringAsync();
+                if (text) {
+                    const parsed = parseEnvVarsFromText(text);
+                    if (parsed.length > 0) {
+                        setClipboardPreview(parsed);
+                        return;
+                    }
+                }
+            } catch { /* fall through to manual paste */ }
         }
+        // Web/Tauri: open manual paste modal
+        setPasteText('');
+        setShowPasteModal(true);
     }, [parseEnvVarsFromText]);
+
+    const handlePasteConfirm = React.useCallback(() => {
+        if (!pasteText.trim()) {
+            setShowPasteModal(false);
+            return;
+        }
+        const parsed = parseEnvVarsFromText(pasteText);
+        setShowPasteModal(false);
+        setPasteText('');
+        if (parsed.length > 0) {
+            setClipboardPreview(parsed);
+        }
+        // Note: if parsed.length === 0, modal just closes — user can retry with different text
+    }, [pasteText, parseEnvVarsFromText]);
 
     const handleConfirmImport = React.useCallback(() => {
         if (!clipboardPreview) return;
@@ -197,6 +231,40 @@ export function EnvironmentVariablesList({
                     />
                 );
             })}
+            {/* Manual paste modal (for web/Tauri where clipboard API is unavailable) */}
+            <Modal
+                visible={showPasteModal}
+                transparent
+                animationType="fade"
+                onRequestClose={() => setShowPasteModal(false)}
+            >
+                <View style={styles.modalOverlay}>
+                    <View style={styles.modalContent}>
+                        <Text style={styles.modalTitle}>Paste Environment Variables</Text>
+                        <TextInput
+                            style={styles.pasteInput}
+                            placeholder="export API_KEY=&quot;sk-xxx&quot;&#10;export BASE_URL=&quot;https://...&quot;"
+                            placeholderTextColor={theme.colors.input.placeholder}
+                            value={pasteText}
+                            onChangeText={setPasteText}
+                            multiline
+                            numberOfLines={8}
+                            autoCapitalize="none"
+                            autoCorrect={false}
+                            textAlignVertical="top"
+                        />
+                        <View style={styles.modalActions}>
+                            <Pressable style={styles.modalCancel} onPress={() => { setShowPasteModal(false); setPasteText(''); }}>
+                                <Text style={styles.modalCancelText}>Cancel</Text>
+                            </Pressable>
+                            <Pressable style={styles.modalConfirm} onPress={handlePasteConfirm}>
+                                <Text style={styles.modalConfirmText}>Parse</Text>
+                            </Pressable>
+                        </View>
+                    </View>
+                </View>
+            </Modal>
+
             {/* Clipboard import preview modal */}
             <Modal
                 visible={clipboardPreview !== null}
@@ -328,6 +396,18 @@ const styles = StyleSheet.create((theme) => ({
         fontWeight: '600',
         color: theme.colors.button.primary.tint,
         ...Typography.default('semiBold'),
+    },
+    pasteInput: {
+        backgroundColor: theme.colors.input.background,
+        borderRadius: theme.borderRadius.md,
+        padding: 12,
+        fontSize: 13,
+        color: theme.colors.text,
+        marginBottom: 16,
+        borderWidth: 1,
+        borderColor: theme.colors.textSecondary,
+        minHeight: 160,
+        fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
     },
     modalOverlay: {
         flex: 1,
