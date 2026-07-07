@@ -43,6 +43,7 @@ export const MarkdownView = React.memo((props: {
     const { theme } = useUnistyles();
     const blocks = React.useMemo(() => parseMarkdown(props.markdown ?? ''), [props.markdown]);
     const textColor = theme.colors.text;
+    const bgColor = theme.colors.background;
     
     // Backwards compatibility: The original version just returned the view, wrapping the list of blocks.
     // It made each of the individual text elements selectable. When we enable the markdownCopyV2 feature,
@@ -85,7 +86,17 @@ export const MarkdownView = React.memo((props: {
                     } else if (block.type === 'table') {
                         return <RenderTableBlock headers={block.headers} rows={block.rows} key={index} first={index === 0} last={index === blocks.length - 1} />;
                     } else if (block.type === 'math') {
-                        return <MathRenderer content={block.content} key={index} />;
+                        return <EnrichedMarkdownText
+                            key={index}
+                            flavor="github"
+                            containerStyle={{ marginVertical: 8 }}
+                            markdown={`$$\n${block.content}\n$$`}
+                            markdownStyle={{
+                                paragraph: { color: textColor },
+                                math: { color: textColor, backgroundColor: bgColor, textAlign: 'center' },
+                            }}
+                            md4cFlags={{ latexMath: true }}
+                        />;
                     } else {
                         return null;
                     }
@@ -139,6 +150,7 @@ function RenderTextBlock(props: { spans: MarkdownSpan[], first: boolean, last: b
     const blockStyle = [style.text, props.first && style.first, props.last && style.last];
     if (hasMath(props.spans)) {
         return <EnrichedMarkdownText
+            flavor="github"
             containerStyle={style.text as any}
             markdown={spansToMarkdown(props.spans)}
             markdownStyle={{ paragraph: { color: props.textColor }, inlineMath: { color: props.textColor } }}
@@ -152,6 +164,7 @@ function RenderHeaderBlock(props: { level: 1 | 2 | 3 | 4 | 5 | 6, spans: Markdow
     const headerStyle = [style.header, s, props.first && style.first, props.last && style.last];
     if (hasMath(props.spans)) {
         return <EnrichedMarkdownText
+            flavor="github"
             containerStyle={(style.header as any)}
             markdown={spansToMarkdown(props.spans)}
             markdownStyle={{ paragraph: { color: props.textColor }, inlineMath: { color: props.textColor } }}
