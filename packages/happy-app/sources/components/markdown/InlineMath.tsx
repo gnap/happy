@@ -3,6 +3,7 @@ import { Platform } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { Text } from '../StyledText';
 import katex from 'katex';
+import { injectKatexCss } from './MathRenderer';
 
 /**
  * Simple HTML-to-RN-Text parser for KaTeX output.
@@ -65,13 +66,18 @@ export const InlineMath = React.memo((props: {
         return <Text style={style.fallback}>${props.expr}$</Text>;
     }
 
-    // Web platform: use dangerouslySetInnerHTML
+    // Web platform: override KaTeX's white-space:nowrap so long inline formulas can wrap
     if (Platform.OS === 'web') {
+        injectKatexCss();
+        const wrappedHtml = displayHtml.replace(
+            /class="katex"/g,
+            'class="katex" style="white-space:normal;overflow-wrap:anywhere"',
+        );
         return (
             // @ts-ignore - Web only
             <span
                 style={{ display: 'inline' }}
-                dangerouslySetInnerHTML={{ __html: displayHtml }}
+                dangerouslySetInnerHTML={{ __html: wrappedHtml }}
             />
         );
     }

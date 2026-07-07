@@ -34,7 +34,7 @@ export function EnvironmentVariablesList({
         };
     }, [profileDocs]);
 
-    // Auto-detect env vars from clipboard on mount
+    // Auto-detect env vars from clipboard on mount (only when entering the edit page)
     React.useEffect(() => {
         void (async () => {
             try {
@@ -44,7 +44,9 @@ export function EnvironmentVariablesList({
                 if (parsed.length > 0) {
                     setClipboardPreview(parsed);
                 }
-            } catch { /* clipboard unavailable */ }
+            } catch (e) {
+                console.warn('[clipboard] Failed to read clipboard:', e);
+            }
         })();
     }, [parseEnvVarsFromText]);
 
@@ -87,11 +89,11 @@ export function EnvironmentVariablesList({
         for (const line of lines) {
             const trimmed = line.trim();
             if (!trimmed || trimmed.startsWith('#')) continue;
-            // Match: export VAR=value, export VAR="value", VAR=value, VAR="value"
-            const m = trimmed.match(/^(?:export\s+)?([A-Z_][A-Z0-9_]*)=(?:"([^"]*)"|'([^']*)'|(.+))$/);
+            // Match: export VAR=value, export VAR="value", VAR=value, VAR="value", VAR=value with spaces, VAR='value'
+            const m = trimmed.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"]*)"|'([^']*)'|(.+?))\s*$/);
             if (m) {
-                const name = m[1];
-                const value = m[2] ?? m[3] ?? m[4] ?? '';
+                const name = m[1].toUpperCase();
+                const value = m[2] ?? m[3] ?? (m[4] ?? '').trim();
                 if (!result.some(v => v.name === name)) {
                     result.push({ name, value });
                 }
@@ -100,7 +102,7 @@ export function EnvironmentVariablesList({
         return result;
     }, []);
 
-    const handlePasteFromClipboard = React.useCallback(async () => {
+    const handlePaste = React.useCallback(async () => {
         try {
             const text = await Clipboard.getStringAsync();
             if (!text) return;
@@ -108,7 +110,9 @@ export function EnvironmentVariablesList({
             if (parsed.length > 0) {
                 setClipboardPreview(parsed);
             }
-        } catch { /* clipboard unavailable */ }
+        } catch (e) {
+            console.warn('[clipboard] Paste failed:', e);
+        }
     }, [parseEnvVarsFromText]);
 
     const handleConfirmImport = React.useCallback(() => {
@@ -130,10 +134,16 @@ export function EnvironmentVariablesList({
         <View style={styles.container}>
             <Text style={styles.sectionTitle}>Environment Variables</Text>
 
-            <Pressable style={styles.addButton} onPress={() => setShowAddForm(true)}>
-                <Ionicons name="add" size={14} color={theme.colors.button.primary.tint} />
-                <Text style={styles.addButtonText}>Add Variable</Text>
-            </Pressable>
+            <View style={styles.buttonRow}>
+                <Pressable style={styles.addButton} onPress={() => setShowAddForm(true)}>
+                    <Ionicons name="add" size={14} color={theme.colors.button.primary.tint} />
+                    <Text style={styles.addButtonText}>Add Variable</Text>
+                </Pressable>
+                <Pressable style={styles.pasteButton} onPress={() => handlePaste()}>
+                    <Ionicons name="clipboard-outline" size={14} color={theme.colors.button.secondary.tint} />
+                    <Text style={styles.pasteButtonText}>Paste from Clipboard</Text>
+                </Pressable>
+            </View>
 
             {showAddForm && (
                 <View style={styles.addForm}>
@@ -260,6 +270,12 @@ const styles = StyleSheet.create((theme) => ({
         fontSize: 12,
         fontWeight: '600',
         color: theme.colors.button.primary.tint,
+        ...Typography.default('semiBold'),
+    },
+    pasteButtonText: {
+        fontSize: 12,
+        fontWeight: '600',
+        color: theme.colors.button.secondary.tint,
         ...Typography.default('semiBold'),
     },
     addForm: {

@@ -3,28 +3,63 @@ import { View, Platform } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import katex from 'katex';
+import { KATEX_CSS } from './katex-css';
 
-const webStyle: any = {
-    display: 'flex',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 16,
-    overflow: 'auto',
-};
+// Inject KaTeX CSS once into document head (web only)
+let katexCssInjected = false;
+export function injectKatexCss() {
+    if (Platform.OS !== 'web' || katexCssInjected) return;
+    const style = document.createElement('style');
+    style.textContent = KATEX_CSS;
+    document.head.appendChild(style);
+    katexCssInjected = true;
+}
 
 export const MathRenderer = React.memo((props: {
     content: string;
 }) => {
     const { theme } = useUnistyles();
     const [dimensions, setDimensions] = React.useState({ width: 0, height: 60 });
+    const containerRef = React.useRef<View>(null);
+    const [containerWidth, setContainerWidth] = React.useState(0);
 
     const onLayout = React.useCallback((event: any) => {
         const { width } = event.nativeEvent.layout;
         setDimensions(prev => ({ ...prev, width }));
     }, []);
 
+    // Measure actual available width from a properly constrained ancestor (once)
+    const measuredRef = React.useRef(false);
+    React.useEffect(() => {
+        if (Platform.OS !== 'web' || !containerRef.current || measuredRef.current) return;
+        const el = (containerRef.current as any) as HTMLElement;
+        // Walk up to find an ancestor with a fixed max-width (e.g., the message bubble)
+        let parent = el.parentElement;
+        while (parent) {
+            const cs = getComputedStyle(parent);
+            if (cs.maxWidth !== 'none' && cs.maxWidth !== '0px' && !cs.maxWidth.includes('%')) {
+                const w = parent.getBoundingClientRect().width;
+                setContainerWidth(w);
+                measuredRef.current = true;
+                // Observe this constrained ancestor for resize
+                const ro = new ResizeObserver(() => {
+                    setContainerWidth(parent!.getBoundingClientRect().width);
+                });
+                ro.observe(parent);
+                return () => ro.disconnect();
+            }
+            parent = parent.parentElement;
+        }
+        // Fallback
+        if (el.parentElement) {
+            setContainerWidth(el.parentElement.getBoundingClientRect().width);
+            measuredRef.current = true;
+        }
+    }, []);
+
     // Web platform: use katex.renderToString + dangerouslySetInnerHTML (instant, no WebView)
     if (Platform.OS === 'web') {
+        injectKatexCss();
         let html: string;
         try {
             html = katex.renderToString(props.content, {
@@ -35,11 +70,22 @@ export const MathRenderer = React.memo((props: {
             html = `<span style="color:${theme.colors.textSecondary}">${props.content}</span>`;
         }
 
+        const w = containerWidth > 0 ? containerWidth : 0;
+
         return (
-            <View style={style.container}>
+            <View ref={containerRef} style={style.container}>
                 {/* @ts-ignore - Web only */}
                 <div
-                    style={webStyle}
+                    style={{
+                        display: 'flex',
+                        justifyContent: 'center',
+                        alignItems: 'center',
+                        padding: 16,
+                        width: w > 0 ? w : '100%',
+                        maxWidth: w > 0 ? w : '100%',
+                        overflowX: 'auto',
+                        overflowY: 'hidden',
+                    }}
                     dangerouslySetInnerHTML={{ __html: html }}
                 />
             </View>
@@ -123,6 +169,7 @@ const style = StyleSheet.create((theme) => ({
     container: {
         marginVertical: 8,
         width: '100%',
+        overflow: 'hidden',
     },
     innerContainer: {
         width: '100%',
