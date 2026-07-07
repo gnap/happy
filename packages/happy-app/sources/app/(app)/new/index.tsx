@@ -303,11 +303,16 @@ function NewSessionWizard() {
     const [favoriteMachines, setFavoriteMachines] = useSettingMutable('favoriteMachines');
     const [dismissedCLIWarnings, setDismissedCLIWarnings] = useSettingMutable('dismissedCLIWarnings');
 
-    // Combined profiles (built-in + custom)
+    // Track which profiles exist (built-in profiles not in here have been deleted)
+    const profileIds = React.useMemo(() => new Set(profiles.map(p => p.id)), [profiles]);
+
+    // Combined profiles: only include built-in profiles that haven't been deleted
     const allProfiles = React.useMemo(() => {
-        const builtInProfiles = DEFAULT_PROFILES.map(bp => getBuiltInProfile(bp.id)!);
+        const builtInProfiles = DEFAULT_PROFILES
+            .map(bp => getBuiltInProfile(bp.id)!)
+            .filter(bp => profileIds.has(bp.id));
         return [...builtInProfiles, ...profiles];
-    }, [profiles]);
+    }, [profiles, profileIds]);
 
     const profileMap = useProfileMap(allProfiles);
     const machines = useAllMachines();
@@ -1606,8 +1611,10 @@ function NewSessionWizard() {
                                 </View>
                             )}
 
-                            {/* Custom profiles - show first */}
-                            {profiles.map((profile) => {
+                            {/* Custom profiles - show first (exclude built-in templates) */}
+                            {profiles
+                                .filter(p => !DEFAULT_PROFILES.some(bp => bp.id === p.id))
+                                .map((profile) => {
                                 const availability = isProfileAvailable(profile);
 
                                 return (
@@ -1669,8 +1676,10 @@ function NewSessionWizard() {
                                 );
                             })}
 
-                            {/* Built-in profiles - show after custom */}
-                            {DEFAULT_PROFILES.map((profileDisplay) => {
+                            {/* Built-in profiles - show after custom (only those not deleted) */}
+                            {DEFAULT_PROFILES
+                                .filter(bp => profileIds.has(bp.id))
+                                .map((profileDisplay) => {
                                 const profile = getBuiltInProfile(profileDisplay.id);
                                 if (!profile) return null;
 
