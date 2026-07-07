@@ -1,8 +1,7 @@
 import React from 'react';
 import { Pressable, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useStyles } from 'react-native-unistyles';
-import { hapticsLight } from '@/utils/haptics';
+import { useUnistyles } from 'react-native-unistyles';
 
 interface SandboxIsolationSelectorProps {
     currentIsolation: string;
@@ -14,13 +13,12 @@ export function SandboxIsolationSelector({
     currentIsolation,
     onPress,
 }: SandboxIsolationSelectorProps) {
-    const { theme } = useStyles();
+    const { theme } = useUnistyles();
     const active = currentIsolation !== 'off';
 
     return (
         <Pressable
             onPress={() => {
-                hapticsLight();
                 onPress();
             }}
             hitSlop={{ top: 5, bottom: 10, left: 0, right: 0 }}

@@ -103,23 +103,21 @@ export function parseMarkdownBlock(markdown: string) {
             continue;
         }
 
-        // Math block ($$...$$)
+        // Math block ($$ ... $$)
         if (trimmed.startsWith('$$') && !trimmed.startsWith('$$$')) {
-            let content: string[] = [];
-            // Single-line math block: $$expr$$
             const singleLine = trimmed.match(/^\$\$(.+?)\$\$$/);
             if (singleLine) {
                 blocks.push({ type: 'math', content: singleLine[1].trim() });
                 continue;
             }
-            // Multi-line math block: $$ on its own line
+            // Multi-line math block
+            const content: string[] = [];
             while (index < lines.length) {
-                const nextLine = lines[index];
-                if (nextLine.trim() === '$$') {
+                if (lines[index].trim() === '$$') {
                     index++;
                     break;
                 }
-                content.push(nextLine);
+                content.push(lines[index]);
                 index++;
             }
             if (content.length > 0) {

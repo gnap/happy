@@ -82,6 +82,7 @@ const agentEventSchema = z.discriminatedUnion('type', [z.object({
     mode: z.string().optional(),
     allowedTools: z.array(z.string()).optional(),
     reason: z.string().optional(),
+    updatedInput: z.unknown().optional(),
 })]);
 export type AgentEvent = z.infer<typeof agentEventSchema>;
 
@@ -190,6 +191,7 @@ const sessionPermissionResultEventSchema = z.object({
     mode: z.string().optional(),
     allowedTools: z.array(z.string()).optional(),
     reason: z.string().optional(),
+    updatedInput: z.unknown().optional(),
 });
 
 const sessionEventSchema = z.discriminatedUnion('t', [
@@ -942,6 +944,7 @@ function normalizeSessionEnvelope(
                 mode: envelope.ev.mode,
                 allowedTools: envelope.ev.allowedTools,
                 reason: envelope.ev.reason,
+                updatedInput: envelope.ev.updatedInput,
             },
             meta,
         } satisfies NormalizedMessage;

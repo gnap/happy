@@ -1,6 +1,6 @@
 import type { MarkdownSpan } from "./parseMarkdown";
 
-// Updated pattern to handle nested markdown, asterisks, and inline math ($...$)
+// Pattern: $$...$$ (1-2), $...$ (3-4), **bold** (5-6), *italic* (7-8), [link](url) (9-11), `code` (12-13)
 const pattern = /(\$\$([^$]+)\$\$)|(\$([^$\s][^$]*?[^$\s])\$)|(\*\*(.*?)(?:\*\*|$))|(\*(.*?)(?:\*|$))|(\[([^\]]+)\](?:\(([^)]+)\))?)|(`(.*?)(?:`|$))/g;
 
 export function parseMarkdownSpans(markdown: string, header: boolean) {
@@ -16,10 +16,10 @@ export function parseMarkdownSpans(markdown: string, header: boolean) {
         }
 
         if (match[1]) {
-            // Block-level inline math ($$expr$$) — treated as text with math style
+            // Display math: $$...$$
             spans.push({ styles: ['math'], text: match[2], url: null });
         } else if (match[3]) {
-            // Inline math ($expr$)
+            // Inline math: $...$
             spans.push({ styles: ['math'], text: match[4], url: null });
         } else if (match[5]) {
             // Bold
