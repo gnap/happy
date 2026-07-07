@@ -4,7 +4,7 @@ import { Link } from 'expo-router';
 import * as React from 'react';
 import { Pressable, ScrollView, View, Platform } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import { StyleSheet } from 'react-native-unistyles';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Text } from '../StyledText';
 import { ExternalLink } from '../ExternalLink';
 import { Typography } from '@/constants/Typography';
@@ -17,6 +17,7 @@ import * as Clipboard from 'expo-clipboard';
 import { MermaidRenderer } from './MermaidRenderer';
 import { MathRenderer } from './MathRenderer';
 import { InlineMath } from './InlineMath';
+import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
 import { t } from '@/text';
 import { isRunningInTauri } from '@/utils/platform';
 
@@ -35,11 +36,13 @@ async function openMarkdownLink(url: string) {
     }
 }
 
-export const MarkdownView = React.memo((props: { 
+export const MarkdownView = React.memo((props: {
     markdown: string;
     onOptionPress?: (option: Option) => void;
 }) => {
+    const { theme } = useUnistyles();
     const blocks = React.useMemo(() => parseMarkdown(props.markdown ?? ''), [props.markdown]);
+    const textColor = theme.colors.text;
     
     // Backwards compatibility: The original version just returned the view, wrapping the list of blocks.
     // It made each of the individual text elements selectable. When we enable the markdownCopyV2 feature,
@@ -64,9 +67,9 @@ export const MarkdownView = React.memo((props: {
             <View style={{ width: '100%' }}>
                 {blocks.map((block, index) => {
                     if (block.type === 'text') {
-                        return <RenderTextBlock spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} />;
+                        return <RenderTextBlock spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} textColor={textColor} />;
                     } else if (block.type === 'header') {
-                        return <RenderHeaderBlock level={block.level} spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} />;
+                        return <RenderHeaderBlock level={block.level} spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} textColor={textColor} />;
                     } else if (block.type === 'horizontal-rule') {
                         return <View style={style.horizontalRule} key={index} />;
                     } else if (block.type === 'list') {
@@ -117,13 +120,43 @@ export const MarkdownView = React.memo((props: {
     );
 });
 
-function RenderTextBlock(props: { spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean }) {
-    return <Text selectable={props.selectable} style={[style.text, props.first && style.first, props.last && style.last]}><RenderSpans spans={props.spans} baseStyle={style.text} /></Text>;
+// Reconstruct raw markdown from parsed spans
+function spansToMarkdown(spans: MarkdownSpan[]): string {
+    return spans.map(s => {
+        if (s.styles.includes('math')) return `$${s.text}$`;
+        if (s.styles.includes('bold')) return `**${s.text}**`;
+        if (s.styles.includes('italic')) return `*${s.text}*`;
+        if (s.styles.includes('code')) return '`' + s.text + '`';
+        if (s.url) return `[${s.text}](${s.url})`;
+        return s.text;
+    }).join('');
+}
+function hasMath(spans: MarkdownSpan[]): boolean {
+    return spans.some(s => s.styles.includes('math'));
 }
 
-function RenderHeaderBlock(props: { level: 1 | 2 | 3 | 4 | 5 | 6, spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean }) {
+function RenderTextBlock(props: { spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, textColor: string }) {
+    const blockStyle = [style.text, props.first && style.first, props.last && style.last];
+    if (hasMath(props.spans)) {
+        return <EnrichedMarkdownText
+            containerStyle={style.text as any}
+            markdown={spansToMarkdown(props.spans)}
+            markdownStyle={{ paragraph: { color: props.textColor }, inlineMath: { color: props.textColor } }}
+        />;
+    }
+    return <Text selectable={props.selectable} style={blockStyle}><RenderSpans spans={props.spans} baseStyle={style.text} /></Text>;
+}
+
+function RenderHeaderBlock(props: { level: 1 | 2 | 3 | 4 | 5 | 6, spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, textColor: string }) {
     const s = (style as any)[`header${props.level}`];
     const headerStyle = [style.header, s, props.first && style.first, props.last && style.last];
+    if (hasMath(props.spans)) {
+        return <EnrichedMarkdownText
+            containerStyle={(style.header as any)}
+            markdown={spansToMarkdown(props.spans)}
+            markdownStyle={{ paragraph: { color: props.textColor }, inlineMath: { color: props.textColor } }}
+        />;
+    }
     return <Text selectable={props.selectable} style={headerStyle}><RenderSpans spans={props.spans} baseStyle={headerStyle} /></Text>;
 }
 
