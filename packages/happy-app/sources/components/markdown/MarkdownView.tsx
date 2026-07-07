@@ -15,6 +15,8 @@ import { storeTempText } from '@/sync/persistence';
 import { useRouter } from 'expo-router';
 import * as Clipboard from 'expo-clipboard';
 import { MermaidRenderer } from './MermaidRenderer';
+import { MathRenderer } from './MathRenderer';
+import { InlineMath } from './InlineMath';
 import { t } from '@/text';
 import { isRunningInTauri } from '@/utils/platform';
 
@@ -79,6 +81,8 @@ export const MarkdownView = React.memo((props: {
                         return <RenderOptionsBlock items={block.items} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} onOptionPress={props.onOptionPress} />;
                     } else if (block.type === 'table') {
                         return <RenderTableBlock headers={block.headers} rows={block.rows} key={index} first={index === 0} last={index === blocks.length - 1} />;
+                    } else if (block.type === 'math') {
+                        return <MathRenderer content={block.content} key={index} />;
                     } else {
                         return null;
                     }
@@ -232,6 +236,11 @@ function RenderOptionsBlock(props: {
 function RenderSpans(props: { spans: MarkdownSpan[], baseStyle?: any }) {
     return (<>
         {props.spans.map((span, index) => {
+            // Inline math: render with KaTeX
+            if (span.styles.includes('math')) {
+                return <InlineMath key={index} expr={span.text} />;
+            }
+
             if (span.url) {
                 if (isRunningInTauri()) {
                     return (
@@ -239,7 +248,7 @@ function RenderSpans(props: { spans: MarkdownSpan[], baseStyle?: any }) {
                             key={index}
                             selectable
                             onPress={() => void openMarkdownLink(span.url!)}
-                            style={[props.baseStyle, style.link, style.desktopLink, span.styles.map(s => style[s])]}
+                            style={[props.baseStyle, style.link, style.desktopLink, span.styles.map(s => (style as any)[s])]}
                         >
                             {span.text}
                         </Text>
@@ -247,12 +256,12 @@ function RenderSpans(props: { spans: MarkdownSpan[], baseStyle?: any }) {
                 }
 
                 if (Platform.OS === 'web') {
-                    return <Link key={index} href={span.url as any} target="_blank" style={[style.link, span.styles.map(s => style[s])]}>{span.text}</Link>
+                    return <Link key={index} href={span.url as any} target="_blank" style={[style.link, span.styles.map(s => (style as any)[s])]}>{span.text}</Link>
                 }
 
-                return <ExternalLink key={index} href={span.url} style={[style.link, span.styles.map(s => style[s])]}>{span.text}</ExternalLink>
+                return <ExternalLink key={index} href={span.url} style={[style.link, span.styles.map(s => (style as any)[s])]}>{span.text}</ExternalLink>
             } else {
-                return <Text key={index} selectable style={[props.baseStyle, span.styles.map(s => style[s])]}>{span.text}</Text>
+                return <Text key={index} selectable style={[props.baseStyle, span.styles.map(s => (style as any)[s])]}>{span.text}</Text>
             }
         })}
     </>)
