@@ -12113,6 +12113,11 @@ react-native-drawer-layout@^4.2.1:
     color "^4.2.3"
     use-latest-callback "^0.2.4"
 
+react-native-enriched-markdown@^0.7.3:
+  version "0.7.3"
+  resolved "https://registry.yarnpkg.com/react-native-enriched-markdown/-/react-native-enriched-markdown-0.7.3.tgz#d06ff5239cd95ca90d22ce33b42ad536f5d21d4b"
+  integrity sha512-+RP3r3bveVpMbT8GLt5GRZl8L2an5hrUMPHHLZ8z4ivtICql26D7T+DDXVSph+vZc7rbPbP5/5RsouDOPaDXWg==
+
 react-native-gesture-handler@~2.28.0:
   version "2.28.0"
   resolved "https://registry.npmjs.org/react-native-gesture-handler/-/react-native-gesture-handler-2.28.0.tgz"

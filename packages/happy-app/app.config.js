@@ -91,6 +91,7 @@ export default {
             "expo-mail-composer",
             "expo-secure-store",
             "expo-web-browser",
+            "react-native-enriched-markdown",
             "react-native-vision-camera",
             "@more-tech/react-native-libsodium",
             "react-native-audio-api",
