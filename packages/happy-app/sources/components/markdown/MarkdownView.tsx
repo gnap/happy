@@ -93,7 +93,7 @@ export const MarkdownView = React.memo((props: {
                             markdown={`$$\n${block.content}\n$$`}
                             markdownStyle={{
                                 paragraph: { color: textColor },
-                                math: { color: textColor, backgroundColor: bgColor, textAlign: 'center' },
+                                math: { color: textColor, backgroundColor: bgColor, fontSize: 14, textAlign: 'center' },
                             }}
                             md4cFlags={{ latexMath: true }}
                         />;
@@ -153,7 +153,7 @@ function RenderTextBlock(props: { spans: MarkdownSpan[], first: boolean, last: b
             flavor="github"
             containerStyle={style.text as any}
             markdown={spansToMarkdown(props.spans)}
-            markdownStyle={{ paragraph: { color: props.textColor }, inlineMath: { color: props.textColor } }}
+            markdownStyle={{ paragraph: { color: props.textColor }, inlineMath: { color: props.textColor, fontSize: 14 } }}
         />;
     }
     return <Text selectable={props.selectable} style={blockStyle}><RenderSpans spans={props.spans} baseStyle={style.text} /></Text>;
@@ -167,7 +167,7 @@ function RenderHeaderBlock(props: { level: 1 | 2 | 3 | 4 | 5 | 6, spans: Markdow
             flavor="github"
             containerStyle={(style.header as any)}
             markdown={spansToMarkdown(props.spans)}
-            markdownStyle={{ paragraph: { color: props.textColor }, inlineMath: { color: props.textColor } }}
+            markdownStyle={{ paragraph: { color: props.textColor }, inlineMath: { color: props.textColor, fontSize: 14 } }}
         />;
     }
     return <Text selectable={props.selectable} style={headerStyle}><RenderSpans spans={props.spans} baseStyle={headerStyle} /></Text>;
