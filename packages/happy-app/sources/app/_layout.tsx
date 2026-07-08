@@ -1,6 +1,26 @@
 import 'react-native-quick-base64';
 import '../theme.css';
 
+// Inject only @font-face declarations for KaTeX fonts (no layout rules).
+// Full KATEX_CSS would break MathML layout when EnrichedMarkdownText renders with it.
+(function injectFonts() {
+    if (typeof document === 'undefined') return;
+    const CDN = 'https://cdn.jsdelivr.net/npm/katex@0.17.0/dist/fonts/';
+    const families = [
+        'KaTeX_AMS', 'KaTeX_Caligraphic', 'KaTeX_Fraktur', 'KaTeX_Main',
+        'KaTeX_Math', 'KaTeX_SansSerif', 'KaTeX_Script',
+        'KaTeX_Size1', 'KaTeX_Size2', 'KaTeX_Size3', 'KaTeX_Size4', 'KaTeX_Typewriter',
+    ];
+    const fontsCSS = families.map(f => {
+        const name = f.replace(/_/g, '-');
+        return `@font-face{font-family:${f};src:url(${CDN}${name}-Regular.woff2) format("woff2"),url(${CDN}${name}-Regular.woff) format("woff"),url(${CDN}${name}-Regular.ttf) format("truetype")}`;
+    }).join('');
+    const s = document.createElement('style');
+    s.id = 'katex-fonts-css';
+    s.textContent = fontsCSS;
+    document.head.appendChild(s);
+})();
+
 // Polyfill for WebKit2GTK (Linux/Tauri): screen.orientation is not implemented.
 if (typeof screen !== 'undefined' && !screen.orientation) {
   Object.defineProperty(screen, 'orientation', {

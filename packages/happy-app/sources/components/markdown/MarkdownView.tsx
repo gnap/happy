@@ -3,6 +3,7 @@ import { parseMarkdownSpans } from './parseMarkdownSpans';
 import { Link } from 'expo-router';
 import * as React from 'react';
 import { Pressable, ScrollView, View, Platform } from 'react-native';
+import * as Clipboard from 'expo-clipboard';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Text } from '../StyledText';
@@ -13,7 +14,6 @@ import { Modal } from '@/modal';
 import { useLocalSetting } from '@/sync/storage';
 import { storeTempText } from '@/sync/persistence';
 import { useRouter } from 'expo-router';
-import * as Clipboard from 'expo-clipboard';
 import { MermaidRenderer } from './MermaidRenderer';
 import { MathRenderer } from './MathRenderer';
 import { SvgRenderer } from './SvgRenderer';
@@ -42,6 +42,14 @@ export const MarkdownView = React.memo((props: {
     onOptionPress?: (option: Option) => void;
 }) => {
     const { theme } = useUnistyles();
+    // Inject KaTeX CSS+fonts once on web (runs on first render, before useEffect)
+    if (Platform.OS === 'web' && typeof document !== 'undefined' && !document.getElementById('katex-fonts-css')) {
+        const style = document.createElement('style');
+        style.id = 'katex-fonts-css';
+        const CDN_BASE = 'https://cdn.jsdelivr.net/npm/katex@0.17.0/dist/fonts/';
+        style.textContent = KATEX_CSS_FULL.replace(/url\(fonts\/([^)]+)\)/g, `url(${CDN_BASE}$1)`);
+        document.head.appendChild(style);
+    }
     const blocks = React.useMemo(() => parseMarkdown(props.markdown ?? ''), [props.markdown]);
     const textColor = theme.colors.text;
     const bgColor = theme.colors.background;
@@ -89,17 +97,41 @@ export const MarkdownView = React.memo((props: {
                     } else if (block.type === 'table') {
                         return <RenderTableBlock headers={block.headers} rows={block.rows} key={index} first={index === 0} last={index === blocks.length - 1} />;
                     } else if (block.type === 'math') {
-                        return <EnrichedMarkdownText
-                            key={index}
-                            flavor="github"
-                            containerStyle={{ marginVertical: 8 }}
-                            markdown={`$$\n${block.content}\n$$`}
-                            markdownStyle={{
-                                paragraph: { color: textColor },
-                                math: { color: textColor, backgroundColor: bgColor, fontSize: 14, textAlign: 'center' },
-                            }}
-                            md4cFlags={{ latexMath: true }}
-                        />;
+                        const copyLatex = (text: string) => {
+                            if (Platform.OS === 'web') {
+                                navigator.clipboard.writeText(text).catch(() => {});
+                            } else {
+                                Clipboard.setStringAsync(text);
+                            }
+                        };
+                        // Web: use MathRenderer (KaTeX HTML output — full glyph support)
+                        // Native: use EnrichedMarkdownText (MD4C MathML — needs proper math fonts)
+                        if (Platform.OS === 'web') {
+                            return (
+                                <View key={index} style={{ position: 'relative' }}
+                                    // @ts-ignore — raw DOM events for hover copy button
+                                    onMouseEnter={(e: any) => { const b = e.currentTarget?.querySelector?.('.math-copy-btn'); if (b) b.style.opacity = '1'; }}
+                                    onMouseLeave={(e: any) => { const b = e.currentTarget?.querySelector?.('.math-copy-btn'); if (b) b.style.opacity = '0'; }}
+                                >
+                                    <MathRenderer content={block.content} />
+                                    {/* @ts-ignore */}
+                                    <button className="math-copy-btn"
+                                        onClick={(e: any) => { e.stopPropagation(); copyLatex(block.content); }}
+                                        style={{ position:'absolute',top:8,right:8,opacity:0,transition:'opacity 0.15s',background:'#333',color:'#fff',border:'none',borderRadius:4,padding:'4px 10px',cursor:'pointer',fontSize:12,zIndex:10 }}
+                                    >Copy LaTeX</button>
+                                </View>
+                            );
+                        }
+                        return (
+                            <Pressable key={index} onLongPress={() => copyLatex(block.content)}>
+                                <EnrichedMarkdownText
+                                    flavor="github" containerStyle={{ marginVertical: 8 }}
+                                    markdown={`$$\n${block.content}\n$$`}
+                                    markdownStyle={{ paragraph: { color: textColor }, math: { color: textColor, backgroundColor: bgColor, fontSize: 14, textAlign: 'center' } }}
+                                    md4cFlags={{ latexMath: true }}
+                                />
+                            </Pressable>
+                        );
                     } else {
                         return null;
                     }

@@ -4,6 +4,27 @@ import { StyleSheet } from 'react-native-unistyles';
 import katex from 'katex';
 import { injectKatexCss } from './MathRenderer';
 
+// Ensure KaTeX CSS+fonts are injected at module load time.
+// EnrichedMarkdownText handles block math, so InlineMath may never render,
+// but we still need CSS for all math elements in the page.
+if (typeof document !== 'undefined') {
+    injectKatexCss();
+    // MathML stretchy operators need a dedicated math font.
+    // Latin Modern Math via CDN — best coverage for stretchy braces.
+    if (!document.getElementById('mathml-fonts-css')) {
+        const mm = document.createElement('style');
+        mm.id = 'mathml-fonts-css';
+        mm.textContent = `
+            @font-face {
+                font-family: 'Latin Modern Math';
+                src: url('https://cdn.jsdelivr.net/npm/@examindev/mathlifier@0.1.0/dist/fonts/latinmodern-math.woff2') format('woff2');
+            }
+            math { font-family: 'Latin Modern Math', 'STIX Two Math', 'Cambria Math', serif; }
+        `;
+        document.head.appendChild(mm);
+    }
+}
+
 const ENTITIES: Record<string, string> = {
     amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
     alpha: 'α', beta: 'β', gamma: 'γ', delta: 'δ', epsilon: 'ε', zeta: 'ζ',

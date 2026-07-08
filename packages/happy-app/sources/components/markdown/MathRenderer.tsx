@@ -3,14 +3,20 @@ import { View, Platform, useWindowDimensions } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import katex from 'katex';
-import { KATEX_CSS } from './katex-css';
 import { KATEX_CSS_FULL } from './katex-css-full';
 
 let katexCssInjected = false;
 export function injectKatexCss() {
-    if (Platform.OS !== 'web' || katexCssInjected) return;
+    if (typeof document === 'undefined') return; // SSR guard
+    if (katexCssInjected) return;
     const style = document.createElement('style');
-    style.textContent = KATEX_CSS;
+    // Use full CSS with @font-face rules, rewriting font URLs to CDN so glyphs
+    // like braces, brackets, and big operators render correctly on web.
+    const CDN_BASE = 'https://cdn.jsdelivr.net/npm/katex@0.17.0/dist/fonts/';
+    style.textContent = KATEX_CSS_FULL.replace(
+        /url\(fonts\/([^)]+)\)/g,
+        `url(${CDN_BASE}$1)`,
+    );
     document.head.appendChild(style);
     katexCssInjected = true;
 }
@@ -27,6 +33,23 @@ export const MathRenderer = React.memo((props: {
     // iOS WKWebView doesn't support percentage widths, so we use pixel values.
     const containerWidth = screenWidth > 0 ? Math.floor(screenWidth) - 32 : 300;
 
+    // Measure constrained ancestor width (JS) to prevent KaTeX overflow pushing layout
+    const [measuredWidth, setMeasuredWidth] = React.useState(0);
+    React.useEffect(() => {
+        if (Platform.OS !== 'web' || !containerRef.current) return;
+        const el = (containerRef.current as any) as HTMLElement;
+        let parent = el.parentElement;
+        while (parent) {
+            const cs = getComputedStyle(parent);
+            if (cs.maxWidth !== 'none' && cs.maxWidth !== '0px' && !cs.maxWidth.includes('%')) {
+                const w = parent.getBoundingClientRect().width;
+                if (w > 0) { setMeasuredWidth(w); return; }
+            }
+            parent = parent.parentElement;
+        }
+        if (el.parentElement) setMeasuredWidth(el.parentElement.getBoundingClientRect().width);
+    }, []);
+
     //
     // Web
     //
@@ -38,13 +61,13 @@ export const MathRenderer = React.memo((props: {
         } catch {
             html = `<span style="color:${theme.colors.textSecondary}">${props.content}</span>`;
         }
-        const w = containerWidth > 0 ? containerWidth : 0;
+        const w = measuredWidth > 0 ? measuredWidth : containerWidth;
         return (
             <View ref={containerRef} style={style.container}>
                 {/* @ts-ignore */}
                 <div style={{
                     display: 'flex', justifyContent: 'center', alignItems: 'center',
-                    padding: 16, width: w > 0 ? w : '100%', maxWidth: w > 0 ? w : '100%',
+                    padding: 16, width: w, maxWidth: w,
                     overflowX: 'auto', overflowY: 'hidden',
                 }} dangerouslySetInnerHTML={{ __html: html }} />
             </View>
