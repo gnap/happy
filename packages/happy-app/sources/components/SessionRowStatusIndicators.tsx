@@ -29,6 +29,7 @@ export const SessionRowStatusIndicators = React.memo(({ session, needsRestart }:
     const styles = stylesheet;
     const a2aUnread = getSessionA2AUnreadCount(session);
     const cronCount = session.agentState?.crons ? Object.keys(session.agentState.crons).length : 0;
+    const ctxPct = session.metadata?.contextUsage?.pct;
 
     let todoLabel: string | null = null;
     if (session.todos && session.todos.length > 0) {
@@ -39,7 +40,11 @@ export const SessionRowStatusIndicators = React.memo(({ session, needsRestart }:
         }
     }
 
-    if (a2aUnread === 0 && !todoLabel && !needsRestart && cronCount === 0) {
+    const ctxColor = ctxPct !== undefined && ctxPct >= 90 ? '#FF3B30'
+        : ctxPct !== undefined && ctxPct >= 70 ? '#FF9500'
+        : '#34C759';
+
+    if (a2aUnread === 0 && !todoLabel && !needsRestart && cronCount === 0 && ctxPct === undefined) {
         return null;
     }
 
@@ -69,6 +74,12 @@ export const SessionRowStatusIndicators = React.memo(({ session, needsRestart }:
                 <View style={styles.badge}>
                     <Ionicons name="alarm-outline" size={10} color={styles.badgeText.color} />
                     <Text style={styles.badgeText}>{cronCount}</Text>
+                </View>
+            ) : null}
+            {ctxPct !== undefined ? (
+                <View style={styles.badge}>
+                    <Ionicons name="layers-outline" size={10} color={ctxColor} />
+                    <Text style={[styles.badgeText, { color: ctxColor }]}>{Math.round(ctxPct)}%</Text>
                 </View>
             ) : null}
             {needsRestart ? (
