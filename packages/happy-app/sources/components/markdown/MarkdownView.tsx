@@ -16,6 +16,7 @@ import { useRouter } from 'expo-router';
 import * as Clipboard from 'expo-clipboard';
 import { MermaidRenderer } from './MermaidRenderer';
 import { MathRenderer } from './MathRenderer';
+import { SvgRenderer } from './SvgRenderer';
 import { InlineMath } from './InlineMath';
 import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
 import { t } from '@/text';
@@ -81,6 +82,8 @@ export const MarkdownView = React.memo((props: {
                         return <RenderCodeBlock content={block.content} language={block.language} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} />;
                     } else if (block.type === 'mermaid') {
                         return <MermaidRenderer content={block.content} key={index} />;
+                    } else if (block.type === 'svg') {
+                        return <SvgRenderer content={block.content} key={index} />;
                     } else if (block.type === 'options') {
                         return <RenderOptionsBlock items={block.items} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} onOptionPress={props.onOptionPress} />;
                     } else if (block.type === 'table') {

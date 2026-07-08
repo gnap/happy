@@ -94,9 +94,11 @@ export function parseMarkdownBlock(markdown: string) {
             }
             const contentString = content.join('\n');
 
-            // Detect mermaid diagram language and route to appropriate block type
+            // Detect special languages for dedicated renderers
             if (language === 'mermaid') {
                 blocks.push({ type: 'mermaid', content: contentString });
+            } else if (language === 'svg') {
+                blocks.push({ type: 'svg', content: contentString });
             } else {
                 blocks.push({ type: 'code-block', language, content: contentString });
             }

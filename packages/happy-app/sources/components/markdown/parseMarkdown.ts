@@ -21,6 +21,9 @@ export type MarkdownBlock = {
     type: 'mermaid',
     content: string
 } | {
+    type: 'svg',
+    content: string
+} | {
     type: 'horizontal-rule'
 } | {
     type: 'options',
