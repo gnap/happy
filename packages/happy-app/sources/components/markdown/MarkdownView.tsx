@@ -104,9 +104,10 @@ export const MarkdownView = React.memo((props: {
                                 Clipboard.setStringAsync(text);
                             }
                         };
-                        // Web: use MathRenderer (KaTeX HTML output — full glyph support)
-                        // Native: use EnrichedMarkdownText (MD4C MathML — needs proper math fonts)
-                        if (Platform.OS === 'web') {
+                        // Linux webkitgtk lacks stretchy MathML fonts; use KaTeX HTML fallback.
+                        // macOS/iOS/Android have system math fonts and use native MathML rendering.
+                        const isLinuxWeb = Platform.OS === 'web' && typeof navigator !== 'undefined' && /Linux/.test(navigator.userAgent);
+                        if (isLinuxWeb) {
                             return (
                                 <View key={index} style={{ position: 'relative' }}
                                     // @ts-ignore — raw DOM events for hover copy button
