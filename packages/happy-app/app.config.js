@@ -20,7 +20,7 @@ export default {
         icon: "./sources/assets/images/icon.png",
         scheme: "happy",
         userInterfaceStyle: "automatic",
-        newArchEnabled: false,
+        newArchEnabled: true,
         notification: {
             icon: "./sources/assets/images/icon-notification.png",
             iosDisplayInForeground: true
