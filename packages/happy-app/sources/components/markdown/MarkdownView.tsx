@@ -52,6 +52,7 @@ export const MarkdownView = React.memo((props: {
     }
     const blocks = React.useMemo(() => parseMarkdown(props.markdown ?? ''), [props.markdown]);
     const textColor = theme.colors.text;
+    const codeBg = theme.colors.surfaceHighest;
     
     // Backwards compatibility: The original version just returned the view, wrapping the list of blocks.
     // It made each of the individual text elements selectable. When we enable the markdownCopyV2 feature,
@@ -76,9 +77,9 @@ export const MarkdownView = React.memo((props: {
             <View style={{ width: '100%' }}>
                 {blocks.map((block, index) => {
                     if (block.type === 'text') {
-                        return <RenderTextBlock spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} textColor={textColor} />;
+                        return <RenderTextBlock spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} textColor={textColor} codeBg={codeBg} />;
                     } else if (block.type === 'header') {
-                        return <RenderHeaderBlock level={block.level} spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} textColor={textColor} />;
+                        return <RenderHeaderBlock level={block.level} spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} textColor={textColor} codeBg={codeBg} />;
                     } else if (block.type === 'horizontal-rule') {
                         return <View style={style.horizontalRule} key={index} />;
                     } else if (block.type === 'list') {
@@ -127,7 +128,7 @@ export const MarkdownView = React.memo((props: {
                                 <EnrichedMarkdownText
                                     flavor="github" containerStyle={{ marginVertical: 8 }}
                                     markdown={`$$\n${block.content}\n$$`}
-                                    markdownStyle={{ paragraph: { color: textColor }, math: { color: textColor, backgroundColor: 'transparent', fontSize: 14, textAlign: 'center' } }}
+                                    markdownStyle={{ paragraph: { color: textColor }, code: { color: textColor, backgroundColor: codeBg }, math: { color: textColor, backgroundColor: 'transparent', fontSize: 14, textAlign: 'center' } }}
                                     md4cFlags={{ latexMath: true }}
                                 />
                             </Pressable>
@@ -181,20 +182,20 @@ function hasMath(spans: MarkdownSpan[]): boolean {
     return spans.some(s => s.styles.includes('math'));
 }
 
-function RenderTextBlock(props: { spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, textColor: string }) {
+function RenderTextBlock(props: { spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, textColor: string, codeBg: string }) {
     const blockStyle = [style.text, props.first && style.first, props.last && style.last];
     if (hasMath(props.spans)) {
         return <EnrichedMarkdownText
             flavor="github"
             containerStyle={style.text as any}
             markdown={spansToMarkdown(props.spans)}
-            markdownStyle={{ paragraph: { color: props.textColor }, inlineMath: { color: props.textColor, fontSize: 14 } }}
+            markdownStyle={{ paragraph: { color: props.textColor }, code: { color: props.textColor, backgroundColor: props.codeBg }, inlineMath: { color: props.textColor, fontSize: 14 } }}
         />;
     }
     return <Text selectable={props.selectable} style={blockStyle}><RenderSpans spans={props.spans} baseStyle={style.text} /></Text>;
 }
 
-function RenderHeaderBlock(props: { level: 1 | 2 | 3 | 4 | 5 | 6, spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, textColor: string }) {
+function RenderHeaderBlock(props: { level: 1 | 2 | 3 | 4 | 5 | 6, spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, textColor: string, codeBg: string }) {
     const s = (style as any)[`header${props.level}`];
     const headerStyle = [style.header, s, props.first && style.first, props.last && style.last];
     if (hasMath(props.spans)) {
@@ -202,7 +203,7 @@ function RenderHeaderBlock(props: { level: 1 | 2 | 3 | 4 | 5 | 6, spans: Markdow
             flavor="github"
             containerStyle={(style.header as any)}
             markdown={spansToMarkdown(props.spans)}
-            markdownStyle={{ paragraph: { color: props.textColor }, inlineMath: { color: props.textColor, fontSize: 14 } }}
+            markdownStyle={{ paragraph: { color: props.textColor }, code: { color: props.textColor, backgroundColor: props.codeBg }, inlineMath: { color: props.textColor, fontSize: 14 } }}
         />;
     }
     return <Text selectable={props.selectable} style={headerStyle}><RenderSpans spans={props.spans} baseStyle={headerStyle} /></Text>;
