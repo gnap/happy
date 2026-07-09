@@ -52,7 +52,6 @@ export const MarkdownView = React.memo((props: {
     }
     const blocks = React.useMemo(() => parseMarkdown(props.markdown ?? ''), [props.markdown]);
     const textColor = theme.colors.text;
-    const bgColor = theme.colors.background;
     
     // Backwards compatibility: The original version just returned the view, wrapping the list of blocks.
     // It made each of the individual text elements selectable. When we enable the markdownCopyV2 feature,
@@ -128,7 +127,7 @@ export const MarkdownView = React.memo((props: {
                                 <EnrichedMarkdownText
                                     flavor="github" containerStyle={{ marginVertical: 8 }}
                                     markdown={`$$\n${block.content}\n$$`}
-                                    markdownStyle={{ paragraph: { color: textColor }, math: { color: textColor, backgroundColor: bgColor, fontSize: 14, textAlign: 'center' } }}
+                                    markdownStyle={{ paragraph: { color: textColor }, math: { color: textColor, backgroundColor: 'transparent', fontSize: 14, textAlign: 'center' } }}
                                     md4cFlags={{ latexMath: true }}
                                 />
                             </Pressable>
