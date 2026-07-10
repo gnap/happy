@@ -1,5 +1,6 @@
 import * as React from 'react';
-import { View, ScrollView, ActivityIndicator, Platform, Pressable } from 'react-native';
+import { View, ScrollView, ActivityIndicator, Platform, Pressable, Image, useWindowDimensions } from 'react-native';
+import { WebView } from 'react-native-webview';
 import { useRoute } from '@react-navigation/native';
 import { useLocalSearchParams } from 'expo-router';
 import { Text } from '@/components/StyledText';
@@ -89,6 +90,9 @@ export default function FileScreen() {
     const [displayMode, setDisplayMode] = React.useState<'file' | 'diff'>('diff');
     const [isLoading, setIsLoading] = React.useState(true);
     const [error, setError] = React.useState<string | null>(null);
+    const [imageBase64, setImageBase64] = React.useState<string | null>(null);
+    const [svgContent, setSvgContent] = React.useState<string | null>(null);
+    const { width: screenWidth } = useWindowDimensions();
 
     // Determine file language from extension
     const getFileLanguage = React.useCallback((path: string): string | null => {
@@ -151,7 +155,7 @@ export default function FileScreen() {
     const isBinaryFile = React.useCallback((path: string): boolean => {
         const ext = path.split('.').pop()?.toLowerCase();
         const binaryExtensions = [
-            'png', 'jpg', 'jpeg', 'gif', 'bmp', 'svg', 'ico',
+            'png', 'jpg', 'jpeg', 'gif', 'bmp', 'ico',
             'mp4', 'avi', 'mov', 'wmv', 'flv', 'webm',
             'mp3', 'wav', 'flac', 'aac', 'ogg',
             'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
@@ -161,6 +165,13 @@ export default function FileScreen() {
             'db', 'sqlite', 'sqlite3'
         ];
         return ext ? binaryExtensions.includes(ext) : false;
+    }, []);
+
+    // Check if file is an image (can be previewed)
+    const isImageFile = React.useCallback((path: string): boolean => {
+        const ext = path.split('.').pop()?.toLowerCase();
+        const imageExtensions = ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'ico', 'svg'];
+        return ext ? imageExtensions.includes(ext) : false;
     }, []);
 
     // Load file content
@@ -176,6 +187,31 @@ export default function FileScreen() {
                 const session = storage.getState().sessions[sessionId!];
                 const sessionPath = session?.metadata?.path;
                 
+                // For image files, load as base64 for preview
+                if (isImageFile(filePath)) {
+                    try {
+                        const response = await sessionReadFile(sessionId, filePath);
+                        if (!isCancelled && response.success && response.content) {
+                            const ext = filePath.split('.').pop()?.toLowerCase();
+                            if (ext === 'svg') {
+                                // SVG is text-based — decode base64 to string
+                                setSvgContent(atob(response.content));
+                            } else {
+                                setImageBase64(response.content);
+                            }
+                            setFileContent({
+                                content: response.content,
+                                encoding: 'base64',
+                                isBinary: true
+                            });
+                        }
+                    } catch (imgError) {
+                        console.log('Failed to load image:', imgError);
+                    }
+                    if (!isCancelled) setIsLoading(false);
+                    return;
+                }
+
                 // Check if file is likely binary before trying to read
                 if (isBinaryFile(filePath)) {
                     if (!isCancelled) {
@@ -335,16 +371,69 @@ export default function FileScreen() {
     }
 
     if (fileContent?.isBinary) {
+        // SVG preview
+        if (svgContent) {
+            const svgHtml = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<style>html,body{margin:0;padding:16px;background:${theme.colors.surface};display:flex;justify-content:center;align-items:center;}svg{max-width:100%!important;height:auto!important;}</style>
+</head><body>${svgContent}</body></html>`;
+            return (
+                <View style={{ flex: 1, backgroundColor: theme.colors.surface }}>
+                    <WebView
+                        source={{ html: svgHtml }}
+                        style={{ flex: 1, backgroundColor: theme.colors.surface }}
+                        scrollEnabled={true}
+                    />
+                </View>
+            );
+        }
+
+        // Image preview
+        if (imageBase64) {
+            const mimeType = fileName?.split('.').pop()?.toLowerCase() === 'png' ? 'image/png'
+                : fileName?.split('.').pop()?.toLowerCase() === 'gif' ? 'image/gif'
+                : fileName?.split('.').pop()?.toLowerCase() === 'webp' ? 'image/webp'
+                : fileName?.split('.').pop()?.toLowerCase() === 'bmp' ? 'image/bmp'
+                : 'image/jpeg';
+            const imageWidth = Math.min(screenWidth - 32, 600);
+            return (
+                <View style={{
+                    flex: 1,
+                    backgroundColor: theme.colors.surface,
+                }}>
+                    <ScrollView
+                        style={{ flex: 1 }}
+                        contentContainerStyle={{
+                            justifyContent: 'center',
+                            alignItems: 'center',
+                            padding: 16,
+                        }}
+                        maximumZoomScale={3}
+                        minimumZoomScale={1}
+                    >
+                        <Image
+                            source={{ uri: `data:${mimeType};base64,${imageBase64}` }}
+                            style={{
+                                width: imageWidth,
+                                height: imageWidth, // aspect ratio from image metadata would be better
+                                resizeMode: 'contain',
+                            }}
+                        />
+                    </ScrollView>
+                </View>
+            );
+        }
+
         return (
-            <View style={{ 
-                flex: 1, 
+            <View style={{
+                flex: 1,
                 backgroundColor: theme.colors.surface,
-                justifyContent: 'center', 
+                justifyContent: 'center',
                 alignItems: 'center',
                 padding: 20
             }}>
-                <Text style={{ 
-                    fontSize: 18, 
+                <Text style={{
+                    fontSize: 18,
                     fontWeight: 'bold',
                     color: theme.colors.textSecondary,
                     marginBottom: 8,

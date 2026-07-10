@@ -23,7 +23,7 @@ export const SvgRenderer = React.memo((props: {
     if (Platform.OS === 'web') {
         const wrappedSvg = props.content.replace(
             /<svg /,
-            '<svg width="100%" style="max-width:100%;height:auto;display:block" ',
+            '<svg style="width:100%!important;max-width:100%!important;height:auto!important;display:block" ',
         );
         return (
             <View style={style.container}>
@@ -58,8 +58,10 @@ export const SvgRenderer = React.memo((props: {
             align-items: center;
         }
         svg {
-            max-width: 100%;
-            height: auto;
+            width: 100% !important;
+            max-width: 100% !important;
+            height: auto !important;
+            display: block;
         }
     </style>
 </head>
