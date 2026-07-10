@@ -128,7 +128,7 @@ export const MarkdownView = React.memo((props: {
                                 <EnrichedMarkdownText
                                     flavor="github" containerStyle={{ marginVertical: 8 }}
                                     markdown={`$$\n${block.content}\n$$`}
-                                    markdownStyle={{ paragraph: { color: textColor }, code: { color: textColor, backgroundColor: codeBg }, math: { color: textColor, backgroundColor: 'transparent', fontSize: 14, textAlign: 'center' } }}
+                                    markdownStyle={{ paragraph: { color: textColor }, strong: { color: textColor }, em: { color: textColor }, code: { color: textColor, backgroundColor: codeBg }, blockquote: { backgroundColor: 'transparent' as any }, math: { color: textColor, backgroundColor: codeBg, fontSize: 14, textAlign: 'center' } }}
                                     md4cFlags={{ latexMath: true }}
                                 />
                             </Pressable>
@@ -185,12 +185,14 @@ function hasMath(spans: MarkdownSpan[]): boolean {
 function RenderTextBlock(props: { spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, textColor: string, codeBg: string }) {
     const blockStyle = [style.text, props.first && style.first, props.last && style.last];
     if (hasMath(props.spans)) {
-        return <EnrichedMarkdownText
-            flavor="github"
-            containerStyle={style.text as any}
-            markdown={spansToMarkdown(props.spans)}
-            markdownStyle={{ paragraph: { color: props.textColor }, code: { color: props.textColor, backgroundColor: props.codeBg }, inlineMath: { color: props.textColor, fontSize: 14 } }}
-        />;
+        return (
+            <EnrichedMarkdownText
+                flavor="github"
+                containerStyle={style.text as any}
+                markdown={spansToMarkdown(props.spans)}
+                markdownStyle={{ paragraph: { color: props.textColor }, strong: { color: props.textColor }, em: { color: props.textColor }, code: { color: props.textColor, backgroundColor: props.codeBg }, blockquote: { backgroundColor: 'transparent' as any }, inlineMath: { color: props.textColor } }}
+            />
+        );
     }
     return <Text selectable={props.selectable} style={blockStyle}><RenderSpans spans={props.spans} baseStyle={style.text} /></Text>;
 }
@@ -199,12 +201,14 @@ function RenderHeaderBlock(props: { level: 1 | 2 | 3 | 4 | 5 | 6, spans: Markdow
     const s = (style as any)[`header${props.level}`];
     const headerStyle = [style.header, s, props.first && style.first, props.last && style.last];
     if (hasMath(props.spans)) {
-        return <EnrichedMarkdownText
-            flavor="github"
-            containerStyle={(style.header as any)}
-            markdown={spansToMarkdown(props.spans)}
-            markdownStyle={{ paragraph: { color: props.textColor }, code: { color: props.textColor, backgroundColor: props.codeBg }, inlineMath: { color: props.textColor, fontSize: 14 } }}
-        />;
+        return (
+            <EnrichedMarkdownText
+                flavor="github"
+                containerStyle={style.header as any}
+                markdown={spansToMarkdown(props.spans)}
+                markdownStyle={{ paragraph: { color: props.textColor }, strong: { color: props.textColor }, em: { color: props.textColor }, code: { color: props.textColor, backgroundColor: props.codeBg }, blockquote: { backgroundColor: 'transparent' as any }, inlineMath: { color: props.textColor } }}
+            />
+        );
     }
     return <Text selectable={props.selectable} style={headerStyle}><RenderSpans spans={props.spans} baseStyle={headerStyle} /></Text>;
 }
