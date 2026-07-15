@@ -68,14 +68,16 @@ export default function SvgViewerScreen() {
         <View style={{ flex: 1, backgroundColor: theme.colors.surface }}>
             <Stack.Screen options={{ headerTitle: `${title} Viewer`, headerBackTitle: 'Back' }} />
 
-            {isMermaid && Platform.OS === 'web' ? (
+            {Platform.OS === 'web' ? (
                 /* @ts-ignore */
                 <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'auto', padding: 16 }}
                     dangerouslySetInnerHTML={{
-                        __html: `<div style="width:100%"><div class="mermaid">${content}</div><script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script><script>mermaid.initialize({startOnLoad:true,theme:'default'});</script></div>`,
+                        __html: isMermaid
+                            ? `<div style="max-width:100%"><div class="mermaid">${content}</div><script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script><script>mermaid.initialize({startOnLoad:true,theme:'default'});</script></div>`
+                            : `<div style="max-width:100%">${content.replace(/<svg /, '<svg style="max-width:100%!important;height:auto!important" ')}</div>`,
                     }}
                 />
-            ) : Platform.OS === 'web' ? null : (
+            ) : (
                 <NativeSvgViewer html={html} />
             )}
         </View>
