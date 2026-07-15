@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View, Platform, useWindowDimensions, Pressable } from 'react-native';
-import { WebView } from 'react-native-webview';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { storeTempText } from '@/sync/persistence';
@@ -43,6 +42,23 @@ export const SvgRenderer = React.memo((props: {
     }
 
     // iOS/Android: render SVG in a WebView, tap to open viewer page
+    // WebView is only imported on native platforms (Linux/Tauri doesn't support it).
+    const [WebViewComp, setWebViewComp] = React.useState<any>(null);
+    React.useEffect(() => {
+        if (Platform.OS !== 'web') {
+            import('react-native-webview').then(m => setWebViewComp(() => m.WebView));
+        }
+    }, []);
+
+    if (!WebViewComp) {
+        return (
+            <Pressable onPress={handlePress}>
+                <View style={[style.container, { justifyContent: 'center', alignItems: 'center', height: 100 }]}>
+                </View>
+            </Pressable>
+        );
+    }
+
     const html = `<!DOCTYPE html>
 <html>
 <head>
@@ -50,35 +66,20 @@ export const SvgRenderer = React.memo((props: {
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
     <style>
         html, body {
-            margin: 0;
-            padding: 16px;
+            margin: 0; padding: 16px;
             background-color: ${theme.colors.surfaceHighest};
-            display: flex;
-            justify-content: center;
-            align-items: center;
+            display: flex; justify-content: center; align-items: center;
         }
-        svg {
-            width: 100% !important;
-            max-width: 100% !important;
-            height: auto !important;
-            display: block;
-        }
+        svg { width: 100% !important; max-width: 100% !important; height: auto !important; display: block; }
     </style>
 </head>
 <body>
     ${props.content}
     <script>
         setTimeout(function() {
-            var h = Math.max(
-                document.body.scrollHeight,
-                document.body.offsetHeight,
-                document.documentElement.scrollHeight,
-                document.documentElement.offsetHeight
-            );
-            window.ReactNativeWebView.postMessage(JSON.stringify({
-                type: 'dimensions',
-                height: h
-            }));
+            var h = Math.max(document.body.scrollHeight, document.body.offsetHeight,
+                document.documentElement.scrollHeight, document.documentElement.offsetHeight);
+            window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'dimensions', height: h }));
         }, 100);
     </script>
 </body>
@@ -87,20 +88,18 @@ export const SvgRenderer = React.memo((props: {
     return (
         <Pressable onPress={handlePress}>
             <View style={style.container}>
-                <WebView
+                <WebViewComp
                     source={{ html }}
                     style={{ width: containerWidth, height: webViewHeight }}
                     scrollEnabled={false}
                     showsVerticalScrollIndicator={false}
                     pointerEvents="none"
-                    onMessage={(event) => {
+                    onMessage={(event: any) => {
                         try {
                             const data = JSON.parse(event.nativeEvent.data);
                             if (data.type === 'dimensions' && typeof data.height === 'number') {
                                 const h = data.height;
-                                if (h > 0 && h !== webViewHeight) {
-                                    setWebViewHeight(h);
-                                }
+                                if (h > 0 && h !== webViewHeight) setWebViewHeight(h);
                             }
                         } catch { /* ignore */ }
                     }}

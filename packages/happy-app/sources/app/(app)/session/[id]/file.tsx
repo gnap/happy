@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View, ScrollView, ActivityIndicator, Platform, Pressable, Image, useWindowDimensions } from 'react-native';
-import { WebView } from 'react-native-webview';
 import { useRoute } from '@react-navigation/native';
 import { useLocalSearchParams } from 'expo-router';
 import { Text } from '@/components/StyledText';
@@ -194,8 +193,11 @@ export default function FileScreen() {
                         if (!isCancelled && response.success && response.content) {
                             const ext = filePath.split('.').pop()?.toLowerCase();
                             if (ext === 'svg') {
-                                // SVG is text-based — decode base64 to string
-                                setSvgContent(atob(response.content));
+                                // SVG is text-based — decode base64 to UTF-8 string
+                                const binary = atob(response.content);
+                                const bytes = new Uint8Array(binary.length);
+                                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                                setSvgContent(new TextDecoder('utf-8').decode(bytes));
                             } else {
                                 setImageBase64(response.content);
                             }
@@ -377,15 +379,17 @@ export default function FileScreen() {
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <style>html,body{margin:0;padding:16px;background:${theme.colors.surface};display:flex;justify-content:center;align-items:center;}svg{max-width:100%!important;height:auto!important;}</style>
 </head><body>${svgContent}</body></html>`;
-            return (
-                <View style={{ flex: 1, backgroundColor: theme.colors.surface }}>
-                    <WebView
-                        source={{ html: svgHtml }}
-                        style={{ flex: 1, backgroundColor: theme.colors.surface }}
-                        scrollEnabled={true}
-                    />
-                </View>
-            );
+            // Web: use dangerouslySetInnerHTML directly (no WebView needed)
+            if (Platform.OS === 'web') {
+                return (
+                    <View style={{ flex: 1, backgroundColor: theme.colors.surface }}>
+                        {/* @ts-ignore */}
+                        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}
+                            dangerouslySetInnerHTML={{ __html: svgContent }} />
+                    </View>
+                );
+            }
+            return <NativeFileSvgView svgHtml={svgHtml} themeBg={theme.colors.surface} />;
         }
 
         // Image preview
@@ -571,6 +575,19 @@ export default function FileScreen() {
                     </Text>
                 ) : null}
             </ScrollView>
+        </View>
+    );
+}
+
+// Dynamic WebView wrapper (unsupported on Linux/Tauri)
+function NativeFileSvgView({ svgHtml, themeBg }: { svgHtml: string; themeBg: string }) {
+    const [WebViewComp, setWebViewComp] = React.useState<any>(null);
+    React.useEffect(() => { import('react-native-webview').then(m => setWebViewComp(() => m.WebView)); }, []);
+    return (
+        <View style={{ flex: 1, backgroundColor: themeBg }}>
+            {WebViewComp
+                ? <WebViewComp source={{ html: svgHtml }} style={{ flex: 1, backgroundColor: themeBg }} scrollEnabled={true} />
+                : null}
         </View>
     );
 }

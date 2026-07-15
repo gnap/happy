@@ -3,7 +3,6 @@ import { View, Platform, useWindowDimensions, Text } from 'react-native';
 import { Stack, useLocalSearchParams } from 'expo-router';
 import { retrieveTempText } from '@/sync/persistence';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { WebView } from 'react-native-webview';
 
 export default function SvgViewerScreen() {
     const { theme } = useUnistyles();
@@ -76,13 +75,19 @@ export default function SvgViewerScreen() {
                         __html: `<div style="width:100%"><div class="mermaid">${content}</div><script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script><script>mermaid.initialize({startOnLoad:true,theme:'default'});</script></div>`,
                     }}
                 />
-            ) : (
-                <WebView
-                    source={{ html }}
-                    style={{ flex: 1 }}
-                    scrollEnabled={true}
-                />
+            ) : Platform.OS === 'web' ? null : (
+                <NativeSvgViewer html={html} />
             )}
         </View>
     );
+}
+
+// Thin wrapper that dynamically imports react-native-webview (unsupported on Linux/Tauri)
+function NativeSvgViewer({ html }: { html: string }) {
+    const [WebViewComp, setWebViewComp] = React.useState<any>(null);
+    React.useEffect(() => {
+        import('react-native-webview').then(m => setWebViewComp(() => m.WebView));
+    }, []);
+    if (!WebViewComp) return null;
+    return <WebViewComp source={{ html }} style={{ flex: 1 }} scrollEnabled={true} />;
 }

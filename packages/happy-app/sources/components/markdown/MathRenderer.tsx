@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View, Platform, useWindowDimensions } from 'react-native';
-import { WebView } from 'react-native-webview';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import katex from 'katex';
 import { KATEX_CSS_FULL } from './katex-css-full';
@@ -124,22 +123,30 @@ export const MathRenderer = React.memo((props: {
 </body>
 </html>`;
 
+    // Dynamic WebView import (unsupported on Linux/Tauri)
+    const [WebViewComp, setWebViewComp] = React.useState<any>(null);
+    React.useEffect(() => {
+        if (Platform.OS !== 'web') {
+            import('react-native-webview').then(m => setWebViewComp(() => m.WebView));
+        }
+    }, []);
+    if (!WebViewComp) {
+        return <View ref={containerRef} style={[style.container, { height: 100 }]} />;
+    }
     return (
         <View ref={containerRef} style={style.container}>
-            <WebView
+            <WebViewComp
                 source={{ html }}
                 style={{ width: containerWidth, height: webViewHeight }}
                 scrollEnabled={true}
                 nestedScrollEnabled={true}
                 showsVerticalScrollIndicator={false}
-                onMessage={(event) => {
+                onMessage={(event: any) => {
                     try {
                         const data = JSON.parse(event.nativeEvent.data);
                         if (data.type === 'dimensions' && typeof data.height === 'number') {
                             const h = data.height;
-                            if (h > 0 && h !== webViewHeight) {
-                                setWebViewHeight(h);
-                            }
+                            if (h > 0 && h !== webViewHeight) setWebViewHeight(h);
                         }
                     } catch { /* ignore */ }
                 }}

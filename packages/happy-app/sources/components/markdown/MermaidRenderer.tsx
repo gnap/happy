@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View, Platform, Text, useWindowDimensions, Pressable } from 'react-native';
-import { WebView } from 'react-native-webview';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
@@ -109,7 +108,14 @@ export const MermaidRenderer = React.memo((props: {
         );
     }
 
-    // iOS/Android: WebView with CDN mermaid
+    // iOS/Android: WebView with CDN mermaid (dynamically imported — unsupported on Linux/Tauri)
+    const [WebViewComp, setWebViewComp] = React.useState<any>(null);
+    React.useEffect(() => {
+        if (Platform.OS !== 'web') {
+            import('react-native-webview').then(m => setWebViewComp(() => m.WebView));
+        }
+    }, []);
+
     const html = `
         <!DOCTYPE html>
         <html>
@@ -118,68 +124,42 @@ export const MermaidRenderer = React.memo((props: {
             <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
             <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
             <style>
-                body {
-                    margin: 0;
-                    padding: 16px;
-                    background-color: ${theme.colors.surfaceHighest};
-                }
-                #mermaid-container {
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
-                    width: 100%;
-                }
-                .mermaid {
-                    text-align: center;
-                    width: 100%;
-                }
-                .mermaid svg {
-                    max-width: 100%;
-                    height: auto;
-                }
+                body { margin: 0; padding: 16px; background-color: ${theme.colors.surfaceHighest}; }
+                #mermaid-container { display: flex; justify-content: center; align-items: center; width: 100%; }
+                .mermaid { text-align: center; width: 100%; }
+                .mermaid svg { max-width: 100%; height: auto; }
             </style>
         </head>
         <body>
-            <div id="mermaid-container" class="mermaid">
-                ${props.content}
-            </div>
+            <div id="mermaid-container" class="mermaid">${props.content}</div>
             <script>
-                mermaid.initialize({
-                    startOnLoad: true,
-                    theme: 'dark'
-                });
+                mermaid.initialize({ startOnLoad: true, theme: 'dark' });
                 setTimeout(function() {
-                    var h = Math.max(
-                        document.body.scrollHeight,
-                        document.body.offsetHeight
-                    );
-                    window.ReactNativeWebView.postMessage(JSON.stringify({
-                        type: 'dimensions',
-                        height: h
-                    }));
+                    var h = Math.max(document.body.scrollHeight, document.body.offsetHeight);
+                    window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'dimensions', height: h }));
                 }, 300);
             </script>
         </body>
         </html>
     `;
 
+    if (!WebViewComp) {
+        return (
+            <View style={[style.container, { height: 400, justifyContent: 'center', alignItems: 'center' }]} />
+        );
+    }
+
     return (
         <Pressable onPress={handlePress}>
             <View style={style.container}>
-                <WebView
+                <WebViewComp
                     source={{ html }}
-                    style={{
-                        width: containerWidth,
-                        height: webViewHeight,
-                        borderRadius: 8,
-                    }}
+                    style={{ width: containerWidth, height: webViewHeight, borderRadius: 8 }}
                     scrollEnabled={false}
-                    onMessage={(event) => {
+                    onMessage={(event: any) => {
                         try {
                             const data = JSON.parse(event.nativeEvent.data);
-                            if (data.type === 'dimensions') {
-                                setWebViewHeight(prev => Math.max(prev, data.height));
-                            }
+                            if (data.type === 'dimensions') setWebViewHeight(prev => Math.max(prev, data.height));
                         } catch { /* ignore */ }
                     }}
                 />

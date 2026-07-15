@@ -1,7 +1,8 @@
 import type { MarkdownSpan } from "./parseMarkdown";
 
 // Pattern: $$...$$ (1-2), $...$ (3-4), **bold** (5-6), *italic* (7-8), [link](url) (9-11), `code` (12-13)
-const pattern = /(\$\$([^$]+)\$\$)|(\$([^$\s][^$]*?[^$\s])\$)|(\*\*(.*?)(?:\*\*|$))|(\*(.*?)(?:\*|$))|(\[([^\]]+)\](?:\(([^)]+)\))?)|(`(.*?)(?:`|$))/g;
+// Inline math $...$ accepts 1+ non-$ chars (single-char like $x$ now works)
+const pattern = /(\$\$([^$]+)\$\$)|(\$([^$\s]?[^$]*?[^$\s]?)\$)|(\*\*(.*?)(?:\*\*|$))|(\*(.*?)(?:\*|$))|(\[([^\]]+)\](?:\(([^)]+)\))?)|(`(.*?)(?:`|$))/g;
 
 export function parseMarkdownSpans(markdown: string, header: boolean) {
     const spans: MarkdownSpan[] = [];
