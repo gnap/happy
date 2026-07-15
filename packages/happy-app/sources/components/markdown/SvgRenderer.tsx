@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { View, Platform, useWindowDimensions, Pressable } from 'react-native';
+import { WebView } from 'react-native-webview';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { storeTempText } from '@/sync/persistence';
@@ -41,23 +42,10 @@ export const SvgRenderer = React.memo((props: {
         );
     }
 
-    // iOS/Android: render SVG in a WebView, tap to open viewer page
-    // WebView is only imported on native platforms (Linux/Tauri doesn't support it).
-    const [WebViewComp, setWebViewComp] = React.useState<any>(null);
-    React.useEffect(() => {
-        if (Platform.OS !== 'web') {
-            import('react-native-webview').then(m => setWebViewComp(() => m.WebView));
-        }
-    }, []);
-
-    if (!WebViewComp) {
-        return (
-            <Pressable onPress={handlePress}>
-                <View style={[style.container, { justifyContent: 'center', alignItems: 'center', height: 100 }]}>
-                </View>
-            </Pressable>
-        );
-    }
+    // iOS/Android: render SVG in a WebView, tap to open viewer page.
+    // Use static import — dynamic import() caused issues on iOS.
+    // On platforms without react-native-webview (Linux/Tauri), we fall back
+    // to the web path above via Platform.OS === 'web'.
 
     const html = `<!DOCTYPE html>
 <html>
@@ -88,13 +76,13 @@ export const SvgRenderer = React.memo((props: {
     return (
         <Pressable onPress={handlePress}>
             <View style={style.container}>
-                <WebViewComp
+                <WebView
                     source={{ html }}
                     style={{ width: containerWidth, height: webViewHeight }}
                     scrollEnabled={false}
                     showsVerticalScrollIndicator={false}
                     pointerEvents="none"
-                    onMessage={(event: any) => {
+                    onMessage={(event) => {
                         try {
                             const data = JSON.parse(event.nativeEvent.data);
                             if (data.type === 'dimensions' && typeof data.height === 'number') {

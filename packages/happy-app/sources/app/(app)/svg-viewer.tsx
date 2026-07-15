@@ -1,5 +1,6 @@
 import React from 'react';
 import { View, Platform, useWindowDimensions, Text } from 'react-native';
+import { WebView } from 'react-native-webview';
 import { Stack, useLocalSearchParams } from 'expo-router';
 import { retrieveTempText } from '@/sync/persistence';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -78,18 +79,8 @@ export default function SvgViewerScreen() {
                     }}
                 />
             ) : (
-                <NativeSvgViewer html={html} />
+                <WebView source={{ html }} style={{ flex: 1 }} scrollEnabled={true} />
             )}
         </View>
     );
-}
-
-// Thin wrapper that dynamically imports react-native-webview (unsupported on Linux/Tauri)
-function NativeSvgViewer({ html }: { html: string }) {
-    const [WebViewComp, setWebViewComp] = React.useState<any>(null);
-    React.useEffect(() => {
-        import('react-native-webview').then(m => setWebViewComp(() => m.WebView));
-    }, []);
-    if (!WebViewComp) return null;
-    return <WebViewComp source={{ html }} style={{ flex: 1 }} scrollEnabled={true} />;
 }
