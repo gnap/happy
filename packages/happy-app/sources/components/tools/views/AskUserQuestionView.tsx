@@ -204,12 +204,18 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
         return null;
     }
 
+    // Allow interaction if the tool is running, has a pending permission, or was completed
+    // without actual answers (synced session where question was never answered).
+    const hasPendingPermission = tool.permission?.status === 'pending';
+    const hasNoResult = !tool.result || (typeof tool.result === 'object' && !(tool.result as any).answers);
+    const isCompleted = tool.state === 'completed' || tool.state === 'error';
     const isRunning = tool.state === 'running';
-    const canInteract = isRunning && !isSubmitted;
+    // Allow interaction if not submitted and not completed-with-results
+    const canInteract = !isSubmitted && !(isCompleted && !hasNoResult) && (isRunning || hasPendingPermission || hasNoResult);
 
     // Diagnostic: log when form is non-interactive
     if (!canInteract && !isSubmitted) {
-        console.warn(`[AskUserQuestion] form non-interactive: tool.state=${tool.state}, permission.status=${tool.permission?.status}, isSubmitted=${isSubmitted}`);
+        console.warn(`[AskUserQuestion] form non-interactive: tool.state=${tool.state}, permission.status=${tool.permission?.status}, isSubmitted=${isSubmitted}, hasNoResult=${hasNoResult}`);
     }
 
     // Check if all questions have at least one selection
@@ -285,13 +291,17 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
             }
         } catch (error) {
             console.error('Failed to submit answer:', error);
+            // Allow retry on failure
+            setIsSubmitted(false);
         } finally {
             setIsSubmitting(false);
         }
     }, [sessionId, questions, selections, allQuestionsAnswered, isSubmitting, tool.permission?.id]);
 
-    // Show submitted state
-    if (isSubmitted || tool.state === 'completed') {
+    // Show submitted state only when there are actual answers
+    const hasAnswers = tool.result && typeof tool.result === 'object' && !!(tool.result as any).answers;
+
+    if (isSubmitted || (tool.state === 'completed' && hasAnswers)) {
         return (
             <ToolSectionView>
                 <View style={styles.submittedContainer}>
