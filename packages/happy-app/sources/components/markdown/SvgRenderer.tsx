@@ -1,7 +1,12 @@
 import * as React from 'react';
 import { View, Platform, useWindowDimensions, Pressable } from 'react-native';
-import { WebView } from 'react-native-webview';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+
+// WebView is unsupported on Linux/Tauri; guard for web platform
+let WebView: any = null;
+if (Platform.OS !== 'web') {
+    try { WebView = require('react-native-webview').WebView; } catch { /* unsupported platform */ }
+}
 import { useRouter } from 'expo-router';
 import { storeTempText } from '@/sync/persistence';
 
