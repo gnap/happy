@@ -1632,6 +1632,7 @@ export function NewSessionWizard({ onComplete, onCancel, initialPrompt = '' }: N
                                 { value: 'adaptiveUsage', label: 'Adaptive Usage', description: 'Automatically choose model', icon: 'analytics-outline' },
                                 { value: 'sonnet', label: 'Sonnet', description: 'Fast and efficient', icon: 'speedometer-outline' },
                                 { value: 'opus', label: 'Opus', description: 'Most capable model', icon: 'diamond-outline' },
+                                { value: 'fable', label: 'Fable', description: 'Next-gen superfast model', icon: 'flash-outline' },
                             ] as const : [
                                 { value: 'gpt-5-codex-high', label: 'GPT-5 Codex High', description: 'Best for complex coding', icon: 'diamond-outline' },
                                 { value: 'gpt-5-codex-medium', label: 'GPT-5 Codex Medium', description: 'Balanced coding assistance', icon: 'cube-outline' },
