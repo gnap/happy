@@ -1131,6 +1131,48 @@ export const knownTools = {
             return null;
         }
     },
+    'Workflow': {
+        title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const input = opts.tool.input as Record<string, unknown> | undefined;
+            const name = input?.name ?? input?.workflow_name;
+            if (name && typeof name === 'string' && name.trim()) return `Workflow: ${name}`;
+            if (opts.tool.description && opts.tool.description.trim()) return opts.tool.description;
+            return 'Workflow';
+        },
+        extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const input = opts.tool.input as Record<string, unknown> | undefined;
+            const phases = input?.phases;
+            if (Array.isArray(phases) && phases.length > 0) {
+                return `${phases.length} phase${phases.length !== 1 ? 's' : ''}`;
+            }
+            return null;
+        },
+        icon: ICON_TASK,
+        isMutable: true,
+        minimal: (opts: { metadata: Metadata | null, tool: ToolCall, messages?: Message[] }) => {
+            const messages = opts.messages || [];
+            for (let m of messages) {
+                if (m.kind === 'tool-call' &&
+                    (m.tool.state === 'running' || m.tool.state === 'completed' || m.tool.state === 'error')) {
+                    return false;
+                }
+                if (m.kind === 'agent-text' && m.text) {
+                    return false;
+                }
+            }
+            return true;
+        },
+    },
+    'workflow': {
+        title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const input = opts.tool.input as Record<string, unknown> | undefined;
+            const name = input?.name ?? input?.workflow_name;
+            if (name && typeof name === 'string' && name.trim()) return `Workflow: ${name}`;
+            if (opts.tool.description && opts.tool.description.trim()) return opts.tool.description;
+            return 'Workflow';
+        },
+        icon: ICON_TASK,
+    },
     'Skill': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
             const skill = (opts.tool.input as any)?.skill;
