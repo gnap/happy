@@ -441,6 +441,20 @@ export async function claudeRemote(opts: {
                     }
                 }
 
+                // Background task completed (Workflow, Agent, etc.) — wake Claude
+                // so it can process the results even if the turn already ended.
+                if (message.type === 'system' && message.subtype === 'task_notification' && !thinking) {
+                    const tn = message as any;
+                    if (tn.status === 'completed' && !messages.done) {
+                        logger.debug('[claudeRemote] Background task completed — waking Claude');
+                        updateThinking(true);
+                        messages.push({
+                            type: 'user',
+                            message: { role: 'user', content: tn.summary || 'Task completed.' },
+                        });
+                    }
+                }
+
                 // Result handling
                 if (message.type === 'result') {
                     updateThinking(false);
