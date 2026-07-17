@@ -64,6 +64,7 @@ class ApiSocket {
     private reconnectedListeners: Set<() => void> = new Set();
     private statusListeners: Set<(status: ConnectionStatus) => void> = new Set();
     private authErrorListeners: Set<() => void> = new Set();
+    private _hasNetworkListeners = false;
     private currentStatus: ConnectionStatus = 'disconnected';
     private lastError: Error | null = null;
     /** When true, do not reconnect (e.g. after 401) */
@@ -87,6 +88,27 @@ class ApiSocket {
 
     connect() {
         if (!this.config) return;
+
+        // Listen for browser online/offline events to recover from sleep/wake
+        // where socket.io may not detect network restoration on Linux.
+        if (typeof window !== 'undefined' && !this._hasNetworkListeners) {
+            this._hasNetworkListeners = true;
+            window.addEventListener('online', () => {
+                if (!this.socket?.connected) {
+                    this.socket?.disconnect();
+                    this.socket = null;
+                    this.connect();
+                }
+            });
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'visible' && !this.socket?.connected) {
+                    this.socket?.disconnect();
+                    this.socket = null;
+                    this.connect();
+                }
+            });
+        }
+
         if (this.socket) {
             // Already have a socket; only force reconnect if we had disabled reconnection (e.g. after token refresh)
             if (this.reconnectionDisabled) {

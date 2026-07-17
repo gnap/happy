@@ -3,6 +3,7 @@ import { apiSocket } from '@/sync/apiSocket';
 import { AuthCredentials } from '@/auth/tokenStorage';
 import { Encryption } from '@/sync/encryption/encryption';
 import { decodeBase64, encodeBase64 } from '@/encryption/base64';
+import { reinitSodium } from '@/encryption/libsodium';
 import { storage } from './storage';
 import { ApiEphemeralUpdateSchema, ApiMessage, ApiUpdateContainerSchema } from './apiTypes';
 import type { ApiEphemeralActivityUpdate } from './apiTypes';
@@ -470,7 +471,8 @@ class Sync {
             }
             onlineDebounce = setTimeout(() => {
                 onlineDebounce = null;
-                log.log('🌐 Window: network online — resuming socket');
+                log.log('🌐 Window: network online — reinit sodium + resume socket');
+                reinitSodium();
                 apiSocket.resumeReconnection();
             }, 300);
         });
@@ -1355,9 +1357,22 @@ class Sync {
             // Initialize all session encryptions first
             const keyDecryptStart = performance.now();
             const sessionKeys = new Map<string, Uint8Array | null>();
+            // Retry decryption up to 3 times with backoff — libsodium WASM can be
+            // unstable after Linux sleep/wake, causing transient crypto_box_open_easy failures.
+            const decryptWithRetry = async (encryptedKey: string, sessionId: string, maxRetries = 3): Promise<Uint8Array | null> => {
+                for (let attempt = 0; attempt < maxRetries; attempt++) {
+                    const decrypted = await this.encryption.decryptEncryptionKey(encryptedKey);
+                    if (decrypted) return decrypted;
+                    if (attempt < maxRetries - 1) {
+                        console.warn(`[encryption] Decrypt retry ${attempt + 1}/${maxRetries} for session ${sessionId}`);
+                        await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+                    }
+                }
+                return null;
+            };
             for (const session of sessions) {
                 if (session.dataEncryptionKey) {
-                    let decrypted = await this.encryption.decryptEncryptionKey(session.dataEncryptionKey);
+                    let decrypted = await decryptWithRetry(session.dataEncryptionKey, session.id);
                     if (!decrypted) {
                         console.error(`Failed to decrypt data encryption key for session ${session.id}`);
                         continue;
