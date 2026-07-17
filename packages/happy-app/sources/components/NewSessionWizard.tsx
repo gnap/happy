@@ -557,7 +557,6 @@ export function NewSessionWizard({ onComplete, onCancel, initialPrompt = '' }: N
     });
 
     // Built-in profiles
-    const builtInProfiles: AIBackendProfile[] = useMemo(() => [
         {
             id: 'anthropic',
             name: 'Anthropic (Default)',
@@ -668,10 +667,12 @@ export function NewSessionWizard({ onComplete, onCancel, initialPrompt = '' }: N
         },
     ], []);
 
-    // Combined profiles
+    // Combined profiles: only show built-in profiles that haven't been deleted
+    const profileIds = useMemo(() => new Set(profiles.map(p => p.id)), [profiles]);
     const allProfiles = useMemo(() => {
-        return [...builtInProfiles, ...profiles];
-    }, [profiles, builtInProfiles]);
+        const activeBuiltIns = builtInProfiles.filter(bp => profileIds.has(bp.id));
+        return [...activeBuiltIns, ...profiles];
+    }, [profiles, builtInProfiles, profileIds]);
 
     const [selectedMachineId, setSelectedMachineId] = useState<string>(() => {
         if (machines.length > 0) {
@@ -1162,7 +1163,7 @@ export function NewSessionWizard({ onComplete, onCancel, initialPrompt = '' }: N
                         </Text>
 
                         <ItemGroup title="Built-in Profiles">
-                            {builtInProfiles.map((profile) => (
+                            {builtInProfiles.filter(bp => profileIds.has(bp.id)).map((profile) => (
                                 <ProfileSelectionItem
                                     key={profile.id}
                                     profile={profile}
