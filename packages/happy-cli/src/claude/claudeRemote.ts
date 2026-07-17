@@ -441,8 +441,17 @@ export async function claudeRemote(opts: {
                     }
                 }
 
-                // Background task completed (Workflow, Agent, etc.) — wake Claude
-                // so it can process the results even if the turn already ended.
+                // Background task lifecycle (Workflow, Agent, etc.)
+                // Route through onMessage so the App receives progress envelopes.
+                if (message.type === 'system'
+                    && (message.subtype === 'task_notification'
+                        || message.subtype === 'task_started'
+                        || message.subtype === 'task_progress')) {
+                    opts.onMessage(message);
+                }
+
+                // Wake Claude on background task completion so it can process
+                // the results even if the turn already ended.
                 if (message.type === 'system' && message.subtype === 'task_notification' && !thinking) {
                     const tn = message as any;
                     if (tn.status === 'completed' && !messages.done) {
