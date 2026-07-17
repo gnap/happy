@@ -1042,8 +1042,20 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         continue;
                     }
 
-                    // Update tool state and result
-                    message.tool.state = c.is_error ? 'error' : 'completed';
+                    // Workflow, Agent, Monitor emit two tool-call-end events:
+                    // (1) async_launched — just confirms the task was queued
+                    // (2) task_notification — carries the actual result when done.
+                    // Keep state = 'running' after (1) so (2) isn't skipped.
+                    const isAsyncLaunch = c.content && typeof c.content === 'object'
+                        && !Array.isArray(c.content)
+                        && ((c.content as any).status === 'async_launched'
+                            || (c.content as any).status === 'remote_launched');
+
+                    if (!isAsyncLaunch) {
+                        message.tool.state = c.is_error ? 'error' : 'completed';
+                        message.tool.completedAt = msg.createdAt;
+                    }
+
                     // For AskUserQuestion, the SDK's tool_result is a text summary string
                     // ("Your questions have been answered..."), not structured answers.
                     // Keep the structured result from permission-result / completedRequests
@@ -1051,7 +1063,6 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     if (message.tool.name !== 'AskUserQuestion' || !message.tool.result) {
                         message.tool.result = c.content;
                     }
-                    message.tool.completedAt = msg.createdAt;
 
                     // TodoWrite result carries the authoritative list (including completed); session list counts from this
                     if (message.tool.name === 'TodoWrite' && !c.is_error && c.content?.newTodos && Array.isArray(c.content.newTodos)) {
