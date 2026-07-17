@@ -62,6 +62,8 @@ export const toolViewRegistry: Record<string, ToolViewComponent> = {
     TaskUpdate: TaskTrackerView,
     AskUserQuestion: AskUserQuestionView,
     Skill: SkillView,
+    Workflow: TaskView,
+    workflow: TaskView,
     // Gemini tools (lowercase)
     edit: GeminiEditView,
     execute: GeminiExecuteView,
@@ -82,6 +84,8 @@ export const toolFullViewRegistry: Record<string, ToolViewComponent> = {
     Task: TaskView, // Task output is in children (sidechain agent-text), not tool.result
     Agent: AgentViewFull,
     Skill: SkillView,
+    Workflow: TaskView,
+    workflow: TaskView,
 };
 
 // Helper function to get the appropriate view component for a tool
