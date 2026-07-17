@@ -569,18 +569,27 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
     }
 
     if (message.type === 'system') {
-        // task_notification: background task (Monitor, Bash run_in_background) completed.
-        // Emit a tool-call-end so the App's tool card transitions from "running" to done.
+        // Task lifecycle: background tasks (Workflow, Agent, Monitor, etc.)
+        // emit tool-call-end envelopes so the App can show progress and results.
         const subtype = (message as Record<string, unknown>).subtype;
-        if (subtype === 'task_notification') {
-            const toolUseId = (message as Record<string, unknown>).tool_use_id;
-            const status = (message as Record<string, unknown>).status;
-            if (typeof toolUseId === 'string' && toolUseId.length > 0) {
-                const turnId = ensureTurn(state, envelopes);
+        const toolUseId = (message as Record<string, unknown>).tool_use_id;
+        if (typeof toolUseId === 'string' && toolUseId.length > 0) {
+            const turnId = ensureTurn(state, envelopes);
+            if (subtype === 'task_notification') {
+                // Final result
+                const status = (message as Record<string, unknown>).status;
                 envelopes.push(createEnvelope('agent', {
                     t: 'tool-call-end',
                     call: toolUseId,
                     result: { task_notification: status },
+                }, { turn: turnId }));
+            } else if (subtype === 'task_started' || subtype === 'task_progress') {
+                // Progress update
+                const summary = (message as Record<string, unknown>).summary;
+                envelopes.push(createEnvelope('agent', {
+                    t: 'tool-call-end',
+                    call: toolUseId,
+                    result: { [subtype]: summary ?? true },
                 }, { turn: turnId }));
             }
         }
