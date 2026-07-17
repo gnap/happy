@@ -121,12 +121,15 @@ export class OutgoingMessageQueue {
             
             // Send if not already sent
             if (!item.sent) {
-                // Pass task_notification / task_updated through so the mapper can
-                // emit tool-call-end for completed background tasks. Other system
-                // messages (thinking_tokens, init, etc.) are still suppressed.
-                const isTaskNotification = item.logMessage.type === 'system'
-                    && (item.logMessage.subtype === 'task_notification' || item.logMessage.subtype === 'task_updated');
-                if (item.logMessage.type !== 'system' || isTaskNotification) {
+                // Pass task lifecycle messages through so the mapper can emit updates
+                // for background tasks (Workflow, Agent, etc.). Other system messages
+                // (thinking_tokens, init, etc.) are still suppressed.
+                const isTaskMessage = item.logMessage.type === 'system'
+                    && (item.logMessage.subtype === 'task_notification'
+                        || item.logMessage.subtype === 'task_updated'
+                        || item.logMessage.subtype === 'task_started'
+                        || item.logMessage.subtype === 'task_progress');
+                if (item.logMessage.type !== 'system' || isTaskMessage) {
                     this.sendFunction(item.logMessage);
                 }
                 item.sent = true;
