@@ -109,6 +109,7 @@ export class SDKToLogConverter {
         switch (sdkMessage.type) {
             case 'user': {
                 const userMsg = sdkMessage as SDKUserMessage
+                const sdkTur = (sdkMessage as any).tool_use_result;
                 logMessage = {
                     ...baseFields,
                     type: 'user',
@@ -117,6 +118,8 @@ export class SDKToLogConverter {
                     ...((sdkMessage as any).isSynthetic === true ? { isSynthetic: true } : {}),
                     ...((sdkMessage as any).origin != null ? { origin: (sdkMessage as any).origin } : {}),
                     ...((sdkMessage as any).cronId != null ? { cronId: (sdkMessage as any).cronId } : {}),
+                    // Preserve structured tool_use_result (Workflow/Agent/Monitor async_launched status)
+                    ...(sdkTur != null ? { toolUseResult: sdkTur } : {}),
                 }
 
                 // Check if this is a tool result and add mode if available
