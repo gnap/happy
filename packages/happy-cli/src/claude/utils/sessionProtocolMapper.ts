@@ -1,5 +1,6 @@
 import { createId } from '@paralleldrive/cuid2';
 import type { RawJSONLines } from '@/claude/types';
+import { logger } from '@/lib';
 import {
     createEnvelope,
     type SessionEnvelope,
@@ -575,14 +576,14 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
         const toolUseId = (message as Record<string, unknown>).tool_use_id;
         const taskId = (message as Record<string, unknown>).task_id;
         if (subtype === 'task_notification' || subtype === 'task_started' || subtype === 'task_progress' || subtype === 'task_updated') {
-            console.error(`[mapper] SYSTEM ${subtype} tool_use_id=${toolUseId} task_id=${taskId} hasToolUseId=${typeof toolUseId === 'string' && toolUseId.length > 0}`);
+            logger.debug(`[mapper] SYSTEM ${subtype} tool_use_id=${toolUseId} task_id=${taskId} hasToolUseId=${typeof toolUseId === 'string' && toolUseId.length > 0}`);
         }
         if (typeof toolUseId === 'string' && toolUseId.length > 0) {
             const turnId = ensureTurn(state, envelopes);
             if (subtype === 'task_notification') {
                 // Final result
                 const status = (message as Record<string, unknown>).status;
-                console.error(`[mapper] EMIT tool-call-end for task_notification call=${toolUseId} status=${status}`);
+                logger.debug(`[mapper] EMIT tool-call-end for task_notification call=${toolUseId} status=${status}`);
                 envelopes.push(createEnvelope('agent', {
                     t: 'tool-call-end',
                     call: toolUseId,
@@ -591,7 +592,7 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
             } else if (subtype === 'task_started' || subtype === 'task_progress') {
                 // Progress update
                 const summary = (message as Record<string, unknown>).summary;
-                console.error(`[mapper] EMIT tool-call-end for ${subtype} call=${toolUseId}`);
+                logger.debug(`[mapper] EMIT tool-call-end for ${subtype} call=${toolUseId}`);
                 envelopes.push(createEnvelope('agent', {
                     t: 'tool-call-end',
                     call: toolUseId,
@@ -599,7 +600,7 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                 }, { turn: turnId }));
             }
         } else if (subtype === 'task_notification' || subtype === 'task_started' || subtype === 'task_progress') {
-            console.error(`[mapper] SKIP ${subtype} — no valid tool_use_id (got: ${JSON.stringify(toolUseId)})`);
+            logger.debug(`[mapper] SKIP ${subtype} — no valid tool_use_id (got: ${JSON.stringify(toolUseId)})`);
         }
         return {
             currentTurnId: state.currentTurnId,
