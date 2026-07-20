@@ -517,6 +517,13 @@ export const en: TranslationStructure = {
             fileLabel: 'FILE',
             folderLabel: 'FOLDER',
         },
+        sandbox: {
+            isolationTitle: 'Sandbox Isolation',
+            off: 'Off',
+            strict: 'Strict (project only)',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
         noMachinesAvailable: 'No machines',
     },
 

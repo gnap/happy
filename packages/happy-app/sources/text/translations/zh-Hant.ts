@@ -410,6 +410,20 @@ export const zhHant: TranslationStructure = {
         },
     },
 
+    sandbox: {
+        isolationTitle: 'Sandbox Isolation',
+        isolation: {
+            off: 'Off',
+            strict: 'Strict',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
+        isolationOffDesc: 'No sandbox restrictions',
+        isolationStrictDesc: 'Full filesystem and network isolation',
+        isolationWorkspaceDesc: 'Sandbox limited to workspace directory',
+        isolationCustomDesc: 'Custom sandbox rules',
+    },
+
     agentInput: {
         permissionMode: {
             title: '權限模式',
@@ -488,6 +502,13 @@ export const zhHant: TranslationStructure = {
         suggestion: {
             fileLabel: '檔案',
             folderLabel: '資料夾',
+        },
+        sandbox: {
+            isolationTitle: 'Sandbox Isolation',
+            off: 'Off',
+            strict: 'Strict (project only)',
+            workspace: 'Workspace',
+            custom: 'Custom',
         },
         noMachinesAvailable: '無裝置',
     },

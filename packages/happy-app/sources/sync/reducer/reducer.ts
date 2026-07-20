@@ -988,9 +988,24 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         const bufferedResult = state.bufferedResults.get(c.id);
                         if (bufferedResult) {
                             state.bufferedResults.delete(c.id);
-                            toolCall.state = bufferedResult.is_error ? 'error' : 'completed';
+                            // Check isIntermediate before marking completed — Workflow/Agent/Monitor
+                            // emit intermediate results (async_launched, task_started, task_progress)
+                            // before the final task_notification.
+                            let bufContent: unknown = bufferedResult.content;
+                            if (typeof bufContent === 'string') {
+                                try { bufContent = JSON.parse(bufContent); } catch {}
+                            }
+                            const bufIsIntermediate = bufContent && typeof bufContent === 'object'
+                                && !Array.isArray(bufContent)
+                                && ((bufContent as any).status === 'async_launched'
+                                    || (bufContent as any).status === 'remote_launched'
+                                    || (bufContent as any).task_started !== undefined
+                                    || (bufContent as any).task_progress !== undefined);
+                            if (!bufIsIntermediate) {
+                                toolCall.state = bufferedResult.is_error ? 'error' : 'completed';
+                                toolCall.completedAt = bufferedResult.createdAt;
+                            }
                             toolCall.result = bufferedResult.content;
-                            toolCall.completedAt = bufferedResult.createdAt;
                         }
 
                         // Track TodoWrite tool inputs
@@ -1042,16 +1057,27 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         continue;
                     }
 
-                    // Workflow, Agent, Monitor emit two tool-call-end events:
-                    // (1) async_launched — just confirms the task was queued
-                    // (2) task_notification — carries the actual result when done.
-                    // Keep state = 'running' after (1) so (2) isn't skipped.
-                    const isAsyncLaunch = c.content && typeof c.content === 'object'
-                        && !Array.isArray(c.content)
-                        && ((c.content as any).status === 'async_launched'
-                            || (c.content as any).status === 'remote_launched');
+                    // Workflow, Agent, Monitor emit multiple tool-call-end events:
+                    // (1) async_launched — task was queued
+                    // (2) task_started/task_progress — intermediate progress
+                    // (3) task_notification — final result.
+                    // Keep state = 'running' after (1) and (2) so the final result isn't skipped.
+                    //
+                    // The first tool-call-end may carry a JSON-stringified result
+                    // (e.g. '{"status":"async_launched","task_id":"1"}'), not a parsed
+                    // object. Extract the effective content before checking isIntermediate.
+                    let effectiveContent: unknown = c.content;
+                    if (typeof effectiveContent === 'string') {
+                        try { effectiveContent = JSON.parse(effectiveContent); } catch {}
+                    }
+                    const isIntermediate = effectiveContent && typeof effectiveContent === 'object'
+                        && !Array.isArray(effectiveContent)
+                        && ((effectiveContent as any).status === 'async_launched'
+                            || (effectiveContent as any).status === 'remote_launched'
+                            || (effectiveContent as any).task_started !== undefined
+                            || (effectiveContent as any).task_progress !== undefined);
 
-                    if (!isAsyncLaunch) {
+                    if (!isIntermediate) {
                         message.tool.state = c.is_error ? 'error' : 'completed';
                         message.tool.completedAt = msg.createdAt;
                     }
@@ -1304,9 +1330,21 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     const bufferedResult = state.sidechainBufferedResults.get(c.id);
                     if (bufferedResult) {
                         state.sidechainBufferedResults.delete(c.id);
-                        toolCall.state = bufferedResult.is_error ? 'error' : 'completed';
+                        let bufContent: unknown = bufferedResult.content;
+                        if (typeof bufContent === 'string') {
+                            try { bufContent = JSON.parse(bufContent); } catch {}
+                        }
+                        const bufIsIntermediate = bufContent && typeof bufContent === 'object'
+                            && !Array.isArray(bufContent)
+                            && ((bufContent as any).status === 'async_launched'
+                                || (bufContent as any).status === 'remote_launched'
+                                || (bufContent as any).task_started !== undefined
+                                || (bufContent as any).task_progress !== undefined);
+                        if (!bufIsIntermediate) {
+                            toolCall.state = bufferedResult.is_error ? 'error' : 'completed';
+                            toolCall.completedAt = bufferedResult.createdAt;
+                        }
                         toolCall.result = bufferedResult.content;
-                        toolCall.completedAt = bufferedResult.createdAt;
                         if (bufferedResult.permissions) {
                             const perms = bufferedResult.permissions as any;
                             toolCall.permission = {

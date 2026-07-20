@@ -557,6 +557,7 @@ export function NewSessionWizard({ onComplete, onCancel, initialPrompt = '' }: N
     });
 
     // Built-in profiles
+    const builtInProfiles = useMemo(() => [
         {
             id: 'anthropic',
             name: 'Anthropic (Default)',

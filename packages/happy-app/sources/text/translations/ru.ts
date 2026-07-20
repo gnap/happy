@@ -419,6 +419,20 @@ export const ru: TranslationStructure = {
         placeholder: 'Введите команду или поиск...',
     },
 
+    sandbox: {
+        isolationTitle: 'Sandbox Isolation',
+        isolation: {
+            off: 'Off',
+            strict: 'Strict',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
+        isolationOffDesc: 'No sandbox restrictions',
+        isolationStrictDesc: 'Full filesystem and network isolation',
+        isolationWorkspaceDesc: 'Sandbox limited to workspace directory',
+        isolationCustomDesc: 'Custom sandbox rules',
+    },
+
     agentInput: {
         permissionMode: {
             title: 'РЕЖИМ РАЗРЕШЕНИЙ',
@@ -497,6 +511,13 @@ export const ru: TranslationStructure = {
         suggestion: {
             fileLabel: 'ФАЙЛ',
             folderLabel: 'ПАПКА',
+        },
+        sandbox: {
+            isolationTitle: 'Sandbox Isolation',
+            off: 'Off',
+            strict: 'Strict (project only)',
+            workspace: 'Workspace',
+            custom: 'Custom',
         },
         noMachinesAvailable: 'Нет машин',
     },
