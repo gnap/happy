@@ -416,6 +416,12 @@ export async function claudeRemote(opts: {
                     continue;
                 }
 
+                // Diagnostic: log all system messages to trace task_notification pipeline
+                if (message.type === 'system') {
+                    const sysMsg = message as Record<string, unknown>;
+                    logger.debug(`[claudeRemote] SYSTEM subtype=${sysMsg.subtype} tool_use_id=${sysMsg.tool_use_id} task_id=${sysMsg.task_id} status=${sysMsg.status}`);
+                }
+
                 opts.onMessage(message);
 
                 // System init

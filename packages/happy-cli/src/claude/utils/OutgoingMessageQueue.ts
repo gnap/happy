@@ -130,7 +130,12 @@ export class OutgoingMessageQueue {
                         || item.logMessage.subtype === 'task_started'
                         || item.logMessage.subtype === 'task_progress');
                 if (item.logMessage.type !== 'system' || isTaskMessage) {
+                    if (isTaskMessage) {
+                        console.error(`[msgQ] SENDING system ${item.logMessage.subtype} tool_use_id=${item.logMessage.tool_use_id} task_id=${item.logMessage.task_id}`);
+                    }
                     this.sendFunction(item.logMessage);
+                } else if (item.logMessage.type === 'system') {
+                    console.error(`[msgQ] SUPPRESS system ${item.logMessage.subtype}`);
                 }
                 item.sent = true;
             }
