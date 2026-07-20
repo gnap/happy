@@ -23,6 +23,14 @@ function extractTaskResult(result: unknown): string | null {
             .join('\n\n');
         return text.trim() || null;
     }
+    // Handle structured task_notification/task_started results from Workflow/Agent/Monitor
+    if (result && typeof result === 'object' && !Array.isArray(result)) {
+        const obj = result as Record<string, unknown>;
+        if (typeof obj.summary === 'string' && obj.summary.trim()) return obj.summary;
+        if (typeof obj.task_notification === 'string') return `Task ${obj.task_notification}`;
+        if (typeof obj.task_progress === 'string') return obj.task_progress;
+        if (obj.status === 'async_launched') return 'Launched…';
+    }
     return null;
 }
 
