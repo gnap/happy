@@ -581,13 +581,14 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
         if (typeof toolUseId === 'string' && toolUseId.length > 0) {
             const turnId = ensureTurn(state, envelopes);
             if (subtype === 'task_notification') {
-                // Final result
+                // Final result — include summary for App display
                 const status = (message as Record<string, unknown>).status;
+                const summary = (message as Record<string, unknown>).summary;
                 logger.debug(`[mapper] EMIT tool-call-end for task_notification call=${toolUseId} status=${status}`);
                 envelopes.push(createEnvelope('agent', {
                     t: 'tool-call-end',
                     call: toolUseId,
-                    result: { task_notification: status },
+                    result: { task_notification: status, summary: typeof summary === 'string' ? summary : undefined },
                 }, { turn: turnId }));
             } else if (subtype === 'task_started' || subtype === 'task_progress') {
                 // Progress update
