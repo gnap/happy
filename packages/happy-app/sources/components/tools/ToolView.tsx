@@ -210,11 +210,13 @@ export const ToolView = ((props: ToolViewProps) => {
                 const SpecificToolView = getToolViewComponent(tool.name);
                 if (SpecificToolView) {
                     const hasChildren = (props.messages && props.messages.length > 0);
-                    // Suppress the content area while running with no children —
-                    // Workflow/Agent cards without sub-agents would otherwise show
-                    // an empty padded container (visible as a white bar). The header
-                    // spinner and elapsed time are enough.
-                    if (tool.state === 'running' && !hasChildren) {
+                    // Suppress the content area when there are no children tool calls
+                    // to display, unless the tool has an error to show.  Workflow/Agent
+                    // cards without sub-agents would otherwise render an empty padded
+                    // <View style={styles.content}> (visible as a white bar below the header).
+                    // The header spinner, elapsed timer, and status icon are sufficient;
+                    // full results are available in the detail page on press.
+                    if (!hasChildren && tool.state !== 'error') {
                         return null;
                     }
                     return (
