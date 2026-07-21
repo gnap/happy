@@ -143,6 +143,8 @@ export interface SpawnSessionOptions {
      * session client fetches messages with seq > resumeAfterSeq instead of starting at session.seq.
      */
     resumeAfterSeq?: number;
+    /** Per-session sandbox config override. Falls back to settings.json if omitted. */
+    sandboxConfig?: import('@/persistence').SandboxConfig;
 }
 
 export type SpawnSessionResult =

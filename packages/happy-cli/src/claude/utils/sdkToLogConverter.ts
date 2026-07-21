@@ -5,6 +5,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { execSync } from 'node:child_process'
+import { logger } from '@/lib';
 import type {
     SDKMessage,
     SDKUserMessage,
@@ -109,6 +110,11 @@ export class SDKToLogConverter {
         switch (sdkMessage.type) {
             case 'user': {
                 const userMsg = sdkMessage as SDKUserMessage
+                const sdkTur = (sdkMessage as any).tool_use_result;
+                // Diagnostic: check if tool_use_result is present on the SDK message
+                if (sdkTur) {
+                    logger.debug(`[converter] Preserving tool_use_result status=${(sdkTur as any).status} taskId=${(sdkTur as any).taskId}`);
+                }
                 logMessage = {
                     ...baseFields,
                     type: 'user',
@@ -117,6 +123,8 @@ export class SDKToLogConverter {
                     ...((sdkMessage as any).isSynthetic === true ? { isSynthetic: true } : {}),
                     ...((sdkMessage as any).origin != null ? { origin: (sdkMessage as any).origin } : {}),
                     ...((sdkMessage as any).cronId != null ? { cronId: (sdkMessage as any).cronId } : {}),
+                    // Preserve structured tool_use_result (Workflow/Agent/Monitor async_launched status)
+                    ...(sdkTur != null ? { toolUseResult: sdkTur } : {}),
                 }
 
                 // Check if this is a tool result and add mode if available

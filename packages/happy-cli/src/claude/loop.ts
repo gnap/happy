@@ -27,6 +27,8 @@ export interface EnhancedMode {
     /** When true, do not resume the existing coding CLI session — start fresh. Used for inbox turns
      *  to avoid polluting the turn with a bloated session history full of "No response requested." */
     noResume?: boolean;
+    /** Sandbox isolation level from user message, triggers compact/respawn on change. */
+    sandboxIsolation?: string;
 }
 
 interface LoopOptions {
