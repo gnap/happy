@@ -26,7 +26,7 @@ interface ToolViewProps {
 }
 
 export const ToolView = React.memo<ToolViewProps>((props) => {
-    const { tool, onPress, sessionId, messageId } = props;
+    const { tool, onPress, sessionId, messageId, compact } = props;
     const router = useRouter();
     const { theme } = useUnistyles();
 
