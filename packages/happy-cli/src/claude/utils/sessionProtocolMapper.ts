@@ -858,7 +858,11 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                 }
                 // Prefer structured toolUseResult (from Workflow/Agent/Monitor async_launched)
                 // over the plain-text content so the App's isIntermediate check works.
-                const resultContent = (message as Record<string, unknown>).toolUseResult ?? block.content;
+                const tur = (message as Record<string, unknown>).toolUseResult;
+                const resultContent = tur ?? block.content;
+                if (tur) {
+                    logger.debug(`[mapper] Using toolUseResult for call=${block.tool_use_id} hasStatus=${(tur as any).status}`);
+                }
                 envelopes.push(createEnvelope('agent', {
                     t: 'tool-call-end',
                     call: block.tool_use_id,
