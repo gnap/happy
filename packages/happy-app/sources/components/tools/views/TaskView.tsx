@@ -29,7 +29,10 @@ function extractTaskResult(result: unknown): string | null {
         if (typeof obj.summary === 'string' && obj.summary.trim()) return obj.summary;
         if (typeof obj.task_notification === 'string') return `Task ${obj.task_notification}`;
         if (typeof obj.task_progress === 'string') return obj.task_progress;
-        if (obj.status === 'async_launched') return 'Launched…';
+        if (typeof obj.task_started === 'string') return obj.task_started;
+        // task_started: true / task_progress: true — intermediate, no text to show
+        if (obj.task_started !== undefined || obj.task_progress !== undefined) return null;
+        if (obj.status === 'async_launched') return null;
     }
     return null;
 }
