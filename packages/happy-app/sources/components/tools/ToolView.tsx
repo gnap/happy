@@ -209,6 +209,14 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
                 // Try to use a specific tool view component first
                 const SpecificToolView = getToolViewComponent(tool.name);
                 if (SpecificToolView) {
+                    // In compact mode, suppress the content area while the tool is
+                    // running and has no child messages — the header spinner is enough.
+                    // Workflow/Agent cards without sub-agents would otherwise render
+                    // an empty padded container (visible as a white bar).
+                    const hasChildren = (props.messages && props.messages.length > 0);
+                    if (compact && tool.state === 'running' && !hasChildren) {
+                        return null;
+                    }
                     return (
                         <View style={styles.content}>
                             <SpecificToolView tool={tool} metadata={props.metadata} messages={props.messages ?? []} sessionId={sessionId} compact />
