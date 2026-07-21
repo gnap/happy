@@ -182,13 +182,15 @@ function parseTaskCreateResult(result: unknown): { id: string; subject: string }
 function extractBackgroundTaskId(block: Record<string, unknown>, message: RawJSONLines): string | undefined {
     // Try toolUseResult first (JSONL format)
     const tur = message.toolUseResult as Record<string, unknown> | undefined;
-    if (tur?.backgroundTaskId && typeof tur.backgroundTaskId === 'string') {
-        return tur.backgroundTaskId;
+    if (tur) {
+        if (typeof tur.backgroundTaskId === 'string') return tur.backgroundTaskId;
+        if (typeof tur.taskId === 'string') return tur.taskId;
     }
     // Try tool_use_result (raw stream format)
     const tur2 = (message as Record<string, unknown>).tool_use_result as Record<string, unknown> | undefined;
-    if (tur2?.backgroundTaskId && typeof tur2.backgroundTaskId === 'string') {
-        return tur2.backgroundTaskId;
+    if (tur2) {
+        if (typeof tur2.backgroundTaskId === 'string') return tur2.backgroundTaskId;
+        if (typeof tur2.taskId === 'string') return tur2.taskId;
     }
     // Fallback: parse from content string "Command running in background with ID: xxx"
     const content = block.content;
