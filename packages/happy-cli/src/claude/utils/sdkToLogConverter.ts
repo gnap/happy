@@ -5,6 +5,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { execSync } from 'node:child_process'
+import { logger } from '@/lib';
 import type {
     SDKMessage,
     SDKUserMessage,
@@ -110,6 +111,10 @@ export class SDKToLogConverter {
             case 'user': {
                 const userMsg = sdkMessage as SDKUserMessage
                 const sdkTur = (sdkMessage as any).tool_use_result;
+                // Diagnostic: check if tool_use_result is present on the SDK message
+                if (sdkTur) {
+                    logger.debug(`[converter] Preserving tool_use_result status=${(sdkTur as any).status} taskId=${(sdkTur as any).taskId}`);
+                }
                 logMessage = {
                     ...baseFields,
                     type: 'user',
