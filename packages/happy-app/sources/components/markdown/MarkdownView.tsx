@@ -19,6 +19,7 @@ import { MathRenderer } from './MathRenderer';
 import { SvgRenderer } from './SvgRenderer';
 import { InlineMath } from './InlineMath';
 import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
+import { KATEX_CSS_FULL } from './katex-css-full';
 import { t } from '@/text';
 import { isRunningInTauri } from '@/utils/platform';
 
