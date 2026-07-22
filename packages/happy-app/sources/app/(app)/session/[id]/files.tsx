@@ -1,9 +1,8 @@
 import * as React from 'react';
 import { View, ActivityIndicator, Platform, TextInput } from 'react-native';
 import { t } from '@/text';
-import { useRoute } from '@react-navigation/native';
-import { useRouter } from 'expo-router';
-import { useFocusEffect } from '@react-navigation/native';
+import { useRouter, useLocalSearchParams } from 'expo-router';
+import { useEffect } from 'react';
 import { Octicons } from '@expo/vector-icons';
 import { Text } from '@/components/StyledText';
 import { Item } from '@/components/Item';
@@ -17,9 +16,8 @@ import { layout } from '@/components/layout';
 import { FileIcon } from '@/components/FileIcon';
 
 export default function FilesScreen() {
-    const route = useRoute();
     const router = useRouter();
-    const sessionId = (route.params! as any).id as string;
+    const { id: sessionId } = useLocalSearchParams<{ id: string }>();
     
     const [gitStatusFiles, setGitStatusFiles] = React.useState<GitStatusFiles | null>(null);
     const [isLoading, setIsLoading] = React.useState(true);
@@ -52,7 +50,7 @@ export default function FilesScreen() {
     }, [loadGitStatusFiles]);
 
     // Refresh when screen is focused
-    useFocusEffect(
+    useEffect(
         React.useCallback(() => {
             loadGitStatusFiles();
         }, [loadGitStatusFiles])

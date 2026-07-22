@@ -3,7 +3,7 @@ import { View, KeyboardAvoidingView, Platform, useWindowDimensions } from 'react
 import { Stack, useRouter, useLocalSearchParams } from 'expo-router';
 import { StyleSheet } from 'react-native-unistyles';
 import { useUnistyles } from 'react-native-unistyles';
-import { useHeaderHeight } from '@react-navigation/elements';
+import { useHeaderHeight } from '@/utils/responsive';
 import Constants from 'expo-constants';
 import { t } from '@/text';
 import { ProfileEditForm } from '@/components/ProfileEditForm';

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { AppState, AppStateStatus, Platform } from 'react-native';
-import * as Updates from 'expo-updates';
+let Updates: any = { reloadAsync: async () => {} };
 
 export function useUpdates() {
     const [updateAvailable, setUpdateAvailable] = useState(false);

@@ -1,7 +1,6 @@
 import React, { useState, useMemo, useRef } from 'react';
 import { View, Text, ScrollView, Pressable } from 'react-native';
 import { Stack, useRouter, useLocalSearchParams } from 'expo-router';
-import { CommonActions, useNavigation } from '@react-navigation/native';
 import { ItemGroup } from '@/components/ItemGroup';
 import { Item } from '@/components/Item';
 import { Typography } from '@/constants/Typography';
@@ -62,7 +61,6 @@ export default function PathPickerScreen() {
     const { theme } = useUnistyles();
     const styles = stylesheet;
     const router = useRouter();
-    const navigation = useNavigation();
     const params = useLocalSearchParams<{ machineId?: string; selectedPath?: string }>();
     const machines = useAllMachines();
     const sessions = useSessions();
@@ -123,17 +121,9 @@ export default function PathPickerScreen() {
 
     const handleSelectPath = React.useCallback(() => {
         const pathToUse = customPath.trim() || machine?.metadata?.homeDir || '/home';
-        // Pass path back via navigation params (main's pattern, received by new/index.tsx)
-        const state = navigation.getState();
-        const previousRoute = state?.routes?.[state.index - 1];
-        if (state && state.index > 0 && previousRoute) {
-            navigation.dispatch({
-                ...CommonActions.setParams({ path: pathToUse }),
-                source: previousRoute.key,
-            } as never);
-        }
+        router.setParams({ path: pathToUse } as any);
         router.back();
-    }, [customPath, router, machine, navigation]);
+    }, [customPath, router, machine]);
 
     if (!machine) {
         return (

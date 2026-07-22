@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { View, Text, ScrollView, Pressable, Platform, NativeModules } from 'react-native';
 import { Stack } from 'expo-router';
 import Constants from 'expo-constants';
-import * as Updates from 'expo-updates';
+let Updates: any = {};
 import { Ionicons } from '@expo/vector-icons';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
