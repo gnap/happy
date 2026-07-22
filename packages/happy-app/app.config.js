@@ -21,6 +21,7 @@ export default {
         scheme: "happy",
         userInterfaceStyle: "automatic",
         newArchEnabled: true,
+        jsEngine: "jsc",
         notification: {
             icon: "./sources/assets/images/icon-notification.png",
             iosDisplayInForeground: true
