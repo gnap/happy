@@ -13,7 +13,7 @@ import { projectPath } from '@/projectPath';
 
 /**
  * Generate a temporary settings file with SessionStart hook configuration
- * 
+ *
  * @param port - The port where Happy server is listening
  * @returns Path to the generated settings file
  */
