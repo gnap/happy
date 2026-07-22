@@ -9,7 +9,7 @@ import { loop } from '@/claude/loop';
 import { AgentState, Metadata, getUserMessageText, getUserMessageFiles } from '@/api/types';
 import type { UserMessage } from '@/api/types';
 import { BUILD_VERSION } from '../version';
-import { Credentials, readSettings, getProfileEnvironmentVariables, writeSessionPidFile, removeSessionPidFile, SandboxConfig } from '@/persistence';
+import { Credentials, readSettings, getProfileEnvironmentVariables, writeSessionPidFile, removeSessionPidFile } from '@/persistence';
 import { EnhancedMode, PermissionMode, EffortLevel } from './loop';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
@@ -20,7 +20,6 @@ import { getEnvironmentInfo } from '@/ui/doctor';
 import { configuration } from '@/configuration';
 import { createEnvelope } from '@slopus/happy-wire';
 import { notifyDaemonSessionStarted, notifyDaemonSessionEnding } from '@/daemon/controlClient';
-import { startUnixSocketClient } from '@/daemon/unixSocketClient';
 import { initialMachineMetadata } from '@/daemon/run';
 import { startHappyServer } from '@/claude/utils/startHappyServer';
 import { startHookServer } from '@/claude/utils/startHookServer';
@@ -90,8 +89,6 @@ export interface StartOptions {
     claudeArgs?: string[]
     startedBy?: 'daemon' | 'terminal'
     noSandbox?: boolean
-    /** Per-session sandbox config override (from daemon --sandbox-config flag). Takes priority over settings.json. */
-    sandboxOverride?: SandboxConfig
     /** Explicit session tag to resume when daemon respawns this Claude process. */
     resumeSessionTag?: string
     /** Pre-wake server seq from daemon poll (fetch messages with seq > this value). */
@@ -129,10 +126,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     // Get machine ID from settings (should already be set up)
     const settings = await readSettings();
     let machineId = settings?.machineId
-    // Priority: --no-sandbox > --sandbox-config (per-session from daemon) > settings.json
-    // Mutable: user messages may change sandbox isolation at runtime without restart.
-    let sandboxConfig = options.noSandbox ? undefined : (options.sandboxOverride ?? settings?.sandboxConfig);
-    let sandboxEnabled = Boolean(sandboxConfig?.enabled);
+    const sandboxConfig = options.noSandbox ? undefined : settings?.sandboxConfig;
+    const sandboxEnabled = Boolean(sandboxConfig?.enabled);
     let initialPermissionMode = applySandboxPermissionPolicy(
         resolveInitialClaudePermissionMode(options.permissionMode, options.claudeArgs),
         sandboxEnabled,
@@ -258,18 +253,6 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     reportToDaemon();
     setInterval(reportToDaemon, 60_000);
 
-    // Connect to daemon's Unix socket for real-time IPC (registration + heartbeat).
-    // Falls back to HTTP webhook (above) when socket is unavailable.
-    const stopSocketClient = startUnixSocketClient({
-        sessionId: response.id,
-        pid: process.pid,
-        sessionTag,
-        metadata,
-    }, reportToDaemon);
-    // Cleanup socket on graceful exit
-    process.on('beforeExit', () => stopSocketClient());
-    process.on('exit', () => stopSocketClient());
-
     // Extract SDK metadata in background and update session when ready.
     // The callback fires asynchronously after extractSDKMetadata completes, so `session`
     // (declared below) is already initialized by the time this runs.
@@ -292,13 +275,6 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         : undefined;
     const session = api.sessionSyncClient(response, true, sessionClientOpts);
     writeSessionPidFile(session.sessionId);
-
-    // Resume ignores new metadata (server returns stored). Explicitly sync sandbox
-    // so restart-with-sandbox correctly updates the session's isolation level.
-    if (sandboxConfig?.enabled) {
-        session.updateMetadata((current) => ({ ...current, sandbox: sandboxConfig }))
-            .catch((err: unknown) => logger.debug('[START] Failed to sync sandbox to session metadata:', err));
-    }
 
     let handleUserMessage: ((message: UserMessage) => Promise<void>) | null = null;
     let isA2AInboxTurnActiveFn: () => boolean = () => false;
@@ -365,8 +341,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         customSystemPrompt: mode.customSystemPrompt,
         appendSystemPrompt: mode.appendSystemPrompt,
         allowedTools: mode.allowedTools,
-        disallowedTools: mode.disallowedTools,
-        sandboxIsolation: mode.sandboxIsolation,
+        disallowedTools: mode.disallowedTools
     }));
 
     // Forward messages to the queue
@@ -403,7 +378,6 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         appendSystemPrompt: currentAppendSystemPrompt,
         allowedTools: currentAllowedTools,
         disallowedTools: currentDisallowedTools,
-        sandboxIsolation: sandboxEnabled ? (sandboxConfig?.sessionIsolation ?? 'workspace') : 'off',
     });
     const a2aInbox = createA2AInboxTurnController({
         logTag: 'claude',
@@ -453,40 +427,6 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             logger.debug(`[loop] Model updated from user message: ${messageModel || 'reset to default'}`);
         } else {
             logger.debug(`[loop] User message received with no model override, using current: ${currentModel || 'default'}`);
-        }
-
-        // Resolve sandbox isolation — runtime switchable like model/permission mode, no restart needed.
-        let messageSandboxIsolation: string | undefined;
-        let sandboxIsolationChanged = false;
-        if (message.meta !== undefined && Object.prototype.hasOwnProperty.call(message.meta, 'sandboxIsolation')) {
-            messageSandboxIsolation = message.meta.sandboxIsolation as string;
-            if (messageSandboxIsolation === 'off') {
-                sandboxEnabled = false;
-                sandboxConfig = undefined;
-            } else {
-                sandboxEnabled = true;
-                sandboxConfig = {
-                    enabled: true,
-                    sessionIsolation: (messageSandboxIsolation as 'strict' | 'workspace' | 'custom') || 'workspace',
-                    workspaceRoot: sandboxConfig?.workspaceRoot,
-                    customWritePaths: sandboxConfig?.customWritePaths ?? [],
-                    denyReadPaths: sandboxConfig?.denyReadPaths ?? ['~/.ssh', '~/.aws', '~/.gnupg'],
-                    extraWritePaths: sandboxConfig?.extraWritePaths ?? ['/tmp'],
-                    denyWritePaths: sandboxConfig?.denyWritePaths ?? ['.env'],
-                    networkMode: sandboxConfig?.networkMode ?? 'allowed',
-                    allowedDomains: sandboxConfig?.allowedDomains ?? [],
-                    deniedDomains: sandboxConfig?.deniedDomains ?? [],
-                    allowLocalBinding: sandboxConfig?.allowLocalBinding ?? true,
-                };
-            }
-            sandboxIsolationChanged = true;
-            logger.debug(`[loop] Sandbox isolation updated from user message: ${messageSandboxIsolation} (enabled=${sandboxEnabled})`);
-            if (currentSession) {
-                currentSession.sandboxConfig = sandboxConfig;
-            }
-            // Update local metadata and notify daemon so restart preserves the new sandbox.
-            metadata.sandbox = sandboxConfig?.enabled ? sandboxConfig : null;
-            notifyDaemonSessionStarted(session.sessionId, metadata).catch(() => {});
         }
 
         // Resolve custom system prompt - use message.meta.customSystemPrompt if provided, otherwise use current
@@ -655,8 +595,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 customSystemPrompt: messageCustomSystemPrompt,
                 appendSystemPrompt: messageAppendSystemPrompt,
                 allowedTools: messageAllowedTools,
-                disallowedTools: messageDisallowedTools,
-                sandboxIsolation: sandboxEnabled ? (sandboxConfig?.sessionIsolation ?? 'workspace') : 'off',
+                disallowedTools: messageDisallowedTools
             };
             messageQueue.pushIsolateAndClear(specialCommand.originalMessage || getUserMessageText(message), enhancedMode, message.meta);
             logger.debugLargeJson('[start] /compact command pushed to queue:', message);
@@ -673,8 +612,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 customSystemPrompt: messageCustomSystemPrompt,
                 appendSystemPrompt: messageAppendSystemPrompt,
                 allowedTools: messageAllowedTools,
-                disallowedTools: messageDisallowedTools,
-                sandboxIsolation: sandboxEnabled ? (sandboxConfig?.sessionIsolation ?? 'workspace') : 'off',
+                disallowedTools: messageDisallowedTools
             };
             messageQueue.pushIsolateAndClear(specialCommand.originalMessage || getUserMessageText(message), enhancedMode, message.meta);
             logger.debugLargeJson('[start] /compact command pushed to queue:', message);
@@ -690,8 +628,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             customSystemPrompt: messageCustomSystemPrompt,
             appendSystemPrompt: messageAppendSystemPrompt,
             allowedTools: messageAllowedTools,
-            disallowedTools: messageDisallowedTools,
-            sandboxIsolation: sandboxEnabled ? (sandboxConfig?.sessionIsolation ?? 'workspace') : 'off',
+            disallowedTools: messageDisallowedTools
         };
         const metaChanged =
             message.meta?.permissionMode !== undefined
@@ -726,21 +663,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         // and echo it back for outbox cleanup.
         const msgText = getUserMessageText(message);
         const files = getUserMessageFiles(message);
-        // Sandbox isolation changes trigger an isolated push so the launcher
-        // resets the mode hash and respawns the SDK process immediately, rather
-        // than waiting until the next turn.
-        if (sandboxIsolationChanged) {
-            messageQueue.pushIsolated(msgText, enhancedMode, { meta: message.meta, files });
-            logger.debug('[loop] Sandbox changed — pushing with isolate for immediate respawn');
-            // Persist sandbox change to session metadata so the App sees the update.
-            session.updateMetadata((m) => ({
-                ...m,
-                sandbox: sandboxConfig?.enabled ? sandboxConfig : null,
-                currentSandboxIsolation: messageSandboxIsolation ?? 'off',
-            })).catch((err) => logger.debug('[loop] Failed to persist sandbox to session metadata', err));
-        } else {
-            messageQueue.push(msgText, enhancedMode, { meta: message.meta, files });
-        }
+        messageQueue.push(msgText, enhancedMode, { meta: message.meta, files });
         logger.debugLargeJson('User message pushed to queue:', message)
     };
     session.onUserMessage(handleUserMessage);
@@ -867,7 +790,6 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         claudeArgs: options.claudeArgs,
         sandboxConfig,
         hookSettingsPath,
-        hookServerPort: hookServer.port,
         jsRuntime: options.jsRuntime
     });
 

@@ -13,7 +13,7 @@ import { join } from 'node:path';
 
 import { ApiClient } from '@/api/api';
 import { logger } from '@/ui/logger';
-import { Credentials, readSettings, writeSessionPidFile, removeSessionPidFile, SandboxConfig } from '@/persistence';
+import { Credentials, readSettings, writeSessionPidFile, removeSessionPidFile } from '@/persistence';
 import { createSessionMetadata } from '@/utils/createSessionMetadata';
 import { initialMachineMetadata } from '@/daemon/run';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
@@ -58,8 +58,6 @@ import { ConversationHistory } from '@/gemini/utils/conversationHistory';
 export async function runGemini(opts: {
   credentials: Credentials;
   startedBy?: 'daemon' | 'terminal';
-  noSandbox?: boolean;
-  sandboxOverride?: SandboxConfig;
   resumeSessionTag?: string;
   resumeAfterSeq?: number;
 }): Promise<void> {
@@ -82,7 +80,7 @@ export async function runGemini(opts: {
 
   const settings = await readSettings();
   const machineId = settings?.machineId;
-  const sandboxConfig = opts.noSandbox ? undefined : (opts.sandboxOverride ?? settings?.sandboxConfig);
+  const sandboxConfig = settings?.sandboxConfig;
   if (!machineId) {
     console.error(`[START] No machine ID found in settings, which is unexpected since authAndSetupMachineIfNeeded should have created it. Please report this issue on https://github.com/slopus/happy-cli/issues`);
     process.exit(1);

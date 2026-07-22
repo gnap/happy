@@ -19,12 +19,10 @@ export class Session {
     claudeArgs?: string[];  // Made mutable to allow filtering
     readonly mcpServers: Record<string, any>;
     readonly allowedTools?: string[];
-    sandboxConfig?: SandboxConfig; // Mutable: user messages may change sandbox isolation at runtime
+    readonly sandboxConfig?: SandboxConfig;
     readonly _onModeChange: (mode: 'local' | 'remote') => void;
     /** Path to temporary settings file with SessionStart hook (required for session tracking) */
     readonly hookSettingsPath: string;
-    /** Port of the hook server. Used to inline SessionStart hook when sandbox is enabled. */
-    readonly hookServerPort: number;
     /** JavaScript runtime to use for spawning Claude Code (default: 'node') */
     readonly jsRuntime: JsRuntime;
 
@@ -65,8 +63,6 @@ export class Session {
         sandboxConfig?: SandboxConfig,
         /** Path to temporary settings file with SessionStart hook (required for session tracking) */
         hookSettingsPath: string,
-        /** Port of the hook server. Used to inline SessionStart hook when sandbox is enabled. */
-        hookServerPort: number,
         /** JavaScript runtime to use for spawning Claude Code (default: 'node') */
         jsRuntime?: JsRuntime,
     }) {
@@ -83,7 +79,6 @@ export class Session {
         this.sandboxConfig = opts.sandboxConfig;
         this._onModeChange = opts.onModeChange;
         this.hookSettingsPath = opts.hookSettingsPath;
-        this.hookServerPort = opts.hookServerPort;
         this.jsRuntime = opts.jsRuntime ?? 'node';
 
         // Start keep alive

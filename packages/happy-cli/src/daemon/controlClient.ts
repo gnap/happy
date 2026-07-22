@@ -149,14 +149,12 @@ export async function spawnDaemonSession(opts: {
   agent?: 'claude' | 'codex' | 'cursor' | 'gemini';
   environmentVariables?: Record<string, string>;
   resumeSessionTag?: string;
-  sandboxConfig?: unknown;
 }): Promise<{ success: boolean; sessionId?: string; error?: string }> {
   const result = await daemonPost('/spawn-session', {
     directory: opts.directory,
     agent: opts.agent,
     environmentVariables: opts.environmentVariables,
-    resumeSessionTag: opts.resumeSessionTag,
-    sandboxConfig: opts.sandboxConfig,
+    resumeSessionTag: opts.resumeSessionTag
   });
   if (result.error) return { success: false, error: result.error };
   if (result.success && result.sessionId) return { success: true, sessionId: result.sessionId };
@@ -239,9 +237,8 @@ export async function isDaemonRunningCurrentlyInstalledHappyVersion(): Promise<b
     // Read package.json on demand from disk - so we are guaranteed to get the latest version
     const packageJsonPath = join(projectPath(), 'package.json');
     const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
-    // Use the compiled BUILD_VERSION (with commit hash) to match the daemon state format
-    const currentCliVersion = configuration.currentCliVersion;
-
+    const currentCliVersion = packageJson.version;
+    
     logger.debug(`[DAEMON CONTROL] Current CLI version: ${currentCliVersion}, Daemon started with version: ${state.startedWithCliVersion}`);
     return currentCliVersion === state.startedWithCliVersion;
     

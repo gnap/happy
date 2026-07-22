@@ -269,34 +269,8 @@ function migrateSettings(raw: any, fromVersion: number): any {
 }
 
 /**
- * Single session record — the canonical persisted representation.
- * Every session the daemon knows about has one of these, regardless of
- * whether it's running, stopped, or archived.
- */
-export interface PersistedSession {
-  sessionId: string;
-  directory: string;
-  sessionTag: string;
-  agent: string;
-  /** Per-session sandbox config (may be undefined if never set). */
-  sandbox?: Record<string, any>;
-  /** PID of the child process (-1 if unknown after daemon restart). */
-  pid: number;
-  /** 'running' = active, 'stopped' = exited but not archived. */
-  status: 'running' | 'stopped';
-  /** Last known message seq from server poll. */
-  lastSeq: number;
-  exitReason?: string;
-  exitTime?: number;
-  lastHeartbeat?: number;
-}
-
-/**
  * Daemon state persisted locally (different from API DaemonState)
- * This is written to disk by the daemon to track its local process state.
- *
- * `sessions` is the canonical session store — all other session-keyed maps
- * are derived from it at runtime, not persisted independently.
+ * This is written to disk by the daemon to track its local process state
  */
 export interface DaemonLocallyPersistedState {
   /** Absent in tombstone state (daemon stopped but session data preserved) */
@@ -307,27 +281,18 @@ export interface DaemonLocallyPersistedState {
   startedWithCliVersion?: string;
   lastHeartbeat?: string;
   daemonLogPath?: string;
-  /**
-   * Primary session state: sessionId -> all session attributes.
-   * Replaces the previous parallel maps (lastSessionTagBySessionId,
-   * lastDirectoryBySessionId, lastAgentBySessionId, lastSandboxBySessionId,
-   * stoppedSessions, lastSeqBySessionId).
-   */
-  sessions?: Record<string, PersistedSession>;
-  /** Session IDs that have been explicitly archived and must never respawn. */
-  archivedSessionIds?: Record<string, number>;
-  // ── legacy fields — read for backward compat during migration, no longer written ──
-  /** @deprecated Migrated into `sessions` on load. */
+  /** Directory -> last known session tag (Cursor). Persisted so restart can reuse same server session after process/daemon restart. */
   lastSessionTagByDirectory?: Record<string, string>;
-  /** @deprecated Migrated into `sessions` on load. */
+  /** Server session ID -> session tag (Cursor). More precise than directory-keyed map when multiple sessions share a directory. */
   lastSessionTagBySessionId?: Record<string, string>;
-  /** @deprecated Migrated into `sessions` on load. */
+  /** Server session ID -> directory. Enables heartbeat polling to find the directory for a session that has new messages. */
   lastDirectoryBySessionId?: Record<string, string>;
-  /** @deprecated Migrated into `sessions` on load. */
+  /** Server session ID -> agent type. Enables correct agent selection when auto-respawning. */
   lastAgentBySessionId?: Record<string, string>;
-  /** @deprecated Migrated into `sessions` on load. */
-  lastSandboxBySessionId?: Record<string, any>;
-  /** @deprecated Migrated into `sessions` on load. */
+  /**
+   * Stopped sessions that have not been archived. Persisted so they survive daemon restart
+   * and can still be restarted or trigger auto-respawn on new messages.
+   */
   stoppedSessions?: Array<{
     happySessionId: string;
     pid: number;
@@ -338,103 +303,10 @@ export interface DaemonLocallyPersistedState {
     exitTime?: number;
     lastHeartbeat?: number;
   }>;
-  /** @deprecated Migrated into `sessions[].lastSeq` on load. */
+  /** Session IDs that have been explicitly archived and must never respawn. */
+  archivedSessionIds?: Record<string, number>;
+  /** Server session ID -> last known message seq (daemon poll baseline for auto-respawn). */
   lastSeqBySessionId?: Record<string, number>;
-}
-
-/**
- * Migrate legacy parallel-map state into the unified `sessions` record.
- * Runs once on daemon startup when old-format state is detected.
- * Returns the merged sessions map (mutates `state.sessions` in place).
- */
-export function migrateLegacySessionState(state: DaemonLocallyPersistedState): Record<string, PersistedSession> {
-  const sessions: Record<string, PersistedSession> = state.sessions ?? {};
-
-  // Seed from the separate maps — each map provides one attribute per sessionId.
-  // lastDirectoryBySessionId has the most complete key set (every persisted session has a directory).
-  const allIds = new Set([
-    ...Object.keys(state.lastDirectoryBySessionId ?? {}),
-    ...Object.keys(state.lastSessionTagBySessionId ?? {}),
-    ...Object.keys(state.lastAgentBySessionId ?? {}),
-    ...Object.keys(state.lastSandboxBySessionId ?? {}),
-    ...Object.keys(state.lastSeqBySessionId ?? {}),
-  ]);
-
-  for (const id of allIds) {
-    if (!sessions[id]) {
-      sessions[id] = {
-        sessionId: id,
-        directory: state.lastDirectoryBySessionId?.[id] ?? '',
-        sessionTag: state.lastSessionTagBySessionId?.[id] ?? '',
-        agent: state.lastAgentBySessionId?.[id] ?? 'cursor',
-        sandbox: state.lastSandboxBySessionId?.[id],
-        pid: -1,
-        status: 'stopped',
-        lastSeq: state.lastSeqBySessionId?.[id] ?? -1,
-      };
-    }
-  }
-
-  // Merge stoppedSessions entries — these have exit metadata and possibly valid PIDs
-  for (const s of state.stoppedSessions ?? []) {
-    if (!s.happySessionId) continue;
-    const existing = sessions[s.happySessionId];
-    if (existing) {
-      existing.pid = s.pid > 0 ? s.pid : existing.pid;
-      existing.status = 'stopped';
-      existing.exitReason = s.exitReason ?? existing.exitReason;
-      existing.exitTime = s.exitTime ?? existing.exitTime;
-      existing.lastHeartbeat = s.lastHeartbeat ?? existing.lastHeartbeat;
-      if (s.directory && !existing.directory) existing.directory = s.directory;
-      if (s.sessionTag && !existing.sessionTag) existing.sessionTag = s.sessionTag;
-      if (s.agent && existing.agent === 'cursor') existing.agent = s.agent;
-    } else {
-      sessions[s.happySessionId] = {
-        sessionId: s.happySessionId,
-        directory: s.directory ?? '',
-        sessionTag: s.sessionTag ?? '',
-        agent: s.agent ?? 'cursor',
-        pid: s.pid,
-        status: 'stopped',
-        lastSeq: -1,
-        exitReason: s.exitReason,
-        exitTime: s.exitTime,
-        lastHeartbeat: s.lastHeartbeat,
-      };
-    }
-  }
-
-  // Carry over lastSessionTagByDirectory — reverse index, pick most recent per directory
-  for (const [dir, tag] of Object.entries(state.lastSessionTagByDirectory ?? {})) {
-    const existing = Object.values(sessions).find(s => s.directory === dir && s.sessionTag === tag);
-    if (!existing) {
-      // This tag isn't linked to any sessionId in the other maps; keep a lightweight entry
-      const orphanId = `dir:${dir}`;
-      if (!sessions[orphanId]) {
-        sessions[orphanId] = {
-          sessionId: orphanId,
-          directory: dir,
-          sessionTag: tag,
-          agent: 'cursor',
-          pid: -1,
-          status: 'stopped',
-          lastSeq: -1,
-        };
-      }
-    }
-  }
-
-  // Clear legacy fields so they aren't written back
-  delete state.lastSessionTagByDirectory;
-  delete state.lastSessionTagBySessionId;
-  delete state.lastDirectoryBySessionId;
-  delete state.lastAgentBySessionId;
-  delete state.lastSandboxBySessionId;
-  delete state.stoppedSessions;
-  delete state.lastSeqBySessionId;
-
-  state.sessions = sessions;
-  return sessions;
 }
 
 function writeFileAtomically(filePath: string, content: string): void {
@@ -735,39 +607,17 @@ export async function clearDaemonState(): Promise<void> {
     Object.keys(existing?.lastSessionTagBySessionId ?? {}).length > 0 ||
     Object.keys(existing?.lastSessionTagByDirectory ?? {}).length > 0 ||
     Object.keys(existing?.lastAgentBySessionId ?? {}).length > 0 ||
-    Object.keys(existing?.archivedSessionIds ?? {}).length > 0 ||
-    Object.keys(existing?.sessions ?? {}).length > 0;
+    Object.keys(existing?.archivedSessionIds ?? {}).length > 0;
 
   if (hasDataToPreserve) {
-    // Write tombstone: no pid/httpPort (signals daemon is stopped), but keep session data.
-    // Write both new `sessions` format and legacy fields for backward compat.
-    const sessions = existing!.sessions ?? {};
-    const lastSessionTagByDirectory: Record<string, string> = {};
-    const lastSessionTagBySessionId: Record<string, string> = {};
-    const lastDirectoryBySessionId: Record<string, string> = {};
-    const lastAgentBySessionId: Record<string, string> = {};
-    for (const [, entry] of Object.entries(sessions)) {
-      if (!entry.sessionId || entry.sessionId.startsWith('dir:')) continue;
-      if (entry.directory && entry.sessionTag) lastSessionTagByDirectory[entry.directory] = entry.sessionTag;
-      if (entry.sessionTag) lastSessionTagBySessionId[entry.sessionId] = entry.sessionTag;
-      if (entry.directory) lastDirectoryBySessionId[entry.sessionId] = entry.directory;
-      if (entry.agent) lastAgentBySessionId[entry.sessionId] = entry.agent;
-    }
+    // Write tombstone: no pid/httpPort (signals daemon is stopped), but keep session data
     writeFileAtomically(configuration.daemonStateFile, JSON.stringify({
-      sessions: existing!.sessions,
+      stoppedSessions: existing!.stoppedSessions,
+      lastDirectoryBySessionId: existing!.lastDirectoryBySessionId,
+      lastSessionTagBySessionId: existing!.lastSessionTagBySessionId,
+      lastSessionTagByDirectory: existing!.lastSessionTagByDirectory,
+      lastAgentBySessionId: existing!.lastAgentBySessionId,
       archivedSessionIds: existing!.archivedSessionIds,
-      // Legacy fields for old daemon binaries
-      stoppedSessions: existing!.stoppedSessions ?? Object.values(sessions).filter(e => e.status === 'stopped').map(e => ({
-        happySessionId: e.sessionId, pid: e.pid, directory: e.directory,
-        sessionTag: e.sessionTag, agent: e.agent,
-        exitReason: e.exitReason, exitTime: e.exitTime, lastHeartbeat: e.lastHeartbeat,
-      })),
-      lastDirectoryBySessionId: existing!.lastDirectoryBySessionId ?? lastDirectoryBySessionId,
-      lastSessionTagBySessionId: existing!.lastSessionTagBySessionId ?? lastSessionTagBySessionId,
-      lastSessionTagByDirectory: existing!.lastSessionTagByDirectory ?? lastSessionTagByDirectory,
-      lastAgentBySessionId: existing!.lastAgentBySessionId ?? lastAgentBySessionId,
-      lastSandboxBySessionId: existing!.lastSandboxBySessionId,
-      lastSeqBySessionId: existing!.lastSeqBySessionId,
     }, null, 2));
   } else if (existsSync(configuration.daemonStateFile)) {
     await unlink(configuration.daemonStateFile);

@@ -109,7 +109,7 @@ type MachineRpcHandlers = {
     spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
     stopSession: (sessionId: string) => boolean;
     archiveSession: (sessionId: string) => boolean;
-    restartSession: (sessionId: string, sandboxConfig?: any) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
+    restartSession: (sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
     requestShutdown: () => void;
 }
 
@@ -143,14 +143,14 @@ export class ApiMachineClient {
     }: MachineRpcHandlers) {
         // Register spawn session handler
         this.rpcHandlerManager.registerHandler('spawn-happy-session', async (params: any) => {
-            const { directory, sessionId, machineId, approvedNewDirectoryCreation, agent, token, environmentVariables, sandboxConfig } = params || {};
+            const { directory, sessionId, machineId, approvedNewDirectoryCreation, agent, token, environmentVariables } = params || {};
             logger.debug(`[API MACHINE] Spawning session with params: ${JSON.stringify(params)}`);
 
             if (!directory) {
                 throw new Error('Directory is required');
             }
 
-            const result = await spawnSession({ directory, sessionId, machineId, approvedNewDirectoryCreation, agent, token, environmentVariables, sandboxConfig });
+            const result = await spawnSession({ directory, sessionId, machineId, approvedNewDirectoryCreation, agent, token, environmentVariables });
 
             switch (result.type) {
                 case 'success':
@@ -200,23 +200,15 @@ export class ApiMachineClient {
             return { success: true, message: archived ? 'Session archived' : 'Session stopped' };
         });
 
-        // Register restart session handler.
-        // Returns immediately (fire-and-forget) to avoid server-side RPC timeout.
-        // The actual restart runs asynchronously; the App will see the session come
-        // back online through normal session update events.
-        this.rpcHandlerManager.registerHandler('restartSession', (params: any) => {
-            const { sessionId, sandboxConfig } = params || {};
+        // Register restart session handler
+        this.rpcHandlerManager.registerHandler('restartSession', async (params: any) => {
+            const { sessionId } = params || {};
             if (!sessionId) {
                 throw new Error('Session ID is required');
             }
-            logger.debug(`[API MACHINE] restartSession params: sessionId=${sessionId}, sandboxConfig=${JSON.stringify(sandboxConfig)}`);
-            // Fire-and-forget — don't await, don't block the RPC response
-            restartSession(sessionId, sandboxConfig).then(r => {
-                logger.debug(`[API MACHINE] restartSession: ${sessionId} — success=${r.success}`);
-            }).catch(err => {
-                logger.debug(`[API MACHINE] restartSession: ${sessionId} — error:`, err);
-            });
-            return { success: true };
+            const result = await restartSession(sessionId);
+            logger.debug(`[API MACHINE] restartSession: ${sessionId} — success=${result.success}`);
+            return result;
         });
 
         // Register stop daemon handler
