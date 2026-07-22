@@ -91,7 +91,7 @@ class ApiSocket {
 
         // Listen for browser online/offline events to recover from sleep/wake
         // where socket.io may not detect network restoration on Linux.
-        if (typeof window !== 'undefined' && !this._hasNetworkListeners) {
+        if (typeof window !== 'undefined' && typeof window.addEventListener === 'function' && !this._hasNetworkListeners) {
             this._hasNetworkListeners = true;
             window.addEventListener('online', () => {
                 if (!this.socket?.connected) {
