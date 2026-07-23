@@ -24,7 +24,7 @@
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:debug": "playwright test --debug",
-    "postinstall": "patch-package && bash scripts/patch-sdk57.sh && npx setup-skia-web public",
+    "postinstall": "patch-package && npx setup-skia-web public",
     "generate-theme": "tsx sources/theme.gen.ts",
     "generate:cursor-icon": "node scripts/generate-cursor-icon.mjs",
     "// ==== Development/Preview/Production Variants ====": "",
