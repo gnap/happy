@@ -7,7 +7,7 @@ import { ReasoningProcessor } from './utils/reasoningProcessor';
 import { DiffProcessor } from './utils/diffProcessor';
 import { randomUUID } from 'node:crypto';
 import { logger } from '@/ui/logger';
-import { Credentials, readSettings, writeSessionPidFile, removeSessionPidFile } from '@/persistence';
+import { Credentials, readSettings, writeSessionPidFile, removeSessionPidFile, SandboxConfig } from '@/persistence';
 import { initialMachineMetadata } from '@/daemon/run';
 import os from 'node:os';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
@@ -67,6 +67,7 @@ export async function runCodex(opts: {
     credentials: Credentials;
     startedBy?: 'daemon' | 'terminal';
     noSandbox?: boolean;
+    sandboxOverride?: SandboxConfig;
     resumeSessionTag?: string;
     resumeAfterSeq?: number;
 }): Promise<void> {
@@ -97,7 +98,7 @@ export async function runCodex(opts: {
 
     const settings = await readSettings();
     let machineId = settings?.machineId;
-    const sandboxConfig = opts.noSandbox ? undefined : settings?.sandboxConfig;
+    const sandboxConfig = opts.noSandbox ? undefined : (opts.sandboxOverride ?? settings?.sandboxConfig);
     if (!machineId) {
         console.error(`[START] No machine ID found in settings, which is unexpected since authAndSetupMachineIfNeeded should have created it. Please report this issue on https://github.com/slopus/happy-cli/issues`);
         process.exit(1);

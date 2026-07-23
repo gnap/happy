@@ -6,6 +6,7 @@
  */
 
 import { AsyncLock } from '@/utils/lock';
+import { logger } from '@/lib';
 
 interface QueueItem {
     id: number;                    // Incremental ID for ordering
@@ -121,13 +122,21 @@ export class OutgoingMessageQueue {
             
             // Send if not already sent
             if (!item.sent) {
-                // Pass task_notification / task_updated through so the mapper can
-                // emit tool-call-end for completed background tasks. Other system
-                // messages (thinking_tokens, init, etc.) are still suppressed.
-                const isTaskNotification = item.logMessage.type === 'system'
-                    && (item.logMessage.subtype === 'task_notification' || item.logMessage.subtype === 'task_updated');
-                if (item.logMessage.type !== 'system' || isTaskNotification) {
+                // Pass task lifecycle messages through so the mapper can emit updates
+                // for background tasks (Workflow, Agent, etc.). Other system messages
+                // (thinking_tokens, init, etc.) are still suppressed.
+                const isTaskMessage = item.logMessage.type === 'system'
+                    && (item.logMessage.subtype === 'task_notification'
+                        || item.logMessage.subtype === 'task_updated'
+                        || item.logMessage.subtype === 'task_started'
+                        || item.logMessage.subtype === 'task_progress');
+                if (item.logMessage.type !== 'system' || isTaskMessage) {
+                    if (isTaskMessage) {
+                        logger.debug(`[msgQ] SENDING system ${item.logMessage.subtype} tool_use_id=${item.logMessage.tool_use_id} task_id=${item.logMessage.task_id}`);
+                    }
                     this.sendFunction(item.logMessage);
+                } else if (item.logMessage.type === 'system') {
+                    logger.debug(`[msgQ] SUPPRESS system ${item.logMessage.subtype}`);
                 }
                 item.sent = true;
             }

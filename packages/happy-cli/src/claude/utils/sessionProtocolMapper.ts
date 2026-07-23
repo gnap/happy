@@ -1,5 +1,6 @@
 import { createId } from '@paralleldrive/cuid2';
 import type { RawJSONLines } from '@/claude/types';
+import { logger } from '@/lib';
 import {
     createEnvelope,
     type SessionEnvelope,
@@ -181,13 +182,15 @@ function parseTaskCreateResult(result: unknown): { id: string; subject: string }
 function extractBackgroundTaskId(block: Record<string, unknown>, message: RawJSONLines): string | undefined {
     // Try toolUseResult first (JSONL format)
     const tur = message.toolUseResult as Record<string, unknown> | undefined;
-    if (tur?.backgroundTaskId && typeof tur.backgroundTaskId === 'string') {
-        return tur.backgroundTaskId;
+    if (tur) {
+        if (typeof tur.backgroundTaskId === 'string') return tur.backgroundTaskId;
+        if (typeof tur.taskId === 'string') return tur.taskId;
     }
     // Try tool_use_result (raw stream format)
     const tur2 = (message as Record<string, unknown>).tool_use_result as Record<string, unknown> | undefined;
-    if (tur2?.backgroundTaskId && typeof tur2.backgroundTaskId === 'string') {
-        return tur2.backgroundTaskId;
+    if (tur2) {
+        if (typeof tur2.backgroundTaskId === 'string') return tur2.backgroundTaskId;
+        if (typeof tur2.taskId === 'string') return tur2.taskId;
     }
     // Fallback: parse from content string "Command running in background with ID: xxx"
     const content = block.content;
@@ -569,20 +572,38 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
     }
 
     if (message.type === 'system') {
-        // task_notification: background task (Monitor, Bash run_in_background) completed.
-        // Emit a tool-call-end so the App's tool card transitions from "running" to done.
+        // Task lifecycle: background tasks (Workflow, Agent, Monitor, etc.)
+        // emit tool-call-end envelopes so the App can show progress and results.
         const subtype = (message as Record<string, unknown>).subtype;
-        if (subtype === 'task_notification') {
-            const toolUseId = (message as Record<string, unknown>).tool_use_id;
-            const status = (message as Record<string, unknown>).status;
-            if (typeof toolUseId === 'string' && toolUseId.length > 0) {
-                const turnId = ensureTurn(state, envelopes);
+        const toolUseId = (message as Record<string, unknown>).tool_use_id;
+        const taskId = (message as Record<string, unknown>).task_id;
+        if (subtype === 'task_notification' || subtype === 'task_started' || subtype === 'task_progress' || subtype === 'task_updated') {
+            logger.debug(`[mapper] SYSTEM ${subtype} tool_use_id=${toolUseId} task_id=${taskId} hasToolUseId=${typeof toolUseId === 'string' && toolUseId.length > 0}`);
+        }
+        if (typeof toolUseId === 'string' && toolUseId.length > 0) {
+            const turnId = ensureTurn(state, envelopes);
+            if (subtype === 'task_notification') {
+                // Final result — include summary for App display
+                const status = (message as Record<string, unknown>).status;
+                const summary = (message as Record<string, unknown>).summary;
+                logger.debug(`[mapper] EMIT tool-call-end for task_notification call=${toolUseId} status=${status}`);
                 envelopes.push(createEnvelope('agent', {
                     t: 'tool-call-end',
                     call: toolUseId,
-                    result: { task_notification: status },
+                    result: { task_notification: status, summary: typeof summary === 'string' ? summary : undefined },
+                }, { turn: turnId }));
+            } else if (subtype === 'task_started' || subtype === 'task_progress') {
+                // Progress update
+                const summary = (message as Record<string, unknown>).summary;
+                logger.debug(`[mapper] EMIT tool-call-end for ${subtype} call=${toolUseId}`);
+                envelopes.push(createEnvelope('agent', {
+                    t: 'tool-call-end',
+                    call: toolUseId,
+                    result: { [subtype]: summary ?? true },
                 }, { turn: turnId }));
             }
+        } else if (subtype === 'task_notification' || subtype === 'task_started' || subtype === 'task_progress') {
+            logger.debug(`[mapper] SKIP ${subtype} — no valid tool_use_id (got: ${JSON.stringify(toolUseId)})`);
         }
         return {
             currentTurnId: state.currentTurnId,
@@ -837,10 +858,17 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                         maybeEmitSubagentStop(state, turnId, sessionSubagentForToolResult, envelopes);
                     }
                 }
+                // Prefer structured toolUseResult (from Workflow/Agent/Monitor async_launched)
+                // over the plain-text content so the App's isIntermediate check works.
+                const tur = (message as Record<string, unknown>).toolUseResult;
+                const resultContent = tur ?? block.content;
+                if (tur) {
+                    logger.debug(`[mapper] Using toolUseResult for call=${block.tool_use_id} hasStatus=${(tur as any).status}`);
+                }
                 envelopes.push(createEnvelope('agent', {
                     t: 'tool-call-end',
                     call: block.tool_use_id,
-                    result: block.content,
+                    result: resultContent,
                 }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
                 continue;
             }
