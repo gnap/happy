@@ -10,6 +10,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
 import { t } from '@/text';
 import { MultiTextInput, MultiTextInputHandle } from '@/components/MultiTextInput';
+import { onPathSelected } from '../index';
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -121,7 +122,7 @@ export default function PathPickerScreen() {
 
     const handleSelectPath = React.useCallback(() => {
         const pathToUse = customPath.trim() || machine?.metadata?.homeDir || '/home';
-        router.setParams({ path: pathToUse } as any);
+        onPathSelected(pathToUse);
         router.back();
     }, [customPath, router, machine]);
 

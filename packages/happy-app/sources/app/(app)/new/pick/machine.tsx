@@ -9,6 +9,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 import { ItemList } from '@/components/ItemList';
 import { SearchableListSelector } from '@/components/SearchableListSelector';
+import { onMachineSelected } from '../index';
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -40,7 +41,7 @@ export default function MachinePickerScreen() {
     const selectedMachine = machines.find(m => m.id === params.selectedId) || null;
 
     const handleSelectMachine = (machine: typeof machines[0]) => {
-        router.setParams({ machineId: machine.id } as any);
+        onMachineSelected(machine.id);
         router.back();
     };
 

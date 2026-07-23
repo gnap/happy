@@ -43,7 +43,8 @@ import { SearchableListSelector, SelectorConfig } from '@/components/SearchableL
 import { clearNewSessionDraft, loadNewSessionDraft, saveNewSessionDraft } from '@/sync/persistence';
 
 // Simple temporary state for passing selections back from picker screens
-let onMachineSelected: (machineId: string) => void = () => { };
+export let onMachineSelected: (machineId: string) => void = () => { };
+export let onPathSelected: (path: string) => void = () => { };
 let onProfileSaved: (profile: AIBackendProfile) => void = () => { };
 
 export const callbacks = {
@@ -914,6 +915,16 @@ function NewSessionWizard() {
             onMachineSelected = () => { };
         };
     }, [recentMachinePaths]);
+
+    React.useEffect(() => {
+        let handler = (path: string) => {
+            setSelectedPath(path.trim());
+        };
+        onPathSelected = handler;
+        return () => {
+            onPathSelected = () => { };
+        };
+    }, []);
 
     React.useEffect(() => {
         let handler = (savedProfile: AIBackendProfile) => {
