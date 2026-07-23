@@ -2,7 +2,7 @@ import * as React from 'react';
 import { View, ActivityIndicator, Platform, TextInput } from 'react-native';
 import { t } from '@/text';
 import { useRouter, useLocalSearchParams } from 'expo-router';
-import { useEffect } from 'react';
+import { useFocusEffect } from 'expo-router';
 import { Octicons } from '@expo/vector-icons';
 import { Text } from '@/components/StyledText';
 import { Item } from '@/components/Item';
@@ -50,7 +50,7 @@ export default function FilesScreen() {
     }, [loadGitStatusFiles]);
 
     // Refresh when screen is focused
-    useEffect(
+    useFocusEffect(
         React.useCallback(() => {
             loadGitStatusFiles();
         }, [loadGitStatusFiles])

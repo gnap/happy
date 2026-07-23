@@ -32,7 +32,7 @@ import { formatPathRelativeToHome, getSessionAvatarId, getSessionName, useSessio
 import { isVersionSupported, MINIMUM_CLI_VERSION } from '@/utils/versionUtils';
 import { Ionicons } from '@expo/vector-icons';
 import { useEffect } from 'react';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import * as React from 'react';
 import { useMemo } from 'react';
 import { ActivityIndicator, Platform, Pressable, Text, View } from 'react-native';
@@ -334,7 +334,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     }), [handleMicrophonePress, realtimeStatus]);
 
     // Trigger session visibility when this screen is focused.
-    useEffect(
+    useFocusEffect(
         React.useCallback(() => {
             sync.onSessionVisible(sessionId);
             gitStatusSync.getSync(sessionId);
