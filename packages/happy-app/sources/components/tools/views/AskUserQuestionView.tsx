@@ -301,10 +301,7 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
     }, [sessionId, questions, selections, allQuestionsAnswered, isSubmitting, tool.permission?.id]);
 
     // Show submitted state only when there are actual answers
-<<<<<<< HEAD
-=======
     // (hasAnswers is defined above in the canInteract block)
->>>>>>> 264586e1 (fix(app): exclude AskUserQuestion from tool content suppression)
     if (isSubmitted || (tool.state === 'completed' && hasAnswers)) {
         return (
             <ToolSectionView>
