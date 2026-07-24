@@ -204,18 +204,16 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
         return null;
     }
 
-    // Allow interaction if the tool is running, has a pending permission, or was completed
-    // without actual answers (synced session where question was never answered).
-    const hasPendingPermission = tool.permission?.status === 'pending';
+    // Allow interaction if:
+    // 1. The question has a permission id (it was asked by the agent)
+    // 2. There's no actual answers in the result yet
+    // 3. It wasn't already submitted locally
     const hasNoResult = !tool.result || (typeof tool.result === 'object' && !(tool.result as any).answers);
-    const isCompleted = tool.state === 'completed' || tool.state === 'error';
-    const isRunning = tool.state === 'running';
-    // Allow interaction if not submitted and not completed-with-results
-    const canInteract = !isSubmitted && !(isCompleted && !hasNoResult) && (isRunning || hasPendingPermission || hasNoResult);
+    const canInteract = !isSubmitted && hasNoResult && !!tool.permission?.id;
 
     // Diagnostic: log when form is non-interactive
     if (!canInteract && !isSubmitted) {
-        console.warn(`[AskUserQuestion] form non-interactive: tool.state=${tool.state}, permission.status=${tool.permission?.status}, isSubmitted=${isSubmitted}, hasNoResult=${hasNoResult}`);
+        console.warn(`[AskUserQuestion] form non-interactive: tool.state=${tool.state}, perm.id=${tool.permission?.id}, perm.status=${tool.permission?.status}, isSubmitted=${isSubmitted}, hasNoResult=${hasNoResult}`);
     }
 
     // Check if all questions have at least one selection
