@@ -205,16 +205,19 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
     }
 
     // Allow interaction if:
-    // 1. The question has a permission id (it was asked by the agent)
-    // 2. There's no actual answers in the result yet
-    // 3. It wasn't already submitted locally
+    // Allow interaction if:
+    // 1. No actual answers in the result yet (result may be a legacy string
+    //    like "Approved" from the old permission flow — that's NOT an answer).
+    // 2. It wasn't already submitted locally
+    // 3. Either has a permission id (CLI flow) or the tool is still running
+    //    (Cursor / agent-state flow where permission may not be set).
     const hasAnswers = tool.result && typeof tool.result === 'object' && !!(tool.result as any).answers;
-    const hasNoResult = !hasAnswers;
-    const canInteract = !isSubmitted && hasNoResult && !!tool.permission?.id;
+    const canInteract = !isSubmitted && !hasAnswers && (!!tool.permission?.id || tool.state === 'running');
 
     // Diagnostic: log when form is non-interactive
-    if (!canInteract) {
-        console.warn(`[AskUserQuestion] form non-interactive: tool.state=${tool.state}, perm.id=${tool.permission?.id}, perm.status=${tool.permission?.status}, isSubmitted=${isSubmitted}, hasNoResult=${hasNoResult}, resultKeys=${tool.result ? Object.keys(tool.result as object).join(',') : 'null'}`);
+    if (!canInteract && !isSubmitted) {
+        const resultType = typeof tool.result;
+        console.warn(`[AskUserQuestion] form non-interactive: tool.state=${tool.state}, perm.id=${tool.permission?.id}, perm.status=${tool.permission?.status}, isSubmitted=${isSubmitted}, hasAnswers=${hasAnswers}, resultType=${resultType}`);
     }
 
     // Check if all questions have at least one selection
@@ -298,6 +301,10 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
     }, [sessionId, questions, selections, allQuestionsAnswered, isSubmitting, tool.permission?.id]);
 
     // Show submitted state only when there are actual answers
+<<<<<<< HEAD
+=======
+    // (hasAnswers is defined above in the canInteract block)
+>>>>>>> 264586e1 (fix(app): exclude AskUserQuestion from tool content suppression)
     if (isSubmitted || (tool.state === 'completed' && hasAnswers)) {
         return (
             <ToolSectionView>

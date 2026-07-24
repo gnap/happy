@@ -216,7 +216,10 @@ export const ToolView = ((props: ToolViewProps) => {
                     // <View style={styles.content}> (visible as a white bar below the header).
                     // The header spinner, elapsed timer, and status icon are sufficient;
                     // full results are available in the detail page on press.
-                    if (!hasChildren && tool.state !== 'error') {
+                    //
+                    // AskUserQuestion always shows its interactive form — it has no
+                    // children but its content IS the user-facing question UI.
+                    if (!hasChildren && tool.name !== 'AskUserQuestion' && tool.state !== 'error') {
                         return null;
                     }
                     return (
