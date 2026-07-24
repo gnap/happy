@@ -208,12 +208,13 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
     // 1. The question has a permission id (it was asked by the agent)
     // 2. There's no actual answers in the result yet
     // 3. It wasn't already submitted locally
-    const hasNoResult = !tool.result || (typeof tool.result === 'object' && !(tool.result as any).answers);
+    const hasAnswers = tool.result && typeof tool.result === 'object' && !!(tool.result as any).answers;
+    const hasNoResult = !hasAnswers;
     const canInteract = !isSubmitted && hasNoResult && !!tool.permission?.id;
 
     // Diagnostic: log when form is non-interactive
-    if (!canInteract && !isSubmitted) {
-        console.warn(`[AskUserQuestion] form non-interactive: tool.state=${tool.state}, perm.id=${tool.permission?.id}, perm.status=${tool.permission?.status}, isSubmitted=${isSubmitted}, hasNoResult=${hasNoResult}`);
+    if (!canInteract) {
+        console.warn(`[AskUserQuestion] form non-interactive: tool.state=${tool.state}, perm.id=${tool.permission?.id}, perm.status=${tool.permission?.status}, isSubmitted=${isSubmitted}, hasNoResult=${hasNoResult}, resultKeys=${tool.result ? Object.keys(tool.result as object).join(',') : 'null'}`);
     }
 
     // Check if all questions have at least one selection
@@ -297,8 +298,6 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
     }, [sessionId, questions, selections, allQuestionsAnswered, isSubmitting, tool.permission?.id]);
 
     // Show submitted state only when there are actual answers
-    const hasAnswers = tool.result && typeof tool.result === 'object' && !!(tool.result as any).answers;
-
     if (isSubmitted || (tool.state === 'completed' && hasAnswers)) {
         return (
             <ToolSectionView>
