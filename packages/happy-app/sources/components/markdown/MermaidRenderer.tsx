@@ -108,13 +108,12 @@ export const MermaidRenderer = React.memo((props: {
         );
     }
 
-    // iOS/Android: WebView with CDN mermaid (dynamically imported — unsupported on Linux/Tauri)
-    const [WebViewComp, setWebViewComp] = React.useState<any>(null);
-    React.useEffect(() => {
-        if (Platform.OS !== 'web') {
-            import('react-native-webview').then(m => setWebViewComp(() => m.WebView));
-        }
-    }, []);
+    // iOS/Android: WebView with CDN mermaid
+    // Use require() with try-catch — dynamic import() fails silently on iOS
+    let WebViewComp: any = null;
+    if (Platform.OS !== 'web') {
+        try { WebViewComp = require('react-native-webview').WebView; } catch { /* unsupported */ }
+    }
 
     const html = `
         <!DOCTYPE html>
@@ -144,9 +143,7 @@ export const MermaidRenderer = React.memo((props: {
     `;
 
     if (!WebViewComp) {
-        return (
-            <View style={[style.container, { height: 400, justifyContent: 'center', alignItems: 'center' }]} />
-        );
+        return <View style={[style.container, { height: 100 }]} />;
     }
 
     return (
