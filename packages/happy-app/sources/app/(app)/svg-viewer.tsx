@@ -9,6 +9,7 @@ if (Platform.OS !== 'web') {
 }
 import { retrieveTempText } from '@/sync/persistence';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { mermaidScriptTag } from '@/components/markdown/mermaid-source';
 
 export default function SvgViewerScreen() {
     const { theme } = useUnistyles();
@@ -41,7 +42,7 @@ export default function SvgViewerScreen() {
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=5,user-scalable=yes">
-    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    ${mermaidScriptTag()}
     <style>
         html,body{margin:0;padding:16px;background:${theme.colors.surface};display:flex;align-items:center;justify-content:center;min-height:100vh}
         .mermaid{width:100%;text-align:center}

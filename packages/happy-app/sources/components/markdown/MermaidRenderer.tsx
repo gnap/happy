@@ -5,6 +5,7 @@ import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
 import { storeTempText } from '@/sync/persistence';
 import { useRouter } from 'expo-router';
+import { mermaidScriptTag } from './mermaid-source';
 
 // Style for Web platform
 const webStyle: any = {
@@ -121,7 +122,7 @@ export const MermaidRenderer = React.memo((props: {
         <head>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-            <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+            ${mermaidScriptTag()}
             <style>
                 body { margin: 0; padding: 16px; background-color: ${theme.colors.surfaceHighest}; }
                 #mermaid-container { display: flex; justify-content: center; align-items: center; width: 100%; }
