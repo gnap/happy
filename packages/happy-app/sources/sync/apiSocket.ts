@@ -142,10 +142,11 @@ class ApiSocket {
     async #doConnect(): Promise<void> {
         if (!this.config) return;
 
-        // While we awaited, the world may have moved on. Bail out if so.
+        // While we awaited, the world may have moved on.
         if (!this.config) return;
         if (this.socket) return;
-        if (this.currentStatus !== 'connecting') return;
+        // Allow any non-stable state — status may have been flipped by lifecycle events.
+        if (this.currentStatus === 'disconnected' && this.reconnectionDisabled) return;
 
         const config = this.config;
         this.socket = io(config.endpoint, {
@@ -154,7 +155,8 @@ class ApiSocket {
                 token: config.token,
                 clientType: 'user-scoped' as const
             },
-            transports: ['websocket'],
+            // WebSocket preferred but fall back to polling for weak/recovering networks (iOS suspend, cellular)
+            transports: ['websocket', 'polling'],
             reconnection: !this.reconnectionDisabled,
             reconnectionDelay: RECONNECT_DELAY_MIN,
             reconnectionDelayMax: RECONNECT_DELAY_MAX,
@@ -356,7 +358,9 @@ class ApiSocket {
      * If we're mid-connect, leave the in-flight attempt alone.
      */
     pauseReconnection() {
-        if (this.currentStatus === 'error' || this.currentStatus === 'disconnected') {
+        // Tear down on any non-connected state — a stale connecting/error socket
+        // will not recover after iOS suspend. resumeReconnection() creates a fresh one.
+        if (this.currentStatus !== 'connected') {
             this.disconnect();
         }
     }
@@ -373,17 +377,17 @@ class ApiSocket {
     async resumeReconnection(): Promise<boolean> {
         if (this.currentStatus === 'connected' && this.socket?.connected) {
             return await this.probeConnection();
-        } else if (this.currentStatus !== 'connecting') {
-            // Ensure clean state, then connect immediately (new socket = backoff reset).
-            if (this.socket) {
-                this.socket.removeAllListeners();
-                this.socket.disconnect();
-                this.socket = null;
-            }
-            this.reconnectionDisabled = false;
-            this.connect();
         }
-        // 'connecting': in-progress attempt, leave it alone.
+        // For any other state (disconnected, connecting, error):
+        // tear down the old socket and start fresh. A stale 'connecting' state
+        // from before iOS suspend will never complete — burn it down.
+        if (this.socket) {
+            this.socket.removeAllListeners();
+            this.socket.disconnect();
+            this.socket = null;
+        }
+        this.reconnectionDisabled = false;
+        this.connect();
         return false;
     }
 
@@ -485,13 +489,13 @@ class ApiSocket {
             }
         });
         manager.on('reconnect_failed', () => {
-            if (this.reconnectionDisabled || !this.config) {
-                return;
+            // With Infinity attempts this should never fire, but if it does,
+            // stay in error state — don't loop. A manual resume or foreground
+            // event will trigger a fresh connect().
+            if (!this.reconnectionDisabled && this.config) {
+                const err = new Error('Socket reconnection failed');
+                this.updateStatus('error', err);
             }
-            const err = new Error('Socket reconnection failed after max attempts');
-            this.updateStatus('error', err);
-            this.disconnect();
-            this.connect();
         });
 
         this.socket.on('disconnect', (reason) => {
