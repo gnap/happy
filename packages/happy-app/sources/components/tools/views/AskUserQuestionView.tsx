@@ -205,7 +205,6 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
     }
 
     // Allow interaction if:
-    // Allow interaction if:
     // 1. No actual answers in the result yet (result may be a legacy string
     //    like "Approved" from the old permission flow — that's NOT an answer).
     // 2. It wasn't already submitted locally
