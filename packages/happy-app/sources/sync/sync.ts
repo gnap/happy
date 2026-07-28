@@ -271,8 +271,15 @@ class Sync {
                 log.log('📱 App became active');
                 // Reconnect or probe the socket before invalidating syncs so
                 // the data fetches have a live connection to use.
-                apiSocket.resumeReconnection();
-                this.#invalidateAllSyncs();
+                // On mobile resumeReconnection returns immediately (sync teardown +
+                // fire-and-forget connect). On desktop it probes first (up to 3s).
+                // We await it with a hard cap so we never block data fetches forever.
+                void Promise.race([
+                    apiSocket.resumeReconnection(),
+                    new Promise<void>(r => setTimeout(r, 5000)),
+                ]).then(() => {
+                    this.#invalidateAllSyncs();
+                });
             } else {
                 log.log(`📱 App state changed to: ${nextAppState}`);
                 // Stop reconnection timers while suspended to avoid waking the
@@ -326,6 +333,10 @@ class Sync {
         // with event-driven invalidations.
         // Skips refresh when the user has been idle for > 10 minutes (desktop).
         this.sessionsRefreshInterval = setInterval(() => {
+            // Check socket health first — a silent TCP drop (socket.connected === true
+            // but no data flowing) won't self-recover without a nudge.
+            apiSocket.checkHealthAndReconnect();
+
             const idleMs = Date.now() - this.lastUserActivityAt;
             if (idleMs > 600_000) {
                 log.log(`🕐 Skipping periodic session refresh — idle for ${Math.round(idleMs / 1000)}s`);
