@@ -3,6 +3,7 @@ import { io } from 'socket.io-client';
 import { TokenStorage } from '@/auth/tokenStorage';
 import { Encryption } from './encryption/encryption';
 import { isRunningInTauri } from '@/utils/platform';
+import { Platform } from 'react-native';
 
 type IoFn = typeof io;
 
@@ -71,6 +72,10 @@ class ApiSocket {
     private reconnectionDisabled = false;
     /** Guards against multiple parallel async loaders racing inside connect(). */
     private connectInFlight = false;
+    /** Timestamp of the last message/event received on the socket. Used for health checks. */
+    private lastMessageReceivedAt = 0;
+    /** The transport currently in use (websocket / polling). For detecting downgrades. */
+    private lastTransportType: string | null = null;
 
     //
     // Initialization
@@ -169,6 +174,7 @@ class ApiSocket {
 
     disconnect() {
         this.reconnectionDisabled = false;
+        this.connectInFlight = false;
         if (this.socket) {
             this.socket.removeAllListeners();
             this.socket.disconnect();
@@ -366,37 +372,60 @@ class ApiSocket {
     }
 
     /**
-     * Called when the app comes back to foreground.
-     * - If connected: sends an application-level ping to verify the connection
-     *   is still alive (silent TCP drops during iOS suspend are common). Forces
-     *   a reconnect if no pong arrives within 5 seconds.
-     * - If not connected (and not already in progress): creates a fresh socket
-     *   immediately, resetting socket.io's exponential backoff from scratch.
-     * - If connecting: leaves the in-progress attempt alone.
+     * Called when the app comes back to foreground, or network becomes reachable,
+     * or network interface switches (WiFi ↔ Cellular).
+     *
+     * MOBILE (iOS/Android): Always tears down and creates a fresh socket.
+     *   After iOS suspend the TCP connection is silently dropped by the OS but
+     *   socket.io's `connected` flag is unreliable — it may still report `true`
+     *   until engine.io's ping timeout fires (up to 20s). Probing a dead socket
+     *   wastes time and provides no benefit on mobile. A fresh connect() resets
+     *   socket.io's exponential backoff and completes in ~1–2s.
+     *
+     * DESKTOP/WEB: Probes the existing connection with an application-level ping
+     *   first. If the probe succeeds the connection is reused. If it fails a
+     *   fresh connection is created.
      */
     async resumeReconnection(): Promise<boolean> {
+        // Mobile: always burn it down and start fresh.
+        // The existing socket's connected flag is meaningless after iOS suspend.
+        if (Platform.OS === 'ios' || Platform.OS === 'android') {
+            this.disconnect();
+            this.connect();
+            return false;
+        }
+
+        // Desktop/Web: probe first, reconnect only if probe fails.
         if (this.currentStatus === 'connected' && this.socket?.connected) {
             return await this.probeConnection();
         }
         // For any other state (disconnected, connecting, error):
         // tear down the old socket and start fresh. A stale 'connecting' state
-        // from before iOS suspend will never complete — burn it down.
-        if (this.socket) {
-            this.socket.removeAllListeners();
-            this.socket.disconnect();
-            this.socket = null;
-        }
-        this.reconnectionDisabled = false;
+        // from before sleep will never complete — burn it down.
+        this.disconnect();
         this.connect();
         return false;
     }
 
     /**
+     * Returns true if the connection appears healthy: socket reports connected
+     * AND a message has been received within the last windowMs. A silent TCP
+     * drop (common after iOS suspend) leaves `socket.connected === true` but
+     * no data flows — the last-message check catches that.
+     */
+    isConnectionHealthy(windowMs: number = 30000): boolean {
+        if (!this.socket?.connected) return false;
+        if (this.lastMessageReceivedAt === 0) return true; // Just connected, give it time
+        return (Date.now() - this.lastMessageReceivedAt) < windowMs;
+    }
+
+    /**
      * Emits an application-level ping and waits for the server ACK.
+     * Only used on desktop/web — mobile always creates a fresh connection.
      * If no response within timeoutMs the connection is treated as stale and
      * a fresh reconnect is forced.
      */
-    private probeConnection(timeoutMs = 5000): Promise<boolean> {
+    private probeConnection(timeoutMs = 3000): Promise<boolean> {
         const socket = this.socket;
         if (!socket) return Promise.resolve(false);
         let settled = false;
@@ -414,8 +443,12 @@ class ApiSocket {
 
             timer = setTimeout(() => {
                 finish(false);
-                this.disconnect();
-                this.connect();
+                // Only reconnect if the probe was the one that detected staleness —
+                // guard against socket already being replaced by another call path.
+                if (this.socket === socket) {
+                    this.disconnect();
+                    this.connect();
+                }
             }, timeoutMs);
 
             try {
@@ -424,10 +457,37 @@ class ApiSocket {
                 });
             } catch {
                 finish(false);
-                this.disconnect();
-                this.connect();
+                if (this.socket === socket) {
+                    this.disconnect();
+                    this.connect();
+                }
             }
         });
+    }
+
+    /**
+     * Periodic health check called from sync.ts's refresh interval.
+     * Detects silent TCP drops (socket.connected === true but no data flowing)
+     * and forces a reconnect. This catches the case where the app stays in
+     * foreground but the OS silently drops the connection (e.g., iOS long idle).
+     *
+     * Only acts when the socket appears connected but no message has been
+     * received in the last 45 seconds. On mobile this triggers a fresh connect;
+     * on desktop it probes first.
+     */
+    checkHealthAndReconnect() {
+        if (this.currentStatus !== 'connected') return;
+        if (!this.socket?.connected) return;
+        if (this.lastMessageReceivedAt === 0) return; // Just connected
+
+        const silentMs = Date.now() - this.lastMessageReceivedAt;
+        if (silentMs < 45000) return; // Still within healthy window
+
+        // Socket appears connected but no data for 45+ seconds — likely a silent TCP drop.
+        // Reconnect to restore data flow.
+        console.warn(`[apiSocket] Silent connection detected (${Math.round(silentMs / 1000)}s without messages), forcing reconnect`);
+        this.disconnect();
+        this.connect();
     }
 
     //
@@ -471,11 +531,26 @@ class ApiSocket {
         // Connection events
         this.socket.on('connect', () => {
             this.lastError = null;
+            this.lastMessageReceivedAt = Date.now(); // Treat connect as activity
             this.updateStatus('connected');
             if (!this.socket?.recovered) {
                 this.reconnectedListeners.forEach(listener => listener());
             }
         });
+
+        // Track transport upgrades/downgrades for diagnostics
+        this.socket.io.engine.on('upgrade', (transport: any) => {
+            this.lastTransportType = transport?.name ?? 'unknown';
+        });
+        // Capture initial transport type (transport may not be created yet at setup time)
+        try {
+            const initialTransport = (this.socket.io as any)?.engine?.transport;
+            if (initialTransport?.name) {
+                this.lastTransportType = initialTransport.name;
+            }
+        } catch {
+            // Transport not yet initialised — will be captured by 'upgrade' event
+        }
 
         // While status stays on the last `connect_error`, socket.io may still be retrying in the
         // background — surface that so the UI isn't stuck looking "idle" on error.
@@ -522,6 +597,8 @@ class ApiSocket {
 
         // Message handling
         this.socket.onAny((event, data) => {
+            // Track last message receipt for health checks
+            this.lastMessageReceivedAt = Date.now();
             // console.log(`📥 SyncSocket: Received event '${event}':`, JSON.stringify(data).substring(0, 200));
             const handler = this.messageHandlers.get(event);
             if (handler) {
