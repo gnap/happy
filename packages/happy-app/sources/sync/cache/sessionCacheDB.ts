@@ -355,9 +355,10 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
                 ON session_messages(session_id, created_at);
 
             CREATE TABLE IF NOT EXISTS sessions_list_cache (
-                id            INTEGER PRIMARY KEY DEFAULT 1,
-                sessions_json TEXT NOT NULL DEFAULT '[]',
-                cached_at     INTEGER NOT NULL DEFAULT 0
+                id                    INTEGER PRIMARY KEY DEFAULT 1,
+                sessions_json         TEXT NOT NULL DEFAULT '[]',
+                cached_at             INTEGER NOT NULL DEFAULT 0,
+                encryption_keys_json  TEXT
             );
         `);
         log.log(`📦 sessionCacheDB: execAsync (schema) took ${Date.now() - t2}ms`);
@@ -445,20 +446,21 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
     async getSessionsListCache(): Promise<CachedSessionListRow | null> {
         await this.ensureReady();
         const row = await this.db.getFirstAsync(
-            'SELECT sessions_json, cached_at FROM sessions_list_cache WHERE id = 1'
+            'SELECT sessions_json, cached_at, encryption_keys_json FROM sessions_list_cache WHERE id = 1'
         ) as Record<string, unknown> | null;
         if (!row) return null;
         return {
             sessionsJson: row['sessions_json'] as string,
             cachedAt: row['cached_at'] as number,
+            encryptionKeysJson: row['encryption_keys_json'] as string | undefined,
         };
     }
 
     async saveSessionsListCache(row: CachedSessionListRow): Promise<void> {
         await this.ensureReady();
         await this.db.runAsync(
-            'INSERT OR REPLACE INTO sessions_list_cache (id, sessions_json, cached_at) VALUES (1, ?, ?)',
-            [row.sessionsJson, row.cachedAt]
+            'INSERT OR REPLACE INTO sessions_list_cache (id, sessions_json, cached_at, encryption_keys_json) VALUES (1, ?, ?, ?)',
+            [row.sessionsJson, row.cachedAt, row.encryptionKeysJson ?? null]
         );
     }
 

@@ -3,7 +3,6 @@ import { io } from 'socket.io-client';
 import { TokenStorage } from '@/auth/tokenStorage';
 import { Encryption } from './encryption/encryption';
 import { isRunningInTauri } from '@/utils/platform';
-import { Platform } from 'react-native';
 
 type IoFn = typeof io;
 
@@ -375,34 +374,25 @@ class ApiSocket {
      * Called when the app comes back to foreground, or network becomes reachable,
      * or network interface switches (WiFi ↔ Cellular).
      *
-     * MOBILE (iOS/Android): Always tears down and creates a fresh socket.
-     *   After iOS suspend the TCP connection is silently dropped by the OS but
-     *   socket.io's `connected` flag is unreliable — it may still report `true`
-     *   until engine.io's ping timeout fires (up to 20s). Probing a dead socket
-     *   wastes time and provides no benefit on mobile. A fresh connect() resets
-     *   socket.io's exponential backoff and completes in ~1–2s.
-     *
-     * DESKTOP/WEB: Probes the existing connection with an application-level ping
-     *   first. If the probe succeeds the connection is reused. If it fails a
-     *   fresh connection is created.
+     * Probes the existing connection with an application-level ping first.
+     * If the probe succeeds the connection is reused. If it fails a fresh
+     * connection is created. The probe timeout is short (1.5s) because it's
+     * just a small ping/pong round-trip — if it takes longer the connection
+     * is almost certainly dead (silent TCP drop after iOS suspend, etc.).
      */
     async resumeReconnection(): Promise<boolean> {
-        // Mobile: always burn it down and start fresh.
-        // The existing socket's connected flag is meaningless after iOS suspend.
-        if (Platform.OS === 'ios' || Platform.OS === 'android') {
-            this.disconnect();
-            this.connect();
-            return false;
-        }
-
-        // Desktop/Web: probe first, reconnect only if probe fails.
         if (this.currentStatus === 'connected' && this.socket?.connected) {
             return await this.probeConnection();
         }
         // For any other state (disconnected, connecting, error):
         // tear down the old socket and start fresh. A stale 'connecting' state
         // from before sleep will never complete — burn it down.
-        this.disconnect();
+        if (this.socket) {
+            this.socket.removeAllListeners();
+            this.socket.disconnect();
+            this.socket = null;
+        }
+        this.reconnectionDisabled = false;
         this.connect();
         return false;
     }
@@ -421,11 +411,11 @@ class ApiSocket {
 
     /**
      * Emits an application-level ping and waits for the server ACK.
-     * Only used on desktop/web — mobile always creates a fresh connection.
      * If no response within timeoutMs the connection is treated as stale and
-     * a fresh reconnect is forced.
+     * a fresh reconnect is forced. The timeout is short because the probe is
+     * just a ping/pong — a live connection responds in < 200ms.
      */
-    private probeConnection(timeoutMs = 3000): Promise<boolean> {
+    private probeConnection(timeoutMs = 1500): Promise<boolean> {
         const socket = this.socket;
         if (!socket) return Promise.resolve(false);
         let settled = false;
