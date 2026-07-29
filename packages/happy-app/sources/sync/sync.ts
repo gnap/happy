@@ -179,6 +179,9 @@ class Sync {
     private sessionDataKeys = new Map<string, Uint8Array>(); // Store session data encryption keys internally
     private machineDataKeys = new Map<string, Uint8Array>(); // Store machine data encryption keys internally
     private artifactDataKeys = new Map<string, Uint8Array>(); // Store artifact data encryption keys internally
+    /** Accumulated base64 dataEncryptionKey values from all fetchSessions responses.
+     *  Merged across delta fetches so the cache always has the full key set. */
+    private sessionEncryptionKeySources = new Map<string, string>();
     private settingsSync: InvalidateSync;
     private profileSync: InvalidateSync;
     private purchasesSync: InvalidateSync;
@@ -269,15 +272,11 @@ class Sync {
                     this.failPendingOutboxMessages('Message failed to send in background after 30s. Please retry.');
                 }
                 log.log('📱 App became active');
-                // Reconnect or probe the socket before invalidating syncs so
-                // the data fetches have a live connection to use.
-                // On mobile resumeReconnection returns immediately (sync teardown +
-                // fire-and-forget connect). On desktop it probes first (up to 3s).
-                // We await it with a hard cap so we never block data fetches forever.
-                void Promise.race([
-                    apiSocket.resumeReconnection(),
-                    new Promise<void>(r => setTimeout(r, 5000)),
-                ]).then(() => {
+                // Probe the socket first — a live connection responds in < 200ms.
+                // If probe fails (1.5s timeout) a fresh connect is triggered.
+                // Only invalidate syncs after the probe settles so data fetches
+                // don't race against a dead socket.
+                void apiSocket.resumeReconnection().then(() => {
                     this.#invalidateAllSyncs();
                 });
             } else {
@@ -570,31 +569,28 @@ class Sync {
                 if (!this.lastSessionRefreshNonDeltaAt) {
                     this.lastSessionRefreshNonDeltaAt = cached.cachedAt;
                 }
-                // Restore encryption keys from cache if available.
+                // Restore encryption keys from cache — dataEncryptionKey is immutable
+                // per session, so we can decrypt messages immediately without waiting
+                // for fetchSessions to complete. This prevents WebSocket-delivered
+                // messages from being dropped on startup (handleUpdate needs the key
+                // to decrypt, otherwise it falls through to the recovery path).
                 const keyCount = Object.keys(cached.encryptionKeys).length;
                 if (keyCount > 0) {
                     const keyMap = new Map<string, Uint8Array | null>();
                     for (const [sid, encKey] of Object.entries(cached.encryptionKeys)) {
                         const decrypted = await this.encryption.decryptEncryptionKey(encKey);
-                        keyMap.set(sid, decrypted);
-                    }
-                    await this.encryption.initializeSessions(keyMap);
-                    log.log(`📦 sessionsListCache: restored ${keyCount} encryption keys from cache`);
-                }
-                // Restore encryption keys from cache — dataEncryptionKey is immutable
-                // per session so we can decrypt immediately without waiting for fetchSessions.
-                const ek = cached.encryptionKeys;
-                if (ek && Object.keys(ek).length > 0) {
-                    const sessionKeys = new Map<string, Uint8Array | null>();
-                    for (const [sid, encryptedKey] of Object.entries(ek)) {
-                        const decrypted = await this.encryption.decryptEncryptionKey(encryptedKey);
                         if (decrypted) {
-                            sessionKeys.set(sid, decrypted);
+                            keyMap.set(sid, decrypted);
                         }
                     }
-                    if (sessionKeys.size > 0) {
-                        await this.encryption.initializeSessions(sessionKeys);
-                        log.log(`📦 sessionsListCache: restored ${sessionKeys.size} encryption keys from cache`);
+                    if (keyMap.size > 0) {
+                        await this.encryption.initializeSessions(keyMap);
+                        // Seed the accumulator so subsequent delta fetches merge with
+                        // the full key set rather than overwriting it.
+                        for (const [sid, encKey] of Object.entries(cached.encryptionKeys)) {
+                            this.sessionEncryptionKeySources.set(sid, encKey);
+                        }
+                        log.log(`📦 sessionsListCache: restored ${keyMap.size} encryption keys from cache`);
                     }
                 }
             }
@@ -1286,15 +1282,19 @@ class Sync {
     // Private
     //
 
-    private fetchSessions = async () => {
+    private fetchSessions = async (force = false) => {
         if (!this.credentials) {
             log.log('📥 fetchSessions: no credentials, skipping');
             return;
         }
 
         // Rate-limit: don't fetch more than once per cooldown period.
+        // 'force' bypasses the cooldown — used by recovery paths (e.g. handleUpdate
+        // when encryption keys are missing for a session whose messages are arriving
+        // via WebSocket). Without this, a message arriving within the 30s cooldown
+        // window would be silently dropped with no path to recovery.
         const now = Date.now();
-        if (!this._forceFullRefreshPending && now - this.lastSessionRefreshAt < Sync.SESSION_REFRESH_COOLDOWN_MS) {
+        if (!force && !this._forceFullRefreshPending && now - this.lastSessionRefreshAt < Sync.SESSION_REFRESH_COOLDOWN_MS) {
             log.log(`⏱️ fetchSessions: skipped — cooldown (${now - this.lastSessionRefreshAt}ms since last)`);
             return;
         }
@@ -1358,10 +1358,11 @@ class Sync {
             }>;
 
             // --- Cache: collect encryption keys for persistence ---
-            const cachedKeys: Record<string, string> = {};
+            // Merge new keys into the accumulated map so delta fetches don't overwrite
+            // keys for sessions that weren't in the current response.
             for (const session of sessions) {
                 if (session.dataEncryptionKey) {
-                    cachedKeys[session.id] = session.dataEncryptionKey;
+                    this.sessionEncryptionKeySources.set(session.id, session.dataEncryptionKey);
                 }
             }
 
@@ -1449,15 +1450,14 @@ class Sync {
             // Save full merged state (cached + delta), not just the delta results.
             const fullState = storage.getState().sessions;
             const allValues = Object.values(fullState).map(({ presence, ...s }) => s);
-            // Gather encryption keys from the API response so they can be cached
-            // and used on next cold start without waiting for the network fetch.
-            const encryptionKeys: Record<string, string> = {};
-            for (const s of sessions) {
-                if (s.dataEncryptionKey) {
-                    encryptionKeys[s.id] = s.dataEncryptionKey;
-                }
+            // Use the accumulated key map (merged across all fetches since startup)
+            // rather than only the current response's keys. Delta fetches return a
+            // subset — without merging, they'd overwrite the full key set in cache.
+            const accumulatedKeys: Record<string, string> = {};
+            for (const [sid, key] of this.sessionEncryptionKeySources) {
+                accumulatedKeys[sid] = key;
             }
-            void saveSessionsListCache(allValues, cachedKeys);
+            void saveSessionsListCache(allValues, accumulatedKeys);
             this._loggedMissingSessionForSid.clear();
 
             // Only eagerly catch up messages for active sessions (agent is running).
@@ -1514,6 +1514,8 @@ class Sync {
                     const keyMap = new Map<string, Uint8Array | null>();
                     keyMap.set(raw.id, key);
                     await this.encryption.initializeSessions(keyMap);
+                    // Accumulate so the next cache save includes this key.
+                    this.sessionEncryptionKeySources.set(raw.id, raw.dataEncryptionKey);
                 }
             }
             const sessionEncryption = this.encryption.getSessionEncryption(raw.id);
@@ -2893,12 +2895,16 @@ class Sync {
             // Get encryption
             const encryption = this.encryption.getSessionEncryption(updateData.body.sid);
             if (!encryption) {
-                // Session not in local store yet (e.g. list not fetched); recover by refetching. Log at most once per sid to avoid flood.
+                // Session encryption not yet initialized (e.g. cache hasn't restored keys,
+                // or a previous fetchSessions cooldown-blocked the recovery). Force-refetch
+                // now to decrypt the dataEncryptionKey from the server response. Without
+                // 'force' the cooldown would silently drop the recovery and leave the app
+                // permanently unable to decrypt messages for this session.
                 if (!this._loggedMissingSessionForSid.has(updateData.body.sid)) {
                     this._loggedMissingSessionForSid.add(updateData.body.sid);
                     log.log(`Session ${updateData.body.sid} not found (refetching sessions)`);
                 }
-                this.fetchSessions();
+                this.fetchSessions(true);
                 return;
             }
 
@@ -2964,8 +2970,10 @@ class Sync {
                             seq: updateData.body.message.seq,
                         }]);
                     } else {
-                        // Fetch sessions again if we don't have this session
-                        this.fetchSessions();
+                        // Fetch sessions again if we don't have this session.
+                        // Force-bypass cooldown: the message was already decrypted but the
+                        // session is missing from storage — waiting 30s is unacceptable.
+                        this.fetchSessions(true);
                     }
 
                     // Fast-path: apply message directly when seq is strictly consecutive.
@@ -3087,7 +3095,11 @@ class Sync {
                 // Get session encryption
                 const sessionEncryption = this.encryption.getSessionEncryption(updateData.body.id);
                 if (!sessionEncryption) {
-                    console.error(`Session encryption not found for ${updateData.body.id} - this should never happen`);
+                    // Encryption key not yet initialised for this session — the cache may
+                    // have been missing the key or a previous fetch may have been cooldown-blocked.
+                    // Force-fetch sessions to recover rather than silently dropping the update.
+                    log.log(`Session encryption not found for ${updateData.body.id} — force-fetching sessions to recover`);
+                    this.fetchSessions(true);
                     return;
                 }
 
