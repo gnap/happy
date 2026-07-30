@@ -278,6 +278,12 @@ class Sync {
                 // don't race against a dead socket.
                 void apiSocket.resumeReconnection().then(() => {
                     this.#invalidateAllSyncs();
+                    // Refresh the currently visible session's messages immediately.
+                    // After background/foreground the session screen is still mounted
+                    // so onSessionVisible doesn't fire — we must trigger it explicitly.
+                    if (this.currentVisibleSessionId) {
+                        this.onSessionVisible(this.currentVisibleSessionId);
+                    }
                 });
             } else {
                 log.log(`📱 App state changed to: ${nextAppState}`);
@@ -560,48 +566,54 @@ class Sync {
         }
 
         // Load cached session list before network fetch so UI shows instantly.
+        // Split into two phases:
+        //   1. Apply cached sessions (already decrypted JSON) + mark ready
+        //   2. Restore encryption keys in background (needed for NEW WS messages)
+        // This avoids showing an empty-state placeholder while libsodium decrypts.
+        let cachedEncryptionKeys: Record<string, string> | undefined;
         try {
             const cached = await loadSessionsListCache();
             if (cached && cached.sessions.length > 0) {
                 log.log(`📦 sessionsListCache: applying ${cached.sessions.length} cached sessions (cachedAt=${cached.cachedAt})`);
                 this.applySessions(cached.sessions);
-                // Use the cache timestamp as the base for delta fetches.
                 if (!this.lastSessionRefreshNonDeltaAt) {
                     this.lastSessionRefreshNonDeltaAt = cached.cachedAt;
                 }
-                // Restore encryption keys from cache — dataEncryptionKey is immutable
-                // per session, so we can decrypt messages immediately without waiting
-                // for fetchSessions to complete. This prevents WebSocket-delivered
-                // messages from being dropped on startup (handleUpdate needs the key
-                // to decrypt, otherwise it falls through to the recovery path).
-                const keyCount = Object.keys(cached.encryptionKeys).length;
-                if (keyCount > 0) {
-                    const keyMap = new Map<string, Uint8Array | null>();
-                    for (const [sid, encKey] of Object.entries(cached.encryptionKeys)) {
-                        const decrypted = await this.encryption.decryptEncryptionKey(encKey);
-                        if (decrypted) {
-                            keyMap.set(sid, decrypted);
-                        }
-                    }
-                    if (keyMap.size > 0) {
-                        await this.encryption.initializeSessions(keyMap);
-                        // Seed the accumulator so subsequent delta fetches merge with
-                        // the full key set rather than overwriting it.
-                        for (const [sid, encKey] of Object.entries(cached.encryptionKeys)) {
-                            this.sessionEncryptionKeySources.set(sid, encKey);
-                        }
-                        log.log(`📦 sessionsListCache: restored ${keyMap.size} encryption keys from cache`);
-                    }
-                }
+                cachedEncryptionKeys = cached.encryptionKeys;
             }
         } catch (e) {
             log.log(`📦 sessionsListCache: error applying cached list: ${e}`);
         }
-        // Mark data ready now regardless of cache hit — cached sessions are already
-        // applied above, and if there's no cache the UI shows an empty list while the
-        // network fetch runs in the background. Avoids a white screen waiting for the
-        // 20s ready timeout on cold starts.
+        // Show cached data NOW — do NOT wait for encryption key decryption.
+        // The sessions in the cache are already decrypted (metadata, agentState),
+        // so the UI can render immediately. Encryption key restoration runs in
+        // the background below and handles future WebSocket-delivered messages.
         storage.getState().applyReady();
+
+        // Phase 2: Restore encryption keys in background.
+        // Cached sessions are already visible (applyReady was called above).
+        // The encryption keys are needed for NEW WebSocket messages; if a message
+        // arrives before restoration completes, handleUpdate calls
+        // fetchSessions(true) to recover — a brief recovery on first launch is
+        // preferable to a visible delay every cold start.
+        if (cachedEncryptionKeys && Object.keys(cachedEncryptionKeys).length > 0) {
+            void (async () => {
+                const keyMap = new Map<string, Uint8Array | null>();
+                for (const [sid, encKey] of Object.entries(cachedEncryptionKeys!)) {
+                    try {
+                        const decrypted = await this.encryption.decryptEncryptionKey(encKey);
+                        if (decrypted) {
+                            keyMap.set(sid, decrypted);
+                            this.sessionEncryptionKeySources.set(sid, encKey);
+                        }
+                    } catch { /* skip corrupt keys */ }
+                }
+                if (keyMap.size > 0) {
+                    await this.encryption.initializeSessions(keyMap);
+                    log.log(`📦 sessionsListCache: restored ${keyMap.size} encryption keys from cache (background)`);
+                }
+            })();
+        }
 
         // Invalidate sync
         log.log('🔄 #init: Invalidating all syncs');
@@ -1460,12 +1472,14 @@ class Sync {
             void saveSessionsListCache(allValues, accumulatedKeys);
             this._loggedMissingSessionForSid.clear();
 
-            // Only eagerly catch up messages for active sessions (agent is running).
-            // Inactive/offline sessions are loaded lazily when the user opens them.
+            // Eagerly catch up messages for active sessions (agent is running) and
+            // the currently visible session (user is looking at it). Inactive/
+            // non-visible sessions are loaded lazily when the user opens them.
             void (async () => {
+                const visibleId = this.currentVisibleSessionId;
                 for (const session of decryptedSessions) {
                     if (session.metadata?.flavor !== 'cursor' && session.metadata?.flavor !== 'acp-cursor' && session.metadata?.flavor !== 'claude') continue;
-                    if (!session.active) continue; // skip offline sessions
+                    if (!session.active && session.id !== visibleId) continue; // skip unless active or visible
                     try {
                         const cached = await getCachedLastSeq(session.id);
                         if (cached != null && cached < session.seq) {
@@ -3611,19 +3625,23 @@ async function syncInit(credentials: AuthCredentials, restore: boolean) {
     // Initialize tracking
     initializeTracking(encryption.anonID);
 
-    // Initialize socket connection
-    const API_ENDPOINT = getServerUrl();
-    apiSocket.initialize({ endpoint: API_ENDPOINT, token: credentials.token }, encryption);
+    // Initialize sessions engine FIRST — loads cache, applies cached data,
+    // registers socket message handlers (subscribeToUpdates). Only AFTER the
+    // cache is loaded and handlers are registered do we start the socket.
+    // Otherwise the socket connects before handlers exist, early messages are
+    // dropped, and cached data is invisible until the socket connects.
+    if (restore) {
+        await sync.restore(credentials, encryption);
+    } else {
+        await sync.create(credentials, encryption);
+    }
 
     // Wire socket status to storage
     apiSocket.onStatusChange((status) => {
         storage.getState().setSocketStatus(status);
     });
 
-    // Initialize sessions engine
-    if (restore) {
-        await sync.restore(credentials, encryption);
-    } else {
-        await sync.create(credentials, encryption);
-    }
+    // Start socket connection — handlers are already registered, cache is loaded.
+    const API_ENDPOINT = getServerUrl();
+    apiSocket.initialize({ endpoint: API_ENDPOINT, token: credentials.token }, encryption);
 }

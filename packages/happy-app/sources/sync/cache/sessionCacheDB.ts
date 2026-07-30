@@ -361,6 +361,13 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
                 encryption_keys_json  TEXT
             );
         `);
+        // Migration: add encryption_keys_json to tables created before this column
+        // existed (CREATE TABLE IF NOT EXISTS won't alter existing tables).
+        try {
+            await this.db.execAsync('ALTER TABLE sessions_list_cache ADD COLUMN encryption_keys_json TEXT');
+        } catch {
+            // Column already exists or table doesn't exist yet — either is fine.
+        }
         log.log(`📦 sessionCacheDB: execAsync (schema) took ${Date.now() - t2}ms`);
 
         this.initialized = true;
@@ -445,23 +452,45 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
 
     async getSessionsListCache(): Promise<CachedSessionListRow | null> {
         await this.ensureReady();
-        const row = await this.db.getFirstAsync(
-            'SELECT sessions_json, cached_at, encryption_keys_json FROM sessions_list_cache WHERE id = 1'
-        ) as Record<string, unknown> | null;
-        if (!row) return null;
-        return {
-            sessionsJson: row['sessions_json'] as string,
-            cachedAt: row['cached_at'] as number,
-            encryptionKeysJson: row['encryption_keys_json'] as string | undefined,
-        };
+        // Try with encryption_keys_json first. If the column doesn't exist yet
+        // (pre-migration), fall back to the old schema.
+        try {
+            const row = await this.db.getFirstAsync(
+                'SELECT sessions_json, cached_at, encryption_keys_json FROM sessions_list_cache WHERE id = 1'
+            ) as Record<string, unknown> | null;
+            if (!row) return null;
+            return {
+                sessionsJson: row['sessions_json'] as string,
+                cachedAt: row['cached_at'] as number,
+                encryptionKeysJson: row['encryption_keys_json'] as string | undefined,
+            };
+        } catch {
+            // Column encryption_keys_json doesn't exist yet — fall back.
+            const row = await this.db.getFirstAsync(
+                'SELECT sessions_json, cached_at FROM sessions_list_cache WHERE id = 1'
+            ) as Record<string, unknown> | null;
+            if (!row) return null;
+            return {
+                sessionsJson: row['sessions_json'] as string,
+                cachedAt: row['cached_at'] as number,
+            };
+        }
     }
 
     async saveSessionsListCache(row: CachedSessionListRow): Promise<void> {
         await this.ensureReady();
-        await this.db.runAsync(
-            'INSERT OR REPLACE INTO sessions_list_cache (id, sessions_json, cached_at, encryption_keys_json) VALUES (1, ?, ?, ?)',
-            [row.sessionsJson, row.cachedAt, row.encryptionKeysJson ?? null]
-        );
+        try {
+            await this.db.runAsync(
+                'INSERT OR REPLACE INTO sessions_list_cache (id, sessions_json, cached_at, encryption_keys_json) VALUES (1, ?, ?, ?)',
+                [row.sessionsJson, row.cachedAt, row.encryptionKeysJson ?? null]
+            );
+        } catch {
+            // Column encryption_keys_json may not exist yet — fall back.
+            await this.db.runAsync(
+                'INSERT OR REPLACE INTO sessions_list_cache (id, sessions_json, cached_at) VALUES (1, ?, ?)',
+                [row.sessionsJson, row.cachedAt]
+            );
+        }
     }
 
     async clearSessionsListCache(): Promise<void> {
