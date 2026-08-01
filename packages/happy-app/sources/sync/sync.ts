@@ -2435,6 +2435,22 @@ class Sync {
     }
 
     /**
+     * Returns true if a fetchMessages error is a transient network/HTTP failure
+     * worth retrying via InvalidateSync's backoff. Logical errors (decryption,
+     * normalization, malformed data) return false — retrying them would spin
+     * forever with no chance of success.
+     */
+    private isRetryableMessageFetchError(err: unknown): boolean {
+        if (!(err instanceof Error)) return false;
+        const msg = err.message.toLowerCase();
+        // HTTP status errors (5xx/4xx) — server may be transiently unavailable.
+        if (/failed to fetch messages/.test(msg)) return true;
+        // Network-level failures and timeouts.
+        if (/network|fetch failed|timeout|econnrefused|econnreset|etimedout|enotfound|abort/i.test(msg)) return true;
+        return false;
+    }
+
+    /**
      * If we later see the server echo a user message that matches one of our optimistic
      * outbox entries, treat it as delivered even if the original POST is still retrying.
      * This prevents Linux/Tauri foreground sends from spinning forever after a lost response.
@@ -2579,10 +2595,15 @@ class Sync {
                 const cachedLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
                 const currentSession = storage.getState().sessions[sessionId];
                 const sessionSeq = currentSession?.seq ?? 0;
+                // Use the store's actual newestSeq (highest seq actually applied to the
+                // message list) rather than sessionLastSeq (highest seq ever seen via WS).
+                // WS fast-path updates sessionLastSeq but messages can be missed during a
+                // disconnect, leaving gaps that sessionLastSeq would wrongly hide.
+                const storedNewestSeq = storage.getState().sessionMessages[sessionId]?.newestSeq ?? 0;
 
                 // Already up-to-date: skip the API call and loading indicator entirely.
-                if (cachedLastSeq > 0 && cachedLastSeq >= sessionSeq) {
-                    log.log(`💬 fetchMessages: already up-to-date for ${sessionId} (lastSeq=${cachedLastSeq} >= seq=${sessionSeq}), skipping fetch`);
+                if (storedNewestSeq > 0 && storedNewestSeq >= sessionSeq) {
+                    log.log(`💬 fetchMessages: already up-to-date for ${sessionId} (newestSeq=${storedNewestSeq} >= seq=${sessionSeq}), skipping fetch`);
                     return;
                 }
 
@@ -2597,15 +2618,17 @@ class Sync {
                 }
 
                 // Always anchor to the latest 100 messages from session.seq.
-                // If cachedLastSeq is recent (gap < 100), afterSeq = cachedLastSeq (incremental).
-                // If cachedLastSeq is stale (gap > 100), afterSeq = sessionSeq - 100 (jump to latest).
-                // This ensures the user always sees the newest messages first, even with a stale cache.
+                // If storedNewestSeq is recent (gap < 100), afterSeq = storedNewestSeq (incremental).
+                // If storedNewestSeq is stale (gap > 100), afterSeq = sessionSeq - 100 (jump to latest).
+                // Using the store's newestSeq (not sessionLastSeq) ensures a missed-message gap
+                // is re-fetched from the last message actually in the list, not from a seq that
+                // was only ever seen over the wire.
                 const latestAnchor = Math.max(0, sessionSeq - 100);
-                const afterSeq = cachedLastSeq > 0
-                    ? Math.max(cachedLastSeq, latestAnchor)
+                const afterSeq = storedNewestSeq > 0
+                    ? Math.max(storedNewestSeq, latestAnchor)
                     : latestAnchor;
 
-                log.log(`💬 fetchMessages: requesting after_seq=${afterSeq} for ${sessionId} (cachedLastSeq=${cachedLastSeq})`);
+                log.log(`💬 fetchMessages: requesting after_seq=${afterSeq} for ${sessionId} (storedNewestSeq=${storedNewestSeq}, sessionSeq=${sessionSeq})`);
                 const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
                 if (!response.ok) {
                     throw new Error(`Failed to fetch messages for ${sessionId}: ${response.status}`);
@@ -2710,6 +2733,14 @@ class Sync {
                 log.log(`💬 fetchMessages failed for session ${sessionId}: ${msg}`);
                 if (err instanceof Error && err.stack) {
                     log.log(`💬 fetchMessages stack: ${err.stack}`);
+                }
+                // Re-throw network/HTTP errors so InvalidateSync's backoff retries
+                // automatically. This is the self-heal path: when the network comes
+                // back (or the server recovers), the message sync retries on its own.
+                // Logical errors (decrypt/normalize) are swallowed — retrying them
+                // would spin forever without any chance of success.
+                if (this.isRetryableMessageFetchError(err)) {
+                    throw err;
                 }
             } finally {
                 storage.getState().applyMessagesLoaded(sessionId);
@@ -2882,6 +2913,12 @@ class Sync {
                     this.getMessagesSync(sessionId).invalidate();
                     gitStatusSync.invalidate(sessionId);
                 }
+                // The currently visible session must refresh regardless of active state —
+                // the user is looking at it right now and expects new messages to appear.
+                if (this.currentVisibleSessionId && !activeIds.has(this.currentVisibleSessionId)) {
+                    this.getMessagesSync(this.currentVisibleSessionId).invalidate();
+                    gitStatusSync.invalidate(this.currentVisibleSessionId);
+                }
                 // inactive: skip entirely — onSessionVisible handles both on open.
             } catch (e) {
                 log.log(`🔄 reconnect: error invalidating message syncs: ${String(e)}`);
@@ -3003,6 +3040,9 @@ class Sync {
                         console.log('🔄 Sync: Applying message (fast path):', JSON.stringify(lastMessage));
                         this.enqueueMessages(updateData.body.sid, [lastMessage]);
                         this.sessionLastSeq.set(updateData.body.sid, incomingSeq);
+                        // Advance the store's newestSeq so fetchMessages' up-to-date check
+                        // reflects messages actually applied (not just seen on the wire).
+                        storage.getState().setNewestSeq(updateData.body.sid, incomingSeq);
                         didFastPath = true;
                     } else {
                         // Seq gap → trigger fetch to fill missing messages.
@@ -3013,7 +3053,8 @@ class Sync {
                             this.getMessagesSync(updateData.body.sid).invalidate();
                         }
                         // Enqueue immediately so the UI updates without waiting for fetchMessages.
-                        // sessionLastSeq is NOT updated here; fetchMessages will set it correctly.
+                        // Neither sessionLastSeq nor newestSeq is advanced here — the gap must
+                        // be filled by fetchMessages before the store is considered caught up.
                         if (lastMessage) {
                             console.log('🔄 Sync: Applying message (lenient path, seq gap):', JSON.stringify(lastMessage));
                             this.enqueueMessages(updateData.body.sid, [lastMessage]);
