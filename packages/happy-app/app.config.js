@@ -6,14 +6,14 @@ const name = {
 }[variant];
 const bundleId = {
     development: "com.slopus.happy.dev.personal",
-    preview: "com.slopus.happy.preview.personal",
+    preview: "com.slopus.happy.preview.testflight",
     production: "com.ex3ndr.happy"
 }[variant];
 
 export default {
     expo: {
         name,
-        slug: "happy",
+        slug: "happy-enhanced",
         version: "1.6.2",
         runtimeVersion: "20",
         orientation: "default",
@@ -153,7 +153,7 @@ export default {
             ]
         ],
         updates: {
-            url: "https://u.expo.dev/4558dd3d-cd5a-47cd-bad9-e591a241cc06",
+            url: "https://u.expo.dev/a8b38014-43de-48eb-9985-0b02a84b9c06",
             requestHeaders: {
                 "expo-channel-name": "production"
             }
@@ -168,7 +168,7 @@ export default {
             // New App (dev/preview): only render session protocol; drop output/codex/cursor to avoid duplicate text/tools
             enableSessionProtocolSend: variant !== 'production',
             eas: {
-                projectId: "4558dd3d-cd5a-47cd-bad9-e591a241cc06"
+                projectId: "a8b38014-43de-48eb-9985-0b02a84b9c06"
             },
             app: {
                 postHogKey: process.env.EXPO_PUBLIC_POSTHOG_API_KEY,
@@ -177,6 +177,6 @@ export default {
                 revenueCatStripeKey: process.env.EXPO_PUBLIC_REVENUE_CAT_STRIPE
             }
         },
-        owner: "bulkacorp"
+        owner: "gnapans-team"
     }
 };

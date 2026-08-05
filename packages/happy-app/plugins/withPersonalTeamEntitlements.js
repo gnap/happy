@@ -1,17 +1,23 @@
 const { withEntitlementsPlist } = require('@expo/config-plugins');
 
 /**
- * For development and preview (.personal) builds: remove Push Notifications
- * and Associated Domains from entitlements so a personal Apple team (free
- * account) can sign the app. Paid teams are unaffected.
+ * For development (.personal) builds only: remove Push Notifications and
+ * Associated Domains so a personal Apple team (free account) can sign the app.
+ * Preview is a paid-team TestFlight build (com.slopus.happy.preview.testflight)
+ * and keeps aps-environment. Production is unaffected.
  */
 function withPersonalTeamEntitlements(config) {
   return withEntitlementsPlist(config, (cfg) => {
     const env = process.env.APP_ENV;
-    if (env !== 'development' && env !== 'preview') return cfg;
     const e = cfg.modResults || {};
-    delete e['aps-environment'];
-    delete e['com.apple.developer.associated-domains'];
+    if (env === 'development') {
+      // Free personal team can't sign these capabilities.
+      delete e['aps-environment'];
+      delete e['com.apple.developer.associated-domains'];
+    } else if (env === 'preview') {
+      // Paid-team TestFlight build: production APNs (TestFlight uses prod APNs).
+      e['aps-environment'] = 'production';
+    }
     cfg.modResults = e;
     return cfg;
   });
