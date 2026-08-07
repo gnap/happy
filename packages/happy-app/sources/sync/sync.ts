@@ -449,9 +449,16 @@ class Sync {
                 onDesktopBlur();
             } else {
                 log.log('🖥️ Window visible — resuming and invalidating syncs');
-                void apiSocket.resumeReconnection();
+                void apiSocket.resumeReconnection().then(() => {
+                    this.#invalidateAllSyncs();
+                    // Refresh the currently visible session's messages immediately.
+                    // After sleep/wake the session screen is still mounted so
+                    // onSessionVisible doesn't fire — we must trigger it explicitly.
+                    if (this.currentVisibleSessionId) {
+                        this.onSessionVisible(this.currentVisibleSessionId);
+                    }
+                });
                 recoverDesktopPendingWork();
-                this.#invalidateAllSyncs();
                 // Full refresh after desktop wake to clean up stale cache.
                 const FULL_REFRESH_DESKTOP_WAKE_DELAY_MS = 3_000;
                 setTimeout(() => this.#refreshSessionsFull(), FULL_REFRESH_DESKTOP_WAKE_DELAY_MS);
@@ -1483,13 +1490,17 @@ class Sync {
                     try {
                         const cached = await getCachedLastSeq(session.id);
                         if (cached != null && cached < session.seq) {
-                            // Skip if WebSocket recently delivered messages — the WS path
-                            // already handles gap resolution via enqueueMessages, so an
-                            // additional HTTP fetch at this point would be redundant.
+                            // Skip the HTTP fetch only when the seq gap is small (< 100)
+                            // AND WebSocket recently delivered messages — the WS path can
+                            // fill a small gap on its own, avoiding a redundant HTTP round-trip.
+                            // For large gaps (e.g. after Linux sleep/wake or long disconnect),
+                            // the WS only delivers new messages going forward, so an HTTP
+                            // gap-fill is required regardless of WS recency.
+                            const gapSize = session.seq - cached;
                             const lastWsAt = this.sessionLastWsMessageAt.get(session.id) ?? 0;
                             const wsGap = Date.now() - lastWsAt;
-                            if (wsGap < 5000) {
-                                log.log(`📥 fetchSessions: skipping redundant message fetch for ${session.id} (WS delivered ${wsGap}ms ago, cached=${cached} < seq=${session.seq})`);
+                            if (gapSize < 100 && wsGap < 5000) {
+                                log.log(`📥 fetchSessions: skipping redundant message fetch for ${session.id} (gap=${gapSize}, WS delivered ${wsGap}ms ago, cached=${cached} < seq=${session.seq})`);
                                 continue;
                             }
                             // Skip if encryption keys are not available — can never fetch
