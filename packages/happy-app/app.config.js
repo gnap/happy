@@ -1,11 +1,13 @@
 const variant = process.env.APP_ENV || 'development';
 const name = {
     development: "Happy (dev)",
+    "dev-testflight": "Happy (dev)",
     preview: "Happy (preview)",
     production: "Happy"
 }[variant];
 const bundleId = {
     development: "com.slopus.happy.dev.personal",
+    "dev-testflight": "com.slopus.happy.dev.testflight",
     preview: "com.slopus.happy.preview.testflight",
     production: "com.ex3ndr.happy"
 }[variant];
