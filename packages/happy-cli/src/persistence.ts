@@ -6,7 +6,7 @@
 
 import { FileHandle } from 'node:fs/promises'
 import { readFile, writeFile, mkdir, open, unlink, rename, stat } from 'node:fs/promises'
-import { existsSync, writeFileSync, readFileSync, unlinkSync, mkdirSync, renameSync } from 'node:fs'
+import { existsSync, writeFileSync, readFileSync, unlinkSync, mkdirSync, renameSync, chmodSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { constants } from 'node:fs'
@@ -437,7 +437,7 @@ export function migrateLegacySessionState(state: DaemonLocallyPersistedState): R
   return sessions;
 }
 
-function writeFileAtomically(filePath: string, content: string): void {
+function writeFileAtomically(filePath: string, content: string, mode?: number): void {
   const directory = dirname(filePath);
   const tempFilePath = join(
     directory,
@@ -450,6 +450,10 @@ function writeFileAtomically(filePath: string, content: string): void {
 
   try {
     writeFileSync(tempFilePath, content, 'utf-8');
+    if (mode !== undefined) {
+      // chmod rather than the writeFileSync mode option, which umask can narrow.
+      chmodSync(tempFilePath, mode);
+    }
     renameSync(tempFilePath, filePath);
   } catch (error) {
     try {
@@ -668,7 +672,7 @@ export async function writeCredentialsLegacy(credentials: { secret: Uint8Array, 
   writeFileAtomically(configuration.privateKeyFile, JSON.stringify({
     secret: encodeBase64(credentials.secret),
     token: credentials.token
-  }, null, 2));
+  }, null, 2), 0o600);
 }
 
 export async function writeCredentialsDataKey(credentials: { publicKey: Uint8Array, machineKey: Uint8Array, token: string }): Promise<void> {
@@ -678,7 +682,7 @@ export async function writeCredentialsDataKey(credentials: { publicKey: Uint8Arr
   writeFileAtomically(configuration.privateKeyFile, JSON.stringify({
     encryption: { publicKey: encodeBase64(credentials.publicKey), machineKey: encodeBase64(credentials.machineKey) },
     token: credentials.token
-  }, null, 2));
+  }, null, 2), 0o600);
 }
 
 export async function clearCredentials(): Promise<void> {
