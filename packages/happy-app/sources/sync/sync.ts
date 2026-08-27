@@ -428,9 +428,9 @@ class Sync {
      *   hidden  → pauseReconnection  (window minimised or tab hidden)
      *   visible → resumeReconnection + full sync invalidation
      *
-     * Tauri WINDOW_FOCUS fires when the OS window regains focus without a
-     * visibility change (window was visible but behind another app). We only
-     * probe the socket here — no full invalidation needed.
+     * Tauri WINDOW_FOCUS/WINDOW_BLUR fire when the OS window gains or loses focus
+     * without a visibility change (window was visible but behind another app). On
+     * focus we only probe the socket — no full invalidation needed.
      */
     async #setupDesktopLifecycle() {
         const recoverDesktopPendingWork = () => {
@@ -438,17 +438,37 @@ class Sync {
             this.recoverPendingOutbox();
         };
 
+        // In Tauri a DOM blur arrives immediately after the OS window regains focus,
+        // so pausing straight away tears down the socket that the focus handler's
+        // resumeReconnection just created and the connection never leaves 'connecting'.
+        // Defer the pause so a focus arriving within the grace window cancels it.
+        const BLUR_PAUSE_GRACE_MS = 5_000;
+        let blurPauseTimer: ReturnType<typeof setTimeout> | null = null;
+
+        const cancelPendingBlurPause = () => {
+            if (blurPauseTimer !== null) {
+                clearTimeout(blurPauseTimer);
+                blurPauseTimer = null;
+            }
+        };
+
         const onDesktopBlur = () => {
-            log.log('🖥️ Desktop blurred — pausing socket');
-            apiSocket.pauseReconnection();
+            cancelPendingBlurPause();
+            blurPauseTimer = setTimeout(() => {
+                blurPauseTimer = null;
+                log.log('🖥️ Desktop blurred — pausing socket');
+                apiSocket.pauseReconnection();
+            }, BLUR_PAUSE_GRACE_MS);
         };
 
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
                 log.log('🖥️ Window hidden — pausing reconnection');
-                onDesktopBlur();
+                cancelPendingBlurPause();
+                apiSocket.pauseReconnection();
             } else {
                 log.log('🖥️ Window visible — resuming and invalidating syncs');
+                cancelPendingBlurPause();
                 void apiSocket.resumeReconnection().then(() => {
                     this.#invalidateAllSyncs();
                     // Refresh the currently visible session's messages immediately.
@@ -468,11 +488,16 @@ class Sync {
         window.addEventListener('focus', () => {
             if (!isRunningInTauri()) {
                 log.log('🖥️ Window focused — resuming socket and recovering pending sends');
+                cancelPendingBlurPause();
                 void apiSocket.resumeReconnection();
                 recoverDesktopPendingWork();
             }
         });
-        window.addEventListener('blur', onDesktopBlur);
+        window.addEventListener('blur', () => {
+            // In Tauri the DOM blur doesn't track the OS window; WINDOW_BLUR does.
+            if (isRunningInTauri()) return;
+            onDesktopBlur();
+        });
 
         // Track user activity for idle detection on desktop.
         // Skips periodic session refreshes when the user hasn't interacted
@@ -511,9 +536,11 @@ class Sync {
         if (isRunningInTauri()) {
             const { getCurrentWindow } = await import('@tauri-apps/api/window');
             const { TauriEvent } = await import('@tauri-apps/api/event');
-            getCurrentWindow().listen(TauriEvent.WINDOW_FOCUS, () => {
+            const appWindow = getCurrentWindow();
+            appWindow.listen(TauriEvent.WINDOW_FOCUS, () => {
                 if (!document.hidden) {
                     log.log('🖥️ Window focused (Tauri) — probing connection');
+                    cancelPendingBlurPause();
                     void apiSocket.resumeReconnection().then((connected) => {
                         if (connected) {
                             this.#refreshSessionsAfterDesktopProbe();
@@ -523,6 +550,7 @@ class Sync {
                     recoverDesktopPendingWork();
                 }
             });
+            appWindow.listen(TauriEvent.WINDOW_BLUR, onDesktopBlur);
         }
     }
 

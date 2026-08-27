@@ -3,6 +3,7 @@ import { io } from 'socket.io-client';
 import { TokenStorage } from '@/auth/tokenStorage';
 import { Encryption } from './encryption/encryption';
 import { isRunningInTauri } from '@/utils/platform';
+import { log } from '@/log';
 
 type IoFn = typeof io;
 
@@ -21,6 +22,26 @@ const REQUEST_TIMEOUT_MS = 30_000;
 
 /** Network error codes that warrant retry (same idea as CLI NETWORK_ERROR_CODES) */
 const RETRYABLE_ERROR_HINTS = ['ECONNREFUSED', 'ETIMEDOUT', 'ECONNRESET', 'ENETUNREACH', 'timeout', 'Network'];
+
+/**
+ * engine.io hides the useful part of a transport failure on `error.description`
+ * (the underlying Event / XHR status), so `error.message` alone is usually just
+ * "websocket error" and tells us nothing about why the socket cannot open.
+ */
+function describeSocketError(error: unknown): string {
+    if (!error || typeof error !== 'object') return String(error);
+    const err = error as Error & { description?: unknown; context?: unknown; type?: string };
+    const parts = [err.message || String(error)];
+    if (err.type) parts.push(`type=${err.type}`);
+    const description = err.description;
+    if (typeof description === 'number' || typeof description === 'string') {
+        parts.push(`description=${description}`);
+    } else if (description && typeof description === 'object') {
+        const desc = description as { type?: string; code?: number; message?: string };
+        parts.push(`description=${desc.type ?? desc.message ?? ''}${desc.code !== undefined ? `(${desc.code})` : ''}`);
+    }
+    return parts.join(' ');
+}
 
 function shouldUseTauriHttp(path: string, method: string): boolean {
     // Tauri plugin-http drops POST /messages responses on Linux, causing permanent
@@ -159,8 +180,12 @@ class ApiSocket {
                 token: config.token,
                 clientType: 'user-scoped' as const
             },
-            // WebSocket preferred but fall back to polling for weak/recovering networks (iOS suspend, cellular)
+            // WebSocket preferred but fall back to polling for weak/recovering networks (iOS suspend,
+            // cellular) and for webviews whose native WebSocket wedges while plain HTTP still works.
+            // engine.io only walks past transports[0] when tryAllTransports is set — without it the
+            // 'polling' entry is inert and a WebSocket that cannot open never recovers.
             transports: ['websocket', 'polling'],
+            tryAllTransports: true,
             reconnection: !this.reconnectionDisabled,
             reconnectionDelay: RECONNECT_DELAY_MIN,
             reconnectionDelayMax: RECONNECT_DELAY_MAX,
@@ -484,6 +509,10 @@ class ApiSocket {
     // Private Methods
     //
 
+    private currentTransportName(): string | null {
+        return (this.socket?.io as any)?.engine?.transport?.name ?? this.lastTransportType;
+    }
+
     private updateStatus(status: ConnectionStatus, error?: Error) {
         if (error) this.lastError = error;
         if (this.currentStatus !== status) {
@@ -522,6 +551,7 @@ class ApiSocket {
         this.socket.on('connect', () => {
             this.lastError = null;
             this.lastMessageReceivedAt = Date.now(); // Treat connect as activity
+            log.log(`🔌 socket connected via ${this.currentTransportName() ?? 'unknown'}`);
             this.updateStatus('connected');
             if (!this.socket?.recovered) {
                 this.reconnectedListeners.forEach(listener => listener());
@@ -545,10 +575,12 @@ class ApiSocket {
         // While status stays on the last `connect_error`, socket.io may still be retrying in the
         // background — surface that so the UI isn't stuck looking "idle" on error.
         const manager = this.socket.io;
-        manager.on('reconnect_attempt', () => {
+        manager.on('reconnect_attempt', (attempt: number) => {
+            log.log(`🔌 socket reconnect attempt #${attempt}`);
             this.updateStatus('connecting');
         });
         manager.on('reconnect_error', (err: Error) => {
+            log.log(`🔌 socket reconnect error: ${describeSocketError(err)}`);
             if (!this.isAuthError(err)) {
                 this.updateStatus('error', err);
             }
@@ -564,12 +596,14 @@ class ApiSocket {
         });
 
         this.socket.on('disconnect', (reason) => {
+            log.log(`🔌 socket disconnected: ${reason}`);
             // io server disconnect = server closed the connection (e.g. auth); socket.io may still retry
             if (this.reconnectionDisabled) return;
             this.updateStatus('disconnected');
         });
 
         this.socket.on('connect_error', (error: Error & { code?: string; status?: number }) => {
+            log.log(`🔌 socket connect_error on ${this.currentTransportName() ?? 'unknown'}: ${describeSocketError(error)}`);
             if (this.isAuthError(error)) {
                 this.stopReconnectionAndNotifyAuthError(error);
                 return;
