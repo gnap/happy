@@ -30,6 +30,9 @@ export default {
         ios: {
             supportsTablet: true,
             bundleIdentifier: bundleId,
+            // Build number (CFBundleVersion). Prebuild writes this literally; for
+            // direct xcodebuild runs the script passes CURRENT_PROJECT_VERSION instead.
+            buildNumber: process.env.IOS_BUILD_NUMBER || '3',
             config: {
                 usesNonExemptEncryption: false
             },
