@@ -112,6 +112,19 @@ export const sessionPermissionResultEventSchema = z.object({
   updatedInput: z.unknown().optional(),
 });
 
+/** /goal condition status — emitted when a goal is armed (sentinel) and when it resolves. */
+export const sessionGoalStatusEventSchema = z.object({
+  t: z.literal('goal-status'),
+  condition: z.string(),
+  met: z.boolean(),
+  sentinel: z.boolean().optional(),
+  failed: z.boolean().optional(),
+  reason: z.string().optional(),
+  iterations: z.number().int().nonnegative().optional(),
+  durationMs: z.number().int().nonnegative().optional(),
+  tokens: z.number().int().nonnegative().optional(),
+});
+
 export const sessionEventSchema = z.discriminatedUnion('t', [
   sessionTextEventSchema,
   sessionServiceMessageEventSchema,
@@ -123,6 +136,7 @@ export const sessionEventSchema = z.discriminatedUnion('t', [
   sessionTurnEndEventSchema,
   sessionStopEventSchema,
   sessionPermissionResultEventSchema,
+  sessionGoalStatusEventSchema,
 ]);
 
 export type SessionEvent = z.infer<typeof sessionEventSchema>;
@@ -161,6 +175,13 @@ export const sessionEnvelopeSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: `${envelope.ev.t} events must use role "agent"`,
+        path: ['role'],
+      });
+    }
+    if (envelope.ev.t === 'goal-status' && envelope.role !== 'agent') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'goal-status events must use role "agent"',
         path: ['role'],
       });
     }
