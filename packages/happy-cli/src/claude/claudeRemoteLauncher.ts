@@ -67,6 +67,7 @@ import { OutgoingMessageQueue } from "./utils/OutgoingMessageQueue";
 import { getToolName } from "./utils/getToolName";
 import { buildClaudeTurnUsagePayload } from "./utils/claudeTurnUsage";
 import { createEnvelope } from '@slopus/happy-wire';
+import { createSessionScanner } from "./utils/sessionScanner";
 
 interface PermissionsField {
     date: number;
@@ -193,6 +194,20 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             session.client.sendClaudeSessionMessage(logMessage);
         }
     );
+
+    // Goal status (/goal arm + resolve) is written to the session's disk transcript by
+    // Claude Code, but never appears in the SDK's message stream — tail the file to pick
+    // it up. Only forwards `attachment` records; user/assistant/system still flow through
+    // the direct SDK `onMessage` below to avoid double-delivery.
+    const goalStatusScanner = await createSessionScanner({
+        sessionId: session.sessionId,
+        workingDirectory: session.path,
+        onMessage: (message) => {
+            if (message.type === 'attachment') {
+                session.client.sendClaudeSessionMessage(message);
+            }
+        }
+    });
 
     // Set up callback to release delayed messages when permission is requested
     permissionHandler.setOnPermissionRequest((toolCallId: string) => {
@@ -698,6 +713,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         // Update converter's session ID when new session is found
                         sdkToLogConverter.updateSessionId(sessionId);
                         session.onSessionFound(sessionId);
+                        goalStatusScanner.onNewSession(sessionId);
                     },
                     onModelInit: (info) => {
                         session.onModelInit(info);
@@ -914,6 +930,9 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
 
         // Clean up permission handler
         permissionHandler.reset();
+
+        // Stop tailing the session file for goal-status attachments
+        await goalStatusScanner.cleanup();
 
         // Reset Terminal
         process.stdin.off('data', abort);

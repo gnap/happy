@@ -49,6 +49,8 @@ interface LoopOptions {
     onSessionReady?: (session: Session) => void
     /** Path to temporary settings file with SessionStart hook (required for session tracking) */
     hookSettingsPath: string
+    /** Port of the hook server. Used to inline SessionStart hook when sandbox is enabled. */
+    hookServerPort: number
     /** JavaScript runtime to use for spawning Claude Code (default: 'node') */
     jsRuntime?: JsRuntime
 }
@@ -71,6 +73,7 @@ export async function loop(opts: LoopOptions): Promise<number> {
         sandboxConfig: opts.sandboxConfig,
         onModeChange: opts.onModeChange,
         hookSettingsPath: opts.hookSettingsPath,
+        hookServerPort: opts.hookServerPort,
         jsRuntime: opts.jsRuntime
     });
 

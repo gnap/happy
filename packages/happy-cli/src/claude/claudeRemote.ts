@@ -16,6 +16,14 @@ import { PermissionResult } from "./sdk/types";
 import type { JsRuntime } from "./runClaude";
 import { normalizeClaudeModelForSdk } from "./utils/model";
 
+/** Quiet window before a deferred stop fires, so a wrap-up turn that immediately
+ *  spawns the next background task can re-claim the session. */
+const DEFERRED_STOP_DEBOUNCE_MS = 2000;
+
+/** How long to wait for the SDK stream to close after the input stream ended before
+ *  forcing it. Only ever reached when background tasks hold the stream open. */
+const STREAM_CLOSE_GRACE_MS = 10_000;
+
 /** Find the system Claude binary for use with the Agent SDK. */
 function resolveClaudeBinaryPath(): string {
     // 1. Explicit override
@@ -339,6 +347,41 @@ export async function claudeRemote(opts: {
     }
 
     const stopSignal = new Future<void>();
+    /** Resolved when outputLoop finishes, so inputLoop can tell whether the SDK
+     *  stream closed on its own after the input stream ended. */
+    const outputDone = new Future<void>();
+
+    /** Live background task ids, mirrored from the SDK's background_tasks_changed
+     *  messages (they carry the full set). While this is non-empty Claude Code holds
+     *  the query stream open to service the tasks and may run further turns on its
+     *  own, so ending the input stream would strand the session with no way to
+     *  accept user messages — the stream cannot be reopened once ended. */
+    const liveBackgroundTasks = new Set<string>();
+    /** A normal result arrived while background tasks were still running; the stop
+     *  is replayed once they drain. */
+    let stopDeferred = false;
+    let stopRequested = false;
+    let deferredStopTimer: ReturnType<typeof setTimeout> | null = null;
+
+    function requestStop(): void {
+        if (stopRequested) return;
+        stopRequested = true;
+        opts.onBeforeStop?.();
+        stopSignal.resolve();
+    }
+
+    function scheduleDeferredStop(): void {
+        if (deferredStopTimer) clearTimeout(deferredStopTimer);
+        deferredStopTimer = setTimeout(() => {
+            deferredStopTimer = null;
+            if (!stopDeferred || liveBackgroundTasks.size > 0) return;
+            // A turn is running again — its result takes the normal stop path.
+            if (thinking) return;
+            logger.debug('[claudeRemote] background tasks drained — completing deferred stop');
+            stopDeferred = false;
+            requestStop();
+        }, DEFERRED_STOP_DEBOUNCE_MS);
+    }
 
     // Input Loop: continuously reads user messages from the queue
     // and pushes them to the SDK. Independent of output processing.
@@ -380,6 +423,21 @@ export async function claudeRemote(opts: {
             messages.push(msg as any);
         }
         messages.end();
+
+        // The loop exited for a re-spawn (mode change, env change, …) rather than a
+        // stop, so nothing has told Claude Code to wind down. With background tasks
+        // alive it keeps the stream open indefinitely and claudeRemote() would never
+        // return. Force it — background tasks do not survive a re-spawn anyway.
+        if (stopRequested || liveBackgroundTasks.size === 0) return;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const closed = await Promise.race([
+            outputDone.promise.then(() => true),
+            new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), STREAM_CLOSE_GRACE_MS); }),
+        ]);
+        clearTimeout(timer);
+        if (closed) return;
+        logger.debug(`[claudeRemote] stream still open after input end with ${liveBackgroundTasks.size} background task(s) — aborting`);
+        abortController.abort();
     }
 
     // Output Loop: processes all SDK response messages.
@@ -422,6 +480,14 @@ export async function claudeRemote(opts: {
                     logger.debug(`[claudeRemote] SYSTEM subtype=${sysMsg.subtype} tool_use_id=${sysMsg.tool_use_id} task_id=${sysMsg.task_id} status=${sysMsg.status}`);
                 }
 
+                if (message.type === 'system' && (message as Record<string, unknown>).subtype === 'background_tasks_changed') {
+                    const tasks = (message as Record<string, unknown>).tasks as Array<{ task_id: string }> | undefined;
+                    liveBackgroundTasks.clear();
+                    for (const task of tasks ?? []) liveBackgroundTasks.add(task.task_id);
+                    logger.debug(`[claudeRemote] background tasks live: ${liveBackgroundTasks.size}`);
+                    if (stopDeferred && liveBackgroundTasks.size === 0) scheduleDeferredStop();
+                }
+
                 opts.onMessage(message);
 
                 // System init
@@ -457,8 +523,11 @@ export async function claudeRemote(opts: {
                 }
 
                 // Wake Claude on background task completion so it can process
-                // the results even if the turn already ended.
-                if (message.type === 'system' && message.subtype === 'task_notification' && !thinking) {
+                // the results even if the turn already ended. Skipped while a stop is
+                // deferred: there Claude Code runs its own wrap-up turn for the task
+                // (a result with origin.kind === 'task-notification'), and pushing here
+                // too would queue a duplicate turn.
+                if (message.type === 'system' && message.subtype === 'task_notification' && !thinking && !stopDeferred) {
                     const tn = message as any;
                     if (tn.status === 'completed' && !messages.done) {
                         logger.debug('[claudeRemote] Background task completed — waking Claude');
@@ -497,6 +566,10 @@ export async function claudeRemote(opts: {
                     if (isTaskNotification && hasTerminalReason) {
                         logger.debug('[claudeRemote] Task-notification (terminal) — reporting, not touching input loop');
                         opts.onReady(message as unknown as SDKResultMessage);
+                        // This turn ran because a background task finished. If it did not
+                        // spawn a replacement, the user turn that was waiting on those
+                        // tasks can finally stop.
+                        if (stopDeferred && liveBackgroundTasks.size === 0) scheduleDeferredStop();
                         continue;
                     }
 
@@ -525,11 +598,21 @@ export async function claudeRemote(opts: {
                         continue;
                     }
 
+                    // Background tasks keep the SDK stream open past the end of this
+                    // turn, so stopping now would close the input stream for good while
+                    // the session stays alive. Stay in-process instead: the input loop
+                    // keeps accepting user messages, and the stop is replayed once the
+                    // tasks drain.
+                    if (liveBackgroundTasks.size > 0) {
+                        logger.debug(`[claudeRemote] Result with ${liveBackgroundTasks.size} background task(s) live — keeping input loop open`);
+                        stopDeferred = true;
+                        continue;
+                    }
+
                     // Signal inputLoop to exit so claudeRemote() returns
                     // and the outer launcher loop can peek inbox / pick
                     // up the next queued message.
-                    opts.onBeforeStop?.();
-                    stopSignal.resolve();
+                    requestStop();
                 }
 
                 // Abort check
@@ -552,7 +635,9 @@ export async function claudeRemote(opts: {
                 throw e;
             }
         } finally {
+            if (deferredStopTimer) clearTimeout(deferredStopTimer);
             stopSignal.resolve();
+            outputDone.resolve();
             updateThinking(false);
         }
     }

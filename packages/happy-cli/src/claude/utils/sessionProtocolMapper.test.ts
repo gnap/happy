@@ -8,6 +8,73 @@ import {
 } from './sessionProtocolMapper';
 
 describe('mapClaudeLogMessageToSessionEnvelopes', () => {
+    it('maps a goal_status sentinel attachment to a goal-status envelope', () => {
+        const result = mapClaudeLogMessageToSessionEnvelopes({
+            type: 'attachment',
+            uuid: 'g-1',
+            attachment: {
+                type: 'goal_status',
+                condition: 'user says done',
+                met: false,
+                sentinel: true,
+            },
+        } as any, { currentTurnId: null });
+
+        expect(result.currentTurnId).toBeNull();
+        expect(result.envelopes).toHaveLength(1);
+        expect(result.envelopes[0].role).toBe('agent');
+        expect(result.envelopes[0].ev).toEqual({
+            t: 'goal-status',
+            condition: 'user says done',
+            met: false,
+            sentinel: true,
+            failed: undefined,
+            reason: undefined,
+            iterations: undefined,
+            durationMs: undefined,
+            tokens: undefined,
+        });
+    });
+
+    it('maps a goal_status resolution attachment to a goal-status envelope', () => {
+        const result = mapClaudeLogMessageToSessionEnvelopes({
+            type: 'attachment',
+            uuid: 'g-2',
+            attachment: {
+                type: 'goal_status',
+                condition: 'user says done',
+                met: true,
+                reason: 'user said done',
+                iterations: 3,
+                durationMs: 1500,
+                tokens: 42,
+            },
+        } as any, { currentTurnId: null });
+
+        expect(result.envelopes).toHaveLength(1);
+        expect(result.envelopes[0].ev).toEqual({
+            t: 'goal-status',
+            condition: 'user says done',
+            met: true,
+            sentinel: undefined,
+            failed: undefined,
+            reason: 'user said done',
+            iterations: 3,
+            durationMs: 1500,
+            tokens: 42,
+        });
+    });
+
+    it('ignores non-goal_status attachments', () => {
+        const result = mapClaudeLogMessageToSessionEnvelopes({
+            type: 'attachment',
+            uuid: 'g-3',
+            attachment: { type: 'something_else' },
+        } as any, { currentTurnId: null });
+
+        expect(result.envelopes).toHaveLength(0);
+    });
+
     it('maps user text to a user text envelope', () => {
         const result = mapClaudeLogMessageToSessionEnvelopes({
             type: 'user',

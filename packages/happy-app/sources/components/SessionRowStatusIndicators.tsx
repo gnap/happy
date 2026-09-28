@@ -5,6 +5,7 @@ import { Text } from '@/components/StyledText';
 import { Typography } from '@/constants/Typography';
 import { Session } from '@/sync/storageTypes';
 import { getSessionA2AUnreadCount } from '@/utils/sessionUtils';
+import { GOAL_STATUS_ICONS, getActiveGoal } from '@/utils/goalUtils';
 import { StyleSheet } from 'react-native-unistyles';
 
 const stylesheet = StyleSheet.create((theme) => ({
@@ -29,6 +30,7 @@ export const SessionRowStatusIndicators = React.memo(({ session, needsRestart }:
     const styles = stylesheet;
     const a2aUnread = getSessionA2AUnreadCount(session);
     const cronCount = session.agentState?.crons ? Object.keys(session.agentState.crons).length : 0;
+    const goal = getActiveGoal(session);
 
     let todoLabel: string | null = null;
     if (session.todos && session.todos.length > 0) {
@@ -39,7 +41,7 @@ export const SessionRowStatusIndicators = React.memo(({ session, needsRestart }:
         }
     }
 
-    if (a2aUnread === 0 && !todoLabel && !needsRestart && cronCount === 0) {
+    if (a2aUnread === 0 && !todoLabel && !needsRestart && cronCount === 0 && !goal) {
         return null;
     }
 
@@ -70,6 +72,9 @@ export const SessionRowStatusIndicators = React.memo(({ session, needsRestart }:
                     <Ionicons name="alarm-outline" size={10} color={styles.badgeText.color} />
                     <Text style={styles.badgeText}>{cronCount}</Text>
                 </View>
+            ) : null}
+            {goal ? (
+                <Ionicons name={GOAL_STATUS_ICONS[goal.status].icon} size={16} color={GOAL_STATUS_ICONS[goal.status].color} />
             ) : null}
             {needsRestart ? (
                 <Ionicons name="sync-circle-outline" size={16} color="#FF9500" />

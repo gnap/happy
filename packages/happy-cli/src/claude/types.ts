@@ -57,6 +57,15 @@ export const RawJSONLinesSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("system"),
     uuid: z.string() // Used in getMessageKey()
+  }).passthrough(),
+
+  // Attachment record - e.g. /goal condition arm/resolve events (attachment.type === "goal_status")
+  z.object({
+    type: z.literal("attachment"),
+    uuid: z.string(), // Used in getMessageKey()
+    attachment: z.object({
+      type: z.string()
+    }).passthrough()
   }).passthrough()
 ]);
 
