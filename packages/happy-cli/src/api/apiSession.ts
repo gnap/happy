@@ -1444,6 +1444,23 @@ export class ApiSessionClient extends EventEmitter {
         this.claudeSessionProtocolState.currentTurnId = mapped.currentTurnId;
         for (const envelope of mapped.envelopes) {
             this.sendSessionProtocolMessage(envelope);
+            // Mirror the latest /goal status into agentState so a client can query
+            // existence + status without replaying the event stream.
+            if (envelope.ev.t === 'goal-status') {
+                const ev = envelope.ev;
+                const status: 'pending' | 'met' | 'failed' =
+                    ev.iterations !== undefined ? (ev.met ? 'met' : 'failed') : 'pending';
+                this.updateAgentState((s) => ({
+                    ...s,
+                    activeGoal: {
+                        condition: ev.condition,
+                        status,
+                        reason: ev.reason,
+                        iterations: ev.iterations,
+                        updatedAt: Date.now(),
+                    },
+                }));
+            }
         }
         // Track usage from assistant messages
         if (body.type === 'assistant' && body.message?.usage) {

@@ -509,4 +509,12 @@ export type AgentState = {
       recurring: boolean
     }
   }
+  /** Latest known status of the session's /goal condition (mirrored from goal_status attachments), so a client can query it without replaying the event stream. */
+  activeGoal?: {
+    condition: string
+    status: 'pending' | 'met' | 'failed'
+    reason?: string
+    iterations?: number
+    updatedAt: number
+  } | null
 }
