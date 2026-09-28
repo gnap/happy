@@ -29,6 +29,7 @@ import { tracking, trackMessageSent } from '@/track';
 import { isRunningOnMac } from '@/utils/platform';
 import { useDeviceType, useHeaderHeight, useIsLandscape, useIsTablet } from '@/utils/responsive';
 import { formatPathRelativeToHome, getSessionAvatarId, getSessionName, useSessionStatus } from '@/utils/sessionUtils';
+import { getActiveGoal } from '@/utils/goalUtils';
 import { isVersionSupported, MINIMUM_CLI_VERSION } from '@/utils/versionUtils';
 import { Ionicons } from '@expo/vector-icons';
 import { useEffect } from 'react';
@@ -388,6 +389,8 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             metadata={session.metadata}
             isSendDisabled={!sync.encryption.getSessionEncryption(sessionId)}
             connectionStatus={(() => {
+                // /goal status is independent of the connection, so it rides along in both branches.
+                const goal = getActiveGoal(session);
                 const hasEncryption = sync.encryption.getSessionEncryption(sessionId);
                 if (!hasEncryption) {
                     return {
@@ -395,6 +398,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                         color: theme.colors.warning,
                         dotColor: theme.colors.warning,
                         isPulsing: true,
+                        goal,
                     };
                 }
                 return {
@@ -402,6 +406,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                     color: sessionStatus.statusColor,
                     dotColor: sessionStatus.statusDotColor,
                     isPulsing: sessionStatus.isPulsing,
+                    goal,
                 };
             })()}
             onSend={() => {

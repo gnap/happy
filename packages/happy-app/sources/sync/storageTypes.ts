@@ -102,6 +102,18 @@ export const AgentStateSchema = z.object({
         schedule: z.string(),
         recurring: z.boolean(),
     })).optional(),
+    /**
+     * Latest /goal condition status, mirrored from the CLI's goal_status attachments.
+     * `pending` while the goal is armed and undecided; `met` / `failed` once judged.
+     * Nullish when the session has no goal.
+     */
+    activeGoal: z.object({
+        condition: z.string(),
+        status: z.enum(['pending', 'met', 'failed']),
+        reason: z.string().optional(),
+        iterations: z.number().optional(),
+        updatedAt: z.number(),
+    }).nullish(),
 });
 
 export type AgentState = z.infer<typeof AgentStateSchema>;

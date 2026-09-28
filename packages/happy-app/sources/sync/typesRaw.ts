@@ -194,6 +194,24 @@ const sessionPermissionResultEventSchema = z.object({
     updatedInput: z.unknown().optional(),
 });
 
+/**
+ * /goal condition status — emitted when a goal is armed (sentinel) and again when it
+ * resolves. Mirrors `sessionGoalStatusEventSchema` in @slopus/happy-wire. The app reads
+ * the current status from `agentState.activeGoal`; this schema exists so the envelope
+ * still validates instead of tripping the VALIDATION ERROR path in normalizeRawMessage.
+ */
+const sessionGoalStatusEventSchema = z.object({
+    t: z.literal('goal-status'),
+    condition: z.string(),
+    met: z.boolean(),
+    sentinel: z.boolean().optional(),
+    failed: z.boolean().optional(),
+    reason: z.string().optional(),
+    iterations: z.number().int().nonnegative().optional(),
+    durationMs: z.number().int().nonnegative().optional(),
+    tokens: z.number().int().nonnegative().optional(),
+});
+
 const sessionEventSchema = z.discriminatedUnion('t', [
     sessionTextEventSchema,
     sessionServiceMessageEventSchema,
@@ -205,6 +223,7 @@ const sessionEventSchema = z.discriminatedUnion('t', [
     sessionTurnEndEventSchema,
     sessionStopEventSchema,
     sessionPermissionResultEventSchema,
+    sessionGoalStatusEventSchema,
 ]);
 
 const sessionEnvelopeSchema = z.object({
@@ -229,6 +248,13 @@ const sessionEnvelopeSchema = z.object({
         ctx.addIssue({
             code: z.ZodIssueCode.custom,
             message: `${envelope.ev.t} events must use role "agent"`,
+            path: ['role'],
+        });
+    }
+    if (envelope.ev.t === 'goal-status' && envelope.role !== 'agent') {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'goal-status events must use role "agent"',
             path: ['role'],
         });
     }
