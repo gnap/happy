@@ -499,7 +499,8 @@ export type AgentState = {
       reason?: string,
       mode?: PermissionMode,
       decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort',
-      allowTools?: string[]
+      allowTools?: string[],
+      updatedInput?: Record<string, unknown>
     }
   }
   /** Pending cron tasks — compact metadata for App display (no prompt payload). */

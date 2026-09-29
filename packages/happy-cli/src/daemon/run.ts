@@ -1215,9 +1215,8 @@ export async function startDaemon(): Promise<void> {
         // Move to stoppedSessions — same as process exit handler
         const tracked = Array.from(pidToTrackedSession.values()).find(s => s.happySessionId === sessionId);
         if (tracked && tracked.pid > 0) {
-          tracked.exitReason = 'socket disconnected';
           tracked.exitTime = Date.now();
-          onSessionEnding(tracked);
+          onSessionEnding(sessionId, tracked.pid, 'socket disconnected');
         }
       },
     });
@@ -1588,7 +1587,7 @@ export async function startDaemon(): Promise<void> {
           );
 
           lastSpawnAttemptBySessionId[id] = now;
-          const autoSandbox = sessionEntry.sandbox;
+          const autoSandbox = sessionEntry.sandbox ?? undefined;
           spawnSession({
             directory,
             agent,

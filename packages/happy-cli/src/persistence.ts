@@ -279,7 +279,7 @@ export interface PersistedSession {
   sessionTag: string;
   agent: string;
   /** Per-session sandbox config (may be undefined if never set). */
-  sandbox?: Record<string, any>;
+  sandbox?: SandboxConfig | null;
   /** PID of the child process (-1 if unknown after daemon restart). */
   pid: number;
   /** 'running' = active, 'stopped' = exited but not archived. */

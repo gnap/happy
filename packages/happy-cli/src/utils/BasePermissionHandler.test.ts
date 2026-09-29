@@ -21,6 +21,7 @@ function createMockSession(): {
   let permissionHandler: ((response: PermissionResponse) => Promise<void>) | null = null;
 
   const session = {
+    sendSessionProtocolMessage: vi.fn(),
     updateAgentState: vi.fn((handler: (state: AgentState) => AgentState) => {
       const next = handler(agentState ?? {});
       agentState = next;

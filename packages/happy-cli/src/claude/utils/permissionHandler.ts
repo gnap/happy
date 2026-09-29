@@ -448,7 +448,7 @@ export class PermissionHandler {
                 const entries = Object.entries({ ...currentState.completedRequests, [id]: {
                     ...request,
                     completedAt: Date.now(),
-                    status: message.approved ? 'approved' : 'denied',
+                    status: message.approved ? 'approved' as const : 'denied' as const,
                     reason: message.reason,
                     mode: message.mode,
                     allowTools: message.allowTools,
