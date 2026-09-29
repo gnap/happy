@@ -84,6 +84,7 @@ export default {
         plugins: [
             require("./plugins/withEinkCompatibility.js"),
             require("./plugins/withPersonalTeamEntitlements.js"),
+            require("./plugins/withSceneLifecycle.js"),
             [
                 "expo-router",
                 {
