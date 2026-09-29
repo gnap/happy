@@ -64,6 +64,10 @@ fi
 cd "$IOS_DIR"
 mkdir -p "$IOS_DIR/build"
 
+# RevenueCat 5.55.3 doesn't compile under Swift 6.4 (Xcode 27). Lives in ios/Pods/,
+# so it must be re-applied after every pod install.
+bash "$SCRIPT_DIR/patch-revenuecat-swift64.sh"
+
 # Force build number + version into Info.plist. Prebuild hardcodes CFBundleVersion
 # to '1', and xcodebuild's CURRENT_PROJECT_VERSION flag does not override a
 # hardcoded plist value. Without this every upload collides with build '1'.
