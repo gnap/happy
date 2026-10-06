@@ -182,6 +182,20 @@ CLI 本地创建（不依赖 server）:
 > - ~~**offline stub 完全不覆盖**~~ → **已修复**，见下。
 > - 写放大 O(Q)：长断网时每入队一条重写整个文件。解法是背压，不在本次。
 
+> **P1b 已实施（2026-10-06）**：`n`（每写者单调计数器）落地，`sid`/`site`/`n` 三元组补齐。**零格式迁移**——P1a 的 `{v, tag, nextN, entries}` 本就预留了位置。
+>
+> - **计数器在「入队点」自增**（紧邻 `enqueueMessage` 的那一行），**不在 `withWriterIdentity` 里**。原因是若两者之间出现提前返回，那个 `n` 会**永久缺席**形成空洞。实测当前无此返回，但结构上避免引狼入室。
+> - **文件从"outbox"重新定义为「会话写者状态」**：`close()` 不再删除它。删掉会连 `nextN` 一起删，而 tag 可恢复（`--resume-session-tag`），计数器回退会让读者按 `(n, site)` 排序时看到重复。（`deleteOutbox` 因此成为死代码，已移除。）
+> - **`nextN` 无条件播种**（队列为空也要播）——这正是它独立于 `entries` 存在的理由。
+> - **`site` 写入文件；加载时若不一致则重置 `nextN` 并告警**：同 tag 在另一台机器恢复时，继承计数会让两个写者的 `n` 区间交织。
+>
+> **已知限制（不粉饰）**：
+> - 上述重置**不阻止交织**——旧 site 的未投递条目仍在盘上会被重发。彻底修需先决定"哪个机器拥有该会话"。
+> - **密钥重置 ≡ 消息丢失**：`<agent>-session-key-<tag>` 丢失/重生成时，盘上条目的 `n` 也随之失去意义。P1a 既有隐患，但 `n` 让它**首次以"空洞"的形式可见**。
+> - `runClaude.ts:196` 用 `randomUUID()` 当 tag：每次重试产生一个永不复用的 tag + 一份永不读取的状态文件。既存反模式，仅加注释。
+> - `pruneOutboxes` 只从构造函数调用，故**长期不 spawn 新会话的 daemon 永不清理**。P1a 既有，不宣称"积累有界"。
+> - 路线图 §2.1 说 `sid` 是 cuid2，实际是「tag 是什么就是什么」（`randomUUID()` 或用户输入）。P0a 遗留，未修。
+
 > **离线路径丢消息已修复（2026-10-06）**：此前"启动时服务器不可达"的会话（codex/gemini/cursor/acp）出站消息 **100% 被静默丢弃**——stub 的 send 方法全是空实现，且它的 `sessionEncryptionKey` 是空数组。根因是 `dataKey` 凭证的会话密钥在 `getOrCreateSession` 内部生成、`return null` 时被丢弃，离线时**根本无密钥可用**。
 >
 > 修法：① `ApiClient.resolveSessionEncryption(tag, existingKey?)` 成为密钥解析的**唯一来源**——`dataKey` 下在 HTTP 调用**之前**落盘到 `~/.happy/session-key-<hash>`（0600），`legacy` 不落盘（密钥已在 `access.key`，再存一份只会扩大暴露面）；② 从 `apiSession.ts` 抽出 `sessionPayloads.ts` 的纯载荷构造函数（**行为保持**的重构，严格 `toEqual` 断言全绿），离线 stub 用它们组装 → 加密 → 写入同一个 tag 键控 outbox；③ 重连时真实 client 播种同一文件并以 HTTP 排空——**无需搬运任何内存状态，文件就是交接点**。同时修正了误导性提示（原"Session syncing in background"对离线路径是假的）。

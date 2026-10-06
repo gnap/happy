@@ -415,8 +415,8 @@ describe('ApiSessionClient v3 messages API migration', () => {
 
         expect(decrypted).toEqual({
             role: 'session',
-            // Writer identity is stamped onto the envelope before encryption.
-            content: { ...envelope, sid: 'test-session-tag', site: 'test-machine-id' },
+            // Writer identity and the monotonic writer counter are stamped before encryption.
+            content: { ...envelope, sid: 'test-session-tag', site: 'test-machine-id', n: 0 },
             meta: {
                 sentFrom: 'cli'
             }

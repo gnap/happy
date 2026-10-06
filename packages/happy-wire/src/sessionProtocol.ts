@@ -163,6 +163,12 @@ export const sessionEnvelopeSchema = z
     sid: z.string().optional(),
     /** Identity of the writer (CLI = machine id, App = device id). Optional, see `sid`. */
     site: z.string().optional(),
+    /**
+     * Monotonic per-(session, writer) counter, assigned in the order the writer produced
+     * envelopes. `(n, site)` is the ordering key independent of the server's `seq`, and a
+     * gap in one writer's `n` proves a message went missing. Optional, see `sid`.
+     */
+    n: z.number().int().nonnegative().optional(),
     ev: sessionEventSchema,
   })
   .superRefine((envelope, ctx) => {

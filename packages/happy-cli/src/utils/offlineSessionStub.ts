@@ -65,6 +65,8 @@ class OfflineSessionStub extends EventEmitter {
     private readonly encryptionVariant: 'legacy' | 'dataKey';
     /** Mirrors the persisted queue so each append does not re-read the file. */
     private readonly queued: OutboxEntry[];
+    /** Next value of the per-writer envelope counter; seeded from disk, see `queueRecord`. */
+    private nextN: number;
 
     constructor(opts: OfflineSessionStubOptions) {
         super();
@@ -73,7 +75,11 @@ class OfflineSessionStub extends EventEmitter {
         this.site = opts.site;
         this.sessionEncryptionKey = opts.encryptionKey;
         this.encryptionVariant = opts.encryptionVariant;
-        this.queued = loadOutbox(opts.tag).entries;
+        const restored = loadOutbox(opts.tag);
+        this.queued = restored.entries;
+        // Continue the counter rather than restarting it: the reconnected client reads this
+        // same file, so the two must agree on what comes next.
+        this.nextN = restored.site !== undefined && restored.site !== opts.site ? 0 : restored.nextN;
     }
 
     /**
@@ -86,7 +92,7 @@ class OfflineSessionStub extends EventEmitter {
             localId,
             content: encodeBase64(encrypt(this.sessionEncryptionKey, this.encryptionVariant, record)),
         });
-        saveOutbox(this.tag, { entries: this.queued, nextN: 0 });
+        saveOutbox(this.tag, { entries: this.queued, nextN: this.nextN, site: this.site });
     }
 
     private withWriterIdentity(envelope: SessionEnvelope): SessionEnvelope {
@@ -118,13 +124,15 @@ class OfflineSessionStub extends EventEmitter {
     sendClaudeSessionMessage(_body: RawJSONLines): void {}
 
     sendSessionProtocolMessage(envelope: SessionEnvelope, extraMeta?: Record<string, unknown>): void {
-        const stamped = this.withWriterIdentity(envelope);
-        this.queueRecord(buildSessionProtocolPayload(stamped, extraMeta), stamped.id);
+        // Counter issued on the line above the enqueue, as in ApiSessionClient: an `n`
+        // without a matching durable write would be a permanent gap.
+        const withN: SessionEnvelope = { ...this.withWriterIdentity(envelope), n: this.nextN++ };
+        this.queueRecord(buildSessionProtocolPayload(withN, extraMeta), withN.id);
     }
 
     sendSessionLifecycleEnvelope(envelope: SessionEnvelope): void {
-        const stamped = this.withWriterIdentity(envelope);
-        this.queueRecord(buildLifecyclePayload(stamped), stamped.id);
+        const withN: SessionEnvelope = { ...this.withWriterIdentity(envelope), n: this.nextN++ };
+        this.queueRecord(buildLifecyclePayload(withN), withN.id);
     }
 
     sendSessionEvent(event: SessionEventPayload, id?: string): void {

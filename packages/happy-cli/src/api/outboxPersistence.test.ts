@@ -32,7 +32,7 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
-import { deleteOutbox, loadOutbox, outboxPath, pruneOutboxes, saveOutbox } from './outboxPersistence';
+import { loadOutbox, outboxPath, pruneOutboxes, saveOutbox } from './outboxPersistence';
 
 const TAG = 'tag-round-trip';
 const dirFor = (home: string) => join(home, 'session-outbox');
@@ -116,13 +116,6 @@ describe('outboxPersistence', () => {
     expect(files).toHaveLength(1);
     expect(files[0]).toMatch(/^[0-9a-f]{32}\.json$/);
     expect(existsSync(join(happyHome, '..', 'etc'))).toBe(false);
-  });
-
-  it('deletes the outbox file', () => {
-    saveOutbox(TAG, { entries: [{ localId: 'a', content: 'b' }], nextN: 0 });
-    deleteOutbox(TAG);
-    expect(existsSync(outboxPath(TAG))).toBe(false);
-    expect(() => deleteOutbox(TAG)).not.toThrow();
   });
 
   it('prunes stale files while protecting the one being loaded', () => {

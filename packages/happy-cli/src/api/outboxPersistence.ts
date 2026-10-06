@@ -12,6 +12,13 @@
  * ones are lost messages. Callers must therefore persist synchronously on enqueue,
  * and only ever persist again after the queue has shrunk.
  *
+ * This is also the durable home of the per-writer counter (`nextN`), which is why the
+ * file must outlive the queue: a session tag can be resumed, and a counter that restarted
+ * at zero would reissue `n` values that a reader sorts on. The counter is stored next to
+ * the entries rather than in its own file so that issuing an `n` and making it durable are
+ * a single atomic rename -- two files could not be ordered safely, and either ordering
+ * leaves a permanent gap or a duplicate.
+ *
  * Every filesystem call is wrapped: a failure downgrades to in-memory-only operation
  * with a warning rather than breaking the session.
  */
@@ -47,11 +54,16 @@ export type OutboxEntry = {
 export type OutboxState = {
   entries: OutboxEntry[];
   /**
-   * Reserved high-water mark for the per-writer `n` counter. Persisted separately from
-   * the entries because the counter must keep advancing even when the queue drains to
-   * empty -- otherwise a restart would reissue `n` values and read as message loss.
+   * High-water mark of the per-writer `n` counter: the next value to issue. Stored
+   * separately from the entries because it must keep advancing even when the queue drains
+   * to empty -- otherwise a restart would reissue `n` values and read as message loss.
    */
   nextN: number;
+  /**
+   * The writer this state belongs to. `n` is only meaningful per writer, so if a tag is
+   * resumed by a different machine the counter must not be inherited -- see `loadOutbox`.
+   */
+  site?: string;
 };
 
 const OUTBOX_DIR = 'session-outbox';
@@ -75,13 +87,14 @@ export function loadOutbox(tag: string): OutboxState {
   }
 
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as { entries?: unknown };
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as { entries?: unknown; nextN?: unknown; site?: unknown };
     if (!Array.isArray(parsed.entries)) {
       return { entries: [], nextN: 0 };
     }
     const entries = parsed.entries.filter(isOutboxEntry);
-    const nextN = typeof (parsed as { nextN?: unknown }).nextN === 'number' ? (parsed as { nextN: number }).nextN : 0;
-    return { entries, nextN };
+    const nextN = typeof parsed.nextN === 'number' ? parsed.nextN : 0;
+    const site = typeof parsed.site === 'string' ? parsed.site : undefined;
+    return { entries, nextN, site };
   } catch (error) {
     // A corrupt or partially-written file must not break session startup; the queue
     // simply starts empty. Unknown fields are ignored, which is what lets a newer
@@ -97,6 +110,7 @@ export function saveOutbox(tag: string, state: OutboxState): void {
   const payload = JSON.stringify({
     v: OUTBOX_FORMAT_VERSION,
     tag,
+    site: state.site,
     nextN: state.nextN,
     entries: state.entries,
   });
@@ -117,17 +131,6 @@ export function saveOutbox(tag: string, state: OutboxState): void {
       /* best effort */
     }
     logOutboxWarning('failed to persist outbox, continuing in memory', { tag, error: String(error) });
-  }
-}
-
-export function deleteOutbox(tag: string): void {
-  const path = outboxPath(tag);
-  try {
-    if (existsSync(path)) {
-      unlinkSync(path);
-    }
-  } catch (error) {
-    logOutboxWarning('failed to delete outbox', { tag, error: String(error) });
   }
 }
 

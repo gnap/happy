@@ -28,7 +28,7 @@ import {
 import { InvalidateSync } from '@/utils/sync';
 import axios from 'axios';
 import { resolveSessionLastSeq } from './sessionLastSeq';
-import { deleteOutbox, loadOutbox, outboxPath, pruneOutboxes, saveOutbox } from './outboxPersistence';
+import { loadOutbox, outboxPath, pruneOutboxes, saveOutbox } from './outboxPersistence';
 import {
     buildAgentMessagePayload,
     buildCodexPayload,
@@ -249,6 +249,12 @@ export class ApiSessionClient extends EventEmitter {
      * re-lose exactly the messages this persistence exists to save.
      */
     private seededRemaining = 0;
+    /**
+     * Next value of the per-writer envelope counter, stamped as `n`. Persisted in the
+     * session writer-state file so it survives a restart -- a counter that restarted would
+     * reissue values a reader sorts on.
+     */
+    private nextN = 0;
     private metadata: Metadata | null;
     private metadataVersion: number;
     private agentState: AgentState | null;
@@ -550,8 +556,8 @@ export class ApiSessionClient extends EventEmitter {
             ...(isNode() && { agent: serverHttpsAgent as any }),
         });
 
-        // Restore anything a previous process left unsent. Entries are stored already
-        // encrypted, so they are resendable as-is; the server dedupes on localId.
+        // Restore the session's writer state. Entries are stored already encrypted, so they
+        // are resendable as-is; the server dedupes on localId.
         const restoredOutbox = loadOutbox(this.sid);
         if (restoredOutbox.entries.length > 0) {
             this.pendingOutbox = restoredOutbox.entries;
@@ -559,6 +565,20 @@ export class ApiSessionClient extends EventEmitter {
             logger.debug(`[API] restored ${restoredOutbox.entries.length} unsent message(s) from disk`);
             this.sendSync.invalidate();
         }
+        // Seed the counter even when the queue came back empty -- that is precisely why it
+        // is stored apart from the entries.
+        const writerChanged = restoredOutbox.site !== undefined && restoredOutbox.site !== this.site;
+        if (writerChanged) {
+            // Same tag, different machine: inheriting the count would interleave two
+            // writers' `n` ranges under one session. Reset, so the divergence is at least
+            // visible rather than silently corrupting the order.
+            logger.warn('[API] session writer changed; restarting the envelope counter', {
+                session: this.sid,
+                previousSite: restoredOutbox.site,
+                site: this.site,
+            });
+        }
+        this.nextN = writerChanged ? 0 : restoredOutbox.nextN;
         pruneOutboxes({ keepPath: outboxPath(this.sid) });
 
         //
@@ -1469,7 +1489,7 @@ export class ApiSessionClient extends EventEmitter {
      * defer this to a timer. Callers that shrink the queue may call it freely.
      */
     private persistOutboxNow(): void {
-        saveOutbox(this.sid, { entries: this.pendingOutbox, nextN: 0 });
+        saveOutbox(this.sid, { entries: this.pendingOutbox, nextN: this.nextN, site: this.site });
     }
 
     private enqueueMessage(content: unknown, invalidate: boolean = true, localId?: string) {
@@ -1583,8 +1603,13 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     private enqueueSessionProtocolEnvelope(envelope: SessionEnvelope, invalidate: boolean = true, extraMeta?: Record<string, unknown>) {
+        // Issue the counter on the line above the enqueue: an `n` handed out without a
+        // matching durable write would be a permanent gap, so the two stay adjacent. Do not
+        // move this into withWriterIdentity -- that runs further from the write, and any
+        // early return between the two would burn a value.
+        const withN: SessionEnvelope = { ...envelope, n: this.nextN++ };
         // Use envelope.id as localId so server dedupes by localId; same envelope sent multiple times becomes one row.
-        this.enqueueMessage(buildSessionProtocolPayload(envelope, extraMeta), invalidate, envelope.id);
+        this.enqueueMessage(buildSessionProtocolPayload(withN, extraMeta), invalidate, withN.id);
     }
 
     /** Count of envelopes sent this process (for trace log); resets only by process restart. */
@@ -1635,7 +1660,8 @@ export class ApiSessionClient extends EventEmitter {
                 appendFileSync(process.env.HAPPY_CURSOR_TRACE_LOG ?? '/tmp/cursor-envelope-trace.log', `${line}\n`);
             } catch { /* ignore */ }
         }
-        this.enqueueMessage(buildLifecyclePayload(envelope), true, envelope.id);
+        const withN: SessionEnvelope = { ...envelope, n: this.nextN++ };
+        this.enqueueMessage(buildLifecyclePayload(withN), true, withN.id);
     }
 
     /**
@@ -1869,11 +1895,9 @@ export class ApiSessionClient extends EventEmitter {
         this.sendSync.stop();
         this.receiveSync.stop();
         this.socket.close();
-        // Only drop the persisted queue once it is fully delivered. A non-empty queue
-        // means those messages never reached the server; leave the file for the next
-        // run of this tag to pick up.
-        if (this.pendingOutbox.length === 0) {
-            deleteOutbox(this.sid);
-        }
+        // The session writer-state file is deliberately NOT deleted here. It holds the
+        // envelope counter as well as any undelivered entries, and a resumed tag must
+        // continue the count rather than reissue values a reader sorts on. Age-based
+        // pruning in the constructor bounds accumulation.
     }
 }

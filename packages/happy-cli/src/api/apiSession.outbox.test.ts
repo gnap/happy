@@ -85,9 +85,12 @@ vi.mock('@/utils/time', () => ({
 }));
 
 import { ApiSessionClient } from './apiSession';
-import { loadOutbox, outboxPath } from './outboxPersistence';
+import { loadOutbox, outboxPath, saveOutbox } from './outboxPersistence';
+import { decodeBase64, decrypt, encodeBase64, encrypt } from './encryption';
 
 const TAG = 'test-session-tag';
+/** Shared so a second client for the same tag can decrypt what the first one posted. */
+const SESSION_KEY = new Uint8Array(32).fill(5);
 
 function makeSession() {
     return {
@@ -106,7 +109,7 @@ function makeSession() {
         metadataVersion: 0,
         agentState: null,
         agentStateVersion: 0,
-        encryptionKey: new Uint8Array(32),
+        encryptionKey: SESSION_KEY,
         encryptionVariant: 'legacy' as const,
     };
 }
@@ -136,6 +139,15 @@ async function waitFor(check: () => void, timeoutMs = 3000) {
 /** localIds of every message ever POSTed, in order. */
 const postedLocalIds = () =>
     mockAxiosPost.mock.calls.flatMap((call: any[]) => (call[1]?.messages ?? []).map((m: any) => m.localId));
+
+/** The `n` each posted envelope carries, read out of its ciphertext. */
+const postedEnvelopeNs = () =>
+    mockAxiosPost.mock.calls.flatMap((call: any[]) =>
+        (call[1]?.messages ?? []).map((m: any) => {
+            const record = decrypt(SESSION_KEY, 'legacy', decodeBase64(m.content)) as { content?: { n?: number } };
+            return record.content?.n;
+        })
+    );
 
 describe('ApiSessionClient outbox durability', () => {
     let happyHome: string;
@@ -206,7 +218,7 @@ describe('ApiSessionClient outbox durability', () => {
         expect(mockSocket.emit).not.toHaveBeenCalledWith('message', expect.anything());
     });
 
-    it('deletes the outbox file on close when the queue is empty', async () => {
+    it('keeps the writer-state file on close even when the queue is empty', async () => {
         mockAxiosPost.mockResolvedValue({
             data: { messages: [{ id: 'm1', seq: 1, localId: 'env-clean', createdAt: 1, updatedAt: 1 }] },
         });
@@ -216,7 +228,73 @@ describe('ApiSessionClient outbox durability', () => {
 
         expect(existsSync(outboxPath(TAG))).toBe(true);
         await client.close();
-        expect(existsSync(outboxPath(TAG))).toBe(false);
+        // The file is session writer state, not just a queue: it carries the envelope
+        // counter, and a resumed tag must continue counting rather than reissue values.
+        expect(existsSync(outboxPath(TAG))).toBe(true);
+    });
+
+    it('continues the envelope counter across a restart with an empty queue', async () => {
+        mockAxiosPost.mockResolvedValue({
+            data: { messages: [{ id: 'm1', seq: 1, localId: 'env-1', createdAt: 1, updatedAt: 1 }] },
+        });
+        const first = new ApiSessionClient('fake-token', makeSession());
+        first.sendSessionProtocolMessage(envelope('env-1', 'one') as never);
+        first.sendSessionProtocolMessage(envelope('env-2', 'two') as never);
+        await waitFor(() => expect(postedLocalIds()).toHaveLength(2));
+
+        expect(postedEnvelopeNs()).toEqual([0, 1]);
+        expect(loadOutbox(TAG).nextN).toBe(2);
+
+        // A clean close leaves the queue empty -- the case where the counter used to be
+        // deleted along with the file.
+        await first.close();
+        mockAxiosPost.mockReset();
+        mockAxiosPost.mockResolvedValue({ data: { messages: [] } });
+
+        const second = new ApiSessionClient('fake-token', makeSession());
+        second.sendSessionProtocolMessage(envelope('env-3', 'three') as never);
+        await waitFor(() => expect(postedLocalIds()).toEqual(['env-3']));
+
+        // Must resume at 2, not restart at 0.
+        expect(postedEnvelopeNs()).toEqual([2]);
+    });
+
+    it('does not reissue a counter value when an undelivered envelope is resent', async () => {
+        // Seed state as a killed process would have left it: entry n=4, counter at 5.
+        const seededEnvelope = {
+            id: 'env-seeded',
+            time: 1,
+            role: 'agent' as const,
+            ev: { t: 'text' as const, text: 'seeded' },
+            sid: TAG,
+            site: 'test-machine-id',
+            n: 4,
+        };
+        saveOutbox(TAG, {
+            entries: [{ localId: 'env-seeded', content: encodeBase64(encrypt(SESSION_KEY, 'legacy', { role: 'session', content: seededEnvelope, meta: { sentFrom: 'cli' } })) }],
+            nextN: 5,
+            site: 'test-machine-id',
+        });
+
+        mockAxiosPost.mockResolvedValue({ data: { messages: [] } });
+        new ApiSessionClient('fake-token', makeSession());
+        await waitFor(() => expect(postedLocalIds()).toEqual(['env-seeded']));
+
+        // The resent envelope keeps its original n, and the counter is not advanced past it.
+        expect(postedEnvelopeNs()).toEqual([4]);
+        expect(loadOutbox(TAG).nextN).toBe(5);
+    });
+
+    it('restarts the counter when the same tag is resumed by a different writer', async () => {
+        saveOutbox(TAG, { entries: [], nextN: 7, site: 'some-other-machine' });
+
+        mockAxiosPost.mockResolvedValue({ data: { messages: [] } });
+        const client = new ApiSessionClient('fake-token', makeSession());
+        client.sendSessionProtocolMessage(envelope('env-after-move', 'moved') as never);
+        await waitFor(() => expect(postedLocalIds()).toEqual(['env-after-move']));
+
+        // Inheriting 7 would interleave two writers' counter ranges under one session.
+        expect(postedEnvelopeNs()).toEqual([0]);
     });
 
     it('keeps the outbox file on close when messages are still queued', async () => {
