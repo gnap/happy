@@ -26,6 +26,8 @@ import { getTmuxUtilities, isTmuxAvailable, parseTmuxSessionIdentifier, formatTm
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
 import { stripProfileManagedEnv } from '@/utils/profileEnv';
 import { fetchSessionProfileMeta } from './fetchSessionProfileMeta';
+import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSessionSummary } from './lanServer';
+import { startLanDiscovery, type LanDiscoveryHandle } from './lanDiscovery';
 
 /** Time to wait for a spawned session to report via /session-started webhook before failing the spawn (Cursor cold start can exceed 30s). */
 const SESSION_WEBHOOK_TIMEOUT_MS = 60_000;
@@ -1222,6 +1224,55 @@ export async function startDaemon(): Promise<void> {
     });
     logger.debug(`[DAEMON RUN] Unix socket server started at ${socketPath}`);
 
+    //
+    // LAN API — opt-in, read-only, authenticated.
+    //
+    // Deliberately separate from the control server above: that one has no authentication
+    // (loopback is its only protection) and can spawn/stop sessions. This one only reads,
+    // so widening it to the network does not widen the control surface.
+    //
+    let lanServer: LanServerHandle | null = null;
+    let lanDiscovery: LanDiscoveryHandle | null = null;
+    if (configuration.enableLan) {
+      if (credentials.encryption.type !== 'dataKey') {
+        // LAN auth is a challenge-response keyed on the machine key, which only dataKey
+        // credentials have. The account secret is not a substitute — it decrypts every
+        // session — and keying the HMAC on an absent key would be attacker-computable.
+        logger.warn('[DAEMON RUN] HAPPY_LAN_ENABLED ignored: LAN auth requires dataKey credentials');
+      } else {
+        try {
+          const accountFingerprint = accountFingerprintOf(credentials.encryption.publicKey);
+          const started = await startLanServer({
+            secret: credentials.encryption.machineKey,
+            machineId,
+            accountFingerprint,
+            getSessions: () => [...pidToTrackedSession.values()]
+              .filter(session => session.happySessionId !== undefined)
+              .map(session => ({
+                happySessionId: session.happySessionId!,
+                directory: session.directory ?? '',
+                agent: session.agent ?? '',
+                startedBy: String(session.startedBy),
+                isAlive: session.exitTime
+                  ? false
+                  : (() => { try { process.kill(session.pid, 0); return true; } catch { return false; } })(),
+                lastHeartbeat: session.lastHeartbeat,
+              } satisfies LanSessionSummary)),
+          });
+          lanServer = started;
+          lanDiscovery = await startLanDiscovery({ port: started.port, machineId, accountFingerprint });
+          logger.debug(`[DAEMON RUN] LAN API listening on port ${started.port}`);
+        } catch (error) {
+          // An opt-in feature must never stop the daemon from starting.
+          logger.warn('[DAEMON RUN] LAN API not started', { error: String(error) });
+          await lanServer?.stop().catch(() => undefined);
+          await lanDiscovery?.stop().catch(() => undefined);
+          lanServer = null;
+          lanDiscovery = null;
+        }
+      }
+    }
+
     // Periodic liveness check: verify sessions are still running by checking their PID.
     // - PID alive and not zombie → keep session, just note if heartbeat is stale
     // - PID gone or zombie       → evict (process is dead regardless of heartbeat state)
@@ -1727,6 +1778,10 @@ export async function startDaemon(): Promise<void> {
       apiMachine.shutdown();
       await stopSocketServer();
       await stopControlServer();
+      // Withdraw the advertisement before the listener goes away, so peers do not keep a
+      // stale record pointing at a closed port.
+      await lanDiscovery?.stop().catch(() => undefined);
+      await lanServer?.stop().catch(() => undefined);
       await cleanupDaemonState();
       await stopCaffeinate();
       await releaseDaemonLock(daemonLockHandle);

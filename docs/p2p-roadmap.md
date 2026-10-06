@@ -211,6 +211,23 @@ APP（同 LAN）:
 | 回退 | 关闭 mDNS 开关 → 回到纯 server |
 | 前置 | iOS 侧声明**已存在**（`app.config.js:36-37`），只需补服务类型（见第十节） |
 
+> **P2 的 CLI 半边已实施（2026-10-06）** —— App 侧仍不在本分支。
+>
+> **为什么范围比路线图小**：路线图说 P2 走"消息"，但**消息数据不在 daemon 手里**——已发送的在 server 上，未发送的在各 session 进程的 outbox 里（P1a）。daemon 只有会话列表。所以 **LAN 消息读取需先解决数据归属**，本次不做。
+>
+> **做了什么**：daemon 新增一个**独立**的只读、带认证的 LAN 监听器（`src/daemon/lanServer.ts`）+ mDNS 广播（`src/daemon/lanDiscovery.ts`）。
+>
+> - **不碰现有控制面**。`controlServer.ts` **完全没有认证**，唯一防护是硬编码 `127.0.0.1`（`:373`），而它有 `/spawn-session` `/stop-session` `/stop`。把它暴露到 LAN 是严重漏洞，所以新监听器独立、只读。测试里有承重断言：`POST /lan/spawn-session` 等**必须 404**。
+> - **认证用 `machineKey` 挑战-应答**：它是 CLI 自造的 32 字节对称密钥，已通过 Machine 记录的 `dataEncryptionKey` 分发给 App，**无需新密钥分发**；且 `machineKey` 永不上链路。令牌是**无状态 HMAC**、TTL **90 秒**（明文下 bearer 令牌可被嗅探，TTL 是主要缓解）。
+> - **`legacy` 凭证直接拒绝启动**：`machineKey` 只在 dataKey 分支生成（`auth.ts:249`）。对 legacy 用它等于 `HMAC(undefined)`（**攻击者可自算**），用 `secret` 顶替更糟（能解密全部会话）。不做 fallback。
+> - **nonce 存储有界 + 逐 IP 限速**：`/lan/challenge` 无认证，不限量就是远程 OOM 向量。
+> - TXT 只放 `{v, machineId, accountFingerprint}` —— **不放会话列表**（RFC 6763 体积约束 + 会话变动会造成多播 churn）。端口用 0 临时分配、由 SRV 记录携带。
+> - 默认**关闭**（`HAPPY_LAN_ENABLED`）；绑定或广播失败**一律非致命**。
+>
+> **显式决定（非遗漏）**：明文 HTTP → App 届时需 `NSAllowsLocalNetworking` ATS 例外；绑 `0.0.0.0` 使**监听面 ⊃ 广播面**（会覆盖 VPN / VM bridge / awdl 等 ciao 不广播的接口），opt-in + 认证下接受，列为后续项。
+>
+> **验证**：8 个单测（含 nonce 单次使用、存储上界、速率限制、变更路由 404）；`scripts/lan-e2e.ts` 跑通完整认证流程；`dns-sd` 确认发现与 TXT。
+
 ### P3 · server 偶发挂的 fallback
 
 | | |

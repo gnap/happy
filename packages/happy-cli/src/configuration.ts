@@ -80,6 +80,8 @@ class Configuration {
 
   public readonly isExperimentalEnabled: boolean
   public readonly disableCaffeinate: boolean
+  /** Opt-in LAN read-only API + mDNS advertisement (HAPPY_LAN_ENABLED). Default off. */
+  public readonly enableLan: boolean
 
   constructor() {
     // Server configuration - priority: parameter > environment > default
@@ -108,6 +110,9 @@ class Configuration {
 
     this.isExperimentalEnabled = ['true', '1', 'yes'].includes(process.env.HAPPY_EXPERIMENTAL?.toLowerCase() || '');
     this.disableCaffeinate = ['true', '1', 'yes'].includes(process.env.HAPPY_DISABLE_CAFFEINATE?.toLowerCase() || '');
+    // Opt-in: this opens a network listener that did not exist before, so it stays off
+    // unless the user asks for it. See src/daemon/lanServer.ts for what it exposes.
+    this.enableLan = ['true', '1', 'yes'].includes(process.env.HAPPY_LAN_ENABLED?.toLowerCase() || '');
 
     this.currentCliVersion = BUILD_VERSION
 
