@@ -4,6 +4,7 @@
 
 import { Metadata } from '@/api/types';
 import { ChildProcess } from 'child_process';
+import type { SandboxConfig } from '@/persistence';
 
 /**
  * Session tracking for daemon
@@ -29,6 +30,8 @@ export interface TrackedSession {
   lastHeartbeat?: number;
   /** Timestamp when the session process was spawned (Date.now()) */
   spawnTime?: number;
+  /** Per-session sandbox config, preserved for stopped sessions so respawns reuse it */
+  sandbox?: SandboxConfig | null;
 
   // --- Exit tracking ---
   /** Process exit code (0 = normal, non-zero = error, null = killed by signal) */

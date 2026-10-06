@@ -30,6 +30,8 @@ export interface SetupOfflineReconnectionOptions {
     response: Session | null;
     /** Existing encryption key for session reuse (avoids key mismatch on reconnection) */
     existingEncryptionKey?: Uint8Array;
+    /** Writer identity, stamped onto envelopes queued while offline as `site`. */
+    site?: string;
     /** Override initial lastSeq (e.g. daemon pre-wake seq) so HTTP sync fetches unread messages. */
     initialLastSeq?: number;
     /**
@@ -87,17 +89,21 @@ export function setupOfflineReconnection(opts: SetupOfflineReconnectionOptions):
 
     // Note: connectionState.notifyOffline() was already called by api.ts with error details
     if (!response) {
-        // Create a no-op session stub for offline mode using shared utility
-        session = createOfflineSessionStub(sessionTag);
+        // The stub encrypts and queues outbound messages rather than dropping them. It needs
+        // the same key the reconnected client will use, so resolve it through the API client
+        // (which persisted it before the failed create attempt) instead of inventing one here.
+        const { encryptionKey, encryptionVariant } = api.resolveSessionEncryption(sessionTag, existingEncryptionKey);
+        session = createOfflineSessionStub({ tag: sessionTag, site: opts.site, encryptionKey, encryptionVariant });
 
         // Start background reconnection
         reconnectionHandle = startOfflineReconnection<ApiSessionClient>({
             serverUrl: configuration.serverUrl,
             onReconnected: async () => {
-                const resp = await api.getOrCreateSession({ tag: sessionTag, metadata, state, existingEncryptionKey });
+                const resp = await api.getOrCreateSession({ tag: sessionTag, site: opts.site, metadata, state, existingEncryptionKey });
                 if (!resp) throw new Error('Server unavailable');
                 const realSession = api.sessionSyncClient(resp, true, sessionClientOpts);
-                // Notify caller to swap the session reference
+                // Notify caller to swap the session reference. The stub wrote its messages to
+                // the tag-keyed outbox, so the new client's constructor seeds and drains them.
                 onSessionSwap(realSession);
                 return realSession;
             },

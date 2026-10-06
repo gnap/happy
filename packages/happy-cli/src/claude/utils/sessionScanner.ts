@@ -82,7 +82,11 @@ export async function createSessionScanner(opts: {
                 opts.onMessage(file);
                 sent++;
             }
-            if (sessionMessages.length > 0) {
+            // Only when something actually moved. This runs on a timer against every known
+            // session, so reporting the unchanged case writes a line every few seconds for as
+            // long as the process lives -- which is what the scraper used to drown its own log
+            // in, burying the lines that matter.
+            if (sent > 0) {
                 logger.debug(`[SESSION_SCANNER] Session ${session}: found=${sessionMessages.length}, skipped=${skipped}, sent=${sent}`);
             }
         }
@@ -158,6 +162,8 @@ function messageKey(message: RawJSONLines): string {
         return 'summary: ' + message.leafUuid + ': ' + message.summary;
     } else if (message.type === 'system') {
         return message.uuid;
+    } else if (message.type === 'attachment') {
+        return message.uuid;
     } else {
         throw Error() // Impossible
     }
@@ -169,12 +175,10 @@ function messageKey(message: RawJSONLines): string {
  */
 async function readSessionLog(projectDir: string, sessionId: string): Promise<RawJSONLines[]> {
     const expectedSessionFile = join(projectDir, `${sessionId}.jsonl`);
-    logger.debug(`[SESSION_SCANNER] Reading session file: ${expectedSessionFile}`);
     let file: string;
     try {
         file = await readFile(expectedSessionFile, 'utf-8');
     } catch (error) {
-        logger.debug(`[SESSION_SCANNER] Session file not found: ${expectedSessionFile}`);
         return [];
     }
     let lines = file.split('\n');

@@ -112,6 +112,19 @@ export const sessionPermissionResultEventSchema = z.object({
   updatedInput: z.unknown().optional(),
 });
 
+/** /goal condition status — emitted when a goal is armed (sentinel) and when it resolves. */
+export const sessionGoalStatusEventSchema = z.object({
+  t: z.literal('goal-status'),
+  condition: z.string(),
+  met: z.boolean(),
+  sentinel: z.boolean().optional(),
+  failed: z.boolean().optional(),
+  reason: z.string().optional(),
+  iterations: z.number().int().nonnegative().optional(),
+  durationMs: z.number().int().nonnegative().optional(),
+  tokens: z.number().int().nonnegative().optional(),
+});
+
 export const sessionEventSchema = z.discriminatedUnion('t', [
   sessionTextEventSchema,
   sessionServiceMessageEventSchema,
@@ -123,6 +136,7 @@ export const sessionEventSchema = z.discriminatedUnion('t', [
   sessionTurnEndEventSchema,
   sessionStopEventSchema,
   sessionPermissionResultEventSchema,
+  sessionGoalStatusEventSchema,
 ]);
 
 export type SessionEvent = z.infer<typeof sessionEventSchema>;
@@ -140,6 +154,21 @@ export const sessionEnvelopeSchema = z
       })
       .optional(),
     taskCall: z.string().optional(),
+    /**
+     * Session identity, owned by the client (not the server-assigned session id).
+     * Lives inside the envelope so the AEAD protects it: a relay cannot transplant
+     * an envelope into a different session without the mismatch being detectable.
+     * Optional — absent on envelopes produced before this field existed.
+     */
+    sid: z.string().optional(),
+    /** Identity of the writer (CLI = machine id, App = device id). Optional, see `sid`. */
+    site: z.string().optional(),
+    /**
+     * Monotonic per-(session, writer) counter, assigned in the order the writer produced
+     * envelopes. `(n, site)` is the ordering key independent of the server's `seq`, and a
+     * gap in one writer's `n` proves a message went missing. Optional, see `sid`.
+     */
+    n: z.number().int().nonnegative().optional(),
     ev: sessionEventSchema,
   })
   .superRefine((envelope, ctx) => {
@@ -161,6 +190,13 @@ export const sessionEnvelopeSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: `${envelope.ev.t} events must use role "agent"`,
+        path: ['role'],
+      });
+    }
+    if (envelope.ev.t === 'goal-status' && envelope.role !== 'agent') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'goal-status events must use role "agent"',
         path: ['role'],
       });
     }

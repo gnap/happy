@@ -15,6 +15,9 @@ import { backoff } from '@/utils/time';
 import { isBun, isNode } from '@/utils/runtime';
 import { RpcHandlerManager } from './rpc/RpcHandlerManager';
 
+/** How long a best-effort daemon-state write may take before the caller moves on. */
+const DAEMON_STATE_WRITE_TIMEOUT_MS = 2000;
+
 function getLocalMachineMetadata(): MachineMetadata {
     return {
         host: os.hostname(),
@@ -260,6 +263,62 @@ export class ApiMachineClient {
                 throw new Error('Metadata version mismatch'); // Triggers retry
             }
         });
+    }
+
+    /** Whether the machine socket is currently connected. */
+    isSocketConnected(): boolean {
+        return this.socket.connected;
+    }
+
+    /**
+     * Write daemon state once, giving up if the server does not answer in time.
+     *
+     * `updateDaemonState` wraps its body in `backoff`, which only returns on success -- on an
+     * unreachable server it never resolves. That is fine for callers that can afford to wait,
+     * but it must never be awaited on the shutdown path: that blocks the rest of the teardown
+     * (including withdrawing the LAN advertisement) for as long as the server stays down.
+     *
+     * Returns whether the write landed. Callers that want eventual delivery retry on a later
+     * tick rather than spinning here.
+     */
+    async tryUpdateDaemonState(handler: (state: DaemonState | null) => DaemonState): Promise<boolean> {
+        try {
+            const updated = handler(this.machine.daemonState);
+            const ack = this.socket.emitWithAck('machine-update-state', {
+                machineId: this.machine.id,
+                daemonState: encodeBase64(encrypt(this.machine.encryptionKey, this.machine.encryptionVariant, updated)),
+                expectedVersion: this.machine.daemonStateVersion
+            });
+            // The ack may still arrive after we give up on it; swallow it so it cannot
+            // surface as an unhandled rejection.
+            ack.catch(() => undefined);
+
+            const answer = await Promise.race([
+                ack,
+                new Promise<null>((resolve) => {
+                    setTimeout(() => resolve(null), DAEMON_STATE_WRITE_TIMEOUT_MS).unref?.();
+                }),
+            ]);
+            if (answer === null) {
+                logger.debug('[API MACHINE] Daemon state write timed out; continuing without it');
+                return false;
+            }
+            if (answer.result === 'success') {
+                this.machine.daemonState = decrypt(this.machine.encryptionKey, this.machine.encryptionVariant, decodeBase64(answer.daemonState));
+                this.machine.daemonStateVersion = answer.version;
+                return true;
+            }
+            // Someone else wrote first: adopt their version and let the caller retry later,
+            // rather than spinning inside an unbounded loop the way updateDaemonState does.
+            if (answer.result === 'version-mismatch' && answer.version > this.machine.daemonStateVersion) {
+                this.machine.daemonStateVersion = answer.version;
+                this.machine.daemonState = decrypt(this.machine.encryptionKey, this.machine.encryptionVariant, decodeBase64(answer.daemonState));
+            }
+            return false;
+        } catch (error) {
+            logger.debug('[API MACHINE] Daemon state write failed; continuing without it', { error: String(error) });
+            return false;
+        }
     }
 
     /**

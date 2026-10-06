@@ -113,6 +113,14 @@ export interface ClientToServerEvents {
  */
 export type Session = {
   id: string,
+  /**
+   * Client-owned session identity (the create-session `tag`), distinct from the
+   * server-assigned `id`. Carried into the envelope as `sid` so a relay cannot
+   * transplant an envelope into a different session undetected.
+   */
+  tag: string,
+  /** Writer identity, propagated to the envelope as `site`. CLI = machine id. */
+  site?: string,
   seq: number,
   encryptionKey: Uint8Array;
   encryptionVariant: 'legacy' | 'dataKey';
@@ -153,7 +161,21 @@ export const DaemonStateSchema = z.object({
     z.union([
       z.enum(['mobile-app', 'cli', 'os-signal', 'unknown']),
       z.string() // Forward compatibility
-    ]).optional()
+    ]).optional(),
+  /**
+   * Where this machine can be reached on the LAN, published so a client can cache it while
+   * the server is healthy and fall back to it when the server is not. Only populated when
+   * the LAN API is enabled.
+   *
+   * Note this blob is a *pre-fetch*: it lives on the server, so it is only readable while
+   * the server is up. It is also durable and account-wide, unlike the mDNS advertisement
+   * next to it, which is LAN-scoped and transient.
+   */
+  p2p: z.object({
+    v: z.number(),
+    at: z.number(),
+    endpoints: z.array(z.object({ t: z.string(), addr: z.string(), port: z.number() }))
+  }).optional()
 })
 
 export type DaemonState = z.infer<typeof DaemonStateSchema>
@@ -499,7 +521,8 @@ export type AgentState = {
       reason?: string,
       mode?: PermissionMode,
       decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort',
-      allowTools?: string[]
+      allowTools?: string[],
+      updatedInput?: Record<string, unknown>
     }
   }
   /** Pending cron tasks — compact metadata for App display (no prompt payload). */
@@ -509,4 +532,12 @@ export type AgentState = {
       recurring: boolean
     }
   }
+  /** Latest known status of the session's /goal condition (mirrored from goal_status attachments), so a client can query it without replaying the event stream. */
+  activeGoal?: {
+    condition: string
+    status: 'pending' | 'met' | 'failed'
+    reason?: string
+    iterations?: number
+    updatedAt: number
+  } | null
 }

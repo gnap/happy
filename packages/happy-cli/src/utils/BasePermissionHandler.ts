@@ -9,7 +9,7 @@
 
 import { logger } from "@/ui/logger";
 import { ApiSessionClient } from "@/api/apiSession";
-import { AgentState } from "@/api/types";
+import { AgentState, PermissionMode } from "@/api/types";
 import { createEnvelope } from '@slopus/happy-wire';
 
 /**
@@ -19,6 +19,9 @@ export interface PermissionResponse {
     id: string;
     approved: boolean;
     decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort';
+    reason?: string;
+    mode?: PermissionMode;
+    allowTools?: string[];
     updatedInput?: Record<string, unknown>;
 }
 
@@ -98,7 +101,7 @@ export abstract class BasePermissionHandler {
                 // This embeds the permission decision into the message stream so the
                 // App reducer can replay it from cached messages rather than relying
                 // solely on agentState.completedRequests.
-                this.session.client.sendSessionProtocolMessage(
+                this.session.sendSessionProtocolMessage(
                     createEnvelope('agent', {
                         t: 'permission-result',
                         call: response.id,
@@ -121,7 +124,7 @@ export abstract class BasePermissionHandler {
                     const entries = Object.entries({ ...currentState.completedRequests, [response.id]: {
                         ...request,
                         completedAt: Date.now(),
-                        status: response.approved ? 'approved' : 'denied',
+                        status: response.approved ? 'approved' as const : 'denied' as const,
                         decision: result.decision,
                         updatedInput: response.updatedInput,
                     } }).slice(-20);
@@ -189,7 +192,7 @@ export abstract class BasePermissionHandler {
                 // Emit canceled permission-result envelopes for each pending request
                 // so the App reducer can replay them from the message stream.
                 for (const [id] of Object.entries(pendingRequests)) {
-                    this.session.client.sendSessionProtocolMessage(
+                    this.session.sendSessionProtocolMessage(
                         createEnvelope('agent', {
                             t: 'permission-result',
                             call: id,

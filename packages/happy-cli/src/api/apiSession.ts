@@ -28,6 +28,18 @@ import {
 import { InvalidateSync } from '@/utils/sync';
 import axios from 'axios';
 import { resolveSessionLastSeq } from './sessionLastSeq';
+import { loadOutbox, outboxPath, pruneOutboxes, saveOutbox } from './outboxPersistence';
+import { appendSessionLog, pruneSessionLogs, sessionLogDir } from './sessionLog';
+import {
+    buildAgentMessagePayload,
+    buildCodexPayload,
+    buildCursorPayload,
+    buildLifecyclePayload,
+    buildOutputFormatPayload,
+    buildSessionEventPayload,
+    buildSessionProtocolPayload,
+    type SessionEventPayload,
+} from './sessionPayloads';
 import {
     cloneA2AInboxState,
     extractLegacyInboxFromAgentState,
@@ -224,9 +236,36 @@ function truncateDiffArgs(
     return { truncated, wasTruncated };
 }
 
+/** A decrypted incoming message plus the wire metadata the local log needs. */
+type IncomingMessage = {
+    body: unknown;
+    seq?: number;
+    /** base64 ciphertext exactly as it crossed the wire. */
+    ct?: string | null;
+    id?: string | null;
+    localId?: string | null;
+};
+
 export class ApiSessionClient extends EventEmitter {
     private readonly token: string;
+    /** Server-assigned session id. Distinct from `sid` below. */
     readonly sessionId: string;
+    /** Client-owned session identity (`Session.tag`), stamped onto outgoing envelopes as `sid`. */
+    private readonly sid: string;
+    /** Writer identity (`Session.site`), stamped onto outgoing envelopes as `site`. */
+    private readonly site: string | undefined;
+    /**
+     * Entries restored from disk at construction. They must drain over the confirmed
+     * HTTP path: the WS path removes optimistically with no server ack, which would
+     * re-lose exactly the messages this persistence exists to save.
+     */
+    private seededRemaining = 0;
+    /**
+     * Next value of the per-writer envelope counter, stamped as `n`. Persisted in the
+     * session writer-state file so it survives a restart -- a counter that restarted would
+     * reissue values a reader sorts on.
+     */
+    private nextN = 0;
     private metadata: Metadata | null;
     private metadataVersion: number;
     private agentState: AgentState | null;
@@ -438,6 +477,8 @@ export class ApiSessionClient extends EventEmitter {
         super()
         this.token = token;
         this.sessionId = session.id;
+        this.sid = session.tag;
+        this.site = session.site;
         this.metadata = session.metadata;
         this.metadataVersion = session.metadataVersion;
         this.agentState = session.agentState;
@@ -525,6 +566,32 @@ export class ApiSessionClient extends EventEmitter {
             autoConnect: false,
             ...(isNode() && { agent: serverHttpsAgent as any }),
         });
+
+        // Restore the session's writer state. Entries are stored already encrypted, so they
+        // are resendable as-is; the server dedupes on localId.
+        const restoredOutbox = loadOutbox(this.sid);
+        if (restoredOutbox.entries.length > 0) {
+            this.pendingOutbox = restoredOutbox.entries;
+            this.seededRemaining = restoredOutbox.entries.length;
+            logger.debug(`[API] restored ${restoredOutbox.entries.length} unsent message(s) from disk`);
+            this.sendSync.invalidate();
+        }
+        // Seed the counter even when the queue came back empty -- that is precisely why it
+        // is stored apart from the entries.
+        const writerChanged = restoredOutbox.site !== undefined && restoredOutbox.site !== this.site;
+        if (writerChanged) {
+            // Same tag, different machine: inheriting the count would interleave two
+            // writers' `n` ranges under one session. Reset, so the divergence is at least
+            // visible rather than silently corrupting the order.
+            logger.warn('[API] session writer changed; restarting the envelope counter', {
+                session: this.sid,
+                previousSite: restoredOutbox.site,
+                site: this.site,
+            });
+        }
+        this.nextN = writerChanged ? 0 : restoredOutbox.nextN;
+        pruneOutboxes({ keepPath: outboxPath(this.sid) });
+        pruneSessionLogs({ keepDir: sessionLogDir(this.sid, this.site) });
 
         //
         // Handlers
@@ -635,7 +702,13 @@ export class ApiSessionClient extends EventEmitter {
                             this.receiveSync.invalidate();
                             return;
                         }
-                        this.routeIncomingMessage(body, messageSeq);
+                        this.routeIncomingMessage({
+                            body,
+                            seq: messageSeq,
+                            ct: data.body.message.content.c,
+                            id: data.body.message.id,
+                            localId: data.body.message.localId,
+                        });
                         this.lastSeq = messageSeq;
                         return;
                     }
@@ -788,7 +861,12 @@ export class ApiSessionClient extends EventEmitter {
         };
     }
 
-    private routeIncomingMessage(message: unknown, seq?: number) {
+    private routeIncomingMessage(incoming: IncomingMessage) {
+        // `body` is the decrypted payload the routing branches below expect; the rest is the
+        // wire metadata the local log needs, carried alongside because the ciphertext is gone
+        // once this method is entered.
+        const { body: message, seq } = incoming;
+
         // Deduplicate by seq: WebSocket push and HTTP fetch may deliver
         // the same message concurrently.
         if (typeof seq === 'number') {
@@ -796,6 +874,19 @@ export class ApiSessionClient extends EventEmitter {
             if (this.routedMessageIds.has(key)) return;
             this.routedMessageIds.add(key);
             if (this.routedMessageIds.size > 1000) this.routedMessageIds.clear();
+        }
+
+        // Logged here rather than at the call sites on purpose: the dedup above runs after
+        // them, so a message that arrives on the socket fast path and is later re-fetched over
+        // HTTP would otherwise be logged twice.
+        if (incoming.ct) {
+            appendSessionLog(this.sid, this.site, {
+                id: incoming.id ?? incoming.localId ?? String(seq ?? ''),
+                localId: incoming.localId ?? null,
+                dir: 'in',
+                at: Date.now(),
+                c: incoming.ct,
+            });
         }
 
         const triggerInboxMessageId = this.ingestA2AInboxFromTrigger(message);
@@ -1145,6 +1236,7 @@ export class ApiSessionClient extends EventEmitter {
 
     private shouldFlushOutboxViaWs(): boolean {
         return this.outboundMode === 'ws'
+            && this.seededRemaining === 0
             && this.socket.connected
             && Date.now() >= this.wsOutboundBackoffUntil;
     }
@@ -1230,7 +1322,13 @@ export class ApiSessionClient extends EventEmitter {
                             });
                             continue;
                         }
-                        this.routeIncomingMessage(body, message.seq);
+                        this.routeIncomingMessage({
+                            body,
+                            seq: message.seq,
+                            ct: message.content.c,
+                            id: message.id,
+                            localId: message.localId,
+                        });
                     } catch (error) {
                         logger.debug('[API] Failed to decrypt fetched message', {
                             sessionId: this.sessionId,
@@ -1347,6 +1445,7 @@ export class ApiSessionClient extends EventEmitter {
         } finally {
             if (sent > 0) {
                 this.pendingOutbox.splice(0, sent);
+                this.persistOutboxNow();
                 logger.debug(`[API] flushOutbox via WS (optimistic): sent ${sent} message(s) to server (replies visible in app)`);
                 // WS send has no seq ack — pull receive cursor forward via HTTP (health poll is backup).
                 this.receiveSync.invalidate();
@@ -1380,6 +1479,8 @@ export class ApiSessionClient extends EventEmitter {
                 );
 
                 this.pendingOutbox.splice(0, chunk.length);
+                this.seededRemaining = Math.max(0, this.seededRemaining - chunk.length);
+                this.persistOutboxNow();
                 flushed += chunk.length;
 
                 const messages = Array.isArray(response.data.messages) ? response.data.messages : [];
@@ -1406,12 +1507,50 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
+    /**
+     * Stamp this client's writer identity onto an outgoing envelope.
+     *
+     * `sid` / `site` ride inside the envelope, so the AEAD covers them: a relay can
+     * neither forge nor alter them, and cannot transplant an envelope into another
+     * session without the mismatch becoming detectable. Conditional spreads keep the
+     * keys absent (rather than `undefined`) when unset, matching `createEnvelope`.
+     */
+    private withWriterIdentity(envelope: SessionEnvelope): SessionEnvelope {
+        return {
+            ...envelope,
+            ...(this.sid ? { sid: this.sid } : {}),
+            ...(this.site ? { site: this.site } : {}),
+        };
+    }
+
+    /**
+     * Mirror the queue to disk.
+     *
+     * Synchronous by design: the file may hold MORE entries than memory (extras are
+     * resent and deduped by the server) but never fewer, so the enqueue path cannot
+     * defer this to a timer. Callers that shrink the queue may call it freely.
+     */
+    private persistOutboxNow(): void {
+        saveOutbox(this.sid, { entries: this.pendingOutbox, nextN: this.nextN, site: this.site });
+    }
+
     private enqueueMessage(content: unknown, invalidate: boolean = true, localId?: string) {
         const encrypted = encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, content));
+        const resolvedLocalId = localId ?? randomUUID();
         this.pendingOutbox.push({
             content: encrypted,
-            localId: localId ?? randomUUID()
+            localId: resolvedLocalId
         });
+        // Same synchronous block and the same ciphertext string as the outbox push, so the two
+        // stores can never disagree about what the bytes were.
+        appendSessionLog(this.sid, this.site, {
+            id: resolvedLocalId,
+            localId: resolvedLocalId,
+            dir: 'out',
+            at: Date.now(),
+            c: encrypted,
+        });
+        this.persistOutboxNow();
         if (invalidate) {
             this.sendSync.invalidate();
         }
@@ -1444,6 +1583,23 @@ export class ApiSessionClient extends EventEmitter {
         this.claudeSessionProtocolState.currentTurnId = mapped.currentTurnId;
         for (const envelope of mapped.envelopes) {
             this.sendSessionProtocolMessage(envelope);
+            // Mirror the latest /goal status into agentState so a client can query
+            // existence + status without replaying the event stream.
+            if (envelope.ev.t === 'goal-status') {
+                const ev = envelope.ev;
+                const status: 'pending' | 'met' | 'failed' =
+                    ev.iterations !== undefined ? (ev.met ? 'met' : 'failed') : 'pending';
+                this.updateAgentState((s) => ({
+                    ...s,
+                    activeGoal: {
+                        condition: ev.condition,
+                        status,
+                        reason: ev.reason,
+                        iterations: ev.iterations,
+                        updatedAt: Date.now(),
+                    },
+                }));
+            }
         }
         // Track usage from assistant messages
         if (body.type === 'assistant' && body.message?.usage) {
@@ -1482,32 +1638,12 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     sendCodexMessage(body: any) {
-        let content = {
-            role: 'agent',
-            content: {
-                type: 'codex',
-                data: body  // This wraps the entire Claude message
-            },
-            meta: {
-                sentFrom: 'cli'
-            }
-        };
-        this.enqueueMessage(content);
+        this.enqueueMessage(buildCodexPayload(body));
     }
 
     /** Same shape as codex but type: 'cursor' so the app normalizes thinking as thinking (no dependency on session.metadata.flavor). */
     sendCursorMessage(body: Parameters<ApiSessionClient['sendCodexMessage']>[0]) {
-        let content = {
-            role: 'agent',
-            content: {
-                type: 'cursor',
-                data: body
-            },
-            meta: {
-                sentFrom: 'cli'
-            }
-        };
-        this.enqueueMessage(content);
+        this.enqueueMessage(buildCursorPayload(body));
     }
 
     /**
@@ -1515,28 +1651,17 @@ export class ApiSessionClient extends EventEmitter {
      * Used for old App compatibility; dual-send alongside session protocol when needed.
      */
     sendOutputFormatMessage(data: OutputFormatData) {
-        const content = {
-            role: 'agent' as const,
-            content: {
-                type: 'output' as const,
-                data,
-            },
-            meta: { sentFrom: 'cli' as const },
-        };
-        this.enqueueMessage(content);
+        this.enqueueMessage(buildOutputFormatPayload(data));
     }
 
     private enqueueSessionProtocolEnvelope(envelope: SessionEnvelope, invalidate: boolean = true, extraMeta?: Record<string, unknown>) {
-        const content = {
-            role: 'session',
-            content: envelope,
-            meta: {
-                sentFrom: 'cli',
-                ...(extraMeta ?? {}),
-            }
-        };
+        // Issue the counter on the line above the enqueue: an `n` handed out without a
+        // matching durable write would be a permanent gap, so the two stay adjacent. Do not
+        // move this into withWriterIdentity -- that runs further from the write, and any
+        // early return between the two would burn a value.
+        const withN: SessionEnvelope = { ...envelope, n: this.nextN++ };
         // Use envelope.id as localId so server dedupes by localId; same envelope sent multiple times becomes one row.
-        this.enqueueMessage(content, invalidate, envelope.id);
+        this.enqueueMessage(buildSessionProtocolPayload(withN, extraMeta), invalidate, withN.id);
     }
 
     /** Count of envelopes sent this process (for trace log); resets only by process restart. */
@@ -1552,7 +1677,7 @@ export class ApiSessionClient extends EventEmitter {
     sendSessionProtocolMessage(envelope: SessionEnvelope, extraMeta?: Record<string, unknown>) {
         // Apply lazy encoding at the single exit point so all code paths
         // (Claude via sendClaudeSessionMessage, Cursor via direct call, etc.) are covered.
-        const finalEnvelope = this.maybeLazyEncodeEnvelope(envelope);
+        const finalEnvelope = this.withWriterIdentity(this.maybeLazyEncodeEnvelope(envelope));
         if (finalEnvelope.role === 'user' && finalEnvelope.ev.t === 'text') {
             const stack = new Error().stack?.split('\n').slice(1, 4).map(s => s.trim()).join(' <- ');
             logger.debug(`[API] USER ENVELOPE: "${(finalEnvelope.ev as any).text?.slice(0,50)}" callstack: ${stack}`);
@@ -1577,6 +1702,7 @@ export class ApiSessionClient extends EventEmitter {
      * messages keep the normal envelope shape.
      */
     sendSessionLifecycleEnvelope(envelope: SessionEnvelope) {
+        envelope = this.withWriterIdentity(envelope);
         if (process.env.HAPPY_CURSOR_TRACE_ENVELOPES === '1') {
             this._envelopeSendCount += 1;
             const ev = envelope.ev as { t?: string; status?: string };
@@ -1586,12 +1712,8 @@ export class ApiSessionClient extends EventEmitter {
                 appendFileSync(process.env.HAPPY_CURSOR_TRACE_LOG ?? '/tmp/cursor-envelope-trace.log', `${line}\n`);
             } catch { /* ignore */ }
         }
-        const content = {
-            role: 'session',
-            content: { type: 'session', data: envelope },
-            meta: { sentFrom: 'cli' },
-        };
-        this.enqueueMessage(content, true, envelope.id);
+        const withN: SessionEnvelope = { ...envelope, n: this.nextN++ };
+        this.enqueueMessage(buildLifecyclePayload(withN), true, withN.id);
     }
 
     /**
@@ -1601,42 +1723,14 @@ export class ApiSessionClient extends EventEmitter {
      * @param provider - The agent provider sending the message (e.g., 'gemini', 'codex', 'claude')
      * @param body - The message payload (type: 'message' | 'reasoning' | 'tool-call' | 'tool-result')
      */
-    sendAgentMessage(provider: 'gemini' | 'codex' | 'claude' | 'cursor' | 'opencode', body: ACPMessageData) {
-        let content = {
-            role: 'agent',
-            content: {
-                type: 'acp',
-                provider,
-                data: body
-            },
-            meta: {
-                sentFrom: 'cli'
-            }
-        };
-
+    sendAgentMessage(provider: ACPProvider, body: ACPMessageData) {
         logger.debug(`[SOCKET] Sending ACP message from ${provider}:`, { type: body.type, hasMessage: 'message' in body });
 
-        this.enqueueMessage(content);
+        this.enqueueMessage(buildAgentMessagePayload(provider, body));
     }
 
-    sendSessionEvent(event: {
-        type: 'switch', mode: 'local' | 'remote'
-    } | {
-        type: 'message', message: string
-    } | {
-        type: 'permission-mode-changed', mode: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan'
-    } | {
-        type: 'ready'
-    }, id?: string) {
-        let content = {
-            role: 'agent',
-            content: {
-                id: id ?? randomUUID(),
-                type: 'event',
-                data: event
-            }
-        };
-        this.enqueueMessage(content);
+    sendSessionEvent(event: SessionEventPayload, id?: string) {
+        this.enqueueMessage(buildSessionEventPayload(id ?? randomUUID(), event));
     }
 
     /**
@@ -1853,5 +1947,9 @@ export class ApiSessionClient extends EventEmitter {
         this.sendSync.stop();
         this.receiveSync.stop();
         this.socket.close();
+        // The session writer-state file is deliberately NOT deleted here. It holds the
+        // envelope counter as well as any undelivered entries, and a resumed tag must
+        // continue the count rather than reissue values a reader sorts on. Age-based
+        // pruning in the constructor bounds accumulation.
     }
 }

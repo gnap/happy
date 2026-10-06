@@ -26,6 +26,13 @@ import { getTmuxUtilities, isTmuxAvailable, parseTmuxSessionIdentifier, formatTm
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
 import { stripProfileManagedEnv } from '@/utils/profileEnv';
 import { fetchSessionProfileMeta } from './fetchSessionProfileMeta';
+import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSessionSummary } from './lanServer';
+import type { ApiMachineClient } from '@/api/apiMachine';
+import { readSessionKey } from '@/api/sessionKeyPersistence';
+import { readSessionLog } from '@/api/sessionLog';
+import { encodeBase64, libsodiumEncryptForPublicKey } from '@/api/encryption';
+import { startLanDiscovery, type LanDiscoveryHandle } from './lanDiscovery';
+import { startEndpointPublisher, type EndpointPublisherHandle } from './lanEndpoints';
 
 /** Time to wait for a spawned session to report via /session-started webhook before failing the spawn (Cursor cold start can exceed 30s). */
 const SESSION_WEBHOOK_TIMEOUT_MS = 60_000;
@@ -1215,13 +1222,113 @@ export async function startDaemon(): Promise<void> {
         // Move to stoppedSessions — same as process exit handler
         const tracked = Array.from(pidToTrackedSession.values()).find(s => s.happySessionId === sessionId);
         if (tracked && tracked.pid > 0) {
-          tracked.exitReason = 'socket disconnected';
           tracked.exitTime = Date.now();
-          onSessionEnding(tracked);
+          onSessionEnding(sessionId, tracked.pid, 'socket disconnected');
         }
       },
     });
     logger.debug(`[DAEMON RUN] Unix socket server started at ${socketPath}`);
+
+    //
+    // LAN API — opt-in, read-only, authenticated.
+    //
+    // Deliberately separate from the control server above: that one has no authentication
+    // (loopback is its only protection) and can spawn/stop sessions. This one only reads,
+    // so widening it to the network does not widen the control surface.
+    //
+    let lanServer: LanServerHandle | null = null;
+    let lanDiscovery: LanDiscoveryHandle | null = null;
+    let endpointPublisher: EndpointPublisherHandle | null = null;
+    // The endpoint publisher needs the machine socket, but that client is created later in
+    // startup (it depends on a network round trip). Referencing `apiMachine` directly here
+    // would hit the temporal dead zone the moment the first tick ran; this indirection is
+    // assigned once the client exists.
+    let apiMachineRef: ApiMachineClient | null = null;
+    if (configuration.enableLan) {
+      if (credentials.encryption.type !== 'dataKey') {
+        // LAN auth is a challenge-response keyed on the machine key, which only dataKey
+        // credentials have. The account secret is not a substitute — it decrypts every
+        // session — and keying the HMAC on an absent key would be attacker-computable.
+        logger.warn('[DAEMON RUN] HAPPY_LAN_ENABLED ignored: LAN auth requires dataKey credentials');
+      } else {
+        try {
+          const accountFingerprint = accountFingerprintOf(credentials.encryption.publicKey);
+          // Captured here because the narrowing on `credentials.encryption` does not survive
+          // into the callback below.
+          const accountPublicKey = credentials.encryption.publicKey;
+          const started = await startLanServer({
+            secret: credentials.encryption.machineKey,
+            machineId,
+            accountFingerprint,
+            port: configuration.lanPort,
+            getSessions: () => [...pidToTrackedSession.values()]
+              .filter(session => session.happySessionId !== undefined)
+              .map(session => ({
+                happySessionId: session.happySessionId!,
+                directory: session.directory ?? '',
+                agent: session.agent ?? '',
+                startedBy: String(session.startedBy),
+                isAlive: session.exitTime
+                  ? false
+                  : (() => { try { process.kill(session.pid, 0); return true; } catch { return false; } })(),
+                lastHeartbeat: session.lastHeartbeat,
+              } satisfies LanSessionSummary)),
+            getHistory: (sessionId) => {
+              // The client addresses by session id because that is what it learns from the
+              // server; the tag is this side's business.
+              const tracked = [...pidToTrackedSession.values()].find((s) => s.happySessionId === sessionId);
+              const tag = tracked?.sessionTag;
+              if (!tag) {
+                return null; // not reported yet -- the client should retry, not give up
+              }
+              // The hashed key store is the authoritative one: it is what the CLI actually
+              // encrypts with. The legacy `<agent>-session-key-<tag>` files are a parallel
+              // store used by the A2A path and are not guaranteed to exist.
+              const sessionKey = readSessionKey(tag);
+              if (!sessionKey) {
+                return null; // rotated or never persisted; the history is unreadable
+              }
+              const wrapped = libsodiumEncryptForPublicKey(sessionKey, accountPublicKey);
+              const dataEncryptionKey = new Uint8Array(wrapped.length + 1);
+              dataEncryptionKey.set([0], 0); // version byte, matching api.ts
+              dataEncryptionKey.set(wrapped, 1);
+              return {
+                tag,
+                dataEncryptionKey: encodeBase64(dataEncryptionKey),
+                entries: readSessionLog(tag, machineId),
+              };
+            },
+          });
+          lanServer = started;
+          lanDiscovery = await startLanDiscovery({ port: started.port, machineId, accountFingerprint });
+          logger.debug(`[DAEMON RUN] LAN API listening on port ${started.port}`);
+
+          // Publish the endpoint so a client can cache it while the server is healthy and
+          // fall back to it when the server is not. Change-driven: it recomputes on a slow
+          // tick and writes only when the address set actually moves, so a roamed laptop
+          // re-publishes and a settled one stays quiet.
+          endpointPublisher = startEndpointPublisher({
+            lanPort: started.port,
+            isConnected: () => apiMachineRef?.isSocketConnected() ?? false,
+            publish: async (endpoints) => apiMachineRef
+              ? apiMachineRef.tryUpdateDaemonState((state) => ({
+                  ...state,
+                  status: state?.status ?? 'running',
+                  p2p: endpoints,
+                }))
+              : false,
+          });
+          void endpointPublisher.tick();
+        } catch (error) {
+          // An opt-in feature must never stop the daemon from starting.
+          logger.warn('[DAEMON RUN] LAN API not started', { error: String(error) });
+          await lanServer?.stop().catch(() => undefined);
+          await lanDiscovery?.stop().catch(() => undefined);
+          lanServer = null;
+          lanDiscovery = null;
+        }
+      }
+    }
 
     // Periodic liveness check: verify sessions are still running by checking their PID.
     // - PID alive and not zombie → keep session, just note if heartbeat is stale
@@ -1466,6 +1573,7 @@ export async function startDaemon(): Promise<void> {
     // Create realtime machine session.
     // Use websocket-only here; Bun has been verified to connect successfully on this path.
     const apiMachine = api.machineSyncClient(machine, true);
+    apiMachineRef = apiMachine;
 
     // Set RPC handlers
     apiMachine.setRPCHandlers({
@@ -1588,7 +1696,7 @@ export async function startDaemon(): Promise<void> {
           );
 
           lastSpawnAttemptBySessionId[id] = now;
-          const autoSandbox = sessionEntry.sandbox;
+          const autoSandbox = sessionEntry.sandbox ?? undefined;
           spawnSession({
             directory,
             agent,
@@ -1714,8 +1822,11 @@ export async function startDaemon(): Promise<void> {
         logger.debug('[DAEMON RUN] Health check interval cleared');
       }
 
-      // Update daemon state before shutting down
-      await apiMachine.updateDaemonState((state: DaemonState | null) => ({
+      // Update daemon state before shutting down. Deliberately the bounded variant: the
+      // regular one retries forever, so on an unreachable server this await would never
+      // return and every teardown step below it -- stopping the LAN listener, withdrawing
+      // the mDNS advertisement, releasing the daemon lock -- would never run.
+      await apiMachine.tryUpdateDaemonState((state: DaemonState | null) => ({
         ...state,
         status: 'shutting-down',
         shutdownRequestedAt: Date.now(),
@@ -1728,6 +1839,11 @@ export async function startDaemon(): Promise<void> {
       apiMachine.shutdown();
       await stopSocketServer();
       await stopControlServer();
+      // Withdraw the advertisement before the listener goes away, so peers do not keep a
+      // stale record pointing at a closed port.
+      endpointPublisher?.stop();
+      await lanDiscovery?.stop().catch(() => undefined);
+      await lanServer?.stop().catch(() => undefined);
       await cleanupDaemonState();
       await stopCaffeinate();
       await releaseDaemonLock(daemonLockHandle);

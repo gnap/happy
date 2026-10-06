@@ -109,7 +109,7 @@ export class GeminiPermissionHandler extends BasePermissionHandler {
             logger.debug(`${this.getLogPrefix()} Auto-approving tool ${toolName} (${toolCallId}) in ${this.currentPermissionMode} mode`);
 
             // Emit permission-result envelope for replayability.
-            this.session.client.sendSessionProtocolMessage(
+            this.session.sendSessionProtocolMessage(
                 createEnvelope('agent', {
                     t: 'permission-result',
                     call: toolCallId,
@@ -127,8 +127,8 @@ export class GeminiPermissionHandler extends BasePermissionHandler {
                         arguments: input,
                         createdAt: Date.now(),
                         completedAt: Date.now(),
-                        status: 'approved',
-                        decision: this.currentPermissionMode === 'yolo' ? 'approved_for_session' : 'approved',
+                        status: 'approved' as const,
+                        decision: this.currentPermissionMode === 'yolo' ? 'approved_for_session' as const : 'approved' as const,
                     } }).slice(-20),
                 ),
             }));

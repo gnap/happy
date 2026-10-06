@@ -189,7 +189,7 @@ export function startOfflineReconnection<TSession>(
 
             // Step 3: Mark success and notify user
             reconnected = true;
-            config.onNotify('✅ Reconnected! Session syncing in background.');
+            config.onNotify('✅ Reconnected! Messages queued while offline are being delivered.');
             logger.debug('[OfflineReconnection] Successfully reconnected');
         } catch (e: unknown) {
             // Check for permanent errors that shouldn't be retried
@@ -326,7 +326,7 @@ class OfflineState {
                 return `${f.operation} failed: ${desc}${url}`;
             })
             .join('; ');
-        logger.warn(`⚠️  Happy server unreachable, offline mode with auto-reconnect enabled - error details: ${summary}`);
+        logger.warn(`⚠️  Happy server unreachable, offline mode with auto-reconnect enabled. Output is being queued locally and will be delivered automatically once the server is reachable - error details: ${summary}`);
 
         // Print detail lines if present - consistent 3-space indent with arrow
         const allDetails = [...this.failures.values()]

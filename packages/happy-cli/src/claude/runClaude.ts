@@ -182,7 +182,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         options.startedBy === 'daemon'
             ? Promise.resolve(null)
             : api.getOrCreateMachine({ machineId, metadata: initialMachineMetadata }),
-        api.getOrCreateSession({ tag: sessionTag, metadata, state, existingEncryptionKey }),
+        api.getOrCreateSession({ tag: sessionTag, site: machineId, metadata, state, existingEncryptionKey }),
     ]);
 
     // Handle server unreachable case - run Claude locally with hot reconnection
@@ -193,7 +193,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         const reconnection = startOfflineReconnection({
             serverUrl: configuration.serverUrl,
             onReconnected: async () => {
-                const resp = await api.getOrCreateSession({ tag: randomUUID(), metadata, state });
+                const resp = await api.getOrCreateSession({ tag: randomUUID(), site: machineId, metadata, state });
                 if (!resp) throw new Error('Server unavailable');
                 const session = api.sessionSyncClient(resp);
                 const scanner = await createSessionScanner({

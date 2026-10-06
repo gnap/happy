@@ -419,7 +419,7 @@ export async function runCursor(opts: {
     opts.startedBy === 'daemon'
       ? Promise.resolve(null)
       : api.getOrCreateMachine({ machineId, metadata: initialMachineMetadata }),
-    api.getOrCreateSession({ tag: sessionTag, metadata, state, existingEncryptionKey }),
+    api.getOrCreateSession({ tag: sessionTag, site: machineId, metadata, state, existingEncryptionKey }),
   ]);
 
   const sessionId = response?.id ?? `offline-${sessionTag}`;
@@ -612,6 +612,7 @@ export async function runCursor(opts: {
     state,
     response,
     existingEncryptionKey,
+    site: machineId,
     initialLastSeq: opts.resumeAfterSeq,
     onSessionSwap: (newSession) => {
       session = newSession;

@@ -571,6 +571,30 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
         };
     }
 
+    if (message.type === 'attachment') {
+        // /goal condition arm/resolve events. Not attached to a turn: the final
+        // judgement runs asynchronously after the turn's Stop hook, by which point
+        // currentTurnId may already be closed.
+        const attachment = (message as Record<string, unknown>).attachment as Record<string, unknown> | undefined;
+        if (attachment?.type === 'goal_status' && typeof attachment.condition === 'string' && typeof attachment.met === 'boolean') {
+            envelopes.push(createEnvelope('agent', {
+                t: 'goal-status',
+                condition: attachment.condition,
+                met: attachment.met,
+                sentinel: typeof attachment.sentinel === 'boolean' ? attachment.sentinel : undefined,
+                failed: typeof attachment.failed === 'boolean' ? attachment.failed : undefined,
+                reason: typeof attachment.reason === 'string' ? attachment.reason : undefined,
+                iterations: typeof attachment.iterations === 'number' ? attachment.iterations : undefined,
+                durationMs: typeof attachment.durationMs === 'number' ? attachment.durationMs : undefined,
+                tokens: typeof attachment.tokens === 'number' ? attachment.tokens : undefined,
+            }));
+        }
+        return {
+            currentTurnId: state.currentTurnId,
+            envelopes,
+        };
+    }
+
     if (message.type === 'system') {
         // Task lifecycle: background tasks (Workflow, Agent, Monitor, etc.)
         // emit tool-call-end envelopes so the App can show progress and results.

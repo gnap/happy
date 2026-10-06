@@ -113,7 +113,7 @@ describe('startOfflineReconnection', () => {
             await waitForReconnection(handle);
 
             expect(onReconnected).toHaveBeenCalledOnce();
-            expect(onNotify).toHaveBeenCalledWith('✅ Reconnected! Session syncing in background.');
+            expect(onNotify).toHaveBeenCalledWith('✅ Reconnected! Messages queued while offline are being delivered.');
             expect(handle.isReconnected()).toBe(true);
 
             handle.cancel();
@@ -368,7 +368,7 @@ describe('startOfflineReconnection', () => {
             expect(onNotify).not.toHaveBeenCalledWith(
                 expect.stringContaining('Authentication failed')
             );
-            expect(onNotify).toHaveBeenCalledWith('✅ Reconnected! Session syncing in background.');
+            expect(onNotify).toHaveBeenCalledWith('✅ Reconnected! Messages queued while offline are being delivered.');
 
             handle.cancel();
         }, 20000);
