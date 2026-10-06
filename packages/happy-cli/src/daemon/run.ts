@@ -27,6 +27,7 @@ import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
 import { stripProfileManagedEnv } from '@/utils/profileEnv';
 import { fetchSessionProfileMeta } from './fetchSessionProfileMeta';
 import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSessionSummary } from './lanServer';
+import type { ApiMachineClient } from '@/api/apiMachine';
 import { readSessionKey } from '@/api/sessionKeyPersistence';
 import { readSessionLog } from '@/api/sessionLog';
 import { encodeBase64, libsodiumEncryptForPublicKey } from '@/api/encryption';
@@ -1238,6 +1239,11 @@ export async function startDaemon(): Promise<void> {
     let lanServer: LanServerHandle | null = null;
     let lanDiscovery: LanDiscoveryHandle | null = null;
     let endpointPublisher: EndpointPublisherHandle | null = null;
+    // The endpoint publisher needs the machine socket, but that client is created later in
+    // startup (it depends on a network round trip). Referencing `apiMachine` directly here
+    // would hit the temporal dead zone the moment the first tick ran; this indirection is
+    // assigned once the client exists.
+    let apiMachineRef: ApiMachineClient | null = null;
     if (configuration.enableLan) {
       if (credentials.encryption.type !== 'dataKey') {
         // LAN auth is a challenge-response keyed on the machine key, which only dataKey
@@ -1303,12 +1309,14 @@ export async function startDaemon(): Promise<void> {
           // re-publishes and a settled one stays quiet.
           endpointPublisher = startEndpointPublisher({
             lanPort: started.port,
-            isConnected: () => apiMachine.isSocketConnected(),
-            publish: async (endpoints) => apiMachine.tryUpdateDaemonState((state) => ({
-              ...state,
-              status: state?.status ?? 'running',
-              p2p: endpoints,
-            })),
+            isConnected: () => apiMachineRef?.isSocketConnected() ?? false,
+            publish: async (endpoints) => apiMachineRef
+              ? apiMachineRef.tryUpdateDaemonState((state) => ({
+                  ...state,
+                  status: state?.status ?? 'running',
+                  p2p: endpoints,
+                }))
+              : false,
           });
           void endpointPublisher.tick();
         } catch (error) {
@@ -1565,6 +1573,7 @@ export async function startDaemon(): Promise<void> {
     // Create realtime machine session.
     // Use websocket-only here; Bun has been verified to connect successfully on this path.
     const apiMachine = api.machineSyncClient(machine, true);
+    apiMachineRef = apiMachine;
 
     // Set RPC handlers
     apiMachine.setRPCHandlers({
