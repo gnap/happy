@@ -275,6 +275,22 @@ APP（同 LAN）:
 | 回退 | Direct Mode 开关 |
 | 明确不覆盖 | 首次配对、CLI 换网（超出范围） |
 
+> **P3 的 CLI 半边已实施（2026-10-06）** —— App 侧的端点缓存与 Direct Mode 状态机仍不在本分支。
+>
+> **先修了一个既存 bug**：`cleanupAndShutdown` 里的 `await apiMachine.updateDaemonState(...)`（`run.ts:1768`）内部是 `backoff`，而 `backoff` 是 `while(true)`、**只在成功时返回**。**服务器不可达时关停 daemon 会永久挂起**，其后的控制面停止、**LAN/mDNS 撤销**、daemon 锁释放、甚至 `process.exit(0)` 全都不执行——P2 的广播会滞留。→ 新增有界变体 `tryUpdateDaemonState`（2s 超时、返回布尔、绝不在关停路径上阻塞），关停路径改用它。
+>
+> **⚠️ 偏离路线图：STUN / srflx / NAT keepalive 从 P3 移到 P4。** 路线图称 20s STUN binding request 是 P3 的**成败关键**，但这经不起推敲：一个已发布的 srflx 地址要被**入站**打通，需要该 NAT **同时**满足端点无关的映射与过滤（即 full-cone）——只有这一个格子可行，而它在全球占少数、在国内住宅 CGNAT/移动网络下更少。没有打洞（P4），keepalive 只维持「到 STUN 服务器」的那条映射，对地址相关过滤的 NAT 与客户端入站毫无关系。**它保住的是一个入站打不通的地址**，留在 P3 会制造「跨网 fallback 可用」的假象。
+>
+> **做了什么**：
+> - 新增 `src/daemon/lanEndpoints.ts`：`computeEndpoints`（纯函数：硬 deny-list 接口名 `awdl/llw/utun/tun/tap/wg/bridge/docker/vmnet/vboxnet` + 丢弃 APIPA/链路本地 + 排名「私网 IPv4 → 全局 IPv6 → ULA」+ 上限 4/2）与 `startEndpointPublisher`（tick 重算、**仅在地址集变化且已连接时**才写、失败由下一 tick 重试）。
+> - 端点写入 `Machine.daemonState.p2p`（**服务端零改动**：它只校验 `typeof === 'string'`，从不解析）。`DaemonStateSchema` 加可选 `p2p`——注意该 schema **从不被 parse**，App 也以 `any` 具名取值，故这是纯类型变更。
+> - **LAN 端口改为稳定**（`HAPPY_LAN_PORT`，默认 55673；占用则回退临时分配）。Daemon 每次 CLI 版本升级都会重启，临时端口会让已发布的端点每次失效。
+> - **不写 `daemon.state.json`**：那是另一个类型，加端点等于复制服务端状态并制造陈旧陷阱；且端口可能回退到临时分配，持久化它就是错的。启动时重新发布即可。
+>
+> **必须承认的 promise 边界**：「server 挂掉仍可达」的准确表述是「**server 挂掉 且 机器没换网 且 用户开了 LAN**」。`enableLan` **默认关闭**，所以本功能对默认用户是 no-op。跨网能力在本阶段为**零**（srflx/打洞在 P4），且 App 必须在 server 在线时至少与机器同网一次才缓存得到端点。
+>
+> **验证**：7 个单测（过滤与排名、上限、未变化时保持安静、变化时重发、断连不发、失败重试、stop 后不再 tick）；全量测试与改动前按测试名逐项一致。
+
 ### P4 · 公网 P2P（rendezvous + 打洞）
 
 | | |

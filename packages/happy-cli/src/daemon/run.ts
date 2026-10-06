@@ -28,6 +28,7 @@ import { stripProfileManagedEnv } from '@/utils/profileEnv';
 import { fetchSessionProfileMeta } from './fetchSessionProfileMeta';
 import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSessionSummary } from './lanServer';
 import { startLanDiscovery, type LanDiscoveryHandle } from './lanDiscovery';
+import { startEndpointPublisher, type EndpointPublisherHandle } from './lanEndpoints';
 
 /** Time to wait for a spawned session to report via /session-started webhook before failing the spawn (Cursor cold start can exceed 30s). */
 const SESSION_WEBHOOK_TIMEOUT_MS = 60_000;
@@ -1233,6 +1234,7 @@ export async function startDaemon(): Promise<void> {
     //
     let lanServer: LanServerHandle | null = null;
     let lanDiscovery: LanDiscoveryHandle | null = null;
+    let endpointPublisher: EndpointPublisherHandle | null = null;
     if (configuration.enableLan) {
       if (credentials.encryption.type !== 'dataKey') {
         // LAN auth is a challenge-response keyed on the machine key, which only dataKey
@@ -1246,6 +1248,7 @@ export async function startDaemon(): Promise<void> {
             secret: credentials.encryption.machineKey,
             machineId,
             accountFingerprint,
+            port: configuration.lanPort,
             getSessions: () => [...pidToTrackedSession.values()]
               .filter(session => session.happySessionId !== undefined)
               .map(session => ({
@@ -1262,6 +1265,21 @@ export async function startDaemon(): Promise<void> {
           lanServer = started;
           lanDiscovery = await startLanDiscovery({ port: started.port, machineId, accountFingerprint });
           logger.debug(`[DAEMON RUN] LAN API listening on port ${started.port}`);
+
+          // Publish the endpoint so a client can cache it while the server is healthy and
+          // fall back to it when the server is not. Change-driven: it recomputes on a slow
+          // tick and writes only when the address set actually moves, so a roamed laptop
+          // re-publishes and a settled one stays quiet.
+          endpointPublisher = startEndpointPublisher({
+            lanPort: started.port,
+            isConnected: () => apiMachine.isSocketConnected(),
+            publish: async (endpoints) => apiMachine.tryUpdateDaemonState((state) => ({
+              ...state,
+              status: state?.status ?? 'running',
+              p2p: endpoints,
+            })),
+          });
+          void endpointPublisher.tick();
         } catch (error) {
           // An opt-in feature must never stop the daemon from starting.
           logger.warn('[DAEMON RUN] LAN API not started', { error: String(error) });
@@ -1764,8 +1782,11 @@ export async function startDaemon(): Promise<void> {
         logger.debug('[DAEMON RUN] Health check interval cleared');
       }
 
-      // Update daemon state before shutting down
-      await apiMachine.updateDaemonState((state: DaemonState | null) => ({
+      // Update daemon state before shutting down. Deliberately the bounded variant: the
+      // regular one retries forever, so on an unreachable server this await would never
+      // return and every teardown step below it -- stopping the LAN listener, withdrawing
+      // the mDNS advertisement, releasing the daemon lock -- would never run.
+      await apiMachine.tryUpdateDaemonState((state: DaemonState | null) => ({
         ...state,
         status: 'shutting-down',
         shutdownRequestedAt: Date.now(),
@@ -1780,6 +1801,7 @@ export async function startDaemon(): Promise<void> {
       await stopControlServer();
       // Withdraw the advertisement before the listener goes away, so peers do not keep a
       // stale record pointing at a closed port.
+      endpointPublisher?.stop();
       await lanDiscovery?.stop().catch(() => undefined);
       await lanServer?.stop().catch(() => undefined);
       await cleanupDaemonState();

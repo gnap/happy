@@ -238,9 +238,23 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
   // Resolve/reject explicitly. The control server's `listen` callback throws inside an async
   // callback, which becomes an unhandled rejection and leaves its promise unsettled forever;
   // a LAN bind failure must instead surface to the caller, which degrades gracefully.
-  await new Promise<void>((resolve, reject) => {
-    app.listen({ port: opts.port ?? 0, host: opts.host ?? '0.0.0.0' }, (err) => (err ? reject(err) : resolve()));
-  });
+  const listen = (port: number) =>
+    new Promise<void>((resolve, reject) => {
+      app.listen({ port, host: opts.host ?? '0.0.0.0' }, (err) => (err ? reject(err) : resolve()));
+    });
+
+  const preferredPort = opts.port ?? 0;
+  try {
+    await listen(preferredPort);
+  } catch (error) {
+    // A preferred port keeps a published endpoint valid across daemon restarts, but losing
+    // the feature to a port conflict would be worse than losing that stability.
+    if (preferredPort === 0 || (error as { code?: string })?.code !== 'EADDRINUSE') {
+      throw error;
+    }
+    logger.warn('[lan] preferred port is in use; falling back to an ephemeral one', { port: preferredPort });
+    await listen(0);
+  }
 
   const address = app.server.address();
   const port = typeof address === 'object' && address !== null ? address.port : (opts.port ?? 0);

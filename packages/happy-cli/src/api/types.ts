@@ -161,7 +161,21 @@ export const DaemonStateSchema = z.object({
     z.union([
       z.enum(['mobile-app', 'cli', 'os-signal', 'unknown']),
       z.string() // Forward compatibility
-    ]).optional()
+    ]).optional(),
+  /**
+   * Where this machine can be reached on the LAN, published so a client can cache it while
+   * the server is healthy and fall back to it when the server is not. Only populated when
+   * the LAN API is enabled.
+   *
+   * Note this blob is a *pre-fetch*: it lives on the server, so it is only readable while
+   * the server is up. It is also durable and account-wide, unlike the mDNS advertisement
+   * next to it, which is LAN-scoped and transient.
+   */
+  p2p: z.object({
+    v: z.number(),
+    at: z.number(),
+    endpoints: z.array(z.object({ t: z.string(), addr: z.string(), port: z.number() }))
+  }).optional()
 })
 
 export type DaemonState = z.infer<typeof DaemonStateSchema>

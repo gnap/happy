@@ -82,6 +82,12 @@ class Configuration {
   public readonly disableCaffeinate: boolean
   /** Opt-in LAN read-only API + mDNS advertisement (HAPPY_LAN_ENABLED). Default off. */
   public readonly enableLan: boolean
+  /**
+   * Preferred port for the LAN API (HAPPY_LAN_PORT). A stable port keeps a published
+   * endpoint valid across daemon restarts, which happen on every CLI version bump; the
+   * listener falls back to an ephemeral port if this one is taken.
+   */
+  public readonly lanPort: number
 
   constructor() {
     // Server configuration - priority: parameter > environment > default
@@ -113,6 +119,7 @@ class Configuration {
     // Opt-in: this opens a network listener that did not exist before, so it stays off
     // unless the user asks for it. See src/daemon/lanServer.ts for what it exposes.
     this.enableLan = ['true', '1', 'yes'].includes(process.env.HAPPY_LAN_ENABLED?.toLowerCase() || '');
+    this.lanPort = Number(process.env.HAPPY_LAN_PORT) || 55673;
 
     this.currentCliVersion = BUILD_VERSION
 
