@@ -144,6 +144,7 @@
     "expo-store-review": "~57.0.1",
     "expo-system-ui": "~57.0.1",
     "expo-web-browser": "~57.0.1",
+    "expo-zeroconf": "0.0.3",
     "fuse.js": "^7.1.0",
     "katex": "^0.17.0",
     "libsodium-wrappers": "0.8.2",

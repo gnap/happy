@@ -36,7 +36,15 @@ export default {
             infoPlist: {
                 NSMicrophoneUsageDescription: "Allow $(PRODUCT_NAME) to access your microphone for voice conversations with AI.",
                 NSLocalNetworkUsageDescription: "Allow $(PRODUCT_NAME) to find and connect to local devices on your network.",
-                NSBonjourServices: ["_http._tcp", "_https._tcp"]
+                // _happy._tcp is the service the CLI daemon advertises (see docs/p2p-roadmap.md §10).
+                NSBonjourServices: ["_http._tcp", "_https._tcp", "_happy._tcp"],
+                // The LAN API is deliberately plain HTTP; ATS blocks cleartext to a LAN address
+                // unless local networking is exempted. Declared explicitly rather than relying on
+                // the generated default, which is not part of this config.
+                NSAppTransportSecurity: {
+                    NSAllowsArbitraryLoads: false,
+                    NSAllowsLocalNetworking: true
+                }
             },
             associatedDomains: variant === 'production' ? ["applinks:app.happy.engineering"] : []
         },
@@ -95,6 +103,15 @@ export default {
             "react-native-enriched-markdown",
             "react-native-vision-camera",
             "@more-tech/react-native-libsodium",
+            [
+                // The plugin only prepends a leading underscore, so the protocol suffix has to be
+                // spelled out here — passing "happy" would yield "_happy" and NSBonjourServices
+                // entries must be of the form _type._tcp for the browse to match.
+                "expo-zeroconf",
+                {
+                    serviceTypes: ["_happy._tcp"]
+                }
+            ],
             "react-native-audio-api",
             "@livekit/react-native-expo-plugin",
             "@config-plugins/react-native-webrtc",

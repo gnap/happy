@@ -148,6 +148,7 @@ class Sync {
         try { return new URL(url).pathname.replace(/\/[a-zA-Z0-9_-]{20,}/g, '/:id'); } catch { return url; }
     }
     // ---- End fetch instrumentation ----
+    encryption!: Encryption;
     serverID!: string;
     anonID!: string;
     private credentials!: AuthCredentials;
@@ -579,6 +580,15 @@ class Sync {
         this.anonID = encryption.anonID;
         this.serverID = parseToken(credentials.token);
         await this.#init();
+    }
+
+    /**
+     * The machine key for a machine whose record has been decrypted, or null if it has not been
+     * fetched yet. It is the 32-byte secret wrapped in the machine's `dataEncryptionKey`; the
+     * App needs it both to decrypt `daemonState` and to answer the LAN API's challenge.
+     */
+    getMachineKey(machineId: string): Uint8Array | null {
+        return this.machineDataKeys.get(machineId) ?? null;
     }
 
     async #init() {

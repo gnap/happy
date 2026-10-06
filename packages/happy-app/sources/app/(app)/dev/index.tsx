@@ -350,6 +350,12 @@ export default function DevScreen() {
                     rightElement={<SocketStatusIndicator />}
                     showChevron={false}
                 />
+                <Item
+                    title="LAN Round Trip"
+                    subtitle="Discover a local daemon, authenticate, read and decrypt history"
+                    icon={<Ionicons name="wifi-outline" size={28} color="#007AFF" />}
+                    onPress={() => router.push('/dev/lan')}
+                />
             </ItemGroup>
         </ItemList>
     );
