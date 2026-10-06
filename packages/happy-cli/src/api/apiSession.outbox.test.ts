@@ -12,11 +12,14 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-const { mockIo, mockAxiosGet, mockAxiosPost, mockSocket, state } = vi.hoisted(() => {
+const { mockIo, mockAxiosGet, mockAxiosPost, mockSocket, socketHandlers, state } = vi.hoisted(() => {
+    const handlers: Record<string, Array<(...args: any[]) => void>> = {};
     const socket = {
         connected: true,
         connect: vi.fn(),
-        on: vi.fn(),
+        on: vi.fn((event: string, handler: (...args: any[]) => void) => {
+            (handlers[event] ||= []).push(handler);
+        }),
         off: vi.fn(),
         emit: vi.fn(),
         emitWithAck: vi.fn(async () => ({ result: 'error' })),
@@ -28,6 +31,7 @@ const { mockIo, mockAxiosGet, mockAxiosPost, mockSocket, state } = vi.hoisted(()
         mockAxiosGet: vi.fn(),
         mockAxiosPost: vi.fn(),
         mockSocket: socket,
+        socketHandlers: handlers,
         state: { happyHome: '/tmp/happy-test-home' },
     };
 });
@@ -86,6 +90,7 @@ vi.mock('@/utils/time', () => ({
 
 import { ApiSessionClient } from './apiSession';
 import { loadOutbox, outboxPath, saveOutbox } from './outboxPersistence';
+import { readSessionLog } from './sessionLog';
 import { decodeBase64, decrypt, encodeBase64, encrypt } from './encryption';
 
 const TAG = 'test-session-tag';
@@ -149,6 +154,97 @@ const postedEnvelopeNs = () =>
         })
     );
 
+/** A socket update carrying one encrypted message, in the shape the server sends. */
+function newMessageUpdate(seq: number, ct: string) {
+    return {
+        id: `upd-${seq}`,
+        seq,
+        createdAt: 1,
+        body: {
+            t: 'new-message',
+            sid: 'test-session-id',
+            message: { id: `msg-${seq}`, seq, localId: null, content: { t: 'encrypted', c: ct }, createdAt: 1, updatedAt: 1 },
+        },
+    };
+}
+
+const emitSocketEvent = (event: string, payload: unknown) => {
+    for (const handler of socketHandlers[event] ?? []) handler(payload);
+};
+
+const loggedEntries = (dir: 'in' | 'out') =>
+    readSessionLog(TAG, 'test-machine-id').filter((e) => e.dir === dir);
+
+describe('ApiSessionClient local message log', () => {
+    let happyHome: string;
+
+    beforeEach(() => {
+        happyHome = mkdtempSync(join(tmpdir(), 'happy-log-cli-'));
+        state.happyHome = happyHome;
+        vi.clearAllMocks();
+        mockIo.mockReturnValue(mockSocket);
+        mockAxiosGet.mockResolvedValue({ data: { sessions: [] } });
+        mockSocket.connected = true;
+        for (const key of Object.keys(socketHandlers)) {
+            delete socketHandlers[key];
+        }
+    });
+
+    afterEach(() => {
+        rmSync(happyHome, { recursive: true, force: true });
+    });
+
+    it('logs an incoming message once, even when a second delivery path replays the same seq', () => {
+        mockAxiosPost.mockResolvedValue({ data: { messages: [] } });
+        const client = new ApiSessionClient('fake-token', makeSession());
+        // Caught up, so seq 6 takes the socket fast path rather than the HTTP catch-up.
+        (client as unknown as { lastSeq: number }).lastSeq = 5;
+
+        const body = { role: 'user', content: { type: 'text', text: 'hello' } };
+        const ct = encodeBase64(encrypt(SESSION_KEY, 'legacy', body));
+
+        emitSocketEvent('update', newMessageUpdate(6, ct));
+        expect(loggedEntries('in')).toHaveLength(1);
+        expect(loggedEntries('in')[0].c).toBe(ct);
+
+        // Replay the same seq, as the HTTP catch-up funnel would. The log is written inside
+        // routeIncomingMessage, after its seq dedup -- hooking the call sites instead would
+        // record this message twice.
+        (client as unknown as { routeIncomingMessage: (m: unknown) => void }).routeIncomingMessage({
+            body,
+            seq: 6,
+            ct,
+            id: 'msg-6',
+            localId: null,
+        });
+        expect(loggedEntries('in')).toHaveLength(1);
+    });
+
+    it('logs outbound messages with the ciphertext that actually went on the wire', async () => {
+        mockAxiosPost.mockResolvedValue({ data: { messages: [] } });
+        const client = new ApiSessionClient('fake-token', makeSession());
+        client.sendSessionProtocolMessage(envelope('env-out', 'out') as never);
+        await waitFor(() => expect(postedLocalIds()).toEqual(['env-out']));
+
+        const posted = mockAxiosPost.mock.calls.flatMap((call: any[]) => call[1].messages).map((m: any) => m.content);
+        const logged = loggedEntries('out');
+        expect(logged.map((e) => e.id)).toEqual(['env-out']);
+        expect(logged[0].c).toBe(posted[0]);
+    });
+
+    it('keeps the log across a restart and appends to it rather than starting over', () => {
+        mockAxiosPost.mockRejectedValue(new Error('ECONNREFUSED'));
+        const first = new ApiSessionClient('fake-token', makeSession());
+        first.sendSessionProtocolMessage(envelope('env-log-1', 'persisted') as never);
+        expect(loggedEntries('out').map((e) => e.id)).toEqual(['env-log-1']);
+
+        // Unlike the outbox, the log is not pruned on session start -- it is history.
+        const second = new ApiSessionClient('fake-token', makeSession());
+        second.sendSessionProtocolMessage(envelope('env-log-2', 'more') as never);
+        expect(loggedEntries('out').map((e) => e.id)).toEqual(['env-log-1', 'env-log-2']);
+    });
+});
+
 describe('ApiSessionClient outbox durability', () => {
     let happyHome: string;
 
@@ -159,6 +255,9 @@ describe('ApiSessionClient outbox durability', () => {
         mockIo.mockReturnValue(mockSocket);
         mockAxiosGet.mockResolvedValue({ data: { sessions: [] } });
         mockSocket.connected = true;
+        for (const key of Object.keys(socketHandlers)) {
+            delete socketHandlers[key];
+        }
     });
 
     afterEach(() => {

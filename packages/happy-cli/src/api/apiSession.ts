@@ -29,6 +29,7 @@ import { InvalidateSync } from '@/utils/sync';
 import axios from 'axios';
 import { resolveSessionLastSeq } from './sessionLastSeq';
 import { loadOutbox, outboxPath, pruneOutboxes, saveOutbox } from './outboxPersistence';
+import { appendSessionLog, pruneSessionLogs, sessionLogDir } from './sessionLog';
 import {
     buildAgentMessagePayload,
     buildCodexPayload,
@@ -234,6 +235,16 @@ function truncateDiffArgs(
 
     return { truncated, wasTruncated };
 }
+
+/** A decrypted incoming message plus the wire metadata the local log needs. */
+type IncomingMessage = {
+    body: unknown;
+    seq?: number;
+    /** base64 ciphertext exactly as it crossed the wire. */
+    ct?: string | null;
+    id?: string | null;
+    localId?: string | null;
+};
 
 export class ApiSessionClient extends EventEmitter {
     private readonly token: string;
@@ -580,6 +591,7 @@ export class ApiSessionClient extends EventEmitter {
         }
         this.nextN = writerChanged ? 0 : restoredOutbox.nextN;
         pruneOutboxes({ keepPath: outboxPath(this.sid) });
+        pruneSessionLogs({ keepDir: sessionLogDir(this.sid, this.site) });
 
         //
         // Handlers
@@ -690,7 +702,13 @@ export class ApiSessionClient extends EventEmitter {
                             this.receiveSync.invalidate();
                             return;
                         }
-                        this.routeIncomingMessage(body, messageSeq);
+                        this.routeIncomingMessage({
+                            body,
+                            seq: messageSeq,
+                            ct: data.body.message.content.c,
+                            id: data.body.message.id,
+                            localId: data.body.message.localId,
+                        });
                         this.lastSeq = messageSeq;
                         return;
                     }
@@ -843,7 +861,12 @@ export class ApiSessionClient extends EventEmitter {
         };
     }
 
-    private routeIncomingMessage(message: unknown, seq?: number) {
+    private routeIncomingMessage(incoming: IncomingMessage) {
+        // `body` is the decrypted payload the routing branches below expect; the rest is the
+        // wire metadata the local log needs, carried alongside because the ciphertext is gone
+        // once this method is entered.
+        const { body: message, seq } = incoming;
+
         // Deduplicate by seq: WebSocket push and HTTP fetch may deliver
         // the same message concurrently.
         if (typeof seq === 'number') {
@@ -851,6 +874,19 @@ export class ApiSessionClient extends EventEmitter {
             if (this.routedMessageIds.has(key)) return;
             this.routedMessageIds.add(key);
             if (this.routedMessageIds.size > 1000) this.routedMessageIds.clear();
+        }
+
+        // Logged here rather than at the call sites on purpose: the dedup above runs after
+        // them, so a message that arrives on the socket fast path and is later re-fetched over
+        // HTTP would otherwise be logged twice.
+        if (incoming.ct) {
+            appendSessionLog(this.sid, this.site, {
+                id: incoming.id ?? incoming.localId ?? String(seq ?? ''),
+                localId: incoming.localId ?? null,
+                dir: 'in',
+                at: Date.now(),
+                c: incoming.ct,
+            });
         }
 
         const triggerInboxMessageId = this.ingestA2AInboxFromTrigger(message);
@@ -1286,7 +1322,13 @@ export class ApiSessionClient extends EventEmitter {
                             });
                             continue;
                         }
-                        this.routeIncomingMessage(body, message.seq);
+                        this.routeIncomingMessage({
+                            body,
+                            seq: message.seq,
+                            ct: message.content.c,
+                            id: message.id,
+                            localId: message.localId,
+                        });
                     } catch (error) {
                         logger.debug('[API] Failed to decrypt fetched message', {
                             sessionId: this.sessionId,
@@ -1494,9 +1536,19 @@ export class ApiSessionClient extends EventEmitter {
 
     private enqueueMessage(content: unknown, invalidate: boolean = true, localId?: string) {
         const encrypted = encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, content));
+        const resolvedLocalId = localId ?? randomUUID();
         this.pendingOutbox.push({
             content: encrypted,
-            localId: localId ?? randomUUID()
+            localId: resolvedLocalId
+        });
+        // Same synchronous block and the same ciphertext string as the outbox push, so the two
+        // stores can never disagree about what the bytes were.
+        appendSessionLog(this.sid, this.site, {
+            id: resolvedLocalId,
+            localId: resolvedLocalId,
+            dir: 'out',
+            at: Date.now(),
+            c: encrypted,
         });
         this.persistOutboxNow();
         if (invalidate) {

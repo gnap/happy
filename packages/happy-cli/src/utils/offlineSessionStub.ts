@@ -31,6 +31,7 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { encodeBase64, encrypt } from '@/api/encryption';
 import { loadOutbox, saveOutbox, type OutboxEntry } from '@/api/outboxPersistence';
+import { appendSessionLog } from '@/api/sessionLog';
 import {
     buildAgentMessagePayload,
     buildCodexPayload,
@@ -88,9 +89,15 @@ class OfflineSessionStub extends EventEmitter {
      * it, so a later resend is deduped by the server rather than duplicated.
      */
     private queueRecord(record: unknown, localId: string): void {
-        this.queued.push({
+        const encrypted = encodeBase64(encrypt(this.sessionEncryptionKey, this.encryptionVariant, record));
+        this.queued.push({ localId, content: encrypted });
+        // Same ciphertext string as the outbox entry, so the log and the queue agree on bytes.
+        appendSessionLog(this.tag, this.site, {
+            id: localId,
             localId,
-            content: encodeBase64(encrypt(this.sessionEncryptionKey, this.encryptionVariant, record)),
+            dir: 'out',
+            at: Date.now(),
+            c: encrypted,
         });
         saveOutbox(this.tag, { entries: this.queued, nextN: this.nextN, site: this.site });
     }
