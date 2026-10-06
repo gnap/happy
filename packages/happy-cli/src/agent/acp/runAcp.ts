@@ -583,7 +583,7 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     opts.startedBy === 'daemon'
       ? Promise.resolve(null)
       : api.getOrCreateMachine({ machineId: settings.machineId, metadata: initialMachineMetadata }),
-    api.getOrCreateSession({ tag: sessionTag, metadata, state }),
+    api.getOrCreateSession({ tag: sessionTag, site: settings.machineId, metadata, state }),
   ]);
   if (response) {
     logAcp('muted', `Happy Session ID: ${response.id}`);

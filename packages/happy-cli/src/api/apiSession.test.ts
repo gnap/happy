@@ -87,6 +87,8 @@ type SocketHandlers = Record<string, SocketHandler[]>;
 function makeSession() {
     return {
         id: 'test-session-id',
+        tag: 'test-session-tag',
+        site: 'test-machine-id',
         seq: 0,
         metadata: {
             path: '/tmp',
@@ -413,11 +415,75 @@ describe('ApiSessionClient v3 messages API migration', () => {
 
         expect(decrypted).toEqual({
             role: 'session',
-            content: envelope,
+            // Writer identity is stamped onto the envelope before encryption.
+            content: { ...envelope, sid: 'test-session-tag', site: 'test-machine-id' },
             meta: {
                 sentFrom: 'cli'
             }
         });
+    });
+
+    it('stamps writer identity onto lifecycle envelopes at content.data', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        mockAxiosPost.mockResolvedValueOnce({
+            data: {
+                messages: [{ id: 'msg-1', seq: 1, localId: 'local-1', createdAt: 1, updatedAt: 1 }]
+            }
+        });
+
+        client.sendSessionLifecycleEnvelope({
+            id: 'env-lifecycle',
+            time: 2000,
+            role: 'agent',
+            ev: { t: 'text', text: 'lifecycle' }
+        });
+
+        await waitForCheck(() => {
+            expect(mockAxiosPost).toHaveBeenCalledTimes(1);
+        });
+
+        const payload = mockAxiosPost.mock.calls[0][1];
+        const decrypted = decrypt(
+            session.encryptionKey,
+            session.encryptionVariant,
+            decodeBase64(payload.messages[0].content)
+        );
+
+        // This path wraps the envelope as content.data — assert the nested location explicitly,
+        // since it is the shape most likely to be missed by a future refactor.
+        expect(decrypted.content.data.sid).toBe('test-session-tag');
+        expect(decrypted.content.data.site).toBe('test-machine-id');
+    });
+
+    it('omits site when the session carries no writer site', async () => {
+        const client = new ApiSessionClient('fake-token', { ...session, site: undefined });
+        mockAxiosPost.mockResolvedValueOnce({
+            data: {
+                messages: [{ id: 'msg-1', seq: 1, localId: 'local-1', createdAt: 1, updatedAt: 1 }]
+            }
+        });
+
+        client.sendSessionProtocolMessage({
+            id: 'env-no-site',
+            time: 3000,
+            role: 'agent',
+            ev: { t: 'text', text: 'no site' }
+        });
+
+        await waitForCheck(() => {
+            expect(mockAxiosPost).toHaveBeenCalledTimes(1);
+        });
+
+        const payload = mockAxiosPost.mock.calls[0][1];
+        const decrypted = decrypt(
+            session.encryptionKey,
+            session.encryptionVariant,
+            decodeBase64(payload.messages[0].content)
+        );
+
+        expect(decrypted.content.sid).toBe('test-session-tag');
+        // Conditional spread: an absent site must not produce an own key.
+        expect('site' in decrypted.content).toBe(false);
     });
 
     it('sends only modern payload for user session envelopes', async () => {

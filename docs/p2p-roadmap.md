@@ -150,11 +150,16 @@ CLI 本地创建（不依赖 server）:
 
 | | |
 |---|---|
-| 做什么 | 信封加 `sid` / `site` / `n`。改动两处 schema：`happy-wire/src/sessionProtocol.ts:130-144` 与 App 侧副本 `happy-app/sources/sync/typesRaw.ts:188` |
+| 做什么 | 信封加 `sid` / `site` / `n`。**只改 `happy-wire/src/sessionProtocol.ts` 的 `sessionEnvelopeSchema`** |
 | **`sid` 定义** | **客户端生成的 cuid2，复用 `tag` 作为对外标识**（*不是* server 的 `Session.id` —— 后者由 server 生成（`schema.prisma:94`），P2P 世界无法复现） |
+| **App 侧副本** | **P0a 不改 `happy-app/sources/sync/typesRaw.ts:188`。** 该副本是 `.passthrough()`，未声明字段照样保留且不报错 → 兼容性已由构造保证；P0a 不做校验，声明它们只会造出两个死字段。留到 P2（App 真正要按 `(n,site)` 排序去重时）再动 |
+| **`n` 的时机** | `n` **不随 P0a 一起上** —— 它必须持久化才有意义（否则 CLI 重启后 `n` 重置，产生假的「消息被删」信号）。等 P1 的 outbox 落盘就位后再引入 |
 | server | **0** |
-| 验收 | 新旧客户端混跑无回归；App 记录但不校验（`warn` 模式）；服务端无感知 |
+| 验收 | 新旧客户端混跑无回归；服务端无感知 |
 | 回退 | 字段 optional，去掉即可 |
+
+> **P0a 已实施（2026-10-06）**：`sid`/`site` 加在 `sessionEnvelopeSchema`；CLI 在 `ApiSessionClient` 上以 `withWriterIdentity()` 于两个发送漏斗（`sendSessionProtocolMessage`、`sendSessionLifecycleEnvelope`）注入，字段随信封进入密文。`Session.tag`（客户端拥有的身份）与 `Session.site`（= `machineId`）由 runner 经 `getOrCreateSession` 传入。验证：happy-wire 19/19、CLI typecheck 0 错误、CLI 全量测试与改动前**逐项一致**。
+> **已知缺口**：`setupOfflineReconnection.ts:97` 路径未传 `site`（该处只有 `sessionTag` 在作用域内，P0a 不新增管道）。P0a 不校验故无影响，P1/P2 需要时再补。
 
 ### P1 · 可靠投递 —— outbox 落盘
 

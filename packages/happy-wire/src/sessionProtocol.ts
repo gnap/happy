@@ -154,6 +154,15 @@ export const sessionEnvelopeSchema = z
       })
       .optional(),
     taskCall: z.string().optional(),
+    /**
+     * Session identity, owned by the client (not the server-assigned session id).
+     * Lives inside the envelope so the AEAD protects it: a relay cannot transplant
+     * an envelope into a different session without the mismatch being detectable.
+     * Optional — absent on envelopes produced before this field existed.
+     */
+    sid: z.string().optional(),
+    /** Identity of the writer (CLI = machine id, App = device id). Optional, see `sid`. */
+    site: z.string().optional(),
     ev: sessionEventSchema,
   })
   .superRefine((envelope, ctx) => {

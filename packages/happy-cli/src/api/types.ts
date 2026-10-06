@@ -113,6 +113,14 @@ export interface ClientToServerEvents {
  */
 export type Session = {
   id: string,
+  /**
+   * Client-owned session identity (the create-session `tag`), distinct from the
+   * server-assigned `id`. Carried into the envelope as `sid` so a relay cannot
+   * transplant an envelope into a different session undetected.
+   */
+  tag: string,
+  /** Writer identity, propagated to the envelope as `site`. CLI = machine id. */
+  site?: string,
   seq: number,
   encryptionKey: Uint8Array;
   encryptionVariant: 'legacy' | 'dataKey';

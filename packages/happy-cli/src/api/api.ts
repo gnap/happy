@@ -30,6 +30,8 @@ export class ApiClient {
    */
   async getOrCreateSession(opts: {
     tag: string,
+    /** Writer identity stamped onto outgoing envelopes as `site` (see `Session.site`). */
+    site?: string,
     metadata: Metadata,
     state: AgentState | null,
     existingEncryptionKey?: Uint8Array
@@ -81,6 +83,8 @@ export class ApiClient {
       let raw = response.data.session;
       let session: Session = {
         id: raw.id,
+        tag: opts.tag,
+        site: opts.site,
         seq: raw.seq,
         metadata: decrypt(encryptionKey, encryptionVariant, decodeBase64(raw.metadata)),
         metadataVersion: raw.metadataVersion,

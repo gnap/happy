@@ -137,7 +137,7 @@ export async function runGemini(opts: {
     opts.startedBy === 'daemon'
       ? Promise.resolve(null)
       : api.getOrCreateMachine({ machineId, metadata: initialMachineMetadata }),
-    api.getOrCreateSession({ tag: sessionTag, metadata, state }),
+    api.getOrCreateSession({ tag: sessionTag, site: machineId, metadata, state }),
   ]);
 
   // Handle server unreachable case - create offline stub with hot reconnection

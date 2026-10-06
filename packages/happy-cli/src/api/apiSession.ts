@@ -226,7 +226,12 @@ function truncateDiffArgs(
 
 export class ApiSessionClient extends EventEmitter {
     private readonly token: string;
+    /** Server-assigned session id. Distinct from `sid` below. */
     readonly sessionId: string;
+    /** Client-owned session identity (`Session.tag`), stamped onto outgoing envelopes as `sid`. */
+    private readonly sid: string;
+    /** Writer identity (`Session.site`), stamped onto outgoing envelopes as `site`. */
+    private readonly site: string | undefined;
     private metadata: Metadata | null;
     private metadataVersion: number;
     private agentState: AgentState | null;
@@ -438,6 +443,8 @@ export class ApiSessionClient extends EventEmitter {
         super()
         this.token = token;
         this.sessionId = session.id;
+        this.sid = session.tag;
+        this.site = session.site;
         this.metadata = session.metadata;
         this.metadataVersion = session.metadataVersion;
         this.agentState = session.agentState;
@@ -1406,6 +1413,22 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
+    /**
+     * Stamp this client's writer identity onto an outgoing envelope.
+     *
+     * `sid` / `site` ride inside the envelope, so the AEAD covers them: a relay can
+     * neither forge nor alter them, and cannot transplant an envelope into another
+     * session without the mismatch becoming detectable. Conditional spreads keep the
+     * keys absent (rather than `undefined`) when unset, matching `createEnvelope`.
+     */
+    private withWriterIdentity(envelope: SessionEnvelope): SessionEnvelope {
+        return {
+            ...envelope,
+            ...(this.sid ? { sid: this.sid } : {}),
+            ...(this.site ? { site: this.site } : {}),
+        };
+    }
+
     private enqueueMessage(content: unknown, invalidate: boolean = true, localId?: string) {
         const encrypted = encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, content));
         this.pendingOutbox.push({
@@ -1569,7 +1592,7 @@ export class ApiSessionClient extends EventEmitter {
     sendSessionProtocolMessage(envelope: SessionEnvelope, extraMeta?: Record<string, unknown>) {
         // Apply lazy encoding at the single exit point so all code paths
         // (Claude via sendClaudeSessionMessage, Cursor via direct call, etc.) are covered.
-        const finalEnvelope = this.maybeLazyEncodeEnvelope(envelope);
+        const finalEnvelope = this.withWriterIdentity(this.maybeLazyEncodeEnvelope(envelope));
         if (finalEnvelope.role === 'user' && finalEnvelope.ev.t === 'text') {
             const stack = new Error().stack?.split('\n').slice(1, 4).map(s => s.trim()).join(' <- ');
             logger.debug(`[API] USER ENVELOPE: "${(finalEnvelope.ev as any).text?.slice(0,50)}" callstack: ${stack}`);
@@ -1594,6 +1617,7 @@ export class ApiSessionClient extends EventEmitter {
      * messages keep the normal envelope shape.
      */
     sendSessionLifecycleEnvelope(envelope: SessionEnvelope) {
+        envelope = this.withWriterIdentity(envelope);
         if (process.env.HAPPY_CURSOR_TRACE_ENVELOPES === '1') {
             this._envelopeSendCount += 1;
             const ev = envelope.ev as { t?: string; status?: string };
