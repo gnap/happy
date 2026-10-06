@@ -175,6 +175,7 @@ export async function runGemini(opts: {
     metadata,
     state,
     response,
+    site: machineId,
     initialLastSeq: opts.resumeAfterSeq,
     onSessionSwap: (newSession) => {
       // If we're processing a message, queue the swap for later

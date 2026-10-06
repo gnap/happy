@@ -612,6 +612,7 @@ export async function runCursor(opts: {
     state,
     response,
     existingEncryptionKey,
+    site: machineId,
     initialLastSeq: opts.resumeAfterSeq,
     onSessionSwap: (newSession) => {
       session = newSession;

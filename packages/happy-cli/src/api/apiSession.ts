@@ -30,6 +30,16 @@ import axios from 'axios';
 import { resolveSessionLastSeq } from './sessionLastSeq';
 import { deleteOutbox, loadOutbox, outboxPath, pruneOutboxes, saveOutbox } from './outboxPersistence';
 import {
+    buildAgentMessagePayload,
+    buildCodexPayload,
+    buildCursorPayload,
+    buildLifecyclePayload,
+    buildOutputFormatPayload,
+    buildSessionEventPayload,
+    buildSessionProtocolPayload,
+    type SessionEventPayload,
+} from './sessionPayloads';
+import {
     cloneA2AInboxState,
     extractLegacyInboxFromAgentState,
     getServerA2AUnreadCount,
@@ -1556,32 +1566,12 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     sendCodexMessage(body: any) {
-        let content = {
-            role: 'agent',
-            content: {
-                type: 'codex',
-                data: body  // This wraps the entire Claude message
-            },
-            meta: {
-                sentFrom: 'cli'
-            }
-        };
-        this.enqueueMessage(content);
+        this.enqueueMessage(buildCodexPayload(body));
     }
 
     /** Same shape as codex but type: 'cursor' so the app normalizes thinking as thinking (no dependency on session.metadata.flavor). */
     sendCursorMessage(body: Parameters<ApiSessionClient['sendCodexMessage']>[0]) {
-        let content = {
-            role: 'agent',
-            content: {
-                type: 'cursor',
-                data: body
-            },
-            meta: {
-                sentFrom: 'cli'
-            }
-        };
-        this.enqueueMessage(content);
+        this.enqueueMessage(buildCursorPayload(body));
     }
 
     /**
@@ -1589,28 +1579,12 @@ export class ApiSessionClient extends EventEmitter {
      * Used for old App compatibility; dual-send alongside session protocol when needed.
      */
     sendOutputFormatMessage(data: OutputFormatData) {
-        const content = {
-            role: 'agent' as const,
-            content: {
-                type: 'output' as const,
-                data,
-            },
-            meta: { sentFrom: 'cli' as const },
-        };
-        this.enqueueMessage(content);
+        this.enqueueMessage(buildOutputFormatPayload(data));
     }
 
     private enqueueSessionProtocolEnvelope(envelope: SessionEnvelope, invalidate: boolean = true, extraMeta?: Record<string, unknown>) {
-        const content = {
-            role: 'session',
-            content: envelope,
-            meta: {
-                sentFrom: 'cli',
-                ...(extraMeta ?? {}),
-            }
-        };
         // Use envelope.id as localId so server dedupes by localId; same envelope sent multiple times becomes one row.
-        this.enqueueMessage(content, invalidate, envelope.id);
+        this.enqueueMessage(buildSessionProtocolPayload(envelope, extraMeta), invalidate, envelope.id);
     }
 
     /** Count of envelopes sent this process (for trace log); resets only by process restart. */
@@ -1661,12 +1635,7 @@ export class ApiSessionClient extends EventEmitter {
                 appendFileSync(process.env.HAPPY_CURSOR_TRACE_LOG ?? '/tmp/cursor-envelope-trace.log', `${line}\n`);
             } catch { /* ignore */ }
         }
-        const content = {
-            role: 'session',
-            content: { type: 'session', data: envelope },
-            meta: { sentFrom: 'cli' },
-        };
-        this.enqueueMessage(content, true, envelope.id);
+        this.enqueueMessage(buildLifecyclePayload(envelope), true, envelope.id);
     }
 
     /**
@@ -1676,42 +1645,14 @@ export class ApiSessionClient extends EventEmitter {
      * @param provider - The agent provider sending the message (e.g., 'gemini', 'codex', 'claude')
      * @param body - The message payload (type: 'message' | 'reasoning' | 'tool-call' | 'tool-result')
      */
-    sendAgentMessage(provider: 'gemini' | 'codex' | 'claude' | 'cursor' | 'opencode', body: ACPMessageData) {
-        let content = {
-            role: 'agent',
-            content: {
-                type: 'acp',
-                provider,
-                data: body
-            },
-            meta: {
-                sentFrom: 'cli'
-            }
-        };
-
+    sendAgentMessage(provider: ACPProvider, body: ACPMessageData) {
         logger.debug(`[SOCKET] Sending ACP message from ${provider}:`, { type: body.type, hasMessage: 'message' in body });
 
-        this.enqueueMessage(content);
+        this.enqueueMessage(buildAgentMessagePayload(provider, body));
     }
 
-    sendSessionEvent(event: {
-        type: 'switch', mode: 'local' | 'remote'
-    } | {
-        type: 'message', message: string
-    } | {
-        type: 'permission-mode-changed', mode: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan'
-    } | {
-        type: 'ready'
-    }, id?: string) {
-        let content = {
-            role: 'agent',
-            content: {
-                id: id ?? randomUUID(),
-                type: 'event',
-                data: event
-            }
-        };
-        this.enqueueMessage(content);
+    sendSessionEvent(event: SessionEventPayload, id?: string) {
+        this.enqueueMessage(buildSessionEventPayload(id ?? randomUUID(), event));
     }
 
     /**

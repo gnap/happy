@@ -1,51 +1,137 @@
 /**
  * Offline Session Stub
  *
- * A no-op `ApiSessionClient`-shaped object used when the CLI wrapper loses
- * (or has not yet established) its WebSocket connection to the Happy server.
- * All side-effecting methods become silent no-ops so the rest of the runner
- * code doesn't need to guard every call site.
+ * An `ApiSessionClient`-shaped object used when the CLI wrapper loses (or has not yet
+ * established) its connection to the Happy server at startup.
+ *
+ * Outbound messages are NOT dropped: they are encrypted and appended to the same durable
+ * outbox a connected session uses, so reconnecting -- which builds a real client for the
+ * same tag -- picks them up and delivers them. Everything that requires a live server
+ * (metadata/state writes, A2A reconciliation, presence) stays a no-op, because those
+ * methods go through `emitWithAck`, which on a socket that never connects would hang
+ * rather than fail.
  *
  * Lifecycle:
  *   1. `setupOfflineReconnection` creates the stub when `api.getOrCreateSession`
- *      returns null (server unreachable at startup).
- *   2. A background task retries the connection; on success it calls
- *      `onSessionSwap(realSession)` in the runner, which replaces the stub.
+ *      returns null (server unreachable at startup), handing it the session key so it can
+ *      encrypt. That key is persisted before the create attempt, so it exists even though
+ *      the create failed.
+ *   2. A background task retries; on success it calls `onSessionSwap(realSession)` in the
+ *      runner, which replaces the stub. The new client seeds the same outbox file and
+ *      drains it over HTTP.
  *
- * Note on the cast: `ApiSessionClient` is a concrete class with private
- * members. TypeScript's structural check for class types requires those
- * private members to be present, so we cannot avoid `as unknown as
- * ApiSessionClient` without either extending `ApiSessionClient` (heavyweight)
- * or extracting a shared interface (large refactor). The cast is intentional
- * and safe because all public methods are explicitly implemented below.
+ * Note on the cast: `ApiSessionClient` is a concrete class with private members.
+ * TypeScript's structural check for class types requires those private members to be
+ * present, so we cannot avoid `as unknown as ApiSessionClient` without either extending
+ * `ApiSessionClient` (heavyweight) or extracting a shared interface (large refactor). The
+ * cast is intentional and safe because all public methods are explicitly implemented below.
  */
 
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
+import { encodeBase64, encrypt } from '@/api/encryption';
+import { loadOutbox, saveOutbox, type OutboxEntry } from '@/api/outboxPersistence';
+import {
+    buildAgentMessagePayload,
+    buildCodexPayload,
+    buildCursorPayload,
+    buildLifecyclePayload,
+    buildOutputFormatPayload,
+    buildSessionEventPayload,
+    buildSessionProtocolPayload,
+    type SessionEventPayload,
+} from '@/api/sessionPayloads';
 import type { ApiSessionClient, ACPMessageData, ACPProvider, OutputFormatData } from '@/api/apiSession';
 import type { AgentState, A2AInboxMessage, A2AInboxState, Metadata } from '@/api/types';
 import type { SessionEnvelope } from '@slopus/happy-wire';
 import type { RawJSONLines } from '@/claude/types';
 
+export type OfflineSessionStubOptions = {
+    /** Client-owned session identity. The outbox is keyed by it, so the reconnected client finds these messages. */
+    tag: string;
+    /** Writer identity, stamped onto envelopes as `site`. */
+    site?: string;
+    encryptionKey: Uint8Array;
+    encryptionVariant: 'legacy' | 'dataKey';
+};
+
 class OfflineSessionStub extends EventEmitter {
     readonly sessionId: string;
-    readonly sessionEncryptionKey: Uint8Array = new Uint8Array(0);
+    readonly sessionEncryptionKey: Uint8Array;
     readonly rpcHandlerManager = { registerHandler: () => {} };
 
-    constructor(sessionTag: string) {
+    private readonly tag: string;
+    private readonly site: string | undefined;
+    private readonly encryptionVariant: 'legacy' | 'dataKey';
+    /** Mirrors the persisted queue so each append does not re-read the file. */
+    private readonly queued: OutboxEntry[];
+
+    constructor(opts: OfflineSessionStubOptions) {
         super();
-        this.sessionId = `offline-${sessionTag}`;
+        this.sessionId = `offline-${opts.tag}`;
+        this.tag = opts.tag;
+        this.site = opts.site;
+        this.sessionEncryptionKey = opts.encryptionKey;
+        this.encryptionVariant = opts.encryptionVariant;
+        this.queued = loadOutbox(opts.tag).entries;
     }
 
-    // ── Outbound messages (no-op while offline) ──────────────────────────────
+    /**
+     * Encrypt and queue a record exactly as a connected client would, so the file this
+     * leaves behind is indistinguishable from one built online. `localId` is stored with
+     * it, so a later resend is deduped by the server rather than duplicated.
+     */
+    private queueRecord(record: unknown, localId: string): void {
+        this.queued.push({
+            localId,
+            content: encodeBase64(encrypt(this.sessionEncryptionKey, this.encryptionVariant, record)),
+        });
+        saveOutbox(this.tag, { entries: this.queued, nextN: 0 });
+    }
 
-    sendCodexMessage(_body: unknown): void {}
-    sendCursorMessage(_body: unknown): void {}
-    sendOutputFormatMessage(_data: OutputFormatData): void {}
-    sendAgentMessage(_provider: ACPProvider, _body: ACPMessageData): void {}
+    private withWriterIdentity(envelope: SessionEnvelope): SessionEnvelope {
+        return {
+            ...envelope,
+            ...(this.tag ? { sid: this.tag } : {}),
+            ...(this.site ? { site: this.site } : {}),
+        };
+    }
+
+    // ── Outbound messages (queued for delivery on reconnect) ─────────────────
+
+    sendCodexMessage(body: unknown): void {
+        this.queueRecord(buildCodexPayload(body), randomUUID());
+    }
+
+    sendCursorMessage(body: unknown): void {
+        this.queueRecord(buildCursorPayload(body), randomUUID());
+    }
+
+    sendOutputFormatMessage(data: OutputFormatData): void {
+        this.queueRecord(buildOutputFormatPayload(data), randomUUID());
+    }
+
+    sendAgentMessage(provider: ACPProvider, body: ACPMessageData): void {
+        this.queueRecord(buildAgentMessagePayload(provider, body), randomUUID());
+    }
+
     sendClaudeSessionMessage(_body: RawJSONLines): void {}
-    sendSessionProtocolMessage(_envelope: SessionEnvelope): void {}
-    sendSessionLifecycleEnvelope(_envelope: SessionEnvelope): void {}
-    sendSessionEvent(_event: unknown, _id?: string): void {}
+
+    sendSessionProtocolMessage(envelope: SessionEnvelope, extraMeta?: Record<string, unknown>): void {
+        const stamped = this.withWriterIdentity(envelope);
+        this.queueRecord(buildSessionProtocolPayload(stamped, extraMeta), stamped.id);
+    }
+
+    sendSessionLifecycleEnvelope(envelope: SessionEnvelope): void {
+        const stamped = this.withWriterIdentity(envelope);
+        this.queueRecord(buildLifecyclePayload(stamped), stamped.id);
+    }
+
+    sendSessionEvent(event: SessionEventPayload, id?: string): void {
+        const eventId = id ?? randomUUID();
+        this.queueRecord(buildSessionEventPayload(eventId, event), eventId);
+    }
+
     sendSessionDeath(): void {}
     keepAlive(_thinking: boolean, _mode: 'local' | 'remote'): void {}
     sendUsageData(_usage: unknown, _model?: string): void {}
@@ -92,16 +178,20 @@ class OfflineSessionStub extends EventEmitter {
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
+    /** Nothing to flush: every send is already on disk. The real client drains it on swap. */
     async flush(): Promise<void> {}
     async close(): Promise<void> {}
 }
 
 /**
- * Create a no-op session stub for offline mode.
+ * Create an offline session stub that queues outbound messages durably.
  *
- * @param sessionTag - The session tag (used to build an offline session ID).
- * @returns An `ApiSessionClient` whose every method is a safe no-op.
+ * @param opts - Session identity and the content key to encrypt with. The key must be the
+ *   one persisted before the failed create attempt, so the reconnected client can read back
+ *   exactly these messages.
+ * @returns An `ApiSessionClient` whose outbound messages are queued and whose server-backed
+ *   operations are safe no-ops.
  */
-export function createOfflineSessionStub(sessionTag: string): ApiSessionClient {
-    return new OfflineSessionStub(sessionTag) as unknown as ApiSessionClient;
+export function createOfflineSessionStub(opts: OfflineSessionStubOptions): ApiSessionClient {
+    return new OfflineSessionStub(opts) as unknown as ApiSessionClient;
 }

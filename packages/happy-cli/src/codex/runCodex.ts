@@ -136,6 +136,7 @@ export async function runCodex(opts: {
         metadata,
         state,
         response,
+        site: machineId,
         initialLastSeq: opts.resumeAfterSeq,
         onSessionSwap: (newSession) => {
             session = newSession;

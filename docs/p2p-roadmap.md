@@ -179,8 +179,14 @@ CLI 本地创建（不依赖 server）:
 >
 > **已知缺口（均已在代码注释与提交信息中标注）**：
 > - **窗口 2 未修**：WS `emit` 返回即 splice，无 ack。需服务端 ack 才能关，违反"服务端零改动"，留待后续。
-> - **offline stub 完全不覆盖**：`offlineSessionStub.ts:41-53` 全是空实现，且 `sessionEncryptionKey` 是**空数组**（无法加密）。即"启动时服务器不可达"的会话，出站消息仍 100% 丢弃，落盘救不了。**这是既存缺陷，需专门一轮。**
+> - ~~**offline stub 完全不覆盖**~~ → **已修复**，见下。
 > - 写放大 O(Q)：长断网时每入队一条重写整个文件。解法是背压，不在本次。
+
+> **离线路径丢消息已修复（2026-10-06）**：此前"启动时服务器不可达"的会话（codex/gemini/cursor/acp）出站消息 **100% 被静默丢弃**——stub 的 send 方法全是空实现，且它的 `sessionEncryptionKey` 是空数组。根因是 `dataKey` 凭证的会话密钥在 `getOrCreateSession` 内部生成、`return null` 时被丢弃，离线时**根本无密钥可用**。
+>
+> 修法：① `ApiClient.resolveSessionEncryption(tag, existingKey?)` 成为密钥解析的**唯一来源**——`dataKey` 下在 HTTP 调用**之前**落盘到 `~/.happy/session-key-<hash>`（0600），`legacy` 不落盘（密钥已在 `access.key`，再存一份只会扩大暴露面）；② 从 `apiSession.ts` 抽出 `sessionPayloads.ts` 的纯载荷构造函数（**行为保持**的重构，严格 `toEqual` 断言全绿），离线 stub 用它们组装 → 加密 → 写入同一个 tag 键控 outbox；③ 重连时真实 client 播种同一文件并以 HTTP 排空——**无需搬运任何内存状态，文件就是交接点**。同时修正了误导性提示（原"Session syncing in background"对离线路径是假的）。
+>
+> 未做：`runClaude` 的离线分支结构不同（不建 session 对象、直接退出进程），仅靠密钥落盘受益。
 
 ### P2 · 局域网优先 + 双写 ← 第一步交付
 

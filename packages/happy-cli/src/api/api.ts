@@ -10,6 +10,7 @@ import { configuration, serverHttpsAgent } from '@/configuration';
 import chalk from 'chalk';
 import { Credentials } from '@/persistence';
 import { connectionState, isNetworkError } from '@/utils/serverConnectionErrors';
+import { persistSessionKey, readSessionKey } from './sessionKeyPersistence';
 
 export class ApiClient {
 
@@ -26,6 +27,33 @@ export class ApiClient {
   }
 
   /**
+   * Resolve the content key a session with this tag must encrypt with.
+   *
+   * Single source of truth: the offline path calls this too, and if the two ever disagreed
+   * the messages queued offline would be undecryptable once the server came back.
+   *
+   * For `dataKey` the key is persisted BEFORE the create request. The server only ever sees
+   * it wrapped, so the CLI is the sole owner of the plaintext -- leaving it in memory means
+   * a failed create (or a process death) loses it, taking everything encrypted with it.
+   * Persisting here is also what lets a session that starts offline still encrypt.
+   *
+   * `legacy` sessions are not persisted: their key is the account secret, already in
+   * `access.key`, and a second copy would widen its exposure for no benefit.
+   */
+  resolveSessionEncryption(
+    tag: string,
+    existingKey?: Uint8Array,
+  ): { encryptionKey: Uint8Array; encryptionVariant: 'legacy' | 'dataKey' } {
+    if (this.credential.encryption.type === 'dataKey') {
+      // Resumption key, else a key persisted by a previous run of this tag, else a new one.
+      const encryptionKey = existingKey ?? readSessionKey(tag) ?? getRandomBytes(32);
+      persistSessionKey(tag, encryptionKey);
+      return { encryptionKey, encryptionVariant: 'dataKey' };
+    }
+    return { encryptionKey: this.credential.encryption.secret, encryptionVariant: 'legacy' };
+  }
+
+  /**
    * Create a new session or load existing one with the given tag
    */
   async getOrCreateSession(opts: {
@@ -39,14 +67,8 @@ export class ApiClient {
 
     // Resolve encryption key
     let dataEncryptionKey: Uint8Array | null = null;
-    let encryptionKey: Uint8Array;
-    let encryptionVariant: 'legacy' | 'dataKey';
+    const { encryptionKey, encryptionVariant } = this.resolveSessionEncryption(opts.tag, opts.existingEncryptionKey);
     if (this.credential.encryption.type === 'dataKey') {
-
-      // Reuse existing key for session resumption, or generate a new one
-      encryptionKey = opts.existingEncryptionKey ?? getRandomBytes(32);
-      encryptionVariant = 'dataKey';
-
       // Derive and encrypt data encryption key
       // const contentDataKey = await deriveKey(this.secret, 'Happy EnCoder', ['content']);
       // const publicKey = libsodiumPublicKeyFromSecretKey(contentDataKey);
@@ -54,9 +76,6 @@ export class ApiClient {
       dataEncryptionKey = new Uint8Array(encryptedDataKey.length + 1);
       dataEncryptionKey.set([0], 0); // Version byte
       dataEncryptionKey.set(encryptedDataKey, 1); // Data key
-    } else {
-      encryptionKey = this.credential.encryption.secret;
-      encryptionVariant = 'legacy';
     }
 
     // Create session

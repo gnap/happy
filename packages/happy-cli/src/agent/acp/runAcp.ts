@@ -599,6 +599,7 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     metadata,
     state,
     response,
+    site: settings.machineId,
     initialLastSeq: opts.resumeAfterSeq,
     onSessionSwap: (newSession) => {
       session = newSession;
