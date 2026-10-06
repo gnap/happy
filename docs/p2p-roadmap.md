@@ -291,6 +291,13 @@ APP（同 LAN）:
 > **关键验证**：`scripts/lan-e2e.ts` 现在跑**完整往返**——生成一对 X25519「账户内容密钥对」扮演 App → 用真实的 `persistSessionKey`/`appendSessionLog` 产出真实历史 → 起真实 LAN 服务 → 完整认证 → 取历史 → **用账户内容私钥解包出 32 字节会话密钥** → 解密每条密文 → 断言明文一致。
 >
 > **这一步的价值**：App 在这一路径上的工作**全是密码学与协议、没有 UI**，所以脚本跑通 ≈ 证明「server 挂掉后，持有 machineKey 与账户私钥的客户端能读到并解开历史」。**不需要 iPad。** 剩下的 App 侧工作是把这套流程接上 UI。
+>
+> **已在真机闭环（2026-10-06）**：`lan-e2e.ts` 用的是合成 App，覆盖不到 daemon 里 `getHistory` 的 sessionId → tag → 日志目录映射——那需要**一个真的写过日志的会话**。用 launchd 起的 daemon（pid 3339，`HAPPY_LAN_ENABLED=1`）+ `restart-session` 重启一个真实会话后：
+> - `[lan] serving read-only API on 0.0.0.0:55673` / `advertising _happy._tcp.local`，`dns-sd -B _happy._tcp local` 能看到（两个接口各一条）
+> - `scripts/lan-query.ts` 用**真实凭证**走完挑战-应答 → 列出会话 → `GET .../history` → 用本地持久化的会话密钥**解密 7/7 条**
+> - 该会话的日志目录由**会话进程**写出（`~/.happy/session-log/<hash>/0000000000.jsonl`），daemon 只读——跨进程的路径契约（`tag` + `site`）成立
+>
+> **只记本机 site 的边界在此可见**：日志只含该进程启动**之后**的消息，不回填 server 已有的历史。这符合既定语义（日志 = CLI 见过的一切），缺口收敛属于 P5。
 
 ### P3 · server 偶发挂的 fallback
 
