@@ -5,6 +5,7 @@ import { Image } from 'expo-image';
 import { layout } from './layout';
 import { MultiTextInput, KeyPressEvent } from './MultiTextInput';
 import { Typography } from '@/constants/Typography';
+import { GOAL_STATUS_ICONS, type GoalStatus } from '@/utils/goalUtils';
 import { PermissionMode, ModelMode } from './PermissionModeSelector';
 import { hapticsLight, hapticsError } from './haptics';
 import { Shaker, ShakeInstance } from './Shaker';
@@ -64,6 +65,8 @@ interface AgentInputProps {
             cursor?: boolean | null;
             gemini?: boolean | null;
         };
+        /** Current /goal condition, when the session has one. */
+        goal?: { status: GoalStatus; condition: string } | null;
     };
     autocompletePrefixes: string[];
     autocompleteSuggestions: (query: string) => Promise<{ key: string, text: string, component: React.ElementType }[]>;
@@ -967,6 +970,26 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                                 </View>
                                             )}
                                         </>
+                                    )}
+                                    {props.connectionStatus.goal && (
+                                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 1 }}>
+                                            <Ionicons
+                                                name={GOAL_STATUS_ICONS[props.connectionStatus.goal.status].icon}
+                                                size={12}
+                                                color={GOAL_STATUS_ICONS[props.connectionStatus.goal.status].color}
+                                            />
+                                            <Text
+                                                numberOfLines={1}
+                                                style={{
+                                                    fontSize: 11,
+                                                    color: theme.colors.textSecondary,
+                                                    flexShrink: 1,
+                                                    ...Typography.default()
+                                                }}
+                                            >
+                                                {props.connectionStatus.goal.condition}
+                                            </Text>
+                                        </View>
                                     )}
                                 </>
                             )}
