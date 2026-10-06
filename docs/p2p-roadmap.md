@@ -165,11 +165,22 @@ CLI 本地创建（不依赖 server）:
 
 | | |
 |---|---|
-| 做什么 | CLI outbox 落盘 + **per-sink 投递位图**；`n` 持久化（跨重启连续） |
+| 做什么 | CLI outbox 落盘（P1a）+ **per-sink 投递位图** + `n` 持久化（P1b） |
 | 现状缺陷 | `pendingOutbox` 为纯内存（`apiSession.ts:409`），进程退出即丢。**P1 本身就在修一个现存缺陷** |
 | server | 0 |
 | 验收 | CLI 被 kill 后重启，未确认消息仍会补发；`n` 无断号 |
 | 回退 | 保留旧的内存 outbox 路径 |
+
+> **P1a 已实施（2026-10-06）**：新增 `src/api/outboxPersistence.ts`，把队列原子镜像到 `~/.happy/session-outbox/<sha256(tag).slice(0,32)>.json`（整体重写 + temp/rename，不做 append —— 避免撕裂尾行与多进程竞争）。`ApiSessionClient` 在构造时播种、在 `enqueueMessage` / 两处 splice 后落盘、`close()` 空队列即删。文件格式已预留 `v` / `nextN`，entry 容忍可选 `n`，**P1b 无需格式迁移**。
+>
+> **核心不变量**：磁盘条目**永远不少于**内存（多出来的重启后重发，服务端按 `localId` 幂等去重），因此 **push 必须同步落盘**、不能 debounce。
+>
+> **播种的条目强制走 HTTP**：WS 路径无 ack、乐观 splice，会立刻丢掉这些刚救回来的消息 —— 设 `seededRemaining` 抑制 WS 直到种子排空。
+>
+> **已知缺口（均已在代码注释与提交信息中标注）**：
+> - **窗口 2 未修**：WS `emit` 返回即 splice，无 ack。需服务端 ack 才能关，违反"服务端零改动"，留待后续。
+> - **offline stub 完全不覆盖**：`offlineSessionStub.ts:41-53` 全是空实现，且 `sessionEncryptionKey` 是**空数组**（无法加密）。即"启动时服务器不可达"的会话，出站消息仍 100% 丢弃，落盘救不了。**这是既存缺陷，需专门一轮。**
+> - 写放大 O(Q)：长断网时每入队一条重写整个文件。解法是背压，不在本次。
 
 ### P2 · 局域网优先 + 双写 ← 第一步交付
 

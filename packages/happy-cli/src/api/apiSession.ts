@@ -28,6 +28,7 @@ import {
 import { InvalidateSync } from '@/utils/sync';
 import axios from 'axios';
 import { resolveSessionLastSeq } from './sessionLastSeq';
+import { deleteOutbox, loadOutbox, outboxPath, pruneOutboxes, saveOutbox } from './outboxPersistence';
 import {
     cloneA2AInboxState,
     extractLegacyInboxFromAgentState,
@@ -232,6 +233,12 @@ export class ApiSessionClient extends EventEmitter {
     private readonly sid: string;
     /** Writer identity (`Session.site`), stamped onto outgoing envelopes as `site`. */
     private readonly site: string | undefined;
+    /**
+     * Entries restored from disk at construction. They must drain over the confirmed
+     * HTTP path: the WS path removes optimistically with no server ack, which would
+     * re-lose exactly the messages this persistence exists to save.
+     */
+    private seededRemaining = 0;
     private metadata: Metadata | null;
     private metadataVersion: number;
     private agentState: AgentState | null;
@@ -532,6 +539,17 @@ export class ApiSessionClient extends EventEmitter {
             autoConnect: false,
             ...(isNode() && { agent: serverHttpsAgent as any }),
         });
+
+        // Restore anything a previous process left unsent. Entries are stored already
+        // encrypted, so they are resendable as-is; the server dedupes on localId.
+        const restoredOutbox = loadOutbox(this.sid);
+        if (restoredOutbox.entries.length > 0) {
+            this.pendingOutbox = restoredOutbox.entries;
+            this.seededRemaining = restoredOutbox.entries.length;
+            logger.debug(`[API] restored ${restoredOutbox.entries.length} unsent message(s) from disk`);
+            this.sendSync.invalidate();
+        }
+        pruneOutboxes({ keepPath: outboxPath(this.sid) });
 
         //
         // Handlers
@@ -1152,6 +1170,7 @@ export class ApiSessionClient extends EventEmitter {
 
     private shouldFlushOutboxViaWs(): boolean {
         return this.outboundMode === 'ws'
+            && this.seededRemaining === 0
             && this.socket.connected
             && Date.now() >= this.wsOutboundBackoffUntil;
     }
@@ -1354,6 +1373,7 @@ export class ApiSessionClient extends EventEmitter {
         } finally {
             if (sent > 0) {
                 this.pendingOutbox.splice(0, sent);
+                this.persistOutboxNow();
                 logger.debug(`[API] flushOutbox via WS (optimistic): sent ${sent} message(s) to server (replies visible in app)`);
                 // WS send has no seq ack — pull receive cursor forward via HTTP (health poll is backup).
                 this.receiveSync.invalidate();
@@ -1387,6 +1407,8 @@ export class ApiSessionClient extends EventEmitter {
                 );
 
                 this.pendingOutbox.splice(0, chunk.length);
+                this.seededRemaining = Math.max(0, this.seededRemaining - chunk.length);
+                this.persistOutboxNow();
                 flushed += chunk.length;
 
                 const messages = Array.isArray(response.data.messages) ? response.data.messages : [];
@@ -1429,12 +1451,24 @@ export class ApiSessionClient extends EventEmitter {
         };
     }
 
+    /**
+     * Mirror the queue to disk.
+     *
+     * Synchronous by design: the file may hold MORE entries than memory (extras are
+     * resent and deduped by the server) but never fewer, so the enqueue path cannot
+     * defer this to a timer. Callers that shrink the queue may call it freely.
+     */
+    private persistOutboxNow(): void {
+        saveOutbox(this.sid, { entries: this.pendingOutbox, nextN: 0 });
+    }
+
     private enqueueMessage(content: unknown, invalidate: boolean = true, localId?: string) {
         const encrypted = encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, content));
         this.pendingOutbox.push({
             content: encrypted,
             localId: localId ?? randomUUID()
         });
+        this.persistOutboxNow();
         if (invalidate) {
             this.sendSync.invalidate();
         }
@@ -1894,5 +1928,11 @@ export class ApiSessionClient extends EventEmitter {
         this.sendSync.stop();
         this.receiveSync.stop();
         this.socket.close();
+        // Only drop the persisted queue once it is fully delivered. A non-empty queue
+        // means those messages never reached the server; leave the file for the next
+        // run of this tag to pick up.
+        if (this.pendingOutbox.length === 0) {
+            deleteOutbox(this.sid);
+        }
     }
 }
