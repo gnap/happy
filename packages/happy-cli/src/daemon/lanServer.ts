@@ -25,6 +25,7 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { hostname, platform } from 'node:os';
 import fastify, { type FastifyInstance } from 'fastify';
 import { logger } from '@/ui/logger';
+import type { SessionLogEntry } from '@/api/sessionLog';
 
 /** How long an issued bearer token stays valid. Short because it travels over cleartext. */
 const TOKEN_TTL_MS = 90_000;
@@ -58,6 +59,18 @@ export type LanSessionSummary = {
   lastHeartbeat?: number;
 };
 
+export type LanHistory = {
+  tag: string;
+  /**
+   * base64 of `version(1) || box(contentKey -> account content public key)` — byte-for-byte
+   * the same shape the server hands out as `Session.dataEncryptionKey`, so a client can reuse
+   * its unwrapping code unchanged. The machine key plays no part in reading message content.
+   */
+  dataEncryptionKey: string;
+  /** Ciphertext entries exactly as they crossed the wire. */
+  entries: SessionLogEntry[];
+};
+
 export type LanServerOptions = {
   /** The machine key: a 32-byte symmetric secret shared with the App via the machine record. */
   secret: Uint8Array;
@@ -65,6 +78,12 @@ export type LanServerOptions = {
   /** Stable non-secret fingerprint of the account, so a client can filter before probing. */
   accountFingerprint: string;
   getSessions: () => LanSessionSummary[];
+  /**
+   * Local history for a session, or null when this machine has none — the session may not
+   * have reported its tag yet, or its key may be gone. Injected so this module keeps knowing
+   * nothing about configuration or the filesystem.
+   */
+  getHistory: (sessionId: string) => LanHistory | null;
   /** Defaults to all interfaces. See the binding caveat in the module docs. */
   host?: string;
   /** Defaults to 0 — the OS assigns one, and mDNS advertises it. */
@@ -233,6 +252,19 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       return reply.code(401).send({ error: 'unauthorized' });
     }
     return reply.send({ sessions: opts.getSessions() });
+  });
+
+  app.get('/lan/sessions/:sessionId/history', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    const { sessionId } = request.params as { sessionId: string };
+    const history = opts.getHistory(sessionId);
+    if (!history) {
+      // 404 rather than an empty list: the client should retry later, not record "no history".
+      return reply.code(404).send({ error: 'no local history for that session' });
+    }
+    return reply.send({ v: LAN_PROTOCOL_VERSION, ...history });
   });
 
   // Resolve/reject explicitly. The control server's `listen` callback throws inside an async

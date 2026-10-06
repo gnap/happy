@@ -6,7 +6,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { startLanServer, lanProofFor, LAN_PROTOCOL_VERSION, type LanServerHandle, type LanSessionSummary } from './lanServer';
+import { startLanServer, lanProofFor, LAN_PROTOCOL_VERSION, type LanHistory, type LanServerHandle, type LanSessionSummary } from './lanServer';
 
 const SECRET = new Uint8Array(32).fill(3);
 const WRONG_SECRET = new Uint8Array(32).fill(4);
@@ -14,6 +14,14 @@ const WRONG_SECRET = new Uint8Array(32).fill(4);
 const SESSIONS: LanSessionSummary[] = [
     { happySessionId: 'sess-1', directory: '/work/repo', agent: 'claude', startedBy: 'daemon', isAlive: true },
 ];
+
+const HISTORY: LanHistory = {
+    tag: 'tag-1',
+    dataEncryptionKey: 'WRAPPED-KEY',
+    entries: [{ id: 'id-1', localId: 'local-1', dir: 'out', at: 1, c: 'CIPHER-1' }],
+};
+/** Mutable so a test can simulate a session whose history this machine does not have. */
+let history: LanHistory | null = HISTORY;
 
 let server: LanServerHandle | null = null;
 
@@ -23,6 +31,7 @@ async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
         machineId: 'machine-1',
         accountFingerprint: 'acct-fingerprint',
         getSessions: () => SESSIONS,
+        getHistory: () => history,
         host: '127.0.0.1',
         port: 0,
         limits,
@@ -136,6 +145,32 @@ describe('lanServer read-only API', () => {
         expect((await fetch(url('/lan/challenge'), { method: 'POST' })).status).toBe(200);
         expect((await fetch(url('/lan/challenge'), { method: 'POST' })).status).toBe(200);
         expect((await fetch(url('/lan/challenge'), { method: 'POST' })).status).toBe(429);
+    });
+
+    it('serves local history with the key wrapped for the account', async () => {
+        await start();
+        const token = await getToken();
+
+        const res = await fetch(url('/lan/sessions/sess-1/history'), authorized(token));
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as { v: number; tag: string; dataEncryptionKey: string; entries: unknown };
+        expect(body.v).toBe(LAN_PROTOCOL_VERSION);
+        expect(body.tag).toBe('tag-1');
+        expect(body.dataEncryptionKey).toBe('WRAPPED-KEY');
+        expect(body.entries).toEqual(HISTORY.entries);
+    });
+
+    it('distinguishes "no history here" from "not authenticated"', async () => {
+        await start();
+        const token = await getToken();
+
+        // The tag may simply not have been reported yet, so this is a retry-later, not a denial.
+        history = null;
+        const missing = await fetch(url('/lan/sessions/sess-1/history'), authorized(token));
+        expect(missing.status).toBe(404);
+
+        expect((await fetch(url('/lan/sessions/sess-1/history'))).status).toBe(401);
+        history = HISTORY;
     });
 
     it('exposes no mutating route', async () => {

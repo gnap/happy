@@ -92,6 +92,9 @@ function listSegments(dir: string): string[] {
  * recovery depend on the write path never being shared, which is not worth the coupling.
  */
 function truncateTornTail(path: string): void {
+  if (!existsSync(path)) {
+    return; // the first append creates it; nothing to repair
+  }
   try {
     const size = statSync(path).size;
     if (size === 0) {

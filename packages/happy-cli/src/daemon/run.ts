@@ -27,6 +27,9 @@ import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
 import { stripProfileManagedEnv } from '@/utils/profileEnv';
 import { fetchSessionProfileMeta } from './fetchSessionProfileMeta';
 import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSessionSummary } from './lanServer';
+import { readSessionKey } from '@/api/sessionKeyPersistence';
+import { readSessionLog } from '@/api/sessionLog';
+import { encodeBase64, libsodiumEncryptForPublicKey } from '@/api/encryption';
 import { startLanDiscovery, type LanDiscoveryHandle } from './lanDiscovery';
 import { startEndpointPublisher, type EndpointPublisherHandle } from './lanEndpoints';
 
@@ -1244,6 +1247,9 @@ export async function startDaemon(): Promise<void> {
       } else {
         try {
           const accountFingerprint = accountFingerprintOf(credentials.encryption.publicKey);
+          // Captured here because the narrowing on `credentials.encryption` does not survive
+          // into the callback below.
+          const accountPublicKey = credentials.encryption.publicKey;
           const started = await startLanServer({
             secret: credentials.encryption.machineKey,
             machineId,
@@ -1261,6 +1267,31 @@ export async function startDaemon(): Promise<void> {
                   : (() => { try { process.kill(session.pid, 0); return true; } catch { return false; } })(),
                 lastHeartbeat: session.lastHeartbeat,
               } satisfies LanSessionSummary)),
+            getHistory: (sessionId) => {
+              // The client addresses by session id because that is what it learns from the
+              // server; the tag is this side's business.
+              const tracked = [...pidToTrackedSession.values()].find((s) => s.happySessionId === sessionId);
+              const tag = tracked?.sessionTag;
+              if (!tag) {
+                return null; // not reported yet -- the client should retry, not give up
+              }
+              // The hashed key store is the authoritative one: it is what the CLI actually
+              // encrypts with. The legacy `<agent>-session-key-<tag>` files are a parallel
+              // store used by the A2A path and are not guaranteed to exist.
+              const sessionKey = readSessionKey(tag);
+              if (!sessionKey) {
+                return null; // rotated or never persisted; the history is unreadable
+              }
+              const wrapped = libsodiumEncryptForPublicKey(sessionKey, accountPublicKey);
+              const dataEncryptionKey = new Uint8Array(wrapped.length + 1);
+              dataEncryptionKey.set([0], 0); // version byte, matching api.ts
+              dataEncryptionKey.set(wrapped, 1);
+              return {
+                tag,
+                dataEncryptionKey: encodeBase64(dataEncryptionKey),
+                entries: readSessionLog(tag, machineId),
+              };
+            },
           });
           lanServer = started;
           lanDiscovery = await startLanDiscovery({ port: started.port, machineId, accountFingerprint });

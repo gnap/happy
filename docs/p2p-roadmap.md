@@ -278,6 +278,20 @@ APP（同 LAN）:
 >
 > **验证**：7 个模块测试（往返、撕裂恢复、轮转与保留、不可写目录不抛、权限、目录清扫）+ 3 个集成测试（**同 seq 重放不重复记录**、出站密文与上线字节一致、跨重启保留并追加）；全量测试与改动前按测试名逐项一致。
 
+> **LAN 历史读取端点已实施（2026-10-06）** —— CLI 侧的**生产者**至此完整；App 侧仍是独立一轮。
+>
+> 新增 `GET /lan/sessions/:sessionId/history` → `{ v, tag, dataEncryptionKey, entries }`。
+>
+> - **按 `sessionId` 寻址**：客户端从 server 学到的就是它，tag 是这一侧的事；daemon 自己做映射。
+> - **密钥与密文同一响应**：历史没有密钥就没用，拆成两个请求只多一次往返而不带来解耦。
+> - 字段名 `dataEncryptionKey` **刻意与 server 的 `Session.dataEncryptionKey` 同名同义**（`version(1) || box(contentKey → 账户内容公钥)`），客户端解包代码可原样复用。
+> - **用哈希版 `readSessionKey`，不用旧方案**：旧方案（`<prefix>-session-key-<tag>`）是 claude/cursor runner 另写的一份，而 CLI 实际加密用的是 `resolveSessionEncryption` 写进哈希路径的那把；codex/gemini/acp 根本不写旧方案。**两者不合并**（那是独立的重构）。
+> - `sessionTag` 尚未上报时返回 **404**（可区分于 401），客户端应重试而非当作永久缺失。
+>
+> **关键验证**：`scripts/lan-e2e.ts` 现在跑**完整往返**——生成一对 X25519「账户内容密钥对」扮演 App → 用真实的 `persistSessionKey`/`appendSessionLog` 产出真实历史 → 起真实 LAN 服务 → 完整认证 → 取历史 → **用账户内容私钥解包出 32 字节会话密钥** → 解密每条密文 → 断言明文一致。
+>
+> **这一步的价值**：App 在这一路径上的工作**全是密码学与协议、没有 UI**，所以脚本跑通 ≈ 证明「server 挂掉后，持有 machineKey 与账户私钥的客户端能读到并解开历史」。**不需要 iPad。** 剩下的 App 侧工作是把这套流程接上 UI。
+
 ### P3 · server 偶发挂的 fallback
 
 | | |
