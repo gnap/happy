@@ -14,6 +14,7 @@ This folder documents how Happy works internally, with a focus on protocol, back
 - permission-resolution.md: State-based permission mode resolution across app and CLI (including sandbox behavior).
 - happy-wire.md: Shared wire schemas/types package and migration notes.
 - p2p-roadmap.md: Progressive P2P enhancement plan (LAN-first direct connect, dual-write to server, replicated-log sync invariants, per-phase rollout).
+- plans/lan-channel-switching.md: App-side design for reading one session across the server and the CLI's LAN channel, plus what the CLI side still lacks (the App is a reader and does no double-writing).
 
 ## Conventions
 - Paths and field names reflect the current implementation in `packages/happy-server`.
