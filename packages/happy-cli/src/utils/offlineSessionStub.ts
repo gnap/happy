@@ -40,7 +40,9 @@ import {
     buildOutputFormatPayload,
     buildSessionEventPayload,
     buildSessionProtocolPayload,
+    stampAgentRecord,
     type SessionEventPayload,
+    type SessionRecord,
 } from '@/api/sessionPayloads';
 import type { ApiSessionClient, ACPMessageData, ACPProvider, OutputFormatData } from '@/api/apiSession';
 import type { AgentState, A2AInboxMessage, A2AInboxState, Metadata } from '@/api/types';
@@ -112,20 +114,28 @@ class OfflineSessionStub extends EventEmitter {
 
     // ── Outbound messages (queued for delivery on reconnect) ─────────────────
 
+    /**
+     * Queue a legacy `role:'agent'` record, stamped exactly as a connected client stamps it.
+     * Counter on the line above the write, same reason as the envelope paths below.
+     */
+    private queueAgentRecord(record: SessionRecord, localId: string = randomUUID()): void {
+        this.queueRecord(stampAgentRecord(record, { sid: this.tag, site: this.site, n: this.nextN++ }), localId);
+    }
+
     sendCodexMessage(body: unknown): void {
-        this.queueRecord(buildCodexPayload(body), randomUUID());
+        this.queueAgentRecord(buildCodexPayload(body));
     }
 
     sendCursorMessage(body: unknown): void {
-        this.queueRecord(buildCursorPayload(body), randomUUID());
+        this.queueAgentRecord(buildCursorPayload(body));
     }
 
     sendOutputFormatMessage(data: OutputFormatData): void {
-        this.queueRecord(buildOutputFormatPayload(data), randomUUID());
+        this.queueAgentRecord(buildOutputFormatPayload(data));
     }
 
     sendAgentMessage(provider: ACPProvider, body: ACPMessageData): void {
-        this.queueRecord(buildAgentMessagePayload(provider, body), randomUUID());
+        this.queueAgentRecord(buildAgentMessagePayload(provider, body));
     }
 
     sendClaudeSessionMessage(_body: RawJSONLines): void {}
@@ -144,7 +154,7 @@ class OfflineSessionStub extends EventEmitter {
 
     sendSessionEvent(event: SessionEventPayload, id?: string): void {
         const eventId = id ?? randomUUID();
-        this.queueRecord(buildSessionEventPayload(eventId, event), eventId);
+        this.queueAgentRecord(buildSessionEventPayload(eventId, event), eventId);
     }
 
     sendSessionDeath(): void {}

@@ -83,6 +83,36 @@ export function buildAgentMessagePayload(provider: ACPProvider, body: ACPMessage
   };
 }
 
+/** The writer identity triple, as it rides inside an encrypted record. */
+export type WriterStamp = {
+  /** Client-owned session identity. */
+  sid?: string;
+  /** Writer (machine) identity. */
+  site?: string;
+  /** Per-writer counter. */
+  n: number;
+};
+
+/**
+ * Stamp the writer identity onto a legacy `role:'agent'` record.
+ *
+ * These shapes predate `SessionEnvelope` and are dispatched by `content.type` on the reader,
+ * so there is no envelope to stamp: the triple rides alongside `type` inside `content`.
+ * Session records keep theirs inside the envelope. Either way it is inside the AEAD, and the
+ * reader's rule is: `role:'session'` reads `content.data ?? content`, everything else `content`.
+ */
+export function stampAgentRecord(record: SessionRecord, stamp: WriterStamp): SessionRecord {
+  return {
+    ...record,
+    content: {
+      ...(record.content as Record<string, unknown>),
+      ...(stamp.sid ? { sid: stamp.sid } : {}),
+      ...(stamp.site ? { site: stamp.site } : {}),
+      n: stamp.n,
+    },
+  };
+}
+
 /** Note: no `meta` -- this is the one record shape that carries none. */
 export function buildSessionEventPayload(id: string, event: SessionEventPayload): SessionRecord {
   return {

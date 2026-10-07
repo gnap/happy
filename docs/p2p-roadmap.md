@@ -53,6 +53,21 @@
 
 **只要这五条守住，双写与复制就是安全的。**
 
+### 2.4 写者身份的覆盖范围与读取规则（App 侧按此实现）
+
+**覆盖**：**每一条**出站记录都带 `(sid, site, n)`，且全部在 AEAD 内。此前只有 session-protocol 与 lifecycle 两条路径带，`role:'agent'` 的五种遗留记录（cursor / codex / output / acp / session-event）**连 `site` 都没有**——对 cursor 会话而言那恰是主消息路径，缺口检测等于完全没有。
+
+**读取**（`role` 决定身份所在，其余一律在 AEAD 内，不依赖 server）：
+
+| `role` | 身份所在 |
+|---|---|
+| `session` | `content.data ?? content`（lifecycle 包在 `data` 里，protocol 就是 `content`） |
+| 其他（遗留） | `content`，与 `type` 同级——这些形状没有信封可戳 |
+
+**I1 的边界**：出站条目写入时只能拿到 `localId`（server id 尚不存在），而日志是 append-only，**回填不可能**。跨通道去重必须包含 `localId`——server 的 `GET /v1/sessions/:id/messages` 与 WS 推送都返回它。这不是缺口，是「id 在两端不同名」而已。
+
+**tag**：resume 路径的 tag 必须贯穿；离线重连**必须复用**原 tag（`runClaude.ts:196`）。换 tag = 换 server 会话 + 换日志/outbox/密钥分桶 = 同一段历史被割成两截。
+
 ---
 
 ## 三、进程模型与身份归属

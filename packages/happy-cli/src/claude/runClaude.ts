@@ -193,7 +193,12 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         const reconnection = startOfflineReconnection({
             serverUrl: configuration.serverUrl,
             onReconnected: async () => {
-                const resp = await api.getOrCreateSession({ tag: randomUUID(), site: machineId, metadata, state });
+                // Same tag as the attempt that failed, not a fresh one: the tag keys the session
+                // on the server and buckets the local log, outbox and encryption key. A new one
+                // would surface this work as a second session and split the history in two.
+                // The key follows the tag -- `resolveSessionEncryption` re-reads the one persisted
+                // before the failed attempt -- so nothing else needs carrying over.
+                const resp = await api.getOrCreateSession({ tag: sessionTag, site: machineId, metadata, state });
                 if (!resp) throw new Error('Server unavailable');
                 const session = api.sessionSyncClient(resp);
                 const scanner = await createSessionScanner({

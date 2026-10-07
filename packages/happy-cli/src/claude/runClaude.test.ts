@@ -33,7 +33,9 @@ const mocks = vi.hoisted(() => {
     mockResponse,
     mockApiCreate: vi.fn(),
     mockGetOrCreateMachine: vi.fn(async () => ({ id: 'machine-1' })),
-    mockGetOrCreateSession: vi.fn(async () => mockResponse),
+    // `unknown` so the offline test can make it resolve null, which is what the server
+    // being unreachable looks like from here.
+    mockGetOrCreateSession: vi.fn(async (): Promise<unknown> => mockResponse),
     mockSessionSyncClient: vi.fn(() => mockSession),
     mockLoop: vi.fn(async () => 0),
     mockStartHappyServer: vi.fn(async () => ({
@@ -62,6 +64,9 @@ const mocks = vi.hoisted(() => {
     mockStartCaffeinate: vi.fn(() => false),
     mockStopCaffeinate: vi.fn(),
     mockProjectPath: vi.fn(() => '/tmp/happy-lib'),
+    mockStartOfflineReconnection: vi.fn((_opts: { onReconnected: () => Promise<unknown> }) => ({ cancel: vi.fn() })),
+    mockClaudeLocal: vi.fn(async () => undefined),
+    mockCreateSessionScanner: vi.fn(async () => ({ cleanup: vi.fn(async () => undefined), onNewSession: vi.fn() })),
     mockLoggerDebug: vi.fn(),
     mockLoggerDebugLargeJson: vi.fn(),
     mockLoggerInfoDeveloper: vi.fn(),
@@ -99,6 +104,19 @@ vi.mock('@/api/api', () => ({
 
 vi.mock('@/claude/loop', () => ({
   loop: mocks.mockLoop,
+}));
+
+vi.mock('@/claude/claudeLocal', () => ({
+  claudeLocal: mocks.mockClaudeLocal,
+}));
+
+vi.mock('@/claude/utils/sessionScanner', () => ({
+  createSessionScanner: mocks.mockCreateSessionScanner,
+}));
+
+vi.mock('@/utils/serverConnectionErrors', () => ({
+  startOfflineReconnection: mocks.mockStartOfflineReconnection,
+  connectionState: { setBackend: vi.fn(), notifyOffline: vi.fn() },
 }));
 
 vi.mock('@/claude/utils/startHappyServer', () => ({
@@ -196,6 +214,37 @@ describe('runClaude resume plumbing', () => {
       expect.objectContaining({
         initialSessionId: 'claude-chat-123',
       }),
+    );
+  });
+
+  /**
+   * The tag keys the session on the server and buckets the local log, outbox and encryption
+   * key. Reconnecting under a fresh one would surface the same conversation as a second
+   * session and split its history in two, so the reconnect has to reattach to the tag that
+   * failed in the first place.
+   */
+  it('reconnects under the original tag after the server was unreachable', async () => {
+    mocks.mockGetOrCreateSession.mockResolvedValueOnce(null);
+    // The offline branch ends in process.exit, which the shared beforeEach stubs out; without
+    // making it throw, control falls through to the online path and dereferences the null.
+    vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('process.exit');
+    }) as never);
+
+    await expect(runClaude({} as any, {
+      startedBy: 'daemon',
+      startingMode: 'remote',
+      resumeSessionTag: 'session-tag-1',
+    })).rejects.toThrow('process.exit');
+
+    expect(mocks.mockStartOfflineReconnection).toHaveBeenCalled();
+    const { onReconnected } = mocks.mockStartOfflineReconnection.mock.calls[0][0];
+
+    mocks.mockGetOrCreateSession.mockResolvedValueOnce(mocks.mockResponse);
+    await onReconnected();
+
+    expect(mocks.mockGetOrCreateSession).toHaveBeenLastCalledWith(
+      expect.objectContaining({ tag: 'session-tag-1' }),
     );
   });
 });
