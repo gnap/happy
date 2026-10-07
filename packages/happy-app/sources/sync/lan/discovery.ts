@@ -13,7 +13,9 @@
  * account content keypair and compared against the advertised value.
  */
 
-import { scan, isAvailable, type ZeroconfService } from 'expo-zeroconf';
+// Type-only, so this import is erased at runtime and does not evaluate the module. The value
+// import is deliberately deferred to `discoverMachines` — see the comment there.
+import type { ZeroconfService } from 'expo-zeroconf';
 import { hmac_sha256 } from '@/encryption/hmac_sha256';
 import { encodeHex } from '@/encryption/hex';
 import { encodeUTF8 } from '@/encryption/text';
@@ -26,7 +28,10 @@ import { LAN_SERVICE_TYPE, LAN_PROTOCOL_VERSION, type DiscoveredMachine } from '
  */
 export async function accountFingerprintOf(accountPublicKey: Uint8Array): Promise<string> {
     const mac = await hmac_sha256(encodeUTF8('happy-lan-account-fingerprint'), accountPublicKey);
-    return encodeHex(mac).slice(0, 16);
+    // Lowercase: the CLI derives this with Node's `digest('hex')`, which is lowercase, while this
+    // app's encodeHex emits uppercase. Without normalising, the two never compare equal and every
+    // discovery is silently filtered out.
+    return encodeHex(mac).slice(0, 16).toLowerCase();
 }
 
 /** Bonjour hostnames arrive fully qualified, e.g. `my-mac.local.`; the trailing dot breaks URLs. */
@@ -70,8 +75,31 @@ export async function discoverMachines(options: {
     accountPublicKey: Uint8Array;
     /** How long to browse before giving up. mDNS needs a moment; 5s is the module default. */
     timeoutMs?: number;
+    /**
+     * Called with how many services the browse actually saw, before the account filter runs.
+     * Lets a caller distinguish "nothing is advertising" (network, or the local-network
+     * permission was denied, in which case a browse silently returns zero) from "something is
+     * advertising but it is not this account".
+     */
+    onRawCount?: (count: number) => void;
+    /** Called when discovery cannot run at all (no native module), as opposed to finding nothing. */
+    onUnavailable?: () => void;
 }): Promise<DiscoveredMachine[]> {
-    if (!isAvailable) {
+    // Resolved lazily rather than at module scope. `expo-zeroconf` calls `requireNativeModule`
+    // during its own first evaluation and caches the result in a module-level `isAvailable`
+    // constant, swallowing any throw. This module is reachable from the app's root layout, so a
+    // top-level import can be evaluated before the native module registry is populated — in which
+    // case `isAvailable` latches to false for the entire run and discovery silently never works.
+    // Importing at scan time makes that outcome deterministic instead of a startup race.
+    let zeroconf: typeof import('expo-zeroconf');
+    try {
+        zeroconf = await import('expo-zeroconf');
+    } catch {
+        options.onUnavailable?.();
+        return [];
+    }
+    if (!zeroconf.isAvailable) {
+        options.onUnavailable?.();
         return [];
     }
 
@@ -79,14 +107,16 @@ export async function discoverMachines(options: {
 
     let services: ZeroconfService[];
     try {
-        services = await scan(LAN_SERVICE_TYPE, {
+        services = await zeroconf.scan(LAN_SERVICE_TYPE, {
             timeoutMs: options.timeoutMs ?? 5000,
             autoResolve: true,
         });
     } catch {
         // A failed browse is not an error worth propagating — the caller retries or falls back.
+        options.onRawCount?.(0);
         return [];
     }
+    options.onRawCount?.(services.length);
 
     return services
         .map(toDiscoveredMachine)

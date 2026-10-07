@@ -90,6 +90,7 @@ export const pl: TranslationStructure = {
         error: 'błąd',
         auth_error: 'zaloguj się ponownie',
         online: 'online',
+        lan: 'LAN',
         offline: 'offline',
         lastSeen: ({ time }: { time: string }) => `ostatnio widziano ${time}`,
         permissionRequired: 'wymagane uprawnienie',

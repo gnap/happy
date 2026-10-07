@@ -79,6 +79,7 @@ export const ca: TranslationStructure = {
         error: 'error',
         auth_error: 'error d\'autenticació',
         online: 'en línia',
+        lan: 'LAN',
         offline: 'fora de línia',
         lastSeen: ({ time }: { time: string }) => `vist per última vegada ${time}`,
         permissionRequired: 'permís requerit',

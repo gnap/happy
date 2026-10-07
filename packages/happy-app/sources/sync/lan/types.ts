@@ -68,6 +68,21 @@ export type LanIdentity = {
     platform: string;
 };
 
+/**
+ * A machine seen on the local network, with the time it was seen.
+ *
+ * This is the app's record of a *local observation*, kept separate from the `Machine` records the
+ * server hands out — see `sync/machinePresence.ts` for why the two are not merged.
+ */
+export type LanSighting = {
+    machineId: string;
+    host: string;
+    port: number;
+    baseUrl: string;
+    /** When this sighting was recorded. Used to expire entries a later scan no longer reports. */
+    at: number;
+};
+
 /** A daemon found by browsing `_happy._tcp`, with its TXT record already decoded. */
 export type DiscoveredMachine = {
     /** The Bonjour instance name, e.g. `happy-<machineId>`. */

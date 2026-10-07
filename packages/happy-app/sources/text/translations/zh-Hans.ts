@@ -81,6 +81,7 @@ export const zhHans: TranslationStructure = {
         error: '错误',
         auth_error: '请重新登录',
         online: '在线',
+        lan: 'LAN',
         offline: '离线',
         lastSeen: ({ time }: { time: string }) => `最后活跃时间 ${time}`,
         permissionRequired: '需要权限',

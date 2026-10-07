@@ -114,6 +114,7 @@ export const ja: TranslationStructure = {
         error: 'エラー',
         auth_error: '再度サインインしてください',
         online: 'オンライン',
+        lan: 'LAN',
         offline: 'オフライン',
         lastSeen: ({ time }: { time: string }) => `最終アクセス: ${time}`,
         permissionRequired: '権限が必要です',

@@ -396,6 +396,7 @@ export const ru: TranslationStructure = {
         error: 'ошибка',
         auth_error: 'войдите снова',
         online: 'online',
+        lan: 'LAN',
         offline: 'offline',
         lastSeen: ({ time }: { time: string }) => `в сети ${time}`,
         permissionRequired: 'требуется разрешение',

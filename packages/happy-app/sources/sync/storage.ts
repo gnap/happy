@@ -6,6 +6,8 @@ import { createReducer, reducer, ReducerState } from "./reducer/reducer";
 import { Message } from "./typesMessage";
 import { NormalizedMessage } from "./typesRaw";
 import { isMachineOnline } from '@/utils/machineUtils';
+import type { LanSighting } from './lan/types';
+import { resolveMachinePresence, type MachinePresence } from './machinePresence';
 import { applySettings, Settings } from "./settings";
 import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
@@ -92,11 +94,18 @@ export type SessionListViewItem =
     | { type: 'active-sessions'; sessions: Session[] }
     | { type: 'project-group'; displayPath: string; machine: Machine }
     | { type: 'worktree-group'; projectPath: string; homeDir?: string; branch?: string }
-    | { type: 'host-group'; projectPath: string; host: string; onlineCount: number; totalCount: number }
+    | { type: 'host-group'; projectPath: string; host: string; machineId?: string; onlineCount: number; totalCount: number }
     | { type: 'session'; session: Session; variant?: 'default' | 'no-path'; needsRestart?: boolean };
 
 // Legacy type for backward compatibility - to be removed
 export type SessionListItem = string | Session;
+
+/**
+ * How long a LAN sighting stays valid after the scan that produced it. Long enough to ride out a
+ * missed mDNS announcement (and the gap between periodic scans), short enough that a machine which
+ * genuinely left the network stops looking reachable.
+ */
+export const LAN_SIGHTING_TTL_MS = 90_000;
 
 interface StorageState {
     settings: Settings;
@@ -111,6 +120,12 @@ interface StorageState {
     outbox: Record<string, OutboxEntry>;
     sessionGitStatus: Record<string, GitStatus | null>;
     machines: Record<string, Machine>;
+    /**
+     * Machines the LAN scanner can currently see, keyed by machineId. Purely a local observation —
+     * deliberately NOT folded into `machines`, whose `active` flag is the server's answer and gets
+     * overwritten wholesale by `fetchMachines`. See `sync/machinePresence.ts`.
+     */
+    lanSightings: Record<string, LanSighting>;
     artifacts: Record<string, DecryptedArtifact>;  // New artifacts storage
     friends: Record<string, UserProfile>;  // All relationships (friends, pending, requested, etc.)
     users: Record<string, UserProfile | null>;  // Global user cache, null = 404/failed fetch
@@ -129,6 +144,8 @@ interface StorageState {
     nativeUpdateStatus: { available: boolean; updateUrl?: string } | null;
     applySessions: (sessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[], fullRefresh?: boolean) => void;
     applyMachines: (machines: Machine[], replace?: boolean) => void;
+    /** Replace the LAN sighting set with the result of one scan. */
+    applyLanSightings: (sightings: LanSighting[]) => void;
     applyLoaded: () => void;
     applyReady: () => void;
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => { changed: string[], hasReadyEvent: boolean };
@@ -205,6 +222,33 @@ interface StorageState {
     // Feed methods
     applyFeedItems: (items: FeedItem[]) => void;
     clearFeed: () => void;
+}
+
+/**
+ * The machine a host group belongs to.
+ *
+ * A host group is keyed by the session's display `host` string, not by machine — two machines
+ * could in principle report the same hostname. Take the most common `machineId` among the group's
+ * sessions so the group reflects the machine most of its sessions actually belong to, rather than
+ * whichever session happened to sort first.
+ */
+function dominantMachineId(sessions: Session[]): string | undefined {
+    const counts = new Map<string, number>();
+    for (const session of sessions) {
+        const id = session.metadata?.machineId;
+        if (id) {
+            counts.set(id, (counts.get(id) ?? 0) + 1);
+        }
+    }
+    let dominant: string | undefined;
+    let best = 0;
+    for (const [id, count] of counts) {
+        if (count > best) {
+            best = count;
+            dominant = id;
+        }
+    }
+    return dominant;
 }
 
 // Helper function to build unified list view data from sessions and machines
@@ -305,7 +349,7 @@ function buildSessionListViewData(
                     return b.createdAt - a.createdAt;
                 });
                 const onlineCount = hostSessions.filter(s => s.active).length;
-                listData.push({ type: 'host-group', projectPath, host, onlineCount, totalCount: hostSessions.length });
+                listData.push({ type: 'host-group', projectPath, host, machineId: dominantMachineId(hostSessions), onlineCount, totalCount: hostSessions.length });
                 for (const s of hostSessions) {
                     listData.push({ type: 'session', session: s, needsRestart: getNeedsRestart(s) });
                 }
@@ -370,7 +414,7 @@ function buildSessionListViewData(
                     return b.createdAt - a.createdAt;
                 });
                 const onlineCount = hostSessions.filter(s => s.active).length;
-                toList.push({ type: 'host-group', host, onlineCount, totalCount: hostSessions.length });
+                toList.push({ type: 'host-group', projectPath, host, machineId: dominantMachineId(hostSessions), onlineCount, totalCount: hostSessions.length });
                 for (const s of hostSessions) {
                     toList.push({ type: 'session', session: s, needsRestart: getNeedsRestart(s) });
                 }
@@ -464,6 +508,7 @@ export const storage = create<StorageState>()((set, get) => {
         profile,
         sessions: {},
         machines: {},
+        lanSightings: {},
         artifacts: {},  // Initialize artifacts
         friends: {},  // Initialize relationships cache
         users: {},  // Initialize global user cache
@@ -1584,6 +1629,21 @@ export const storage = create<StorageState>()((set, get) => {
                 sessionListViewData
             };
         }),
+        applyLanSightings: (sightings: LanSighting[]) => set((state) => {
+            const now = Date.now();
+            const next: Record<string, LanSighting> = {};
+            // Carry over recent sightings a scan didn't report: mDNS is lossy, and dropping a
+            // machine on a single missed scan would make the list flicker between lan and offline.
+            for (const [id, sighting] of Object.entries(state.lanSightings)) {
+                if (now - sighting.at < LAN_SIGHTING_TTL_MS) {
+                    next[id] = sighting;
+                }
+            }
+            for (const sighting of sightings) {
+                next[sighting.machineId] = sighting;
+            }
+            return { ...state, lanSightings: next };
+        }),
         // Artifact methods
         applyArtifacts: (artifacts: DecryptedArtifact[]) => set((state) => {
             console.log(`🗂️ Storage.applyArtifacts: Applying ${artifacts.length} artifacts`);
@@ -1912,6 +1972,43 @@ export function useAllMachines(): Machine[] {
 
 export function useMachine(machineId: string): Machine | null {
     return storage(useShallow((state) => state.machines[machineId] ?? null));
+}
+
+/**
+ * Presence for every machine the app currently knows about, by machineId — the server's view
+ * (`Machine.active`) joined with the LAN scanner's (`lanSightings`).
+ *
+ * Deliberately one map rather than a `useMachinePresence(machineId)` hook: the session list
+ * renders host groups inside a map/switch, where a per-item hook call would break the rules of
+ * hooks. Callers read this once and index into it.
+ *
+ * Machines known only through a LAN sighting are included, so a daemon we have no server record
+ * for still resolves to `lan` instead of disappearing.
+ */
+/** Machines the LAN scanner can currently see, by machineId. */
+export function useLanSightings(): Record<string, LanSighting> {
+    return storage(useShallow((state) => state.lanSightings));
+}
+
+/**
+ * Every machine the app knows, by machineId, WITHOUT the `active` filter `useAllMachines` applies.
+ * The session list groups by machine, and a machine that is currently server-inactive (but perhaps
+ * LAN-reachable) still needs its real name rather than a bare machineId.
+ */
+export function useMachinesMap(): Record<string, Machine> {
+    return storage(useShallow((state) => state.machines));
+}
+
+export function useMachinePresenceMap(): Record<string, MachinePresence> {
+    const machines = storage(useShallow((state) => state.machines));
+    const sightings = storage(useShallow((state) => state.lanSightings));
+    return React.useMemo(() => {
+        const map: Record<string, MachinePresence> = {};
+        for (const id of new Set([...Object.keys(machines), ...Object.keys(sightings)])) {
+            map[id] = resolveMachinePresence(machines[id], !!sightings[id]);
+        }
+        return map;
+    }, [machines, sightings]);
 }
 
 export function useSessionListViewData(): SessionListViewItem[] | null {

@@ -80,6 +80,7 @@ export const zhHant: TranslationStructure = {
         error: '錯誤',
         auth_error: '請重新登入',
         online: '線上',
+        lan: 'LAN',
         offline: '離線',
         lastSeen: ({ time }: { time: string }) => `最後活躍時間 ${time}`,
         permissionRequired: '需要權限',

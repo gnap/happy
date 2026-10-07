@@ -3,7 +3,8 @@ import { View, Pressable, SectionList, Platform, ActivityIndicator, RefreshContr
 import { Swipeable } from 'react-native-gesture-handler';
 import { Text } from '@/components/StyledText';
 import { usePathname } from 'expo-router';
-import { SessionListViewItem, useSessionIsFetching } from '@/sync/storage';
+import { SessionListViewItem, useSessionIsFetching, useMachinePresenceMap } from '@/sync/storage';
+import { MACHINE_PRESENCE_COLORS } from '@/sync/machinePresence';
 import { Ionicons } from '@expo/vector-icons';
 import { getSessionName, useSessionStatus, getSessionSubtitle, getSessionAvatarId, formatPathRelativeToHome } from '@/utils/sessionUtils';
 import { Avatar } from './Avatar';
@@ -95,6 +96,10 @@ const stylesheet = StyleSheet.create((theme) => ({
         color: theme.colors.textSecondary,
         marginLeft: 6,
         ...Typography.default(),
+    },
+    /** Gap between the machine presence dot and the host label, inside the centered header row. */
+    hostGroupDot: {
+        marginRight: 4,
     },
     sessionItem: {
         height: 88,
@@ -225,6 +230,9 @@ export function SessionsList() {
     const styles = stylesheet;
     const safeArea = useSafeAreaInsets();
     const data = useVisibleSessionListViewData();
+    // Resolved once per render rather than per host-group item: the row renderer is a map/switch,
+    // where a hook call per item would break the rules of hooks.
+    const machinePresence = useMachinePresenceMap();
     const pathname = usePathname();
     const isTablet = useIsTablet();
     const navigateToSession = useNavigateToSession();
@@ -413,6 +421,9 @@ export function SessionsList() {
                 const hostKey = item.projectPath + '|' + item.host;
                 const isHidingOffline = hiddenOfflineHosts.has(hostKey);
                 const hasOffline = item.totalCount > item.onlineCount;
+                // Unknown machineId (sessions whose metadata predates it, or a mixed group) falls
+                // back to `offline` rather than guessing.
+                const presence = (item.machineId ? machinePresence[item.machineId] : undefined) ?? 'offline';
                 return (
                     <Pressable
                         onPress={hasOffline ? () => setHiddenOfflineHosts(prev => {
@@ -426,8 +437,12 @@ export function SessionsList() {
                             { opacity: hasOffline && pressed ? 0.7 : 1 },
                         ]}
                     >
+                        <StatusDot
+                            color={MACHINE_PRESENCE_COLORS[presence]}
+                            style={styles.hostGroupDot}
+                        />
                         <Text style={styles.hostGroupText} numberOfLines={1}>
-                            {item.host || 'Unknown'}{' · '}{item.onlineCount}/{item.totalCount} online{hasOffline ? (isHidingOffline ? ' ▸' : ' ▾') : ''}
+                            {item.host || 'Unknown'}{' · '}{item.onlineCount}/{item.totalCount} online{presence === 'lan' ? ` · ${t('status.lan')}` : ''}{hasOffline ? (isHidingOffline ? ' ▸' : ' ▾') : ''}
                         </Text>
                     </Pressable>
                 );

@@ -79,6 +79,7 @@ export const es: TranslationStructure = {
         error: 'error',
         auth_error: 'inicia sesión de nuevo',
         online: 'en línea',
+        lan: 'LAN',
         offline: 'desconectado',
         lastSeen: ({ time }: { time: string }) => `visto por última vez ${time}`,
         permissionRequired: 'permiso requerido',

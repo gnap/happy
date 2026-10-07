@@ -17,7 +17,8 @@ import { isUsingCustomServer } from '@/sync/serverConfig';
 import { trackPaywallButtonClicked, trackWhatsNewClicked } from '@/track';
 import { Modal } from '@/modal';
 import { useMultiClick } from '@/hooks/useMultiClick';
-import { useAllMachines } from '@/sync/storage';
+import { useAllMachines, useMachinesMap, useMachinePresenceMap, useLanSightings } from '@/sync/storage';
+import { MachinePresenceBadge } from '@/components/MachinePresenceBadge';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { useUnistyles } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
@@ -38,7 +39,21 @@ export const SettingsView = React.memo(function SettingsView() {
     const isPro = __DEV__ || useEntitlement('pro');
     const experiments = useSetting('experiments');
     const isCustomServer = isUsingCustomServer();
-    const allMachines = useAllMachines();
+    // Unfiltered: `useAllMachines` hides every machine the server reports inactive, which would
+    // hide exactly the hosts worth looking at here — an offline machine is still worth listing
+    // (it may be reachable on the LAN), and hiding it also hides the reason it is interesting.
+    const machinesById = useMachinesMap();
+    const allMachines = React.useMemo(
+        () => Object.values(machinesById).sort((a, b) => {
+            const aOnline = isMachineOnline(a) ? 1 : 0;
+            const bOnline = isMachineOnline(b) ? 1 : 0;
+            if (aOnline !== bOnline) return bOnline - aOnline;
+            return b.activeAt - a.activeAt;
+        }),
+        [machinesById]
+    );
+    const machinePresence = useMachinePresenceMap();
+    const lanSightings = useLanSightings();
     const profile = useProfile();
     const displayName = getDisplayName(profile);
     const avatarUrl = getAvatarUrl(profile);
@@ -287,6 +302,12 @@ export const SettingsView = React.memo(function SettingsView() {
                                         name="desktop-outline"
                                         size={29}
                                         color={isOnline ? theme.colors.status.connected : theme.colors.status.disconnected}
+                                    />
+                                }
+                                rightElement={
+                                    <MachinePresenceBadge
+                                        presence={machinePresence[machine.id] ?? 'offline'}
+                                        lanReachable={!!lanSightings[machine.id]}
                                     />
                                 }
                                 onPress={() => router.push(`/machine/${machine.id}`)}

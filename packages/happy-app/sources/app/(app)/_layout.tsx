@@ -7,6 +7,7 @@ import { Platform, TouchableOpacity, Text } from 'react-native';
 import { isRunningOnMac } from '@/utils/platform';
 import { useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
+import { useLanScanner } from '@/hooks/useLanScanner';
 
 export const unstable_settings = {
     initialRouteName: 'index',
@@ -16,6 +17,10 @@ export default function RootLayout() {
     // Use custom header on Android and Mac Catalyst, native header on iOS (non-Catalyst)
     const shouldUseCustomHeader = Platform.OS === 'android' || isRunningOnMac() || Platform.OS === 'web';
     const { theme } = useUnistyles();
+
+    // Owns the periodic LAN browse for the whole authenticated app; mounted here (not in a screen)
+    // so the cadence is not restarted by navigation.
+    useLanScanner();
 
     return (
         <Stack

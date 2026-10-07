@@ -94,6 +94,7 @@ export const en: TranslationStructure = {
         error: 'error',
         auth_error: 'Sign in again',
         online: 'online',
+        lan: 'LAN',
         offline: 'offline',
         lastSeen: ({ time }: { time: string }) => `last seen ${time}`,
         permissionRequired: 'permission required',
