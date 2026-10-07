@@ -125,7 +125,13 @@ LAN 的 history 端点按 **server 的 `sessionId`** 寻址（`happy-cli/src/dae
 1. **给所有出站补 `n`**，或明确「缺口检测仅对 session-protocol 信封有效」—— 否则 §6.2.3 无法实现
 2. **resume 路径的 tag 必须稳定**，不得在重连时更换
 3. 出站条目在 server ack 后**回填 server id**（或同时保留两个 id）
-4. （可选，体验项）history 支持 `after` 游标；一次 live 通道（SSE 或 long-poll）
+4. **局域网需要真正的消息投递（live 通道）** —— **这不是体验项，而是 App 侧 UI 调试的前置条件。**
+   没有它，App 切到局域网后只能反复拉全量快照，「通道切换」就无法作为一个真实行为被观察和调试。
+   形态不限：SSE / long-poll / WebSocket 任一。
+5.（可选，优化项）history 支持 `after` 游标，降低轮询的全量传输开销
+
+**顺序**：1–3 是 App 侧**收敛正确性**的前提；**4 是 UI 调试的前提** —— 在 4 落地之前，App 侧
+只能做到「把线接好，但看不到效果」。
 
 ## 八、当前可并行的工作
 
