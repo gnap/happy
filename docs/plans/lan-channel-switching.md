@@ -24,47 +24,57 @@ LAN 的 history 端点按 **server 的 `sessionId`** 寻址（`happy-cli/src/dae
 因此 App **用 server 的 sessionId 就能同时命中两条通道**，不需要引入新的会话标识。标识问题只影响 CLI 侧的**日志分桶**
 （目录为 `sha256(tag + ':' + site)`，`api/sessionLog.ts:67-70`）。
 
-## 三、CLI 侧硬缺口（必须 CLI 分支修，App 无法绕过）
+## 三、CLI 侧硬缺口
 
-### 3.1 `n` 覆盖不完整 ← 最关键
+> **状态（2026-10-07）：三项均已由 CLI 分支处理完毕，见 `e748ed43`。**
+> 下方保留原始评估与结论，便于对照「我们预期的」与「他们实际做的」。
 
-`n` 只在两处赋值，且都走 session-protocol 路径：
+### 3.1 `n` 覆盖不完整 ← 最关键 —— ✅ 已修
 
-- `api/apiSession.ts:1662`（`enqueueSessionProtocolEnvelope`）
-- `api/apiSession.ts:1715`（`sendSessionLifecycleEnvelope`）
+原始评估：`n` 只在 `enqueueSessionProtocolEnvelope` 与 `sendSessionLifecycleEnvelope` 两处赋值，
+而 `sendCursorMessage` / `sendOutputFormatMessage` / `sendAgentMessage` / `sendSessionEvent` 走
+`enqueueMessage` 但不经过它们，其记录没有 `n`。
 
-而 `sendCursorMessage` / `sendOutputFormatMessage` / `sendAgentMessage` / `sendSessionEvent` 走 `enqueueMessage`
-但**不经过上述两处**，其信封没有 `n`。
+**他们做得比评估更彻底，也更准**：对 cursor 会话，这些都是**主消息路径**，所以不是「覆盖不完整」
+而是「完全没有」；claude 会话则由两个 launcher 都会调的 `sendSessionEvent` 把日志搅成混合的。
 
-**后果**：本地日志里 `dir:'out'` 的条目**混杂「有 n」与「无 n」两类**。App 若按 `n` 连续性做缺口检测，
-会在**合法数据上误报** —— 路线图 P5 承诺的缺口检测实际上不可用。
+修法：新增 `stampAgentRecord(record, {sid, site, n})`（`api/sessionPayloads.ts`）与
+`enqueueAgentRecord`（`api/apiSession.ts`），五个 legacy sender 全部改走它。legacy 记录
+没有信封可盖，三元组放在 `content` 里 `type` 旁边；session 记录仍放信封内。
+`n` 的取号**紧贴写入那一行**，与 session-protocol 路径同一纪律（发了号却没有对应的持久化写入
+就是永久空洞）。
 
-**要求**：给所有出站补 `n`，**或者**明确声明「缺口检测仅对 session-protocol 信封有效」，让 App 能据此门控。
-两者取其一即可，但必须明确，否则 App 无法区分「真的缺号」与「这类消息本来就没有 n」。
+**读取规则（App 侧解析的权威依据）**：
 
-### 3.2 `tag` 不稳定
+```ts
+role === 'session' ? content.data ?? content : content
+```
 
-稳定与否取决于 runner：
+有测试对每种形状各发一条，断言该规则取出的 `site` 一致、且 `n` 连续。
 
-| runner | 行为 | 位置 |
-|---|---|---|
-| cursor | 显式 `--resume-session-tag` → 否则 workspace 文件复用 → 否则 `randomUUID()` | `cursor/runCursor.ts:343-368` |
-| claude / codex / gemini / acp | `resumeSessionTag?.trim() \|\| randomUUID()` | `runClaude.ts:108`、`runCodex.ts:85`、`runGemini.ts:71`、`runAcp.ts:544` |
-| claude 离线重连 | **重连成功后用新 `randomUUID()` 建 session** | `runClaude.ts:196` |
+### 3.2 `tag` 不稳定 —— ✅ 已修
 
-**后果**：换 tag 即换日志/outbox/密钥分桶 → 同一会话的历史被割成两段，App 无法认作同一会话。
+原始评估：tag 是否稳定取决于 runner（cursor 有 workspace 复用；claude/codex/gemini/acp 用
+`randomUUID()`），且 `runClaude.ts:196` 离线重连成功后会**新建 tag**。
 
-**要求**：至少 resume 路径的 tag 必须贯穿，**不得在重连时更换**。
+**已修**：离线重连不再造新 tag，而是重attach 到失败的那个 tag —— 这也顺带恢复了密钥
+（`resolveSessionEncryption` 会重读失败前落盘的那把）。
 
-### 3.3 出站条目的 `id` 与 server id 分裂
+### 3.3 出站条目的 `id` 与 server id 分裂 —— ❌ 请求已撤回（他们是对的）
 
-日志条目形如 `{ id, localId, dir, at, c }`（`api/sessionLog.ts:43-52`）。出站写入时 `id = localId`
-（`apiSession.ts:1546-1552`），**server ack 后不回填 server id**。
+原始评估提出：出站条目 `id = localId`，server ack 后不回填 server id，于是同一条消息在
+「CLI 日志」与「server」上是两个 id，会违反不变量 I1，要求 ack 后回填。
 
-**后果**：同一条出站消息在「CLI 日志」与「server」上是两个不同的 id → 违反不变量 I1（跨路径逐字节相同 id）
-→ 跨通道按 `id` 去重会**产生重复**。
+**他们的反驳（我接受）**：
 
-**要求**：ack 后回填 server id，或在条目里同时保留两个 id。
+> 不可实现 —— 日志是 append-only，写入时 server id 尚不存在。而且**没有必要**：
+> server 在 HTTP 与 websocket 两条路径上都会回传 `localId`，跨路径去重就以它为键。
+
+我原来的判断错在两点：① 跨路径**逐字节相同的是密文**，日志条目里的 `id` 只是本地字段，
+并非 I1 所指的那个 id；② 去重键本该落在 `localId` 上（App 的 reducer 对 user 消息已经在这么做）。
+append-only 的设计也让「回填」在构造上不成立。
+
+**对 App 设计的修正**：跨通道去重**以 `localId` 为首选键**，不是 `id`。见 §6.2。
 
 ## 四、CLI 侧软缺口（App 可降级，代价是带宽/延迟，不是正确性）
 
@@ -105,10 +115,13 @@ LAN 的 history 端点按 **server 的 `sessionId`** 寻址（`happy-cli/src/dae
 
 ### 6.2 收敛规则（App 的核心工作）
 
-1. **排序**：优先 `(n, site)`；**对无 `n` 的条目回退到 `at` + `id`**（应对缺口 3.1）。
-2. **去重**：优先 `(n, site)`；其次 `id`；再次 `localId`（应对缺口 3.3）。
-3. **缺口检测门控**：**仅在同一 site 内、且该 site 的条目全部带 `n` 时才启用**。
-   任一条件不满足即关闭该 site 的缺口检测 —— 否则会把「本来没有 n 的消息类型」误判为丢失。
+1. **排序**：按 `(n, site)`。CLI 已保证所有出站记录都带三元组（§3.1），正常路径不需要回退；
+   仍保留一条回退（`at` + `id`）以应对更早写入、不含三元组的旧记录。
+2. **去重**：**首选 `localId`** —— server 在 HTTP 与 websocket 两条路径上都会回传它，CLI 的日志条目
+   也带它，所以它才是真正跨路径稳定、可比的键（见 §3.3）。其次 `(n, site)`，再次 `id`。
+3. **缺口检测门控**：CLI 侧 `n` 覆盖已补齐，正常可启用。**但门控仍要保留** —— 对端写入的记录
+   （更老的 App）可能不带 `n`；同一 site 内一旦出现无 `n` 条目，就关闭该 site 的缺口检测，
+   否则会把「本来没有 `n` 的记录」误判成丢失。
 
 ### 6.3 降级与如实呈现
 
@@ -122,16 +135,15 @@ LAN 的 history 端点按 **server 的 `sessionId`** 寻址（`happy-cli/src/dae
 
 ## 七、向 CLI 分支提的请求（按优先级）
 
-1. **给所有出站补 `n`**，或明确「缺口检测仅对 session-protocol 信封有效」—— 否则 §6.2.3 无法实现
-2. **resume 路径的 tag 必须稳定**，不得在重连时更换
-3. 出站条目在 server ack 后**回填 server id**（或同时保留两个 id）
-4. **局域网需要真正的消息投递（live 通道）** —— **这不是体验项，而是 App 侧 UI 调试的前置条件。**
-   没有它，App 切到局域网后只能反复拉全量快照，「通道切换」就无法作为一个真实行为被观察和调试。
-   形态不限：SSE / long-poll / WebSocket 任一。
+1. ~~给所有出站补 `n`~~ —— ✅ **已完成**（`e748ed43`），且比请求更彻底：五个 legacy sender 全部覆盖
+2. ~~resume 路径的 tag 必须稳定~~ —— ✅ **已完成**（同一提交）
+3. ~~出站条目 ack 后回填 server id~~ —— ❌ **已撤回**，他们的反驳成立（见 §3.3）。App 侧改为以 `localId` 去重
+4. **局域网需要真正的消息投递（live 通道）** —— **尚未做。** 这不是体验项，而是 App 侧 UI 调试的
+   前置条件：没有它，App 切到局域网后只能反复拉全量快照，「通道切换」就无法作为一个真实行为被
+   观察和调试。形态不限：SSE / long-poll / WebSocket 任一。
 5.（可选，优化项）history 支持 `after` 游标，降低轮询的全量传输开销
 
-**顺序**：1–3 是 App 侧**收敛正确性**的前提；**4 是 UI 调试的前提** —— 在 4 落地之前，App 侧
-只能做到「把线接好，但看不到效果」。
+**顺序**：1–3 已清；**4 是 UI 调试的前提**。
 
 ## 八、当前可并行的工作
 
