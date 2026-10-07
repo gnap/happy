@@ -25,7 +25,8 @@ import { projectPath } from '@/projectPath';
 import { getTmuxUtilities, isTmuxAvailable, parseTmuxSessionIdentifier, formatTmuxSessionIdentifier } from '@/utils/tmux';
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
 import { stripProfileManagedEnv } from '@/utils/profileEnv';
-import { fetchSessionProfileMeta } from './fetchSessionProfileMeta';
+import { fetchSessionProfileMeta, PROFILE_META_DEADLINE_MS } from './fetchSessionProfileMeta';
+import { delay } from '@/utils/time';
 import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSessionSummary } from './lanServer';
 import type { ApiMachineClient } from '@/api/apiMachine';
 import { readSessionKey } from '@/api/sessionKeyPersistence';
@@ -1156,7 +1157,15 @@ export async function startDaemon(): Promise<void> {
       // re-execute them, which surfaces as the App replaying historical messages on
       // restart. The offline-wake auto-respawn path still passes resumeAfterSeq because
       // that flow is meant to catch up missed messages while the PID was dead.
-      const recoveredProfile = await fetchSessionProfileMeta(sessionId);
+      //
+      // Bounded on purpose: a stalled server must not be able to wedge a user-initiated
+      // restart. Every value here is optional -- null just means the child spawns with the
+      // daemon's baseline env and learns the profile from the next user message -- so giving
+      // up early costs nothing that the unbounded wait was buying.
+      const recoveredProfile = await Promise.race([
+        fetchSessionProfileMeta(sessionId),
+        delay(PROFILE_META_DEADLINE_MS).then(() => null),
+      ]);
       // RPC-provided sandboxConfig takes priority; falls back to session metadata
       const perSessionSandbox = sandboxConfig ?? found.happySessionMetadataFromLocalWebhook?.sandbox ?? undefined;
       const result = await spawnSession({
