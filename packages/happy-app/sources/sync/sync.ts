@@ -34,6 +34,7 @@ import { AsyncLock } from '@/utils/lock';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
+import { readSessionOverLan, type LanSessionRead } from './lan/sessionChannel';
 import { systemPrompt } from './prompt/systemPrompt';
 import { fetchArtifact, fetchArtifacts, createArtifact, updateArtifact } from './apiArtifacts';
 import { DecryptedArtifact, Artifact, ArtifactCreateRequest, ArtifactUpdateRequest } from './artifactTypes';
@@ -2734,6 +2735,10 @@ class Sync {
                     this.applyMessages(sessionId, normalizedMessages);
                 }
 
+                // The server answered, so this session is back on the primary channel — drop any
+                // "served over LAN" marker left by a fallback during an outage.
+                storage.getState().markSessionServedOverLan(sessionId, null);
+
                 this.sessionLastSeq.set(sessionId, maxSeq);
 
                 // Determine pagination state.
@@ -2805,6 +2810,24 @@ class Sync {
                 // Logical errors (decrypt/normalize) are swallowed — retrying them
                 // would spin forever without any chance of success.
                 if (this.isRetryableMessageFetchError(err)) {
+                    // The server is unreachable. Before handing this over to the retry backoff,
+                    // try the other channel: the daemon that owns this session keeps its own log
+                    // of everything the session process saw, and it may be sitting on this very
+                    // network. This is the channel switch, and it is driven by the failure itself
+                    // rather than by a status flag — so it covers every reason the server can be
+                    // unreachable, not just the ones a status enum happens to model.
+                    try {
+                        const read = await this.fetchSessionFromLan(sessionId);
+                        if (read) {
+                            log.log(`📡 fetchMessages: server unreachable — read ${read.messages.length} message(s) over the LAN for ${sessionId}`);
+                        }
+                    } catch (lanError) {
+                        // The LAN is best-effort. A failure here must not mask the original error.
+                        log.log(`📡 fetchMessages: LAN fallback failed for ${sessionId}: ${String(lanError)}`);
+                    }
+                    // Still re-throw: the LAN log only covers what that process has seen since it
+                    // started, so it supplements the server rather than replacing it, and the
+                    // backoff keeps trying for the fuller channel.
                     throw err;
                 }
             } finally {
@@ -3591,6 +3614,72 @@ class Sync {
         }
 
         // daemon-status ephemeral updates are deprecated, machine status is handled via machine-activity
+    }
+
+    //
+    // LAN channel
+    //
+
+    /**
+     * Reads a session over the local network and merges what it finds into the store.
+     *
+     * The App is a reader on both channels and nothing here writes. This exists so a session can
+     * still be read when the server is not answering: the daemon keeps its own log of everything
+     * the session process saw, and serves it over the LAN.
+     *
+     * Dedup happens *here*, not in the reducer. The reducer keys on `msg.id`, but the same message
+     * legitimately carries different ids on the two routes — the CLI logs its own outbound
+     * messages under its local id, while the server hands them back under a server-assigned id.
+     * `localId` is the one field both routes agree on, so messages already in the store are
+     * indexed by it (and by id, for records that carry no localId) and the LAN set is filtered
+     * against that index before it reaches the reducer. Without this, every message the CLI
+     * itself sent would appear twice after a switch.
+     *
+     * Note the LAN log is *not* a complete history: the CLI only records what its process saw
+     * since it started, so this is a supplement to the server's copy, never a replacement.
+     *
+     * Returns null when there is nothing to read over the LAN — see `readSessionOverLan` for the
+     * cases that covers.
+     */
+    async fetchSessionFromLan(sessionId: string): Promise<LanSessionRead | null> {
+        const accountPublicKey = this.encryption?.contentDataKey;
+        if (!accountPublicKey) {
+            return null;
+        }
+
+        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        const read = await readSessionOverLan({
+            sessionId,
+            machineId,
+            accountPublicKey,
+            machineKey: machineId ? this.getMachineKey(machineId) : null,
+            encryption: this.encryption,
+        });
+        if (!read) {
+            return null;
+        }
+
+        const known = new Set<string>();
+        for (const message of storage.getState().sessionMessages[sessionId]?.messages ?? []) {
+            known.add(message.id);
+            // Not every variant carries a localId (mode-switch messages do not), so narrow first.
+            const localId = 'localId' in message ? message.localId : null;
+            if (localId) {
+                known.add(localId);
+            }
+        }
+        const fresh = read.messages.filter((message) =>
+            !known.has(message.id) && !(message.localId && known.has(message.localId))
+        );
+        if (fresh.length > 0) {
+            this.applyMessages(sessionId, fresh);
+        }
+        storage.getState().markSessionServedOverLan(sessionId, { messages: read.messages.length });
+        log.log(
+            `📡 fetchSessionFromLan: ${read.messages.length} read, ${fresh.length} new ` +
+            `(${read.decryptedCount}/${read.total} decrypted, tag ${read.tag})`
+        );
+        return read;
     }
 
     //

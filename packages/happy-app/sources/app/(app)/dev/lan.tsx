@@ -6,7 +6,7 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { sync } from '@/sync/sync';
-import { useAllMachines } from '@/sync/storage';
+import { useAllMachines, storage } from '@/sync/storage';
 import { discoverMachines, accountFingerprintOf } from '@/sync/lan/discovery';
 import { authenticate, fetchIdentity, fetchSessions, fetchHistory } from '@/sync/lan/client';
 import { decryptLanHistory } from '@/sync/lan/history';
@@ -87,6 +87,7 @@ const LanDevScreen = React.memo(function LanDevScreen() {
 
             // ── Stage 4: fetch and decrypt history ───────────────────────────────
             let decryptedAny = false;
+            const seenHistory = new Set<string>();
             for (const session of sessions) {
                 const history = await fetchHistory(target.baseUrl, token, session.happySessionId);
                 if (!history) {
@@ -95,6 +96,7 @@ const LanDevScreen = React.memo(function LanDevScreen() {
                 }
                 const decrypted = await decryptLanHistory(sync.encryption!, history);
                 decryptedAny = true;
+                seenHistory.add(session.happySessionId);
                 push(line(
                     'history',
                     `${session.happySessionId}: ${decrypted.decryptedCount}/${decrypted.entries.length} decrypted, tag ${decrypted.tag}`
@@ -108,6 +110,25 @@ const LanDevScreen = React.memo(function LanDevScreen() {
             }
             if (!decryptedAny) {
                 push(line('history', 'no session had local history on that machine', false));
+            }
+
+            // ── Stage 5: feed it through the app's real path ─────────────────────
+            // The stages above use the LAN client directly. This one goes through the same
+            // `Sync.fetchSessionFromLan` a channel switch would use, so what it exercises is the
+            // production path — normalization, dedup against the store, and the reducer — rather
+            // than a parallel implementation that could pass while the real one is broken.
+            const mergeTarget = sessions.find((s) => seenHistory.has(s.happySessionId));
+            if (mergeTarget) {
+                const read = await sync.fetchSessionFromLan(mergeTarget.happySessionId);
+                if (!read) {
+                    push(line('merge', 'fetchSessionFromLan found nothing to read', false));
+                } else {
+                    const stored = storage.getState().sessionMessages[mergeTarget.happySessionId]?.messages.length ?? 0;
+                    push(line(
+                        'merge',
+                        `${read.messages.length} normalized, ${read.decryptedCount}/${read.total} decrypted → store now holds ${stored} message(s)`
+                    ));
+                }
             }
 
             push(line('done', 'LAN round trip complete'));

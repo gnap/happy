@@ -126,6 +126,13 @@ interface StorageState {
      * overwritten wholesale by `fetchMachines`. See `sync/machinePresence.ts`.
      */
     lanSightings: Record<string, LanSighting>;
+    /**
+     * Sessions whose messages were last supplemented from the LAN, by sessionId, with when and how
+     * many. This is what makes the channel visible: without it a switch is indistinguishable from
+     * the server simply having answered, which is exactly the ambiguity the feature exists to
+     * remove. Cleared for a session when the server answers it again.
+     */
+    lanServed: Record<string, { at: number; messages: number }>;
     artifacts: Record<string, DecryptedArtifact>;  // New artifacts storage
     friends: Record<string, UserProfile>;  // All relationships (friends, pending, requested, etc.)
     users: Record<string, UserProfile | null>;  // Global user cache, null = 404/failed fetch
@@ -146,6 +153,8 @@ interface StorageState {
     applyMachines: (machines: Machine[], replace?: boolean) => void;
     /** Replace the LAN sighting set with the result of one scan. */
     applyLanSightings: (sightings: LanSighting[]) => void;
+    /** Record that a session's messages came from the LAN. Pass null to clear (the server answered). */
+    markSessionServedOverLan: (sessionId: string, result: { messages: number } | null) => void;
     applyLoaded: () => void;
     applyReady: () => void;
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => { changed: string[], hasReadyEvent: boolean };
@@ -509,6 +518,7 @@ export const storage = create<StorageState>()((set, get) => {
         sessions: {},
         machines: {},
         lanSightings: {},
+        lanServed: {},
         artifacts: {},  // Initialize artifacts
         friends: {},  // Initialize relationships cache
         users: {},  // Initialize global user cache
@@ -1644,6 +1654,19 @@ export const storage = create<StorageState>()((set, get) => {
             }
             return { ...state, lanSightings: next };
         }),
+        markSessionServedOverLan: (sessionId: string, result: { messages: number } | null) => set((state) => {
+            if (result === null) {
+                if (!(sessionId in state.lanServed)) {
+                    return state;
+                }
+                const { [sessionId]: _cleared, ...rest } = state.lanServed;
+                return { ...state, lanServed: rest };
+            }
+            return {
+                ...state,
+                lanServed: { ...state.lanServed, [sessionId]: { at: Date.now(), messages: result.messages } },
+            };
+        }),
         // Artifact methods
         applyArtifacts: (artifacts: DecryptedArtifact[]) => set((state) => {
             console.log(`🗂️ Storage.applyArtifacts: Applying ${artifacts.length} artifacts`);
@@ -1988,6 +2011,14 @@ export function useMachine(machineId: string): Machine | null {
 /** Machines the LAN scanner can currently see, by machineId. */
 export function useLanSightings(): Record<string, LanSighting> {
     return storage(useShallow((state) => state.lanSightings));
+}
+
+/**
+ * Whether this session's messages currently come from the LAN rather than the server, and how
+ * many arrived that way. `null` means the server is serving it (the normal case).
+ */
+export function useSessionServedOverLan(sessionId: string): { at: number; messages: number } | null {
+    return storage(useShallow((state) => state.lanServed[sessionId] ?? null));
 }
 
 /**
