@@ -31,6 +31,10 @@ if [[ ! -f "$TARGET" ]]; then
   exit 0
 fi
 
+# CocoaPods copies pod sources read-only (0444) on a fresh install, so the rewrite below
+# fails with EACCES unless we take ownership of the mode first.
+chmod u+w "$TARGET"
+
 python3 - "$TARGET" << 'PYEOF'
 import sys
 
