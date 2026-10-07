@@ -181,6 +181,16 @@ class Sync {
     private sessionDataKeys = new Map<string, Uint8Array>(); // Store session data encryption keys internally
     private machineDataKeys = new Map<string, Uint8Array>(); // Store machine data encryption keys internally
     private artifactDataKeys = new Map<string, Uint8Array>(); // Store artifact data encryption keys internally
+    /**
+     * Per-session LAN polling while the server is not answering, keyed by sessionId.
+     *
+     * The LAN channel has no push — the daemon serves a snapshot of its log — so a one-shot read
+     * would freeze a session the moment it switched. Polling is what makes the switch an actual
+     * channel rather than a single look. It runs only while the server is unreachable: the moment
+     * a server fetch succeeds the poll is stopped (see `fetchMessages`), so this cannot quietly
+     * become a permanent second source of traffic.
+     */
+    private lanPollTimers = new Map<string, ReturnType<typeof setInterval>>();
     /** Accumulated base64 dataEncryptionKey values from all fetchSessions responses.
      *  Merged across delta fetches so the cache always has the full key set. */
     private sessionEncryptionKeySources = new Map<string, string>();
@@ -2736,7 +2746,9 @@ class Sync {
                 }
 
                 // The server answered, so this session is back on the primary channel — drop any
-                // "served over LAN" marker left by a fallback during an outage.
+                // "served over LAN" marker left by a fallback during an outage, and stop the
+                // polling that outage started.
+                this.stopLanPolling(sessionId);
                 storage.getState().markSessionServedOverLan(sessionId, null);
 
                 this.sessionLastSeq.set(sessionId, maxSeq);
@@ -2820,6 +2832,10 @@ class Sync {
                         const read = await this.fetchSessionFromLan(sessionId);
                         if (read) {
                             log.log(`📡 fetchMessages: server unreachable — read ${read.messages.length} message(s) over the LAN for ${sessionId}`);
+                            // The LAN only serves snapshots, so without this the session would
+                            // freeze at the moment of the switch. Keep reading until the server
+                            // answers again (stopped in the success path below).
+                            this.startLanPolling(sessionId);
                         }
                     } catch (lanError) {
                         // The LAN is best-effort. A failure here must not mask the original error.
@@ -3680,6 +3696,39 @@ class Sync {
             `(${read.decryptedCount}/${read.total} decrypted, tag ${read.tag})`
         );
         return read;
+    }
+
+    /** How often to re-read the LAN while the server is unavailable. */
+    private static readonly LAN_POLL_INTERVAL_MS = 10_000;
+
+    /**
+     * Keeps re-reading a session over the LAN until the server answers again.
+     *
+     * Started by the fallback in `fetchMessages` and stopped by its success path, so the polling
+     * exists exactly as long as the server does not — a session that switches back does not leave
+     * a timer behind.
+     */
+    private startLanPolling(sessionId: string): void {
+        if (this.lanPollTimers.has(sessionId)) {
+            return;
+        }
+        const timer = setInterval(() => {
+            void this.fetchSessionFromLan(sessionId).catch(() => undefined);
+        }, Sync.LAN_POLL_INTERVAL_MS);
+        // Node/web only; keeps the timer from holding the process open in tests.
+        (timer as unknown as { unref?: () => void }).unref?.();
+        this.lanPollTimers.set(sessionId, timer);
+        log.log(`📡 LAN mode: polling ${sessionId} every ${Sync.LAN_POLL_INTERVAL_MS / 1000}s until the server answers`);
+    }
+
+    private stopLanPolling(sessionId: string): void {
+        const timer = this.lanPollTimers.get(sessionId);
+        if (!timer) {
+            return;
+        }
+        clearInterval(timer);
+        this.lanPollTimers.delete(sessionId);
+        log.log(`📡 LAN mode: stopped polling ${sessionId}`);
     }
 
     //
