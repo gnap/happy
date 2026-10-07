@@ -289,8 +289,11 @@ class Sync {
             } else {
                 log.log(`📱 App state changed to: ${nextAppState}`);
                 // Stop reconnection timers while suspended to avoid waking the
-                // JS thread unnecessarily. A live connected socket is preserved.
-                apiSocket.pauseReconnection();
+                // JS thread unnecessarily. A live connected socket is preserved so a short trip
+                // to the background can resume on it — but `osSuspend` also arms a delayed reset,
+                // because past the server's heartbeat timeout this socket is certainly closed
+                // while `connected` still reads true.
+                apiSocket.pauseReconnection({ osSuspend: true });
                 this.maybeStartBackgroundSendWatchdog();
             }
         });
@@ -1390,9 +1393,12 @@ class Sync {
             // response.json() uses the browser's native streaming parser (faster than
             // text()+JSON.parse, especially on JSC engines like WebKitGTK and iOS).
             const data = await response.json() as { sessions?: unknown };
-            const respSizeKb = Math.round(JSON.stringify(data).length / 1024);
+            // Payload size comes from the header. This used to call JSON.stringify(data).length,
+            // which re-serialised the entire (multi-hundred-KB) response on every fetch purely to
+            // produce a log line.
             const contentLength = response.headers.get('content-length');
-            const xferKb = contentLength ? Math.round(parseInt(contentLength) / 1024) : respSizeKb;
+            const respSizeKb = contentLength ? Math.round(parseInt(contentLength) / 1024) : 0;
+            const xferKb = respSizeKb;
             const parseMs = Math.round(performance.now() - parseStart);
             const rawSessions = data.sessions;
             if (!Array.isArray(rawSessions)) {
@@ -1500,7 +1506,7 @@ class Sync {
             const decryptTotalMs = keyDecryptMs + metadataDecryptMs;
             console.warn(
                 `⏱️ fetchSessions: ${totalMs}ms total | ` +
-                `network ${networkMs}ms | parse ${parseMs}ms (${respSizeKb}KB uncompressed${xferKb !== respSizeKb ? `, ${xferKb}KB on wire` : ''}) | ` +
+                `network ${networkMs}ms | parse ${parseMs}ms (${respSizeKb}KB${xferKb !== respSizeKb ? `, ${xferKb}KB on wire` : ''}) | ` +
                 `decrypt ${decryptTotalMs}ms (keys ${keyDecryptMs}ms + meta ${metadataDecryptMs}ms) | ` +
                 `apply ${applyMs}ms | ${decryptedSessions.length} sessions (delta)`
             );
@@ -1557,8 +1563,18 @@ class Sync {
             })();
         } catch (err) {
             log.log(`📥 fetchSessions failed: ${err instanceof Error ? err.message : String(err)}`);
-            // Apply empty list so UI shows empty state instead of endless spinner
-            this.applySessions([]);
+            // Deliberately leave the store untouched. This used to call applySessions([]) "so the
+            // UI shows an empty state instead of an endless spinner" — but on a full refresh
+            // applySessions replaces the whole map, so any transient failure wiped every session
+            // the user had. That is exactly what iOS does to an in-flight request when the app
+            // backgrounds, and a full refresh of a large account is slow enough (~1MB / 15s for
+            // 104 sessions) that backgrounding mid-fetch reliably emptied the list while the
+            // separate, smaller fetchMachines kept the machine list populated.
+            //
+            // No spinner risk: sessionListViewData is initialised to [] on applyReady, so an
+            // empty store already renders the empty state. _forceFullRefreshPending is also only
+            // cleared inside the try, so a failed attempt stays pending and the next invalidation
+            // retries the full refresh.
         }
     }
 

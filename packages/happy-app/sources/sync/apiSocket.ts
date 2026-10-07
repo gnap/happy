@@ -20,6 +20,16 @@ const RECONNECT_RANDOMIZATION_FACTOR = 0.5;
 /** HTTP request timeout for sync RPCs */
 const REQUEST_TIMEOUT_MS = 30_000;
 
+/**
+ * How long a backgrounded connection may be kept before it must be treated as dead.
+ *
+ * Matches the server's own `pingTimeout` (45000 — happy-server/sources/app/api/socket.ts), after
+ * which the server closes a connection that has not exchanged a heartbeat. Past that point
+ * `socket.connected` on this side is stale: the socket is already gone but JS never processed the
+ * close, so the app would keep reporting a healthy connection that cannot carry anything.
+ */
+const SUSPENDED_CONNECTION_TRUST_MS = 45_000;
+
 /** Network error codes that warrant retry (same idea as CLI NETWORK_ERROR_CODES) */
 const RETRYABLE_ERROR_HINTS = ['ECONNREFUSED', 'ETIMEDOUT', 'ECONNRESET', 'ENETUNREACH', 'timeout', 'Network'];
 
@@ -92,6 +102,10 @@ class ApiSocket {
     private reconnectionDisabled = false;
     /** Guards against multiple parallel async loaders racing inside connect(). */
     private connectInFlight = false;
+    /** When the app last went to the background, or null while it is in the foreground. */
+    private suspendedAt: number | null = null;
+    /** Armed on background: tears the socket down if the app stays away past the trust window. */
+    private suspendedResetTimer: ReturnType<typeof setTimeout> | null = null;
     /** Timestamp of the last message/event received on the socket. Used for health checks. */
     private lastMessageReceivedAt = 0;
     /** The transport currently in use (websocket / polling). For detecting downgrades. */
@@ -197,6 +211,7 @@ class ApiSocket {
     }
 
     disconnect() {
+        this.clearSuspendedReset();
         this.reconnectionDisabled = false;
         this.connectInFlight = false;
         if (this.socket) {
@@ -387,11 +402,44 @@ class ApiSocket {
      * socket.io's reconnection timers don't keep running in the background.
      * If we're mid-connect, leave the in-flight attempt alone.
      */
-    pauseReconnection() {
+    /**
+     * @param options.osSuspend Pass true only when the OS may suspend JS entirely — i.e. the app
+     *   going to the background on iOS/Android. There the client stops sending heartbeats, so past
+     *   the server's `pingTimeout` the socket is certainly closed while `connected` still reads
+     *   true, and a delayed reset is the only honest answer.
+     *
+     *   Leave it false for desktop blur/hidden and for network loss: those leave the process
+     *   running, socket.io's server-driven ping/pong keeps the connection alive, and
+     *   `socket.connected` stays trustworthy — the probe in resumeReconnection is the better tool
+     *   there, and forcing a reset would tear down a connection that is genuinely usable.
+     */
+    pauseReconnection(options?: { osSuspend?: boolean }) {
+        this.suspendedAt = options?.osSuspend ? Date.now() : null;
         // Tear down on any non-connected state — a stale connecting/error socket
         // will not recover after iOS suspend. resumeReconnection() creates a fresh one.
         if (this.currentStatus !== 'connected') {
             this.disconnect();
+            return;
+        }
+        this.clearSuspendedReset();
+        if (!options?.osSuspend) {
+            return;
+        }
+        // Connected, but the OS is about to suspend us: keep the socket for now so a brief trip to
+        // the background resumes on it, but arm the delayed reset. On platforms whose timers keep
+        // running it fires in the background; resumeReconnection() re-checks the deadline to cover
+        // the suspended case where the timer could not fire.
+        this.suspendedResetTimer = setTimeout(() => {
+            this.suspendedResetTimer = null;
+            this.disconnect();
+        }, SUSPENDED_CONNECTION_TRUST_MS);
+    }
+
+    /** Cancels a pending background reset. Safe to call when none is armed. */
+    private clearSuspendedReset() {
+        if (this.suspendedResetTimer !== null) {
+            clearTimeout(this.suspendedResetTimer);
+            this.suspendedResetTimer = null;
         }
     }
 
@@ -406,6 +454,19 @@ class ApiSocket {
      * is almost certainly dead (silent TCP drop after iOS suspend, etc.).
      */
     async resumeReconnection(): Promise<boolean> {
+        const suspendedFor = this.suspendedAt === null ? null : Date.now() - this.suspendedAt;
+        this.suspendedAt = null;
+        this.clearSuspendedReset();
+
+        // A background gap past the server's heartbeat timeout means the socket is already gone and
+        // `socket.connected` simply has not caught up. Reset first so the branch below starts from
+        // a truthful state, rather than spending a full probe timeout to reach the same conclusion
+        // while reporting a dead connection as healthy in the meantime.
+        if (suspendedFor !== null && suspendedFor >= SUSPENDED_CONNECTION_TRUST_MS) {
+            log.log(`🔌 socket reset after ${Math.round(suspendedFor / 1000)}s in background`);
+            this.disconnect();
+        }
+
         if (this.currentStatus === 'connected' && this.socket?.connected) {
             return await this.probeConnection();
         }
