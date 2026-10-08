@@ -247,14 +247,17 @@ const tokenizeCode = (code: string, language: string | null) => {
   return tokens;
 };
 
-export const SimpleSyntaxHighlighter: React.FC<SimpleSyntaxHighlighterProps> = ({
+export const SimpleSyntaxHighlighter: React.FC<SimpleSyntaxHighlighterProps> = React.memo(({
   code,
   language,
   selectable
 }) => {
   const { theme } = useUnistyles();
   const colors = getColors(theme);
-  const tokens = tokenizeCode(code, language);
+  // Tokenizing walks the whole snippet character by character, and this component re-renders
+  // whenever its message does — during streaming, that is once per batch. The code text is what
+  // the work depends on, so it is worth not repeating while that text is unchanged.
+  const tokens = React.useMemo(() => tokenizeCode(code, language), [code, language]);
 
   const getColorForType = (type: string, nestLevel?: number): string => {
     switch (type) {
@@ -319,4 +322,4 @@ export const SimpleSyntaxHighlighter: React.FC<SimpleSyntaxHighlighterProps> = (
       </Text>
     </View>
   );
-}; 
+}); 

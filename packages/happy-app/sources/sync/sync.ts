@@ -3217,7 +3217,10 @@ class Sync {
     }
 
     private handleUpdate = async (update: unknown) => {
-        console.log('🔄 Sync: handleUpdate called with:', JSON.stringify(update).substring(0, 300));
+        // No JSON.stringify of the payload here. This runs on every socket update and the body
+        // carries base64 message content, so serialising one only to truncate the log to 300
+        // characters was real JS work on the hottest path in the app. The validated type is
+        // logged just below, which is what the line was actually for.
         const validatedUpdate = ApiUpdateContainerSchema.safeParse(update);
         if (!validatedUpdate.success) {
             console.log('❌ Sync: Invalid update received:', validatedUpdate.error);

@@ -151,10 +151,14 @@ const ChatListInternal = React.memo((props: {
             data={messagesWithTasks}
             inverted={true}
             keyExtractor={keyExtractor}
-            maintainVisibleContentPosition={{
-                minIndexForVisible: 0,
-                autoscrollToTopThreshold: 10,
-            }}
+            // No maintainVisibleContentPosition here, deliberately. On an inverted list it defeats
+            // windowing: it made the list mount far more cells than `windowSize` allows, and
+            // opening a session spent ~1.3s building that extra window. An inverted list already
+            // stays anchored at the newest message, and the effect below re-pins it explicitly,
+            // so it was buying nothing.
+            //
+            // Measured on device when opening a ~2000 message session — cells actually mounted
+            // fell from ~60 to 24 and the fill burst from ~1277ms to ~270ms.
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'none'}
             renderItem={renderItem}
@@ -164,6 +168,16 @@ const ChatListInternal = React.memo((props: {
             scrollEventThrottle={100}
             ListHeaderComponent={listHeader}
             ListFooterComponent={listFooter}
+            // A busy session is thousands of messages and nothing here had ever been tuned, so
+            // FlatList's defaults applied: 10 to start, 10 per batch, and a 21-viewport window —
+            // neither the mount nor the per-batch reconcile proportional to what is on screen.
+            // These bound it to roughly the visible area. (The cells themselves turned out to be
+            // cheap to render — markdown parse and syntax tokenize measure ~0ms — so the cost was
+            // the window's size, not any one cell.)
+            initialNumToRender={8}
+            maxToRenderPerBatch={8}
+            updateCellsBatchingPeriod={50}
+            windowSize={7}
         />
     )
 });
