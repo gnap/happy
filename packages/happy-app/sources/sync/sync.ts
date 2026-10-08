@@ -3737,6 +3737,11 @@ class Sync {
         const fresh = this.withoutStoredDuplicates(sessionId, read.messages);
         if (fresh.length > 0) {
             this.applyMessages(sessionId, fresh);
+            // Persist what the LAN just delivered. Hydration on the next start reads the same
+            // cache the server path writes, and this path never wrote it — so a reload dropped
+            // everything that had arrived over the LAN until the server happened to resend it.
+            // Only on change: a tick with nothing new must not touch SQLite every two seconds.
+            void this.saveSessionCache(sessionId);
         }
         storage.getState().markSessionServedOverLan(sessionId, { messages: read.messages.length });
         log.log(
