@@ -175,35 +175,103 @@ function pruneToKeepSegments(dir: string): void {
   }
 }
 
+export type SessionLogPage = {
+  entries: SessionLogEntry[];
+  /** Opaque position to hand back as `since` on the next read. */
+  cursor: string;
+  /**
+   * True when `since` could not be honoured — the log was pruned past it, or the cursor was
+   * malformed — so `entries` is the whole log rather than a continuation of it.
+   */
+  reset: boolean;
+};
+
+/** `"<segmentIndex>:<lineOffset>"`. Anything else is treated as unusable, not as "no cursor". */
+function parseCursor(since: string | undefined): { segment: number; line: number } | null {
+  if (since === undefined) {
+    return null;
+  }
+  const match = /^(\d+):(\d+)$/.exec(since);
+  return match ? { segment: Number(match[1]), line: Number(match[2]) } : null;
+}
+
+/** Segments are named with a zero-padded index, so lexicographic order is numeric order. */
+const segmentIndexOf = (name: string): number => Number.parseInt(name.slice(0, 10), 10);
+
 /**
- * Read every entry, oldest segment first.
+ * Reads the entries written after `since`, oldest first.
  *
- * Stops at the first line that does not parse rather than skipping it: a torn tail is benign,
- * but a torn *middle* (delayed allocation losing a page) leaves a gap that skipping would
- * silently paper over.
+ * The cursor is a *position* — segment index and line offset — rather than a timestamp. `at` is a
+ * local write time that NTP jumps and session resumptions move around, so it cannot order the
+ * log; positions can, because segments are append-only and rotate into new files. Only whole old
+ * segments are ever dropped, which is the one case `reset` reports: the caller must then read the
+ * entries as the whole log instead of as a continuation.
+ *
+ * Stops at the first line that does not parse rather than skipping it: a torn tail is benign, but
+ * a torn *middle* (delayed allocation losing a page) leaves a gap that skipping would silently
+ * paper over. The cursor is left *before* the torn line so the next read picks it up again.
  */
-export function readSessionLog(tag: string, site: string | undefined): SessionLogEntry[] {
+export function readSessionLogSince(
+  tag: string,
+  site: string | undefined,
+  since?: string,
+): SessionLogPage {
   const dir = sessionLogDir(tag, site);
+  const segments = listSegments(dir);
+  const cursor = parseCursor(since);
+  const pruned = cursor !== null && !segments.some((name) => segmentIndexOf(name) === cursor.segment);
+  const reset = (since !== undefined && cursor === null) || pruned;
+
+  const from = reset || cursor === null ? -1 : cursor.segment;
+  const skipLines = reset || cursor === null ? 0 : cursor.line;
+
   const entries: SessionLogEntry[] = [];
-  for (const name of listSegments(dir)) {
+  let lastSegment = 0;
+  let lastLine = 0;
+
+  for (const name of segments) {
+    const index = segmentIndexOf(name);
+    if (index < from) {
+      continue;
+    }
     let contents: string;
     try {
       contents = readFileSync(join(dir, name), 'utf8');
     } catch {
       break;
     }
+    const skip = index === from ? skipLines : 0;
+    let lineNo = 0;
+    let torn = false;
     for (const line of contents.split('\n')) {
       if (line === '') {
+        continue;
+      }
+      lineNo += 1;
+      if (lineNo <= skip) {
         continue;
       }
       try {
         entries.push(JSON.parse(line) as SessionLogEntry);
       } catch {
-        return entries;
+        torn = true;
+        break;
       }
     }
+    lastSegment = index;
+    // A torn line was not delivered, so the cursor stops short of it and the next read retries.
+    lastLine = torn ? lineNo - 1 : lineNo;
+    if (torn) {
+      break;
+    }
   }
-  return entries;
+
+  return { entries, cursor: `${lastSegment}:${lastLine}`, reset };
+}
+
+/** Read every entry, oldest segment first. */
+export function readSessionLog(tag: string, site: string | undefined): SessionLogEntry[] {
+  return readSessionLogSince(tag, site).entries;
 }
 
 /**

@@ -29,7 +29,7 @@ import { fetchSessionProfileMeta } from './fetchSessionProfileMeta';
 import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSessionSummary } from './lanServer';
 import type { ApiMachineClient } from '@/api/apiMachine';
 import { readSessionKey } from '@/api/sessionKeyPersistence';
-import { readSessionLog } from '@/api/sessionLog';
+import { readSessionLogSince } from '@/api/sessionLog';
 import { encodeBase64, libsodiumEncryptForPublicKey } from '@/api/encryption';
 import { startLanDiscovery, type LanDiscoveryHandle } from './lanDiscovery';
 import { startEndpointPublisher, type EndpointPublisherHandle } from './lanEndpoints';
@@ -1273,7 +1273,7 @@ export async function startDaemon(): Promise<void> {
                   : (() => { try { process.kill(session.pid, 0); return true; } catch { return false; } })(),
                 lastHeartbeat: session.lastHeartbeat,
               } satisfies LanSessionSummary)),
-            getHistory: (sessionId) => {
+            getHistory: (sessionId, since) => {
               // The client addresses by session id because that is what it learns from the
               // server; the tag is this side's business.
               const tracked = [...pidToTrackedSession.values()].find((s) => s.happySessionId === sessionId);
@@ -1292,10 +1292,13 @@ export async function startDaemon(): Promise<void> {
               const dataEncryptionKey = new Uint8Array(wrapped.length + 1);
               dataEncryptionKey.set([0], 0); // version byte, matching api.ts
               dataEncryptionKey.set(wrapped, 1);
+              const page = readSessionLogSince(tag, machineId, since);
               return {
                 tag,
                 dataEncryptionKey: encodeBase64(dataEncryptionKey),
-                entries: readSessionLog(tag, machineId),
+                entries: page.entries,
+                cursor: page.cursor,
+                reset: page.reset,
               };
             },
           });
