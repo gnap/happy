@@ -4092,9 +4092,17 @@ class Sync {
                 // `opened` is null until the open completes, so a drop during the handshake is
                 // ignored here — that case is reported as a null return instead.
                 if (opened && this.lanSocket?.handle === opened) {
-                    log.log(`📡 LAN socket dropped (${baseUrl}); polling continues until it reopens`);
+                    log.log(`📡 LAN socket dropped (${baseUrl}); falling back to polling until it reopens`);
                     this.lanSocket = null;
                     storage.getState().setLanSocketStatus(null);
+                    // This socket was carrying every session on that machine, so they have just lost
+                    // their push. Invalidating them is what puts polling back: it runs
+                    // `fetchMessages`, which restarts the timer now that no socket backs the read.
+                    for (const [sessionId, channel] of this.lanChannels) {
+                        if (channel.connection.baseUrl === baseUrl) {
+                            this.getMessagesSync(sessionId).invalidate();
+                        }
+                    }
                 }
             },
         });
@@ -4103,6 +4111,13 @@ class Sync {
             this.lanSocket = { baseUrl, handle };
             storage.getState().setLanSocketStatus({ baseUrl, connectedAt: Date.now() });
             log.log(`📡 LAN socket live at ${baseUrl}`);
+            // Stop the fallback for the sessions this socket now covers, rather than waiting for
+            // each one's next tick to notice. Any session on another machine keeps its timer.
+            for (const [sessionId, channel] of this.lanChannels) {
+                if (channel.connection.baseUrl === baseUrl) {
+                    this.stopLanPolling(sessionId);
+                }
+            }
         }
     }
 
@@ -4185,10 +4200,18 @@ class Sync {
                 ? `📡 fetchMessages: on LAN — read ${read.messages.length} message(s), ${read.decryptedCount}/${read.total} decrypted`
                 : '📡 fetchMessages: on LAN — nothing to read (no daemon for this session)'
         );
-        // Polling starts even when this read found nothing. "No local history yet" is a 404 the
-        // daemon documents as retryable, so treating it as final would strand the channel: the
-        // session would sit empty until something else invalidated the sync, which for a pinned
-        // channel may never happen.
+        // Polling is the fallback, not the mechanism. A socket that is up pushes `log-grew` the
+        // moment anything is written to the log, so a tick would only re-ask a question already
+        // answered — that is what made this run a full read twice a second forever.
+        //
+        // It still has to run when there is no socket, which is also the case the read just
+        // reported: "no local history yet" is a 404 the daemon documents as retryable, and
+        // treating it as final would strand the channel, since for a pinned session nothing else
+        // would ever invalidate the sync.
+        if (read && this.lanSocket?.baseUrl === read.connection.baseUrl) {
+            this.stopLanPolling(sessionId);
+            return;
+        }
         this.startLanPolling(sessionId);
     };
 
@@ -4233,12 +4256,11 @@ class Sync {
         clearInterval(timer);
         this.lanPollTimers.delete(sessionId);
         log.log(`📡 LAN mode: stopped polling ${sessionId}`);
-        // The socket is machine-wide, so it outlives any one session's use of the LAN. It goes
-        // away only when nothing is on the channel any more, or one session leaving would cut the
-        // live feed out from under the others.
-        if (this.lanPollTimers.size === 0) {
-            this.closeLanSocket();
-        }
+        // The socket is deliberately left alone. It used to be closed once no polling session
+        // remained, back when polling was the mechanism and the socket only existed to shorten its
+        // interval — under that reading an idle socket was waste. It is the mechanism now, so
+        // tying it to the fallback's bookkeeping would close the channel the moment it started
+        // carrying the session, and reopening it would look exactly like a flapping connection.
     }
 
     //
