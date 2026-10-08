@@ -177,6 +177,21 @@ export function forwardSessionEventToDaemon(event: Record<string, unknown>): boo
 }
 
 /**
+ * Reports whether a LAN-delivered user message actually landed.
+ *
+ * The App marks a message sent the moment it writes it, so without this the daemon has no way to
+ * tell a message that arrived and was routed from one that arrived and was dropped — and the App
+ * cannot tell either. Only the session can say, because only the session knows whether the message
+ * reached the agent.
+ */
+export function reportLanDelivery(localId: string, delivered: boolean): void {
+    if (!state.socket || state.socket.readyState !== 'open') {
+        return;
+    }
+    send(state.socket, { type: 'lan-delivered', localId, delivered });
+}
+
+/**
  * Check if daemon is reachable via Unix socket without registering.
  */
 export function isDaemonReachable(): Promise<boolean> {

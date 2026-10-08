@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import { logger } from '@/ui/logger';
 
 export interface DaemonSocketMessage {
-    type: 'hello' | 'heartbeat' | 'goodbye' | 'session-event';
+    type: 'hello' | 'heartbeat' | 'goodbye' | 'session-event' | 'lan-delivered';
     sessionId?: string;
     pid?: number;
     sessionTag?: string;
@@ -17,6 +17,9 @@ export interface DaemonSocketMessage {
      * server uses, which is what makes the LAN channel protocol-transparent to the App.
      */
     event?: Record<string, unknown>;
+    /** For `lan-delivered`: which message, and whether the session routed it. */
+    localId?: string;
+    delivered?: boolean;
 }
 
 interface SessionSocketState {
@@ -44,6 +47,16 @@ export type SessionEventHandler = (
     event: Record<string, unknown>,
 ) => void;
 
+/**
+ * A session reporting whether a LAN-delivered user message reached it. The daemon relays this to
+ * the App, which otherwise has no way to tell a delivered message from a dropped one.
+ */
+export type LanDeliveryHandler = (
+    sessionId: string | null,
+    localId: string,
+    delivered: boolean,
+) => void;
+
 const SOCKET_BASE = process.env.HAPPY_HOME_DIR || join(homedir(), '.happy');
 const SOCKET_PATH = join(SOCKET_BASE, 'daemon.sock');
 const HEARTBEAT_TIMEOUT_MS = 12_000; // 12s without heartbeat = dead (2x heartbeat interval)
@@ -57,6 +70,7 @@ export function startUnixSocketServer(callbacks: {
     onSessionHello: SessionRegistrationHandler;
     onSessionDisconnect: SessionDisconnectHandler;
     onSessionEvent: SessionEventHandler;
+    onLanDelivery: LanDeliveryHandler;
 }): {
     stop: () => Promise<void>;
     socketPath: string;
@@ -134,14 +148,26 @@ export function startUnixSocketServer(callbacks: {
                                 callbacks.onSessionEvent(state.sessionId, msg.event);
                             }
                             break;
+                        case 'lan-delivered':
+                            if (state.sessionId && typeof msg.localId === 'string') {
+                                callbacks.onLanDelivery(state.sessionId, msg.localId, msg.delivered === true);
+                            }
+                            break;
                         case 'goodbye':
                             logger.debug(`[UNIX SOCKET] Session ${state.sessionId} sent goodbye`);
                             if (heartbeatTimer) clearTimeout(heartbeatTimer);
                             socket.end();
                             break;
                     }
-                } catch {
-                    logger.debug(`[UNIX SOCKET] Invalid JSON from session: ${line.slice(0, 80)}`);
+                } catch (error) {
+                    // Head, tail and length, not a truncated head: a frame that was torn, doubled,
+                    // or genuinely malformed all look identical in the first 80 characters, which
+                    // is exactly what made the previous occurrence undiagnosable. Only logged once
+                    // parsing has already failed, so it costs nothing on the working path.
+                    logger.debug(
+                        `[UNIX SOCKET] Invalid JSON from session (${line.length} bytes, ${String(error)}):` +
+                        ` head=${line.slice(0, 60)} … tail=${line.slice(-60)}`,
+                    );
                 }
             }
         });

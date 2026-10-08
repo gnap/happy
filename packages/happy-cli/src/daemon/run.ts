@@ -1222,6 +1222,15 @@ export async function startDaemon(): Promise<void> {
           createdAt: Date.now(),
         });
       },
+      onLanDelivery(sessionId, localId, delivered) {
+        // Relay the session's verdict to whoever is reading over the LAN. The App marked the
+        // message sent when it wrote it, so this is the only thing that can tell it the message
+        // was dropped rather than delivered.
+        lanServer?.broadcast('delivered', { sessionId, localId, delivered });
+        if (!delivered) {
+          logger.debug(`[DAEMON RUN] LAN user message ${localId} rejected by ${sessionId}`);
+        }
+      },
       onSessionHello(_sock, msg) {
         const { sessionId, pid, sessionTag, metadata } = msg;
         if (!sessionId || !pid) return;
