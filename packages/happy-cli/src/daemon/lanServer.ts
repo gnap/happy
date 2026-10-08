@@ -24,6 +24,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { hostname, platform } from 'node:os';
 import fastify, { type FastifyInstance } from 'fastify';
+import websocket, { type WebSocket } from '@fastify/websocket';
 import { logger } from '@/ui/logger';
 import type { SessionLogEntry } from '@/api/sessionLog';
 
@@ -110,6 +111,12 @@ export type LanServerOptions = {
 
 export type LanServerHandle = {
   port: number;
+  /**
+   * Pushes one named event to every live socket reader. The daemon calls this with the same
+   * envelope shape the server's socket uses, which is what makes the LAN channel transparent to
+   * the App's existing update handler.
+   */
+  broadcast: (event: string, payload: unknown) => void;
   stop: () => Promise<void>;
 };
 
@@ -147,6 +154,37 @@ const CORS_HEADERS: Record<string, string> = {
 
 export async function startLanServer(opts: LanServerOptions): Promise<LanServerHandle> {
   const app: FastifyInstance = fastify({ logger: false, bodyLimit: BODY_LIMIT_BYTES });
+
+  await app.register(websocket);
+
+  /**
+   * Live LAN readers.
+   *
+   * The socket is the point of the whole exercise: a reader that holds one open no longer polls,
+   * so a message reaches it when it is written rather than up to an interval later. It is also
+   * why the bearer token could go — a socket authenticates once at the upgrade and then *is* the
+   * authenticated channel, so there is no short-lived credential to sniff or expire.
+   */
+  const subscribers = new Set<WebSocket>();
+
+  /**
+   * Pushes one event to every live reader, in the same envelope shape the server's socket uses.
+   * Named `event`/`payload` because a raw socket has no event names of its own, and the names are
+   * what let the App route this to the same handler the server channel feeds.
+   */
+  const broadcast = (event: string, payload: unknown): void => {
+    if (subscribers.size === 0) {
+      return;
+    }
+    const frame = JSON.stringify({ event, payload });
+    for (const socket of subscribers) {
+      // 1 = OPEN. A socket mid-close is skipped rather than throwing out of the daemon's
+      // session-event handler, which is on a session's forwarding path.
+      if (socket.readyState === 1) {
+        socket.send(frame);
+      }
+    }
+  };
 
   app.addHook('onRequest', async (request, reply) => {
     for (const [name, value] of Object.entries(CORS_HEADERS)) {
@@ -227,6 +265,23 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     return verifyToken(header.slice('Bearer '.length), Date.now());
   };
 
+  /**
+   * The nonce record when `proof` verifies against it, else null. Does not consume the nonce —
+   * callers decide that, because the two callers want different things: the token exchange keeps
+   * the nonce so the token stays bound to it, while a socket upgrade spends it outright.
+   */
+  const verifiedNonce = (nonce: string | null, proof: string | null, now: number): NonceRecord | null => {
+    if (!nonce || !proof) {
+      return null;
+    }
+    const record = nonces.get(nonce);
+    if (!record || now - record.issuedAt > NONCE_TTL_MS || record.expiresAt <= now) {
+      return null;
+    }
+    const expected = hmac(opts.secret, `${PROOF_CONTEXT}.${nonce}`).toString('base64url');
+    return safeEqual(Buffer.from(proof), Buffer.from(expected)) ? record : null;
+  };
+
   app.post('/lan/challenge', async (request, reply) => {
     const now = Date.now();
     if (!underLimit(challenges, request.ip, MAX_CHALLENGES, now)) {
@@ -256,18 +311,13 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       return reply.code(400).send({ error: 'nonce and proof required' });
     }
 
-    const record = nonces.get(nonce);
+    const record = verifiedNonce(nonce, proof, now);
     // Consume the nonce regardless of the outcome: a nonce that survived a failed proof
     // would be a free retry oracle for an attacker guessing at the key.
     nonces.delete(nonce);
-    if (!record || now - record.issuedAt > NONCE_TTL_MS || record.expiresAt <= now) {
-      return reply.code(401).send({ error: 'invalid or expired nonce' });
-    }
-
-    const expected = hmac(opts.secret, `${PROOF_CONTEXT}.${nonce}`).toString('base64url');
-    if (!safeEqual(Buffer.from(proof), Buffer.from(expected))) {
+    if (!record) {
       // Never echo the proof or the secret into logs or the error body.
-      return reply.code(401).send({ error: 'invalid proof' });
+      return reply.code(401).send({ error: 'invalid or expired nonce' });
     }
 
     nonces.set(nonce, record);
@@ -308,6 +358,33 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     return reply.send({ v: LAN_PROTOCOL_VERSION, ...history });
   });
 
+  /**
+   * The live channel. Authenticated at the upgrade with the same challenge proof the read routes
+   * use, then spent: no token is minted, so there is nothing short-lived to leak or expire.
+   */
+  app.get('/lan/socket', { websocket: true }, (socket, request) => {
+    const { nonce, proof } = request.query as { nonce?: string; proof?: string };
+    const now = Date.now();
+    const record = verifiedNonce(nonce ?? null, proof ?? null, now);
+    // Spent either way, so a failed attempt cannot be retried against the same nonce.
+    if (nonce) {
+      nonces.delete(nonce);
+    }
+    if (!record) {
+      socket.close(4401, 'unauthorized');
+      return;
+    }
+
+    subscribers.add(socket);
+    logger.debug('[lan] socket reader connected', { readers: subscribers.size });
+    socket.on('close', () => {
+      subscribers.delete(socket);
+    });
+    // The App owns the read side; anything it sends is ignored rather than treated as a command.
+    socket.on('message', () => undefined);
+    socket.on('error', () => socket.close());
+  });
+
   // Resolve/reject explicitly. The control server's `listen` callback throws inside an async
   // callback, which becomes an unhandled rejection and leaves its promise unsettled forever;
   // a LAN bind failure must instead surface to the caller, which degrades gracefully.
@@ -335,7 +412,14 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
 
   return {
     port,
+    broadcast,
     stop: async () => {
+      // Close readers first: `app.close()` waits for open connections, and a subscriber that
+      // never reconnects would hold the port open past the daemon's shutdown.
+      for (const socket of subscribers) {
+        socket.close(1001, 'daemon shutting down');
+      }
+      subscribers.clear();
       await app.close();
     },
   };

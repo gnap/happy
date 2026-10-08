@@ -1211,8 +1211,16 @@ export async function startDaemon(): Promise<void> {
         // updates so a LAN reader can see it live. The daemon has no other view of session traffic
         // — the session talks to the server directly — so this is the only source for it.
         //
-        // Nothing subscribes yet: the LAN WebSocket that would consume it is the next piece.
-        logger.debug(`[DAEMON RUN] Session event from ${sessionId}: ${String(event.t)}`);
+        // Wrapped in the server's own envelope shape so the App's update handler runs unchanged
+        // against this channel. The outer `seq` is the user-wide counter the App explicitly
+        // ignores for cursors; the ordering it does use, the session-internal `message.seq`,
+        // travels inside `body` and is passed through untouched.
+        lanServer?.broadcast('update', {
+          id: `lan-${++lanEventCounter}`,
+          seq: 0,
+          body: event,
+          createdAt: Date.now(),
+        });
       },
       onSessionHello(_sock, msg) {
         const { sessionId, pid, sessionTag, metadata } = msg;
@@ -1254,6 +1262,8 @@ export async function startDaemon(): Promise<void> {
     // so widening it to the network does not widen the control surface.
     //
     let lanServer: LanServerHandle | null = null;
+    /** Only has to make the envelope's `id` unique; the App does not key on it. */
+    let lanEventCounter = 0;
     let lanDiscovery: LanDiscoveryHandle | null = null;
     let endpointPublisher: EndpointPublisherHandle | null = null;
     // The endpoint publisher needs the machine socket, but that client is created later in
