@@ -2768,8 +2768,12 @@ class Sync {
                     this.applySessionThinkingFromRawContent(sessionId, decrypted.content);
                 }
 
-                if (normalizedMessages.length > 0) {
-                    this.applyMessages(sessionId, normalizedMessages);
+                // Same dedup as the LAN path, and for the same reason — the two channels name the
+                // same message differently, so whichever one arrives second must filter against
+                // the store rather than trust the reducer's id check.
+                const freshServerMessages = this.withoutStoredDuplicates(sessionId, normalizedMessages);
+                if (freshServerMessages.length > 0) {
+                    this.applyMessages(sessionId, freshServerMessages);
                 }
 
                 // The server answered, so this session is back on the primary channel — drop any
@@ -3704,18 +3708,7 @@ class Sync {
             return null;
         }
 
-        const known = new Set<string>();
-        for (const message of storage.getState().sessionMessages[sessionId]?.messages ?? []) {
-            known.add(message.id);
-            // Not every variant carries a localId (mode-switch messages do not), so narrow first.
-            const localId = 'localId' in message ? message.localId : null;
-            if (localId) {
-                known.add(localId);
-            }
-        }
-        const fresh = read.messages.filter((message) =>
-            !known.has(message.id) && !(message.localId && known.has(message.localId))
-        );
+        const fresh = this.withoutStoredDuplicates(sessionId, read.messages);
         if (fresh.length > 0) {
             this.applyMessages(sessionId, fresh);
         }
@@ -3807,6 +3800,32 @@ class Sync {
     //
     // Apply store
     //
+
+    /**
+     * Drops messages the store already holds.
+     *
+     * Neither channel can rely on the reducer for this across a switch. The reducer dedups on
+     * `msg.id`, but the same message carries *different* ids on the two channels — the CLI logs
+     * its own outbound messages under its local id, while the server hands them back under a
+     * server-assigned id. `localId` is the one field both routes agree on, so it is the key here.
+     * Without this, reading a session over the LAN and then switching back would duplicate every
+     * message the CLI itself sent — and symmetrically, the LAN read would duplicate everything
+     * the server had already delivered.
+     */
+    private withoutStoredDuplicates(sessionId: string, messages: NormalizedMessage[]): NormalizedMessage[] {
+        const known = new Set<string>();
+        for (const message of storage.getState().sessionMessages[sessionId]?.messages ?? []) {
+            known.add(message.id);
+            // Not every variant carries a localId (mode-switch messages do not), so narrow first.
+            const localId = 'localId' in message ? message.localId : null;
+            if (localId) {
+                known.add(localId);
+            }
+        }
+        return messages.filter(
+            (message) => !known.has(message.id) && !(message.localId && known.has(message.localId))
+        );
+    }
 
     private applyMessages = (sessionId: string, messages: NormalizedMessage[]) => {
         const result = storage.getState().applyMessages(sessionId, messages);
