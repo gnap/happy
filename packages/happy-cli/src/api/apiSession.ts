@@ -30,7 +30,7 @@ import { InvalidateSync } from '@/utils/sync';
 import axios from 'axios';
 import { resolveSessionLastSeq } from './sessionLastSeq';
 import { loadOutbox, outboxPath, pruneOutboxes, saveOutbox } from './outboxPersistence';
-import { appendSessionLog, pruneSessionLogs, sessionLogDir } from './sessionLog';
+import { appendSessionLog, pruneSessionLogs, sessionLogDir, type SessionLogEntry } from './sessionLog';
 import {
     buildAgentMessagePayload,
     buildCodexPayload,
@@ -1601,15 +1601,30 @@ export class ApiSessionClient extends EventEmitter {
             content: encrypted,
             localId: resolvedLocalId
         });
-        // Same synchronous block and the same ciphertext string as the outbox push, so the two
-        // stores can never disagree about what the bytes were.
-        appendSessionLog(this.sid, this.site, {
+        // Built once and handed to both stores, so a LAN reader can never be given an entry that
+        // differs from the one on disk — including its timestamp.
+        const entry: SessionLogEntry = {
             id: resolvedLocalId,
             localId: resolvedLocalId,
             dir: 'out',
             at: Date.now(),
             c: encrypted,
-        });
+        };
+        // Same synchronous block and the same ciphertext string as the outbox push, so the two
+        // stores can never disagree about what the bytes were.
+        appendSessionLog(this.sid, this.site, entry);
+        // The entry itself, not only the hint that one exists. `log-grew` tells a LAN reader there
+        // is something to read, which still costs it a round trip to find out what — so a session
+        // on the LAN would trail one on the server by a fetch for every message, and an agent
+        // message would never reach the socket at all. The mirror cannot see this write on its own:
+        // it hooks the updates the session *receives*, and the server never echoes a session's own
+        // writes back to it.
+        //
+        // The entry is the same ciphertext the log holds, so a reader that applies it and a reader
+        // that reads it from the log converge on identical bytes; `localId` is what they dedupe on.
+        // Addressed by the server session id, not the tag the log is filed under: the App demuxes
+        // the machine-wide socket on it, exactly as it does for the server channel.
+        forwardSessionEventToDaemon({ t: 'log-entry', id: this.sessionId, entry });
         this.announceLogGrowth();
         this.persistOutboxNow();
         if (invalidate) {
