@@ -185,4 +185,51 @@ describe('lanServer read-only API', () => {
             expect(res.status, `${path} must not exist`).toBe(404);
         }
     });
+
+    describe('CORS', () => {
+        // A desktop webview enforces CORS where native fetch does not, so without these headers
+        // every LAN read fails with an opaque "Load failed" and the channel looks dead on
+        // desktop while working on a phone.
+
+        it('answers the preflight instead of 404ing', async () => {
+            await start();
+
+            const res = await fetch(url('/lan/session'), {
+                method: 'OPTIONS',
+                headers: {
+                    origin: 'http://localhost:8081',
+                    'access-control-request-method': 'POST',
+                    'access-control-request-headers': 'content-type',
+                },
+            });
+
+            expect(res.status).toBe(204);
+            expect(res.headers.get('access-control-allow-origin')).toBe('*');
+            expect(res.headers.get('access-control-allow-headers')).toContain('content-type');
+            expect(res.headers.get('access-control-allow-methods')).toContain('POST');
+        });
+
+        it('allows the browser to read a real response', async () => {
+            await start();
+
+            const res = await fetch(url('/lan/identity'), {
+                headers: { origin: 'http://localhost:8081' },
+            });
+
+            // 401 here is correct — the point is that the caller can read it at all.
+            expect(res.status).toBe(401);
+            expect(res.headers.get('access-control-allow-origin')).toBe('*');
+        });
+
+        it('leaves a request with no origin untouched', async () => {
+            await start();
+
+            // Native fetch (iOS/Android) sends no Origin and is not subject to CORS; the header
+            // is harmless there, but the request must still authenticate normally.
+            const token = await getToken();
+            const res = await fetch(url('/lan/identity'), authorized(token));
+
+            expect(res.status).toBe(200);
+        });
+    });
 });
