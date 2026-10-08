@@ -116,8 +116,40 @@ function safeEqual(a: Buffer, b: Buffer): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+/**
+ * The App reaches this API from a webview on desktop, and a webview enforces CORS where the
+ * native fetch on iOS/Android does not. Without these headers the browser discards every
+ * response, so the session reads fail with an opaque "Load failed" — the LAN channel looks
+ * completely dead on desktop while working fine on a phone.
+ *
+ * Origin is `*` deliberately. The caller's origin differs per build (the Metro dev server on
+ * localhost, `tauri://localhost` once packaged), and an allowlist that misses one reinstates
+ * exactly that silent failure. It is affordable here because nothing is cookie-authenticated:
+ * every route but `/lan/challenge` requires a bearer token the caller can only obtain by proving
+ * possession of the machine key, so a wildcard grants no ambient authority. A hostile page can
+ * reach the challenge route and learn that a daemon is present; it cannot mint a token, and the
+ * nonce it receives is useless without the key.
+ */
+const CORS_HEADERS: Record<string, string> = {
+  'access-control-allow-origin': '*',
+  'access-control-allow-methods': 'GET, POST, OPTIONS',
+  'access-control-allow-headers': 'authorization, content-type',
+  'access-control-max-age': '600',
+};
+
 export async function startLanServer(opts: LanServerOptions): Promise<LanServerHandle> {
   const app: FastifyInstance = fastify({ logger: false, bodyLimit: BODY_LIMIT_BYTES });
+
+  app.addHook('onRequest', async (request, reply) => {
+    for (const [name, value] of Object.entries(CORS_HEADERS)) {
+      reply.header(name, value);
+    }
+    if (request.method === 'OPTIONS') {
+      // Fastify has no OPTIONS route, so without this the preflight gets a 404 and the browser
+      // never sends the request it was asking about — a JSON POST always preflights.
+      return reply.code(204).send();
+    }
+  });
   const MAX_NONCES = opts.limits?.maxTrackedNonces ?? MAX_TRACKED_NONCES;
   const MAX_CHALLENGES = opts.limits?.maxChallengesPerWindow ?? MAX_CHALLENGES_PER_WINDOW;
   const MAX_SESSION_ATTEMPTS = opts.limits?.maxSessionAttemptsPerWindow ?? MAX_SESSION_ATTEMPTS_PER_WINDOW;
