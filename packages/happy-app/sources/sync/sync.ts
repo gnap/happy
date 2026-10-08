@@ -4004,16 +4004,17 @@ class Sync {
      * takes — which polling used to bypass by calling the LAN read directly, so two ticks could
      * overlap and race each other into the store.
      *
-     * A forced LAN channel bypasses the server entirely. That is the point of the control: without
-     * it the only way to exercise the LAN path is to break the server, so a broken fallback stays
-     * invisible until the day it is needed.
+     * A session on the LAN bypasses the server entirely — whether the preference put it there or a
+     * pin did. The pin exists so the path can be exercised deliberately: without it the only other
+     * way to reach the LAN is to break the server, so a broken channel stays invisible until the
+     * day it is needed.
      */
     private fetchMessagesViaLan = async (sessionId: string): Promise<void> => {
         const read = await this.fetchSessionFromLan(sessionId);
         log.log(
             read
-                ? `📡 fetchMessages: forced LAN — read ${read.messages.length} message(s), ${read.decryptedCount}/${read.total} decrypted`
-                : '📡 fetchMessages: forced LAN — nothing to read (no daemon for this session)'
+                ? `📡 fetchMessages: on LAN — read ${read.messages.length} message(s), ${read.decryptedCount}/${read.total} decrypted`
+                : '📡 fetchMessages: on LAN — nothing to read (no daemon for this session)'
         );
         // Polling starts even when this read found nothing. "No local history yet" is a 404 the
         // daemon documents as retryable, so treating it as final would strand the channel: the
