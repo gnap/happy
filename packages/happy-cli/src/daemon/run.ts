@@ -317,6 +317,45 @@ export async function startDaemon(): Promise<void> {
       return 'unknown';
     };
 
+    const onChildExited = (pid: number, code?: number | null, signal?: string | null) => {
+      const session = pidToTrackedSession.get(pid);
+      if (session) {
+        if (session.exitCode === undefined && session.exitSignal === undefined) {
+          session.exitCode = code ?? null;
+          session.exitSignal = signal ?? null;
+        }
+        if (!session.exitReason) {
+          session.exitReason = resolveExitReason(code ?? null, signal);
+        }
+        session.exitTime = session.exitTime ?? Date.now();
+        persistSessionTagBeforeRemove(session);
+        pushRecentlyExited(session);
+        if (session.pendingArchive) {
+          // App-initiated archive (killSession RPC): do not keep in list
+          logger.debug(`[DAEMON RUN] Session ${session.happySessionId} (PID ${pid}) archived by app, removing from list`);
+          if (session.happySessionId) {
+            markSessionArchived(session.happySessionId);
+            persistNow();
+          }
+        } else {
+          // Process exited on its own (pause / signal / crash): keep visible until user archives
+          logger.debug(`[DAEMON RUN] Session ${session.happySessionId} (PID ${pid}) exited (reason: ${session.exitReason}), moving to stoppedSessions`);
+          if (session.happySessionId) {
+            stoppedSessions.set(session.happySessionId, {
+              ...session,
+              childProcess: undefined,
+              sandbox: session.happySessionMetadataFromLocalWebhook?.sandbox,
+            });
+            noteDaemonManagedLocalStop(session);
+            persistNow();
+          }
+        }
+      } else {
+        logger.debug(`[DAEMON RUN] Removing exited process PID ${pid} from tracking`);
+      }
+      pidToTrackedSession.delete(pid);
+    };
+
     const terminateTrackedProcess = (pid: number, session: TrackedSession, reason: string) => {
       logger.debug(`[DAEMON RUN] ${reason}: terminating PID ${pid}`);
       session.exitReason = reason;
@@ -1008,44 +1047,6 @@ export async function startDaemon(): Promise<void> {
     };
 
     // Handle child process exit
-    const onChildExited = (pid: number, code?: number | null, signal?: string | null) => {
-      const session = pidToTrackedSession.get(pid);
-      if (session) {
-        if (session.exitCode === undefined && session.exitSignal === undefined) {
-          session.exitCode = code ?? null;
-          session.exitSignal = signal ?? null;
-        }
-        if (!session.exitReason) {
-          session.exitReason = resolveExitReason(code ?? null, signal);
-        }
-        session.exitTime = session.exitTime ?? Date.now();
-        persistSessionTagBeforeRemove(session);
-        pushRecentlyExited(session);
-        if (session.pendingArchive) {
-          // App-initiated archive (killSession RPC): do not keep in list
-          logger.debug(`[DAEMON RUN] Session ${session.happySessionId} (PID ${pid}) archived by app, removing from list`);
-          if (session.happySessionId) {
-            markSessionArchived(session.happySessionId);
-            persistNow();
-          }
-        } else {
-          // Process exited on its own (pause / signal / crash): keep visible until user archives
-          logger.debug(`[DAEMON RUN] Session ${session.happySessionId} (PID ${pid}) exited (reason: ${session.exitReason}), moving to stoppedSessions`);
-          if (session.happySessionId) {
-            stoppedSessions.set(session.happySessionId, {
-              ...session,
-              childProcess: undefined,
-              sandbox: session.happySessionMetadataFromLocalWebhook?.sandbox,
-            });
-            noteDaemonManagedLocalStop(session);
-            persistNow();
-          }
-        }
-      } else {
-        logger.debug(`[DAEMON RUN] Removing exited process PID ${pid} from tracking`);
-      }
-      pidToTrackedSession.delete(pid);
-    };
 
     /** Remove a stopped session from the visible list (explicit user action). */
     const archiveSession = (sessionId: string): boolean => {
