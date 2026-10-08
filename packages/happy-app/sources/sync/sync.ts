@@ -35,6 +35,7 @@ import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
 import { readSessionOverLan, listSessionsOverLan, type LanConnection, type LanSessionRead } from './lan/sessionChannel';
+import { openLanSocket, type LanSocketHandle } from './lan/socket';
 import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
 import { systemPrompt } from './prompt/systemPrompt';
 import { fetchArtifact, fetchArtifacts, createArtifact, updateArtifact } from './apiArtifacts';
@@ -203,6 +204,12 @@ class Sync {
     >();
     /** Pending coalesced cache writes, one per session. */
     private cacheSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    /**
+     * The live LAN socket, when one is open. Keyed by baseUrl because the daemon's socket is
+     * machine-wide: one connection carries every session on that machine, and the App
+     * demultiplexes on `body.sid` exactly as it does for the server channel.
+     */
+    private lanSocket: { baseUrl: string; handle: LanSocketHandle } | null = null;
     /** Accumulated base64 dataEncryptionKey values from all fetchSessions responses.
      *  Merged across delta fetches so the cache always has the full key set. */
     private sessionEncryptionKeySources = new Map<string, string>();
@@ -3750,6 +3757,7 @@ class Sync {
         }
 
         const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        const machineKey = machineId ? this.getMachineKey(machineId) : null;
         // Resume where the last read stopped, and over the connection it used. Both matter: a
         // cursor keeps each poll from re-reading and re-decrypting the whole log, and the
         // connection keeps it from paying for an mDNS browse and a handshake on every tick.
@@ -3759,7 +3767,7 @@ class Sync {
             sessionId,
             machineId,
             accountPublicKey,
-            machineKey: machineId ? this.getMachineKey(machineId) : null,
+            machineKey,
             encryption: this.encryption,
             since: resumable?.cursor,
             connection: resumable?.connection,
@@ -3772,6 +3780,12 @@ class Sync {
             cursor: read.cursor,
             connection: read.connection,
         });
+        // The machine answered, so bring the live channel up alongside the poll. Fire-and-forget:
+        // polling is what keeps the session readable, and the socket only removes the delay
+        // between a message being written and being seen.
+        if (machineKey) {
+            void this.ensureLanSocket(read.connection.baseUrl, machineKey);
+        }
 
         // Dedup inside the shared pipeline is what makes `reset` safe to ignore: a full log resent
         // after a pruned cursor lands as "nothing new" rather than as duplicates.
@@ -3832,6 +3846,55 @@ class Sync {
         }
         log.log(`📡 channel for ${sessionId}: ${channel ?? 'auto'}`);
         this.getMessagesSync(sessionId).invalidate();
+    }
+
+    /**
+     * Opens the live LAN channel for a machine, if it is not already up.
+     *
+     * Frames go straight to `handleUpdate` — the same handler the server socket feeds — because
+     * the daemon emits the server's own envelope shape. That is the whole point: this channel adds
+     * no second way to interpret an update, so nothing downstream has to know which one delivered
+     * it.
+     *
+     * Failure is not an error path: polling keeps running, so a socket that cannot open or cannot
+     * stay open degrades to exactly what the channel did before it existed.
+     */
+    private async ensureLanSocket(baseUrl: string, machineKey: Uint8Array): Promise<void> {
+        if (this.lanSocket?.baseUrl === baseUrl) {
+            return;
+        }
+        this.closeLanSocket();
+
+        let opened: LanSocketHandle | null = null;
+        const handle = await openLanSocket({
+            baseUrl,
+            machineKey,
+            onUpdate: (payload) => {
+                void this.handleUpdate(payload);
+            },
+            onClosed: () => {
+                // Only clear the entry this handle owns: a replacement may already be in place.
+                // `opened` is null until the open completes, so a drop during the handshake is
+                // ignored here — that case is reported as a null return instead.
+                if (opened && this.lanSocket?.handle === opened) {
+                    log.log(`📡 LAN socket dropped (${baseUrl}); polling continues until it reopens`);
+                    this.lanSocket = null;
+                }
+            },
+        });
+        opened = handle;
+        if (handle) {
+            this.lanSocket = { baseUrl, handle };
+            log.log(`📡 LAN socket live at ${baseUrl}`);
+        }
+    }
+
+    private closeLanSocket(): void {
+        if (!this.lanSocket) {
+            return;
+        }
+        this.lanSocket.handle.close();
+        this.lanSocket = null;
     }
 
     /**
@@ -3898,6 +3961,12 @@ class Sync {
         clearInterval(timer);
         this.lanPollTimers.delete(sessionId);
         log.log(`📡 LAN mode: stopped polling ${sessionId}`);
+        // The socket is machine-wide, so it outlives any one session's use of the LAN. It goes
+        // away only when nothing is on the channel any more, or one session leaving would cut the
+        // live feed out from under the others.
+        if (this.lanPollTimers.size === 0) {
+            this.closeLanSocket();
+        }
     }
 
     //
