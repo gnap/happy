@@ -4231,9 +4231,18 @@ class Sync {
         presence?: "online" | number;
     })[], fullRefresh?: boolean) => {
         const active = storage.getState().getActiveSessions();
+        const channelBefore = new Map(sessions.map((s) => [s.id, this.preferredChannel(s.id)]));
         storage.getState().applySessions(sessions, fullRefresh);
         const newActive = storage.getState().getActiveSessions();
         this.applySessionDiff(active, newActive);
+
+        // The channel is only chosen when a read starts, so a session already open on the server
+        // would stay there after its CLI restarts and declares the LAN. Re-read it on the new one.
+        for (const [sessionId, before] of channelBefore) {
+            if (before !== 'lan' && this.preferredChannel(sessionId) === 'lan') {
+                this.messagesSync.get(sessionId)?.invalidate();
+            }
+        }
     }
 
     private applySessionDiff = (active: Session[], newActive: Session[]) => {
