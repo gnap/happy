@@ -2506,7 +2506,7 @@ class Sync {
         //
         // Falling through when the socket is closed is deliberate: the outbox still holds the
         // message, so an unavailable channel costs a retry rather than the message.
-        if (storage.getState().channelOverride[sessionId] === 'lan' && this.lanSocket) {
+        if (this.preferredChannel(sessionId) === 'lan' && this.lanSocket) {
             const socket = this.lanSocket.handle;
             const allSent = batch.every((msg) =>
                 socket.send({ sessionId, localId: msg.localId, content: msg.content })
@@ -2770,7 +2770,7 @@ class Sync {
             try {
                 // A channel is chosen per session, and everything after this point is the same
                 // whichever one it was: the read's bytes go through `ingestChannelRead`.
-                if (storage.getState().channelOverride[sessionId] === 'lan') {
+                if (this.preferredChannel(sessionId) === 'lan') {
                     await this.fetchMessagesViaLan(sessionId);
                     return;
                 }
@@ -2951,8 +2951,11 @@ class Sync {
                 // back (or the server recovers), the message sync retries on its own.
                 // Logical errors (decrypt/normalize) are swallowed — retrying them
                 // would spin forever without any chance of success.
-                // A session pinned to the server must not fall back, so the pin actually proves
-                // something when it is used to test that the LAN stays out of the way.
+                // A session committed to the server must not fall back, so a pin to `server`
+                // actually proves something when it is used to test that the LAN stays out of the
+                // way. Note this is the *pin*, not the preference: a session the preference puts
+                // on the server should still reach for the LAN when the server fails, which is
+                // how a machine that has just come onto the network gets picked up.
                 if (this.isRetryableMessageFetchError(err) && storage.getState().channelOverride[sessionId] !== 'server') {
                     // The server is unreachable. Before handing this over to the retry backoff,
                     // try the other channel: the daemon that owns this session keeps its own log
@@ -3877,6 +3880,33 @@ class Sync {
         }
         log.log(`📡 channel for ${sessionId}: ${channel ?? 'auto'}`);
         this.getMessagesSync(sessionId).invalidate();
+    }
+
+    /**
+     * Which channel a session should read and write on.
+     *
+     * A manual pin wins outright — that is what makes it a useful debug control, and a pin to
+     * `server` is how you prove the LAN is staying out of the way.
+     *
+     * Otherwise the LAN wins whenever its machine is advertising on this network. It is the same
+     * daemon on the local link with a live push instead of a poll and no round trip through the
+     * server, so when it is there it is simply the better channel. A sighting is only present
+     * while it is fresh, so a machine that leaves the network drops back to the server on the next
+     * tick without anything having to notice the departure.
+     *
+     * Requires the machine key: without it the LAN cannot authenticate, so advertising is not
+     * enough.
+     */
+    private preferredChannel(sessionId: string): 'lan' | 'server' {
+        const override = storage.getState().channelOverride[sessionId];
+        if (override) {
+            return override;
+        }
+        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        if (!machineId || !this.getMachineKey(machineId)) {
+            return 'server';
+        }
+        return storage.getState().lanSightings[machineId] ? 'lan' : 'server';
     }
 
     /**
