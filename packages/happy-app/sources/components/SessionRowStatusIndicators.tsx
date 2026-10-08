@@ -35,20 +35,11 @@ export const SessionRowStatusIndicators = React.memo(({ session, needsRestart }:
     const cronCount = session.agentState?.crons ? Object.keys(session.agentState.crons).length : 0;
     const goal = getActiveGoal(session);
 
-    let todoLabel: string | null = null;
-    if (session.todos && session.todos.length > 0) {
-        const total = session.todos.length;
-        const completed = session.todos.filter((t) => t.status === 'completed').length;
-        if (completed < total) {
-            todoLabel = `${completed}/${total}`;
-        }
-    }
-
     // Present only while the server is not serving this session and the LAN is — so it reads as
     // "you are on the fallback channel right now", not as a permanent property of the session.
     const lanServed = useSessionServedOverLan(session.id);
 
-    if (a2aUnread === 0 && !todoLabel && !needsRestart && cronCount === 0 && !goal && !lanServed) {
+    if (a2aUnread === 0 && !needsRestart && cronCount === 0 && !goal && !lanServed) {
         return null;
     }
 
@@ -58,12 +49,6 @@ export const SessionRowStatusIndicators = React.memo(({ session, needsRestart }:
                 <View style={styles.badge}>
                     <Ionicons name="wifi-outline" size={10} color={MACHINE_PRESENCE_COLORS.lan} />
                     <Text style={[styles.badgeText, { color: MACHINE_PRESENCE_COLORS.lan }]}>{t('status.lan')}</Text>
-                </View>
-            ) : null}
-            {todoLabel ? (
-                <View style={styles.badge}>
-                    <Ionicons name="bulb-outline" size={10} color={styles.badgeText.color} />
-                    <Text style={styles.badgeText}>{todoLabel}</Text>
                 </View>
             ) : null}
             {session.tasks && session.tasks.length > 0 ? (

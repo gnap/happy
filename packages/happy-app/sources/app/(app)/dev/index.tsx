@@ -7,7 +7,7 @@ import { ItemList } from '@/components/ItemList';
 import { useRouter } from 'expo-router';
 import Constants from 'expo-constants';
 import * as Application from 'expo-application';
-import { useLocalSettingMutable, useSocketStatus } from '@/sync/storage';
+import { useLanSocketStatus, useLocalSettingMutable, useSocketStatus } from '@/sync/storage';
 import { Modal } from '@/modal';
 import { sync } from '@/sync/sync';
 import { getServerUrl, setServerUrl, validateServerUrl } from '@/sync/serverConfig';
@@ -20,6 +20,7 @@ export default function DevScreen() {
     const [debugMode, setDebugMode] = useLocalSettingMutable('debugMode');
     const [verboseLogging, setVerboseLogging] = React.useState(false);
     const socketStatus = useSocketStatus();
+    const lanSocketStatus = useLanSocketStatus();
     const anonymousId = sync.encryption!.anonID;
     const { theme } = useUnistyles();
 
@@ -336,18 +337,31 @@ export default function DevScreen() {
             </ItemGroup>
 
             {/* Network */}
-            <ItemGroup title="Network">
+            <ItemGroup
+                title="Network"
+                footer="Two channels can carry a session. The server socket always exists; the LAN socket is the daemon on this network, and the app prefers it when it is up."
+            >
                 <Item
                     title="API Endpoint"
                     detail={getServerUrl()}
                     onPress={handleEditServerUrl}
-                    detailStyle={{ flex: 1, textAlign: 'right', minWidth: '70%' }}
                 />
                 <Item
-                    title="Socket.IO Status"
+                    title="Server Socket"
                     subtitle={getSocketStatusSubtitle()}
                     detail={socketStatus.status}
                     rightElement={<SocketStatusIndicator />}
+                    showChevron={false}
+                />
+                <Item
+                    title="LAN Socket"
+                    subtitle={lanSocketStatus
+                        ? `${lanSocketStatus.baseUrl} · up ${formatTimeAgo(lanSocketStatus.connectedAt)}`
+                        : 'No daemon on this network is serving an open channel'}
+                    detail={lanSocketStatus ? 'live' : 'off'}
+                    rightElement={lanSocketStatus
+                        ? <Ionicons name="checkmark-circle" size={22} color="#34C759" />
+                        : <Ionicons name="close-circle" size={22} color="#8E8E93" />}
                     showChevron={false}
                 />
                 <Item

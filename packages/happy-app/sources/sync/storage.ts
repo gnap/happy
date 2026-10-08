@@ -127,6 +127,12 @@ interface StorageState {
      */
     lanSightings: Record<string, LanSighting>;
     /**
+     * The live LAN socket, when one is open. Separate from `lanSightings` on purpose: a sighting
+     * says a daemon is advertising, this says a channel to one is actually established — which is
+     * the thing that makes messages arrive without a poll.
+     */
+    lanSocketStatus: { baseUrl: string; connectedAt: number } | null;
+    /**
      * Sessions whose messages were last supplemented from the LAN, by sessionId, with when and how
      * many. This is what makes the channel visible: without it a switch is indistinguishable from
      * the server simply having answered, which is exactly the ambiguity the feature exists to
@@ -174,6 +180,8 @@ interface StorageState {
     applyMachines: (machines: Machine[], replace?: boolean) => void;
     /** Replace the LAN sighting set with the result of one scan. */
     applyLanSightings: (sightings: LanSighting[]) => void;
+    /** Record the live LAN socket, or null once it is gone. */
+    setLanSocketStatus: (status: { baseUrl: string; connectedAt: number } | null) => void;
     /** Record that a session's messages came from the LAN. Pass null to clear (the server answered). */
     markSessionServedOverLan: (sessionId: string, result: { messages: number } | null) => void;
     applyLoaded: () => void;
@@ -539,6 +547,7 @@ export const storage = create<StorageState>()((set, get) => {
         sessions: {},
         machines: {},
         lanSightings: {},
+        lanSocketStatus: null,
         lanServed: {},
         lanSessionList: {},
         channelOverride: {},
@@ -1662,6 +1671,7 @@ export const storage = create<StorageState>()((set, get) => {
                 sessionListViewData
             };
         }),
+        setLanSocketStatus: (status) => set({ lanSocketStatus: status }),
         applyLanSightings: (sightings: LanSighting[]) => set((state) => {
             const now = Date.now();
             const next: Record<string, LanSighting> = {};
@@ -2071,6 +2081,14 @@ export function useLanSightings(): Record<string, LanSighting> {
  */
 export function useSessionServedOverLan(sessionId: string): { at: number; messages: number } | null {
     return storage(useShallow((state) => state.lanServed[sessionId] ?? null));
+}
+
+/**
+ * The live LAN socket, or null when none is open. Distinct from a `lanSightings` entry: a sighting
+ * means a daemon is advertising, this means a channel to one is actually established.
+ */
+export function useLanSocketStatus(): { baseUrl: string; connectedAt: number } | null {
+    return storage(useShallow((state) => state.lanSocketStatus));
 }
 
 /** The manually forced channel for a session, or null for automatic. */

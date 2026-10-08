@@ -3966,12 +3966,14 @@ class Sync {
                 if (opened && this.lanSocket?.handle === opened) {
                     log.log(`📡 LAN socket dropped (${baseUrl}); polling continues until it reopens`);
                     this.lanSocket = null;
+                    storage.getState().setLanSocketStatus(null);
                 }
             },
         });
         opened = handle;
         if (handle) {
             this.lanSocket = { baseUrl, handle };
+            storage.getState().setLanSocketStatus({ baseUrl, connectedAt: Date.now() });
             log.log(`📡 LAN socket live at ${baseUrl}`);
         }
     }
@@ -4005,6 +4007,7 @@ class Sync {
         }
         this.lanSocket.handle.close();
         this.lanSocket = null;
+        storage.getState().setLanSocketStatus(null);
     }
 
     /**
