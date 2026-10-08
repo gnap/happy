@@ -316,6 +316,16 @@ APP（同 LAN）:
 
 ### P3 · server 偶发挂的 fallback
 
+> **前置：会话进程必须活过 server 停机（已实施，2026-10-07）**
+>
+> 原来 `runClaude` 在 `getOrCreateSession` 失败时有条岔路：绕开 `loop` 直接跑 `claudeLocal`（起全局 Claude Code CLI），跑完 `process.exit(0)`。三个问题：它是 local 模式，**永远不切回 SDK**；它的失败（`ExitCodeError`）没有任何 catch，会一路冒到 `process.exit(1)`，**把会话连同进程一起带走**；而 App 驱动的会话本来就没有键盘前的用户，那条路对它毫无意义。
+>
+> 现在 **remote 会话**改为**原地等待**：`createBackoff` 无限重试同一 tag（5s→60s 封顶），期间不发任何会话级事件、不跑任何本地 Claude。server 一回来就继续走 `response` 之后的正常启动 → `loop` 的 remote 模式 → 新用户消息触发新 turn 走 SDK。
+>
+> **local 模式（终端手敲，`startingMode !== 'remote'`）行为不变**——那条路上确实有人在键盘前，本地跑起来是有意义的。两者天然互斥：`runClaude.ts:114` 已经禁止 daemon 起的会话用 local 模式。
+>
+> **对 App 的含义**：server 停机期间这个会话**不会出现在会话列表里**（没有 server id，无法上报），也不会发出退出事件。它只是"还没上线"，不是"死了"。
+
 | | |
 |---|---|
 | 做什么 | 端点写入 `Machine.daemonState.p2p`（**零服务端改动**，该字段是加密 opaque string，`schema.prisma:210`，App 已在消费 `daemonState`）；App 侧端点缓存；**CLI 侧 NAT keepalive**；Direct Mode 状态机 |
