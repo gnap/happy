@@ -641,6 +641,19 @@ class Sync {
         // Subscribe to updates
         this.subscribeToUpdates();
 
+        // A machine on this network gets its live channel as soon as it is seen. Waiting for a
+        // session to ask for the LAN was circular: the declaration that makes a session prefer it
+        // arrives over the very socket this would open, and until then only the slow server list
+        // could say so.
+        if (!this.lanSightingWatch) {
+            this.lanSightingWatch = storage.subscribe((state, previous) => {
+                if (state.lanSightings !== previous.lanSightings) {
+                    this.openLanSocketForSightedMachine();
+                }
+            });
+            this.openLanSocketForSightedMachine();
+        }
+
         // Sync initial PostHog opt-out state with stored settings
         if (tracking) {
             const currentSettings = storage.getState().settings;
@@ -3947,6 +3960,22 @@ class Sync {
      * Failure is not an error path: polling keeps running, so a socket that cannot open or cannot
      * stay open degrades to exactly what the channel did before it existed.
      */
+    private lanSightingWatch: (() => void) | null = null;
+
+    /** Opens the live channel to a sighted machine this device holds a key for. One socket at a time. */
+    private openLanSocketForSightedMachine(): void {
+        if (this.lanSocket) {
+            return;
+        }
+        for (const sighting of Object.values(storage.getState().lanSightings)) {
+            const machineKey = this.getMachineKey(sighting.machineId);
+            if (machineKey) {
+                void this.ensureLanSocket(sighting.baseUrl, machineKey);
+                return;
+            }
+        }
+    }
+
     private async ensureLanSocket(baseUrl: string, machineKey: Uint8Array): Promise<void> {
         if (this.lanSocket?.baseUrl === baseUrl) {
             return;
