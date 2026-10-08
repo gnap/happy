@@ -9,6 +9,8 @@ import { useHeaderHeight, useHasSidebar } from '@/utils/responsive';
 import { layout } from '@/components/layout';
 import { useUnistyles } from 'react-native-unistyles';
 import { useSidebar } from './SidebarContext';
+import { MACHINE_PRESENCE_COLORS } from '@/sync/machinePresence';
+import { t } from '@/text';
 
 interface ChatHeaderViewProps {
     title: string;
@@ -21,6 +23,13 @@ interface ChatHeaderViewProps {
     tintColor?: string;
     isConnected?: boolean;
     flavor?: string | null;
+    /**
+     * Which channel this session is pinned to. `auto` (the default) means the server with the LAN
+     * as a fallback; the other two force one and disable the other. Rendered only when
+     * `onChannelPress` is provided.
+     */
+    channel?: 'auto' | 'lan' | 'server';
+    onChannelPress?: () => void;
 }
 
 export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
@@ -32,6 +41,8 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
     avatarId,
     isConnected = true,
     flavor,
+    channel,
+    onChannelPress,
 }) => {
     const { theme } = useUnistyles();
     const router = useRouter();
@@ -126,6 +137,29 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
                     )}
                 </View>
                 
+                {onChannelPress && channel && (
+                    <Pressable
+                        onPress={onChannelPress}
+                        hitSlop={15}
+                        style={styles.channelButton}
+                        accessibilityRole="button"
+                        accessibilityLabel={`channel: ${channel}`}
+                    >
+                        <Ionicons
+                            name={channel === 'lan' ? 'wifi' : channel === 'server' ? 'cloud-outline' : 'swap-horizontal-outline'}
+                            size={16}
+                            color={channel === 'lan' ? MACHINE_PRESENCE_COLORS.lan : theme.colors.header.tint}
+                        />
+                        {/* Only the LAN pin gets a word: it reuses an existing i18n key, and the
+                            server pin is unambiguous from its icon alone. */}
+                        {channel === 'lan' && (
+                            <Text style={[styles.channelLabel, { color: MACHINE_PRESENCE_COLORS.lan }]}>
+                                {t('status.lan')}
+                            </Text>
+                        )}
+                    </Pressable>
+                )}
+
                 {avatarId && onAvatarPress && (
                     <Pressable
                         onPress={onAvatarPress}
@@ -164,6 +198,19 @@ const styles = StyleSheet.create({
     },
     backButton: {
         marginRight: 8,
+    },
+    /** Channel pin, sitting between the title and the avatar. */
+    channelButton: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 3,
+        paddingHorizontal: 6,
+        paddingVertical: 4,
+        marginRight: 4,
+    },
+    channelLabel: {
+        fontSize: 11,
+        ...Typography.default('semiBold'),
     },
     titleContainer: {
         flex: 1,

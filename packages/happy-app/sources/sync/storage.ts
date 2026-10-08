@@ -133,6 +133,17 @@ interface StorageState {
      * remove. Cleared for a session when the server answers it again.
      */
     lanServed: Record<string, { at: number; messages: number }>;
+    /**
+     * A per-session, manually forced channel. Absent means automatic: the server, falling back to
+     * the LAN when it cannot answer.
+     *
+     * This exists so the LAN path can be exercised on demand. Without it the only way to reach
+     * that path is to break the server, which makes it untestable in normal use — and an
+     * untestable fallback is one nobody finds out is broken until they need it.
+     */
+    channelOverride: Record<string, 'lan' | 'server'>;
+    /** Pass null to return the session to automatic. */
+    setSessionChannelOverride: (sessionId: string, channel: 'lan' | 'server' | null) => void;
     artifacts: Record<string, DecryptedArtifact>;  // New artifacts storage
     friends: Record<string, UserProfile>;  // All relationships (friends, pending, requested, etc.)
     users: Record<string, UserProfile | null>;  // Global user cache, null = 404/failed fetch
@@ -519,6 +530,7 @@ export const storage = create<StorageState>()((set, get) => {
         machines: {},
         lanSightings: {},
         lanServed: {},
+        channelOverride: {},
         artifacts: {},  // Initialize artifacts
         friends: {},  // Initialize relationships cache
         users: {},  // Initialize global user cache
@@ -1654,6 +1666,16 @@ export const storage = create<StorageState>()((set, get) => {
             }
             return { ...state, lanSightings: next };
         }),
+        setSessionChannelOverride: (sessionId: string, channel: 'lan' | 'server' | null) => set((state) => {
+            if (channel === null) {
+                if (!(sessionId in state.channelOverride)) {
+                    return state;
+                }
+                const { [sessionId]: _cleared, ...rest } = state.channelOverride;
+                return { ...state, channelOverride: rest };
+            }
+            return { ...state, channelOverride: { ...state.channelOverride, [sessionId]: channel } };
+        }),
         markSessionServedOverLan: (sessionId: string, result: { messages: number } | null) => set((state) => {
             if (result === null) {
                 if (!(sessionId in state.lanServed)) {
@@ -2019,6 +2041,11 @@ export function useLanSightings(): Record<string, LanSighting> {
  */
 export function useSessionServedOverLan(sessionId: string): { at: number; messages: number } | null {
     return storage(useShallow((state) => state.lanServed[sessionId] ?? null));
+}
+
+/** The manually forced channel for a session, or null for automatic. */
+export function useSessionChannelOverride(sessionId: string): 'lan' | 'server' | null {
+    return storage(useShallow((state) => state.channelOverride[sessionId] ?? null));
 }
 
 /**

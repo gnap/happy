@@ -19,7 +19,7 @@ import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { startRealtimeSession, stopRealtimeSession } from '@/realtime/RealtimeSession';
 import { gitStatusSync } from '@/sync/gitStatusSync';
 import { sessionAbort } from '@/sync/ops';
-import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionMessages, useSessionUsage, useSetting } from '@/sync/storage';
+import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionMessages, useSessionUsage, useSetting, useSessionChannelOverride } from '@/sync/storage';
 import { useSession } from '@/sync/storage';
 import { Session } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
@@ -53,6 +53,15 @@ export const SessionView = React.memo((props: { id: string }) => {
     const headerHeight = useHeaderHeight();
     const realtimeStatus = useRealtimeStatus();
     const isTablet = useIsTablet();
+    const channelOverride = useSessionChannelOverride(sessionId);
+
+    // Cycles auto → LAN → server → auto. A pin is a debug control for the LAN channel: without it
+    // the only way to reach that path is to break the server, so a broken fallback would stay
+    // invisible until the day someone actually needs it.
+    const cycleChannel = React.useCallback(() => {
+        const next = channelOverride === null ? 'lan' : channelOverride === 'lan' ? 'server' : null;
+        sync.setSessionChannel(sessionId, next);
+    }, [channelOverride, sessionId]);
 
     // Compute header props based on session state
     const headerProps = useMemo(() => {
@@ -129,6 +138,8 @@ export const SessionView = React.memo((props: { id: string }) => {
                     <ChatHeaderView
                         {...headerProps}
                         onBackPress={() => router.back()}
+                        channel={channelOverride ?? 'auto'}
+                        onChannelPress={cycleChannel}
                     />
                     {/* Voice status bar below header - not on tablet (shown in sidebar) */}
                     {!isTablet && realtimeStatus !== 'disconnected' && (

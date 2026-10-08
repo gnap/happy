@@ -2639,6 +2639,22 @@ class Sync {
             await this.acquireMessageFetchSlot();
             log.log(`💬 fetchMessages: got lock for ${sessionId}`);
             try {
+                // A manually forced LAN channel bypasses the server entirely. That is the point of
+                // the control: without it the only way to exercise the LAN path is to break the
+                // server, so a broken fallback stays invisible until the day it is needed.
+                if (storage.getState().channelOverride[sessionId] === 'lan') {
+                    const read = await this.fetchSessionFromLan(sessionId);
+                    log.log(
+                        read
+                            ? `📡 fetchMessages: forced LAN — read ${read.messages.length} message(s), ${read.decryptedCount}/${read.total} decrypted`
+                            : '📡 fetchMessages: forced LAN — nothing to read (no daemon for this session)'
+                    );
+                    if (read) {
+                        this.startLanPolling(sessionId);
+                    }
+                    return;
+                }
+
                 // --- Cache: cold-start hydration (Cursor sessions only) ---
                 // Load cache first — even if encryption isn't ready yet, cached
                 // messages provide instant display while the network fetch waits.
@@ -2821,7 +2837,9 @@ class Sync {
                 // back (or the server recovers), the message sync retries on its own.
                 // Logical errors (decrypt/normalize) are swallowed — retrying them
                 // would spin forever without any chance of success.
-                if (this.isRetryableMessageFetchError(err)) {
+                // A session pinned to the server must not fall back, so the pin actually proves
+                // something when it is used to test that the LAN stays out of the way.
+                if (this.isRetryableMessageFetchError(err) && storage.getState().channelOverride[sessionId] !== 'server') {
                     // The server is unreachable. Before handing this over to the retry backoff,
                     // try the other channel: the daemon that owns this session keeps its own log
                     // of everything the session process saw, and it may be sitting on this very
@@ -3696,6 +3714,23 @@ class Sync {
             `(${read.decryptedCount}/${read.total} decrypted, tag ${read.tag})`
         );
         return read;
+    }
+
+    /**
+     * Pin a session to one channel, or return it to automatic with null.
+     *
+     * Invalidates the message sync so the choice takes effect now rather than at the next
+     * scheduled fetch — a control that appears to do nothing for several seconds is worse than
+     * no control.
+     */
+    setSessionChannel(sessionId: string, channel: 'lan' | 'server' | null): void {
+        storage.getState().setSessionChannelOverride(sessionId, channel);
+        if (channel !== 'lan') {
+            // Leaving the LAN: a poll started by an earlier fallback must not outlive the choice.
+            this.stopLanPolling(sessionId);
+        }
+        log.log(`📡 channel for ${sessionId}: ${channel ?? 'auto'}`);
+        this.getMessagesSync(sessionId).invalidate();
     }
 
     /** How often to re-read the LAN while the server is unavailable. */
