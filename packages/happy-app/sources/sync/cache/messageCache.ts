@@ -33,6 +33,15 @@ import { log } from '@/log';
  */
 export function isCacheEnabled(session: Session | null | undefined): boolean {
     const flavor = session?.metadata?.flavor;
+    // `flavor` is nullish in the schema, so "not set" and "not one of ours" are different states
+    // and only the second is a reason to decline. Nothing in the cache is flavor-specific — it
+    // holds normalized, already-reduced messages and the reducer state that produced them, and
+    // both are read the same way whatever wrote them. Routing "unknown" into the same branch as
+    // "unsupported" silently leaves those sessions with no cache at all, which is the cold-start
+    // jank the cache exists to prevent, with no log line saying why.
+    if (flavor === null || flavor === undefined) {
+        return true;
+    }
     return flavor === 'cursor' || flavor === 'acp-cursor' || flavor === 'claude';
 }
 
@@ -98,10 +107,18 @@ export async function loadMessageCache(session: Session): Promise<LoadedCache | 
             return null;
         }
 
+        // The version belongs to the *reducer state* serializer, not to the message rows, which are
+        // stored separately and are already-reduced plain data this build still knows how to read.
+        // `deserializeReducerStateOrCreate` below already falls back to a fresh state on a mismatch,
+        // so the messages are still worth hydrating. Discarding the row instead — as this used to,
+        // deleting it for good measure — blanks the screen and refetches everything, for *every*
+        // session at once and on every serializer change: precisely the cold-start jank the cache
+        // exists to prevent, inflicted wholesale by a version bump.
         if (cacheRow.schemaVersion !== SERIALIZER_SCHEMA_VERSION) {
-            log.log(`📦 messageCache: schema mismatch for ${session.id}, clearing stale cache`);
-            await db.clearSessionCache(session.id);
-            return null;
+            log.log(
+                `📦 messageCache: reducer schema v${cacheRow.schemaVersion} != v${SERIALIZER_SCHEMA_VERSION} for ${session.id};` +
+                ' keeping the messages, restarting the reducer'
+            );
         }
 
         const messages = await db.getSessionMessages(session.id);
