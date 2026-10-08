@@ -7,7 +7,7 @@ import { ItemList } from '@/components/ItemList';
 import { useRouter } from 'expo-router';
 import Constants from 'expo-constants';
 import * as Application from 'expo-application';
-import { useLanSocketStatus, useLocalSettingMutable, useSocketStatus } from '@/sync/storage';
+import { useLanSightings, useLanSocketStatus, useLocalSettingMutable, useSocketStatus } from '@/sync/storage';
 import { Modal } from '@/modal';
 import { sync } from '@/sync/sync';
 import { getServerUrl, setServerUrl, validateServerUrl } from '@/sync/serverConfig';
@@ -21,6 +21,7 @@ export default function DevScreen() {
     const [verboseLogging, setVerboseLogging] = React.useState(false);
     const socketStatus = useSocketStatus();
     const lanSocketStatus = useLanSocketStatus();
+    const lanSightingCount = Object.keys(useLanSightings()).length;
     const anonymousId = sync.encryption!.anonID;
     const { theme } = useUnistyles();
 
@@ -339,7 +340,7 @@ export default function DevScreen() {
             {/* Network */}
             <ItemGroup
                 title="Network"
-                footer="Two channels can carry a session. The server socket always exists; the LAN socket is the daemon on this network, and the app prefers it when it is up."
+                footer="Reachability and use are different things: a daemon can be advertising while no session is using it — the socket only opens for a session whose machine is on this network and whose CLI declared it can serve one. So an idle socket is not a broken one."
             >
                 <Item
                     title="API Endpoint"
@@ -354,14 +355,25 @@ export default function DevScreen() {
                     showChevron={false}
                 />
                 <Item
+                    title="LAN Discovery"
+                    subtitle={lanSightingCount > 0
+                        ? `${lanSightingCount} daemon${lanSightingCount === 1 ? '' : 's'} advertising on this network`
+                        : 'No daemon advertising on this network'}
+                    detail={String(lanSightingCount)}
+                    rightElement={lanSightingCount > 0
+                        ? <Ionicons name="checkmark-circle" size={22} color="#34C759" />
+                        : <Ionicons name="close-circle" size={22} color="#8E8E93" />}
+                    showChevron={false}
+                />
+                <Item
                     title="LAN Socket"
                     subtitle={lanSocketStatus
                         ? `${lanSocketStatus.baseUrl} · up ${formatTimeAgo(lanSocketStatus.connectedAt)}`
-                        : 'No daemon on this network is serving an open channel'}
-                    detail={lanSocketStatus ? 'live' : 'off'}
+                        : 'Idle — opens when a session here can use it'}
+                    detail={lanSocketStatus ? 'live' : 'idle'}
                     rightElement={lanSocketStatus
                         ? <Ionicons name="checkmark-circle" size={22} color="#34C759" />
-                        : <Ionicons name="close-circle" size={22} color="#8E8E93" />}
+                        : <Ionicons name="ellipse-outline" size={22} color="#8E8E93" />}
                     showChevron={false}
                 />
                 <Item
