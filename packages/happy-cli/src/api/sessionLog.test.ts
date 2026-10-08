@@ -23,7 +23,7 @@ vi.mock('@/ui/logger', () => ({
     logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
 }));
 
-import { appendSessionLog, readSessionLog, sessionLogDir, pruneSessionLogs, type SessionLogEntry } from './sessionLog';
+import { appendSessionLog, readSessionLog, readSessionLogSince, sessionLogDir, pruneSessionLogs, type SessionLogEntry } from './sessionLog';
 
 let home: string;
 /** Distinct tag per test: the torn-tail check is memoised per path within a process. */
@@ -132,5 +132,73 @@ describe('sessionLog', () => {
 
         expect(readSessionLog(stale, SITE)).toEqual([]);
         expect(readSessionLog(kept, SITE)).toEqual([entry(2)]);
+    });
+
+    describe('incremental reads', () => {
+        // Without these the LAN client re-reads and re-decrypts the whole log on every poll, so
+        // the cost of a tick grows with the session. The cursor is what makes polling affordable.
+
+        it('returns only what was appended after the cursor', () => {
+            const tag = tagFor('cursor');
+            appendSessionLog(tag, SITE, entry(1));
+
+            const first = readSessionLogSince(tag, SITE);
+            expect(first.entries).toEqual([entry(1)]);
+            expect(first.reset).toBe(false);
+
+            appendSessionLog(tag, SITE, entry(2));
+            const second = readSessionLogSince(tag, SITE, first.cursor);
+            expect(second.entries).toEqual([entry(2)]);
+            expect(second.reset).toBe(false);
+        });
+
+        it('returns nothing when nothing was appended', () => {
+            const tag = tagFor('idle');
+            appendSessionLog(tag, SITE, entry(1));
+
+            const idle = readSessionLogSince(tag, SITE, readSessionLogSince(tag, SITE).cursor);
+            expect(idle.entries).toEqual([]);
+            expect(idle.reset).toBe(false);
+        });
+
+        it('falls back to the whole log when the cursor is unusable', () => {
+            const tag = tagFor('garbage');
+            appendSessionLog(tag, SITE, entry(1));
+
+            const page = readSessionLogSince(tag, SITE, 'not-a-cursor');
+            expect(page.entries).toEqual([entry(1)]);
+            expect(page.reset).toBe(true);
+        });
+
+        it('reports a reset when the cursor segment has been pruned away', () => {
+            process.env.HAPPY_SESSION_LOG_SEGMENT_BYTES = '1';
+            process.env.HAPPY_SESSION_LOG_KEEP_SEGMENTS = '1';
+            const tag = tagFor('pruned');
+
+            appendSessionLog(tag, SITE, entry(1));
+            const first = readSessionLogSince(tag, SITE);
+
+            // The next append rotates into a new segment and drops the one the cursor points at.
+            appendSessionLog(tag, SITE, entry(2));
+
+            const page = readSessionLogSince(tag, SITE, first.cursor);
+            expect(page.reset).toBe(true);
+            expect(page.entries).toEqual([entry(2)]);
+        });
+
+        it('holds the cursor before a torn line so the repair is still delivered', () => {
+            const tag = tagFor('torn-cursor');
+            appendSessionLog(tag, SITE, entry(1));
+
+            const dir = sessionLogDir(tag, SITE);
+            appendFileSync(join(dir, readdirSync(dir)[0]), '{"id":"id-2"');
+
+            const page = readSessionLogSince(tag, SITE);
+            expect(page.entries).toEqual([entry(1)]);
+
+            // The writer drops the partial line; whatever lands there next must not be skipped.
+            appendSessionLog(tag, SITE, entry(3));
+            expect(readSessionLogSince(tag, SITE, page.cursor).entries).toEqual([entry(3)]);
+        });
     });
 });

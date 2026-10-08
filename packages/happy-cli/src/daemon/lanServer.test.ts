@@ -19,9 +19,13 @@ const HISTORY: LanHistory = {
     tag: 'tag-1',
     dataEncryptionKey: 'WRAPPED-KEY',
     entries: [{ id: 'id-1', localId: 'local-1', dir: 'out', at: 1, c: 'CIPHER-1' }],
+    cursor: '0:1',
+    reset: false,
 };
 /** Mutable so a test can simulate a session whose history this machine does not have. */
 let history: LanHistory | null = HISTORY;
+/** What the route passed down, so the cursor plumbing can be asserted rather than assumed. */
+let lastSince: string | undefined;
 
 let server: LanServerHandle | null = null;
 
@@ -31,7 +35,10 @@ async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
         machineId: 'machine-1',
         accountFingerprint: 'acct-fingerprint',
         getSessions: () => SESSIONS,
-        getHistory: () => history,
+        getHistory: (_sessionId, since) => {
+            lastSince = since;
+            return history;
+        },
         host: '127.0.0.1',
         port: 0,
         limits,
@@ -184,6 +191,28 @@ describe('lanServer read-only API', () => {
             const res = await fetch(url(path), { method: 'POST', ...authorized(token) });
             expect(res.status, `${path} must not exist`).toBe(404);
         }
+    });
+
+    describe('incremental history', () => {
+        it('passes the cursor through to the log reader and returns the next one', async () => {
+            await start();
+            const token = await getToken();
+
+            const res = await fetch(url('/lan/sessions/sess-1/history?since=0:5'), authorized(token));
+
+            expect(lastSince).toBe('0:5');
+            const body = (await res.json()) as { cursor: string };
+            expect(body.cursor).toBe('0:1');
+        });
+
+        it('omits the cursor on a first read', async () => {
+            await start();
+            const token = await getToken();
+
+            await fetch(url('/lan/sessions/sess-1/history'), authorized(token));
+
+            expect(lastSince).toBeUndefined();
+        });
     });
 
     describe('CORS', () => {

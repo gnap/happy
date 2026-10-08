@@ -67,8 +67,16 @@ export type LanHistory = {
    * its unwrapping code unchanged. The machine key plays no part in reading message content.
    */
   dataEncryptionKey: string;
-  /** Ciphertext entries exactly as they crossed the wire. */
+  /** Ciphertext entries exactly as they crossed the wire — only those written after `since`. */
   entries: SessionLogEntry[];
+  /**
+   * Opaque position to pass back as `?since=` for the next read. Without it a polling client
+   * re-fetches and re-decrypts the entire log on every tick, which is the difference between a
+   * fallback that is merely slower than the server and one that is unusable.
+   */
+  cursor: string;
+  /** True when `since` could not be honoured, so `entries` is the whole log, not a continuation. */
+  reset: boolean;
 };
 
 export type LanServerOptions = {
@@ -83,7 +91,7 @@ export type LanServerOptions = {
    * have reported its tag yet, or its key may be gone. Injected so this module keeps knowing
    * nothing about configuration or the filesystem.
    */
-  getHistory: (sessionId: string) => LanHistory | null;
+  getHistory: (sessionId: string, since?: string) => LanHistory | null;
   /** Defaults to all interfaces. See the binding caveat in the module docs. */
   host?: string;
   /** Defaults to 0 — the OS assigns one, and mDNS advertises it. */
@@ -291,7 +299,8 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       return reply.code(401).send({ error: 'unauthorized' });
     }
     const { sessionId } = request.params as { sessionId: string };
-    const history = opts.getHistory(sessionId);
+    const { since } = request.query as { since?: string };
+    const history = opts.getHistory(sessionId, since);
     if (!history) {
       // 404 rather than an empty list: the client should retry later, not record "no history".
       return reply.code(404).send({ error: 'no local history for that session' });
