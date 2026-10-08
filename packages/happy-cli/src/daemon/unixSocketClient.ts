@@ -124,6 +124,23 @@ export function startUnixSocketClient(
 }
 
 /**
+ * Forwards one server-shaped update body to the daemon, for it to mirror onto its LAN socket.
+ *
+ * Fire-and-forget on purpose: the LAN channel is a *mirror*, so a frame lost here must never
+ * affect the session's own path to the server, which is the one that actually delivers work. A
+ * reader that misses a frame catches up from the session log on its next read.
+ *
+ * Returns false when there is no daemon socket — the session still runs, just without a mirror.
+ */
+export function forwardSessionEventToDaemon(event: Record<string, unknown>): boolean {
+    if (!state.socket) {
+        return false;
+    }
+    send(state.socket, { type: 'session-event', event });
+    return true;
+}
+
+/**
  * Check if daemon is reachable via Unix socket without registering.
  */
 export function isDaemonReachable(): Promise<boolean> {

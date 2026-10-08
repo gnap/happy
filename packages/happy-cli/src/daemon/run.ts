@@ -1205,7 +1205,15 @@ export async function startDaemon(): Promise<void> {
     // Start Unix Domain Socket server for real-time daemon ↔ session IPC.
     // Sessions connect on startup and register via { type: 'hello' }.
     // Replaces the periodic HTTP webhook for registration and heartbeat.
-    const { stop: stopSocketServer, socketPath, isSessionConnected } = startUnixSocketServer({
+    const { stop: stopSocketServer, socketPath, isSessionConnected, sendToSession } = startUnixSocketServer({
+      onSessionEvent(sessionId, event) {
+        // The fan-out point for the LAN socket: a session forwarding one of its own server-shaped
+        // updates so a LAN reader can see it live. The daemon has no other view of session traffic
+        // — the session talks to the server directly — so this is the only source for it.
+        //
+        // Nothing subscribes yet: the LAN WebSocket that would consume it is the next piece.
+        logger.debug(`[DAEMON RUN] Session event from ${sessionId}: ${String(event.t)}`);
+      },
       onSessionHello(_sock, msg) {
         const { sessionId, pid, sessionTag, metadata } = msg;
         if (!sessionId || !pid) return;
