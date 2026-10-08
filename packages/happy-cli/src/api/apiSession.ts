@@ -18,6 +18,7 @@ import { isNode } from '@/utils/runtime';
 import { RpcHandlerManager } from './rpc/RpcHandlerManager';
 import { registerCommonHandlers } from '../modules/common/registerCommonHandlers';
 import { calculateCost } from '@/utils/pricing';
+import { forwardSessionEventToDaemon } from '@/daemon/unixSocketClient';
 import { type SessionEnvelope, type SessionTurnEndStatus } from '@slopus/happy-wire';
 import {
     closeClaudeTurnWithStatus,
@@ -685,6 +686,14 @@ export class ApiSessionClient extends EventEmitter {
                     logger.debug('[SOCKET] [UPDATE] [ERROR] No body in update!');
                     return;
                 }
+
+                // Mirror every update onto the daemon's LAN socket, before any branching — a body
+                // this session does not recognise should still reach a LAN reader, since the
+                // daemon re-wraps it untouched and the App decides what it means. This is the one
+                // place the session holds the server's own shape, which is what the LAN channel
+                // needs to stay transparent; it never sees a frame the daemon would have to
+                // re-derive. Fire-and-forget: the LAN is a mirror and must not affect this path.
+                forwardSessionEventToDaemon(data.body as unknown as Record<string, unknown>);
 
                 if (data.body.t === 'new-message') {
                     const messageSeq = data.body.message?.seq;
