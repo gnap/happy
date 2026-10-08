@@ -196,7 +196,10 @@ export async function saveMessageCache(
     }
 
     try {
+        const started = Date.now();
         const db = getSessionCacheDB();
+        const reducerStateJson = serializeReducerStateToJson(reducerState);
+        const stateMs = Date.now() - started;
         await db.saveSessionCache(
             {
                 sessionId: session.id,
@@ -205,11 +208,13 @@ export async function saveMessageCache(
                 hasOlderMessages,
                 schemaVersion: SERIALIZER_SCHEMA_VERSION,
                 cachedAt: Date.now(),
-                reducerStateJson: serializeReducerStateToJson(reducerState),
+                reducerStateJson,
             },
             messages,
         );
-        log.log(`📦 messageCache: saved ${messages.length} messages for ${session.id} (lastSeq=${lastSeq}, oldestSeq=${oldestSeq}, hasOlderMessages=${hasOlderMessages})`);
+        const totalMs = Date.now() - started;
+        const slow = totalMs > 200 ? ` in ${totalMs}ms (reducer state ${stateMs}ms)` : '';
+        log.log(`📦 messageCache: saved ${messages.length} messages for ${session.id} (lastSeq=${lastSeq}, oldestSeq=${oldestSeq}, hasOlderMessages=${hasOlderMessages})${slow}`);
         notifyCachedLastSeq(session.id, lastSeq);
     } catch (err) {
         log.log(`📦 messageCache: save error for ${session.id}: ${err}`);
