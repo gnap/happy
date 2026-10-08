@@ -305,7 +305,7 @@ APP（同 LAN）:
 |---|---|
 | 做什么 | 端点写入 `Machine.daemonState.p2p`（**零服务端改动**，该字段是加密 opaque string，`schema.prisma:210`，App 已在消费 `daemonState`）；App 侧端点缓存；**CLI 侧 NAT keepalive**；Direct Mode 状态机 |
 | 触发 | `ConnectionStatus`（`apiSocket.ts:41`）进入 `error` / `disconnected` 且超 5–8s → Direct Mode。**`auth_error` 不触发**（凭证问题，P2P 救不了） |
-| 连接顺序 | mDNS 重查 → 缓存 `lastSuccess` → 缓存 LAN → 缓存 srflx/ipv6 → 降级提示 |
+| 连接顺序 | ~~mDNS 重查 → 缓存 `lastSuccess` → 缓存 LAN → 缓存 srflx/ipv6 → 降级提示~~ **⚠️ 已被 §十一 取代**：LAN 不再是"挂掉后的备胎"，而是**可达即优先**的完整通道（实时 socket + 可发送 + 投递裁决）。实测原模型的触发条件（服务器**失败**）在这条网络上永不成立 —— 服务器是慢，不是挂。 |
 | **成败关键** | **CLI 每 ~20s 发一次 STUN binding request 维持 NAT 映射。** 没有它，srflx 缓存几分钟即失效，整个 fallback 形同虚设 |
 | server | 0 |
 | 验收 | server 断开后同 LAN 100% 可用；跨网未换网场景成功率达标；**降级时用户看到明确提示，不静默失败** |
@@ -477,6 +477,72 @@ happy-mach-spike-001._happy._tcp.local. can be reached at happy-mach-spike-001.l
 | 新增验证脚本 | `packages/happy-cli/scripts/spike-mdns-ciao.mjs` |
 
 > **App 侧（`react-native-zeroconf` + 真机构建）不在 `feature/cursor-agent` 分支实施。** 本期只做 CLI 侧验证与选型；App 侧留待后续分支，届时只需：`NSBonjourServices` 追加 `_happy._tcp`、引入 zeroconf 库、一次真机验证。
+
+---
+
+## 十一、LAN 通道的实施结果（2026-10-08）
+
+> 这一节取代 P3 里「连接顺序：mDNS 重查 → 缓存 lastSuccess → 缓存 LAN → …」的模型。那个模型把 LAN 当作 server 挂掉后的备胎；实际做出来的是**可达即优先**的完整通道。
+
+### 11.1 为什么改了模型：原触发条件在这条网络上永不成立
+
+原设计的自动切换挂在**服务器调用失败**上（`isRetryableMessageFetchError`）。实测（2026-10-08）：
+
+| 观测 | 结果 |
+|---|---|
+| 服务器**慢**（单次请求 480s、普遍数百 ms～数十 s） | ✅ 是 |
+| 服务器**失败** | ❌ 否，慢但最终成功 |
+| 自动回落实际触发次数 | **0**（成功与失败路径都是 0 —— 唯一入口是手动 pin） |
+
+**慢不等于失败**，所以 LAN 通道在这台机器上从未被自动使用过。附带后果：`ensureLanSocket` 挂在"成功读取 LAN 之后"，于是**实时 socket 也连带不会启动**。
+
+现在的规则：**手动 pin 最高优先（双向）；否则机器有新鲜 LAN 目击即用 LAN**。目击会过期，所以机器离开网络后下一个 tick 自动回到服务器，不需要任何东西主动察觉离开。
+
+### 11.2 实时通道：协议与 server 同形
+
+`GET /lan/socket`，帧格式 `{event, payload}`。daemon 用 **server 自己的 `update` 信封**广播会话更新，因此 App 把这些帧直接喂给 `handleUpdate` —— 与服务器 channel 同一个处理器，下游不需要知道来源。
+
+- 一条 socket 服务**整台机器**（daemon 的 socket 是 machine-wide），App 按 `body.sid` 分流
+- **不要重编 `seq`**：socket 的 `seq` 是用户级、`message.seq` 是会话级且 App 用它排序；daemon 的外层 `seq` 填 0，App 明确忽略它
+- 密文原样透传，App 用已持有密钥自行解密 —— LAN 是明文 HTTP，这点不能松
+
+### 11.3 鉴权：升级时消费一次 proof，不签发 token
+
+`POST /lan/challenge` 拿 nonce → 算出 proof → 放进 WS 升级请求 → 服务端校验并**消费** nonce（无论成败），**不签发任何 token**。
+
+WebSocket 结构上比 HTTP 更优：**在升级时认证一次，之后通道本身就是已认证的**，没有可嗅探的短命凭据。HTTP 读路由仍在用 bearer token，属于过渡遗留。
+
+### 11.4 前提：daemon 看不到会话流量
+
+**这是整套方案的门槛，务必先理解**：会话进程自己连服务器（session-scoped socket），daemon 是另一个 machine-scoped socket，只收 `update-machine`。daemon 唯一能看到会话密文的地方是**磁盘日志**，而那是"写入方可读"的契约、不是通知通道。
+
+所以 daemon 托管的 LAN socket 要承载实时消息，**必须新增 session→daemon 转发出腿**：会话把它收到的 server 形状 update body 转发给 daemon，daemon 重新包装广播。做成 fire-and-forget —— LAN 是镜像，丢帧不能影响会话通往服务器的那条正路。
+
+### 11.5 投递裁决：写入不等于送达
+
+App 原本照抄服务器路径的**乐观 ack**。那在服务器路径成立是因为服务器会回显；**LAN 这条路上没有任何东西确认写入** —— 于是"送达"与"静默丢弃"在 App 看来一样（实测：跑旧 bundle 的会话不认识 `deliver` 帧，消息就是这样被静默丢掉的）。
+
+现在由**会话回报结果**（只有会话知道消息是否真的进了 agent），daemon 转达给 LAN 读者；App 据此 ack 或标记失败，且**等待有界**（15s），否则一个永不来的裁决会让消息卡在"发送中"—— 一个清不掉的转圈。
+
+### 11.6 能力声明：为什么不能用版本门
+
+`agentState.lanSocket` 由支持 LAN socket 的 CLI 声明。**不能推断版本**，理由是实测的：
+
+`BUILD_VERSION` 形如 `0.14.0-<gitSha>`，`compareVersions` 会**剥掉 `-` 后缀**只比 `0.14.0`；而**包版本号在两次构建之间不变**，变的只有 sha（并非 semver，无法排序）。结果：一个跑着旧 bundle 的会话报的也是 `0.14.0`，与阈值比较**相等 → 通过门槛 → 误判为支持 LAN**。
+
+还必须走 `agentState`（而非 LAN 自身）：客户端**必须在选通道之前**知道能力，不能"上了 LAN 才知道能不能用 LAN"。agentState 走服务器，来得及。
+
+**缺失即不支持**（旧会话留在服务器）。**但故障回落不加这个 gate** —— 服务器不可达时正是 LAN 最有价值的时刻，用一条那个会话当时根本发不出来的声明去挡住它，就本末倒置了。
+
+### 11.7 落地时踩到的两个坑（都会静默失效）
+
+1. **分块边界解码**：daemon 与会话两侧都用 `Buffer.toString('utf8')`，帧跨 TCP chunk 时会**切断多字节字符**，产生替换字符导致 JSON 解析失败；会话侧还缺行缓冲。此前没暴露是因为所有帧都是小 ASCII（hello/heartbeat/goodbye），**第一个携带真实载荷的帧**（转发的中文 update body）才踩到。两侧改用 `StringDecoder`。
+2. **`ws` 把文本帧以 `Buffer` 投递，不是字符串**。用 `typeof raw !== 'string'` 过滤会**静默丢掉每一帧**。测试抓到了它。
+
+### 11.8 已知残留
+
+- **偶发坏帧**：daemon 启动时个别 `hello` 帧解析失败（会话仍通过 HTTP webhook 与第二次 socket hello 正常注册，不影响功能）。坏帧日志已改为记录 head + tail + 长度 + 解析错误 —— 截断的前 80 字符无法区分"被撕裂/被重复/真畸形"，这正是它此前查不出来的原因。
+- **HTTP 读路由 + bearer token** 尚未收敛到 proof-only。
 
 ---
 
