@@ -7,9 +7,6 @@ import { Session } from '@/sync/storageTypes';
 import { getSessionA2AUnreadCount } from '@/utils/sessionUtils';
 import { GOAL_STATUS_ICONS, getActiveGoal } from '@/utils/goalUtils';
 import { StyleSheet } from 'react-native-unistyles';
-import { useSessionServedOverLan } from '@/sync/storage';
-import { MACHINE_PRESENCE_COLORS } from '@/sync/machinePresence';
-import { t } from '@/text';
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -35,22 +32,12 @@ export const SessionRowStatusIndicators = React.memo(({ session, needsRestart }:
     const cronCount = session.agentState?.crons ? Object.keys(session.agentState.crons).length : 0;
     const goal = getActiveGoal(session);
 
-    // Present only while the server is not serving this session and the LAN is — so it reads as
-    // "you are on the fallback channel right now", not as a permanent property of the session.
-    const lanServed = useSessionServedOverLan(session.id);
-
-    if (a2aUnread === 0 && !needsRestart && cronCount === 0 && !goal && !lanServed) {
+    if (a2aUnread === 0 && !needsRestart && cronCount === 0 && !goal) {
         return null;
     }
 
     return (
         <View style={styles.container}>
-            {lanServed ? (
-                <View style={styles.badge}>
-                    <Ionicons name="wifi-outline" size={10} color={MACHINE_PRESENCE_COLORS.lan} />
-                    <Text style={[styles.badgeText, { color: MACHINE_PRESENCE_COLORS.lan }]}>{t('status.lan')}</Text>
-                </View>
-            ) : null}
             {session.tasks && session.tasks.length > 0 ? (
                 <View style={styles.badge}>
                     <Ionicons name="checkmark-circle-outline" size={10} color={styles.badgeText.color} />

@@ -2076,14 +2076,6 @@ export function useLanSightings(): Record<string, LanSighting> {
 }
 
 /**
- * Whether this session's messages currently come from the LAN rather than the server, and how
- * many arrived that way. `null` means the server is serving it (the normal case).
- */
-export function useSessionServedOverLan(sessionId: string): { at: number; messages: number } | null {
-    return storage(useShallow((state) => state.lanServed[sessionId] ?? null));
-}
-
-/**
  * The live LAN socket, or null when none is open. Distinct from a `lanSightings` entry: a sighting
  * means a daemon is advertising, this means a channel to one is actually established.
  */
