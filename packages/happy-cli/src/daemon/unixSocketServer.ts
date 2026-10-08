@@ -123,6 +123,10 @@ export function startUnixSocketServer(callbacks: {
                         case 'session-event':
                             // Liveness is implied by the heartbeat, so this frame only carries the
                             // body; a malformed one is dropped rather than tearing down the socket.
+                            logger.debug(
+                                `[UNIX SOCKET] session-event from ${state.sessionId} for ${String(msg.event?.t)}` +
+                                `${state.sessionId ? '' : ' (dropped: not registered)'}${msg.event ? '' : ' (dropped: no event)'}`,
+                            );
                             if (state.sessionId && msg.event) {
                                 callbacks.onSessionEvent(state.sessionId, msg.event);
                             }
