@@ -170,7 +170,8 @@ export function forwardSessionEventToDaemon(event: Record<string, unknown>): boo
         logger.debug(`[UNIX CLIENT] forward ${String(event.t)} skipped: socket state ${state.socket.readyState}`);
         return false;
     }
-    logger.debug(`[UNIX CLIENT] forward ${String(event.t)} (${JSON.stringify(event).length} bytes)`);
+    // No log on the success path: this runs once per incoming update, and the volume would bury
+    // the skips above, which are the ones worth seeing.
     send(state.socket, { type: 'session-event', event });
     return true;
 }
