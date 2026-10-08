@@ -201,6 +201,8 @@ class Sync {
         string,
         { machineId: string; cursor: string; connection: LanConnection }
     >();
+    /** Pending coalesced cache writes, one per session. */
+    private cacheSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
     /** Accumulated base64 dataEncryptionKey values from all fetchSessions responses.
      *  Merged across delta fetches so the cache always has the full key set. */
     private sessionEncryptionKeySources = new Map<string, string>();
@@ -309,6 +311,9 @@ class Sync {
                 });
             } else {
                 log.log(`📱 App state changed to: ${nextAppState}`);
+                // A coalesced cache write may be waiting on a timer that suspension will not run.
+                // This is the last reliable moment before the App can be killed, so write now.
+                this.flushPendingCacheSaves();
                 // Stop reconnection timers while suspended to avoid waking the
                 // JS thread unnecessarily. A live connected socket is preserved so a short trip
                 // to the background can resume on it — but `osSuspend` also arms a delayed reset,
@@ -770,6 +775,53 @@ class Sync {
      * Persist the current in-memory state for a session to SQLite.
      * Called after resolving lazy tool content so the full content is saved to cache.
      */
+    /**
+     * How long a burst of changes is allowed to coalesce before it is written.
+     *
+     * Long enough that a turn's worth of messages costs one write rather than one per message,
+     * short enough that a force-quit shortly after reading loses little. Backgrounding flushes
+     * immediately, which is the case a timer alone would lose.
+     */
+    private static readonly CACHE_SAVE_DEBOUNCE_MS = 1_500;
+
+    /**
+     * Schedules a cache write for a session, coalescing a burst into one.
+     *
+     * Persisting used to happen only after a *successful* server fetch, so a fetch that failed —
+     * routine on a slow network, and the normal state of affairs during an outage — left whatever
+     * had arrived meanwhile in memory alone. Killing the App then lost it, which is exactly the
+     * "restart and it has to fetch everything again" jank. Tying the write to the store changing,
+     * rather than to one channel's request succeeding, is what keeps the data and what keeps the
+     * cache indifferent to which channel delivered it.
+     */
+    private scheduleCacheSave(sessionId: string): void {
+        if (this.cacheSaveTimers.has(sessionId)) {
+            return;
+        }
+        const timer = setTimeout(() => {
+            this.cacheSaveTimers.delete(sessionId);
+            void this.saveSessionCache(sessionId);
+        }, Sync.CACHE_SAVE_DEBOUNCE_MS);
+        // Node/web only; keeps the timer from holding the process open in tests.
+        (timer as unknown as { unref?: () => void }).unref?.();
+        this.cacheSaveTimers.set(sessionId, timer);
+    }
+
+    /** Writes every pending save now, for the paths where a timer would not survive. */
+    private flushPendingCacheSaves(): void {
+        const pending = Array.from(this.cacheSaveTimers.keys());
+        for (const sessionId of pending) {
+            const timer = this.cacheSaveTimers.get(sessionId);
+            if (timer) {
+                clearTimeout(timer);
+                this.cacheSaveTimers.delete(sessionId);
+            }
+        }
+        for (const sessionId of pending) {
+            void this.saveSessionCache(sessionId);
+        }
+    }
+
     saveSessionCache = async (
         sessionId: string,
         /**
@@ -780,6 +832,15 @@ class Sync {
          */
         watermark?: { lastSeq: number; oldestSeq: number; hasOlderMessages: boolean },
     ): Promise<void> => {
+        // This write supersedes any queued one: it is either the same state or a more precise
+        // statement of it (a paged fetch knows the window better than the store does), so leaving
+        // the timer armed would only write again a second later.
+        const queued = this.cacheSaveTimers.get(sessionId);
+        if (queued) {
+            clearTimeout(queued);
+            this.cacheSaveTimers.delete(sessionId);
+        }
+
         const state = storage.getState();
         const session = state.sessions[sessionId];
         const sessionMsgs = state.sessionMessages[sessionId];
@@ -3718,10 +3779,8 @@ class Sync {
             messages: read.messages,
             sessionKey: read.sessionKey,
         });
-        if (fresh > 0) {
-            // Persist only on change: a tick with nothing new must not touch SQLite every 2s.
-            void this.saveSessionCache(sessionId);
-        }
+        // No explicit persist here: `ingestChannelRead` schedules one when the store changed, and
+        // a tick with nothing new costs no write at 2s intervals.
         storage.getState().markSessionServedOverLan(sessionId, { messages: read.messages.length });
         log.log(
             `📡 fetchSessionFromLan: ${read.messages.length} read, ${fresh} new ` +
@@ -3882,6 +3941,10 @@ class Sync {
             return 0;
         }
         this.applyMessages(sessionId, fresh);
+        // Persist because the store changed, not because a request succeeded — see
+        // `scheduleCacheSave`. This is what makes the cache independent of which channel
+        // delivered the messages, and of whether that channel's fetch also went through.
+        this.scheduleCacheSave(sessionId);
         return fresh.length;
     }
 
