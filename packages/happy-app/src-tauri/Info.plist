@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Merged into the generated Info.plist for macOS bundles (Tauri picks up an `Info.plist` sitting
+  next to tauri.conf.json — see the MacConfig.infoPlist note in the CLI's config schema).
+
+  These two keys are the prerequisite for local network access on macOS. Without them the system
+  never shows the Local Network prompt, the app never appears under Privacy & Security, and
+  multicast fails silently — which presents as "discovery finds nothing" with no error anywhere.
+  That is exactly the LAN fallback being dead.
+
+  Note this is only the declaration half. A Finder-launched bundle also needs a real signing
+  identity: the LAN permission is tracked by code signature, and an ad-hoc signed app has no
+  stable identity to attach it to, so it can be denied without ever prompting.
+-->
+<plist version="1.0">
+<dict>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Allow Happy to find and connect to your development machines on the local network, so sessions still work when the server is unreachable.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <!-- The service type the CLI daemon advertises; must match LAN_SERVICE_TYPE. -->
+        <string>_happy._tcp</string>
+    </array>
+</dict>
+</plist>

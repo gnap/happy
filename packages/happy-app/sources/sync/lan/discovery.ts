@@ -20,6 +20,7 @@ import { hmac_sha256 } from '@/encryption/hmac_sha256';
 import { encodeHex } from '@/encryption/hex';
 import { encodeUTF8 } from '@/encryption/text';
 import { LAN_SERVICE_TYPE, LAN_PROTOCOL_VERSION, type DiscoveredMachine } from './types';
+import { browseViaTauri } from './tauriDiscovery';
 
 /**
  * Non-secret, stable fingerprint of the account — must equal `accountFingerprintOf` in
@@ -85,36 +86,47 @@ export async function discoverMachines(options: {
     /** Called when discovery cannot run at all (no native module), as opposed to finding nothing. */
     onUnavailable?: () => void;
 }): Promise<DiscoveredMachine[]> {
-    // Resolved lazily rather than at module scope. `expo-zeroconf` calls `requireNativeModule`
-    // during its own first evaluation and caches the result in a module-level `isAvailable`
-    // constant, swallowing any throw. This module is reachable from the app's root layout, so a
-    // top-level import can be evaluated before the native module registry is populated — in which
-    // case `isAvailable` latches to false for the entire run and discovery silently never works.
-    // Importing at scan time makes that outcome deterministic instead of a startup race.
-    let zeroconf: typeof import('expo-zeroconf');
-    try {
-        zeroconf = await import('expo-zeroconf');
-    } catch {
-        options.onUnavailable?.();
-        return [];
-    }
-    if (!zeroconf.isAvailable) {
-        options.onUnavailable?.();
-        return [];
-    }
-
     const expectedFingerprint = await accountFingerprintOf(options.accountPublicKey);
 
+    // Two browse backends: `expo-zeroconf` on iOS/Android, the Rust side on desktop. The Tauri
+    // probe is a cheap synchronous flag when it does not apply, so trying it first costs nothing
+    // on mobile. Both produce the same `ZeroconfService` shape past this point.
+    const viaTauri = await browseViaTauri({
+        serviceType: LAN_SERVICE_TYPE,
+        timeoutMs: options.timeoutMs,
+    });
+
     let services: ZeroconfService[];
-    try {
-        services = await zeroconf.scan(LAN_SERVICE_TYPE, {
-            timeoutMs: options.timeoutMs ?? 5000,
-            autoResolve: true,
-        });
-    } catch {
-        // A failed browse is not an error worth propagating — the caller retries or falls back.
-        options.onRawCount?.(0);
-        return [];
+    if (viaTauri !== null) {
+        services = viaTauri;
+    } else {
+        // Resolved lazily rather than at module scope. `expo-zeroconf` calls `requireNativeModule`
+        // during its own first evaluation and caches the result in a module-level `isAvailable`
+        // constant, swallowing any throw. This module is reachable from the app's root layout, so a
+        // top-level import can be evaluated before the native module registry is populated — in which
+        // case `isAvailable` latches to false for the entire run and discovery silently never works.
+        // Importing at scan time makes that outcome deterministic instead of a startup race.
+        let zeroconf: typeof import('expo-zeroconf');
+        try {
+            zeroconf = await import('expo-zeroconf');
+        } catch {
+            options.onUnavailable?.();
+            return [];
+        }
+        if (!zeroconf.isAvailable) {
+            options.onUnavailable?.();
+            return [];
+        }
+        try {
+            services = await zeroconf.scan(LAN_SERVICE_TYPE, {
+                timeoutMs: options.timeoutMs ?? 5000,
+                autoResolve: true,
+            });
+        } catch {
+            // A failed browse is not an error worth propagating — the caller retries or falls back.
+            options.onRawCount?.(0);
+            return [];
+        }
     }
     options.onRawCount?.(services.length);
 
