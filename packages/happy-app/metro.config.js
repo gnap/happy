@@ -67,9 +67,12 @@ config.server.rewriteRequestUrl = (url) => {
   return typeof expoRewrite === "function" ? expoRewrite(decoded) : decoded;
 };
 
-// Exclude Rust/Tauri build artifacts from module resolution.
-// For dev mode, use CARGO_TARGET_DIR=/tmp/... to keep Rust build output
-// outside the project tree entirely, preventing FallbackWatcher crashes.
+// Keep Rust/Tauri build artifacts out of Metro's file map. This is not only about module
+// resolution: Metro hands `blockList` to metro-file-map as its `ignorePattern`
+// (metro/src/node-haste/DependencyGraph/createFileMap.js), which is what the crawler and the
+// watcher filter on. So a cargo build writing tens of thousands of files into src-tauri/target
+// does not churn the watcher — no CARGO_TARGET_DIR redirect needed, and the build output stays
+// in the worktree like every other variant.
 config.resolver.blockList = [/src-tauri[/\\]target[/\\].*/];
 
 
