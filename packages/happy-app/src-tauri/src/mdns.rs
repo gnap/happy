@@ -34,7 +34,11 @@ fn browse_blocking(service_type: &str, timeout_ms: u64) -> Result<Vec<MdnsServic
         .browse(service_type)
         .map_err(|e| format!("mdns browse {service_type}: {e}"))?;
 
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let hard_deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut deadline = hard_deadline;
+    // Once something has resolved, answers from the rest of the network arrive within a moment of
+    // each other; waiting out the full window after that only delays the caller.
+    let settle = Duration::from_millis(700);
     // Keyed by fullname: the same instance can be reported more than once as its records arrive,
     // and the later report is the resolved one we want.
     let mut found: HashMap<String, MdnsService> = HashMap::new();
@@ -57,6 +61,8 @@ fn browse_blocking(service_type: &str, timeout_ms: u64) -> Result<Vec<MdnsServic
                         })
                     })
                     .collect();
+
+                deadline = std::cmp::min(hard_deadline, Instant::now() + settle);
 
                 let fullname = info.get_fullname().to_string();
                 found.insert(

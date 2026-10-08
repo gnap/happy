@@ -295,6 +295,27 @@ export function retrieveTempText(id: string): string | null {
     return null;
 }
 
+/**
+ * Machine data keys as the server hands them out: wrapped for this account, so what sits here is
+ * no more sensitive than what the server already holds. Kept so the LAN channel can authenticate
+ * at launch instead of waiting on the machines request, which is the slowest thing it could wait on.
+ */
+export function loadWrappedMachineKeys(): Record<string, string> {
+    const raw = mmkv.getString('wrapped-machine-keys');
+    if (!raw) {
+        return {};
+    }
+    try {
+        return JSON.parse(raw) as Record<string, string>;
+    } catch {
+        return {};
+    }
+}
+
+export function saveWrappedMachineKeys(keys: Record<string, string>) {
+    mmkv.set('wrapped-machine-keys', JSON.stringify(keys));
+}
+
 export function clearPersistence() {
     mmkv.clearAll();
 }

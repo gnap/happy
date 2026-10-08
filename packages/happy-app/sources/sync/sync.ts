@@ -20,7 +20,7 @@ import { NormalizedMessage, normalizeRawMessage, RawRecord } from './typesRaw';
 import type { MessageMeta } from './typesMessageMeta';
 import { applySettings, Settings, settingsDefaults, settingsParse, SUPPORTED_SCHEMA_VERSION } from './settings';
 import { Profile, profileParse } from './profile';
-import { loadPendingSettings, savePendingSettings } from './persistence';
+import { loadPendingSettings, savePendingSettings, loadWrappedMachineKeys, saveWrappedMachineKeys } from './persistence';
 import { initializeTracking, tracking } from '@/track';
 import { parseToken } from '@/utils/parseToken';
 import { RevenueCat, LogLevel, PaywallResult } from './revenueCat';
@@ -650,6 +650,15 @@ class Sync {
 
         // Subscribe to updates
         this.subscribeToUpdates();
+
+        // Machine keys from the last run, so the LAN can authenticate before the machines request
+        // returns. A key that no longer unwraps (another account, rotated) is simply skipped.
+        for (const [machineId, wrapped] of Object.entries(loadWrappedMachineKeys())) {
+            const key = await this.encryption.decryptEncryptionKey(wrapped);
+            if (key && !this.machineDataKeys.has(machineId)) {
+                this.machineDataKeys.set(machineId, key);
+            }
+        }
 
         // A machine on this network gets its live channel as soon as it is seen. Waiting for a
         // session to ask for the LAN was circular: the declaration that makes a session prefer it
@@ -2081,6 +2090,7 @@ class Sync {
 
         // First, collect and decrypt encryption keys for all machines
         const machineKeysMap = new Map<string, Uint8Array | null>();
+        const wrappedKeys: Record<string, string> = {};
         for (const machine of machines) {
             if (machine.dataEncryptionKey) {
                 const decryptedKey = await this.encryption.decryptEncryptionKey(machine.dataEncryptionKey);
@@ -2090,10 +2100,15 @@ class Sync {
                 }
                 machineKeysMap.set(machine.id, decryptedKey);
                 this.machineDataKeys.set(machine.id, decryptedKey);
+                wrappedKeys[machine.id] = machine.dataEncryptionKey;
             } else {
                 machineKeysMap.set(machine.id, null);
             }
         }
+
+        saveWrappedMachineKeys({ ...loadWrappedMachineKeys(), ...wrappedKeys });
+        // A key that arrives after the sighting is what makes the machine usable; nothing else re-checks.
+        this.openLanSocketForSightedMachine();
 
         // Initialize machine encryptions
         await this.encryption.initializeMachines(machineKeysMap);
