@@ -18,6 +18,12 @@ interface SessionSocketState {
      * (e.g., send HTTP POST to daemon's /session-started).
      */
     onHeartbeatFallback: (() => void) | null;
+    /**
+     * Called when the daemon delivers a user message that arrived over the LAN. The session
+     * handles it exactly as it would one from the server; from here the two channels are
+     * indistinguishable.
+     */
+    onDeliver: ((payload: { sessionId: string; localId: string; content: string }) => void) | null;
 }
 
 let state: SessionSocketState = {
@@ -26,6 +32,7 @@ let state: SessionSocketState = {
     reconnectTimer: null,
     stopped: false,
     onHeartbeatFallback: null,
+    onDeliver: null,
 };
 
 function send(socket: Socket, msg: Record<string, unknown>): void {
@@ -68,6 +75,12 @@ function connect(helloPayload: Record<string, unknown>): Socket {
                     socket.end();
                     process.exit(0);
                 }
+                if (msg.type === 'deliver' && msg.deliver) {
+                    // A user message the daemon took in over its LAN API. Handled off the socket
+                    // callback so a slow handler cannot stall the heartbeat.
+                    const deliver = msg.deliver as { sessionId: string; localId: string; content: string };
+                    setTimeout(() => state.onDeliver?.(deliver), 0);
+                }
             } catch { /* ignore */ }
         }
     });
@@ -106,9 +119,11 @@ function connect(helloPayload: Record<string, unknown>): Socket {
 export function startUnixSocketClient(
     helloPayload: Record<string, unknown>,
     heartbeatFallback?: () => void,
+    onDeliver?: (payload: { sessionId: string; localId: string; content: string }) => void,
 ): () => void {
     state.stopped = false;
     state.onHeartbeatFallback = heartbeatFallback ?? null;
+    state.onDeliver = onDeliver ?? null;
     connect(helloPayload);
 
     return () => {

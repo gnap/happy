@@ -93,6 +93,12 @@ export type LanServerOptions = {
    * nothing about configuration or the filesystem.
    */
   getHistory: (sessionId: string, since?: string) => LanHistory | null;
+  /**
+   * A user message the App sent over the LAN socket. `content` is the same ciphertext the server
+   * route carries, so this stays end-to-end encrypted — the LAN is plain HTTP, which is exactly
+   * why the payload must not be readable here.
+   */
+  onSend: (message: { sessionId: string; localId: string; content: string }) => void;
   /** Defaults to all interfaces. See the binding caveat in the module docs. */
   host?: string;
   /** Defaults to 0 — the OS assigns one, and mDNS advertises it. */
@@ -380,8 +386,47 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     socket.on('close', () => {
       subscribers.delete(socket);
     });
-    // The App owns the read side; anything it sends is ignored rather than treated as a command.
-    socket.on('message', () => undefined);
+
+    /**
+     * Writing back over the same socket, rather than a new HTTP route.
+     *
+     * The socket is already authenticated, so a send needs no credential of its own — no token to
+     * mint, and no second way to prove the same thing. It also collapses what would otherwise be a
+     * second round trip into the channel the App already holds open.
+     *
+     * This does make the socket a write surface, which the read-only LAN API deliberately was not.
+     * What keeps it bounded: the caller has already proved possession of the machine key, and all
+     * it can do with that is hand a user message to a session — the same thing it could do through
+     * the server. There is no spawn, stop, or shutdown route here, and none is implied.
+     */
+    socket.on('message', (raw: unknown) => {
+      // `ws` hands a text frame over as a Buffer, not a string, so coercing here rather than
+      // type-checking for a string: testing for one silently dropped every frame.
+      const text = Buffer.isBuffer(raw)
+        ? raw.toString('utf8')
+        : raw instanceof ArrayBuffer
+          ? Buffer.from(raw).toString('utf8')
+          : typeof raw === 'string'
+            ? raw
+            : null;
+      if (text === null) {
+        return;
+      }
+      let frame: { event?: unknown; payload?: unknown };
+      try {
+        frame = JSON.parse(text) as { event?: unknown; payload?: unknown };
+      } catch {
+        return;
+      }
+      if (frame.event !== 'send' || typeof frame.payload !== 'object' || frame.payload === null) {
+        return;
+      }
+      const { sessionId, localId, content } = frame.payload as Record<string, unknown>;
+      if (typeof sessionId !== 'string' || typeof localId !== 'string' || typeof content !== 'string') {
+        return;
+      }
+      opts.onSend({ sessionId, localId, content });
+    });
     socket.on('error', () => socket.close());
   });
 

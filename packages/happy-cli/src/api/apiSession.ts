@@ -818,6 +818,36 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
+    /**
+     * A user message that arrived over the LAN rather than from the server.
+     *
+     * Routed through the same path a server-delivered message takes — decrypt, record, hand to
+     * the CLI — so the session cannot tell which channel carried it. That is what makes the two
+     * interchangeable from here, and it is also why nothing else is needed to keep them in
+     * agreement: the CLI's own outgoing path syncs the message to the server as it would any
+     * other, so every other client sees it without the App ever writing to both channels.
+     *
+     * Returns false when the payload does not decrypt. That is a caller problem rather than a
+     * transient one, so there is nothing to retry.
+     */
+    deliverLanUserMessage(payload: { localId: string; content: string }): boolean {
+        const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(payload.content));
+        if (body == null || typeof body !== 'object') {
+            logger.debug('[API] LAN user message did not decrypt; dropping', { sessionId: this.sessionId });
+            return false;
+        }
+        this.routeIncomingMessage({
+            body,
+            // No seq: the server assigns that, and this message has not been there yet. Its echo
+            // will carry one, and the localId dedup is what stops that echo routing it twice.
+            seq: undefined,
+            ct: payload.content,
+            id: undefined,
+            localId: payload.localId,
+        });
+        return true;
+    }
+
     private authHeaders() {
         return {
             'Authorization': `Bearer ${this.token}`,
@@ -876,13 +906,23 @@ export class ApiSessionClient extends EventEmitter {
         // once this method is entered.
         const { body: message, seq } = incoming;
 
-        // Deduplicate by seq: WebSocket push and HTTP fetch may deliver
-        // the same message concurrently.
-        if (typeof seq === 'number') {
-            const key = String(seq);
-            if (this.routedMessageIds.has(key)) return;
+        // Deduplicate across the two ways one message can arrive twice. `seq` catches a WebSocket
+        // push racing an HTTP fetch. `localId` catches the same user message arriving first over
+        // the LAN — which carries no server seq, because the server has not seen it yet — and then
+        // again as the server's echo of the CLI's own sync. Without the second key the CLI would
+        // hand the same message to the agent twice, which reads as the agent answering twice.
+        const dedupKeys = [
+            typeof seq === 'number' ? String(seq) : null,
+            incoming.localId ? `local:${incoming.localId}` : null,
+        ].filter((key): key is string => key !== null);
+        if (dedupKeys.some((key) => this.routedMessageIds.has(key))) {
+            return;
+        }
+        for (const key of dedupKeys) {
             this.routedMessageIds.add(key);
-            if (this.routedMessageIds.size > 1000) this.routedMessageIds.clear();
+        }
+        if (this.routedMessageIds.size > 1000) {
+            this.routedMessageIds.clear();
         }
 
         // Logged here rather than at the call sites on purpose: the dedup above runs after

@@ -26,6 +26,8 @@ const HISTORY: LanHistory = {
 let history: LanHistory | null = HISTORY;
 /** What the route passed down, so the cursor plumbing can be asserted rather than assumed. */
 let lastSince: string | undefined;
+/** Messages the socket handed to the daemon, in order. */
+let sent: { sessionId: string; localId: string; content: string }[] = [];
 
 let server: LanServerHandle | null = null;
 
@@ -38,6 +40,9 @@ async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
         getHistory: (_sessionId, since) => {
             lastSince = since;
             return history;
+        },
+        onSend: (message) => {
+            sent.push(message);
         },
         host: '127.0.0.1',
         port: 0,
@@ -212,6 +217,55 @@ describe('lanServer read-only API', () => {
             await fetch(url('/lan/sessions/sess-1/history'), authorized(token));
 
             expect(lastSince).toBeUndefined();
+        });
+    });
+
+    describe('sending over the socket', () => {
+        // The socket is deliberately a write surface, unlike the read-only HTTP API. What bounds
+        // it is that the caller already proved possession of the machine key at the upgrade, and
+        // the only thing a send can do is hand a user message to a session — the same act the
+        // server route performs. There is no spawn/stop/shutdown reachable from here.
+
+        async function connectSocket(): Promise<WebSocket> {
+            const { nonce } = await (await fetch(url('/lan/challenge'), { method: 'POST' })).json() as { nonce: string };
+            const proof = lanProofFor(SECRET, nonce);
+            const socket = new WebSocket(
+                `ws://127.0.0.1:${server!.port}/lan/socket?nonce=${encodeURIComponent(nonce)}&proof=${encodeURIComponent(proof)}`,
+            );
+            await new Promise<void>((resolve, reject) => {
+                socket.addEventListener('open', () => resolve());
+                socket.addEventListener('close', () => reject(new Error('socket refused')));
+            });
+            return socket;
+        }
+
+        it('hands a sent message to the daemon with its ciphertext intact', async () => {
+            await start();
+            sent = [];
+            const socket = await connectSocket();
+
+            socket.send(JSON.stringify({
+                event: 'send',
+                payload: { sessionId: 'sess-1', localId: 'local-9', content: 'CIPHER-9' },
+            }));
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            socket.close();
+
+            expect(sent).toEqual([{ sessionId: 'sess-1', localId: 'local-9', content: 'CIPHER-9' }]);
+        });
+
+        it('ignores a frame that is not a send, and a send that is missing fields', async () => {
+            await start();
+            sent = [];
+            const socket = await connectSocket();
+
+            socket.send(JSON.stringify({ event: 'subscribe', payload: { sessionId: 'sess-1' } }));
+            socket.send(JSON.stringify({ event: 'send', payload: { sessionId: 'sess-1' } }));
+            socket.send('not json at all');
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            socket.close();
+
+            expect(sent).toEqual([]);
         });
     });
 

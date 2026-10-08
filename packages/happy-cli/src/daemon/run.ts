@@ -1291,6 +1291,18 @@ export async function startDaemon(): Promise<void> {
                   : (() => { try { process.kill(session.pid, 0); return true; } catch { return false; } })(),
                 lastHeartbeat: session.lastHeartbeat,
               } satisfies LanSessionSummary)),
+            onSend: ({ sessionId, localId, content }) => {
+              // Hand it to the session that owns it. The session routes it exactly as a
+              // server-delivered message, so its own outgoing sync then carries it to the server —
+              // which is what keeps the two channels in agreement without the App writing twice.
+              const delivered = sendToSession(sessionId, {
+                type: 'deliver',
+                deliver: { sessionId, localId, content },
+              });
+              logger.debug(
+                `[DAEMON RUN] LAN user message for ${sessionId}: ${delivered ? 'delivered to session' : 'no live session socket'}`,
+              );
+            },
             getHistory: (sessionId, since) => {
               // The client addresses by session id because that is what it learns from the
               // server; the tag is this side's business.
