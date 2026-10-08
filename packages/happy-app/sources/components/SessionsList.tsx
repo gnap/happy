@@ -16,6 +16,7 @@ import { useVisibleSessionListViewData } from '@/hooks/useVisibleSessionListView
 import { Typography } from '@/constants/Typography';
 import { Session } from '@/sync/storageTypes';
 import { StatusDot } from './StatusDot';
+import { SessionStatusDot } from './SessionStatusDot';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useIsTablet } from '@/utils/responsive';
 import { requestReview } from '@/utils/requestReview';
@@ -609,7 +610,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle, 
                 {/* Status line with dot */}
                 <View style={styles.statusRow}>
                     <View style={styles.statusDotContainer}>
-                        <StatusDot color={sessionStatus.statusDotColor} isPulsing={sessionStatus.isPulsing} />
+                        <SessionStatusDot sessionId={session.id} color={sessionStatus.statusDotColor} isPulsing={sessionStatus.isPulsing} />
                     </View>
                     <Text style={[
                         styles.statusText,

@@ -8,7 +8,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { getSessionName, useSessionStatus, getSessionAvatarId, formatPathRelativeToHome } from '@/utils/sessionUtils';
 import { Avatar } from './Avatar';
 import { Typography } from '@/constants/Typography';
-import { StatusDot } from './StatusDot';
+import { SessionStatusDot } from './SessionStatusDot';
 import { MachinePresenceBadge } from './MachinePresenceBadge';
 import { useAllMachines, useSetting, useMachinesMap, useMachinePresenceMap, useLanSightings } from '@/sync/storage';
 import { MACHINE_PRESENCE_COLORS } from '@/sync/machinePresence';
@@ -432,7 +432,7 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
                 <View style={styles.statusRow}>
                     <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                         <View style={styles.statusDotContainer}>
-                            <StatusDot color={sessionStatus.statusDotColor} isPulsing={sessionStatus.isPulsing} />
+                            <SessionStatusDot sessionId={session.id} color={sessionStatus.statusDotColor} isPulsing={sessionStatus.isPulsing} />
                         </View>
                         <Text style={[
                             styles.statusText,
