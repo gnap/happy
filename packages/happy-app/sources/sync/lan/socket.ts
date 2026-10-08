@@ -60,6 +60,11 @@ export async function openLanSocket(options: {
     onUpdate: (payload: unknown) => void;
     /** Called once the socket closes, for any reason; the caller decides whether to reopen. */
     onClosed?: () => void;
+    /**
+     * Called with the session's verdict on a message the App sent this way. A write is not a
+     * delivery, and only the session can say whether the message reached the agent.
+     */
+    onDelivered?: (result: { sessionId: string; localId: string; delivered: boolean }) => void;
 }): Promise<LanSocketHandle | null> {
     let nonce: string;
     try {
@@ -90,10 +95,21 @@ export async function openLanSocket(options: {
         } catch {
             return;
         }
-        // Only `update` is acted on today. An unknown event is ignored rather than guessed at,
-        // so a daemon that learns to push more cannot make an older App misread it.
+        // An unknown event is ignored rather than guessed at, so a daemon that learns to push more
+        // cannot make an older App misread it.
         if (frame.event === 'update') {
             options.onUpdate(frame.payload);
+            return;
+        }
+        if (frame.event === 'delivered') {
+            const result = frame.payload as { sessionId?: unknown; localId?: unknown; delivered?: unknown };
+            if (typeof result?.localId === 'string') {
+                options.onDelivered?.({
+                    sessionId: typeof result.sessionId === 'string' ? result.sessionId : '',
+                    localId: result.localId,
+                    delivered: result.delivered === true,
+                });
+            }
         }
     };
 

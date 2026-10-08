@@ -210,6 +210,11 @@ class Sync {
      * demultiplexes on `body.sid` exactly as it does for the server channel.
      */
     private lanSocket: { baseUrl: string; handle: LanSocketHandle } | null = null;
+    /** LAN sends awaiting the session's verdict, so a lost one cannot sit "sending" forever. */
+    private lanSendTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+
+    /** How long a LAN send waits for the session's verdict before it is treated as lost. */
+    private static readonly LAN_DELIVERY_TIMEOUT_MS = 15_000;
     /** Accumulated base64 dataEncryptionKey values from all fetchSessions responses.
      *  Merged across delta fetches so the cache always has the full key set. */
     private sessionEncryptionKeySources = new Map<string, string>();
@@ -2508,10 +2513,13 @@ class Sync {
             );
             if (allSent) {
                 pending.splice(0, batch.length);
+                // Deliberately not marked acked here, unlike the server socket path. There the
+                // server echoes the message back, so a fast-ack is a claim the server will honour;
+                // here nothing confirms the write but the session itself, and treating the write as
+                // the delivery is exactly what hides a dropped message. Each entry waits for that
+                // verdict, and fails if it never arrives.
                 for (const msg of batch) {
-                    // Optimistic, exactly as the server socket path is: the echo is what actually
-                    // confirms it, and handleUpdate fast-acks it when it arrives.
-                    storage.getState().markOutboxMessageAcked(msg.localId);
+                    this.awaitLanDelivery(msg.localId);
                 }
                 return;
             }
@@ -3895,6 +3903,24 @@ class Sync {
             onUpdate: (payload) => {
                 void this.handleUpdate(payload);
             },
+            onDelivered: (result) => {
+                const timer = this.lanSendTimeouts.get(result.localId);
+                if (timer) {
+                    clearTimeout(timer);
+                    this.lanSendTimeouts.delete(result.localId);
+                }
+                // A write is not a delivery, and the App cannot see whether the session could read
+                // the message — so this verdict is the only thing separating a dropped message from
+                // one that looks sent forever.
+                if (result.delivered) {
+                    storage.getState().markOutboxMessageAcked(result.localId);
+                } else {
+                    storage.getState().failOutboxEntries(
+                        [result.localId],
+                        'The session could not read this message.',
+                    );
+                }
+            },
             onClosed: () => {
                 // Only clear the entry this handle owns: a replacement may already be in place.
                 // `opened` is null until the open completes, so a drop during the handshake is
@@ -3910,6 +3936,29 @@ class Sync {
             this.lanSocket = { baseUrl, handle };
             log.log(`📡 LAN socket live at ${baseUrl}`);
         }
+    }
+
+    /**
+     * Waits for the session to say whether it could read a message sent over the LAN.
+     *
+     * Bounded on purpose: a verdict that never comes — an older session that cannot read the
+     * frame at all, or a socket that dies mid-flight — would otherwise leave the entry "sending"
+     * indefinitely, which is a spinner the user cannot clear.
+     */
+    private awaitLanDelivery(localId: string): void {
+        if (this.lanSendTimeouts.has(localId)) {
+            return;
+        }
+        const timer = setTimeout(() => {
+            this.lanSendTimeouts.delete(localId);
+            storage.getState().failOutboxEntries(
+                [localId],
+                'No confirmation that the session received this message.',
+            );
+            log.log(`📡 LAN send ${localId} was never confirmed`);
+        }, Sync.LAN_DELIVERY_TIMEOUT_MS);
+        (timer as unknown as { unref?: () => void }).unref?.();
+        this.lanSendTimeouts.set(localId, timer);
     }
 
     private closeLanSocket(): void {
