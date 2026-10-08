@@ -51,3 +51,9 @@ export function resolveMachinePresence(
     }
     return 'offline';
 }
+
+/** Glyph per channel: wifi for the local link, a globe for the public server. */
+export const CHANNEL_ICONS = {
+    lan: 'wifi',
+    server: 'globe-outline',
+} as const;

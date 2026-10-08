@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { ViewStyle } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import Animated, { useSharedValue, useAnimatedStyle, withRepeat, withTiming } from 'react-native-reanimated';
 
 export interface StatusDotProps {
@@ -7,9 +8,11 @@ export interface StatusDotProps {
     isPulsing?: boolean;
     size?: number;
     style?: ViewStyle;
+    /** Draws this glyph instead of a plain dot, keeping the same colour and pulse. */
+    icon?: React.ComponentProps<typeof Ionicons>['name'];
 }
 
-export const StatusDot = React.memo(({ color, isPulsing, size = 6, style }: StatusDotProps) => {
+export const StatusDot = React.memo(({ color, isPulsing, size = 6, style, icon }: StatusDotProps) => {
     const opacity = useSharedValue(1);
 
     React.useEffect(() => {
@@ -29,6 +32,14 @@ export const StatusDot = React.memo(({ color, isPulsing, size = 6, style }: Stat
             opacity: opacity.value,
         };
     });
+
+    if (icon) {
+        return (
+            <Animated.View style={[animatedStyle, style]}>
+                <Ionicons name={icon} size={size} color={color} />
+            </Animated.View>
+        );
+    }
 
     const baseStyle: ViewStyle = {
         width: size,

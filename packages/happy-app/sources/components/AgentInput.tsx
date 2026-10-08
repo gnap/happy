@@ -10,6 +10,7 @@ import { PermissionMode, ModelMode } from './PermissionModeSelector';
 import { hapticsLight, hapticsError } from './haptics';
 import { Shaker, ShakeInstance } from './Shaker';
 import { StatusDot } from './StatusDot';
+import { CHANNEL_ICONS } from '@/sync/machinePresence';
 import { useActiveWord } from './autocomplete/useActiveWord';
 import { useActiveSuggestions } from './autocomplete/useActiveSuggestions';
 import { AgentInputAutocomplete } from './AgentInputAutocomplete';
@@ -59,6 +60,8 @@ interface AgentInputProps {
         color: string;
         dotColor: string;
         isPulsing?: boolean;
+        /** How the session is being reached; when given, its glyph replaces the plain dot. */
+        channel?: { kind: 'lan' | 'server'; pinned: boolean };
         cliStatus?: {
             claude: boolean | null;
             codex: boolean | null;
@@ -872,8 +875,12 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                         <StatusDot
                                             color={props.connectionStatus.dotColor}
                                             isPulsing={props.connectionStatus.isPulsing}
-                                            size={6}
+                                            size={props.connectionStatus.channel ? 12 : 6}
+                                            icon={props.connectionStatus.channel ? CHANNEL_ICONS[props.connectionStatus.channel.kind] : undefined}
                                         />
+                                        {props.connectionStatus.channel?.pinned && (
+                                            <Ionicons name="pin" size={9} color={props.connectionStatus.dotColor} />
+                                        )}
                                         <Text style={{
                                             fontSize: 11,
                                             color: props.connectionStatus.color,

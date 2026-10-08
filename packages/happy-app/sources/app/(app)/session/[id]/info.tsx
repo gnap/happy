@@ -8,7 +8,9 @@ import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Avatar } from '@/components/Avatar';
 import { useSession, useIsDataReady, useSessionMessages, useMachine } from '@/sync/storage';
-import { sync } from '@/sync/sync';
+import { sync, type ChannelReason } from '@/sync/sync';
+import { useSessionChannel } from '@/hooks/useSessionChannel';
+import { CHANNEL_ICONS } from '@/sync/machinePresence';
 import { getSessionName, useSessionStatus, formatOSPlatform, formatPathRelativeToHome, getSessionAvatarId } from '@/utils/sessionUtils';
 import * as Clipboard from 'expo-clipboard';
 import { Modal } from '@/modal';
@@ -23,6 +25,16 @@ import { useHappyAction } from '@/hooks/useHappyAction';
 import { HappyError } from '@/utils/errors';
 import { getCachedLastSeq, subscribeToCachedLastSeq } from '@/sync/cache/messageCache';
 import { getBitmapSegments } from '@/sync/cacheSegment';
+
+function channelReasonText(reason: ChannelReason): string {
+    switch (reason) {
+        case 'reachable': return t('sessionInfo.channelWhyReachable');
+        case 'not-declared': return t('sessionInfo.channelWhyNotDeclared');
+        case 'not-on-network': return t('sessionInfo.channelWhyNotOnNetwork');
+        case 'no-machine-key': return t('sessionInfo.channelWhyNoKey');
+        default: return t('sessionInfo.channelWhyUnknown');
+    }
+}
 
 // Animated status dot component
 function StatusDot({ color, isPulsing, size = 8 }: { color: string; isPulsing?: boolean; size?: number }) {
@@ -164,6 +176,20 @@ function SessionInfoContent({ session }: { session: Session }) {
     const devModeEnabled = __DEV__;
     const sessionName = getSessionName(session);
     const sessionStatus = useSessionStatus(session);
+    const channel = useSessionChannel(session.id);
+    const channelSubtitle = channel.pinned
+        ? t('sessionInfo.channelPinned')
+        : `${t('sessionInfo.channelAuto')} · ${channelReasonText(channel.reason)}`;
+    const handleChooseChannel = useCallback(() => {
+        const current = channel.pinned ? channel.channel : null;
+        const mark = (value: 'lan' | 'server' | null, label: string) => (current === value ? `✓ ${label}` : label);
+        Modal.alert(t('sessionInfo.connectionStatus'), undefined, [
+            { text: mark(null, t('sessionInfo.channelAuto')), onPress: () => sync.setSessionChannel(session.id, null) },
+            { text: mark('lan', t('status.lan')), onPress: () => sync.setSessionChannel(session.id, 'lan') },
+            { text: mark('server', t('sessionInfo.channelServer')), onPress: () => sync.setSessionChannel(session.id, 'server') },
+            { text: t('common.cancel'), style: 'cancel' },
+        ]);
+    }, [channel.pinned, channel.channel, session.id]);
     const { cachedBitmap } = useSessionMessages(session.id);
     
     // Check if CLI version is outdated
@@ -392,9 +418,11 @@ function SessionInfoContent({ session }: { session: Session }) {
                     )}
                     <Item
                         title={t('sessionInfo.connectionStatus')}
-                        detail={sessionStatus.isConnected ? t('status.online') : t('status.offline')}
-                        icon={<Ionicons name="pulse-outline" size={29} color={sessionStatus.isConnected ? "#34C759" : "#8E8E93"} />}
-                        showChevron={false}
+                        detail={`${sessionStatus.isConnected ? t('status.online') : t('status.offline')} · ${channel.channel === 'lan' ? t('status.lan') : t('sessionInfo.channelServer')}`}
+                        subtitle={channelSubtitle}
+                        subtitleLines={0}
+                        icon={<Ionicons name={CHANNEL_ICONS[channel.channel]} size={29} color={sessionStatus.isConnected ? "#34C759" : "#8E8E93"} />}
+                        onPress={handleChooseChannel}
                     />
                     <Item
                         title={t('sessionInfo.created')}

@@ -75,6 +75,16 @@ type OutboxMessage = {
     content: string;
 };
 
+/** Why a session is on the channel it is on; the UI turns these into words. */
+export type ChannelReason =
+    | 'pinned'
+    | 'reachable'
+    | 'session-not-loaded'
+    | 'not-declared'
+    | 'no-machine-id'
+    | 'no-machine-key'
+    | 'not-on-network';
+
 class Sync {
     private static readonly BACKGROUND_SEND_TIMEOUT_MS = 30_000;
     private static readonly DESKTOP_SESSION_REFRESH_COOLDOWN_MS = 15_000;
@@ -3921,7 +3931,13 @@ class Sync {
 
     private channelReasons = new Map<string, string>();
 
-    private resolveChannel(sessionId: string): ['lan' | 'server', string] {
+    /** Which channel a session is on right now, and why. The single source for logic and UI alike. */
+    describeChannel(sessionId: string): { channel: 'lan' | 'server'; reason: ChannelReason } {
+        const [channel, reason] = this.resolveChannel(sessionId);
+        return { channel, reason };
+    }
+
+    private resolveChannel(sessionId: string): ['lan' | 'server', ChannelReason] {
         const override = storage.getState().channelOverride[sessionId];
         if (override) {
             return [override, 'pinned'];
@@ -3932,34 +3948,23 @@ class Sync {
         // delivered back over it. Preferring the LAN for one would show an empty session and
         // swallow sends, so an undeclared session stays on the server until it restarts.
         if (!session) {
-            return ['server', 'session not loaded'];
+            return ['server', 'session-not-loaded'];
         }
         if (!session.agentState?.lanSocket) {
-            return ['server', 'session has not declared the LAN'];
+            return ['server', 'not-declared'];
         }
         const machineId = session.metadata?.machineId;
         if (!machineId) {
-            return ['server', 'no machineId'];
+            return ['server', 'no-machine-id'];
         }
         if (!this.getMachineKey(machineId)) {
-            return ['server', 'no machine key'];
+            return ['server', 'no-machine-key'];
         }
         return storage.getState().lanSightings[machineId]
-            ? ['lan', 'declared and reachable']
-            : ['server', 'machine not seen on this network'];
+            ? ['lan', 'reachable']
+            : ['server', 'not-on-network'];
     }
 
-    /**
-     * Opens the live LAN channel for a machine, if it is not already up.
-     *
-     * Frames go straight to `handleUpdate` — the same handler the server socket feeds — because
-     * the daemon emits the server's own envelope shape. That is the whole point: this channel adds
-     * no second way to interpret an update, so nothing downstream has to know which one delivered
-     * it.
-     *
-     * Failure is not an error path: polling keeps running, so a socket that cannot open or cannot
-     * stay open degrades to exactly what the channel did before it existed.
-     */
     private lanSightingWatch: (() => void) | null = null;
 
     /** Opens the live channel to a sighted machine this device holds a key for. One socket at a time. */
@@ -3976,6 +3981,17 @@ class Sync {
         }
     }
 
+    /**
+     * Opens the live LAN channel for a machine, if it is not already up.
+     *
+     * Frames go straight to `handleUpdate` — the same handler the server socket feeds — because
+     * the daemon emits the server's own envelope shape. That is the whole point: this channel adds
+     * no second way to interpret an update, so nothing downstream has to know which one delivered
+     * it.
+     *
+     * Failure is not an error path: polling keeps running, so a socket that cannot open or cannot
+     * stay open degrades to exactly what the channel did before it existed.
+     */
     private async ensureLanSocket(baseUrl: string, machineKey: Uint8Array): Promise<void> {
         if (this.lanSocket?.baseUrl === baseUrl) {
             return;
