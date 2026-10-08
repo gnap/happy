@@ -33,7 +33,10 @@
     "patch-package": "^8.0.0"
   },
   "resolutions": {
-    "@tauri-apps/api": "^2.11"
+    "@tauri-apps/api": "^2.11",
+    "whatwg-url": "14.2.0",
+    "parse-path": "7.0.3",
+    "@types/parse-path": "7.0.3"
   },
   "version": "1.0.0"
 }
