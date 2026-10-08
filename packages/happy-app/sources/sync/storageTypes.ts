@@ -103,6 +103,16 @@ export const AgentStateSchema = z.object({
         recurring: z.boolean(),
     })).optional(),
     /**
+     * Declared by a CLI that can serve this session over the LAN socket — it keeps the message log
+     * the LAN reads from and can take a message delivered back over it.
+     *
+     * Absent means a session started from an older build, which cannot do either: preferring the
+     * LAN for one would show an empty session and swallow sends. Declared rather than inferred from
+     * a version, because a client must know before it picks a channel and cannot ask over the LAN
+     * without already being on it.
+     */
+    lanSocket: z.boolean().optional(),
+    /**
      * Latest /goal condition status, mirrored from the CLI's goal_status attachments.
      * `pending` while the goal is armed and undecided; `met` / `failed` once judged.
      * Nullish when the session has no goal.

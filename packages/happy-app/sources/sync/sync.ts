@@ -3902,7 +3902,15 @@ class Sync {
         if (override) {
             return override;
         }
-        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        const session = storage.getState().sessions[sessionId];
+        // A session that never declared the capability is running a build that cannot serve the LAN
+        // at all: it keeps no message log for the LAN to read, and it cannot take a message
+        // delivered back over it. Preferring the LAN for one would show an empty session and
+        // swallow sends, so an undeclared session stays on the server until it restarts.
+        if (!session?.agentState?.lanSocket) {
+            return 'server';
+        }
+        const machineId = session.metadata?.machineId;
         if (!machineId || !this.getMachineKey(machineId)) {
             return 'server';
         }
