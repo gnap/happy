@@ -20,7 +20,7 @@ import { NormalizedMessage, normalizeRawMessage, RawRecord } from './typesRaw';
 import type { MessageMeta } from './typesMessageMeta';
 import { applySettings, Settings, settingsDefaults, settingsParse, SUPPORTED_SCHEMA_VERSION } from './settings';
 import { Profile, profileParse } from './profile';
-import { loadPendingSettings, savePendingSettings, loadWrappedMachineKeys, saveWrappedMachineKeys } from './persistence';
+import { loadPendingSettings, savePendingSettings, loadWrappedMachineKeys, saveWrappedMachineKeys, loadLanCursors, saveLanCursors } from './persistence';
 import { initializeTracking, tracking } from '@/track';
 import { parseToken } from '@/utils/parseToken';
 import { RevenueCat, LogLevel, PaywallResult } from './revenueCat';
@@ -214,6 +214,12 @@ class Sync {
         string,
         { machineId: string; cursor: string; connection: LanConnection }
     >();
+    /**
+     * Where each session's log read got to, across restarts. `lanChannels` is runtime state and
+     * dies with the process; this is the half that has to survive it, or a cold start reads the
+     * whole log again — thousands of entries to fetch and decrypt before the session settles.
+     */
+    private lanCursors = loadLanCursors();
     /** Pending coalesced cache writes, one per session. */
     private cacheSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
     /**
@@ -2813,16 +2819,15 @@ class Sync {
             await this.acquireMessageFetchSlot();
             log.log(`💬 fetchMessages: got lock for ${sessionId}`);
             try {
-                // A channel is chosen per session, and everything after this point is the same
-                // whichever one it was: the read's bytes go through `ingestChannelRead`.
-                if (this.preferredChannel(sessionId) === 'lan') {
-                    await this.fetchMessagesViaLan(sessionId);
-                    return;
-                }
-
-                // --- Cache: cold-start hydration (Cursor sessions only) ---
-                // Load cache first — even if encryption isn't ready yet, cached
-                // messages provide instant display while the network fetch waits.
+                // --- Cache: cold-start hydration ---
+                // Before the channel is chosen, not after. The cache is channel-agnostic — it holds
+                // whatever either channel last delivered — so it is the one thing here that must
+                // not be skipped for any session. Hydrating below the LAN branch meant a LAN
+                // session never hydrated at all: reopening the app showed an empty conversation
+                // and then re-read and re-decrypted its whole log before anything appeared.
+                //
+                // Load first — even if encryption isn't ready yet, cached messages provide instant
+                // display while the network fetch waits.
                 const session = storage.getState().sessions[sessionId];
                 const existingSessionMessages = storage.getState().sessionMessages[sessionId];
                 if (!existingSessionMessages?.isLoaded) {
@@ -2841,6 +2846,13 @@ class Sync {
                     } else {
                         log.log(`💬 fetchMessages: no cache for ${sessionId} (will fetch from server)`);
                     }
+                }
+
+                // A channel is chosen per session, and everything after this point is the same
+                // whichever one it was: the read's bytes go through `ingestChannelRead`.
+                if (this.preferredChannel(sessionId) === 'lan') {
+                    await this.fetchMessagesViaLan(sessionId);
+                    return;
                 }
 
                 const encryption = this.encryption.getSessionEncryption(sessionId);
@@ -3842,13 +3854,19 @@ class Sync {
         // connection keeps it from paying for an mDNS browse and a handshake on every tick.
         const remembered = this.lanChannels.get(sessionId);
         const resumable = remembered && remembered.machineId === machineId ? remembered : undefined;
+        // The persisted cursor is the restart's fallback. The connection is gone with the process,
+        // but the position is not — and resuming from it is the difference between reading the
+        // delta and reading the entire log.
+        const persisted = this.lanCursors[sessionId];
+        const since = resumable?.cursor
+            ?? (persisted && persisted.machineId === machineId ? persisted.cursor : undefined);
         const read = await readSessionOverLan({
             sessionId,
             machineId,
             accountPublicKey,
             machineKey,
             encryption: this.encryption,
-            since: resumable?.cursor,
+            since,
             connection: resumable?.connection,
         });
         if (!read) {
@@ -3859,6 +3877,8 @@ class Sync {
             cursor: read.cursor,
             connection: read.connection,
         });
+        this.lanCursors[sessionId] = { machineId: read.machineId, cursor: read.cursor };
+        saveLanCursors(this.lanCursors);
         // The machine answered, so bring the live channel up alongside the poll. Fire-and-forget:
         // polling is what keeps the session readable, and the socket only removes the delay
         // between a message being written and being seen.
