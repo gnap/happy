@@ -4003,6 +4003,16 @@ class Sync {
             baseUrl,
             machineKey,
             onUpdate: (payload) => {
+                // The daemon's hint that a session's local log grew. It is not a server update, so
+                // it never reaches handleUpdate: it only means "read now" instead of waiting for
+                // the next poll tick.
+                const body = (payload as { body?: { t?: string; id?: string } } | null)?.body;
+                if (body?.t === 'log-grew' && body.id) {
+                    if (this.preferredChannel(body.id) === 'lan') {
+                        this.messagesSync.get(body.id)?.invalidate();
+                    }
+                    return;
+                }
                 void this.handleUpdate(payload);
             },
             onDelivered: (result) => {
