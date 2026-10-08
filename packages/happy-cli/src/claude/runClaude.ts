@@ -20,7 +20,7 @@ import { getEnvironmentInfo } from '@/ui/doctor';
 import { configuration } from '@/configuration';
 import { createEnvelope } from '@slopus/happy-wire';
 import { notifyDaemonSessionStarted, notifyDaemonSessionEnding } from '@/daemon/controlClient';
-import { startUnixSocketClient } from '@/daemon/unixSocketClient';
+import { startUnixSocketClient, reportLanDelivery } from '@/daemon/unixSocketClient';
 import { initialMachineMetadata } from '@/daemon/run';
 import { startHappyServer } from '@/claude/utils/startHappyServer';
 import { startHookServer } from '@/claude/utils/startHookServer';
@@ -276,6 +276,9 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         // before it can service a socket message.
         const delivered = session.deliverLanUserMessage(payload);
         logger.debug(`[START] LAN user message ${delivered ? 'routed' : 'rejected (did not decrypt)'}`);
+        // Report the outcome either way. A rejection is the one case the App cannot otherwise
+        // learn about, and it must not be left showing a message as sent.
+        reportLanDelivery(payload.localId, delivered);
     });
     // Cleanup socket on graceful exit
     process.on('beforeExit', () => stopSocketClient());
