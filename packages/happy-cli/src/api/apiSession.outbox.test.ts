@@ -71,6 +71,11 @@ vi.mock('@/api/rpc/RpcHandlerManager', () => ({
 
 vi.mock('@/modules/common/registerCommonHandlers', () => ({ registerCommonHandlers: vi.fn() }));
 
+// The daemon link is what a LAN reader actually receives from, so it is stubbed rather than
+// left to fail silently: the point of these tests is the frame, not the socket.
+const { mockForward } = vi.hoisted(() => ({ mockForward: vi.fn(() => true) }));
+vi.mock('@/daemon/unixSocketClient', () => ({ forwardSessionEventToDaemon: mockForward }));
+
 vi.mock('@/utils/time', () => ({
     // Fewer iterations than the real unbounded loop, and it resolves rather than throws:
     // the real one retries forever, so a throw here would surface as an unhandled
@@ -230,6 +235,29 @@ describe('ApiSessionClient local message log', () => {
         const logged = loggedEntries('out');
         expect(logged.map((e) => e.id)).toEqual(['env-out']);
         expect(logged[0].c).toBe(posted[0]);
+    });
+
+    it('mirrors each outbound entry to the daemon as a log-entry frame, ciphertext included', async () => {
+        mockAxiosPost.mockResolvedValue({ data: { messages: [] } });
+        const client = new ApiSessionClient('fake-token', makeSession());
+        client.sendSessionProtocolMessage(envelope('env-lan', 'for the LAN') as never);
+        await waitFor(() => expect(loggedEntries('out')).toHaveLength(1));
+
+        const mirrored = mockForward.mock.calls
+            .map((call: any[]) => call[0])
+            .filter((event: any) => event?.t === 'log-entry');
+
+        // The frame is the entry itself, not a hint that one exists: a reader that applies it and
+        // one that reads the log converge on the same bytes, which is what lets the LAN channel
+        // deliver messages without an extra fetch.
+        const logged = loggedEntries('out')[0];
+        expect(mirrored).toEqual([
+            {
+                t: 'log-entry',
+                id: 'test-session-id',
+                entry: { id: 'env-lan', localId: 'env-lan', dir: 'out', at: logged.at, c: logged.c },
+            },
+        ]);
     });
 
     it('keeps the log across a restart and appends to it rather than starting over', () => {
