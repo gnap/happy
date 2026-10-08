@@ -160,9 +160,17 @@ export function startUnixSocketClient(
  * Returns false when there is no daemon socket — the session still runs, just without a mirror.
  */
 export function forwardSessionEventToDaemon(event: Record<string, unknown>): boolean {
+    // Logged at each exit so a silent drop is distinguishable from a call that never happened —
+    // `send` swallows a socket that is not open, so without this the two look identical.
     if (!state.socket) {
+        logger.debug(`[UNIX CLIENT] forward ${String(event.t)} skipped: no socket`);
         return false;
     }
+    if (state.socket.readyState !== 'open') {
+        logger.debug(`[UNIX CLIENT] forward ${String(event.t)} skipped: socket state ${state.socket.readyState}`);
+        return false;
+    }
+    logger.debug(`[UNIX CLIENT] forward ${String(event.t)} (${JSON.stringify(event).length} bytes)`);
     send(state.socket, { type: 'session-event', event });
     return true;
 }
