@@ -346,6 +346,12 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     const session = api.sessionSyncClient(response, true, sessionClientOpts);
     writeSessionPidFile(session.sessionId);
 
+    // Announce that this session can be served over the LAN. Declared here rather than inferred by
+    // the client from a version: a client has to know before it picks a channel, and it cannot ask
+    // over the LAN without already being on it. agentState travels by the server, so it arrives in
+    // time. A session started from an older build never declares it, and stays on the server.
+    session.updateAgentState((state) => ({ ...state, lanSocket: true }));
+
     // Resume ignores new metadata (server returns stored). Explicitly sync sandbox
     // so restart-with-sandbox correctly updates the session's isolation level.
     if (sandboxConfig?.enabled) {
