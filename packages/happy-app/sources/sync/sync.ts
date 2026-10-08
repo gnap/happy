@@ -2494,6 +2494,29 @@ class Sync {
 
         const batch = pending.slice();
 
+        // A session on the LAN channel writes back over the LAN, the same way the server path
+        // prefers its own socket. Both channels are chosen the same way and neither is written to
+        // twice — keeping them in agreement is the CLI's job, since the message it receives is
+        // synced onward by its ordinary outgoing path.
+        //
+        // Falling through when the socket is closed is deliberate: the outbox still holds the
+        // message, so an unavailable channel costs a retry rather than the message.
+        if (storage.getState().channelOverride[sessionId] === 'lan' && this.lanSocket) {
+            const socket = this.lanSocket.handle;
+            const allSent = batch.every((msg) =>
+                socket.send({ sessionId, localId: msg.localId, content: msg.content })
+            );
+            if (allSent) {
+                pending.splice(0, batch.length);
+                for (const msg of batch) {
+                    // Optimistic, exactly as the server socket path is: the echo is what actually
+                    // confirms it, and handleUpdate fast-acks it when it arrives.
+                    storage.getState().markOutboxMessageAcked(msg.localId);
+                }
+                return;
+            }
+        }
+
         // Prefer WebSocket send — same path as CLI. No HTTP round-trip, no
         // Tauri HTTP plugin issues. Server echoes back via new-message WS
         // event, which handleUpdate already fast-acks.

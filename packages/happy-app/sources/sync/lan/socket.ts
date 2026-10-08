@@ -31,6 +31,15 @@ const LAN_SOCKET_OPEN_TIMEOUT_MS = 5_000;
 
 export type LanSocketHandle = {
     baseUrl: string;
+    /**
+     * Writes a user message back over the live channel. False when the socket is not open, which
+     * the caller treats as "not this channel" rather than as a failure — the outbox still holds
+     * the message, and the server path is still there.
+     *
+     * `content` is the ciphertext the server route carries: the LAN is plain HTTP, so the payload
+     * must stay unreadable here and is decrypted only by the session that owns the key.
+     */
+    send: (message: { sessionId: string; localId: string; content: string }) => boolean;
     close: () => void;
 };
 
@@ -129,6 +138,19 @@ export async function openLanSocket(options: {
 
     return {
         baseUrl: options.baseUrl,
+        send: (message) => {
+            // 1 = OPEN. Checked per send rather than once, because a socket can close between
+            // sends and reporting success for a write nobody receives would lose the message.
+            if (deliberatelyClosed || socket.readyState !== 1) {
+                return false;
+            }
+            try {
+                socket.send(JSON.stringify({ event: 'send', payload: message }));
+                return true;
+            } catch {
+                return false;
+            }
+        },
         close: () => {
             // Detach first: a deliberate close must not report back as a drop, or the caller
             // would reopen the socket it just asked to shut.
