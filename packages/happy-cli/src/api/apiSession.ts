@@ -1888,6 +1888,7 @@ export class ApiSessionClient extends EventEmitter {
                     const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
                     this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
                     this.metadataVersion = answer.version;
+                    this.mirrorStateToDaemon({ metadata: { version: answer.version, value: answer.metadata } });
                     this.emit('metadata-updated', this.metadata);
                 } else if (answer.result === 'version-mismatch') {
                     if (answer.version > this.metadataVersion) {
@@ -1905,6 +1906,16 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     /**
+     * Mirrors this session's own state change onto the daemon's LAN socket, in the server's
+     * `update-session` shape. The server never echoes a session's own writes back to it, so the
+     * `update` handler's mirror cannot see them — and without this a LAN reader learns nothing
+     * about agentState or metadata until the server's slow session list says so.
+     */
+    private mirrorStateToDaemon(change: { metadata?: { version: number; value: string }; agentState?: { version: number; value: string | null } }): void {
+        forwardSessionEventToDaemon({ t: 'update-session', id: this.sessionId, ...change });
+    }
+
+    /**
      * Update session agent state
      * @param handler - Handler function that returns the updated agent state
      */
@@ -1918,6 +1929,7 @@ export class ApiSessionClient extends EventEmitter {
                     this.agentState = answer.agentState ? decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.agentState)) : null;
                     this.agentStateVersion = answer.version;
                     this.stripServerInboxFromAgentState();
+                    this.mirrorStateToDaemon({ agentState: { version: answer.version, value: answer.agentState } });
                     logger.debug('Agent state updated', this.agentState);
                 } else if (answer.result === 'version-mismatch') {
                     if (answer.version > this.agentStateVersion) {

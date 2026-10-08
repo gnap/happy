@@ -30,6 +30,8 @@ let lastSince: string | undefined;
 let sent: { sessionId: string; localId: string; content: string }[] = [];
 
 let server: LanServerHandle | null = null;
+/** What a socket reader should be handed on connect; mutable so one test can set it. */
+let snapshot: unknown[] = [];
 
 async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
     server = await startLanServer({
@@ -44,6 +46,7 @@ async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
         onSend: (message) => {
             sent.push(message);
         },
+        getSnapshot: () => snapshot,
         host: '127.0.0.1',
         port: 0,
         limits,
@@ -252,6 +255,24 @@ describe('lanServer read-only API', () => {
             socket.close();
 
             expect(sent).toEqual([{ sessionId: 'sess-1', localId: 'local-9', content: 'CIPHER-9' }]);
+        });
+
+        it('replays the current session state to a reader that connects late', async () => {
+            await start();
+            const envelope = { id: 'lan-1', seq: 0, body: { t: 'update-session', id: 'sess-1' }, createdAt: 1 };
+            snapshot = [envelope];
+            const { nonce } = await (await fetch(url('/lan/challenge'), { method: 'POST' })).json() as { nonce: string };
+            const socket = new WebSocket(
+                `ws://127.0.0.1:${server!.port}/lan/socket?nonce=${encodeURIComponent(nonce)}&proof=${encodeURIComponent(lanProofFor(SECRET, nonce))}`,
+            );
+            const first = await new Promise<string>((resolve, reject) => {
+                socket.addEventListener('message', (event) => resolve(String(event.data)));
+                socket.addEventListener('close', () => reject(new Error('socket refused')));
+            });
+            socket.close();
+            snapshot = [];
+
+            expect(JSON.parse(first)).toEqual({ event: 'update', payload: envelope });
         });
 
         it('ignores a frame that is not a send, and a send that is missing fields', async () => {

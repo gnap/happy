@@ -1206,6 +1206,17 @@ export async function startDaemon(): Promise<void> {
         // against this channel. The outer `seq` is the user-wide counter the App explicitly
         // ignores for cursors; the ordering it does use, the session-internal `message.seq`,
         // travels inside `body` and is passed through untouched.
+        if (sessionId && event.t === 'update-session') {
+          const change = event as { metadata?: { version: number; value: string }; agentState?: { version: number; value: string | null } };
+          const known = lanSessionState.get(sessionId) ?? {};
+          if (change.metadata && change.metadata.version >= (known.metadata?.version ?? 0)) {
+            known.metadata = change.metadata;
+          }
+          if (change.agentState && change.agentState.version >= (known.agentState?.version ?? 0)) {
+            known.agentState = change.agentState;
+          }
+          lanSessionState.set(sessionId, known);
+        }
         lanServer?.broadcast('update', {
           id: `lan-${++lanEventCounter}`,
           seq: 0,
@@ -1264,6 +1275,15 @@ export async function startDaemon(): Promise<void> {
     let lanServer: LanServerHandle | null = null;
     /** Only has to make the envelope's `id` unique; the App does not key on it. */
     let lanEventCounter = 0;
+    /**
+     * The latest `update-session` state each session has mirrored to us, so a LAN reader that
+     * connects late still gets the current agentState/metadata instead of waiting for the server.
+     * Ciphertext only, exactly as the server would have sent it.
+     */
+    const lanSessionState = new Map<string, {
+      metadata?: { version: number; value: string };
+      agentState?: { version: number; value: string | null };
+    }>();
     let lanDiscovery: LanDiscoveryHandle | null = null;
     let endpointPublisher: EndpointPublisherHandle | null = null;
     // The endpoint publisher needs the machine socket, but that client is created later in
@@ -1288,6 +1308,23 @@ export async function startDaemon(): Promise<void> {
             machineId,
             accountFingerprint,
             port: configuration.lanPort,
+            getSnapshot: () => {
+              const live = new Set([...pidToTrackedSession.values()].map(s => s.happySessionId));
+              const frames: unknown[] = [];
+              for (const [id, state] of lanSessionState) {
+                if (!live.has(id)) {
+                  lanSessionState.delete(id);
+                  continue;
+                }
+                frames.push({
+                  id: `lan-${++lanEventCounter}`,
+                  seq: 0,
+                  body: { t: 'update-session', id, ...state },
+                  createdAt: Date.now(),
+                });
+              }
+              return frames;
+            },
             getSessions: () => [...pidToTrackedSession.values()]
               .filter(session => session.happySessionId !== undefined)
               .map(session => ({
