@@ -3898,23 +3898,42 @@ class Sync {
      * enough.
      */
     private preferredChannel(sessionId: string): 'lan' | 'server' {
+        const [channel, reason] = this.resolveChannel(sessionId);
+        if (this.channelReasons.get(sessionId) !== reason) {
+            this.channelReasons.set(sessionId, reason);
+            log.log(`📡 channel for ${sessionId}: ${channel} (${reason})`);
+        }
+        return channel;
+    }
+
+    private channelReasons = new Map<string, string>();
+
+    private resolveChannel(sessionId: string): ['lan' | 'server', string] {
         const override = storage.getState().channelOverride[sessionId];
         if (override) {
-            return override;
+            return [override, 'pinned'];
         }
         const session = storage.getState().sessions[sessionId];
         // A session that never declared the capability is running a build that cannot serve the LAN
         // at all: it keeps no message log for the LAN to read, and it cannot take a message
         // delivered back over it. Preferring the LAN for one would show an empty session and
         // swallow sends, so an undeclared session stays on the server until it restarts.
-        if (!session?.agentState?.lanSocket) {
-            return 'server';
+        if (!session) {
+            return ['server', 'session not loaded'];
+        }
+        if (!session.agentState?.lanSocket) {
+            return ['server', 'session has not declared the LAN'];
         }
         const machineId = session.metadata?.machineId;
-        if (!machineId || !this.getMachineKey(machineId)) {
-            return 'server';
+        if (!machineId) {
+            return ['server', 'no machineId'];
         }
-        return storage.getState().lanSightings[machineId] ? 'lan' : 'server';
+        if (!this.getMachineKey(machineId)) {
+            return ['server', 'no machine key'];
+        }
+        return storage.getState().lanSightings[machineId]
+            ? ['lan', 'declared and reachable']
+            : ['server', 'machine not seen on this network'];
     }
 
     /**
