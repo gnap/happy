@@ -2669,21 +2669,10 @@ class Sync {
             await this.acquireMessageFetchSlot();
             log.log(`💬 fetchMessages: got lock for ${sessionId}`);
             try {
-                // A manually forced LAN channel bypasses the server entirely. That is the point of
-                // the control: without it the only way to exercise the LAN path is to break the
-                // server, so a broken fallback stays invisible until the day it is needed.
+                // A channel is chosen per session, and everything after this point is the same
+                // whichever one it was: the read's bytes go through `ingestChannelRead`.
                 if (storage.getState().channelOverride[sessionId] === 'lan') {
-                    const read = await this.fetchSessionFromLan(sessionId);
-                    log.log(
-                        read
-                            ? `📡 fetchMessages: forced LAN — read ${read.messages.length} message(s), ${read.decryptedCount}/${read.total} decrypted`
-                            : '📡 fetchMessages: forced LAN — nothing to read (no daemon for this session)'
-                    );
-                    // Polling starts even when this read found nothing. "No local history yet" is a
-                    // 404 the daemon documents as retryable, so treating it as final would strand
-                    // the channel: the session would sit empty until something else invalidated
-                    // the sync, which for a pinned channel may never happen.
-                    this.startLanPolling(sessionId);
+                    await this.fetchMessagesViaLan(sessionId);
                     return;
                 }
 
@@ -3787,6 +3776,29 @@ class Sync {
     }
 
     /**
+     * One tick of the LAN channel, run inside the same session lock and fetch slot the server path
+     * takes — which polling used to bypass by calling the LAN read directly, so two ticks could
+     * overlap and race each other into the store.
+     *
+     * A forced LAN channel bypasses the server entirely. That is the point of the control: without
+     * it the only way to exercise the LAN path is to break the server, so a broken fallback stays
+     * invisible until the day it is needed.
+     */
+    private fetchMessagesViaLan = async (sessionId: string): Promise<void> => {
+        const read = await this.fetchSessionFromLan(sessionId);
+        log.log(
+            read
+                ? `📡 fetchMessages: forced LAN — read ${read.messages.length} message(s), ${read.decryptedCount}/${read.total} decrypted`
+                : '📡 fetchMessages: forced LAN — nothing to read (no daemon for this session)'
+        );
+        // Polling starts even when this read found nothing. "No local history yet" is a 404 the
+        // daemon documents as retryable, so treating it as final would strand the channel: the
+        // session would sit empty until something else invalidated the sync, which for a pinned
+        // channel may never happen.
+        this.startLanPolling(sessionId);
+    };
+
+    /**
      * How often to re-read the LAN while the server is unavailable.
      *
      * This is short because a tick is now cheap: the cursor means only newly-written entries come
@@ -3808,7 +3820,10 @@ class Sync {
             return;
         }
         const timer = setInterval(() => {
-            void this.fetchSessionFromLan(sessionId).catch(() => undefined);
+            // Through the same entry point the server path uses, so a tick takes the session lock
+            // and a fetch slot rather than racing whatever else is reading this session. The
+            // override is re-read there, so a channel switch also takes effect on the next tick.
+            this.getMessagesSync(sessionId).invalidate();
         }, Sync.LAN_POLL_INTERVAL_MS);
         // Node/web only; keeps the timer from holding the process open in tests.
         (timer as unknown as { unref?: () => void }).unref?.();
