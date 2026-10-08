@@ -94,6 +94,8 @@ export class ApiClient {
             'Content-Type': 'application/json'
           },
           timeout: 60000,
+          // A real bound, unlike `timeout`: it also covers DNS and connection setup.
+          signal: AbortSignal.timeout(60000),
           httpsAgent: serverHttpsAgent,
         }
       )
@@ -221,6 +223,8 @@ export class ApiClient {
             'Content-Type': 'application/json'
           },
           timeout: 60000,
+          // A real bound, unlike `timeout`: it also covers DNS and connection setup.
+          signal: AbortSignal.timeout(60000),
           httpsAgent: serverHttpsAgent,
         }
       );
@@ -337,6 +341,8 @@ export class ApiClient {
             'Content-Type': 'application/json'
           },
           timeout: 5000,
+          // A real bound, unlike `timeout`: it also covers DNS and connection setup.
+          signal: AbortSignal.timeout(5000),
           httpsAgent: serverHttpsAgent,
         }
       );
@@ -374,6 +380,8 @@ export class ApiClient {
           headers: { Authorization: `Bearer ${this.credential.token}` },
           httpsAgent: serverHttpsAgent,
           timeout: 10000,
+          // A real bound, unlike `timeout`: it also covers DNS and connection setup.
+          signal: AbortSignal.timeout(10000),
         }
       );
       return (response.data.sessions ?? []).map((s: Record<string, unknown>) => ({
@@ -401,6 +409,8 @@ export class ApiClient {
             'Content-Type': 'application/json'
           },
           timeout: 5000,
+          // A real bound, unlike `timeout`: it also covers DNS and connection setup.
+          signal: AbortSignal.timeout(5000),
           httpsAgent: serverHttpsAgent,
         }
       );

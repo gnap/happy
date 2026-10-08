@@ -263,7 +263,11 @@ describe('ApiSessionClient v3 messages API migration', () => {
             role: 'agent',
             content: {
                 type: 'codex',
-                data: { type: 'delta', text: 'hello' }
+                data: { type: 'delta', text: 'hello' },
+                // Legacy records carry no envelope, so the writer identity rides in `content`.
+                sid: 'test-session-tag',
+                site: 'test-machine-id',
+                n: 0,
             },
             meta: {
                 sentFrom: 'cli'
@@ -599,7 +603,10 @@ describe('ApiSessionClient v3 messages API migration', () => {
                 data: {
                     type: 'message',
                     message: 'hi'
-                }
+                },
+                sid: 'test-session-tag',
+                site: 'test-machine-id',
+                n: 0,
             },
             meta: {
                 sentFrom: 'cli'
@@ -635,9 +642,66 @@ describe('ApiSessionClient v3 messages API migration', () => {
                 type: 'event',
                 data: {
                     type: 'ready'
-                }
+                },
+                sid: 'test-session-tag',
+                site: 'test-machine-id',
+                n: 0,
             }
         });
+    });
+
+    /**
+     * The reader's contract, executed rather than described: whichever record shape a client
+     * sends, the writer identity is reachable and the counter is contiguous across all of them.
+     * A reader that gap-detects over `n` needs both halves of that to hold.
+     */
+    it('carries a readable writer identity on every record shape', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        mockAxiosPost.mockResolvedValue({
+            data: {
+                messages: [{ id: 'msg-1', seq: 1, localId: 'local-1', createdAt: 1, updatedAt: 1 }]
+            }
+        });
+
+        client.sendSessionProtocolMessage({
+            id: 'env-protocol',
+            time: 1000,
+            role: 'agent',
+            ev: { t: 'text', text: 'protocol' }
+        });
+        client.sendSessionLifecycleEnvelope({
+            id: 'env-lifecycle',
+            time: 2000,
+            role: 'agent',
+            ev: { t: 'text', text: 'lifecycle' }
+        });
+        client.sendSessionEvent({ type: 'ready' }, 'event-1');
+        client.sendCursorMessage({ type: 'delta', text: 'cursor' });
+
+        await waitForCheck(() => {
+            expect((client as any).pendingOutbox).toHaveLength(0);
+            expect(mockAxiosPost).toHaveBeenCalled();
+        });
+
+        const records = mockAxiosPost.mock.calls
+            .flatMap((call) => call[1].messages)
+            .map((m: { content: string }) => decrypt(
+                session.encryptionKey,
+                session.encryptionVariant,
+                decodeBase64(m.content)
+            ) as { role: string; content: any });
+
+        expect(records).toHaveLength(4);
+
+        // Session records nest the envelope (`data` for lifecycle); legacy records carry the
+        // identity in `content` itself, since there is no envelope there.
+        const identityOf = (record: { role: string; content: any }) =>
+            record.role === 'session' ? (record.content.data ?? record.content) : record.content;
+
+        const identities = records.map(identityOf);
+        expect(identities.map((i) => i.sid)).toEqual(Array(4).fill('test-session-tag'));
+        expect(identities.map((i) => i.site)).toEqual(Array(4).fill('test-machine-id'));
+        expect(identities.map((i) => i.n)).toEqual([0, 1, 2, 3]);
     });
 
     it('fetchMessages uses after_seq=0 initially and routes user messages to callback', async () => {

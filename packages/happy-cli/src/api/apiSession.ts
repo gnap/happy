@@ -39,7 +39,9 @@ import {
     buildOutputFormatPayload,
     buildSessionEventPayload,
     buildSessionProtocolPayload,
+    stampAgentRecord,
     type SessionEventPayload,
+    type SessionRecord,
 } from './sessionPayloads';
 import {
     cloneA2AInboxState,
@@ -1696,13 +1698,25 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
+    /**
+     * Enqueue a legacy `role:'agent'` record, which carries no envelope to stamp.
+     *
+     * The counter is issued on the line above the write, as in the session-protocol path: a
+     * value handed out without a matching durable write would be a permanent gap. Without
+     * this these records reach the log with no writer identity at all, which reads as missing
+     * messages to a reader doing gap detection over `n`.
+     */
+    private enqueueAgentRecord(record: SessionRecord): void {
+        this.enqueueMessage(stampAgentRecord(record, { sid: this.sid, site: this.site, n: this.nextN++ }));
+    }
+
     sendCodexMessage(body: any) {
-        this.enqueueMessage(buildCodexPayload(body));
+        this.enqueueAgentRecord(buildCodexPayload(body));
     }
 
     /** Same shape as codex but type: 'cursor' so the app normalizes thinking as thinking (no dependency on session.metadata.flavor). */
     sendCursorMessage(body: Parameters<ApiSessionClient['sendCodexMessage']>[0]) {
-        this.enqueueMessage(buildCursorPayload(body));
+        this.enqueueAgentRecord(buildCursorPayload(body));
     }
 
     /**
@@ -1710,7 +1724,7 @@ export class ApiSessionClient extends EventEmitter {
      * Used for old App compatibility; dual-send alongside session protocol when needed.
      */
     sendOutputFormatMessage(data: OutputFormatData) {
-        this.enqueueMessage(buildOutputFormatPayload(data));
+        this.enqueueAgentRecord(buildOutputFormatPayload(data));
     }
 
     private enqueueSessionProtocolEnvelope(envelope: SessionEnvelope, invalidate: boolean = true, extraMeta?: Record<string, unknown>) {
@@ -1785,11 +1799,11 @@ export class ApiSessionClient extends EventEmitter {
     sendAgentMessage(provider: ACPProvider, body: ACPMessageData) {
         logger.debug(`[SOCKET] Sending ACP message from ${provider}:`, { type: body.type, hasMessage: 'message' in body });
 
-        this.enqueueMessage(buildAgentMessagePayload(provider, body));
+        this.enqueueAgentRecord(buildAgentMessagePayload(provider, body));
     }
 
     sendSessionEvent(event: SessionEventPayload, id?: string) {
-        this.enqueueMessage(buildSessionEventPayload(id ?? randomUUID(), event));
+        this.enqueueAgentRecord(buildSessionEventPayload(id ?? randomUUID(), event));
     }
 
     /**

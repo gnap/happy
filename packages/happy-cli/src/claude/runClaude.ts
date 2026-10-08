@@ -31,6 +31,7 @@ import { detectWorktree } from '../utils/createSessionMetadata';
 import { startOfflineReconnection, connectionState } from '@/utils/serverConnectionErrors';
 import { claudeLocal } from '@/claude/claudeLocal';
 import { createSessionScanner } from '@/claude/utils/sessionScanner';
+import { createBackoff } from '@/utils/time';
 import { Session } from './session';
 import { applySandboxPermissionPolicy, resolveInitialClaudePermissionMode, resolveStoredSessionPermissionMode } from './utils/permissionMode';
 import { claudeModelCodeForMetadata, normalizeClaudeModelForSdk } from './utils/model';
@@ -178,56 +179,94 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
 
     // When started by the daemon, the machine is already registered — skip the redundant call.
     // Otherwise, parallelize machine registration and session creation since they are independent.
-    const [, response] = await Promise.all([
+    let [, response] = await Promise.all([
         options.startedBy === 'daemon'
             ? Promise.resolve(null)
             : api.getOrCreateMachine({ machineId, metadata: initialMachineMetadata }),
         api.getOrCreateSession({ tag: sessionTag, site: machineId, metadata, state, existingEncryptionKey }),
     ]);
 
-    // Handle server unreachable case - run Claude locally with hot reconnection
-    // Note: connectionState.notifyOffline() was already called by api.ts with error details
+    // The server was unreachable at startup. What to do about it depends on who is driving
+    // this session, and the two cases are disjoint: a daemon-spawned session is rejected above
+    // if it asks for local mode, so local mode means "someone is at the terminal".
     if (!response) {
-        let offlineSessionId: string | null = null;
+        if ((options.startingMode ?? 'local') === 'local') {
+            // Terminal session: run Claude locally so the person in front of it keeps working,
+            // and mirror the transcript up once the server returns. The App never drives this
+            // mode, so it keeps the behaviour it always had.
+            let offlineSessionId: string | null = null;
 
-        const reconnection = startOfflineReconnection({
-            serverUrl: configuration.serverUrl,
-            onReconnected: async () => {
-                const resp = await api.getOrCreateSession({ tag: randomUUID(), site: machineId, metadata, state });
-                if (!resp) throw new Error('Server unavailable');
-                const session = api.sessionSyncClient(resp);
-                const scanner = await createSessionScanner({
-                    sessionId: null,
-                    workingDirectory,
-                    onMessage: (msg) => session.sendClaudeSessionMessage(msg)
-                });
-                if (offlineSessionId) scanner.onNewSession(offlineSessionId);
-                return { session, scanner };
-            },
-            onNotify: console.log,
-            onCleanup: () => {
-                // Scanner cleanup handled automatically when process exits
-            }
-        });
-
-        try {
-            await claudeLocal({
-                path: workingDirectory,
-                sessionId: null,
-                onSessionFound: (id) => { offlineSessionId = id; },
-                onThinkingChange: () => {},
-                abort: new AbortController().signal,
-                claudeEnvVars: options.claudeEnvVars,
-                claudeArgs: options.claudeArgs,
-                mcpServers: {},
-                allowedTools: [],
-                sandboxConfig,
+            const reconnection = startOfflineReconnection({
+                serverUrl: configuration.serverUrl,
+                onReconnected: async () => {
+                    // Same tag as the attempt that failed, not a fresh one: the tag keys the session
+                    // on the server and buckets the local log, outbox and encryption key. A new one
+                    // would surface this work as a second session and split the history in two.
+                    // The key follows the tag -- `resolveSessionEncryption` re-reads the one persisted
+                    // before the failed attempt -- so nothing else needs carrying over.
+                    const resp = await api.getOrCreateSession({ tag: sessionTag, site: machineId, metadata, state });
+                    if (!resp) throw new Error('Server unavailable');
+                    const session = api.sessionSyncClient(resp);
+                    const scanner = await createSessionScanner({
+                        sessionId: null,
+                        workingDirectory,
+                        onMessage: (msg) => session.sendClaudeSessionMessage(msg)
+                    });
+                    if (offlineSessionId) scanner.onNewSession(offlineSessionId);
+                    return { session, scanner };
+                },
+                onNotify: console.log,
+                onCleanup: () => {
+                    // Scanner cleanup handled automatically when process exits
+                }
             });
-        } finally {
-            reconnection.cancel();
-            stopCaffeinate();
+
+            try {
+                await claudeLocal({
+                    path: workingDirectory,
+                    sessionId: null,
+                    onSessionFound: (id) => { offlineSessionId = id; },
+                    onThinkingChange: () => {},
+                    abort: new AbortController().signal,
+                    claudeEnvVars: options.claudeEnvVars,
+                    claudeArgs: options.claudeArgs,
+                    mcpServers: {},
+                    allowedTools: [],
+                    sandboxConfig,
+                });
+            } finally {
+                reconnection.cancel();
+                stopCaffeinate();
+            }
+            process.exit(0);
         }
-        process.exit(0);
+
+        // Remote session: hold here and keep retrying rather than falling back to running Claude
+        // locally. A local run drives the Claude Code CLI in its own execution mode, which never
+        // hands back to the SDK, so a server hiccup would pin this session to a mode the App
+        // cannot use -- and any failure in it takes the whole process down, dropping the session
+        // entirely. Waiting sends no session events and keeps the process alive; the moment the
+        // server answers this continues into an ordinary remote session, and the next user
+        // message starts a turn through the SDK as usual.
+        //
+        // Retrying is deliberately unlimited: the alternative to a long wait here is not a
+        // working session, it is no session. A daemon-initiated stop still terminates the process.
+        logger.debug('[START] Server unreachable at startup; waiting for it instead of running Claude locally');
+        const acquireSession = createBackoff({
+            minDelay: 5_000,
+            maxDelay: 60_000,
+            maxFailureCount: 10,
+            onError: (error, failures) => logger.debug(`[START] Still cannot reach the server (attempt ${failures}):`, error),
+        });
+        response = await acquireSession(async () => {
+            // Same tag as the attempt that failed: it keys the session on the server and
+            // buckets the local log, outbox and encryption key, so a new one would surface
+            // this work as a second session. The key follows the tag -- resolveSessionEncryption
+            // re-reads the one persisted before the failed attempt -- so nothing else carries over.
+            const resp = await api.getOrCreateSession({ tag: sessionTag, site: machineId, metadata, state, existingEncryptionKey });
+            if (!resp) throw new Error('Server unreachable');
+            return resp;
+        });
     }
 
     logger.debug(`Session created: ${response.id}`);

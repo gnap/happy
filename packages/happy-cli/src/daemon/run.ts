@@ -25,7 +25,8 @@ import { projectPath } from '@/projectPath';
 import { getTmuxUtilities, isTmuxAvailable, parseTmuxSessionIdentifier, formatTmuxSessionIdentifier } from '@/utils/tmux';
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
 import { stripProfileManagedEnv } from '@/utils/profileEnv';
-import { fetchSessionProfileMeta } from './fetchSessionProfileMeta';
+import { fetchSessionProfileMeta, PROFILE_META_DEADLINE_MS } from './fetchSessionProfileMeta';
+import { delay } from '@/utils/time';
 import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSessionSummary } from './lanServer';
 import type { ApiMachineClient } from '@/api/apiMachine';
 import { readSessionKey } from '@/api/sessionKeyPersistence';
@@ -253,6 +254,14 @@ export async function startDaemon(): Promise<void> {
      *  Persisted to daemon.state.json and restored on restart.
      *  `pidToTrackedSession` is the runtime-only active-process index. */
     let sessions: Record<string, PersistedSession> = {};
+    /**
+     * Write the full daemon state snapshot to disk. Declared here, ahead of the socket and
+     * webhook handlers that call it, because those are registered long before the snapshot
+     * machinery below is built: it needs `syncStoppedToSessions` and `fileState`, which cannot
+     * be hoisted. A frame arriving in that window used to throw a temporal-dead-zone error and
+     * be dropped; now it is a no-op, and the state is written once the real one is installed.
+     */
+    let persistNow: () => void = () => {};
     /** In-memory cooldown: session ID -> last spawn attempt timestamp. Prevents rapid re-spawn loops. */
     const lastSpawnAttemptBySessionId: Record<string, number> = {};
     /** Timestamp used as changedSince for next /v2/sessions poll. */
@@ -306,6 +315,45 @@ export async function startDaemon(): Promise<void> {
       if (code === 0) return 'completed normally (exit 0)';
       if (code !== null && code !== undefined) return `exited with error (code ${code})`;
       return 'unknown';
+    };
+
+    const onChildExited = (pid: number, code?: number | null, signal?: string | null) => {
+      const session = pidToTrackedSession.get(pid);
+      if (session) {
+        if (session.exitCode === undefined && session.exitSignal === undefined) {
+          session.exitCode = code ?? null;
+          session.exitSignal = signal ?? null;
+        }
+        if (!session.exitReason) {
+          session.exitReason = resolveExitReason(code ?? null, signal);
+        }
+        session.exitTime = session.exitTime ?? Date.now();
+        persistSessionTagBeforeRemove(session);
+        pushRecentlyExited(session);
+        if (session.pendingArchive) {
+          // App-initiated archive (killSession RPC): do not keep in list
+          logger.debug(`[DAEMON RUN] Session ${session.happySessionId} (PID ${pid}) archived by app, removing from list`);
+          if (session.happySessionId) {
+            markSessionArchived(session.happySessionId);
+            persistNow();
+          }
+        } else {
+          // Process exited on its own (pause / signal / crash): keep visible until user archives
+          logger.debug(`[DAEMON RUN] Session ${session.happySessionId} (PID ${pid}) exited (reason: ${session.exitReason}), moving to stoppedSessions`);
+          if (session.happySessionId) {
+            stoppedSessions.set(session.happySessionId, {
+              ...session,
+              childProcess: undefined,
+              sandbox: session.happySessionMetadataFromLocalWebhook?.sandbox,
+            });
+            noteDaemonManagedLocalStop(session);
+            persistNow();
+          }
+        }
+      } else {
+        logger.debug(`[DAEMON RUN] Removing exited process PID ${pid} from tracking`);
+      }
+      pidToTrackedSession.delete(pid);
     };
 
     const terminateTrackedProcess = (pid: number, session: TrackedSession, reason: string) => {
@@ -999,44 +1047,6 @@ export async function startDaemon(): Promise<void> {
     };
 
     // Handle child process exit
-    const onChildExited = (pid: number, code?: number | null, signal?: string | null) => {
-      const session = pidToTrackedSession.get(pid);
-      if (session) {
-        if (session.exitCode === undefined && session.exitSignal === undefined) {
-          session.exitCode = code ?? null;
-          session.exitSignal = signal ?? null;
-        }
-        if (!session.exitReason) {
-          session.exitReason = resolveExitReason(code ?? null, signal);
-        }
-        session.exitTime = session.exitTime ?? Date.now();
-        persistSessionTagBeforeRemove(session);
-        pushRecentlyExited(session);
-        if (session.pendingArchive) {
-          // App-initiated archive (killSession RPC): do not keep in list
-          logger.debug(`[DAEMON RUN] Session ${session.happySessionId} (PID ${pid}) archived by app, removing from list`);
-          if (session.happySessionId) {
-            markSessionArchived(session.happySessionId);
-            persistNow();
-          }
-        } else {
-          // Process exited on its own (pause / signal / crash): keep visible until user archives
-          logger.debug(`[DAEMON RUN] Session ${session.happySessionId} (PID ${pid}) exited (reason: ${session.exitReason}), moving to stoppedSessions`);
-          if (session.happySessionId) {
-            stoppedSessions.set(session.happySessionId, {
-              ...session,
-              childProcess: undefined,
-              sandbox: session.happySessionMetadataFromLocalWebhook?.sandbox,
-            });
-            noteDaemonManagedLocalStop(session);
-            persistNow();
-          }
-        }
-      } else {
-        logger.debug(`[DAEMON RUN] Removing exited process PID ${pid} from tracking`);
-      }
-      pidToTrackedSession.delete(pid);
-    };
 
     /** Remove a stopped session from the visible list (explicit user action). */
     const archiveSession = (sessionId: string): boolean => {
@@ -1156,7 +1166,15 @@ export async function startDaemon(): Promise<void> {
       // re-execute them, which surfaces as the App replaying historical messages on
       // restart. The offline-wake auto-respawn path still passes resumeAfterSeq because
       // that flow is meant to catch up missed messages while the PID was dead.
-      const recoveredProfile = await fetchSessionProfileMeta(sessionId);
+      //
+      // Bounded on purpose: a stalled server must not be able to wedge a user-initiated
+      // restart. Every value here is optional -- null just means the child spawns with the
+      // daemon's baseline env and learns the profile from the next user message -- so giving
+      // up early costs nothing that the unbounded wait was buying.
+      const recoveredProfile = await Promise.race([
+        fetchSessionProfileMeta(sessionId),
+        delay(PROFILE_META_DEADLINE_MS).then(() => null),
+      ]);
       // RPC-provided sandboxConfig takes priority; falls back to session metadata
       const perSessionSandbox = sandboxConfig ?? found.happySessionMetadataFromLocalWebhook?.sandbox ?? undefined;
       const result = await spawnSession({
@@ -1589,7 +1607,7 @@ export async function startDaemon(): Promise<void> {
     };
 
     /** Write the full daemon state snapshot to disk immediately. */
-    const persistNow = () => {
+    persistNow = () => {
       syncStoppedToSessions();
       // Update running sessions' PIDs into sessions record
       for (const [, tracked] of pidToTrackedSession) {

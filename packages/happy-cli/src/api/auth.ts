@@ -23,6 +23,12 @@ export async function authGetToken(secret: Uint8Array): Promise<string> {
     challenge: encodeBase64(challenge),
     publicKey: encodeBase64(publicKey),
     signature: encodeBase64(signature)
+  }, {
+    // This was the one call with no bound at all. `signal` rather than `timeout` because only
+    // the signal also covers DNS and connection setup: a stalled server must fail the login
+    // rather than hang it.
+    timeout: 15_000,
+    signal: AbortSignal.timeout(15_000),
   });
 
   if (!response.data.success || !response.data.token) {

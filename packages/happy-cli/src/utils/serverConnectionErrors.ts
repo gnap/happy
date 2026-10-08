@@ -156,6 +156,8 @@ export function startOfflineReconnection<TSession>(
         const { serverHttpsAgent } = await import('@/configuration');
         await axios.get(`${config.serverUrl}/v1/sessions`, {
             timeout: 5000,
+                // A real bound, unlike `timeout`: it also covers DNS and connection setup.
+                signal: AbortSignal.timeout(5000),
             validateStatus: (status) => status < 500, // 4xx = server is up, 5xx = server error
             httpsAgent: serverHttpsAgent,
         });

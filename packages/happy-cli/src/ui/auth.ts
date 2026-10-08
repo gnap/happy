@@ -44,6 +44,8 @@ export async function doAuth(): Promise<Credentials | null> {
             },
             {
                 timeout: 30_000,
+        // A real bound, unlike `timeout`: it also covers DNS and connection setup.
+        signal: AbortSignal.timeout(30_000),
                 httpsAgent: serverHttpsAgent,
             }
         );

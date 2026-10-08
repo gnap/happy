@@ -23,6 +23,19 @@ type RawMessage = {
 };
 
 /**
+ * Hard ceiling on the whole lookup, enforced by the caller racing this against a timer and
+ * by the request's own abort signal.
+ *
+ * This runs on the critical path of a user-initiated restart, and its result is only a
+ * best-effort recovery of the App's profile: a null answer is already handled by spawning
+ * with the daemon's baseline env. So there is nothing to gain by waiting, and a lot to lose —
+ * on a stalled server the request can outlive the axios `timeout`, which does not cover DNS
+ * resolution or connection setup, and a restart that never returns has no cure short of
+ * restarting the daemon.
+ */
+export const PROFILE_META_DEADLINE_MS = 5_000;
+
+/**
  * Walk the most-recent messages of `sessionId` (server returns newest first),
  * decrypt with the daemon-held session key, and return the latest user message's
  * `meta.profileId` + `meta.environmentVariables`. Used by restart-session so the
@@ -51,6 +64,7 @@ export async function fetchSessionProfileMeta(sessionId: string): Promise<Sessio
                 },
                 httpsAgent: serverHttpsAgent,
                 timeout: 30000,
+                signal: AbortSignal.timeout(PROFILE_META_DEADLINE_MS),
             },
         );
     } catch (error) {

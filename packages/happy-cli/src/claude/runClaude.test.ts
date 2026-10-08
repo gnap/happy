@@ -10,6 +10,10 @@ const mocks = vi.hoisted(() => {
     close: vi.fn(async () => undefined),
     keepAlive: vi.fn(),
     onUserMessage: vi.fn(),
+    // Enough of the A2A surface for the startup path, which peeks the inbox to decide
+    // whether an inbox turn is due before it reaches the (mocked) loop.
+    getA2AInbox: vi.fn(() => ({ messages: [] })),
+    getMetadata: vi.fn(() => null),
     rpcHandlerManager: {
       registerHandler: vi.fn(),
     },
@@ -33,7 +37,10 @@ const mocks = vi.hoisted(() => {
     mockResponse,
     mockApiCreate: vi.fn(),
     mockGetOrCreateMachine: vi.fn(async () => ({ id: 'machine-1' })),
-    mockGetOrCreateSession: vi.fn(async () => mockResponse),
+    // `unknown` so the offline test can make it resolve null, which is what the server
+    // being unreachable looks like from here; the parameter is typed so the test can read
+    // back the options each attempt was made with.
+    mockGetOrCreateSession: vi.fn(async (_opts: { tag: string; [key: string]: unknown }): Promise<unknown> => mockResponse),
     mockSessionSyncClient: vi.fn(() => mockSession),
     mockLoop: vi.fn(async () => 0),
     mockStartHappyServer: vi.fn(async () => ({
@@ -48,7 +55,10 @@ const mocks = vi.hoisted(() => {
     mockGenerateHookSettingsFile: vi.fn(() => '/tmp/hook-settings.json'),
     mockCleanupHookSettingsFile: vi.fn(),
     mockExtractSDKMetadataAsync: vi.fn((cb: (metadata: { tools: string[]; slashCommands: string[] }) => void) => {
-      void cb({ tools: ['Read'], slashCommands: ['/clear'] });
+      // Asynchronously, as the real extractor does: runClaude assigns `session` after this
+      // call returns, and the callback dereferences it. Firing it inline hit the temporal
+      // dead zone and failed the resume test for a reason that had nothing to do with resume.
+      queueMicrotask(() => cb({ tools: ['Read'], slashCommands: ['/clear'] }));
     }),
     mockNotifyDaemonSessionStarted: vi.fn(async () => ({ error: null })),
     mockNotifyDaemonSessionEnding: vi.fn(async () => undefined),
@@ -62,6 +72,8 @@ const mocks = vi.hoisted(() => {
     mockStartCaffeinate: vi.fn(() => false),
     mockStopCaffeinate: vi.fn(),
     mockProjectPath: vi.fn(() => '/tmp/happy-lib'),
+    mockStartOfflineReconnection: vi.fn((_opts: { onReconnected: () => Promise<unknown> }) => ({ cancel: vi.fn() })),
+    mockClaudeLocal: vi.fn(async () => undefined),
     mockLoggerDebug: vi.fn(),
     mockLoggerDebugLargeJson: vi.fn(),
     mockLoggerInfoDeveloper: vi.fn(),
@@ -99,6 +111,32 @@ vi.mock('@/api/api', () => ({
 
 vi.mock('@/claude/loop', () => ({
   loop: mocks.mockLoop,
+}));
+
+vi.mock('@/utils/serverConnectionErrors', () => ({
+  startOfflineReconnection: mocks.mockStartOfflineReconnection,
+  connectionState: { setBackend: vi.fn(), notifyOffline: vi.fn() },
+}));
+
+vi.mock('@/claude/claudeLocal', () => ({
+  claudeLocal: mocks.mockClaudeLocal,
+}));
+
+// The real backoff waits 5s+ between attempts, which the offline test below would have to sit
+// through. Retry immediately instead; the schedule itself is not what that test is about.
+vi.mock('@/utils/time', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/utils/time')>()),
+  createBackoff: () => async <T>(callback: () => Promise<T>): Promise<T> => {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        return await callback();
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError;
+  },
 }));
 
 vi.mock('@/claude/utils/startHappyServer', () => ({
@@ -197,5 +235,52 @@ describe('runClaude resume plumbing', () => {
         initialSessionId: 'claude-chat-123',
       }),
     );
+  });
+
+  /**
+   * When the server is unreachable at startup the session waits for it rather than running
+   * Claude locally. A local run is a different execution mode that the App cannot drive, and
+   * its failure would take the whole process — and so the session — down with it.
+   *
+   * Both attempts must use the same tag: it keys the session on the server and buckets the
+   * local log, outbox and encryption key, so a fresh one would surface the same conversation
+   * as a second session and split its history in two.
+   */
+  it('waits for the server under the original tag instead of running Claude locally', async () => {
+    mocks.mockGetOrCreateSession.mockResolvedValueOnce(null);
+    mocks.mockGetOrCreateSession.mockResolvedValueOnce(mocks.mockResponse);
+
+    await runClaude({} as any, {
+      startedBy: 'daemon',
+      startingMode: 'remote',
+      resumeSessionTag: 'session-tag-1',
+    });
+
+    const attemptedTags = mocks.mockGetOrCreateSession.mock.calls.map((call) => call[0].tag);
+    expect(attemptedTags).toEqual(['session-tag-1', 'session-tag-1']);
+    // It reached the ordinary startup path rather than exiting after a local run.
+    expect(loop).toHaveBeenCalled();
+  });
+
+  /**
+   * Local mode is someone at the terminal, and the App never drives it. Its behaviour when the
+   * server is unreachable is therefore left exactly as it was: run Claude locally so that
+   * person keeps working, then mirror the transcript up on reconnect.
+   */
+  it('still runs Claude locally when a terminal session cannot reach the server', async () => {
+    mocks.mockGetOrCreateSession.mockResolvedValue(null);
+    vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('process.exit');
+    }) as never);
+
+    await expect(runClaude({} as any, {
+      startedBy: 'terminal',
+      startingMode: 'local',
+      resumeSessionTag: 'session-tag-1',
+    })).rejects.toThrow('process.exit');
+
+    expect(mocks.mockClaudeLocal).toHaveBeenCalled();
+    expect(mocks.mockStartOfflineReconnection).toHaveBeenCalled();
+    expect(loop).not.toHaveBeenCalled();
   });
 });

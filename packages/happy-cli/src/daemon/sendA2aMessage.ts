@@ -130,6 +130,8 @@ export async function sendA2aMessage(sessionId: string, text: string, options: S
       },
       httpsAgent: serverHttpsAgent,
       timeout: 120000,
+        // A real bound, unlike `timeout`: it also covers DNS and connection setup.
+        signal: AbortSignal.timeout(120000),
     },
   );
 

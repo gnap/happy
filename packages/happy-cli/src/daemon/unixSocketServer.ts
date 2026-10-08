@@ -116,8 +116,23 @@ export function startUnixSocketServer(callbacks: {
 
             for (const line of lines) {
                 if (!line.trim()) continue;
+                let msg: DaemonSocketMessage;
                 try {
-                    const msg: DaemonSocketMessage = JSON.parse(line);
+                    msg = JSON.parse(line);
+                } catch (error) {
+                    // Head, tail and length, not a truncated head: a frame that was torn, doubled,
+                    // or genuinely malformed all look identical in the first 80 characters, which
+                    // is exactly what made the previous occurrence undiagnosable.
+                    logger.debug(
+                        `[UNIX SOCKET] Invalid JSON from session (${line.length} bytes, ${String(error)}):` +
+                        ` head=${line.slice(0, 60)} … tail=${line.slice(-60)}`,
+                    );
+                    continue;
+                }
+                // Parsing and handling are caught separately: sharing one catch reported every
+                // handler error as malformed JSON, and sent the reader looking at the bytes
+                // instead of at the code. The frame is already known to be well-formed here.
+                try {
                     switch (msg.type) {
                         case 'hello':
                             state.sessionId = msg.sessionId ?? null;
@@ -160,13 +175,8 @@ export function startUnixSocketServer(callbacks: {
                             break;
                     }
                 } catch (error) {
-                    // Head, tail and length, not a truncated head: a frame that was torn, doubled,
-                    // or genuinely malformed all look identical in the first 80 characters, which
-                    // is exactly what made the previous occurrence undiagnosable. Only logged once
-                    // parsing has already failed, so it costs nothing on the working path.
                     logger.debug(
-                        `[UNIX SOCKET] Invalid JSON from session (${line.length} bytes, ${String(error)}):` +
-                        ` head=${line.slice(0, 60)} … tail=${line.slice(-60)}`,
+                        `[UNIX SOCKET] ${msg.type} frame from session ${state.sessionId ?? 'unknown'} failed to handle: ${String(error)}`,
                     );
                 }
             }

@@ -53,6 +53,21 @@
 
 **只要这五条守住，双写与复制就是安全的。**
 
+### 2.4 写者身份的覆盖范围与读取规则（App 侧按此实现）
+
+**覆盖**：**每一条**出站记录都带 `(sid, site, n)`，且全部在 AEAD 内。此前只有 session-protocol 与 lifecycle 两条路径带，`role:'agent'` 的五种遗留记录（cursor / codex / output / acp / session-event）**连 `site` 都没有**——对 cursor 会话而言那恰是主消息路径，缺口检测等于完全没有。
+
+**读取**（`role` 决定身份所在，其余一律在 AEAD 内，不依赖 server）：
+
+| `role` | 身份所在 |
+|---|---|
+| `session` | `content.data ?? content`（lifecycle 包在 `data` 里，protocol 就是 `content`） |
+| 其他（遗留） | `content`，与 `type` 同级——这些形状没有信封可戳 |
+
+**I1 的边界**：出站条目写入时只能拿到 `localId`（server id 尚不存在），而日志是 append-only，**回填不可能**。跨通道去重必须包含 `localId`——server 的 `GET /v1/sessions/:id/messages` 与 WS 推送都返回它。这不是缺口，是「id 在两端不同名」而已。
+
+**tag**：resume 路径的 tag 必须贯穿；离线重连**必须复用**原 tag（`runClaude.ts:196`）。换 tag = 换 server 会话 + 换日志/outbox/密钥分桶 = 同一段历史被割成两截。
+
 ---
 
 ## 三、进程模型与身份归属
@@ -300,6 +315,16 @@ APP（同 LAN）:
 > **只记本机 site 的边界在此可见**：日志只含该进程启动**之后**的消息，不回填 server 已有的历史。这符合既定语义（日志 = CLI 见过的一切），缺口收敛属于 P5。
 
 ### P3 · server 偶发挂的 fallback
+
+> **前置：会话进程必须活过 server 停机（已实施，2026-10-07）**
+>
+> 原来 `runClaude` 在 `getOrCreateSession` 失败时有条岔路：绕开 `loop` 直接跑 `claudeLocal`（起全局 Claude Code CLI），跑完 `process.exit(0)`。三个问题：它是 local 模式，**永远不切回 SDK**；它的失败（`ExitCodeError`）没有任何 catch，会一路冒到 `process.exit(1)`，**把会话连同进程一起带走**；而 App 驱动的会话本来就没有键盘前的用户，那条路对它毫无意义。
+>
+> 现在 **remote 会话**改为**原地等待**：`createBackoff` 无限重试同一 tag（5s→60s 封顶），期间不发任何会话级事件、不跑任何本地 Claude。server 一回来就继续走 `response` 之后的正常启动 → `loop` 的 remote 模式 → 新用户消息触发新 turn 走 SDK。
+>
+> **local 模式（终端手敲，`startingMode !== 'remote'`）行为不变**——那条路上确实有人在键盘前，本地跑起来是有意义的。两者天然互斥：`runClaude.ts:114` 已经禁止 daemon 起的会话用 local 模式。
+>
+> **对 App 的含义**：server 停机期间这个会话**不会出现在会话列表里**（没有 server id，无法上报），也不会发出退出事件。它只是"还没上线"，不是"死了"。
 
 | | |
 |---|---|
