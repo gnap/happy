@@ -824,10 +824,10 @@ export class ApiSessionClient extends EventEmitter {
      * A user message that arrived over the LAN rather than from the server.
      *
      * Routed through the same path a server-delivered message takes — decrypt, record, hand to
-     * the CLI — so the session cannot tell which channel carried it. That is what makes the two
-     * interchangeable from here, and it is also why nothing else is needed to keep them in
-     * agreement: the CLI's own outgoing path syncs the message to the server as it would any
-     * other, so every other client sees it without the App ever writing to both channels.
+     * the CLI — so the session cannot tell which channel carried it. The CLI's agent output
+     * never re-emits user text (the App is what normally writes it to the server), so this
+     * method also queues the ciphertext for the server under the same localId. That keeps the
+     * App sending on one channel only while every other client still sees the message.
      *
      * Returns false when the payload does not decrypt. That is a caller problem rather than a
      * transient one, so there is nothing to retry.
@@ -838,6 +838,7 @@ export class ApiSessionClient extends EventEmitter {
             logger.debug('[API] LAN user message did not decrypt; dropping', { sessionId: this.sessionId });
             return false;
         }
+        const alreadySeen = this.routedMessageIds.has(`local:${payload.localId}`);
         this.routeIncomingMessage({
             body,
             // No seq: the server assigns that, and this message has not been there yet. Its echo
@@ -847,6 +848,13 @@ export class ApiSessionClient extends EventEmitter {
             id: undefined,
             localId: payload.localId,
         });
+        if (!alreadySeen) {
+            // Same ciphertext the App produced; the server dedupes on localId, so a retry or the
+            // App's own server-side send cannot create a second row.
+            this.pendingOutbox.push({ content: payload.content, localId: payload.localId });
+            this.persistOutboxNow();
+            this.sendSync.invalidate();
+        }
         return true;
     }
 

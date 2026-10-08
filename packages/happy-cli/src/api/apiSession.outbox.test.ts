@@ -297,6 +297,29 @@ describe('ApiSessionClient outbox durability', () => {
         expect(loadOutbox(TAG).entries).toEqual([]);
     });
 
+    it('queues a LAN-delivered user message for the server once, under the App\'s localId', async () => {
+        mockAxiosPost.mockResolvedValue({ data: { messages: [{ id: 'm1', seq: 1, localId: 'app-1', createdAt: 1, updatedAt: 1 }] } });
+        const client = new ApiSessionClient('fake-token', makeSession());
+        const content = encodeBase64(encrypt(SESSION_KEY, 'legacy', { role: 'user', content: { type: 'text', text: 'hi' } }));
+
+        expect(client.deliverLanUserMessage({ localId: 'app-1', content })).toBe(true);
+        // The same frame arriving again must not queue a second copy.
+        expect(client.deliverLanUserMessage({ localId: 'app-1', content })).toBe(true);
+
+        await waitFor(() => expect(postedLocalIds()).toEqual(['app-1']));
+        const posted = mockAxiosPost.mock.calls.flatMap((call: any[]) => call[1]?.messages ?? []);
+        expect(posted[0].content).toBe(content);
+    });
+
+    it('does not queue a LAN message that fails to decrypt', async () => {
+        mockAxiosPost.mockResolvedValue({ data: { messages: [] } });
+        const client = new ApiSessionClient('fake-token', makeSession());
+        const bad = encodeBase64(encrypt(new Uint8Array(32).fill(9), 'legacy', { role: 'user' }));
+
+        expect(client.deliverLanUserMessage({ localId: 'app-2', content: bad })).toBe(false);
+        expect((client as unknown as { pendingOutbox: unknown[] }).pendingOutbox).toHaveLength(0);
+    });
+
     it('drains restored messages over HTTP even when the socket is connected', async () => {
         // Leave a queue behind, as a crashed process would.
         const seeded = new ApiSessionClient('fake-token', makeSession());
