@@ -35,6 +35,13 @@ export type LanSessionRead = {
     reset: boolean;
     /** Endpoint and token used, to hand back as `connection` on the next read. */
     connection: LanConnection;
+    /**
+     * The session key this read unwrapped, for the caller to register.
+     *
+     * Handed back rather than registered here on purpose: holding the key is App state, not a
+     * property of the LAN, and a channel that registers it is a channel that has to remember to.
+     */
+    sessionKey: Uint8Array;
 };
 
 /** A resolved daemon endpoint plus a live bearer token for it. */
@@ -169,14 +176,6 @@ export async function readSessionOverLan(options: {
         }
 
         const decrypted = await decryptLanHistory(options.encryption, history);
-        // Register the key the read just unwrapped. Reading over the LAN proves the App can hold
-        // this session's encryption, and until it is registered anything gated on
-        // `getSessionEncryption` stays closed — the composer disabled and the status line reading
-        // "handshaking…" — while messages are visibly arriving. The channel was working; the App
-        // simply had no record that it held the key.
-        await options.encryption.initializeSessions(
-            new Map([[options.sessionId, decrypted.sessionKey]])
-        );
         const messages: NormalizedMessage[] = [];
         for (const entry of decrypted.entries) {
             if (entry.content === null) {
@@ -202,6 +201,7 @@ export async function readSessionOverLan(options: {
             cursor: history.cursor,
             reset: history.reset,
             connection,
+            sessionKey: decrypted.sessionKey,
         };
     };
 

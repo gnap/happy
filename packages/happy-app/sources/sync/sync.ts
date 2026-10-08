@@ -770,14 +770,23 @@ class Sync {
      * Persist the current in-memory state for a session to SQLite.
      * Called after resolving lazy tool content so the full content is saved to cache.
      */
-    saveSessionCache = async (sessionId: string): Promise<void> => {
+    saveSessionCache = async (
+        sessionId: string,
+        /**
+         * What the caller just learned about the cache window. Omitted means "persist whatever the
+         * store holds", which is right for a channel that only appends. A paged server fetch
+         * knows better — `applyMessages` does not write `oldestSeq`/`hasOlderMessages`, so the
+         * store can lag behind what the fetch actually established — and passes its own numbers.
+         */
+        watermark?: { lastSeq: number; oldestSeq: number; hasOlderMessages: boolean },
+    ): Promise<void> => {
         const state = storage.getState();
         const session = state.sessions[sessionId];
         const sessionMsgs = state.sessionMessages[sessionId];
         if (!session || !sessionMsgs) return;
-        const lastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
-        const oldestSeq = sessionMsgs.oldestSeq;
-        const hasOlderMessages = sessionMsgs.hasOlderMessages ?? false;
+        const lastSeq = watermark?.lastSeq ?? this.sessionLastSeq.get(sessionId) ?? 0;
+        const oldestSeq = watermark?.oldestSeq ?? sessionMsgs.oldestSeq;
+        const hasOlderMessages = watermark?.hasOlderMessages ?? sessionMsgs.hasOlderMessages ?? false;
         await saveMessageCache(session, sessionMsgs.messages, sessionMsgs.reducerState, lastSeq, oldestSeq, hasOlderMessages);
     }
 
@@ -2780,13 +2789,7 @@ class Sync {
                     this.applySessionThinkingFromRawContent(sessionId, decrypted.content);
                 }
 
-                // Same dedup as the LAN path, and for the same reason — the two channels name the
-                // same message differently, so whichever one arrives second must filter against
-                // the store rather than trust the reducer's id check.
-                const freshServerMessages = this.withoutStoredDuplicates(sessionId, normalizedMessages);
-                if (freshServerMessages.length > 0) {
-                    this.applyMessages(sessionId, freshServerMessages);
-                }
+                this.ingestChannelRead(sessionId, { messages: normalizedMessages });
 
                 // The server answered, so this session is back on the primary channel — drop any
                 // "served over LAN" marker left by a fallback during an outage, and stop the
@@ -2840,19 +2843,15 @@ class Sync {
                 // Update the high-water mark for the progress bar.
                 storage.getState().setNewestSeq(sessionId, maxSeq);
 
-                // --- Cache: persist after successful fetch ---
-                const updatedSession = storage.getState().sessions[sessionId];
-                const sessionMsgs = storage.getState().sessionMessages[sessionId];
-                if (updatedSession && sessionMsgs) {
-                    void saveMessageCache(
-                        updatedSession,
-                        sessionMsgs.messages,
-                        sessionMsgs.reducerState,
-                        maxSeq,
-                        oldestSeq,
-                        hasOlderMessages,
-                    );
-                }
+                // --- Cache: persist once the page has settled ---
+                // With the window this fetch established, not the store's — `applyMessages` does not
+                // write `oldestSeq`/`hasOlderMessages`, so the store can still lag what the page
+                // actually proved until `applyOlderMessages` above has run.
+                void this.saveSessionCache(sessionId, {
+                    lastSeq: maxSeq,
+                    oldestSeq,
+                    hasOlderMessages,
+                });
             } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
                 log.log(`💬 fetchMessages failed for session ${sessionId}: ${msg}`);
@@ -2957,20 +2956,12 @@ class Sync {
 
                 storage.getState().applyOlderMessages(sessionId, normalizedMessages, newOldestSeq, newHasOlderMessages);
 
-                // Persist updated cache
-                const updatedSession = storage.getState().sessions[sessionId];
-                const sessionMsgs = storage.getState().sessionMessages[sessionId];
-                if (updatedSession && sessionMsgs) {
-                    const lastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
-                    void saveMessageCache(
-                        updatedSession,
-                        sessionMsgs.messages,
-                        sessionMsgs.reducerState,
-                        lastSeq,
-                        newOldestSeq,
-                        newHasOlderMessages,
-                    );
-                }
+                // Persist updated cache, with the window this page established.
+                void this.saveSessionCache(sessionId, {
+                    lastSeq: this.sessionLastSeq.get(sessionId) ?? 0,
+                    oldestSeq: newOldestSeq,
+                    hasOlderMessages: newHasOlderMessages,
+                });
             } catch (err) {
                 log.log(`💬 fetchOlderMessages failed for ${sessionId}: ${err}`);
                 storage.getState().setLoadingOlder(sessionId, false);
@@ -3732,20 +3723,19 @@ class Sync {
             connection: read.connection,
         });
 
-        // The dedup below is what makes `reset` safe to ignore here: a full log resent after a
-        // pruned cursor still lands as "nothing new" rather than as duplicates.
-        const fresh = this.withoutStoredDuplicates(sessionId, read.messages);
-        if (fresh.length > 0) {
-            this.applyMessages(sessionId, fresh);
-            // Persist what the LAN just delivered. Hydration on the next start reads the same
-            // cache the server path writes, and this path never wrote it — so a reload dropped
-            // everything that had arrived over the LAN until the server happened to resend it.
-            // Only on change: a tick with nothing new must not touch SQLite every two seconds.
+        // Dedup inside the shared pipeline is what makes `reset` safe to ignore: a full log resent
+        // after a pruned cursor lands as "nothing new" rather than as duplicates.
+        const fresh = this.ingestChannelRead(sessionId, {
+            messages: read.messages,
+            sessionKey: read.sessionKey,
+        });
+        if (fresh > 0) {
+            // Persist only on change: a tick with nothing new must not touch SQLite every 2s.
             void this.saveSessionCache(sessionId);
         }
         storage.getState().markSessionServedOverLan(sessionId, { messages: read.messages.length });
         log.log(
-            `📡 fetchSessionFromLan: ${read.messages.length} read, ${fresh.length} new ` +
+            `📡 fetchSessionFromLan: ${read.messages.length} read, ${fresh} new ` +
             `(${read.decryptedCount}/${read.total} decrypted, tag ${read.tag}` +
             `${resumable ? `, since ${resumable.cursor}` : ''}${read.reset ? ', cursor reset' : ''})`
         );
@@ -3839,6 +3829,46 @@ class Sync {
     //
     // Apply store
     //
+
+    /**
+     * Everything that has to happen to messages a channel just delivered, whichever channel it was.
+     *
+     * A channel moves bytes: discover, authenticate, read. Deciding what those bytes *mean* — that
+     * they are decryptable, that they are not already held, that they belong in the store — is
+     * infrastructure, and it lives here so that a channel cannot forget a step. It could before:
+     * session-key registration and cache persistence sat inside the server path, so the LAN could
+     * deliver messages the App had no key on record for and would never persist, and both showed
+     * up only as "the LAN channel is broken".
+     *
+     * Returns how many messages were actually new, for logging and for deciding whether anything
+     * downstream needs to happen.
+     *
+     * Deliberately not here: persisting to the cache. A channel that only appends can persist
+     * straight away, but a paged server fetch knows the cache window better once its page has
+     * settled, so each channel calls `saveSessionCache` when its own read is complete.
+     */
+    private ingestChannelRead(
+        sessionId: string,
+        read: {
+            messages: NormalizedMessage[];
+            /**
+             * The session key the read unwrapped, when the channel carried one. Registering it is
+             * what lets the rest of the App treat the session as ready to read and write — the
+             * server path does the same with the same key material.
+             */
+            sessionKey?: Uint8Array;
+        },
+    ): number {
+        if (read.sessionKey) {
+            void this.encryption.initializeSessions(new Map([[sessionId, read.sessionKey]]));
+        }
+        const fresh = this.withoutStoredDuplicates(sessionId, read.messages);
+        if (fresh.length === 0) {
+            return 0;
+        }
+        this.applyMessages(sessionId, fresh);
+        return fresh.length;
+    }
 
     /**
      * Drops messages the store already holds.
