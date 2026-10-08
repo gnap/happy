@@ -141,6 +141,16 @@ interface StorageState {
      * that path is to break the server, which makes it untestable in normal use — and an
      * untestable fallback is one nobody finds out is broken until they need it.
      */
+    /**
+     * What a LAN daemon reported about its sessions, by sessionId.
+     *
+     * Only useful when the server cannot answer. Note what it cannot do: the LAN summary carries
+     * no `metadata` — that is encrypted and only ever travels inside a message payload — so this
+     * can confirm which sessions exist and which are alive, but it cannot build a session row.
+     */
+    lanSessionList: Record<string, { isAlive: boolean; directory: string; agent: string; at: number }>;
+    /** Replace the LAN's view. Pass null to clear it (the server answered). */
+    applyLanSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string }[] | null) => void;
     channelOverride: Record<string, 'lan' | 'server'>;
     /** Pass null to return the session to automatic. */
     setSessionChannelOverride: (sessionId: string, channel: 'lan' | 'server' | null) => void;
@@ -530,6 +540,7 @@ export const storage = create<StorageState>()((set, get) => {
         machines: {},
         lanSightings: {},
         lanServed: {},
+        lanSessionList: {},
         channelOverride: {},
         artifacts: {},  // Initialize artifacts
         friends: {},  // Initialize relationships cache
@@ -1666,6 +1677,25 @@ export const storage = create<StorageState>()((set, get) => {
             }
             return { ...state, lanSightings: next };
         }),
+        applyLanSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string }[] | null) => set((state) => {
+            if (sessions === null) {
+                if (Object.keys(state.lanSessionList).length === 0) {
+                    return state;
+                }
+                return { ...state, lanSessionList: {} };
+            }
+            const at = Date.now();
+            const next: Record<string, { isAlive: boolean; directory: string; agent: string; at: number }> = {};
+            for (const session of sessions) {
+                next[session.happySessionId] = {
+                    isAlive: session.isAlive,
+                    directory: session.directory,
+                    agent: session.agent,
+                    at,
+                };
+            }
+            return { ...state, lanSessionList: next };
+        }),
         setSessionChannelOverride: (sessionId: string, channel: 'lan' | 'server' | null) => set((state) => {
             if (channel === null) {
                 if (!(sessionId in state.channelOverride)) {
@@ -2046,6 +2076,11 @@ export function useSessionServedOverLan(sessionId: string): { at: number; messag
 /** The manually forced channel for a session, or null for automatic. */
 export function useSessionChannelOverride(sessionId: string): 'lan' | 'server' | null {
     return storage(useShallow((state) => state.channelOverride[sessionId] ?? null));
+}
+
+/** What a LAN daemon reported about its sessions; empty unless the server could not answer. */
+export function useLanSessionList(): Record<string, { isAlive: boolean; directory: string; agent: string; at: number }> {
+    return storage(useShallow((state) => state.lanSessionList));
 }
 
 /**

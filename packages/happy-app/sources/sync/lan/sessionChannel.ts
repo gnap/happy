@@ -1,8 +1,9 @@
 import { normalizeRawMessage, type NormalizedMessage } from '@/sync/typesRaw';
 import { Encryption } from '@/sync/encryption/encryption';
 import { discoverMachines } from './discovery';
-import { authenticate, fetchHistory } from './client';
+import { authenticate, fetchHistory, fetchSessions } from './client';
 import { decryptLanHistory } from './history';
+import type { LanSessionSummary } from './types';
 
 /**
  * Reads one session over the local network, producing messages in the same shape the server path
@@ -64,6 +65,42 @@ function recordTimestamp(content: unknown, fallback: number): number {
  * Genuine failures (a rejected proof, an unwrappable session key) still throw: those are bugs or
  * credential problems, and silently reporting "nothing here" would hide them.
  */
+/**
+ * Lists what the daemons on this network say they have.
+ *
+ * Note what this can and cannot give. The LAN summary is `{happySessionId, directory, agent,
+ * startedBy, isAlive, lastHeartbeat}` — there is no `metadata`, because metadata is encrypted and
+ * only ever travels inside a message payload. So this cannot render a session row on its own: it
+ * is useful for confirming which sessions exist and which are alive when the server cannot say,
+ * and for noticing a session the app has never seen. Anything richer has to come from the message
+ * payloads themselves.
+ */
+export async function listSessionsOverLan(options: {
+    accountPublicKey: Uint8Array;
+    /**
+     * The machine key for a given machineId, or null when this device does not hold one. A key
+     * only answers its own machine's challenge, so the caller has to resolve it per machine rather
+     * than hand over one key and hope it matches.
+     */
+    machineKeyFor: (machineId: string) => Uint8Array | null;
+    timeoutMs?: number;
+}): Promise<{ machineId: string; sessions: LanSessionSummary[] } | null> {
+    const discovered = await discoverMachines({
+        accountPublicKey: options.accountPublicKey,
+        timeoutMs: options.timeoutMs ?? 4000,
+    });
+
+    for (const machine of discovered) {
+        const machineKey = options.machineKeyFor(machine.machineId);
+        if (!machineKey) {
+            continue;
+        }
+        const { token } = await authenticate(machine.baseUrl, machineKey);
+        return { machineId: machine.machineId, sessions: await fetchSessions(machine.baseUrl, token) };
+    }
+    return null;
+}
+
 export async function readSessionOverLan(options: {
     sessionId: string;
     /** The machine the session belongs to, from `session.metadata.machineId`. */

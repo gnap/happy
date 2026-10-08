@@ -34,7 +34,7 @@ import { AsyncLock } from '@/utils/lock';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
-import { readSessionOverLan, type LanSessionRead } from './lan/sessionChannel';
+import { readSessionOverLan, listSessionsOverLan, type LanSessionRead } from './lan/sessionChannel';
 import { systemPrompt } from './prompt/systemPrompt';
 import { fetchArtifact, fetchArtifacts, createArtifact, updateArtifact } from './apiArtifacts';
 import { DecryptedArtifact, Artifact, ArtifactCreateRequest, ArtifactUpdateRequest } from './artifactTypes';
@@ -1502,6 +1502,8 @@ class Sync {
             // Apply to storage — full refresh replaces stale cache, delta merges.
             const applyStart = performance.now();
             this.applySessions(decryptedSessions, fullRefresh);
+            // The server answered, so the LAN's view of the list is no longer the fallback.
+            storage.getState().applyLanSessionList(null);
             // Record timestamp for next delta fetch.
             // During forceFullRefresh, only the actual full fetch (fullRefresh=true)
             // should clear the flag — the stale in-flight fetch must not overwrite
@@ -1582,6 +1584,15 @@ class Sync {
             // 104 sessions) that backgrounding mid-fetch reliably emptied the list while the
             // separate, smaller fetchMachines kept the machine list populated.
             //
+            // Ask the LAN what it knows before giving up. The session list itself is untouched
+            // (the app's own copy survives, and `sessionsListCache` covers a cold start), but the
+            // daemon can say which sessions exist and are alive right now — including one this app
+            // has never seen, which is exactly the case a cached list cannot cover.
+            try {
+                await this.fetchSessionListFromLan();
+            } catch (lanError) {
+                log.log(`📡 fetchSessions: LAN list failed: ${String(lanError)}`);
+            }
             // No spinner risk: sessionListViewData is initialised to [] on applyReady, so an
             // empty store already renders the empty state. _forceFullRefreshPending is also only
             // cleared inside the try, so a failed attempt stays pending and the next invalidation
@@ -3714,6 +3725,33 @@ class Sync {
             `(${read.decryptedCount}/${read.total} decrypted, tag ${read.tag})`
         );
         return read;
+    }
+
+    /**
+     * Asks the LAN daemons what sessions they have and records it.
+     *
+     * Called when the server cannot answer. The LAN summary carries no metadata — that is
+     * encrypted and only travels inside a message payload — so this cannot populate the session
+     * list on its own. What it buys is knowing which sessions exist and are alive on a machine we
+     * can still reach, including one this app has never seen.
+     */
+    async fetchSessionListFromLan(): Promise<number> {
+        const accountPublicKey = this.encryption?.contentDataKey;
+        if (!accountPublicKey) {
+            return 0;
+        }
+        const read = await listSessionsOverLan({
+            accountPublicKey,
+            // Resolved per machine: a key only answers its own machine's challenge.
+            machineKeyFor: (machineId) => this.getMachineKey(machineId),
+        });
+        if (!read) {
+            log.log('📡 fetchSessions: server unreachable, and no LAN daemon answered for this account');
+            return 0;
+        }
+        storage.getState().applyLanSessionList(read.sessions);
+        log.log(`📡 fetchSessions: server unreachable — daemon ${read.machineId.slice(0, 8)} reports ${read.sessions.length} session(s)`);
+        return read.sessions.length;
     }
 
     /**
