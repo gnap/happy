@@ -169,6 +169,14 @@ export async function readSessionOverLan(options: {
         }
 
         const decrypted = await decryptLanHistory(options.encryption, history);
+        // Register the key the read just unwrapped. Reading over the LAN proves the App can hold
+        // this session's encryption, and until it is registered anything gated on
+        // `getSessionEncryption` stays closed — the composer disabled and the status line reading
+        // "handshaking…" — while messages are visibly arriving. The channel was working; the App
+        // simply had no record that it held the key.
+        await options.encryption.initializeSessions(
+            new Map([[options.sessionId, decrypted.sessionKey]])
+        );
         const messages: NormalizedMessage[] = [];
         for (const entry of decrypted.entries) {
             if (entry.content === null) {

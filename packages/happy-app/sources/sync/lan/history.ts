@@ -31,6 +31,13 @@ export type DecryptedLanHistory = {
     entries: DecryptedLanEntry[];
     /** How many entries actually opened — a short count means the key is wrong for some. */
     decryptedCount: number;
+    /**
+     * The session key this history was opened with. Returned so the caller can register it —
+     * the server path hands the same key material to `initializeSessions`, and without that
+     * registration the App holds no session encryption and treats the session as not ready,
+     * even while the LAN is successfully reading it.
+     */
+    sessionKey: Uint8Array;
 };
 
 /**
@@ -68,5 +75,6 @@ export async function decryptLanHistory(
         tag: history.tag,
         entries,
         decryptedCount: entries.filter((entry) => entry.content !== null).length,
+        sessionKey,
     };
 }
