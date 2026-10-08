@@ -532,6 +532,15 @@ export type AgentState = {
       recurring: boolean
     }
   }
+  /**
+   * Set by a CLI that can serve its session over the LAN socket — it keeps the message log the
+   * LAN reads from and can take a message delivered back over it.
+   *
+   * Declared rather than inferred from a version because a client has to know *before* it picks a
+   * channel, and it cannot ask over the LAN without already being on it. agentState travels by the
+   * server, so it arrives in time. Absent means an older session, which must stay on the server.
+   */
+  lanSocket?: boolean
   /** Latest known status of the session's /goal condition (mirrored from goal_status attachments), so a client can query it without replaying the event stream. */
   activeGoal?: {
     condition: string
