@@ -304,7 +304,18 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         pid: process.pid,
         sessionTag,
         metadata,
-    }, reportToDaemon);
+    }, reportToDaemon, (payload) => {
+        // A message the App sent over the LAN, routed exactly as a server-delivered one so the
+        // session is unaware of the channel. Nothing here relays it to the server: the CLI's own
+        // outgoing path does that, which is what keeps the two channels in agreement without the
+        // App writing to both.
+        //
+        // Safe to reference `session` below even though it is declared after this registration:
+        // the two are separated only by synchronous code, and node runs this block to completion
+        // before it can service a socket message.
+        const delivered = session.deliverLanUserMessage(payload);
+        logger.debug(`[START] LAN user message ${delivered ? 'routed' : 'rejected (did not decrypt)'}`);
+    });
     // Cleanup socket on graceful exit
     process.on('beforeExit', () => stopSocketClient());
     process.on('exit', () => stopSocketClient());
