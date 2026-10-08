@@ -64,8 +64,9 @@ describe('isCacheEnabled', () => {
         expect(isCacheEnabled(makeSession('cursor'))).toBe(true);
     });
 
-    it('returns false for claude sessions', () => {
-        expect(isCacheEnabled(makeSession('claude'))).toBe(false);
+    it('returns true for claude and acp-cursor sessions', () => {
+        expect(isCacheEnabled(makeSession('claude'))).toBe(true);
+        expect(isCacheEnabled(makeSession('acp-cursor'))).toBe(true);
     });
 
     it('returns false for codex sessions', () => {
@@ -139,9 +140,9 @@ describe('loadMessageCache', () => {
         expect(result!.reducerState.lastThinkingMessageId).toBe('think1');
     });
 
-    it('clears and returns null when schemaVersion is mismatched', async () => {
+    it('keeps the messages but restarts the reducer when schemaVersion is mismatched', async () => {
         const session = makeSession('cursor');
-        // Manually plant a row with wrong schemaVersion
+        // Manually plant a row written by an older serializer.
         await db.saveSessionCache(
             {
                 sessionId: session.id,
@@ -156,10 +157,17 @@ describe('loadMessageCache', () => {
         );
 
         const result = await loadMessageCache(session);
-        expect(result).toBeNull();
 
-        // The stale row should have been cleaned up
-        expect(await db.getSessionCache(session.id)).toBeNull();
+        // The version describes the reducer state, not the messages. Discarding the row would
+        // blank the screen and refetch everything — for every session at once, since the version
+        // is global — which is the cold-start jank the cache exists to prevent.
+        expect(result).not.toBeNull();
+        expect(result!.messages).toHaveLength(2);
+        expect(result!.lastSeq).toBe(10);
+        // The reducer starts fresh rather than from the unreadable state.
+        expect(result!.reducerState).toEqual(createReducer());
+        // And the row is kept, not deleted.
+        expect(await db.getSessionCache(session.id)).not.toBeNull();
     });
 
     it('falls back to empty reducerState when reducerStateJson is invalid', async () => {
@@ -197,7 +205,7 @@ describe('saveMessageCache', () => {
     });
 
     it('is a no-op for non-cursor sessions', async () => {
-        const session = makeSession('claude');
+        const session = makeSession('codex');
         await saveMessageCache(session, makeMessages(5), createReducer(), 10);
         expect(await db.getSessionCache(session.id)).toBeNull();
     });

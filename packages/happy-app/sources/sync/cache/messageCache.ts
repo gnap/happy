@@ -33,15 +33,6 @@ import { log } from '@/log';
  */
 export function isCacheEnabled(session: Session | null | undefined): boolean {
     const flavor = session?.metadata?.flavor;
-    // `flavor` is nullish in the schema, so "not set" and "not one of ours" are different states
-    // and only the second is a reason to decline. Nothing in the cache is flavor-specific — it
-    // holds normalized, already-reduced messages and the reducer state that produced them, and
-    // both are read the same way whatever wrote them. Routing "unknown" into the same branch as
-    // "unsupported" silently leaves those sessions with no cache at all, which is the cold-start
-    // jank the cache exists to prevent, with no log line saying why.
-    if (flavor === null || flavor === undefined) {
-        return true;
-    }
     return flavor === 'cursor' || flavor === 'acp-cursor' || flavor === 'claude';
 }
 

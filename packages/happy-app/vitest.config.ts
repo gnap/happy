@@ -21,6 +21,11 @@ export default defineConfig({
     resolve: {
         alias: {
             '@': resolve('./sources'),
+            // expo-sqlite pulls in react-native, whose Flow-typed entry point Rollup cannot parse
+            // — so importing anything that reaches `sessionCacheDB` failed at load time and the
+            // tests never ran. Nothing under test opens a real database, so the native module is
+            // kept out of the graph rather than dragging the React Native runtime in to satisfy it.
+            'expo-sqlite': resolve('./sources/test-utils/expoSqliteStub.ts'),
         },
     },
 })
