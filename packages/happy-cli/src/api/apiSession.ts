@@ -938,6 +938,7 @@ export class ApiSessionClient extends EventEmitter {
                 at: Date.now(),
                 c: incoming.ct,
             });
+            this.announceLogGrowth();
         }
 
         const triggerInboxMessageId = this.ingestA2AInboxFromTrigger(message);
@@ -1601,6 +1602,7 @@ export class ApiSessionClient extends EventEmitter {
             at: Date.now(),
             c: encrypted,
         });
+        this.announceLogGrowth();
         this.persistOutboxNow();
         if (invalidate) {
             this.sendSync.invalidate();
@@ -1925,6 +1927,11 @@ export class ApiSessionClient extends EventEmitter {
      * `update` handler's mirror cannot see them — and without this a LAN reader learns nothing
      * about agentState or metadata until the server's slow session list says so.
      */
+    /** Tells LAN readers there is something new to read; the entries themselves stay in the log. */
+    private announceLogGrowth(): void {
+        forwardSessionEventToDaemon({ t: 'log-grew', id: this.sessionId });
+    }
+
     private mirrorStateToDaemon(change: { metadata?: { version: number; value: string }; agentState?: { version: number; value: string | null } }): void {
         forwardSessionEventToDaemon({ t: 'update-session', id: this.sessionId, ...change });
     }
