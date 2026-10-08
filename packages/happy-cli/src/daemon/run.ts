@@ -254,6 +254,14 @@ export async function startDaemon(): Promise<void> {
      *  Persisted to daemon.state.json and restored on restart.
      *  `pidToTrackedSession` is the runtime-only active-process index. */
     let sessions: Record<string, PersistedSession> = {};
+    /**
+     * Write the full daemon state snapshot to disk. Declared here, ahead of the socket and
+     * webhook handlers that call it, because those are registered long before the snapshot
+     * machinery below is built: it needs `syncStoppedToSessions` and `fileState`, which cannot
+     * be hoisted. A frame arriving in that window used to throw a temporal-dead-zone error and
+     * be dropped; now it is a no-op, and the state is written once the real one is installed.
+     */
+    let persistNow: () => void = () => {};
     /** In-memory cooldown: session ID -> last spawn attempt timestamp. Prevents rapid re-spawn loops. */
     const lastSpawnAttemptBySessionId: Record<string, number> = {};
     /** Timestamp used as changedSince for next /v2/sessions poll. */
@@ -1598,7 +1606,7 @@ export async function startDaemon(): Promise<void> {
     };
 
     /** Write the full daemon state snapshot to disk immediately. */
-    const persistNow = () => {
+    persistNow = () => {
       syncStoppedToSessions();
       // Update running sessions' PIDs into sessions record
       for (const [, tracked] of pidToTrackedSession) {
