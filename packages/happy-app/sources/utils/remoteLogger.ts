@@ -7,6 +7,7 @@
  */
 
 import { config } from '@/config';
+import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
 
 
 let logBuffer: any[] = []
@@ -37,7 +38,7 @@ export function monkeyPatchConsoleForRemoteLoggingForFasterAiAutoDebuggingOnlyIn
 
   const sendLog = async (level: string, args: any[]) => {
     try {
-      await fetch(url + '/logs-combined-from-cli-and-mobile-for-simple-ai-debugging', {
+      await fetchWithTimeout(url + '/logs-combined-from-cli-and-mobile-for-simple-ai-debugging', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

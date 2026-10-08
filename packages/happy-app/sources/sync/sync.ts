@@ -35,6 +35,7 @@ import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
 import { readSessionOverLan, listSessionsOverLan, type LanSessionRead } from './lan/sessionChannel';
+import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
 import { systemPrompt } from './prompt/systemPrompt';
 import { fetchArtifact, fetchArtifacts, createArtifact, updateArtifact } from './apiArtifacts';
 import { DecryptedArtifact, Artifact, ArtifactCreateRequest, ArtifactUpdateRequest } from './artifactTypes';
@@ -1934,7 +1935,7 @@ class Sync {
 
         const API_ENDPOINT = getServerUrl();
         log.log(`🖥️ fetchMachines: GET ${API_ENDPOINT}/v1/machines`);
-        const response = await fetch(`${API_ENDPOINT}/v1/machines`, {
+        const response = await fetchWithTimeout(`${API_ENDPOINT}/v1/machines`, {
             headers: {
                 'Authorization': `Bearer ${this.credentials.token}`,
                 'Content-Type': 'application/json'
@@ -2157,7 +2158,7 @@ class Sync {
             while (retryCount < maxRetries) {
                 let version = storage.getState().settingsVersion;
                 let settings = applySettings(storage.getState().settings, this.pendingSettings);
-                const response = await fetch(`${API_ENDPOINT}/v1/account/settings`, {
+                const response = await fetchWithTimeout(`${API_ENDPOINT}/v1/account/settings`, {
                     method: 'POST',
                     body: JSON.stringify({
                         settings: await this.encryption.encryptRaw(settings),
@@ -2218,7 +2219,7 @@ class Sync {
         }
 
         // Run request
-        const response = await fetch(`${API_ENDPOINT}/v1/account/settings`, {
+        const response = await fetchWithTimeout(`${API_ENDPOINT}/v1/account/settings`, {
             headers: {
                 'Authorization': `Bearer ${this.credentials.token}`,
                 'Content-Type': 'application/json'
@@ -2263,7 +2264,7 @@ class Sync {
         if (!this.credentials) return;
 
         const API_ENDPOINT = getServerUrl();
-        const response = await fetch(`${API_ENDPOINT}/v1/account/profile`, {
+        const response = await fetchWithTimeout(`${API_ENDPOINT}/v1/account/profile`, {
             headers: {
                 'Authorization': `Bearer ${this.credentials.token}`,
                 'Content-Type': 'application/json'
@@ -2311,7 +2312,7 @@ class Sync {
             const version = Constants.expoConfig?.version!;
             const appId = (Platform.OS === 'ios' ? Constants.expoConfig?.ios?.bundleIdentifier! : Constants.expoConfig?.android?.package!);
 
-            const response = await fetch(`${serverUrl}/v1/version`, {
+            const response = await fetchWithTimeout(`${serverUrl}/v1/version`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',

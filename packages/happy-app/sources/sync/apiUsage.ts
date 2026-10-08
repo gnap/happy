@@ -1,6 +1,7 @@
 import { AuthCredentials } from '@/auth/tokenStorage';
 import { backoff } from '@/utils/time';
 import { getServerUrl } from './serverConfig';
+import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
 
 export interface UsageDataPoint {
     timestamp: number;
@@ -30,7 +31,7 @@ export async function queryUsage(
     const API_ENDPOINT = getServerUrl();
     
     return await backoff(async () => {
-        const response = await fetch(`${API_ENDPOINT}/v1/usage/query`, {
+        const response = await fetchWithTimeout(`${API_ENDPOINT}/v1/usage/query`, {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${credentials.token}`,
