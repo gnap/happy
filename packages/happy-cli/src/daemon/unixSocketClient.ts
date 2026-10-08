@@ -1,4 +1,5 @@
 import { createConnection, Socket } from 'node:net';
+import { StringDecoder } from 'node:string_decoder';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { logger } from '@/ui/logger';
@@ -65,9 +66,20 @@ function connect(helloPayload: Record<string, unknown>): Socket {
         startHeartbeat(socket);
     });
 
+    // Decodes across chunk boundaries, and buffers partial lines. `toString('utf8')` tears a
+    // multi-byte character in half when a frame straddles two chunks, and splitting without
+    // buffering hands a half-line to `JSON.parse` — either way the frame is lost, which for a
+    // delivered user message means a message that silently never arrives.
+    const decoder = new StringDecoder('utf8');
+    let buf = '';
     socket.on('data', (data: Buffer) => {
-        const lines = data.toString('utf-8').split('\n').filter(l => l.trim());
+        buf += decoder.write(data);
+        const lines = buf.split('\n');
+        buf = lines.pop() ?? '';
         for (const line of lines) {
+            if (!line.trim()) {
+                continue;
+            }
             try {
                 const msg = JSON.parse(line);
                 if (msg.type === 'stop') {

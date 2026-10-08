@@ -1,4 +1,5 @@
 import { createServer, Server, Socket } from 'node:net';
+import { StringDecoder } from 'node:string_decoder';
 import { unlinkSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -79,6 +80,11 @@ export function startUnixSocketServer(callbacks: {
     const server: Server = createServer((socket: Socket) => {
         const state: SessionSocketState = { sessionId: null, sessionTag: null, pid: null };
         let buf = '';
+        // Decodes across chunk boundaries. `Buffer.toString('utf8')` tears a multi-byte character
+        // in half when a frame straddles two chunks, and the replacement characters that produces
+        // make the line unparseable — which dropped forwarded message frames (full of CJK) while
+        // the small ASCII hello/heartbeat frames sailed through.
+        const decoder = new StringDecoder('utf8');
         let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
 
         const resetHeartbeat = () => {
@@ -90,7 +96,7 @@ export function startUnixSocketServer(callbacks: {
         };
 
         socket.on('data', (data: Buffer) => {
-            buf += data.toString('utf-8');
+            buf += decoder.write(data);
             const lines = buf.split('\n');
             buf = lines.pop() ?? ''; // keep incomplete line in buffer
 
