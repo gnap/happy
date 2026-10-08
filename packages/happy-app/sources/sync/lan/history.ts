@@ -13,7 +13,7 @@
 
 import { decodeBase64 } from '@/encryption/base64';
 import { Encryption } from '@/sync/encryption/encryption';
-import type { LanHistory } from './types';
+import type { LanHistory, LanSessionLogEntry } from './types';
 
 export type DecryptedLanEntry = {
     id: string;
@@ -51,6 +51,31 @@ export class LanKeyUnwrapError extends Error {
     }
 }
 
+/**
+ * Opens log entries with a session key the caller already holds.
+ *
+ * Split out from `decryptLanHistory` for the live socket, which is handed one entry at a time and
+ * never sees the wrapped key: the response that carries it is the history read, and by the time
+ * frames arrive the App has long since registered the key. Same decryptor, same shapes — a socket
+ * entry and a history entry are indistinguishable once they are here.
+ */
+export async function decryptLanEntries(
+    encryption: Encryption,
+    sessionKey: Uint8Array,
+    entries: LanSessionLogEntry[]
+): Promise<DecryptedLanEntry[]> {
+    const decryptor = await encryption.openEncryption(sessionKey);
+    const plaintexts = await decryptor.decrypt(entries.map((entry) => decodeBase64(entry.c, 'base64')));
+
+    return entries.map((entry, index) => ({
+        id: entry.id,
+        localId: entry.localId ?? null,
+        dir: entry.dir,
+        at: entry.at,
+        content: plaintexts[index] ?? null,
+    }));
+}
+
 export async function decryptLanHistory(
     encryption: Encryption,
     history: LanHistory
@@ -60,16 +85,7 @@ export async function decryptLanHistory(
         throw new LanKeyUnwrapError();
     }
 
-    const decryptor = await encryption.openEncryption(sessionKey);
-    const plaintexts = await decryptor.decrypt(history.entries.map((entry) => decodeBase64(entry.c, 'base64')));
-
-    const entries: DecryptedLanEntry[] = history.entries.map((entry, index) => ({
-        id: entry.id,
-        localId: entry.localId ?? null,
-        dir: entry.dir,
-        at: entry.at,
-        content: plaintexts[index] ?? null,
-    }));
+    const entries = await decryptLanEntries(encryption, sessionKey, history.entries);
 
     return {
         tag: history.tag,

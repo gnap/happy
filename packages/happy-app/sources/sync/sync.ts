@@ -34,8 +34,10 @@ import { AsyncLock } from '@/utils/lock';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
-import { readSessionOverLan, listSessionsOverLan, type LanConnection, type LanSessionRead } from './lan/sessionChannel';
+import { readSessionOverLan, listSessionsOverLan, toNormalizedMessages, type LanConnection, type LanSessionRead } from './lan/sessionChannel';
+import { decryptLanEntries } from './lan/history';
 import { openLanSocket, type LanSocketHandle } from './lan/socket';
+import type { LanSessionLogEntry } from './lan/types';
 import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
 import { systemPrompt } from './prompt/systemPrompt';
 import { fetchArtifact, fetchArtifacts, createArtifact, updateArtifact } from './apiArtifacts';
@@ -220,6 +222,11 @@ class Sync {
      * demultiplexes on `body.sid` exactly as it does for the server channel.
      */
     private lanSocket: { baseUrl: string; handle: LanSocketHandle } | null = null;
+    /**
+     * The session key each LAN read unwrapped, by session. The live socket is handed entries with
+     * no read and no wrapped key around them, so this is the only place it can come from.
+     */
+    private lanSessionKeys = new Map<string, Uint8Array>();
     /** LAN sends awaiting the session's verdict, so a lost one cannot sit "sending" forever. */
     private lanSendTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -4018,13 +4025,28 @@ class Sync {
             baseUrl,
             machineKey,
             onUpdate: (payload) => {
+                const body = (payload as {
+                    body?: { t?: string; id?: string; entry?: LanSessionLogEntry };
+                } | null)?.body;
                 // The daemon's hint that a session's local log grew. It is not a server update, so
                 // it never reaches handleUpdate: it only means "read now" instead of waiting for
-                // the next poll tick.
-                const body = (payload as { body?: { t?: string; id?: string } } | null)?.body;
+                // the next poll tick. It stays even though entries are pushed as well — it is what
+                // recovers a frame the socket missed while it was down.
                 if (body?.t === 'log-grew' && body.id) {
                     if (this.preferredChannel(body.id) === 'lan') {
                         this.messagesSync.get(body.id)?.invalidate();
+                    }
+                    return;
+                }
+                // An entry the session wrote to its log, pushed as it was appended. Applying it
+                // here is what makes the LAN channel deliver a message rather than announce one:
+                // no round trip, and dedup on `localId` means the overlapping read cannot double
+                // it. Only for sessions that resolve to the LAN — a session pinned to the server
+                // reads the same bytes from there, and applying both would be the one path the
+                // dedup is not set up to cover.
+                if (body?.t === 'log-entry' && body.id && body.entry) {
+                    if (this.preferredChannel(body.id) === 'lan') {
+                        void this.applyPushedLanEntry(body.id, body.entry);
                     }
                     return;
                 }
@@ -4064,6 +4086,36 @@ class Sync {
             this.lanSocket = { baseUrl, handle };
             storage.getState().setLanSocketStatus({ baseUrl, connectedAt: Date.now() });
             log.log(`📡 LAN socket live at ${baseUrl}`);
+        }
+    }
+
+    /**
+     * Applies one log entry the daemon pushed over the live socket.
+     *
+     * The frame carries the same entry a history read returns, so it goes through the same two
+     * steps that read does — open it with the session key, normalize it — and then into
+     * `ingestChannelRead`, which is where `localId` dedup lives. That overlap is the point: an
+     * entry pushed while a read is in flight must not land twice.
+     *
+     * A key we do not hold yet is not an error: it arrives with the first read, and until then the
+     * read is the only path that could have applied the entry anyway. A frame that will not open is
+     * likewise a delay rather than a loss — the entry is still in the session's log, so the next
+     * read delivers it.
+     */
+    private async applyPushedLanEntry(sessionId: string, entry: LanSessionLogEntry): Promise<void> {
+        const sessionKey = this.lanSessionKeys.get(sessionId);
+        if (!sessionKey) {
+            return;
+        }
+        try {
+            const decrypted = await decryptLanEntries(this.encryption, sessionKey, [entry]);
+            const messages = toNormalizedMessages(decrypted);
+            if (messages.length > 0) {
+                const fresh = this.ingestChannelRead(sessionId, { messages });
+                log.log(`📡 LAN entry applied for ${sessionId}: ${fresh} new of ${messages.length} (over the socket)`);
+            }
+        } catch (error) {
+            log.log(`📡 LAN entry for ${sessionId} could not be applied: ${String(error)}`);
         }
     }
 
@@ -4206,6 +4258,9 @@ class Sync {
         },
     ): number {
         if (read.sessionKey) {
+            // Kept as well as registered: the encryption object holds a decryptor, not the key, and
+            // the live socket has to open an entry that arrived on its own with no read around it.
+            this.lanSessionKeys.set(sessionId, read.sessionKey);
             void this.encryption.initializeSessions(new Map([[sessionId, read.sessionKey]]));
         }
         const fresh = this.withoutStoredDuplicates(sessionId, read.messages);

@@ -2,7 +2,7 @@ import { normalizeRawMessage, type NormalizedMessage } from '@/sync/typesRaw';
 import { Encryption } from '@/sync/encryption/encryption';
 import { discoverMachines } from './discovery';
 import { authenticate, fetchHistory, fetchSessions, LanRequestError } from './client';
-import { decryptLanHistory } from './history';
+import { decryptLanEntries, decryptLanHistory, type DecryptedLanEntry } from './history';
 import type { LanSessionSummary } from './types';
 
 /**
@@ -13,9 +13,10 @@ import type { LanSessionSummary } from './types';
  * channel, and nothing here sends. The CLI is the writer, and it already keeps a local log of every
  * message it has seen, which is what the LAN endpoint serves.
  *
- * What this is NOT: a live channel. The daemon serves a snapshot of its log; it has no way to push
- * a new message yet. So a caller gets "everything this machine recorded, as of now" and must come
- * back for more — see the roadmap's outstanding request for a live transport.
+ * The live side of the channel is `./socket`: the daemon pushes each new log entry as it is
+ * written, and `toNormalizedMessages` is what turns one into the same message a read would have
+ * produced. A read still runs alongside it, because a socket that dropped has to be recoverable
+ * without the App knowing what it missed.
  *
  * Dependencies are passed in rather than imported from `sync`/`storage`: those modules end up
  * importing this one, and reaching back into them would be a cycle.
@@ -90,6 +91,33 @@ function recordTimestamp(content: unknown, fallback: number): number {
         : inner;
     const time = data.time ?? record.time;
     return typeof time === 'number' && Number.isFinite(time) ? time : fallback;
+}
+
+/**
+ * Turns decrypted log entries into the messages the store holds.
+ *
+ * Shared by the read and the live socket because both are handed the *same* entry — one straight
+ * from the log, one straight from the frame the session wrote as it appended it. If the two mapped
+ * differently, the same message would land twice under two shapes and dedup on `localId` would
+ * have nothing to match on. Entries that do not decrypt are skipped rather than guessed at.
+ */
+export function toNormalizedMessages(entries: DecryptedLanEntry[]): NormalizedMessage[] {
+    const messages: NormalizedMessage[] = [];
+    for (const entry of entries) {
+        if (entry.content === null) {
+            continue;
+        }
+        const normalized = normalizeRawMessage(
+            entry.id,
+            entry.localId,
+            recordTimestamp(entry.content, entry.at),
+            entry.content
+        );
+        if (normalized) {
+            messages.push(normalized);
+        }
+    }
+    return messages;
 }
 
 /**
@@ -176,21 +204,7 @@ export async function readSessionOverLan(options: {
         }
 
         const decrypted = await decryptLanHistory(options.encryption, history);
-        const messages: NormalizedMessage[] = [];
-        for (const entry of decrypted.entries) {
-            if (entry.content === null) {
-                continue;
-            }
-            const normalized = normalizeRawMessage(
-                entry.id,
-                entry.localId,
-                recordTimestamp(entry.content, entry.at),
-                entry.content
-            );
-            if (normalized) {
-                messages.push(normalized);
-            }
-        }
+        const messages = toNormalizedMessages(decrypted.entries);
 
         return {
             machineId: connection.machineId,
