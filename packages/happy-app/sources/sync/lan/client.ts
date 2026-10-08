@@ -112,6 +112,11 @@ export async function fetchSessions(baseUrl: string, token: string): Promise<Lan
 /**
  * Fetches a session's local history.
  *
+ * `since` is the cursor from the previous read; the daemon then returns only what was appended
+ * after it. That matters more than it looks: without a cursor every poll re-sends and re-decrypts
+ * the whole log, so the cost of a tick grows with the session's length and the channel gets
+ * slower the longer it runs.
+ *
  * Returns null for 404, which the daemon uses for "this machine has no local history for that
  * session yet" — a retryable condition, deliberately distinct from the 401 an unauthorised
  * caller gets. Other failures throw.
@@ -119,11 +124,14 @@ export async function fetchSessions(baseUrl: string, token: string): Promise<Lan
 export async function fetchHistory(
     baseUrl: string,
     token: string,
-    sessionId: string
+    sessionId: string,
+    since?: string
 ): Promise<LanHistory | null> {
-    const response = await request(`${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/history`, {
-        token,
-    });
+    const query = since ? `?since=${encodeURIComponent(since)}` : '';
+    const response = await request(
+        `${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/history${query}`,
+        { token }
+    );
     if (response.status === 404) {
         return null;
     }

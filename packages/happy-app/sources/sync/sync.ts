@@ -34,7 +34,7 @@ import { AsyncLock } from '@/utils/lock';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
-import { readSessionOverLan, listSessionsOverLan, type LanSessionRead } from './lan/sessionChannel';
+import { readSessionOverLan, listSessionsOverLan, type LanConnection, type LanSessionRead } from './lan/sessionChannel';
 import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
 import { systemPrompt } from './prompt/systemPrompt';
 import { fetchArtifact, fetchArtifacts, createArtifact, updateArtifact } from './apiArtifacts';
@@ -192,6 +192,15 @@ class Sync {
      * become a permanent second source of traffic.
      */
     private lanPollTimers = new Map<string, ReturnType<typeof setInterval>>();
+    /**
+     * Per-session LAN state: where to resume reading, and the connection that position came from.
+     * Both are kept with the machine that issued them — a cursor addresses a position in one
+     * machine's log, and a token only authenticates against that machine.
+     */
+    private lanChannels = new Map<
+        string,
+        { machineId: string; cursor: string; connection: LanConnection }
+    >();
     /** Accumulated base64 dataEncryptionKey values from all fetchSessions responses.
      *  Merged across delta fetches so the cache always has the full key set. */
     private sessionEncryptionKeySources = new Map<string, string>();
@@ -2661,9 +2670,11 @@ class Sync {
                             ? `📡 fetchMessages: forced LAN — read ${read.messages.length} message(s), ${read.decryptedCount}/${read.total} decrypted`
                             : '📡 fetchMessages: forced LAN — nothing to read (no daemon for this session)'
                     );
-                    if (read) {
-                        this.startLanPolling(sessionId);
-                    }
+                    // Polling starts even when this read found nothing. "No local history yet" is a
+                    // 404 the daemon documents as retryable, so treating it as final would strand
+                    // the channel: the session would sit empty until something else invalidated
+                    // the sync, which for a pinned channel may never happen.
+                    this.startLanPolling(sessionId);
                     return;
                 }
 
@@ -3698,17 +3709,31 @@ class Sync {
         }
 
         const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        // Resume where the last read stopped, and over the connection it used. Both matter: a
+        // cursor keeps each poll from re-reading and re-decrypting the whole log, and the
+        // connection keeps it from paying for an mDNS browse and a handshake on every tick.
+        const remembered = this.lanChannels.get(sessionId);
+        const resumable = remembered && remembered.machineId === machineId ? remembered : undefined;
         const read = await readSessionOverLan({
             sessionId,
             machineId,
             accountPublicKey,
             machineKey: machineId ? this.getMachineKey(machineId) : null,
             encryption: this.encryption,
+            since: resumable?.cursor,
+            connection: resumable?.connection,
         });
         if (!read) {
             return null;
         }
+        this.lanChannels.set(sessionId, {
+            machineId: read.machineId,
+            cursor: read.cursor,
+            connection: read.connection,
+        });
 
+        // The dedup below is what makes `reset` safe to ignore here: a full log resent after a
+        // pruned cursor still lands as "nothing new" rather than as duplicates.
         const fresh = this.withoutStoredDuplicates(sessionId, read.messages);
         if (fresh.length > 0) {
             this.applyMessages(sessionId, fresh);
@@ -3716,7 +3741,8 @@ class Sync {
         storage.getState().markSessionServedOverLan(sessionId, { messages: read.messages.length });
         log.log(
             `📡 fetchSessionFromLan: ${read.messages.length} read, ${fresh.length} new ` +
-            `(${read.decryptedCount}/${read.total} decrypted, tag ${read.tag})`
+            `(${read.decryptedCount}/${read.total} decrypted, tag ${read.tag}` +
+            `${resumable ? `, since ${resumable.cursor}` : ''}${read.reset ? ', cursor reset' : ''})`
         );
         return read;
     }
@@ -3765,8 +3791,15 @@ class Sync {
         this.getMessagesSync(sessionId).invalidate();
     }
 
-    /** How often to re-read the LAN while the server is unavailable. */
-    private static readonly LAN_POLL_INTERVAL_MS = 10_000;
+    /**
+     * How often to re-read the LAN while the server is unavailable.
+     *
+     * This is short because a tick is now cheap: the cursor means only newly-written entries come
+     * back, and the reused connection means no mDNS browse and no handshake. At the old interval
+     * a tick re-read and re-decrypted the session's whole log and re-ran discovery, so the cost
+     * per tick grew with the session and the channel got slower the longer it was used.
+     */
+    private static readonly LAN_POLL_INTERVAL_MS = 2_000;
 
     /**
      * Keeps re-reading a session over the LAN until the server answers again.

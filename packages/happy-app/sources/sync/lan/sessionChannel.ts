@@ -1,7 +1,7 @@
 import { normalizeRawMessage, type NormalizedMessage } from '@/sync/typesRaw';
 import { Encryption } from '@/sync/encryption/encryption';
 import { discoverMachines } from './discovery';
-import { authenticate, fetchHistory, fetchSessions } from './client';
+import { authenticate, fetchHistory, fetchSessions, LanRequestError } from './client';
 import { decryptLanHistory } from './history';
 import type { LanSessionSummary } from './types';
 
@@ -29,7 +29,39 @@ export type LanSessionRead = {
     /** How many log entries actually decrypted, against how many were returned. */
     decryptedCount: number;
     total: number;
+    /** Opaque position to pass back as `since` on the next read of this session. */
+    cursor: string;
+    /** True when the cursor was not honoured and `messages` covers the whole log. */
+    reset: boolean;
+    /** Endpoint and token used, to hand back as `connection` on the next read. */
+    connection: LanConnection;
 };
+
+/** A resolved daemon endpoint plus a live bearer token for it. */
+export type LanConnection = {
+    machineId: string;
+    baseUrl: string;
+    token: string;
+    /** Epoch ms. */
+    expiresAt: number;
+};
+
+/** Reuse a connection only while its token has real life left; expiring mid-read costs a handshake. */
+const CONNECTION_EXPIRY_MARGIN_MS = 15_000;
+
+/**
+ * Whether a connection from an earlier read can still serve this one.
+ *
+ * A session whose machine is unknown is deliberately never cached: the read exists to probe
+ * whichever daemon answers, and pinning it to the last winner would stop it finding the right one.
+ */
+function isConnectionUsable(connection: LanConnection, machineId: string | undefined): boolean {
+    return (
+        machineId !== undefined &&
+        connection.machineId === machineId &&
+        connection.expiresAt - Date.now() > CONNECTION_EXPIRY_MARGIN_MS
+    );
+}
 
 /**
  * A record's own timestamp, falling back to when the CLI wrote it to its log.
@@ -110,32 +142,30 @@ export async function readSessionOverLan(options: {
     /** The machine key, used to answer the daemon's challenge. */
     machineKey: Uint8Array | null;
     encryption: Encryption;
+    /** Cursor from the previous read of this session; omit to read the whole log. */
+    since?: string;
+    /**
+     * Connection from the previous read. Reused while it is still valid, which is what keeps the
+     * mDNS browse and the challenge-response out of every poll — a browse alone runs for its full
+     * timeout, so paying it per tick makes the channel slower the more often it is used.
+     */
+    connection?: LanConnection | null;
 }): Promise<LanSessionRead | null> {
-    if (!options.machineKey) {
+    const machineKey = options.machineKey;
+    if (!machineKey) {
         return null;
     }
 
-    const discovered = await discoverMachines({
-        accountPublicKey: options.accountPublicKey,
-        // A session belongs to exactly one machine, so there is nothing to learn from the others.
-        // When the id is unknown, fall back to probing whatever is advertising — the daemon
-        // answers 404 for sessions it does not have, which is a cheap way to find the right one.
-        timeoutMs: 4000,
-    });
-    const candidates = options.machineId
-        ? discovered.filter((machine) => machine.machineId === options.machineId)
-        : discovered;
-    if (candidates.length === 0) {
-        return null;
-    }
-
-    for (const machine of candidates) {
-        const { token } = await authenticate(machine.baseUrl, options.machineKey);
-        const history = await fetchHistory(machine.baseUrl, token, options.sessionId);
+    /** Reads one session from one machine; null means "this machine has no log for it yet". */
+    const readFrom = async (connection: LanConnection): Promise<LanSessionRead | null> => {
+        const history = await fetchHistory(
+            connection.baseUrl,
+            connection.token,
+            options.sessionId,
+            options.since
+        );
         if (!history) {
-            // 404: this machine has no log for that session. Deliberately distinguishable from an
-            // auth failure so it can be retried rather than treated as permanently absent.
-            continue;
+            return null;
         }
 
         const decrypted = await decryptLanHistory(options.encryption, history);
@@ -156,12 +186,58 @@ export async function readSessionOverLan(options: {
         }
 
         return {
-            machineId: machine.machineId,
+            machineId: connection.machineId,
             tag: history.tag,
             messages,
             decryptedCount: decrypted.decryptedCount,
             total: decrypted.entries.length,
+            cursor: history.cursor,
+            reset: history.reset,
+            connection,
         };
+    };
+
+    // The connection from the previous read is tried first, because discovery is the expensive
+    // half: a browse runs for its entire timeout, so paying it on every poll would make the
+    // channel slower the more often it is used.
+    const cached = options.connection;
+    if (cached && isConnectionUsable(cached, options.machineId)) {
+        try {
+            const result = await readFrom(cached);
+            if (result) {
+                return result;
+            }
+        } catch (error) {
+            // A token can expire or be revoked between reads; only that justifies a fresh
+            // handshake here. Anything else is a real failure and belongs to the caller.
+            if (!(error instanceof LanRequestError) || error.status !== 401) {
+                throw error;
+            }
+        }
+    }
+
+    const discovered = await discoverMachines({
+        accountPublicKey: options.accountPublicKey,
+        // A session belongs to exactly one machine, so there is nothing to learn from the others.
+        // When the id is unknown, fall back to probing whatever is advertising — the daemon
+        // answers 404 for sessions it does not have, which is a cheap way to find the right one.
+        timeoutMs: 4000,
+    });
+    const candidates = options.machineId
+        ? discovered.filter((machine) => machine.machineId === options.machineId)
+        : discovered;
+
+    for (const machine of candidates) {
+        const { token, expiresAt } = await authenticate(machine.baseUrl, machineKey);
+        const result = await readFrom({
+            machineId: machine.machineId,
+            baseUrl: machine.baseUrl,
+            token,
+            expiresAt,
+        });
+        if (result) {
+            return result;
+        }
     }
 
     return null;

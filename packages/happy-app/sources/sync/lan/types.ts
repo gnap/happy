@@ -57,7 +57,12 @@ export type LanSessionLogEntry = {
 export type LanHistory = {
     tag: string;
     dataEncryptionKey: string;
+    /** Only the entries written after the `since` this read was made with, when one was sent. */
     entries: LanSessionLogEntry[];
+    /** Opaque position to send back as `since` on the next read. */
+    cursor: string;
+    /** True when `since` could not be honoured, so `entries` is the whole log, not a continuation. */
+    reset: boolean;
 };
 
 export type LanIdentity = {
