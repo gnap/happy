@@ -2936,11 +2936,9 @@ class Sync {
 
                 this.ingestChannelRead(sessionId, { messages: normalizedMessages });
 
-                // The server answered, so this session is back on the primary channel — drop any
-                // "served over LAN" marker left by a fallback during an outage, and stop the
-                // polling that outage started.
+                // The server answered, so this session is back on the primary channel — stop the
+                // polling an outage started.
                 this.stopLanPolling(sessionId);
-                storage.getState().markSessionServedOverLan(sessionId, null);
 
                 this.sessionLastSeq.set(sessionId, maxSeq);
 
@@ -3894,7 +3892,6 @@ class Sync {
         });
         // No explicit persist here: `ingestChannelRead` schedules one when the store changed, and
         // a tick with nothing new costs no write at 2s intervals.
-        storage.getState().markSessionServedOverLan(sessionId, { messages: read.messages.length });
         log.log(
             `📡 fetchSessionFromLan: ${read.messages.length} read, ${fresh} new ` +
             `(${read.decryptedCount}/${read.total} decrypted, tag ${read.tag}` +
