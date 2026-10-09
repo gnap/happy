@@ -439,21 +439,26 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
             ? raw
             : null;
       if (text === null) {
+        logger.debug('[lan] socket frame dropped: not a text frame');
         return;
       }
       let frame: { event?: unknown; payload?: unknown };
       try {
         frame = JSON.parse(text) as { event?: unknown; payload?: unknown };
       } catch {
+        logger.debug(`[lan] socket frame dropped: not JSON bytes=${text.length}`);
         return;
       }
       if (frame.event !== 'send' || typeof frame.payload !== 'object' || frame.payload === null) {
+        logger.debug(`[lan] socket frame ignored: event=${String(frame.event)}`);
         return;
       }
       const { sessionId, localId, content } = frame.payload as Record<string, unknown>;
       if (typeof sessionId !== 'string' || typeof localId !== 'string' || typeof content !== 'string') {
+        logger.debug('[lan] socket send dropped: malformed payload');
         return;
       }
+      logger.debug(`[lan] socket send received session=${sessionId} localId=${localId}`);
       opts.onSend({ sessionId, localId, content });
     });
     socket.on('error', () => socket.close());

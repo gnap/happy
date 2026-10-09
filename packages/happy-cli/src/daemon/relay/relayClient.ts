@@ -104,7 +104,11 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
         local.onerror = () => { /* onclose follows */ };
       } else if (msg.t === 'ws-msg') {
         const entry = locals.get(msg.id);
-        if (!entry) return;
+        if (!entry) {
+          logger.debug(`[relay] ws-msg for unknown socket ${String(msg.id)}, dropped`);
+          return;
+        }
+        logger.debug(`[relay] ws-msg -> local socket ${String(msg.id)} bytes=${String(msg.data).length} open=${entry.open}`);
         if (entry.open) entry.ws.send(String(msg.data));
         else entry.queue.push(String(msg.data));
       } else if (msg.t === 'ws-close') {
