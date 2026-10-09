@@ -1,0 +1,17 @@
+{
+    "name": "happy-relay",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "description": "Stateless emergency relay: lets an App reach a daemon's LAN API over the public internet when happy-server is down.",
+    "scripts": {
+        "start": "bun src/main.ts",
+        "test": "bun test"
+    },
+    "dependencies": {
+        "tweetnacl": "^1.0.3"
+    },
+    "devDependencies": {
+        "@types/bun": "latest"
+    }
+}
