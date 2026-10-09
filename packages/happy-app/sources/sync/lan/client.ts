@@ -22,6 +22,14 @@ import type { LanHistory, LanIdentity, LanSessionSummary } from './types';
 
 /** A challenge is worthless once the daemon's nonce expires; don't hang on a wedged host. */
 const REQUEST_TIMEOUT_MS = 10_000;
+/**
+ * Reading history is not like the other calls: the response is a page of a session's log, measured
+ * in megabytes when the reader is catching up, and it may travel over the relay to a phone on
+ * cellular. Ten seconds is enough for the LAN and not for that, and a request that times out is
+ * the worst possible failure — the reader threw away a page it had already paid to transfer and
+ * asks for the same one again. Failing fast is not worth that.
+ */
+const HISTORY_TIMEOUT_MS = 45_000;
 
 /** The proof context string — must match `PROOF_CONTEXT` in the CLI's lanServer.ts. */
 const PROOF_CONTEXT = 'v1.proof';
@@ -47,11 +55,11 @@ export async function lanProofFor(machineKey: Uint8Array, nonce: string): Promis
 
 async function request(
     url: string,
-    init: RequestInit & { token?: string } = {}
+    init: RequestInit & { token?: string; timeoutMs?: number } = {}
 ): Promise<Response> {
-    const { token, ...rest } = init;
+    const { token, timeoutMs, ...rest } = init;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), timeoutMs ?? REQUEST_TIMEOUT_MS);
     try {
         return await fetch(url, {
             ...rest,
@@ -130,7 +138,7 @@ export async function fetchHistory(
     const query = since ? `?since=${encodeURIComponent(since)}` : '';
     const response = await request(
         `${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/history${query}`,
-        { token }
+        { token, timeoutMs: HISTORY_TIMEOUT_MS }
     );
     if (response.status === 404) {
         return null;
