@@ -925,12 +925,27 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     process.on('SIGHUP', () => { exitSignalName = 'SIGHUP'; void cleanup(false); });
 
     // Handle uncaught exceptions and rejections
+    // A write to a pipe whose reader went away (EPIPE) is a lost write, not a corrupt process.
+    // Tearing the whole session down for it turned one raced spawn into hours of "offline".
+    const isBrokenPipe = (value: unknown): boolean => {
+        const code = (value as { code?: unknown } | null)?.code;
+        return code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED';
+    };
+
     process.on('uncaughtException', (error) => {
+        if (isBrokenPipe(error)) {
+            logger.debug('[START] Ignoring broken pipe (uncaught exception):', error);
+            return;
+        }
         logger.debug('[START] Uncaught exception:', error);
         void cleanup(false);
     });
 
     process.on('unhandledRejection', (reason) => {
+        if (isBrokenPipe(reason)) {
+            logger.debug('[START] Ignoring broken pipe (unhandled rejection):', reason, (reason as Error)?.stack);
+            return;
+        }
         logger.debug('[START] Unhandled rejection:', reason);
         void cleanup(false);
     });
