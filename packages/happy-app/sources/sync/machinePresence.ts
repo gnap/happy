@@ -1,4 +1,5 @@
 import type { Machine } from './storageTypes';
+import type { SessionChannel } from './lan/types';
 
 /**
  * How a machine is currently reachable from this device.
@@ -65,3 +66,31 @@ export const CHANNEL_ICONS = {
     relay: 'swap-horizontal',
     server: 'globe-outline',
 } as const;
+
+/**
+ * Which channel icons to draw for a machine, in priority order, and whether each one is reaching
+ * the machine *now* (green) or merely switched on and possible (grey).
+ *
+ * Capability and reachability are separate questions and the two icons answer them differently:
+ * the server icon is drawn whenever the server channel is on, since a server that does not report
+ * the machine is still a channel the App could use; the relay icon is drawn when the machine
+ * published a route, which is a claim its daemon made; the LAN icon is drawn only when this device
+ * has actually seen the machine, because no daemon announces a LAN route it might be reachable on.
+ * Colour is reachability in every case.
+ */
+export function machineChannelIcons(
+    priority: readonly SessionChannel[],
+    presence: MachinePresence,
+    lanReachable: boolean,
+    relayCapable: boolean,
+): { channel: SessionChannel; up: boolean }[] {
+    return priority.flatMap((channel): { channel: SessionChannel; up: boolean }[] => {
+        if (channel === 'server') {
+            return [{ channel, up: presence === 'server' }];
+        }
+        if (channel === 'lan') {
+            return lanReachable ? [{ channel, up: true }] : [];
+        }
+        return relayCapable || presence === 'relay' ? [{ channel, up: presence === 'relay' }] : [];
+    });
+}

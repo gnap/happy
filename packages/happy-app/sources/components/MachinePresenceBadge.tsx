@@ -2,8 +2,7 @@ import React from 'react';
 import { View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet } from 'react-native-unistyles';
-import { CHANNEL_ICONS, type MachinePresence } from '@/sync/machinePresence';
-import type { SessionChannel } from '@/sync/lan/types';
+import { CHANNEL_ICONS, machineChannelIcons, type MachinePresence } from '@/sync/machinePresence';
 import { useLocalSetting } from '@/sync/storage';
 
 const CONNECTED = '#34C759';
@@ -11,8 +10,9 @@ const DOWN = '#8E8E93';
 
 /**
  * How a machine is reachable: one icon per enabled channel in priority order, green when that
- * channel reaches the machine now, grey when it does not. LAN is hidden unless the machine is
- * currently seen on the network, and the relay is hidden unless the machine published a route.
+ * channel reaches the machine now, grey when it does not. Only channels switched on in the
+ * priority setting appear at all. LAN is hidden unless the machine is currently seen on the
+ * network, and the relay is hidden unless the machine published a route.
  */
 export const MachinePresenceBadge = React.memo(function MachinePresenceBadge({
     presence,
@@ -24,15 +24,7 @@ export const MachinePresenceBadge = React.memo(function MachinePresenceBadge({
     relayCapable?: boolean;
 }) {
     const priority = useLocalSetting('channelPriority');
-    const icons = priority.flatMap((channel): { channel: SessionChannel; up: boolean }[] => {
-        if (channel === 'server') {
-            return [{ channel, up: presence === 'server' }];
-        }
-        if (channel === 'lan') {
-            return lanReachable ? [{ channel, up: true }] : [];
-        }
-        return relayCapable || presence === 'relay' ? [{ channel, up: presence === 'relay' || relayCapable }] : [];
-    });
+    const icons = machineChannelIcons(priority, presence, lanReachable, relayCapable);
 
     return (
         <View style={styles.container}>
