@@ -14,12 +14,16 @@ import { Option } from './markdown/MarkdownView';
 import { useSetting, useOutboxEntry, storage } from "@/sync/storage";
 import { Ionicons } from '@expo/vector-icons';
 
-export const MessageView = (props: {
+/**
+ * Memoised because the list re-renders on every store write and each row renders markdown: without
+ * this, appending one message re-rendered every visible row, tool output and all.
+ */
+export const MessageView = React.memo(function MessageView(props: {
   message: Message;
   metadata: Metadata | null;
   sessionId: string;
   getMessageById?: (id: string) => Message | null;
-}) => {
+}) {
   if (props.message.kind === 'tool-call') {
     const name = (props.message as any).tool?.name;
     if (name === 'TaskCreate' || name === 'TaskUpdate' || name === 'TaskGet' || name === 'TaskList') {
@@ -38,7 +42,7 @@ export const MessageView = (props: {
       </View>
     </View>
   );
-};
+});
 
 // RenderBlock function that dispatches to the correct component based on message kind
 function RenderBlock(props: {

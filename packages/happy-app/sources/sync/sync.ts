@@ -122,6 +122,19 @@ export type ChannelReason =
     | 'server-down-relay'
     | 'by-priority';
 
+/**
+ * Frame-level tracing for the update pipeline, off unless the dev page turns debug mode on.
+ *
+ * These fire per frame and per message; a busy session produces thousands a minute, and each line
+ * also walks the logger's listener list — a re-render for whatever log view is open. Takes a thunk
+ * so the payload is never serialised when tracing is off, which is the whole cost of the call.
+ */
+function traceUpdate(message: () => string): void {
+    if (storage.getState().localSettings.debugMode) {
+        log.log(message());
+    }
+}
+
 class Sync {
     private static readonly BACKGROUND_SEND_TIMEOUT_MS = 30_000;
     private static readonly DESKTOP_SESSION_REFRESH_COOLDOWN_MS = 15_000;
@@ -3368,7 +3381,7 @@ class Sync {
     }
 
     private handleUpdate = async (update: unknown) => {
-        console.log('🔄 Sync: handleUpdate called with:', JSON.stringify(update).substring(0, 300));
+        traceUpdate(() => `🔄 Sync: handleUpdate called with: ${JSON.stringify(update).substring(0, 300)}`);
         const validatedUpdate = ApiUpdateContainerSchema.safeParse(update);
         if (!validatedUpdate.success) {
             console.log('❌ Sync: Invalid update received:', validatedUpdate.error);
@@ -3376,7 +3389,7 @@ class Sync {
             return;
         }
         const updateData = validatedUpdate.data;
-        console.log(`🔄 Sync: Validated update type: ${updateData.body.t}`);
+        traceUpdate(() => `🔄 Sync: Validated update type: ${updateData.body.t}`);
 
         if (updateData.body.t === 'new-message') {
 
@@ -3474,7 +3487,7 @@ class Sync {
                     const incomingSeq = updateData.body.message.seq;
                     const isFastPath = lastMessage !== null && currentLastSeq !== undefined && incomingSeq === currentLastSeq + 1;
                     if (isFastPath && lastMessage) {
-                        console.log('🔄 Sync: Applying message (fast path):', JSON.stringify(lastMessage));
+                        traceUpdate(() => `🔄 Sync: Applying message (fast path): ${JSON.stringify(lastMessage).substring(0, 300)}`);
                         this.enqueueMessages(updateData.body.sid, [lastMessage]);
                         this.sessionLastSeq.set(updateData.body.sid, incomingSeq);
                         // Advance the store's newestSeq so fetchMessages' up-to-date check
@@ -3500,7 +3513,7 @@ class Sync {
                         // Neither sessionLastSeq nor newestSeq is advanced here — the gap must
                         // be filled by fetchMessages before the store is considered caught up.
                         if (lastMessage) {
-                            console.log('🔄 Sync: Applying message (lenient path, seq gap):', JSON.stringify(lastMessage));
+                            traceUpdate(() => `🔄 Sync: Applying message (lenient path, seq gap): ${JSON.stringify(lastMessage).substring(0, 300)}`);
                             this.enqueueMessages(updateData.body.sid, [lastMessage]);
                         }
                     }
