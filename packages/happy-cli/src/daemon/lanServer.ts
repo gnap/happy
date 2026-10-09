@@ -60,6 +60,9 @@ export type LanSessionSummary = {
   lastHeartbeat?: number;
 };
 
+/** How a reader names a session: by the id the server issued, or by the tag the CLI owns. */
+export type LanSessionAddress = { sessionId: string } | { tag: string };
+
 export type LanHistory = {
   tag: string;
   /**
@@ -100,8 +103,12 @@ export type LanServerOptions = {
    * Local history for a session, or null when this machine has none — the session may not
    * have reported its tag yet, or its key may be gone. Injected so this module keeps knowing
    * nothing about configuration or the filesystem.
+   *
+   * Two addresses, because they become available at different times: the server issues the id,
+   * the CLI owns the tag. A client that knows only the tag can still read, which is what keeps
+   * a session reachable while it is waiting for the server.
    */
-  getHistory: (sessionId: string, query: { since?: string; before?: string }) => LanHistory | null;
+  getHistory: (address: LanSessionAddress, query: { since?: string; before?: string }) => LanHistory | null;
   /**
    * A user message the App sent over the LAN socket. `content` is the same ciphertext the server
    * route carries, so this stays end-to-end encrypted — the LAN is plain HTTP, which is exactly
@@ -365,6 +372,31 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     return reply.send({ sessions: opts.getSessions() });
   });
 
+  /**
+   * The same history, addressed by the tag the CLI owns rather than the id the server issued.
+   *
+   * This is what keeps a session reachable while it is waiting out a server stall: it has a tag
+   * from the moment it starts, but no session id until the server answers, and a reader that
+   * cannot name it cannot reach it at all.
+   */
+  app.get('/lan/tags/:tag/history', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    const { tag } = request.params as { tag: string };
+    const { since, before } = request.query as { since?: string; before?: string };
+    const history = opts.getHistory({ tag }, { since, before });
+    if (!history) {
+      logger.debug(`[lan] history 404 tag=${tag} since=${since ?? '-'} before=${before ?? '-'}`);
+      return reply.code(404).send({ error: 'no local history for that tag' });
+    }
+    logger.debug(
+      `[lan] history tag=${tag} since=${since ?? '-'} before=${before ?? '-'} ` +
+      `entries=${history.entries.length} hasNewer=${history.hasNewer} hasOlder=${history.hasOlder} reset=${history.reset}`,
+    );
+    return reply.send({ v: LAN_PROTOCOL_VERSION, ...history });
+  });
+
   app.get('/lan/sessions/:sessionId/history', async (request, reply) => {
     if (!requireToken(request)) {
       return reply.code(401).send({ error: 'unauthorized' });
@@ -373,7 +405,7 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     // No anchor at all means "the newest page": a reader that has just opened a session wants the
     // end of the log, not the beginning.
     const { since, before } = request.query as { since?: string; before?: string };
-    const history = opts.getHistory(sessionId, { since, before });
+    const history = opts.getHistory({ sessionId }, { since, before });
     if (!history) {
       // 404 rather than an empty list: the client should retry later, not record "no history".
       logger.debug(`[lan] history 404 ${sessionId} since=${since ?? '-'} before=${before ?? '-'}`);

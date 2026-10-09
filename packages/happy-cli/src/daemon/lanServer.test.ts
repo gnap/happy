@@ -29,6 +29,8 @@ const HISTORY: LanHistory = {
 let history: LanHistory | null = HISTORY;
 /** What the route passed down, so the anchor plumbing can be asserted rather than assumed. */
 let lastQuery: { since?: string; before?: string } | undefined;
+/** How the route named the session, so the two addresses can be told apart. */
+let lastAddress: { sessionId?: string; tag?: string } | undefined;
 /** Messages the socket handed to the daemon, in order. */
 let sent: { sessionId: string; localId: string; content: string }[] = [];
 
@@ -42,8 +44,9 @@ async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
         machineId: 'machine-1',
         accountFingerprint: 'acct-fingerprint',
         getSessions: () => SESSIONS,
-        getHistory: (_sessionId, query) => {
+        getHistory: (address, query) => {
             lastQuery = query;
+            lastAddress = address;
             return history;
         },
         onSend: (message) => {
@@ -188,6 +191,33 @@ describe('lanServer read-only API', () => {
         expect(missing.status).toBe(404);
 
         expect((await fetch(url('/lan/sessions/sess-1/history'))).status).toBe(401);
+        history = HISTORY;
+    });
+
+    /**
+     * The tag is the CLI's own identity: it exists before the server has answered, so a session
+     * waiting out a server stall is reachable this way and not the other.
+     */
+    it('serves the same history when addressed by tag instead of session id', async () => {
+        await start();
+        const token = await getToken();
+
+        const res = await fetch(url('/lan/tags/tag-1/history'), authorized(token));
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ v: LAN_PROTOCOL_VERSION, ...HISTORY });
+        // Addressed by tag, not by id -- that is the whole point of the route.
+        expect(lastAddress).toEqual({ tag: 'tag-1' });
+
+        expect((await fetch(url('/lan/tags/tag-1/history'))).status).toBe(401);
+    });
+
+    it('reports a tag it has no history for the same way as a session it does not know', async () => {
+        await start();
+        const token = await getToken();
+
+        history = null;
+        const missing = await fetch(url('/lan/tags/unknown-tag/history'), authorized(token));
+        expect(missing.status).toBe(404);
         history = HISTORY;
     });
 

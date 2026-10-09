@@ -1370,11 +1370,15 @@ export async function startDaemon(): Promise<void> {
                 `[DAEMON RUN] LAN user message for ${sessionId}: ${delivered ? 'delivered to session' : 'no live session socket'}`,
               );
             },
-            getHistory: (sessionId, query) => {
-              // The client addresses by session id because that is what it learns from the
-              // server; the tag is this side's business.
-              const tracked = [...pidToTrackedSession.values()].find((s) => s.happySessionId === sessionId);
-              const tag = tracked?.sessionTag;
+            getHistory: (address, query) => {
+              // Two ways in. By session id is what a client learns from the server; by tag is
+              // the CLI's own identity, which exists before the server has ever answered -- so a
+              // session waiting out a server stall is still reachable. A tag-addressed read
+              // deliberately does not require the session to be tracked at all: the log is keyed
+              // by (tag, site) on disk, so it survives a daemon restart too.
+              const tag = 'tag' in address
+                ? address.tag
+                : [...pidToTrackedSession.values()].find((s) => s.happySessionId === address.sessionId)?.sessionTag;
               if (!tag) {
                 return null; // not reported yet -- the client should retry, not give up
               }
