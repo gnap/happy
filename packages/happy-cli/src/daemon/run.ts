@@ -30,7 +30,7 @@ import { delay } from '@/utils/time';
 import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSessionSummary } from './lanServer';
 import type { ApiMachineClient } from '@/api/apiMachine';
 import { readSessionKey } from '@/api/sessionKeyPersistence';
-import { readSessionLogSince } from '@/api/sessionLog';
+import { readSessionLogPage } from '@/api/sessionLog';
 import { encodeBase64, libsodiumEncryptForPublicKey } from '@/api/encryption';
 import { startLanDiscovery, type LanDiscoveryHandle } from './lanDiscovery';
 import { startEndpointPublisher, type EndpointPublisherHandle, type LanEndpoint } from './lanEndpoints';
@@ -1370,7 +1370,7 @@ export async function startDaemon(): Promise<void> {
                 `[DAEMON RUN] LAN user message for ${sessionId}: ${delivered ? 'delivered to session' : 'no live session socket'}`,
               );
             },
-            getHistory: (sessionId, since) => {
+            getHistory: (sessionId, query) => {
               // The client addresses by session id because that is what it learns from the
               // server; the tag is this side's business.
               const tracked = [...pidToTrackedSession.values()].find((s) => s.happySessionId === sessionId);
@@ -1389,14 +1389,16 @@ export async function startDaemon(): Promise<void> {
               const dataEncryptionKey = new Uint8Array(wrapped.length + 1);
               dataEncryptionKey.set([0], 0); // version byte, matching api.ts
               dataEncryptionKey.set(wrapped, 1);
-              const page = readSessionLogSince(tag, machineId, since);
+              const page = readSessionLogPage({ tag, site: machineId, since: query.since, before: query.before });
               return {
                 tag,
                 dataEncryptionKey: encodeBase64(dataEncryptionKey),
                 entries: page.entries,
                 cursor: page.cursor,
+                older: page.older,
+                hasNewer: page.hasNewer,
+                hasOlder: page.hasOlder,
                 reset: page.reset,
-                more: page.more,
               };
             },
           });

@@ -176,139 +176,257 @@ function pruneToKeepSegments(dir: string): void {
 }
 
 export type SessionLogPage = {
+  /** Oldest first, always — whichever direction the page was read in. */
   entries: SessionLogEntry[];
-  /** Opaque position to hand back as `since` on the next read. */
+  /** Boundary after the last entry. Hand back as `since` to continue forward. */
   cursor: string;
+  /** Boundary before the first entry. Hand back as `before` to read older. */
+  older: string;
+  /** There are entries after this page. */
+  hasNewer: boolean;
+  /** There are entries before this page. */
+  hasOlder: boolean;
   /**
-   * True when `since` could not be honoured — the log was pruned past it, or the cursor was
-   * malformed — so `entries` is the whole log rather than a continuation of it.
+   * True when `since` could not be honoured — the log was pruned past it, or it was malformed —
+   * so `entries` is the log from its start rather than a continuation. Only a forward read can
+   * report it: a reader walking backwards is at the log's beginning, which `hasOlder` says.
    */
   reset: boolean;
-  /**
-   * True when the log continues past this page. The transport cannot carry an arbitrarily long
-   * log in one frame, so a read that hits the budget ends early and says so; the caller pages on
-   * with `cursor` instead of assuming it now holds everything.
-   */
-  more: boolean;
 };
 
 /**
- * Per read. Sized for the *reader*, not for the log: a page travels over the LAN or, worse, over
- * the relay to a phone on cellular, and a reader that cannot finish a page re-reads it forever.
- * Small enough that one page is a short transfer, large enough that a long log is not thousands of
- * round trips.
+ * How much one page may weigh. Sized for the *reader*, not for the log: a page travels over the
+ * LAN or, worse, over the relay to a phone on cellular, and a reader that cannot finish a page
+ * re-reads it forever. Small enough that one page is a short transfer, large enough that a long
+ * log is not thousands of round trips.
  */
 const DEFAULT_PAGE_MAX_BYTES = 1024 * 1024;
 
-/** `"<segmentIndex>:<lineOffset>"`. Anything else is treated as unusable, not as "no cursor". */
-function parseCursor(since: string | undefined): { segment: number; line: number } | null {
-  if (since === undefined) {
+/**
+ * A boundary in the log: `"<segmentIndex>:<lineOffset>"` means *after* that line, so line 0 is the
+ * start of the segment. The same value reads in either direction — `since=S:L` is everything after
+ * that boundary, `before=S:L` is everything up to it — which is what lets a page be described by
+ * its two edges and nothing else.
+ */
+type Anchor = { segment: number; line: number };
+
+/** Anything that is not a pair of integers is unusable, not "no anchor". */
+function parseAnchor(value: string | undefined): Anchor | null {
+  if (value === undefined) {
     return null;
   }
-  const match = /^(\d+):(\d+)$/.exec(since);
+  const match = /^(\d+):(\d+)$/.exec(value);
   return match ? { segment: Number(match[1]), line: Number(match[2]) } : null;
 }
+
+const formatAnchor = (anchor: Anchor): string => `${anchor.segment}:${anchor.line}`;
 
 /** Segments are named with a zero-padded index, so lexicographic order is numeric order. */
 const segmentIndexOf = (name: string): number => Number.parseInt(name.slice(0, 10), 10);
 
+/** The non-empty lines of a segment, in order — index 0 is line 1 of the anchor encoding. */
+function readSegmentLines(dir: string, name: string): string[] | null {
+  let contents: string;
+  try {
+    contents = readFileSync(join(dir, name), 'utf8');
+  } catch {
+    return null;
+  }
+  return contents.split('\n').filter((line) => line !== '');
+}
+
+export type SessionLogQuery = {
+  tag: string;
+  site: string | undefined;
+  /** Read the entries after this boundary. */
+  since?: string;
+  /** Read the entries up to this boundary. Omit both to read the newest page. */
+  before?: string;
+  maxBytes?: number;
+};
+
 /**
- * Reads the entries written after `since`, oldest first.
+ * Reads one page of a session's log.
  *
- * The cursor is a *position* — segment index and line offset — rather than a timestamp. `at` is a
+ * The anchor is a *position* — segment index and line offset — rather than a timestamp. `at` is a
  * local write time that NTP jumps and session resumptions move around, so it cannot order the
  * log; positions can, because segments are append-only and rotate into new files. Only whole old
- * segments are ever dropped, which is the one case `reset` reports: the caller must then read the
- * entries as the whole log instead of as a continuation.
+ * segments are ever dropped, which is what `reset` reports to a forward reader: it must then treat
+ * the page as the whole log instead of a continuation.
  *
- * Stops at the first line that does not parse rather than skipping it: a torn tail is benign, but
- * a torn *middle* (delayed allocation losing a page) leaves a gap that skipping would silently
- * paper over. The cursor is left *before* the torn line so the next read picks it up again.
+ * Three reads, and they are the same walk in different directions:
  *
- * Also stops at `maxBytes`, for the same reason in a different direction: the entries leave this
- * process as one frame, and a reader on the far side of the relay is on a transport with a frame
- * limit. `more` says the log continues, and the cursor is left before the entry that did not fit.
+ * - `since` — everything after a boundary. This is following a session that is already open.
+ * - `before` — everything up to a boundary. This is scrolling back.
+ * - neither — the newest page, which is what a reader that has just opened a session wants: a
+ *   reader that starts from its last position instead has to carry every entry written while it
+ *   was away before it can show anything recent, and on a long session that never finishes.
+ *
+ * Going forward, reading stops at the first line that does not parse rather than skipping it: a
+ * torn tail is benign, but a torn *middle* (delayed allocation losing a page) leaves a gap that
+ * skipping would silently paper over, and the cursor is left before it so the next read retries.
+ * Going backwards the same line has to be stepped over instead — stopping there would make every
+ * older page unreachable — and the page simply does not contain it.
+ *
+ * Either walk also stops at `maxBytes`. A page leaves this process as one frame, and a frame can
+ * be too large for the transport to carry at all; `hasNewer`/`hasOlder` say whether that is why it
+ * ended, so the caller knows a page was cut rather than the log running out.
  */
-export function readSessionLogSince(
-  tag: string,
-  site: string | undefined,
-  since?: string,
-  maxBytes: number = DEFAULT_PAGE_MAX_BYTES,
+export function readSessionLogPage(query: SessionLogQuery): SessionLogPage {
+  const maxBytes = query.maxBytes ?? DEFAULT_PAGE_MAX_BYTES;
+  const dir = sessionLogDir(query.tag, query.site);
+  const names = listSegments(dir);
+  if (names.length === 0) {
+    return { entries: [], cursor: '0:0', older: '0:0', hasNewer: false, hasOlder: false, reset: false };
+  }
+
+  const since = parseAnchor(query.since);
+  const pruned = since !== null && !names.some((name) => segmentIndexOf(name) === since.segment);
+  const reset = query.since !== undefined && (since === null || pruned);
+
+  const before = parseAnchor(query.before);
+  if (before !== null || (query.since === undefined && query.before === undefined)) {
+    return readPage(dir, names, { backwards: true, before, reset, maxBytes });
+  }
+  return readPage(dir, names, { backwards: false, since, reset, maxBytes });
+}
+
+function readPage(
+  dir: string,
+  names: string[],
+  options:
+    | { backwards: true; before: Anchor | null; reset: boolean; maxBytes: number }
+    | { backwards: false; since: Anchor | null; reset: boolean; maxBytes: number },
 ): SessionLogPage {
-  const dir = sessionLogDir(tag, site);
-  const segments = listSegments(dir);
-  const cursor = parseCursor(since);
-  const pruned = cursor !== null && !segments.some((name) => segmentIndexOf(name) === cursor.segment);
-  const reset = (since !== undefined && cursor === null) || pruned;
+  const indices = names.map(segmentIndexOf);
+  const firstIndex = indices[0];
+  const lastIndex = indices[indices.length - 1];
 
-  const from = reset || cursor === null ? -1 : cursor.segment;
-  const skipLines = reset || cursor === null ? 0 : cursor.line;
-
-  const entries: SessionLogEntry[] = [];
+  // Collected newest-last either way, so the page is ordered the same whichever way it was read.
+  const pages: { entry: SessionLogEntry; segment: number; line: number }[] = [];
   let bytes = 0;
-  let more = false;
-  let lastSegment = 0;
-  let lastLine = 0;
+  let cut = false;
 
-  for (const name of segments) {
-    const index = segmentIndexOf(name);
-    if (index < from) {
+  if (!options.backwards) {
+    const from = options.reset || options.since === null ? firstIndex : options.since.segment;
+    const skip = options.reset || options.since === null ? 0 : options.since.line;
+    let started = false;
+    let torn = false;
+    for (let i = 0; i < names.length && !cut && !torn; i += 1) {
+      const index = indices[i];
+      if (index < from) {
+        continue;
+      }
+      const lines = readSegmentLines(dir, names[i]);
+      if (lines === null) {
+        break;
+      }
+      const skipHere = index === from ? skip : 0;
+      for (let line = skipHere; line < lines.length; line += 1) {
+        const size = lines[line].length + 1;
+        if (pages.length > 0 && bytes + size > options.maxBytes) {
+          cut = true;
+          break;
+        }
+        let entry: SessionLogEntry;
+        try {
+          entry = JSON.parse(lines[line]) as SessionLogEntry;
+        } catch {
+          torn = true; // Torn middle: stop *before* it so the next read retries this line.
+          break;
+        }
+        pages.push({ entry, segment: index, line: line + 1 });
+        bytes += size;
+        started = true;
+      }
+    }
+    const first = pages[0];
+    const last = pages[pages.length - 1];
+    // A page that began at the very start of the log has nothing before it; anything else has the
+    // entries the reader already holds, which is all `hasOlder` means here.
+    const beganAtStart = (options.reset || options.since === null) ||
+      (options.since.segment === firstIndex && options.since.line === 0);
+    return {
+      entries: pages.map((p) => p.entry),
+      cursor: last ? formatAnchor({ segment: last.segment, line: last.line }) : formatAnchor(options.reset || options.since === null ? { segment: firstIndex, line: 0 } : options.since),
+      older: first ? formatAnchor({ segment: first.segment, line: first.line - 1 }) : formatAnchor(options.reset || options.since === null ? { segment: firstIndex, line: 0 } : options.since),
+      hasNewer: cut || torn,
+      hasOlder: !beganAtStart && started,
+      reset: options.reset,
+    };
+  }
+
+  // Backwards: from the boundary down to the start of the log, newest lines first.
+  const from = options.before ?? { segment: lastIndex, line: Number.MAX_SAFE_INTEGER };
+  const newest = options.before === null;
+  let exhausted = true;
+  for (let i = indices.length - 1; i >= 0 && !cut; i -= 1) {
+    const index = indices[i];
+    if (index > from.segment) {
       continue;
     }
-    let contents: string;
-    try {
-      contents = readFileSync(join(dir, name), 'utf8');
-    } catch {
+    const lines = readSegmentLines(dir, names[i]);
+    if (lines === null) {
+      exhausted = false;
       break;
     }
-    const skip = index === from ? skipLines : 0;
-    let lineNo = 0;
-    let torn = false;
-    let stopped = false;
-    for (const line of contents.split('\n')) {
-      if (line === '') {
-        continue;
-      }
-      lineNo += 1;
-      if (lineNo <= skip) {
-        continue;
-      }
-      // A page the transport could not carry has to end here rather than be sent and lose the
-      // whole connection: a reader asking for a long session's log from the beginning would
-      // otherwise build one frame of tens of megabytes. The cursor stops *before* this entry, so
-      // the next read resumes at exactly this line. An entry larger than the budget still goes out
-      // alone, because refusing to deliver it would stall the reader forever.
-      if (entries.length > 0 && bytes + line.length + 1 > maxBytes) {
-        stopped = true;
+    const limit = index === from.segment ? Math.min(from.line, lines.length) : lines.length;
+    for (let line = limit; line >= 1; line -= 1) {
+      const size = lines[line - 1].length + 1;
+      if (pages.length > 0 && bytes + size > options.maxBytes) {
+        cut = true;
         break;
       }
+      let entry: SessionLogEntry;
       try {
-        entries.push(JSON.parse(line) as SessionLogEntry);
+        entry = JSON.parse(lines[line - 1]) as SessionLogEntry;
       } catch {
-        torn = true;
-        break;
+        continue; // Stepped over, not stopped at: an older page must stay reachable past it.
       }
-      bytes += line.length + 1;
+      pages.push({ entry, segment: index, line });
+      bytes += size;
     }
-    lastSegment = index;
-    // A line that was not delivered — torn, or left for the next page — must not be stepped over,
-    // so the cursor stops short of it and the next read starts there again.
-    lastLine = torn || stopped ? lineNo - 1 : lineNo;
-    if (torn) {
-      break;
-    }
-    if (stopped) {
-      more = true;
-      break;
+    if (!cut && i === 0) {
+      exhausted = true;
     }
   }
 
-  return { entries, cursor: `${lastSegment}:${lastLine}`, reset, more };
+  pages.reverse(); // Oldest first, like every other page.
+  const first = pages[0];
+  const last = pages[pages.length - 1];
+  // Anything at or after the boundary is newer than this page. The segment we were pointed into
+  // tells us for free whether it has lines past it; if it ends there, a later segment would.
+  const newerInAnchorSegment = !newest && linesPastBoundary(dir, names, indices, from);
+  return {
+    entries: pages.map((p) => p.entry),
+    cursor: last ? formatAnchor({ segment: last.segment, line: last.line }) : formatAnchor(from),
+    older: first ? formatAnchor({ segment: first.segment, line: first.line - 1 }) : formatAnchor(from),
+    hasNewer: newest ? false : newerInAnchorSegment,
+    hasOlder: cut || !exhausted,
+    reset: false,
+  };
 }
 
-/** Read every entry, oldest segment first. */
+/** Whether the log has a line at or after `anchor`, without reading past the segment it names. */
+function linesPastBoundary(dir: string, names: string[], indices: number[], anchor: Anchor): boolean {
+  if (indices.some((index) => index > anchor.segment)) {
+    return true;
+  }
+  const at = names.findIndex((name) => segmentIndexOf(name) === anchor.segment);
+  if (at === -1) {
+    return false;
+  }
+  const lines = readSegmentLines(dir, names[at]);
+  return lines !== null && lines.length > anchor.line;
+}
+
+/**
+ * Read every entry, oldest segment first. Unbounded on purpose: this is the whole-log form, used
+ * by tests and by callers that want the file rather than a view of it — a reader that is talking to
+ * a client over a transport must page instead, which is what `readSessionLogPage` is for.
+ */
 export function readSessionLog(tag: string, site: string | undefined): SessionLogEntry[] {
-  return readSessionLogSince(tag, site).entries;
+  return readSessionLogPage({ tag, site, since: '0:0', maxBytes: Number.MAX_SAFE_INTEGER }).entries;
 }
 
 /**

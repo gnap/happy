@@ -20,13 +20,15 @@ const HISTORY: LanHistory = {
     dataEncryptionKey: 'WRAPPED-KEY',
     entries: [{ id: 'id-1', localId: 'local-1', dir: 'out', at: 1, c: 'CIPHER-1' }],
     cursor: '0:1',
+    older: '0:0',
+    hasNewer: false,
+    hasOlder: false,
     reset: false,
-    more: false,
 };
 /** Mutable so a test can simulate a session whose history this machine does not have. */
 let history: LanHistory | null = HISTORY;
-/** What the route passed down, so the cursor plumbing can be asserted rather than assumed. */
-let lastSince: string | undefined;
+/** What the route passed down, so the anchor plumbing can be asserted rather than assumed. */
+let lastQuery: { since?: string; before?: string } | undefined;
 /** Messages the socket handed to the daemon, in order. */
 let sent: { sessionId: string; localId: string; content: string }[] = [];
 
@@ -40,8 +42,8 @@ async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
         machineId: 'machine-1',
         accountFingerprint: 'acct-fingerprint',
         getSessions: () => SESSIONS,
-        getHistory: (_sessionId, since) => {
-            lastSince = since;
+        getHistory: (_sessionId, query) => {
+            lastQuery = query;
             return history;
         },
         onSend: (message) => {
@@ -203,24 +205,34 @@ describe('lanServer read-only API', () => {
     });
 
     describe('incremental history', () => {
-        it('passes the cursor through to the log reader and returns the next one', async () => {
+        it('passes the anchor through to the log reader and returns the page edges', async () => {
             await start();
             const token = await getToken();
 
             const res = await fetch(url('/lan/sessions/sess-1/history?since=0:5'), authorized(token));
 
-            expect(lastSince).toBe('0:5');
-            const body = (await res.json()) as { cursor: string };
+            expect(lastQuery).toEqual({ since: '0:5', before: undefined });
+            const body = (await res.json()) as { cursor: string; older: string };
             expect(body.cursor).toBe('0:1');
+            expect(body.older).toBe('0:0');
         });
 
-        it('omits the cursor on a first read', async () => {
+        it('passes `before` through, so a reader can page back', async () => {
+            await start();
+            const token = await getToken();
+
+            await fetch(url('/lan/sessions/sess-1/history?before=2:9'), authorized(token));
+
+            expect(lastQuery).toEqual({ since: undefined, before: '2:9' });
+        });
+
+        it('asks for no anchor at all on a first read, which means the newest page', async () => {
             await start();
             const token = await getToken();
 
             await fetch(url('/lan/sessions/sess-1/history'), authorized(token));
 
-            expect(lastSince).toBeUndefined();
+            expect(lastQuery).toEqual({ since: undefined, before: undefined });
         });
     });
 

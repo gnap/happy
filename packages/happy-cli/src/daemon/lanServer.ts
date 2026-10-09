@@ -79,11 +79,14 @@ export type LanHistory = {
   /** True when `since` could not be honoured, so `entries` is the whole log, not a continuation. */
   reset: boolean;
   /**
-   * True when the log continues past this page, which a reader must act on: a page is bounded so
-   * that no single response is too large for the transport, so stopping at the first one leaves a
-   * reader permanently behind the end of the log.
+   * Boundary before the first entry, to hand back as `before` for the next older page. Every page
+   * carries both of its edges, so a reader can walk the log in either direction.
    */
-  more: boolean;
+  older: string;
+  /** The log continues past this page, which is what tells a reader its page was cut short. */
+  hasNewer: boolean;
+  /** The log continues before this page, which is the whole "there is older history" signal. */
+  hasOlder: boolean;
 };
 
 export type LanServerOptions = {
@@ -98,7 +101,7 @@ export type LanServerOptions = {
    * have reported its tag yet, or its key may be gone. Injected so this module keeps knowing
    * nothing about configuration or the filesystem.
    */
-  getHistory: (sessionId: string, since?: string) => LanHistory | null;
+  getHistory: (sessionId: string, query: { since?: string; before?: string }) => LanHistory | null;
   /**
    * A user message the App sent over the LAN socket. `content` is the same ciphertext the server
    * route carries, so this stays end-to-end encrypted — the LAN is plain HTTP, which is exactly
@@ -367,19 +370,22 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       return reply.code(401).send({ error: 'unauthorized' });
     }
     const { sessionId } = request.params as { sessionId: string };
-    const { since } = request.query as { since?: string };
-    const history = opts.getHistory(sessionId, since);
+    // No anchor at all means "the newest page": a reader that has just opened a session wants the
+    // end of the log, not the beginning.
+    const { since, before } = request.query as { since?: string; before?: string };
+    const history = opts.getHistory(sessionId, { since, before });
     if (!history) {
       // 404 rather than an empty list: the client should retry later, not record "no history".
-      logger.debug(`[lan] history 404 ${sessionId} since=${since ?? '-'}`);
+      logger.debug(`[lan] history 404 ${sessionId} since=${since ?? '-'} before=${before ?? '-'}`);
       return reply.code(404).send({ error: 'no local history for that session' });
     }
-    // One line per read, because "the reader is behind" and "the reader is stuck" look identical
-    // from outside and are told apart by whether the cursor moves between reads.
+    // One line per read, because "the reader is behind" and "the reader is stuck on one page" look
+    // identical from outside and are told apart only by whether the anchors move between reads.
     logger.debug(
-      `[lan] history ${sessionId} since=${since ?? '-'} entries=${history.entries.length} ` +
-      `bytes=${history.entries.reduce((n, e) => n + e.c.length, 0)} more=${history.more} ` +
-      `reset=${history.reset} cursor=${history.cursor}`,
+      `[lan] history ${sessionId} since=${since ?? '-'} before=${before ?? '-'} ` +
+      `entries=${history.entries.length} bytes=${history.entries.reduce((n, e) => n + e.c.length, 0)} ` +
+      `hasNewer=${history.hasNewer} hasOlder=${history.hasOlder} reset=${history.reset} ` +
+      `cursor=${history.cursor} older=${history.older}`,
     );
     return reply.send({ v: LAN_PROTOCOL_VERSION, ...history });
   });
