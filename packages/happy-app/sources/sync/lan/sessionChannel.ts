@@ -35,6 +35,11 @@ export type LanSessionRead = {
     cursor: string;
     /** Boundary before this page's first entry: hand back as `older` to read further back. */
     older: string;
+    /**
+     * The log has entries after this page, which means the page was cut short at its budget: the
+     * reader is further behind than one page, and belongs at the newest one instead of walking.
+     */
+    hasNewer: boolean;
     /** The log has entries before this page. The UI's "load older" gate. */
     hasOlder: boolean;
     /** True when the anchor was not honoured and `messages` covers the log from its start. */
@@ -267,6 +272,7 @@ export async function readSessionOverLan(options: {
                 total: decrypted.entries.length,
                 cursor: history.cursor,
                 older: history.older,
+                hasNewer: history.hasNewer,
                 hasOlder: history.hasOlder,
                 reset: history.reset,
                 connection,

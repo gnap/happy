@@ -196,6 +196,16 @@ interface StorageState {
     applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState, oldestSeq: number, hasOlderMessages: boolean, lastSeq: number) => void;
     setNewestSeq: (sessionId: string, newestSeq: number) => void;
     applyOlderMessages: (sessionId: string, olderMessages: NormalizedMessage[], newOldestSeq: number, hasOlderMessages: boolean) => void;
+    /**
+     * Replace a session's loaded window with a page that does not abut it.
+     *
+     * `applyMessages` merges by id and sorts by time, so handing it two ranges of a session that
+     * are not adjacent silently joins them: the messages in between never arrive, and nothing
+     * downstream can tell, because the window fields still describe one contiguous span. A channel
+     * whose reads can land anywhere in a log (the daemon's) therefore has to say when it is
+     * starting over, and this is that statement — the page becomes the whole window.
+     */
+    applyWindow: (sessionId: string, messages: NormalizedMessage[], oldestSeq: number, newestSeq: number, hasOlderMessages: boolean) => void;
     setLoadingOlder: (sessionId: string, loading: boolean) => void;
     applySettings: (settings: Settings, version: number) => void;
     applySettingsLocal: (settings: Partial<Settings>) => void;
@@ -1157,6 +1167,41 @@ export const storage = create<StorageState>()((set, get) => {
                         isLoaded: true,
                         oldestSeq,
                         newestSeq: lastSeq,
+                        cachedBitmap,
+                        hasOlderMessages,
+                        isLoadingOlder: false,
+                        isFetching: false,
+                    } satisfies SessionMessages,
+                },
+            };
+        }),
+        applyWindow: (sessionId: string, messages: NormalizedMessage[], oldestSeq: number, newestSeq: number, hasOlderMessages: boolean) => set((state) => {
+            // A fresh reducer over the page, because the window it replaces is gone: the previous
+            // reducer state describes messages that are no longer held, and running the new page
+            // through it would carry their tool state into a window that does not contain them.
+            const reducerState = createReducer();
+            const session = state.sessions[sessionId];
+            const reducerResult = reducer(reducerState, messages, session?.agentState ?? undefined);
+
+            const messagesMap: Record<string, Message> = {};
+            for (const msg of reducerResult.messages) {
+                messagesMap[msg.id] = msg;
+            }
+            const sorted = Object.values(messagesMap).sort((a, b) => b.createdAt - a.createdAt);
+            const totalSeq = session?.seq ?? 0;
+            const cachedBitmap = computeBitmap(oldestSeq, newestSeq, totalSeq);
+
+            return {
+                ...state,
+                sessionMessages: {
+                    ...state.sessionMessages,
+                    [sessionId]: {
+                        messages: sorted,
+                        messagesMap,
+                        reducerState,
+                        isLoaded: true,
+                        oldestSeq,
+                        newestSeq,
                         cachedBitmap,
                         hasOlderMessages,
                         isLoadingOlder: false,

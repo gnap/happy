@@ -127,6 +127,38 @@ export function saveSessionDrafts(drafts: Record<string, string>) {
 }
 
 /**
+ * Where a session's loaded window sits in its daemon log: `cursor` is the boundary above the newest
+ * message held, `floor` the one below the oldest, and `hasOlder` whether the log continues beneath
+ * it. An anchor is a position in one machine's file, so it is kept with the machine that issued it.
+ *
+ * A daemon read can land anywhere in a log, so a window is only meaningful together with these:
+ * without them a restart cannot tell whether a fresh page abuts what it already holds, and joining
+ * two ranges that are not adjacent is what a silent hole looks like.
+ */
+export type PersistedLanWindow = {
+    machineId: string;
+    cursor: string;
+    floor: string;
+    hasOlder: boolean;
+};
+
+export function loadLanWindows(): Record<string, PersistedLanWindow> {
+    const raw = mmkv.getString('lan-windows');
+    if (raw) {
+        try {
+            return JSON.parse(raw);
+        } catch (e) {
+            console.error('Failed to parse LAN windows', e);
+        }
+    }
+    return {};
+}
+
+export function saveLanWindows(windows: Record<string, PersistedLanWindow>) {
+    mmkv.set('lan-windows', JSON.stringify(windows));
+}
+
+/**
  * Relay routes outlive the process on purpose: they are learned from the server, and the case they
  * exist for is the server being down at the next cold start, when nothing could re-learn them.
  */

@@ -182,6 +182,7 @@ export async function getCachedLastSeq(sessionId: string): Promise<number | null
  * Persist the current messages and reducer state for a session after a fetch cycle.
  * No-op if caching is disabled for this session.
  */
+/** False when the rows did not land, so a caller that stores something *about* them can hold off. */
 export async function saveMessageCache(
     session: Session,
     messages: Message[],
@@ -189,10 +190,10 @@ export async function saveMessageCache(
     lastSeq: number,
     oldestSeq: number = 0,
     hasOlderMessages: boolean = false,
-): Promise<void> {
+): Promise<boolean> {
     if (!isCacheEnabled(session)) {
         log.log(`📦 messageCache: skip save for ${session.id} (flavor=${session.metadata?.flavor ?? 'none'}, not cursor)`);
-        return;
+        return false;
     }
 
     try {
@@ -211,8 +212,10 @@ export async function saveMessageCache(
         );
         log.log(`📦 messageCache: saved ${messages.length} messages for ${session.id} (lastSeq=${lastSeq}, oldestSeq=${oldestSeq}, hasOlderMessages=${hasOlderMessages})`);
         notifyCachedLastSeq(session.id, lastSeq);
+        return true;
     } catch (err) {
         log.log(`📦 messageCache: save error for ${session.id}: ${err}`);
+        return false;
     }
 }
 
