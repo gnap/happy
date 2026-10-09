@@ -7,7 +7,7 @@ import { ItemList } from '@/components/ItemList';
 import { useRouter } from 'expo-router';
 import Constants from 'expo-constants';
 import * as Application from 'expo-application';
-import { useLanSightings, useLanSocketStatus, useLocalSettingMutable, useSocketStatus } from '@/sync/storage';
+import { useDaemonSocketStatus, useLanSightings, useLocalSettingMutable, useRelayEndpoints, useRelaySightings, useSocketStatus } from '@/sync/storage';
 import { Modal } from '@/modal';
 import { sync } from '@/sync/sync';
 import { getServerUrl, setServerUrl, validateServerUrl } from '@/sync/serverConfig';
@@ -20,8 +20,12 @@ export default function DevScreen() {
     const [debugMode, setDebugMode] = useLocalSettingMutable('debugMode');
     const [verboseLogging, setVerboseLogging] = React.useState(false);
     const socketStatus = useSocketStatus();
-    const lanSocketStatus = useLanSocketStatus();
+    const lanSocketStatus = useDaemonSocketStatus('lan');
+    const relaySocketStatus = useDaemonSocketStatus('relay');
     const lanSightingCount = Object.keys(useLanSightings()).length;
+    const [channelPriority] = useLocalSettingMutable('channelPriority');
+    const relayRouteCount = Object.keys(useRelayEndpoints()).length;
+    const relaySightingCount = Object.keys(useRelaySightings()).length;
     const anonymousId = sync.encryption!.anonID;
     const { theme } = useUnistyles();
 
@@ -381,6 +385,41 @@ export default function DevScreen() {
                     subtitle="Discover a local daemon, authenticate, read and decrypt history"
                     icon={<Ionicons name="wifi-outline" size={28} color="#007AFF" />}
                     onPress={() => router.push('/dev/lan')}
+                />
+                <Item
+                    title="Channel Priority"
+                    subtitle="Enable, disable and reorder LAN / Relay / Server"
+                    detail={channelPriority.map((c) => c === 'lan' ? 'LAN' : c === 'relay' ? 'Relay' : 'Server').join(' › ')}
+                    icon={<Ionicons name="git-branch-outline" size={28} color="#007AFF" />}
+                    onPress={() => router.push('/dev/channels')}
+                />
+                <Item
+                    title="Relay Routes"
+                    subtitle={relayRouteCount === 0
+                        ? 'No machine has published a relay route yet'
+                        : `${relaySightingCount} of ${relayRouteCount} route${relayRouteCount === 1 ? '' : 's'} answering a probe`}
+                    detail={`${relaySightingCount}/${relayRouteCount}`}
+                    rightElement={relaySightingCount > 0
+                        ? <Ionicons name="checkmark-circle" size={22} color="#34C759" />
+                        : <Ionicons name="close-circle" size={22} color="#8E8E93" />}
+                    showChevron={false}
+                />
+                <Item
+                    title="Relay Socket"
+                    subtitle={relaySocketStatus
+                        ? `${relaySocketStatus.baseUrl} · up ${formatTimeAgo(relaySocketStatus.connectedAt)}`
+                        : 'Idle — opens while the server is down or a session is pinned to the relay'}
+                    detail={relaySocketStatus ? 'live' : 'idle'}
+                    rightElement={relaySocketStatus
+                        ? <Ionicons name="checkmark-circle" size={22} color="#34C759" />
+                        : <Ionicons name="ellipse-outline" size={22} color="#8E8E93" />}
+                    showChevron={false}
+                />
+                <Item
+                    title="Relay Round Trip"
+                    subtitle="Through the public relay: authenticate, list sessions, read and decrypt history"
+                    icon={<Ionicons name="swap-horizontal" size={28} color="#AF52DE" />}
+                    onPress={() => router.push('/dev/lan?route=relay')}
                 />
             </ItemGroup>
         </ItemList>

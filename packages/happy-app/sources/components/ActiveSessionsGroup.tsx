@@ -10,7 +10,7 @@ import { Avatar } from './Avatar';
 import { Typography } from '@/constants/Typography';
 import { SessionStatusDot } from './SessionStatusDot';
 import { MachinePresenceBadge } from './MachinePresenceBadge';
-import { useAllMachines, useSetting, useMachinesMap, useMachinePresenceMap, useLanSightings } from '@/sync/storage';
+import { useAllMachines, useSetting, useMachinesMap, useMachinePresenceMap, useLanSightings, useRelayEndpoints } from '@/sync/storage';
 import { MACHINE_PRESENCE_COLORS } from '@/sync/machinePresence';
 import { StyleSheet } from 'react-native-unistyles';
 import { isMachineOnline } from '@/utils/machineUtils';
@@ -216,6 +216,7 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
     const machinesMap = useMachinesMap();
     const machinePresence = useMachinePresenceMap();
     const lanSightings = useLanSightings();
+    const relayEndpoints = useRelayEndpoints();
 
     // Group sessions by project, then associate with machine
     const projectGroups = React.useMemo(() => {
@@ -325,6 +326,7 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
                                     <MachinePresenceBadge
                                         presence={machinePresence[singleMachineId] ?? 'offline'}
                                         lanReachable={!!lanSightings[singleMachineId]}
+                                        relayCapable={!!relayEndpoints[singleMachineId]}
                                     />
                                 ) : null}
                             </View>

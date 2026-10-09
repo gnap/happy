@@ -3,6 +3,7 @@ import { Settings, settingsDefaults, settingsParse, SettingsSchema } from './set
 import { LocalSettings, localSettingsDefaults, localSettingsParse } from './localSettings';
 import { Purchases, purchasesDefaults, purchasesParse } from './purchases';
 import { Profile, profileDefaults, profileParse } from './profile';
+import type { RelayEndpoint } from './lan/types';
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 
 const mmkv = new MMKV();
@@ -144,6 +145,26 @@ export function loadLanCursors(): Record<string, { machineId: string; cursor: st
         }
     }
     return {};
+}
+
+/**
+ * Relay routes outlive the process on purpose: they are learned from the server, and the case they
+ * exist for is the server being down at the next cold start, when nothing could re-learn them.
+ */
+export function loadRelayEndpoints(): Record<string, RelayEndpoint> {
+    const raw = mmkv.getString('relay-endpoints');
+    if (raw) {
+        try {
+            return JSON.parse(raw);
+        } catch (e) {
+            console.error('Failed to parse relay endpoints', e);
+        }
+    }
+    return {};
+}
+
+export function saveRelayEndpoints(endpoints: Record<string, RelayEndpoint>) {
+    mmkv.set('relay-endpoints', JSON.stringify(endpoints));
 }
 
 export function saveLanCursors(cursors: Record<string, { machineId: string; cursor: string }>) {

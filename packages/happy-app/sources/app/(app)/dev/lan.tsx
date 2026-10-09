@@ -6,7 +6,9 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { sync } from '@/sync/sync';
+import { useLocalSearchParams } from 'expo-router';
 import { useAllMachines, storage } from '@/sync/storage';
+import type { DaemonRoute } from '@/sync/lan/types';
 import { discoverMachines, accountFingerprintOf } from '@/sync/lan/discovery';
 import { authenticate, fetchIdentity, fetchSessions, fetchHistory } from '@/sync/lan/client';
 import { decryptLanHistory } from '@/sync/lan/history';
@@ -32,6 +34,8 @@ const line = (stage: string, text: string, ok = true): LogLine => ({ stage, text
 const LanDevScreen = React.memo(function LanDevScreen() {
     const { theme } = useUnistyles();
     const machines = useAllMachines();
+    const params = useLocalSearchParams<{ route?: string }>();
+    const route: DaemonRoute = params.route === 'relay' ? 'relay' : 'lan';
     const [running, setRunning] = React.useState(false);
     const [lines, setLines] = React.useState<LogLine[]>([]);
 
@@ -56,15 +60,34 @@ const LanDevScreen = React.memo(function LanDevScreen() {
             const fingerprint = await accountFingerprintOf(accountPublicKey);
             push(line('account', `fingerprint ${fingerprint}`));
 
-            // ── Stage 1: discover ────────────────────────────────────────────────
-            const discovered = await discoverMachines({ accountPublicKey });
-            if (discovered.length === 0) {
-                push(line('discover', 'no _happy._tcp machines found for this account', false));
-                push(line('discover', 'is the daemon running with HAPPY_LAN_ENABLED=1, and the local network permission granted?', false));
-                return;
-            }
-            for (const machine of discovered) {
-                push(line('discover', `${machine.serviceName} -> ${machine.baseUrl}`));
+            // ── Stage 1: find the daemon ─────────────────────────────────────────
+            // LAN browses mDNS; the relay takes the routes machines published. Everything after
+            // this point is the same protocol, which is the point of the relay being a peer route.
+            let discovered: { machineId: string; baseUrl: string; serviceName: string }[];
+            if (route === 'relay') {
+                discovered = Object.values(storage.getState().relayEndpoints).map((endpoint) => ({
+                    machineId: endpoint.machineId,
+                    baseUrl: endpoint.baseUrl,
+                    serviceName: `machine ${endpoint.machineId.slice(0, 8)}`,
+                }));
+                if (discovered.length === 0) {
+                    push(line('discover', 'no machine has published a relay route (set HAPPY_RELAY_URL on the daemon)', false));
+                    return;
+                }
+                const sighting = storage.getState().relaySightings;
+                for (const machine of discovered) {
+                    push(line('discover', `${machine.serviceName} -> ${machine.baseUrl} (${sighting[machine.machineId] ? 'probe ok' : 'no probe answer yet'})`, !!sighting[machine.machineId]));
+                }
+            } else {
+                discovered = await discoverMachines({ accountPublicKey });
+                if (discovered.length === 0) {
+                    push(line('discover', 'no _happy._tcp machines found for this account', false));
+                    push(line('discover', 'is the daemon running with HAPPY_LAN_ENABLED=1, and the local network permission granted?', false));
+                    return;
+                }
+                for (const machine of discovered) {
+                    push(line('discover', `${machine.serviceName} -> ${machine.baseUrl}`));
+                }
             }
 
             // ── Stage 2: authenticate ────────────────────────────────────────────
@@ -114,14 +137,14 @@ const LanDevScreen = React.memo(function LanDevScreen() {
 
             // ── Stage 5: feed it through the app's real path ─────────────────────
             // The stages above use the LAN client directly. This one goes through the same
-            // `Sync.fetchSessionFromLan` a channel switch would use, so what it exercises is the
+            // `Sync.fetchSessionFromDaemon` a channel switch would use, so what it exercises is the
             // production path — normalization, dedup against the store, and the reducer — rather
             // than a parallel implementation that could pass while the real one is broken.
             const mergeTarget = sessions.find((s) => seenHistory.has(s.happySessionId));
             if (mergeTarget) {
-                const read = await sync.fetchSessionFromLan(mergeTarget.happySessionId);
+                const read = await sync.fetchSessionFromDaemon(mergeTarget.happySessionId, route);
                 if (!read) {
-                    push(line('merge', 'fetchSessionFromLan found nothing to read', false));
+                    push(line('merge', 'fetchSessionFromDaemon found nothing to read', false));
                 } else {
                     const stored = storage.getState().sessionMessages[mergeTarget.happySessionId]?.messages.length ?? 0;
                     push(line(
@@ -131,7 +154,7 @@ const LanDevScreen = React.memo(function LanDevScreen() {
                 }
             }
 
-            push(line('done', 'LAN round trip complete'));
+            push(line('done', `${route === 'relay' ? 'Relay' : 'LAN'} round trip complete`));
         } catch (error) {
             push(line('error', String(error), false));
         } finally {
@@ -142,13 +165,15 @@ const LanDevScreen = React.memo(function LanDevScreen() {
     return (
         <ItemList>
             <ItemGroup
-                title="LAN API"
-                footer="Runs against the CLI daemon's read-only LAN API. It must be started with HAPPY_LAN_ENABLED=1."
+                title={route === 'relay' ? 'Relay API' : 'LAN API'}
+                footer={route === 'relay'
+                    ? "Runs the same daemon API through the public relay. The daemon must be started with HAPPY_RELAY_URL."
+                    : "Runs against the CLI daemon's read-only LAN API. It must be started with HAPPY_LAN_ENABLED=1."}
             >
                 <Item
-                    title="Run LAN round trip"
-                    subtitle="discover → authenticate → read history → decrypt"
-                    icon={<Ionicons name="wifi-outline" size={28} color="#007AFF" />}
+                    title={route === 'relay' ? 'Run relay round trip' : 'Run LAN round trip'}
+                    subtitle={route === 'relay' ? 'cached route → authenticate → read history → decrypt' : 'discover → authenticate → read history → decrypt'}
+                    icon={<Ionicons name={route === 'relay' ? 'swap-horizontal' : 'wifi-outline'} size={28} color={route === 'relay' ? '#AF52DE' : '#007AFF'} />}
                     onPress={run}
                     showChevron={false}
                     rightElement={running ? <ActivityIndicator size="small" /> : undefined}

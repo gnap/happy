@@ -21,9 +21,37 @@ export const LAN_DEFAULT_PORT = 55673;
  * globally routable one. Published in `Machine.daemonState.p2p` by the daemon.
  */
 export type LanEndpoint = {
-    t: 'lan' | 'ipv6';
+    t: 'lan' | 'ipv6' | 'relay';
     addr: string;
     port: number;
+    /** Relay only: the path segment (`/r/<tag>`) the relay routes to this machine. */
+    tag?: string;
+};
+
+/**
+ * How a session's traffic reaches its daemon. `lan` is a direct link found on this network,
+ * `relay` is a public relay the daemon dials out to (usable when the server is down and the
+ * daemon is elsewhere), and `server` is the Happy server.
+ */
+export type SessionChannel = 'lan' | 'relay' | 'server';
+
+/** The two ways to reach a daemon directly; the third channel, `server`, is not a daemon route. */
+export type DaemonRoute = Exclude<SessionChannel, 'server'>;
+
+/** A relay route that answered a probe recently: the daemon is registered and reachable through it. */
+export type RelaySighting = {
+    machineId: string;
+    baseUrl: string;
+    at: number;
+};
+
+/** A public relay route to a machine, learned from its published endpoints. */
+export type RelayEndpoint = {
+    machineId: string;
+    /** `https://host[:port]/r/<tag>` — usable anywhere a LAN base URL is. */
+    baseUrl: string;
+    /** When the daemon published it; the cache is a hint, not a lease. */
+    at: number;
 };
 
 /** The `daemonState.p2p` payload, as published by `lanEndpoints.ts`. */

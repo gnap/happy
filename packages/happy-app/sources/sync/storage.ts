@@ -6,14 +6,14 @@ import { createReducer, reducer, ReducerState } from "./reducer/reducer";
 import { Message } from "./typesMessage";
 import { NormalizedMessage } from "./typesRaw";
 import { isMachineOnline } from '@/utils/machineUtils';
-import type { LanSighting } from './lan/types';
+import type { DaemonRoute, LanSighting, RelayEndpoint, RelaySighting, SessionChannel } from './lan/types';
 import { resolveMachinePresence, type MachinePresence } from './machinePresence';
 import { applySettings, Settings } from "./settings";
 import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
 import { Profile } from "./profile";
 import { UserProfile, RelationshipUpdatedEvent } from "./friendTypes";
-import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionMaxModes, saveSessionMaxModes, loadSessionProfileIds, saveSessionProfileIds, loadSessionSandboxIsolations, saveSessionSandboxIsolations } from "./persistence";
+import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionMaxModes, saveSessionMaxModes, loadSessionProfileIds, saveSessionProfileIds, loadSessionSandboxIsolations, saveSessionSandboxIsolations, loadRelayEndpoints, saveRelayEndpoints } from "./persistence";
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 import type { CustomerInfo } from './revenueCat/types';
 import React from "react";
@@ -127,11 +127,24 @@ interface StorageState {
      */
     lanSightings: Record<string, LanSighting>;
     /**
-     * The live LAN socket, when one is open. Separate from `lanSightings` on purpose: a sighting
-     * says a daemon is advertising, this says a channel to one is actually established — which is
-     * the thing that makes messages arrive without a poll.
+     * Public relay routes per machine, learned from `daemonState.p2p` and persisted so they are
+     * still known when the server is down at the next cold start.
      */
-    lanSocketStatus: { baseUrl: string; connectedAt: number } | null;
+    relayEndpoints: Record<string, RelayEndpoint>;
+    applyRelayEndpoint: (machineId: string, endpoint: RelayEndpoint | null) => void;
+    /**
+     * Relay routes that answered a probe, keyed by machineId: the relay counterpart of
+     * `lanSightings`, and like it a local observation that never touches the server. A cached
+     * endpoint says a route exists; a sighting says it works right now.
+     */
+    relaySightings: Record<string, RelaySighting>;
+    applyRelaySightings: (sightings: RelaySighting[]) => void;
+    /**
+     * The live daemon socket per route, when one is open. Separate from the sightings on purpose:
+     * a sighting says a daemon is reachable, this says a channel to one is actually established —
+     * which is the thing that makes messages arrive without a poll.
+     */
+    daemonSockets: Record<DaemonRoute, { baseUrl: string; connectedAt: number } | null>;
     /**
      * A per-session, manually forced channel. Absent means automatic: the server, falling back to
      * the LAN when it cannot answer.
@@ -147,12 +160,12 @@ interface StorageState {
      * no `metadata` — that is encrypted and only ever travels inside a message payload — so this
      * can confirm which sessions exist and which are alive, but it cannot build a session row.
      */
-    lanSessionList: Record<string, { isAlive: boolean; directory: string; agent: string; at: number }>;
-    /** Replace the LAN's view. Pass null to clear it (the server answered). */
-    applyLanSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string }[] | null) => void;
-    channelOverride: Record<string, 'lan' | 'server'>;
+    daemonSessionList: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; at: number }>;
+    /** Replace the daemons' view. Pass null to clear it (the server answered). */
+    applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute }[] | null) => void;
+    channelOverride: Record<string, SessionChannel>;
     /** Pass null to return the session to automatic. */
-    setSessionChannelOverride: (sessionId: string, channel: 'lan' | 'server' | null) => void;
+    setSessionChannelOverride: (sessionId: string, channel: SessionChannel | null) => void;
     artifacts: Record<string, DecryptedArtifact>;  // New artifacts storage
     friends: Record<string, UserProfile>;  // All relationships (friends, pending, requested, etc.)
     users: Record<string, UserProfile | null>;  // Global user cache, null = 404/failed fetch
@@ -174,7 +187,7 @@ interface StorageState {
     /** Replace the LAN sighting set with the result of one scan. */
     applyLanSightings: (sightings: LanSighting[]) => void;
     /** Record the live LAN socket, or null once it is gone. */
-    setLanSocketStatus: (status: { baseUrl: string; connectedAt: number } | null) => void;
+    setDaemonSocketStatus: (route: DaemonRoute, status: { baseUrl: string; connectedAt: number } | null) => void;
     applyLoaded: () => void;
     applyReady: () => void;
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => { changed: string[], hasReadyEvent: boolean };
@@ -538,8 +551,10 @@ export const storage = create<StorageState>()((set, get) => {
         sessions: {},
         machines: {},
         lanSightings: {},
-        lanSocketStatus: null,
-        lanSessionList: {},
+        relayEndpoints: loadRelayEndpoints(),
+        relaySightings: {},
+        daemonSockets: { lan: null, relay: null },
+        daemonSessionList: {},
         channelOverride: {},
         artifacts: {},  // Initialize artifacts
         friends: {},  // Initialize relationships cache
@@ -1661,7 +1676,38 @@ export const storage = create<StorageState>()((set, get) => {
                 sessionListViewData
             };
         }),
-        setLanSocketStatus: (status) => set({ lanSocketStatus: status }),
+        setDaemonSocketStatus: (route, status) => set((state) => ({
+            daemonSockets: { ...state.daemonSockets, [route]: status },
+        })),
+        applyRelaySightings: (sightings: RelaySighting[]) => set((state) => {
+            const now = Date.now();
+            const next: Record<string, RelaySighting> = {};
+            // Same carry-over as the LAN: one failed probe must not flicker a machine to offline.
+            for (const [id, sighting] of Object.entries(state.relaySightings)) {
+                if (now - sighting.at < LAN_SIGHTING_TTL_MS) {
+                    next[id] = sighting;
+                }
+            }
+            for (const sighting of sightings) {
+                next[sighting.machineId] = sighting;
+            }
+            return { ...state, relaySightings: next };
+        }),
+        applyRelayEndpoint: (machineId: string, endpoint: RelayEndpoint | null) => set((state) => {
+            const current = state.relayEndpoints[machineId];
+            if (endpoint === null) {
+                // A machine that stopped publishing a relay keeps its cached route: the publisher
+                // also goes quiet whenever the daemon is merely offline, and the cache is for
+                // exactly that moment.
+                return state;
+            }
+            if (current?.baseUrl === endpoint.baseUrl) {
+                return state;
+            }
+            const next = { ...state.relayEndpoints, [machineId]: endpoint };
+            saveRelayEndpoints(next);
+            return { ...state, relayEndpoints: next };
+        }),
         applyLanSightings: (sightings: LanSighting[]) => set((state) => {
             const now = Date.now();
             const next: Record<string, LanSighting> = {};
@@ -1677,26 +1723,27 @@ export const storage = create<StorageState>()((set, get) => {
             }
             return { ...state, lanSightings: next };
         }),
-        applyLanSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string }[] | null) => set((state) => {
+        applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute }[] | null) => set((state) => {
             if (sessions === null) {
-                if (Object.keys(state.lanSessionList).length === 0) {
+                if (Object.keys(state.daemonSessionList).length === 0) {
                     return state;
                 }
-                return { ...state, lanSessionList: {} };
+                return { ...state, daemonSessionList: {} };
             }
             const at = Date.now();
-            const next: Record<string, { isAlive: boolean; directory: string; agent: string; at: number }> = {};
+            const next: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; at: number }> = {};
             for (const session of sessions) {
                 next[session.happySessionId] = {
                     isAlive: session.isAlive,
                     directory: session.directory,
                     agent: session.agent,
+                    via: session.via,
                     at,
                 };
             }
-            return { ...state, lanSessionList: next };
+            return { ...state, daemonSessionList: next };
         }),
-        setSessionChannelOverride: (sessionId: string, channel: 'lan' | 'server' | null) => set((state) => {
+        setSessionChannelOverride: (sessionId: string, channel: SessionChannel | null) => set((state) => {
             if (channel === null) {
                 if (!(sessionId in state.channelOverride)) {
                     return state;
@@ -2053,21 +2100,31 @@ export function useLanSightings(): Record<string, LanSighting> {
 }
 
 /**
- * The live LAN socket, or null when none is open. Distinct from a `lanSightings` entry: a sighting
- * means a daemon is advertising, this means a channel to one is actually established.
+ * The live socket on one daemon route, or null when none is open. Distinct from a sighting: a
+ * sighting means a daemon is reachable, this means a channel to one is actually established.
  */
-export function useLanSocketStatus(): { baseUrl: string; connectedAt: number } | null {
-    return storage(useShallow((state) => state.lanSocketStatus));
+export function useDaemonSocketStatus(route: DaemonRoute): { baseUrl: string; connectedAt: number } | null {
+    return storage(useShallow((state) => state.daemonSockets[route]));
+}
+
+/** Relay routes that answered a probe recently, by machineId. */
+export function useRelaySightings(): Record<string, RelaySighting> {
+    return storage(useShallow((state) => state.relaySightings));
+}
+
+/** Public relay routes per machine id; presence means the machine published one. */
+export function useRelayEndpoints(): Record<string, RelayEndpoint> {
+    return storage(useShallow((state) => state.relayEndpoints));
 }
 
 /** The manually forced channel for a session, or null for automatic. */
-export function useSessionChannelOverride(sessionId: string): 'lan' | 'server' | null {
+export function useSessionChannelOverride(sessionId: string): SessionChannel | null {
     return storage(useShallow((state) => state.channelOverride[sessionId] ?? null));
 }
 
 /** What a LAN daemon reported about its sessions; empty unless the server could not answer. */
 export function useLanSessionList(): Record<string, { isAlive: boolean; directory: string; agent: string; at: number }> {
-    return storage(useShallow((state) => state.lanSessionList));
+    return storage(useShallow((state) => state.daemonSessionList));
 }
 
 /**
@@ -2082,13 +2139,20 @@ export function useMachinesMap(): Record<string, Machine> {
 export function useMachinePresenceMap(): Record<string, MachinePresence> {
     const machines = storage(useShallow((state) => state.machines));
     const sightings = storage(useShallow((state) => state.lanSightings));
+    const relaySightings = storage(useShallow((state) => state.relaySightings));
+    const priority = storage(useShallow((state) => state.localSettings.channelPriority));
     return React.useMemo(() => {
+        // A channel switched off in the priority setting contributes nothing, so a machine is never
+        // shown as reachable over a path this device has been told not to use.
+        const useServer = priority.includes('server');
+        const useLan = priority.includes('lan');
+        const useRelay = priority.includes('relay');
         const map: Record<string, MachinePresence> = {};
-        for (const id of new Set([...Object.keys(machines), ...Object.keys(sightings)])) {
-            map[id] = resolveMachinePresence(machines[id], !!sightings[id]);
+        for (const id of new Set([...Object.keys(machines), ...Object.keys(sightings), ...Object.keys(relaySightings)])) {
+            map[id] = resolveMachinePresence(useServer ? machines[id] : null, useLan && !!sightings[id], useRelay && !!relaySightings[id]);
         }
         return map;
-    }, [machines, sightings]);
+    }, [machines, sightings, relaySightings, priority]);
 }
 
 export function useSessionListViewData(): SessionListViewItem[] | null {
@@ -2189,6 +2253,41 @@ export function useRealtimeStatus(): 'disconnected' | 'connecting' | 'connected'
 
 export function useRealtimeMode(): 'idle' | 'speaking' {
     return storage(useShallow((state) => state.realtimeMode));
+}
+
+export type ChannelLinkState = 'connected' | 'connecting' | 'disconnected';
+
+/**
+ * Per enabled channel, in priority order, how its link is doing. LAN is hidden until a daemon has
+ * been discovered, since it only exists on the local network; the server and the relay always
+ * show, grey when down.
+ */
+export function useChannelLinks(): { channel: SessionChannel; state: ChannelLinkState }[] {
+    const priority = storage(useShallow((state) => state.localSettings.channelPriority));
+    const facts = storage(useShallow((state) => ({
+        serverStatus: state.socketStatus,
+        lanSocket: !!state.daemonSockets.lan,
+        lanSeen: Object.keys(state.lanSightings).length > 0,
+        relaySocket: !!state.daemonSockets.relay,
+        relaySeen: Object.keys(state.relaySightings).length > 0,
+    })));
+    return React.useMemo(() => {
+        const links: { channel: SessionChannel; state: ChannelLinkState }[] = [];
+        for (const channel of priority) {
+            if (channel === 'server') {
+                links.push({
+                    channel,
+                    state: facts.serverStatus === 'connected' ? 'connected' : facts.serverStatus === 'connecting' ? 'connecting' : 'disconnected',
+                });
+            } else if (channel === 'lan') {
+                if (facts.lanSocket) links.push({ channel, state: 'connected' });
+                else if (facts.lanSeen) links.push({ channel, state: 'connecting' });
+            } else {
+                links.push({ channel, state: facts.relaySocket || facts.relaySeen ? 'connected' : 'disconnected' });
+            }
+        }
+        return links;
+    }, [priority, facts]);
 }
 
 export function useSocketStatus() {

@@ -1,3 +1,4 @@
+import type { SessionChannel } from '@/sync/lan/types';
 import { Ionicons, Octicons } from '@expo/vector-icons';
 import * as React from 'react';
 import { View, Platform, useWindowDimensions, ViewStyle, Text, ActivityIndicator, TouchableWithoutFeedback, Image as RNImage, Pressable } from 'react-native';
@@ -61,7 +62,7 @@ interface AgentInputProps {
         dotColor: string;
         isPulsing?: boolean;
         /** How the session is being reached; when given, its glyph replaces the plain dot. */
-        channel?: { kind: 'lan' | 'server'; pinned: boolean };
+        channel?: { kind: SessionChannel; pinned: boolean };
         cliStatus?: {
             claude: boolean | null;
             codex: boolean | null;
