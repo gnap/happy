@@ -88,6 +88,8 @@ class Configuration {
    * listener falls back to an ephemeral port if this one is taken.
    */
   public readonly lanPort: number
+  /** Public relay (HAPPY_RELAY_URL, e.g. https://47.80.241.214) used when the server is unreachable. Default off. */
+  public readonly relayUrl: string | null
 
   constructor() {
     // Server configuration - priority: parameter > environment > default
@@ -120,6 +122,7 @@ class Configuration {
     // unless the user asks for it. See src/daemon/lanServer.ts for what it exposes.
     this.enableLan = ['true', '1', 'yes'].includes(process.env.HAPPY_LAN_ENABLED?.toLowerCase() || '');
     this.lanPort = Number(process.env.HAPPY_LAN_PORT) || 55673;
+    this.relayUrl = process.env.HAPPY_RELAY_URL?.trim() || null;
 
     this.currentCliVersion = BUILD_VERSION
 

@@ -7,7 +7,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import os from 'node:os';
-import { computeEndpoints, startEndpointPublisher, type PublishedEndpoints } from './lanEndpoints';
+import { computeEndpoints, startEndpointPublisher, type LanEndpoint, type PublishedEndpoints } from './lanEndpoints';
 
 const LAN_PORT = 55673;
 
@@ -71,12 +71,14 @@ describe('startEndpointPublisher', () => {
     readInterfaces: () => NodeJS.Dict<os.NetworkInterfaceInfo[]>;
     publish: (e: PublishedEndpoints) => Promise<boolean>;
     isConnected?: () => boolean;
+    extraEndpoints?: () => LanEndpoint[];
   }) {
     return startEndpointPublisher({
       lanPort: LAN_PORT,
       readInterfaces: opts.readInterfaces,
       publish: opts.publish,
       isConnected: opts.isConnected ?? (() => true),
+      extraEndpoints: opts.extraEndpoints,
       now: () => 1_700_000_000_000,
     });
   }
@@ -146,5 +148,21 @@ describe('startEndpointPublisher', () => {
 
     expect(await p.tick()).toBe(false);
     expect(publish).not.toHaveBeenCalled();
+  });
+
+  it('appends relay endpoints after the on-link ones and republishes when one appears', async () => {
+    const publish = vi.fn(async (_e: PublishedEndpoints) => true);
+    let extra: LanEndpoint[] = [];
+    const p = publisher({ readInterfaces: () => setA, publish, extraEndpoints: () => extra });
+
+    expect(await p.tick()).toBe(true);
+    expect(await p.tick()).toBe(false);
+
+    extra = [{ t: 'relay', addr: '1.2.3.4', port: 443, tag: 'a'.repeat(32) }];
+    expect(await p.tick()).toBe(true);
+    const last = publish.mock.calls.at(-1)![0];
+    expect(last.endpoints.at(-1)).toEqual(extra[0]);
+    expect(last.endpoints[0].t).toBe('lan');
+    p.stop();
   });
 });

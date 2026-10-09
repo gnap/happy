@@ -33,7 +33,8 @@ import { readSessionKey } from '@/api/sessionKeyPersistence';
 import { readSessionLogSince } from '@/api/sessionLog';
 import { encodeBase64, libsodiumEncryptForPublicKey } from '@/api/encryption';
 import { startLanDiscovery, type LanDiscoveryHandle } from './lanDiscovery';
-import { startEndpointPublisher, type EndpointPublisherHandle } from './lanEndpoints';
+import { startEndpointPublisher, type EndpointPublisherHandle, type LanEndpoint } from './lanEndpoints';
+import { startRelayClient, type RelayClientHandle } from './relay/relayClient';
 
 /** Time to wait for a spawned session to report via /session-started webhook before failing the spawn (Cursor cold start can exceed 30s). */
 const SESSION_WEBHOOK_TIMEOUT_MS = 60_000;
@@ -1304,6 +1305,8 @@ export async function startDaemon(): Promise<void> {
     }>();
     let lanDiscovery: LanDiscoveryHandle | null = null;
     let endpointPublisher: EndpointPublisherHandle | null = null;
+    let relayClient: RelayClientHandle | null = null;
+    let relayEndpoint: LanEndpoint | null = null;
     // The endpoint publisher needs the machine socket, but that client is created later in
     // startup (it depends on a network round trip). Referencing `apiMachine` directly here
     // would hit the temporal dead zone the moment the first tick ran; this indirection is
@@ -1397,6 +1400,23 @@ export async function startDaemon(): Promise<void> {
             },
           });
           lanServer = started;
+          if (configuration.relayUrl) {
+            const relayUrl = new URL(configuration.relayUrl);
+            relayClient = startRelayClient({
+              relayUrl: configuration.relayUrl,
+              machineKey: credentials.encryption.machineKey,
+              lanPort: started.port,
+              // Republish as soon as the relay is (un)available rather than at the next slow tick.
+              onStatus: () => { void endpointPublisher?.tick(); },
+            });
+            relayEndpoint = {
+              t: 'relay',
+              addr: relayUrl.hostname,
+              port: Number(relayUrl.port) || (relayUrl.protocol === 'http:' ? 80 : 443),
+              tag: relayClient.identity.tag,
+            };
+            logger.debug(`[DAEMON RUN] relay client started for ${configuration.relayUrl}, tag ${relayClient.identity.tag}`);
+          }
           lanDiscovery = await startLanDiscovery({ port: started.port, machineId, accountFingerprint });
           logger.debug(`[DAEMON RUN] LAN API listening on port ${started.port}`);
 
@@ -1407,6 +1427,7 @@ export async function startDaemon(): Promise<void> {
           endpointPublisher = startEndpointPublisher({
             lanPort: started.port,
             isConnected: () => apiMachineRef?.isSocketConnected() ?? false,
+            extraEndpoints: () => (relayEndpoint ? [relayEndpoint] : []),
             publish: async (endpoints) => apiMachineRef
               ? apiMachineRef.tryUpdateDaemonState((state) => ({
                   ...state,
@@ -1419,6 +1440,9 @@ export async function startDaemon(): Promise<void> {
         } catch (error) {
           // An opt-in feature must never stop the daemon from starting.
           logger.warn('[DAEMON RUN] LAN API not started', { error: String(error) });
+          relayClient?.stop();
+          relayClient = null;
+          relayEndpoint = null;
           await lanServer?.stop().catch(() => undefined);
           await lanDiscovery?.stop().catch(() => undefined);
           lanServer = null;
@@ -1939,6 +1963,7 @@ export async function startDaemon(): Promise<void> {
       // Withdraw the advertisement before the listener goes away, so peers do not keep a
       // stale record pointing at a closed port.
       endpointPublisher?.stop();
+      relayClient?.stop();
       await lanDiscovery?.stop().catch(() => undefined);
       await lanServer?.stop().catch(() => undefined);
       await cleanupDaemonState();

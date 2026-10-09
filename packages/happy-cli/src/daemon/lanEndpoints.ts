@@ -36,9 +36,11 @@ const DENIED_INTERFACE_PREFIXES = ['awdl', 'llw', 'utun', 'tun', 'tap', 'wg', 'b
 
 export type LanEndpoint = {
   /** `lan` for private IPv4, `ipv6` for a globally routable v6 address. */
-  t: 'lan' | 'ipv6';
+  t: 'lan' | 'ipv6' | 'relay';
   addr: string;
   port: number;
+  /** Relay only: the path segment the relay routes to this machine (`/r/<tag>`). */
+  tag?: string;
 };
 
 export type EndpointSet = {
@@ -55,6 +57,8 @@ export type EndpointPublisherOptions = {
   /** Stored on the server; returns whether the write landed. */
   publish: (endpoints: PublishedEndpoints) => Promise<boolean>;
   isConnected: () => boolean;
+  /** Extra endpoints appended after the on-link ones (e.g. a registered public relay). */
+  extraEndpoints?: () => LanEndpoint[];
   /** Injected for tests, so nothing here touches a real NIC. */
   readInterfaces?: () => NodeJS.Dict<os.NetworkInterfaceInfo[]>;
   now?: () => number;
@@ -139,7 +143,8 @@ export function startEndpointPublisher(opts: EndpointPublisherOptions): Endpoint
     if (stopped) {
       return false;
     }
-    const set = computeEndpoints(readInterfaces(), opts.lanPort);
+    const base = computeEndpoints(readInterfaces(), opts.lanPort);
+    const set = { ...base, endpoints: [...base.endpoints, ...(opts.extraEndpoints?.() ?? [])] };
     const key = JSON.stringify(set);
     if (key === lastPublished) {
       return false;
