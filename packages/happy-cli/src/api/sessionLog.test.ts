@@ -186,6 +186,38 @@ describe('sessionLog', () => {
             expect(page.entries).toEqual([entry(2)]);
         });
 
+        // A log longer than one response has to be paged: the entries leave as a single frame, and
+        // the relay both refuses to carry one over its frame limit and drops the whole connection
+        // when it sees one — which turns a long session into a reconnect loop rather than a read.
+        it('pages at the byte budget and resumes exactly where it stopped', () => {
+            const tag = tagFor('paging');
+            for (let n = 1; n <= 5; n += 1) {
+                appendSessionLog(tag, SITE, entry(n));
+            }
+            const oneEntry = JSON.stringify(entry(1)).length + 1;
+
+            const first = readSessionLogSince(tag, SITE, undefined, oneEntry * 2);
+            expect(first.entries).toEqual([entry(1), entry(2)]);
+            expect(first.more).toBe(true);
+
+            const second = readSessionLogSince(tag, SITE, first.cursor, oneEntry * 2);
+            expect(second.entries).toEqual([entry(3), entry(4)]);
+            expect(second.more).toBe(true);
+
+            const third = readSessionLogSince(tag, SITE, second.cursor, oneEntry * 2);
+            expect(third.entries).toEqual([entry(5)]);
+            expect(third.more).toBe(false);
+        });
+
+        it('delivers an entry larger than the budget rather than stalling the reader on it', () => {
+            const tag = tagFor('oversized');
+            appendSessionLog(tag, SITE, entry(1));
+
+            const page = readSessionLogSince(tag, SITE, undefined, 1);
+            expect(page.entries).toEqual([entry(1)]);
+            expect(page.more).toBe(false);
+        });
+
         it('holds the cursor before a torn line so the repair is still delivered', () => {
             const tag = tagFor('torn-cursor');
             appendSessionLog(tag, SITE, entry(1));

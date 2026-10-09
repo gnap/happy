@@ -25,6 +25,8 @@ export type RelayClientHandle = {
   stop: () => void;
 };
 
+/** The relay closes a connection rather than deliver a frame larger than this. */
+const RELAY_MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const STRIP_REQUEST_HEADERS = new Set(['host', 'connection', 'content-length', 'accept-encoding']);
 const STRIP_RESPONSE_HEADERS = new Set(['content-length', 'content-encoding', 'transfer-encoding', 'connection']);
 
@@ -69,8 +71,19 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
         setConnected(true);
         logger.debug(`[relay] registered as ${identity.tag} via ${control}`);
       } else if (msg.t === 'http') {
-        logger.debug(`[relay] http ${msg.method} ${String(msg.path).split('?')[0]}`);
-        void forwardHttp(msg, options.lanPort).then(send);
+        // The query is part of the picture for a history read: `since` is what says whether the
+        // reader is taking pages or re-reading the log from the start every time.
+        logger.debug(`[relay] http ${msg.method} ${msg.path}`);
+        void forwardHttp(msg, options.lanPort).then((res) => {
+          const size = JSON.stringify(res).length;
+          // Mirrors the relay's maxFrameBytes. A larger frame does not fail cleanly: the relay's
+          // runtime drops the whole connection, which reads as a phantom network fault and makes
+          // every reader on it retry. Saying so here is what turns that into a diagnosable bug.
+          if (size > RELAY_MAX_FRAME_BYTES) {
+            logger.warn(`[relay] response too large for the relay: ${msg.method} ${msg.path} bytes=${size}`);
+          }
+          send(res);
+        });
       } else if (msg.t === 'ws-open') {
         logger.debug(`[relay] ws-open ${String(msg.path).split('?')[0]}`);
         const local = new WebSocket(`ws://127.0.0.1:${options.lanPort}${msg.path}`);
@@ -98,7 +111,8 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
       }
     };
 
-    const onGone = () => {
+    const onGone = (event: any) => {
+      logger.debug(`[relay] control closed code=${event?.code} reason=${event?.reason ?? ''} opened=${opened} wasCurrent=${socket === ws}`);
       if (socket !== ws) return;
       socket = null;
       for (const entry of locals.values()) {

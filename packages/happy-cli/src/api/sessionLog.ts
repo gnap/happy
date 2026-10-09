@@ -184,7 +184,16 @@ export type SessionLogPage = {
    * malformed — so `entries` is the whole log rather than a continuation of it.
    */
   reset: boolean;
+  /**
+   * True when the log continues past this page. The transport cannot carry an arbitrarily long
+   * log in one frame, so a read that hits the budget ends early and says so; the caller pages on
+   * with `cursor` instead of assuming it now holds everything.
+   */
+  more: boolean;
 };
+
+/** Per read. Well under the relay's frame limit, which is what a LAN reader may be reading over. */
+const DEFAULT_PAGE_MAX_BYTES = 2 * 1024 * 1024;
 
 /** `"<segmentIndex>:<lineOffset>"`. Anything else is treated as unusable, not as "no cursor". */
 function parseCursor(since: string | undefined): { segment: number; line: number } | null {
@@ -210,11 +219,16 @@ const segmentIndexOf = (name: string): number => Number.parseInt(name.slice(0, 1
  * Stops at the first line that does not parse rather than skipping it: a torn tail is benign, but
  * a torn *middle* (delayed allocation losing a page) leaves a gap that skipping would silently
  * paper over. The cursor is left *before* the torn line so the next read picks it up again.
+ *
+ * Also stops at `maxBytes`, for the same reason in a different direction: the entries leave this
+ * process as one frame, and a reader on the far side of the relay is on a transport with a frame
+ * limit. `more` says the log continues, and the cursor is left before the entry that did not fit.
  */
 export function readSessionLogSince(
   tag: string,
   site: string | undefined,
   since?: string,
+  maxBytes: number = DEFAULT_PAGE_MAX_BYTES,
 ): SessionLogPage {
   const dir = sessionLogDir(tag, site);
   const segments = listSegments(dir);
@@ -226,6 +240,8 @@ export function readSessionLogSince(
   const skipLines = reset || cursor === null ? 0 : cursor.line;
 
   const entries: SessionLogEntry[] = [];
+  let bytes = 0;
+  let more = false;
   let lastSegment = 0;
   let lastLine = 0;
 
@@ -243,6 +259,7 @@ export function readSessionLogSince(
     const skip = index === from ? skipLines : 0;
     let lineNo = 0;
     let torn = false;
+    let stopped = false;
     for (const line of contents.split('\n')) {
       if (line === '') {
         continue;
@@ -251,22 +268,37 @@ export function readSessionLogSince(
       if (lineNo <= skip) {
         continue;
       }
+      // A page the transport could not carry has to end here rather than be sent and lose the
+      // whole connection: a reader asking for a long session's log from the beginning would
+      // otherwise build one frame of tens of megabytes. The cursor stops *before* this entry, so
+      // the next read resumes at exactly this line. An entry larger than the budget still goes out
+      // alone, because refusing to deliver it would stall the reader forever.
+      if (entries.length > 0 && bytes + line.length + 1 > maxBytes) {
+        stopped = true;
+        break;
+      }
       try {
         entries.push(JSON.parse(line) as SessionLogEntry);
       } catch {
         torn = true;
         break;
       }
+      bytes += line.length + 1;
     }
     lastSegment = index;
-    // A torn line was not delivered, so the cursor stops short of it and the next read retries.
-    lastLine = torn ? lineNo - 1 : lineNo;
+    // A line that was not delivered — torn, or left for the next page — must not be stepped over,
+    // so the cursor stops short of it and the next read starts there again.
+    lastLine = torn || stopped ? lineNo - 1 : lineNo;
     if (torn) {
+      break;
+    }
+    if (stopped) {
+      more = true;
       break;
     }
   }
 
-  return { entries, cursor: `${lastSegment}:${lastLine}`, reset };
+  return { entries, cursor: `${lastSegment}:${lastLine}`, reset, more };
 }
 
 /** Read every entry, oldest segment first. */
