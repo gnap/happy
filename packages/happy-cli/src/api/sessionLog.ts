@@ -192,8 +192,13 @@ export type SessionLogPage = {
   more: boolean;
 };
 
-/** Per read. Well under the relay's frame limit, which is what a LAN reader may be reading over. */
-const DEFAULT_PAGE_MAX_BYTES = 2 * 1024 * 1024;
+/**
+ * Per read. Sized for the *reader*, not for the log: a page travels over the LAN or, worse, over
+ * the relay to a phone on cellular, and a reader that cannot finish a page re-reads it forever.
+ * Small enough that one page is a short transfer, large enough that a long log is not thousands of
+ * round trips.
+ */
+const DEFAULT_PAGE_MAX_BYTES = 1024 * 1024;
 
 /** `"<segmentIndex>:<lineOffset>"`. Anything else is treated as unusable, not as "no cursor". */
 function parseCursor(since: string | undefined): { segment: number; line: number } | null {

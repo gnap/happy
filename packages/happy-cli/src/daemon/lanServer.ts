@@ -78,6 +78,12 @@ export type LanHistory = {
   cursor: string;
   /** True when `since` could not be honoured, so `entries` is the whole log, not a continuation. */
   reset: boolean;
+  /**
+   * True when the log continues past this page, which a reader must act on: a page is bounded so
+   * that no single response is too large for the transport, so stopping at the first one leaves a
+   * reader permanently behind the end of the log.
+   */
+  more: boolean;
 };
 
 export type LanServerOptions = {
@@ -365,8 +371,16 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     const history = opts.getHistory(sessionId, since);
     if (!history) {
       // 404 rather than an empty list: the client should retry later, not record "no history".
+      logger.debug(`[lan] history 404 ${sessionId} since=${since ?? '-'}`);
       return reply.code(404).send({ error: 'no local history for that session' });
     }
+    // One line per read, because "the reader is behind" and "the reader is stuck" look identical
+    // from outside and are told apart by whether the cursor moves between reads.
+    logger.debug(
+      `[lan] history ${sessionId} since=${since ?? '-'} entries=${history.entries.length} ` +
+      `bytes=${history.entries.reduce((n, e) => n + e.c.length, 0)} more=${history.more} ` +
+      `reset=${history.reset} cursor=${history.cursor}`,
+    );
     return reply.send({ v: LAN_PROTOCOL_VERSION, ...history });
   });
 

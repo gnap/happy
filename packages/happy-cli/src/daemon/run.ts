@@ -1396,6 +1396,7 @@ export async function startDaemon(): Promise<void> {
                 entries: page.entries,
                 cursor: page.cursor,
                 reset: page.reset,
+                more: page.more,
               };
             },
           });

@@ -75,6 +75,9 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
         // reader is taking pages or re-reading the log from the start every time.
         logger.debug(`[relay] http ${msg.method} ${msg.path}`);
         void forwardHttp(msg, options.lanPort).then((res) => {
+          if (res && typeof res === 'object' && 'status' in res && (res as { status: number }).status >= 400) {
+            logger.debug(`[relay] http-res ${(res as { status: number }).status} ${msg.method} ${msg.path}`);
+          }
           const size = JSON.stringify(res).length;
           // Mirrors the relay's maxFrameBytes. A larger frame does not fail cleanly: the relay's
           // runtime drops the whole connection, which reads as a phantom network fault and makes

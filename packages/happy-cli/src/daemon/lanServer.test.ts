@@ -21,6 +21,7 @@ const HISTORY: LanHistory = {
     entries: [{ id: 'id-1', localId: 'local-1', dir: 'out', at: 1, c: 'CIPHER-1' }],
     cursor: '0:1',
     reset: false,
+    more: false,
 };
 /** Mutable so a test can simulate a session whose history this machine does not have. */
 let history: LanHistory | null = HISTORY;
