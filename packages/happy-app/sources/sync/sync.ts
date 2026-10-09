@@ -3467,7 +3467,14 @@ class Sync {
                         // Skip invalidate when the message normalized to null — the gap is
                         // caused by a null-normalized message (e.g. session-protocol user msg),
                         // not by actual missing data, so no fetch is needed.
-                        if (lastMessage) {
+                        //
+                        // And skip it on a daemon channel, where this fetch is not the cheap no-op
+                        // it is on the server: that path checks "am I already up to date" before
+                        // asking, while the daemon branch reads before it can know. Every pushed
+                        // message would therefore cost a read that finds nothing, because the
+                        // message was just applied — the daemon's own `log-grew` hint, sent after
+                        // a burst, is what fills a frame the socket actually missed.
+                        if (lastMessage && this.preferredChannel(updateData.body.sid) === 'server') {
                             this.getMessagesSync(updateData.body.sid).invalidate();
                         }
                         // Enqueue immediately so the UI updates without waiting for fetchMessages.
