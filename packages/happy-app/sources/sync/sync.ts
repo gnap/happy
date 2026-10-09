@@ -1554,9 +1554,23 @@ class Sync {
             // Payload size comes from the header. This used to call JSON.stringify(data).length,
             // which re-serialised the entire (multi-hundred-KB) response on every fetch purely to
             // produce a log line.
+            //
+            // The header is not always there — the server answers chunked, so this logged 0KB and
+            // the largest cost in the app was invisible. Summing the encrypted field lengths is
+            // O(sessions) over strings already in memory, and gives a real number without
+            // re-serialising anything.
             const contentLength = response.headers.get('content-length');
             const respSizeKb = contentLength ? Math.round(parseInt(contentLength) / 1024) : 0;
-            const xferKb = respSizeKb;
+            const ciphertextKb = Math.round(
+                ((data.sessions as Array<{ metadata?: string | null; agentState?: string | null; dataEncryptionKey?: string | null; lastMessage?: { content?: { c?: string } } | null }> | undefined) ?? [])
+                    .reduce((total, s) =>
+                        total
+                        + (s.metadata?.length ?? 0)
+                        + (s.agentState?.length ?? 0)
+                        + (s.dataEncryptionKey?.length ?? 0)
+                        + (s.lastMessage?.content?.c?.length ?? 0), 0) / 1024,
+            );
+            const xferKb = respSizeKb || ciphertextKb;
             const parseMs = Math.round(performance.now() - parseStart);
             const rawSessions = data.sessions;
             if (!Array.isArray(rawSessions)) {
@@ -3181,43 +3195,24 @@ class Sync {
             this.friendsSync.invalidate();
             this.friendRequestsSync.invalidate();
             this.feedSync.invalidate();
-            // Invalidate message sync for all sessions: active first so they get the concurrency slots
-            try {
-                const state = storage.getState();
-                const activeIds = new Set(state.getActiveSessions().map(s => s.id));
-                const sessionsData = state.sessionsData;
-                let active: string[] = [];
-                let inactive: string[] = [];
-                if (Array.isArray(sessionsData)) {
-                    for (const item of sessionsData) {
-                        if (typeof item !== 'string' && item?.id) {
-                            if (activeIds.has(item.id)) active.push(item.id);
-                            else inactive.push(item.id);
-                        }
-                    }
-                } else {
-                    // Fallback when sessionsData not yet populated (e.g. before first fetchSessions)
-                    const sessions = Object.values(state.sessions);
-                    for (const s of sessions) {
-                        if (activeIds.has(s.id)) active.push(s.id);
-                        else inactive.push(s.id);
-                    }
-                }
-                // On reconnect, only eagerly refresh active sessions.
-                // Inactive/offline sessions load both messages and git status lazily on open.
-                for (const sessionId of active) {
-                    this.getMessagesSync(sessionId).invalidate();
-                    gitStatusSync.invalidate(sessionId);
-                }
-                // The currently visible session must refresh regardless of active state —
-                // the user is looking at it right now and expects new messages to appear.
-                if (this.currentVisibleSessionId && !activeIds.has(this.currentVisibleSessionId)) {
-                    this.getMessagesSync(this.currentVisibleSessionId).invalidate();
-                    gitStatusSync.invalidate(this.currentVisibleSessionId);
-                }
-                // inactive: skip entirely — onSessionVisible handles both on open.
-            } catch (e) {
-                log.log(`🔄 reconnect: error invalidating message syncs: ${String(e)}`);
+            // Refresh the session the user is looking at, and only that one.
+            //
+            // This used to fan out over every session the store reports as *active*, which in this
+            // fork never means "the agent is running" — `active` is set from the session online
+            // flag, so with a daemon on the LAN keeping every session online it matched all of
+            // them. On a cold start that was 38 sessions each hydrating from SQLite at once, and
+            // because expo-sqlite serialises everything down one connection, a single-row read was
+            // measured at ~1.3s purely from queueing behind the rest. The session the user was
+            // actually opening was at the back of that queue, which is the blank conversation
+            // after the navigation animation.
+            //
+            // Scoping it down loses nothing. A session that is not loaded yet hydrates from cache
+            // when it is opened (`onSessionVisible`), and one that is already loaded receives
+            // anything new over the socket — `new-message` updates are applied whether or not the
+            // session is on screen.
+            if (this.currentVisibleSessionId) {
+                this.getMessagesSync(this.currentVisibleSessionId).invalidate();
+                gitStatusSync.invalidate(this.currentVisibleSessionId);
             }
             for (const sync of this.sendSync.values()) {
                 sync.invalidate();
