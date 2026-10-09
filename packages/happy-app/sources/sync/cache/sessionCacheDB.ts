@@ -306,7 +306,49 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
 const DB_NAME = 'happy_message_cache_v2.db';
 const SCHEMA_VERSION = 2;
 
+/**
+ * What a save has to write, given what the database already holds.
+ *
+ * Object identity is the change signal: the store rebuilds a message object when it changes and
+ * keeps the same one otherwise, so a re-render that touched nothing costs nothing here. An absent
+ * `previous` means the rows on disk are unknown (a fresh install, or a session never read), which
+ * is the one case that needs the session rewritten outright.
+ */
+export function diffMessages<T extends { id: string }>(
+    previous: Map<string, T> | undefined,
+    messages: T[],
+): { next: Map<string, T>; inserts: T[]; removed: string[]; rewrite: boolean } {
+    const next = new Map<string, T>();
+    const inserts: T[] = [];
+    for (const message of messages) {
+        next.set(message.id, message);
+        if (previous?.get(message.id) !== message) {
+            inserts.push(message);
+        }
+    }
+    return {
+        next,
+        inserts,
+        removed: previous ? [...previous.keys()].filter((id) => !next.has(id)) : [],
+        rewrite: !previous,
+    };
+}
+
 class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
+    /**
+     * What this database believes it holds, per session: message id → the object that was written.
+     *
+     * The write path used to delete every row for a session and insert them all again, on a
+     * 1.5-second timer, for whatever had changed — which for a long session is megabytes of
+     * serialisation and thousands of statements per save, growing with the window rather than with
+     * the change. Comparing against what was written turns the steady state into a handful of
+     * inserts, and the rows still end up describing exactly the messages the store holds.
+     *
+     * Object identity is the change signal: the store rebuilds a message object when it changes and
+     * keeps the same one otherwise, so a re-render that touched nothing costs nothing here.
+     */
+    private written = new Map<string, Map<string, Message>>();
+
     // We use dynamic require to avoid crashing on platforms without native support
     // (the web platform uses MemorySessionCacheDB instead)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -412,11 +454,16 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
                 // Skip malformed rows
             }
         }
+        // Reading is how the database learns what it holds: it has just seen every row, so the next
+        // save can be a delta rather than a rewrite.
+        this.written.set(sessionId, new Map(messages.map((message) => [message.id, message])));
         return messages;
     }
 
     async saveSessionCache(row: CachedSessionRow, messages: Message[]): Promise<void> {
         await this.ensureReady();
+
+        const { next, inserts, removed, rewrite } = diffMessages(this.written.get(row.sessionId), messages);
 
         await this.db.withTransactionAsync(async () => {
             await this.db.runAsync(
@@ -426,24 +473,37 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
                 [row.sessionId, row.lastSeq, row.oldestSeq, row.hasOlderMessages ? 1 : 0, row.schemaVersion, row.cachedAt, row.reducerStateJson]
             );
 
-            await this.db.runAsync(
-                'DELETE FROM session_messages WHERE session_id = ?',
-                [row.sessionId]
-            );
+            if (rewrite) {
+                await this.db.runAsync('DELETE FROM session_messages WHERE session_id = ?', [row.sessionId]);
+            } else if (removed.length > 0) {
+                const marks = removed.map(() => '?').join(',');
+                await this.db.runAsync(
+                    `DELETE FROM session_messages WHERE session_id = ? AND message_id IN (${marks})`,
+                    [row.sessionId, ...removed]
+                );
+            }
 
-            for (const message of messages) {
+            // One statement per chunk rather than one per message: each round trip crosses into
+            // native, and a burst of messages is the normal case, not the exception.
+            const CHUNK = 100;
+            for (let at = 0; at < inserts.length; at += CHUNK) {
+                const chunk = inserts.slice(at, at + CHUNK);
+                const values = chunk.map(() => '(?, ?, ?, ?)').join(',');
                 await this.db.runAsync(
                     `INSERT OR REPLACE INTO session_messages
                         (session_id, message_id, created_at, message_json)
-                     VALUES (?, ?, ?, ?)`,
-                    [row.sessionId, message.id, message.createdAt, JSON.stringify(message)]
+                     VALUES ${values}`,
+                    chunk.flatMap((message) => [row.sessionId, message.id, message.createdAt, JSON.stringify(message)])
                 );
             }
         });
+
+        this.written.set(row.sessionId, next);
     }
 
     async clearSessionCache(sessionId: string): Promise<void> {
         await this.ensureReady();
+        this.written.delete(sessionId);
         await this.db.withTransactionAsync(async () => {
             await this.db.runAsync('DELETE FROM session_cache WHERE session_id = ?', [sessionId]);
             await this.db.runAsync('DELETE FROM session_messages WHERE session_id = ?', [sessionId]);
@@ -500,6 +560,7 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
 
     async clearAllCaches(): Promise<void> {
         await this.ensureReady();
+        this.written.clear();
         await this.db.withTransactionAsync(async () => {
             await this.db.runAsync('DELETE FROM session_cache');
             await this.db.runAsync('DELETE FROM session_messages');
