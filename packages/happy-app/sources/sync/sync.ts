@@ -215,6 +215,16 @@ class Sync {
         { machineId: string; cursor: string; connection: LanConnection }
     >();
     /**
+     * The connection each machine was last reached over, keyed by machine rather than by session.
+     *
+     * A connection is a property of the machine — one address, one token, good for every session
+     * it serves — but the cache above is keyed by session, so a session that had never been read
+     * before had no connection of its own and paid a full mDNS browse to find one. A browse is
+     * not returned early; it collects until its timeout elapses, so that was a flat 4s per
+     * previously-unread session, on a channel polled every two seconds.
+     */
+    private lanMachineConnections = new Map<string, LanConnection>();
+    /**
      * Where each session's log read got to, across restarts. `lanChannels` is runtime state and
      * dies with the process; this is the half that has to survive it, or a cold start reads the
      * whole log again — thousands of entries to fetch and decrypt before the session settles.
@@ -3868,7 +3878,9 @@ class Sync {
             machineKey,
             encryption: this.encryption,
             since,
-            connection: resumable?.connection,
+            // The session's own connection when it has one, otherwise whatever this machine was
+            // last reached over — same machine, so the same address and a token that covers it.
+            connection: resumable?.connection ?? (machineId ? this.lanMachineConnections.get(machineId) : undefined),
         });
         if (!read) {
             return null;
@@ -3878,6 +3890,7 @@ class Sync {
             cursor: read.cursor,
             connection: read.connection,
         });
+        this.lanMachineConnections.set(read.machineId, read.connection);
         this.lanCursors[sessionId] = { machineId: read.machineId, cursor: read.cursor };
         saveLanCursors(this.lanCursors);
         // The machine answered, so bring the live channel up alongside the poll. Fire-and-forget:

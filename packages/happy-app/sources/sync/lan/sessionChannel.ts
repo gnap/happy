@@ -223,17 +223,36 @@ export async function readSessionOverLan(options: {
     // half: a browse runs for its entire timeout, so paying it on every poll would make the
     // channel slower the more often it is used.
     const cached = options.connection;
-    if (cached && isConnectionUsable(cached, options.machineId)) {
-        try {
-            const result = await readFrom(cached);
-            if (result) {
-                return result;
+    if (cached && cached.machineId === options.machineId) {
+        if (isConnectionUsable(cached, options.machineId)) {
+            try {
+                const result = await readFrom(cached);
+                if (result) {
+                    return result;
+                }
+            } catch (error) {
+                // A token can expire or be revoked between reads; only that justifies a fresh
+                // handshake here. Anything else is a real failure and belongs to the caller.
+                if (!(error instanceof LanRequestError) || error.status !== 401) {
+                    throw error;
+                }
             }
-        } catch (error) {
-            // A token can expire or be revoked between reads; only that justifies a fresh
-            // handshake here. Anything else is a real failure and belongs to the caller.
-            if (!(error instanceof LanRequestError) || error.status !== 401) {
-                throw error;
+        } else {
+            // The bearer token aged out — it is 90s server-side and only counts as usable with
+            // 15s left, so this happens about every 75 seconds. The *address* is still good:
+            // discovery exists to find it, and we already have it, so re-ask the same host for a
+            // token instead of browsing again. A browse is not returned early, it collects until
+            // its timeout elapses, so rediscovering a machine we can already reach costs a flat
+            // 4s — on a channel polled every 2s, that is most of what it spends its time on.
+            // Only a host that has actually moved falls through to discovery below.
+            try {
+                const { token, expiresAt } = await authenticate(cached.baseUrl, machineKey);
+                const result = await readFrom({ ...cached, token, expiresAt });
+                if (result) {
+                    return result;
+                }
+            } catch {
+                // Unreachable or refused: fall through to a full browse.
             }
         }
     }
