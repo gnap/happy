@@ -1,0 +1,40 @@
+name: Relay typecheck and tests
+
+on:
+    pull_request:
+        paths:
+            - 'packages/happy-relay/**'
+            - '.github/workflows/relay-test.yml'
+    push:
+        branches:
+            - main
+        paths:
+            - 'packages/happy-relay/**'
+            - '.github/workflows/relay-test.yml'
+
+jobs:
+    relay:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            # Its own toolchain rather than the repo's yarn workspaces: this package is deployed on
+            # its own with bun and shares no dependency with the rest of the monorepo.
+            - name: Setup Bun
+              uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: 1.4.2
+
+            - name: Install dependencies
+              working-directory: packages/happy-relay
+              run: bun install --frozen-lockfile
+
+            - name: TypeScript typecheck
+              working-directory: packages/happy-relay
+              run: bun run typecheck
+
+            - name: Tests
+              working-directory: packages/happy-relay
+              run: bun test

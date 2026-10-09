@@ -18,6 +18,13 @@ export type RelayOptions = {
     tls?: { certFile: string; keyFile: string };
     /** Max request/response body in bytes. */
     maxBodyBytes?: number;
+    /**
+     * Max WebSocket frame in bytes. Separate from the body limit because the two carry different
+     * things: a request body is one message the App chose to send, while a frame may be a page of a
+     * session's log, which the daemon sizes. Bun closes the whole connection when a frame exceeds
+     * it, so this must stay comfortably above the daemon's page size.
+     */
+    maxFrameBytes?: number;
     httpTimeoutMs?: number;
     /** Requests per IP per minute on the public side. */
     ratePerMinute?: number;
@@ -48,6 +55,7 @@ const HOP_HEADERS = new Set(['host', 'connection', 'content-length', 'transfer-e
 
 export function startRelay(options: RelayOptions): RelayHandle {
     const maxBody = options.maxBodyBytes ?? 4 * 1024 * 1024;
+    const maxFrame = options.maxFrameBytes ?? 8 * 1024 * 1024;
     const httpTimeout = options.httpTimeoutMs ?? 15_000;
     const rate = options.ratePerMinute ?? 600;
     const daemons = new Map<string, Daemon>();
@@ -142,7 +150,7 @@ export function startRelay(options: RelayOptions): RelayHandle {
             });
         },
         websocket: {
-            maxPayloadLength: maxBody,
+            maxPayloadLength: maxFrame,
             idleTimeout: 120,
             sendPings: true,
             open(ws) {
@@ -254,7 +262,9 @@ export function startRelay(options: RelayOptions): RelayHandle {
     }
 
     return {
-        port: server.port,
+        // Bun reports the bound port only once listening; the requested one is what it bound unless
+        // it was 0, in which case the OS chose and `server.port` has it.
+        port: server.port ?? options.port,
         stop: () => { clearInterval(sweep); server.stop(true); },
         daemonCount: () => daemons.size,
     };
