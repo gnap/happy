@@ -455,6 +455,13 @@ export class ApiSessionClient extends EventEmitter {
         activeSubagents: new Set<string>(),
     };
     private lastSeq: number;
+    /**
+     * True while this client was built from a cached binding and the server has not yet said where
+     * "now" is. `lastSeq` is meaningless in that window, so nothing may read from, or advance, the
+     * server cursor; the LAN path and the outbox are unaffected because neither depends on it.
+     */
+    private serverCursorPending = false;
+    private initialLastSeqHint: number | undefined;
     private pendingOutbox: Array<{ content: string; localId: string }> = [];
     private readonly sendSync: InvalidateSync;
     private readonly receiveSync: InvalidateSync;
@@ -482,7 +489,7 @@ export class ApiSessionClient extends EventEmitter {
         token: string,
         session: Session,
         private websocketOnly: boolean = true,
-        opts?: { initialLastSeq?: number },
+        opts?: { initialLastSeq?: number; serverCursorPending?: boolean },
     ) {
         super()
         this.token = token;
@@ -513,7 +520,9 @@ export class ApiSessionClient extends EventEmitter {
         this.requestedMetadata = session.requestedMetadata ?? null;
         this.encryptionKey = session.encryptionKey;
         this.encryptionVariant = session.encryptionVariant;
-        this.lastSeq = resolveSessionLastSeq(session.seq, opts?.initialLastSeq);
+        this.initialLastSeqHint = opts?.initialLastSeq;
+        this.serverCursorPending = opts?.serverCursorPending === true;
+        this.lastSeq = this.serverCursorPending ? 0 : resolveSessionLastSeq(session.seq, opts?.initialLastSeq);
         if (opts?.initialLastSeq !== undefined && this.lastSeq !== opts.initialLastSeq) {
             logger.debug(
                 `[API] Session ${session.id} resume cursor adjusted: requested=${opts.initialLastSeq}, `
@@ -705,6 +714,11 @@ export class ApiSessionClient extends EventEmitter {
                 forwardSessionEventToDaemon(data.body as unknown as Record<string, unknown>);
 
                 if (data.body.t === 'new-message') {
+                    if (this.serverCursorPending) {
+                        // Anything pushed before the cursor is known sits at or below "now", which is
+                        // where a restart deliberately picks up from; it would be skipped anyway.
+                        return;
+                    }
                     const messageSeq = data.body.message?.seq;
                     const isEncrypted = data.body.message?.content?.t === 'encrypted';
                     const acceptSeq = typeof messageSeq === 'number' && this.lastSeq > 0 && messageSeq === this.lastSeq + 1;
@@ -818,6 +832,34 @@ export class ApiSessionClient extends EventEmitter {
         // from App before socket connected). Otherwise we only fetch after socket 'connect' or
         // after connect_error (fallback poll every 8s), so new sessions can appear unresponsive.
         this.receiveSync.invalidate();
+    }
+
+    /**
+     * Take the server's answer for a client that started without it.
+     *
+     * Only the cursor is settled here, because it is the one value a stale copy cannot stand in
+     * for. Versions are raised, never lowered: a newer one only means the server saw writes this
+     * process has not, and a lower one would turn the next update into a guaranteed mismatch.
+     * Metadata and agentState content are not replaced -- the server pushes them on connect, and
+     * overwriting a local edit made during the outage would lose it.
+     *
+     * Returns false when the server names a different session than the one this client was
+     * addressed to, which the caller must treat as fatal: everything keyed on the old id is wrong.
+     */
+    resolveServerSession(fresh: Session): boolean {
+        if (fresh.id !== this.sessionId) {
+            logger.warn('[API] server session id differs from the cached one', { cached: this.sessionId, fresh: fresh.id });
+            return false;
+        }
+        this.metadataVersion = Math.max(this.metadataVersion, fresh.metadataVersion);
+        this.agentStateVersion = Math.max(this.agentStateVersion, fresh.agentStateVersion);
+        if (this.serverCursorPending) {
+            this.lastSeq = resolveSessionLastSeq(fresh.seq, this.initialLastSeqHint);
+            this.serverCursorPending = false;
+            logger.debug(`[API] Session ${this.sessionId} server cursor resolved: lastSeq=${this.lastSeq} (server seq=${fresh.seq ?? 0})`);
+            this.receiveSync.invalidate();
+        }
+        return true;
     }
 
     onUserMessage(callback: (data: UserMessage) => void) {
@@ -1335,6 +1377,9 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     private async fetchMessages() {
+        if (this.serverCursorPending) {
+            return;
+        }
         const untilSeq = this.receiveCatchUpUntilSeq;
         const startLastSeq = this.lastSeq;
         let afterSeq = this.lastSeq;
@@ -1554,7 +1599,9 @@ export class ApiSessionClient extends EventEmitter {
                 const maxSeq = messages.reduce((acc, message) => (
                     message.seq > acc ? message.seq : acc
                 ), this.lastSeq);
-                this.lastSeq = maxSeq;
+                if (!this.serverCursorPending) {
+                    this.lastSeq = maxSeq;
+                }
                 logger.debug(`[API] flushOutbox via HTTP: sent ${chunk.length} message(s) to server (replies visible in app)`);
                 return;
             } catch (error: unknown) {

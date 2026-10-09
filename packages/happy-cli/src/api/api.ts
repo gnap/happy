@@ -11,6 +11,7 @@ import chalk from 'chalk';
 import { Credentials } from '@/persistence';
 import { connectionState, isNetworkError } from '@/utils/serverConnectionErrors';
 import { persistSessionKey, readSessionKey } from './sessionKeyPersistence';
+import { loadSessionBinding, saveSessionBinding } from './sessionBinding';
 
 export class ApiClient {
 
@@ -102,6 +103,13 @@ export class ApiClient {
 
       logger.debug(`Session created/loaded: ${response.data.session.id} (tag: ${opts.tag})`)
       let raw = response.data.session;
+      saveSessionBinding(opts.tag, {
+        id: raw.id,
+        metadata: raw.metadata,
+        metadataVersion: raw.metadataVersion,
+        agentState: raw.agentState ?? null,
+        agentStateVersion: raw.agentStateVersion,
+      });
       let session: Session = {
         id: raw.id,
         tag: opts.tag,
@@ -165,6 +173,55 @@ export class ApiClient {
       }
 
       throw new Error(`Failed to get or create session: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Rebuild a session from what the server last said about this tag, without asking it.
+   *
+   * Everything the CLI owns (tag, site, key) is resolved locally; the rest comes from the binding
+   * saved by the last successful `getOrCreateSession`. Returns null when there is no binding or it
+   * cannot be read with the current key -- both mean "this tag has not been through the server
+   * yet", and the caller falls back to waiting for it.
+   *
+   * `seq` is 0 and meaningless here: "resume from now" is the server's to say, so the client built
+   * from this must be told to hold server ingest until the real create answers.
+   */
+  loadCachedSession(opts: {
+    tag: string,
+    site?: string,
+    metadata: Metadata,
+    existingEncryptionKey?: Uint8Array,
+  }): Session | null {
+    const binding = loadSessionBinding(opts.tag);
+    if (!binding) {
+      return null;
+    }
+    const { encryptionKey, encryptionVariant } = this.resolveSessionEncryption(opts.tag, opts.existingEncryptionKey);
+    try {
+      const metadata = decrypt(encryptionKey, encryptionVariant, decodeBase64(binding.metadata));
+      if (!metadata) {
+        return null;
+      }
+      const agentState = binding.agentState
+        ? decrypt(encryptionKey, encryptionVariant, decodeBase64(binding.agentState))
+        : null;
+      return {
+        id: binding.id,
+        tag: opts.tag,
+        site: opts.site,
+        seq: 0,
+        metadata: sanitizeSessionMetadataForApp(metadata) as Metadata,
+        metadataVersion: binding.metadataVersion,
+        agentState,
+        agentStateVersion: binding.agentStateVersion,
+        encryptionKey,
+        encryptionVariant,
+        requestedMetadata: opts.metadata,
+      };
+    } catch (error) {
+      logger.debug('[API] Cached session binding unusable; will wait for the server', { tag: opts.tag, error: String(error) });
+      return null;
     }
   }
 
@@ -311,7 +368,7 @@ export class ApiClient {
   sessionSyncClient(
     session: Session,
     websocketOnly: boolean = true,
-    opts?: { initialLastSeq?: number },
+    opts?: { initialLastSeq?: number; serverCursorPending?: boolean },
   ): ApiSessionClient {
     return new ApiSessionClient(this.credential.token, session, websocketOnly, opts);
   }

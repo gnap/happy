@@ -458,3 +458,66 @@ describe('ApiSessionClient outbox durability', () => {
         expect(loadOutbox(TAG).entries.map((e) => e.localId)).toEqual(['env-stuck']);
     });
 });
+
+describe('ApiSessionClient started from a cached binding (server cursor pending)', () => {
+    let happyHome: string;
+    const messagesFetches = () =>
+        mockAxiosGet.mock.calls.filter((call: any[]) => String(call[0]).includes('/messages'));
+
+    beforeEach(() => {
+        happyHome = mkdtempSync(join(tmpdir(), 'happy-cursor-cli-'));
+        state.happyHome = happyHome;
+        vi.clearAllMocks();
+        mockIo.mockReturnValue(mockSocket);
+        mockAxiosGet.mockResolvedValue({ data: { messages: [], hasMore: false } });
+        mockSocket.connected = true;
+        for (const key of Object.keys(socketHandlers)) {
+            delete socketHandlers[key];
+        }
+    });
+
+    afterEach(() => {
+        rmSync(happyHome, { recursive: true, force: true });
+    });
+
+    it('reads nothing from the server until the cursor is known', async () => {
+        const client = new ApiSessionClient('fake-token', makeSession(), true, { serverCursorPending: true });
+        const received: unknown[] = [];
+        client.onUserMessage((m) => received.push(m));
+
+        const ct = encodeBase64(encrypt(SESSION_KEY, 'legacy', { role: 'user', content: { type: 'text', text: 'early' } }));
+        emitSocketEvent('update', newMessageUpdate(1, ct));
+        emitSocketEvent('connect', undefined);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        expect(received).toEqual([]);
+        expect(messagesFetches()).toHaveLength(0);
+    });
+
+    it('still takes a message delivered over the LAN while the cursor is pending', () => {
+        const client = new ApiSessionClient('fake-token', makeSession(), true, { serverCursorPending: true });
+        const received: unknown[] = [];
+        client.onUserMessage((m) => received.push(m));
+        mockAxiosPost.mockRejectedValue(new Error('ECONNREFUSED'));
+
+        const content = encodeBase64(encrypt(SESSION_KEY, 'legacy', { role: 'user', content: { type: 'text', text: 'over lan' } }));
+        expect(client.deliverLanUserMessage({ localId: 'lan-1', content })).toBe(true);
+        expect(received).toHaveLength(1);
+    });
+
+    it('starts reading after the server\'s seq once it answers, not from zero', async () => {
+        const client = new ApiSessionClient('fake-token', makeSession(), true, { serverCursorPending: true });
+        expect(messagesFetches()).toHaveLength(0);
+
+        expect(client.resolveServerSession({ ...makeSession(), seq: 42 })).toBe(true);
+
+        await waitFor(() => expect(messagesFetches().length).toBeGreaterThan(0));
+        expect(messagesFetches()[0][1].params.after_seq).toBe(42);
+    });
+
+    it('refuses an answer that names a different session', () => {
+        const client = new ApiSessionClient('fake-token', makeSession(), true, { serverCursorPending: true });
+        expect(client.resolveServerSession({ ...makeSession(), id: 'someone-else', seq: 5 })).toBe(false);
+        expect(messagesFetches()).toHaveLength(0);
+    });
+});

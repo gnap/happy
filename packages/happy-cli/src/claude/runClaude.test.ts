@@ -41,7 +41,10 @@ const mocks = vi.hoisted(() => {
     // being unreachable looks like from here; the parameter is typed so the test can read
     // back the options each attempt was made with.
     mockGetOrCreateSession: vi.fn(async (_opts: { tag: string; [key: string]: unknown }): Promise<unknown> => mockResponse),
-    mockSessionSyncClient: vi.fn(() => mockSession),
+    mockSessionSyncClient: vi.fn((..._args: unknown[]) => mockSession),
+    // A tag that has not been through the server yet has no cached binding; tests that start
+    // from one override this.
+    mockLoadCachedSession: vi.fn((_opts: unknown): unknown => null),
     mockLoop: vi.fn(async () => 0),
     mockStartHappyServer: vi.fn(async () => ({
       url: 'http://127.0.0.1:9999',
@@ -209,6 +212,7 @@ describe('runClaude resume plumbing', () => {
     mocks.mockApiCreate.mockResolvedValue({
       getOrCreateMachine: mocks.mockGetOrCreateMachine,
       getOrCreateSession: mocks.mockGetOrCreateSession,
+      loadCachedSession: mocks.mockLoadCachedSession,
       sessionSyncClient: mocks.mockSessionSyncClient,
     });
     vi.spyOn(process, 'exit').mockImplementation(((code?: number) => undefined as never) as typeof process.exit);
@@ -282,5 +286,45 @@ describe('runClaude resume plumbing', () => {
     expect(mocks.mockClaudeLocal).toHaveBeenCalled();
     expect(mocks.mockStartOfflineReconnection).toHaveBeenCalled();
     expect(loop).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A tag the server has answered for before starts from that record. The session must come up,
+   * report to the daemon under the cached id (which is what lets the LAN serve it), and run its
+   * loop while the server's answer is still outstanding -- only server ingest waits for it.
+   */
+  it('starts from a cached binding without waiting for a slow server', async () => {
+    mocks.mockLoadCachedSession.mockReturnValueOnce({ ...mocks.mockResponse, seq: 0 });
+    mocks.mockGetOrCreateSession.mockReturnValue(new Promise(() => {}));
+
+    await runClaude({} as any, {
+      startedBy: 'daemon',
+      startingMode: 'remote',
+      resumeSessionTag: 'session-tag-1',
+    });
+
+    expect(mocks.mockSessionSyncClient).toHaveBeenCalledWith(
+      expect.anything(),
+      true,
+      expect.objectContaining({ serverCursorPending: true }),
+    );
+    expect(mocks.mockNotifyDaemonSessionStarted).toHaveBeenCalledWith('session-1', expect.anything());
+    expect(loop).toHaveBeenCalled();
+  });
+
+  it('settles the server cursor when the answer arrives after a cached start', async () => {
+    mocks.mockLoadCachedSession.mockReturnValueOnce({ ...mocks.mockResponse, seq: 0 });
+    const resolveServerSession = vi.fn(() => true);
+    (mocks.mockSession as Record<string, unknown>).resolveServerSession = resolveServerSession;
+    mocks.mockGetOrCreateSession.mockResolvedValue({ ...mocks.mockResponse, seq: 77 });
+
+    await runClaude({} as any, {
+      startedBy: 'daemon',
+      startingMode: 'remote',
+      resumeSessionTag: 'session-tag-1',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(resolveServerSession).toHaveBeenCalledWith(expect.objectContaining({ seq: 77 }));
   });
 });
