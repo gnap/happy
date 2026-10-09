@@ -85,7 +85,7 @@ export function startUnixSocketServer(callbacks: {
      * This is what lets a message that arrived over the daemon's LAN API — with the server
      * unreachable — still reach the session process that can act on it.
      */
-    const sessionSockets = new Map<string, Socket>();
+    const sessionSockets = new Map<string, Socket[]>();
     // Clean up stale socket file from previous daemon run
     if (existsSync(SOCKET_PATH)) {
         try { unlinkSync(SOCKET_PATH); } catch { /* ignore */ }
@@ -140,7 +140,12 @@ export function startUnixSocketServer(callbacks: {
                             state.pid = msg.pid ?? null;
                             if (state.sessionId) {
                                 connectedSessions.add(state.sessionId);
-                                sessionSockets.set(state.sessionId, socket);
+                                // A stack, newest last: two processes can claim one session id
+                                // (a slow restart that lands after its replacement), and when the
+                                // newer one dies the older, still-live one must become reachable again.
+                                const open = (sessionSockets.get(state.sessionId) ?? []).filter((existing) => existing !== socket);
+                                open.push(socket);
+                                sessionSockets.set(state.sessionId, open);
                             }
                             logger.debug(`[UNIX SOCKET] Session ${msg.sessionId} registered (pid=${msg.pid})`);
                             callbacks.onSessionHello(socket, msg);
@@ -185,11 +190,12 @@ export function startUnixSocketServer(callbacks: {
         socket.on('close', () => {
             if (heartbeatTimer) clearTimeout(heartbeatTimer);
             if (state.sessionId) {
-                connectedSessions.delete(state.sessionId);
-                // Only if it is still this socket's entry: a reconnecting session may already have
-                // replaced it, and dropping the new one would strand the session.
-                if (sessionSockets.get(state.sessionId) === socket) {
+                const remaining = (sessionSockets.get(state.sessionId) ?? []).filter((existing) => existing !== socket && !existing.destroyed);
+                if (remaining.length > 0) {
+                    sessionSockets.set(state.sessionId, remaining);
+                } else {
                     sessionSockets.delete(state.sessionId);
+                    connectedSessions.delete(state.sessionId);
                 }
             }
             logger.debug(`[UNIX SOCKET] Session ${state.sessionId} disconnected`);
@@ -214,10 +220,10 @@ export function startUnixSocketServer(callbacks: {
         socketPath: SOCKET_PATH,
         isSessionConnected: (sessionId: string) => connectedSessions.has(sessionId),
         sendToSession: (sessionId: string, message: Record<string, unknown>) => {
-            const socket = sessionSockets.get(sessionId);
             // `writable` rather than just a lookup: a socket can linger after the peer is gone, and
             // reporting success for a write nobody receives would be worse than reporting failure.
-            if (!socket || socket.destroyed || !socket.writable) {
+            const socket = [...(sessionSockets.get(sessionId) ?? [])].reverse().find((candidate) => !candidate.destroyed && candidate.writable);
+            if (!socket) {
                 return false;
             }
             // Same newline-delimited framing the sessions use on the way in.

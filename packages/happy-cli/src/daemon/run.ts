@@ -1369,6 +1369,11 @@ export async function startDaemon(): Promise<void> {
               logger.debug(
                 `[DAEMON RUN] LAN user message for ${sessionId}: ${delivered ? 'delivered to session' : 'no live session socket'}`,
               );
+              if (!delivered) {
+                // Nobody will ever send a verdict for a message no session received, so say so now
+                // rather than leaving the App to time out and call it an unexplained failure.
+                lanServer?.broadcast('delivered', { sessionId, localId, delivered: false });
+              }
             },
             getHistory: (sessionId, query) => {
               // The client addresses by session id because that is what it learns from the
