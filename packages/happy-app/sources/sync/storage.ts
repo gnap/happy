@@ -1219,6 +1219,9 @@ export const storage = create<StorageState>()((set, get) => {
             const existing = state.sessionMessages[sessionId];
             if (!existing) return state;
             const newNewestSeq = Math.max(existing.newestSeq, newestSeq);
+            // Unchanged means no state to write: returning a new object here re-rendered every
+            // subscriber, including the message list, to show exactly what it already showed.
+            if (newNewestSeq === existing.newestSeq) return state;
             const totalSeq = state.sessions[sessionId]?.seq ?? 0;
             const cachedBitmap = computeBitmap(existing.oldestSeq, newNewestSeq, totalSeq);
             return {
@@ -1232,6 +1235,11 @@ export const storage = create<StorageState>()((set, get) => {
         applyOlderMessages: (sessionId: string, olderMessages: NormalizedMessage[], newOldestSeq: number, hasOlderMessages: boolean) => set((state) => {
             const existing = state.sessionMessages[sessionId];
             if (!existing) return state;
+            // The window is often patched with an empty batch (a read that establishes the floor
+            // without adding messages); when that changes nothing, the state does not change either.
+            if (olderMessages.length === 0 && existing.oldestSeq === newOldestSeq && existing.hasOlderMessages === hasOlderMessages) {
+                return state;
+            }
 
             // Run a fresh temporary reducer on just the older batch.
             // The main reducerState is left intact so incremental (new) messages keep working.

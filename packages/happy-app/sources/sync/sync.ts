@@ -4125,11 +4125,16 @@ class Sync {
             this.lanSessionKeys.set(sessionId, read.sessionKey);
             void this.encryption.initializeSessions(new Map([[sessionId, read.sessionKey]]));
         }
-        void this.saveSessionCache(
-            sessionId,
-            { lastSeq: newestSeq, oldestSeq, hasOlderMessages: read.hasOlder },
-            { machineId: read.machineId, cursor: window.cursor, floor: window.older, hasOlder: window.hasOlder },
-        );
+        // A page with no entries moved neither edge, so there is nothing to persist — and this is
+        // the common case for a session that is simply being watched, where the alternative is
+        // serialising the whole reducer state and rewriting the row every tick to say so.
+        if (read.messages.length > 0) {
+            void this.saveSessionCache(
+                sessionId,
+                { lastSeq: newestSeq, oldestSeq, hasOlderMessages: read.hasOlder },
+                { machineId: read.machineId, cursor: window.cursor, floor: window.older, hasOlder: window.hasOlder },
+            );
+        }
         log.log(
             `📡 fetchSessionFromDaemon: ${read.messages.length} read ` +
             `(${read.decryptedCount}/${read.total} decrypted, tag ${read.tag}` +

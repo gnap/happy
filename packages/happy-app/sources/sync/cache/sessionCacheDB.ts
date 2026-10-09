@@ -348,6 +348,8 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
      * keeps the same one otherwise, so a re-render that touched nothing costs nothing here.
      */
     private written = new Map<string, Map<string, Message>>();
+    /** The watermark of those same rows, so a save that would change nothing is not made. */
+    private writtenWatermark = new Map<string, { lastSeq: number; oldestSeq: number; hasOlderMessages: boolean }>();
 
     // We use dynamic require to avoid crashing on platforms without native support
     // (the web platform uses MemorySessionCacheDB instead)
@@ -464,6 +466,21 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
         await this.ensureReady();
 
         const { next, inserts, removed, rewrite } = diffMessages(this.written.get(row.sessionId), messages);
+        // Nothing to add, nothing to drop, and the window is where it was: the row on disk already
+        // says all of this. The reducer state needs no comparison of its own — it is only ever
+        // mutated by reducing messages, and any message that changed is one of the inserts.
+        const watermark = this.writtenWatermark.get(row.sessionId);
+        if (
+            !rewrite &&
+            inserts.length === 0 &&
+            removed.length === 0 &&
+            watermark !== undefined &&
+            watermark.lastSeq === row.lastSeq &&
+            watermark.oldestSeq === row.oldestSeq &&
+            watermark.hasOlderMessages === row.hasOlderMessages
+        ) {
+            return;
+        }
 
         await this.db.withTransactionAsync(async () => {
             await this.db.runAsync(
@@ -499,11 +516,17 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
         });
 
         this.written.set(row.sessionId, next);
+        this.writtenWatermark.set(row.sessionId, {
+            lastSeq: row.lastSeq,
+            oldestSeq: row.oldestSeq,
+            hasOlderMessages: row.hasOlderMessages,
+        });
     }
 
     async clearSessionCache(sessionId: string): Promise<void> {
         await this.ensureReady();
         this.written.delete(sessionId);
+        this.writtenWatermark.delete(sessionId);
         await this.db.withTransactionAsync(async () => {
             await this.db.runAsync('DELETE FROM session_cache WHERE session_id = ?', [sessionId]);
             await this.db.runAsync('DELETE FROM session_messages WHERE session_id = ?', [sessionId]);
@@ -561,6 +584,7 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
     async clearAllCaches(): Promise<void> {
         await this.ensureReady();
         this.written.clear();
+        this.writtenWatermark.clear();
         await this.db.withTransactionAsync(async () => {
             await this.db.runAsync('DELETE FROM session_cache');
             await this.db.runAsync('DELETE FROM session_messages');
