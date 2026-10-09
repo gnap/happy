@@ -91,6 +91,11 @@ export type LanHistory = {
     cursor: string;
     /** True when `since` could not be honoured, so `entries` is the whole log, not a continuation. */
     reset: boolean;
+    /**
+     * True when the log continues past this page. A daemon bounds each response so a long session
+     * cannot produce a frame its transport will not carry; the reader pages on with `cursor`.
+     */
+    more?: boolean;
 };
 
 export type LanIdentity = {

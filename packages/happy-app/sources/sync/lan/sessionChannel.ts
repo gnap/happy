@@ -3,6 +3,9 @@ import { Encryption } from '@/sync/encryption/encryption';
 import { discoverMachines } from './discovery';
 import { authenticate, fetchHistory, fetchSessions, LanRequestError } from './client';
 import { decryptLanEntries, decryptLanHistory, type DecryptedLanEntry } from './history';
+
+/** A ceiling on the paging loop, so a daemon that never advances the cursor cannot spin forever. */
+const MAX_HISTORY_PAGES = 500;
 import type { DaemonRoute, LanSessionSummary } from './types';
 
 /**
@@ -232,29 +235,54 @@ export async function readSessionOverLan(options: {
 
     /** Reads one session from one machine; null means "this machine has no log for it yet". */
     const readFrom = async (connection: LanConnection): Promise<LanSessionRead | null> => {
-        const history = await fetchHistory(
-            connection.baseUrl,
-            connection.token,
-            options.sessionId,
-            options.since
-        );
-        if (!history) {
-            return null;
-        }
+        const entries: DecryptedLanEntry[] = [];
+        let decryptedCount = 0;
+        let tag = '';
+        let sessionKey: Uint8Array | null = null;
+        let cursor = options.since ?? '';
+        let reset = false;
+        let since = options.since;
 
-        const decrypted = await decryptLanHistory(options.encryption, history);
-        const messages = toNormalizedMessages(decrypted.entries);
+        // A long session's log does not fit in one response — the daemon bounds each page so the
+        // frame stays within what the transport carries — so read pages until the daemon says the
+        // log is exhausted. The cursor moves every round; a page that left it where it was would
+        // repeat forever, so the loop stops there as well as at a ceiling.
+        for (let page = 0; page < MAX_HISTORY_PAGES; page += 1) {
+            const history = await fetchHistory(
+                connection.baseUrl,
+                connection.token,
+                options.sessionId,
+                since
+            );
+            if (!history) {
+                return null;
+            }
+            const decrypted = await decryptLanHistory(options.encryption, history);
+            entries.push(...decrypted.entries);
+            decryptedCount += decrypted.decryptedCount;
+            tag = history.tag;
+            sessionKey = decrypted.sessionKey;
+            cursor = history.cursor;
+            // `reset` describes the whole read, so it is the first page's answer that counts.
+            if (page === 0) {
+                reset = history.reset;
+            }
+            if (!history.more || history.cursor === since) {
+                break;
+            }
+            since = history.cursor;
+        }
 
         return {
             machineId: connection.machineId,
-            tag: history.tag,
-            messages,
-            decryptedCount: decrypted.decryptedCount,
-            total: decrypted.entries.length,
-            cursor: history.cursor,
-            reset: history.reset,
+            tag,
+            messages: toNormalizedMessages(entries),
+            decryptedCount,
+            total: entries.length,
+            cursor,
+            reset,
             connection,
-            sessionKey: decrypted.sessionKey,
+            sessionKey: sessionKey as Uint8Array,
         };
     };
 
