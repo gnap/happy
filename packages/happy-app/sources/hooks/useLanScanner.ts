@@ -41,6 +41,10 @@ export function useLanScanner(): void {
             // `sync.encryption` is only set once the user is signed in and the master secret has
             // been derived; the account public key is the input the discovery filter needs.
             const accountPublicKey = sync.encryption?.contentDataKey;
+            // Switched off in the channel priority setting: do not browse at all.
+            if (!storage.getState().localSettings.channelPriority.includes('lan')) {
+                return;
+            }
             if (!accountPublicKey || cancelled) {
                 // Before sign-in there is no account key, so the scan cannot be filtered to this
                 // account. Say so once instead of looking like a scanner that finds nothing.

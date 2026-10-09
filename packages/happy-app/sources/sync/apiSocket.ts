@@ -100,6 +100,14 @@ class ApiSocket {
     private lastError: Error | null = null;
     /** When true, do not reconnect (e.g. after 401) */
     private reconnectionDisabled = false;
+    /**
+     * When true, the server channel is switched off in the channel priority setting, so this
+     * client must not hold a connection to happy-server at all: no socket, no reconnect, and
+     * nothing to fall back to. Kept apart from `reconnectionDisabled` because that one is a
+     * reaction to the server (a 401) and is cleared by any reconnect, while this is a standing
+     * instruction from the user that only the setting clears.
+     */
+    private serverDisabled = false;
     /** Guards against multiple parallel async loaders racing inside connect(). */
     private connectInFlight = false;
     /** When the app last went to the background, or null while it is in the foreground. */
@@ -125,8 +133,19 @@ class ApiSocket {
     // Connection Management
     //
 
+    /** Follows the channel priority setting: false means this App does not use happy-server. */
+    setServerEnabled(enabled: boolean) {
+        this.serverDisabled = !enabled;
+        if (enabled) {
+            this.connect();
+        } else {
+            this.disconnect();
+        }
+    }
+
     connect() {
         if (!this.config) return;
+        if (this.serverDisabled) return;
 
         // Listen for browser online/offline events to recover from sleep/wake
         // where socket.io may not detect network restoration on Linux.
@@ -454,6 +473,9 @@ class ApiSocket {
      * is almost certainly dead (silent TCP drop after iOS suspend, etc.).
      */
     async resumeReconnection(): Promise<boolean> {
+        if (this.serverDisabled) {
+            return false;
+        }
         const suspendedFor = this.suspendedAt === null ? null : Date.now() - this.suspendedAt;
         this.suspendedAt = null;
         this.clearSuspendedReset();

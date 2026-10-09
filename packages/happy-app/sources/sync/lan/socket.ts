@@ -1,4 +1,5 @@
 import { lanProofFor } from './client';
+import { bump } from '@/sync/metrics';
 
 /**
  * The live LAN channel.
@@ -86,6 +87,7 @@ export async function openLanSocket(options: {
     let deliberatelyClosed = false;
 
     socket.onmessage = (event) => {
+        bump('socketFrames');
         if (typeof event.data !== 'string') {
             return;
         }

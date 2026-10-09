@@ -8,6 +8,7 @@ import { isRunningOnMac } from '@/utils/platform';
 import { useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 import { useLanScanner } from '@/hooks/useLanScanner';
+import { useRelayProber } from '@/hooks/useRelayProber';
 
 export const unstable_settings = {
     initialRouteName: 'index',
@@ -21,6 +22,8 @@ export default function RootLayout() {
     // Owns the periodic LAN browse for the whole authenticated app; mounted here (not in a screen)
     // so the cadence is not restarted by navigation.
     useLanScanner();
+    // The relay's counterpart: learns which cached relay routes answer, independent of the server.
+    useRelayProber();
 
     return (
         <Stack
@@ -237,6 +240,12 @@ export default function RootLayout() {
                 }}
             />
 
+            <Stack.Screen
+                name="dev/channels"
+                options={{
+                    headerTitle: 'Channel Priority',
+                }}
+            />
             <Stack.Screen
                 name="dev/list-demo"
                 options={{

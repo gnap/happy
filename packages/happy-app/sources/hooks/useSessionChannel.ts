@@ -1,5 +1,6 @@
 import { useShallow } from 'zustand/react/shallow';
 import { storage } from '@/sync/storage';
+import type { SessionChannel } from '@/sync/lan/types';
 import { sync, type ChannelReason } from '@/sync/sync';
 
 /**
@@ -9,7 +10,7 @@ import { sync, type ChannelReason } from '@/sync/sync';
  * set of inputs the resolver reads.
  */
 export function useSessionChannel(sessionId: string): {
-    channel: 'lan' | 'server';
+    channel: SessionChannel;
     reason: ChannelReason;
     pinned: boolean;
 } {

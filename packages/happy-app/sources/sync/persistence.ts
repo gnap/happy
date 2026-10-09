@@ -3,6 +3,7 @@ import { Settings, settingsDefaults, settingsParse, SettingsSchema } from './set
 import { LocalSettings, localSettingsDefaults, localSettingsParse } from './localSettings';
 import { Purchases, purchasesDefaults, purchasesParse } from './purchases';
 import { Profile, profileDefaults, profileParse } from './profile';
+import type { RelayEndpoint } from './lan/types';
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 
 const mmkv = new MMKV();
@@ -126,29 +127,57 @@ export function saveSessionDrafts(drafts: Record<string, string>) {
 }
 
 /**
- * Where each session's LAN log read got to, so a restart resumes instead of re-reading it.
+ * Where a session's loaded window sits in its daemon log: `cursor` is the boundary above the newest
+ * message held, `floor` the one below the oldest, and `hasOlder` whether the log continues beneath
+ * it. An anchor is a position in one machine's file, so it is kept with the machine that issued it.
  *
- * Kept per session and with the machine that issued it: a cursor is a `segment:offset` into one
- * machine's file, so it only means anything against the log it came from. Without this every cold
- * start reads and decrypts the whole log — which for a long session is thousands of entries and
- * is felt as the app hanging on open.
+ * A daemon read can land anywhere in a log, so a window is only meaningful together with these:
+ * without them a restart cannot tell whether a fresh page abuts what it already holds, and joining
+ * two ranges that are not adjacent is what a silent hole looks like.
  */
-export function loadLanCursors(): Record<string, { machineId: string; cursor: string }> {
-    const cursors = mmkv.getString('lan-cursors');
-    if (cursors) {
+export type PersistedLanWindow = {
+    machineId: string;
+    cursor: string;
+    floor: string;
+    hasOlder: boolean;
+};
+
+export function loadLanWindows(): Record<string, PersistedLanWindow> {
+    const raw = mmkv.getString('lan-windows');
+    if (raw) {
         try {
-            return JSON.parse(cursors);
+            return JSON.parse(raw);
         } catch (e) {
-            console.error('Failed to parse LAN cursors', e);
-            return {};
+            console.error('Failed to parse LAN windows', e);
         }
     }
     return {};
 }
 
-export function saveLanCursors(cursors: Record<string, { machineId: string; cursor: string }>) {
-    mmkv.set('lan-cursors', JSON.stringify(cursors));
+export function saveLanWindows(windows: Record<string, PersistedLanWindow>) {
+    mmkv.set('lan-windows', JSON.stringify(windows));
 }
+
+/**
+ * Relay routes outlive the process on purpose: they are learned from the server, and the case they
+ * exist for is the server being down at the next cold start, when nothing could re-learn them.
+ */
+export function loadRelayEndpoints(): Record<string, RelayEndpoint> {
+    const raw = mmkv.getString('relay-endpoints');
+    if (raw) {
+        try {
+            return JSON.parse(raw);
+        } catch (e) {
+            console.error('Failed to parse relay endpoints', e);
+        }
+    }
+    return {};
+}
+
+export function saveRelayEndpoints(endpoints: Record<string, RelayEndpoint>) {
+    mmkv.set('relay-endpoints', JSON.stringify(endpoints));
+}
+
 
 export function loadNewSessionDraft(): NewSessionDraft | null {
     const raw = mmkv.getString(NEW_SESSION_DRAFT_KEY);

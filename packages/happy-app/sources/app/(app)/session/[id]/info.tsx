@@ -24,6 +24,7 @@ import { Session } from '@/sync/storageTypes';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { HappyError } from '@/utils/errors';
 import { getCachedLastSeq, subscribeToCachedLastSeq } from '@/sync/cache/messageCache';
+import type { SessionChannel } from '@/sync/lan/types';
 import { getBitmapSegments } from '@/sync/cacheSegment';
 
 function channelReasonText(reason: ChannelReason): string {
@@ -32,6 +33,8 @@ function channelReasonText(reason: ChannelReason): string {
         case 'not-declared': return t('sessionInfo.channelWhyNotDeclared');
         case 'not-on-network': return t('sessionInfo.channelWhyNotOnNetwork');
         case 'no-machine-key': return t('sessionInfo.channelWhyNoKey');
+        case 'by-priority': return t('sessionInfo.channelWhyByPriority');
+        case 'server-down-relay': return t('sessionInfo.channelWhyServerDownRelay');
         default: return t('sessionInfo.channelWhyUnknown');
     }
 }
@@ -182,10 +185,11 @@ function SessionInfoContent({ session }: { session: Session }) {
         : `${t('sessionInfo.channelAuto')} · ${channelReasonText(channel.reason)}`;
     const handleChooseChannel = useCallback(() => {
         const current = channel.pinned ? channel.channel : null;
-        const mark = (value: 'lan' | 'server' | null, label: string) => (current === value ? `✓ ${label}` : label);
+        const mark = (value: SessionChannel | null, label: string) => (current === value ? `✓ ${label}` : label);
         Modal.alert(t('sessionInfo.connectionStatus'), undefined, [
             { text: mark(null, t('sessionInfo.channelAuto')), onPress: () => sync.setSessionChannel(session.id, null) },
             { text: mark('lan', t('status.lan')), onPress: () => sync.setSessionChannel(session.id, 'lan') },
+            { text: mark('relay', t('sessionInfo.channelRelay')), onPress: () => sync.setSessionChannel(session.id, 'relay') },
             { text: mark('server', t('sessionInfo.channelServer')), onPress: () => sync.setSessionChannel(session.id, 'server') },
             { text: t('common.cancel'), style: 'cancel' },
         ]);
@@ -418,7 +422,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                     )}
                     <Item
                         title={t('sessionInfo.connectionStatus')}
-                        detail={`${sessionStatus.isConnected ? t('status.online') : t('status.offline')} · ${channel.channel === 'lan' ? t('status.lan') : t('sessionInfo.channelServer')}`}
+                        detail={`${sessionStatus.isConnected ? t('status.online') : t('status.offline')} · ${channel.channel === 'lan' ? t('status.lan') : channel.channel === 'relay' ? t('sessionInfo.channelRelay') : t('sessionInfo.channelServer')}`}
                         subtitle={channelSubtitle}
                         subtitleLines={0}
                         icon={<Ionicons name={CHANNEL_ICONS[channel.channel]} size={29} color={sessionStatus.isConnected ? "#34C759" : "#8E8E93"} />}

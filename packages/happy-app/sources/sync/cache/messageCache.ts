@@ -22,6 +22,7 @@ import type { ReducerState } from '../reducer/reducer';
 import type { Message } from '../typesMessage';
 import type { Session } from '../storageTypes';
 import { log } from '@/log';
+import { bump } from '../metrics';
 
 // ---------------------------------------------------------------------------
 // Guard: only Cursor sessions use the cache
@@ -182,6 +183,7 @@ export async function getCachedLastSeq(sessionId: string): Promise<number | null
  * Persist the current messages and reducer state for a session after a fetch cycle.
  * No-op if caching is disabled for this session.
  */
+/** False when the rows did not land, so a caller that stores something *about* them can hold off. */
 export async function saveMessageCache(
     session: Session,
     messages: Message[],
@@ -189,10 +191,10 @@ export async function saveMessageCache(
     lastSeq: number,
     oldestSeq: number = 0,
     hasOlderMessages: boolean = false,
-): Promise<void> {
+): Promise<boolean> {
     if (!isCacheEnabled(session)) {
         log.log(`📦 messageCache: skip save for ${session.id} (flavor=${session.metadata?.flavor ?? 'none'}, not cursor)`);
-        return;
+        return false;
     }
 
     try {
@@ -200,24 +202,28 @@ export async function saveMessageCache(
         const db = getSessionCacheDB();
         const reducerStateJson = serializeReducerStateToJson(reducerState);
         const stateMs = Date.now() - started;
-        await db.saveSessionCache(
-            {
-                sessionId: session.id,
-                lastSeq,
-                oldestSeq,
-                hasOlderMessages,
-                schemaVersion: SERIALIZER_SCHEMA_VERSION,
-                cachedAt: Date.now(),
-                reducerStateJson,
-            },
-            messages,
-        );
+        const row = {
+            sessionId: session.id,
+            lastSeq,
+            oldestSeq,
+            hasOlderMessages,
+            schemaVersion: SERIALIZER_SCHEMA_VERSION,
+            cachedAt: Date.now(),
+            reducerStateJson,
+        };
+        await db.saveSessionCache(row, messages);
+        bump('cacheSaves');
+        // The state is serialised per save because it is a field of the same row; this is what makes
+        // its size visible, since it is the part of a save that scales with the window.
+        bump('cacheBytes', reducerStateJson.length);
         const totalMs = Date.now() - started;
         const slow = totalMs > 200 ? ` in ${totalMs}ms (reducer state ${stateMs}ms)` : '';
         log.log(`📦 messageCache: saved ${messages.length} messages for ${session.id} (lastSeq=${lastSeq}, oldestSeq=${oldestSeq}, hasOlderMessages=${hasOlderMessages})${slow}`);
         notifyCachedLastSeq(session.id, lastSeq);
+        return true;
     } catch (err) {
         log.log(`📦 messageCache: save error for ${session.id}: ${err}`);
+        return false;
     }
 }
 

@@ -17,7 +17,7 @@ import { isUsingCustomServer } from '@/sync/serverConfig';
 import { trackPaywallButtonClicked, trackWhatsNewClicked } from '@/track';
 import { Modal } from '@/modal';
 import { useMultiClick } from '@/hooks/useMultiClick';
-import { useAllMachines, useMachinesMap, useMachinePresenceMap, useLanSightings } from '@/sync/storage';
+import { useAllMachines, useMachinesMap, useMachinePresenceMap, useLanSightings, useRelayEndpoints } from '@/sync/storage';
 import { MachinePresenceBadge } from '@/components/MachinePresenceBadge';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { useUnistyles } from 'react-native-unistyles';
@@ -54,6 +54,7 @@ export const SettingsView = React.memo(function SettingsView() {
     );
     const machinePresence = useMachinePresenceMap();
     const lanSightings = useLanSightings();
+    const relayEndpoints = useRelayEndpoints();
     const profile = useProfile();
     const displayName = getDisplayName(profile);
     const avatarUrl = getAvatarUrl(profile);
@@ -308,6 +309,7 @@ export const SettingsView = React.memo(function SettingsView() {
                                     <MachinePresenceBadge
                                         presence={machinePresence[machine.id] ?? 'offline'}
                                         lanReachable={!!lanSightings[machine.id]}
+                                        relayCapable={!!relayEndpoints[machine.id]}
                                     />
                                 }
                                 onPress={() => router.push(`/machine/${machine.id}`)}

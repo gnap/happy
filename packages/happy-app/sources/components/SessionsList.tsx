@@ -443,7 +443,7 @@ export function SessionsList() {
                             style={styles.hostGroupDot}
                         />
                         <Text style={styles.hostGroupText} numberOfLines={1}>
-                            {item.host || 'Unknown'}{' · '}{item.onlineCount}/{item.totalCount} online{presence === 'lan' ? ` · ${t('status.lan')}` : ''}{hasOffline ? (isHidingOffline ? ' ▸' : ' ▾') : ''}
+                            {item.host || 'Unknown'}{' · '}{item.onlineCount}/{item.totalCount} online{presence === 'lan' ? ` · ${t('status.lan')}` : presence === 'relay' ? ` · ${t('sessionInfo.channelRelay')}` : ''}{hasOffline ? (isHidingOffline ? ' ▸' : ' ▾') : ''}
                         </Text>
                     </Pressable>
                 );

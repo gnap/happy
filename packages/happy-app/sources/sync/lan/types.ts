@@ -21,9 +21,37 @@ export const LAN_DEFAULT_PORT = 55673;
  * globally routable one. Published in `Machine.daemonState.p2p` by the daemon.
  */
 export type LanEndpoint = {
-    t: 'lan' | 'ipv6';
+    t: 'lan' | 'ipv6' | 'relay';
     addr: string;
     port: number;
+    /** Relay only: the path segment (`/r/<tag>`) the relay routes to this machine. */
+    tag?: string;
+};
+
+/**
+ * How a session's traffic reaches its daemon. `lan` is a direct link found on this network,
+ * `relay` is a public relay the daemon dials out to (usable when the server is down and the
+ * daemon is elsewhere), and `server` is the Happy server.
+ */
+export type SessionChannel = 'lan' | 'relay' | 'server';
+
+/** The two ways to reach a daemon directly; the third channel, `server`, is not a daemon route. */
+export type DaemonRoute = Exclude<SessionChannel, 'server'>;
+
+/** A relay route that answered a probe recently: the daemon is registered and reachable through it. */
+export type RelaySighting = {
+    machineId: string;
+    baseUrl: string;
+    at: number;
+};
+
+/** A public relay route to a machine, learned from its published endpoints. */
+export type RelayEndpoint = {
+    machineId: string;
+    /** `https://host[:port]/r/<tag>` — usable anywhere a LAN base URL is. */
+    baseUrl: string;
+    /** When the daemon published it; the cache is a hint, not a lease. */
+    at: number;
 };
 
 /** The `daemonState.p2p` payload, as published by `lanEndpoints.ts`. */
@@ -57,11 +85,17 @@ export type LanSessionLogEntry = {
 export type LanHistory = {
     tag: string;
     dataEncryptionKey: string;
-    /** Only the entries written after the `since` this read was made with, when one was sent. */
+    /** The page's entries, oldest first, whichever direction it was read in. */
     entries: LanSessionLogEntry[];
-    /** Opaque position to send back as `since` on the next read. */
+    /** Boundary after the last entry: send back as `since` to follow the log forward. */
     cursor: string;
-    /** True when `since` could not be honoured, so `entries` is the whole log, not a continuation. */
+    /** Boundary before the first entry: send back as `before` to read older. */
+    older: string;
+    /** The log continues past this page, so a reader's page was cut short rather than the log ending. */
+    hasNewer: boolean;
+    /** The log continues before this page — "there is older history", which is what the UI gates on. */
+    hasOlder: boolean;
+    /** True when `since` could not be honoured, so `entries` is the log from its start. */
     reset: boolean;
 };
 

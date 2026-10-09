@@ -3,7 +3,8 @@ import { Encryption } from '@/sync/encryption/encryption';
 import { discoverMachines } from './discovery';
 import { authenticate, fetchHistory, fetchSessions, LanRequestError } from './client';
 import { decryptLanEntries, decryptLanHistory, type DecryptedLanEntry } from './history';
-import type { LanSessionSummary } from './types';
+
+import type { DaemonRoute, LanSessionSummary } from './types';
 
 /**
  * Reads one session over the local network, producing messages in the same shape the server path
@@ -30,9 +31,18 @@ export type LanSessionRead = {
     /** How many log entries actually decrypted, against how many were returned. */
     decryptedCount: number;
     total: number;
-    /** Opaque position to pass back as `since` on the next read of this session. */
+    /** Boundary after this page's last entry: hand back as `follow` to keep up with the log. */
     cursor: string;
-    /** True when the cursor was not honoured and `messages` covers the whole log. */
+    /** Boundary before this page's first entry: hand back as `older` to read further back. */
+    older: string;
+    /**
+     * The log has entries after this page, which means the page was cut short at its budget: the
+     * reader is further behind than one page, and belongs at the newest one instead of walking.
+     */
+    hasNewer: boolean;
+    /** The log has entries before this page. The UI's "load older" gate. */
+    hasOlder: boolean;
+    /** True when the anchor was not honoured and `messages` covers the log from its start. */
     reset: boolean;
     /** Endpoint and token used, to hand back as `connection` on the next read. */
     connection: LanConnection;
@@ -48,6 +58,8 @@ export type LanSessionRead = {
 /** A resolved daemon endpoint plus a live bearer token for it. */
 export type LanConnection = {
     machineId: string;
+    /** Which route this connection came in on: found on the network, or through the public relay. */
+    route: DaemonRoute;
     baseUrl: string;
     token: string;
     /** Epoch ms. */
@@ -151,21 +163,50 @@ export async function listSessionsOverLan(options: {
      */
     machineKeyFor: (machineId: string) => Uint8Array | null;
     timeoutMs?: number;
-}): Promise<{ machineId: string; sessions: LanSessionSummary[] } | null> {
-    const discovered = await discoverMachines({
-        accountPublicKey: options.accountPublicKey,
-        timeoutMs: options.timeoutMs ?? 4000,
-    });
+    /** Public relay routes, tried for machines discovery did not find. */
+    relays?: { machineId: string; baseUrl: string }[];
+    /** Browse the local network. Off when the LAN channel is switched off. */
+    browseLan?: boolean;
+}): Promise<{ machineId: string; via: DaemonRoute; sessions: LanSessionSummary[] }[]> {
+    const answers: { machineId: string; via: DaemonRoute; sessions: LanSessionSummary[] }[] = [];
+    const answered = new Set<string>();
+    const discovered = options.browseLan === false
+        ? []
+        : await discoverMachines({
+            accountPublicKey: options.accountPublicKey,
+            timeoutMs: options.timeoutMs ?? 4000,
+        });
 
+    // Every reachable machine is asked, not just the first: a session list is the union of what
+    // each daemon says, and which route answered is kept so the UI can show it.
     for (const machine of discovered) {
         const machineKey = options.machineKeyFor(machine.machineId);
         if (!machineKey) {
             continue;
         }
-        const { token } = await authenticate(machine.baseUrl, machineKey);
-        return { machineId: machine.machineId, sessions: await fetchSessions(machine.baseUrl, token) };
+        try {
+            const { token } = await authenticate(machine.baseUrl, machineKey);
+            answers.push({ machineId: machine.machineId, via: 'lan', sessions: await fetchSessions(machine.baseUrl, token) });
+            answered.add(machine.machineId);
+        } catch {
+            // This daemon refused or dropped; the relay (or another machine) may still answer.
+        }
     }
-    return null;
+    // The relay is independent of the LAN, not a fallback for a browse that found nothing: a
+    // machine that is not on this network is reached here, and one already answered above is skipped.
+    await Promise.all((options.relays ?? []).map(async (relay) => {
+        const machineKey = options.machineKeyFor(relay.machineId);
+        if (!machineKey || answered.has(relay.machineId)) {
+            return;
+        }
+        try {
+            const { token } = await authenticate(relay.baseUrl, machineKey);
+            answers.push({ machineId: relay.machineId, via: 'relay', sessions: await fetchSessions(relay.baseUrl, token) });
+        } catch {
+            // This relay route is down or its daemon is offline.
+        }
+    }));
+    return answers;
 }
 
 export async function readSessionOverLan(options: {
@@ -177,53 +218,84 @@ export async function readSessionOverLan(options: {
     /** The machine key, used to answer the daemon's challenge. */
     machineKey: Uint8Array | null;
     encryption: Encryption;
-    /** Cursor from the previous read of this session; omit to read the whole log. */
-    since?: string;
+    /**
+     * Which page to read. `tail` is the newest page — what opening a session wants; `follow`
+     * continues forward from a boundary; `older` walks back from one. Every read is one bounded
+     * page: a reader that pages forward until it catches up is a reader that can be minutes behind
+     * on a long session, because it must carry every entry written while it was away.
+     */
+    page: { kind: 'tail' } | { kind: 'follow'; cursor: string } | { kind: 'older'; before: string };
     /**
      * Connection from the previous read. Reused while it is still valid, which is what keeps the
      * mDNS browse and the challenge-response out of every poll — a browse alone runs for its full
      * timeout, so paying it per tick makes the channel slower the more often it is used.
      */
     connection?: LanConnection | null;
+    /** The public relay route to the same daemon, when the machine published one. */
+    relayBaseUrl?: string;
+    /**
+     * Which route to read on. `lan` only browses, `relay` only uses the relay (skipping a browse
+     * for a machine known to be elsewhere, which would burn its timeout every tick), and `any`
+     * browses first and falls back to the relay.
+     */
+    via: 'lan' | 'relay' | 'any';
 }): Promise<LanSessionRead | null> {
     const machineKey = options.machineKey;
     if (!machineKey) {
         return null;
     }
 
-    /** Reads one session from one machine; null means "this machine has no log for it yet". */
+    /**
+     * One page, one request. A follow read that comes back cut short means the reader is further
+     * behind than a page, and the answer to that is not to walk forward through the backlog — it is
+     * to jump to the newest page, which is the only part of it the reader can see anyway. That is
+     * what the server channel does when it anchors its window near the session's newest seq.
+     */
     const readFrom = async (connection: LanConnection): Promise<LanSessionRead | null> => {
-        const history = await fetchHistory(
-            connection.baseUrl,
-            connection.token,
-            options.sessionId,
-            options.since
-        );
-        if (!history) {
-            return null;
-        }
-
-        const decrypted = await decryptLanHistory(options.encryption, history);
-        const messages = toNormalizedMessages(decrypted.entries);
-
-        return {
-            machineId: connection.machineId,
-            tag: history.tag,
-            messages,
-            decryptedCount: decrypted.decryptedCount,
-            total: decrypted.entries.length,
-            cursor: history.cursor,
-            reset: history.reset,
-            connection,
-            sessionKey: decrypted.sessionKey,
+        const request = (page: typeof options.page) =>
+            fetchHistory(
+                connection.baseUrl,
+                connection.token,
+                options.sessionId,
+                page.kind === 'follow' ? { since: page.cursor } : page.kind === 'older' ? { before: page.before } : {},
+            );
+        const decode = async (history: Awaited<ReturnType<typeof fetchHistory>>) => {
+            if (!history) {
+                return null;
+            }
+            const decrypted = await decryptLanHistory(options.encryption, history);
+            return {
+                machineId: connection.machineId,
+                tag: history.tag,
+                messages: toNormalizedMessages(decrypted.entries),
+                decryptedCount: decrypted.decryptedCount,
+                total: decrypted.entries.length,
+                cursor: history.cursor,
+                older: history.older,
+                hasNewer: history.hasNewer,
+                hasOlder: history.hasOlder,
+                reset: history.reset,
+                connection,
+                sessionKey: decrypted.sessionKey as Uint8Array,
+            };
         };
+
+        const page = await request(options.page);
+        if (page && options.page.kind === 'follow' && page.hasNewer) {
+            return decode(await request({ kind: 'tail' }));
+        }
+        return decode(page);
     };
 
     // The connection from the previous read is tried first, because discovery is the expensive
     // half: a browse runs for its entire timeout, so paying it on every poll would make the
     // channel slower the more often it is used.
     const cached = options.connection;
-    if (cached && cached.machineId === options.machineId) {
+    // A cached connection is only reusable for the route it was made on: a session being read over
+    // the relay must not be handed the LAN connection another session left behind, and the other
+    // way round.
+    const cachedMatchesRoute = options.via === 'any' || cached?.route === options.via;
+    if (cached && cached.machineId === options.machineId && cachedMatchesRoute) {
         if (isConnectionUsable(cached, options.machineId)) {
             try {
                 const result = await readFrom(cached);
@@ -257,21 +329,28 @@ export async function readSessionOverLan(options: {
         }
     }
 
-    const discovered = await discoverMachines({
-        accountPublicKey: options.accountPublicKey,
-        // A session belongs to exactly one machine, so there is nothing to learn from the others.
-        // When the id is unknown, fall back to probing whatever is advertising — the daemon
-        // answers 404 for sessions it does not have, which is a cheap way to find the right one.
-        timeoutMs: 4000,
-    });
-    const candidates = options.machineId
+    const discovered = options.via === 'relay'
+        ? []
+        : await discoverMachines({
+            accountPublicKey: options.accountPublicKey,
+            // A session belongs to exactly one machine, so there is nothing to learn from the others.
+            // When the id is unknown, fall back to probing whatever is advertising — the daemon
+            // answers 404 for sessions it does not have, which is a cheap way to find the right one.
+            timeoutMs: 4000,
+        });
+    const candidates: { machineId: string; baseUrl: string; route: DaemonRoute }[] = (options.machineId
         ? discovered.filter((machine) => machine.machineId === options.machineId)
-        : discovered;
+        : discovered
+    ).map((machine) => ({ machineId: machine.machineId, baseUrl: machine.baseUrl, route: 'lan' as const }));
+    if (candidates.length === 0 && options.via !== 'lan' && options.relayBaseUrl && options.machineId) {
+        candidates.push({ machineId: options.machineId, baseUrl: options.relayBaseUrl, route: 'relay' });
+    }
 
     for (const machine of candidates) {
         const { token, expiresAt } = await authenticate(machine.baseUrl, machineKey);
         const result = await readFrom({
             machineId: machine.machineId,
+            route: machine.route,
             baseUrl: machine.baseUrl,
             token,
             expiresAt,
