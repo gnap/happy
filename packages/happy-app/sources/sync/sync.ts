@@ -696,6 +696,14 @@ class Sync {
                 if (state.localSettings.channelPriority !== previous.localSettings.channelPriority) {
                     // A new order changes where every session reads from, so re-resolve them now
                     // instead of at each one's next scheduled fetch.
+                    const serverWas = previous.localSettings.channelPriority.includes('server');
+                    const serverNow = state.localSettings.channelPriority.includes('server');
+                    if (serverWas !== serverNow) {
+                        // Switching the server off has to drop the connection, not just stop
+                        // choosing it: until the socket is gone the App is still talking to
+                        // happy-server, which is the thing the setting is there to stop.
+                        apiSocket.setServerEnabled(serverNow);
+                    }
                     this.reconcileDaemonSockets();
                     for (const syncer of this.messagesSync.values()) {
                         syncer.invalidate();
@@ -1526,6 +1534,17 @@ class Sync {
             return;
         }
         this.lastSessionRefreshAt = now;
+
+        // With the server channel switched off this App does not talk to happy-server, so the list
+        // is asked of the daemons that can be reached instead. Without this the request below would
+        // still go out and fail, which is the connection the setting exists to stop — the fallback
+        // in the catch would reach the same place, but only after trying.
+        if (!this.channelPriority().includes('server')) {
+            await this.fetchSessionListFromDaemons().catch((error) => {
+                log.log(`📡 fetchSessions: daemon session list failed: ${String(error)}`);
+            });
+            return;
+        }
 
         // Full refresh when delta base is 0 (either first fetch or reset by #refreshSessionsFull).
         const fullRefresh = this.lastSessionRefreshNonDeltaAt === 0;
@@ -4123,13 +4142,18 @@ class Sync {
             // Nothing on this device has reached the machine. The session is not readable over any
             // daemon route, so it stays on the server path — which is where the content on screen
             // came from — rather than being labelled with a channel that was never established.
-            return ['server', 'not-on-network'];
+            // Unless the server is switched off, in which case that path is not this App's to
+            // take either: the session is simply unreachable, and says so.
+            return [priority.includes('server') ? 'server' : priority[0], 'not-on-network'];
         }
         if (channel === 'lan') {
             return ['lan', 'reachable'];
         }
         if (channel === 'relay') {
-            return ['relay', serverDown ? 'server-down-relay' : 'by-priority'];
+            // "Server unreachable" only describes a server that is meant to be there. One switched
+            // off in the setting was not unreachable, it was not used.
+            const serverOff = !priority.includes('server');
+            return ['relay', serverDown && !serverOff ? 'server-down-relay' : 'by-priority'];
         }
         return ['server', priority.length === 1 || available.lan || available.relay ? 'by-priority' : 'not-on-network'];
     }
@@ -4678,5 +4702,8 @@ async function syncInit(credentials: AuthCredentials, restore: boolean) {
 
     // Start socket connection — handlers are already registered, cache is loaded.
     const API_ENDPOINT = getServerUrl();
+    // Set before initialising: a server the setting has switched off must not be connected to even
+    // for the instant it takes the first connect to come back.
+    apiSocket.setServerEnabled(storage.getState().localSettings.channelPriority.includes('server'));
     apiSocket.initialize({ endpoint: API_ENDPOINT, token: credentials.token }, encryption);
 }
