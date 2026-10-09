@@ -13,6 +13,7 @@
 
 import { decodeBase64 } from '@/encryption/base64';
 import { Encryption } from '@/sync/encryption/encryption';
+import { bump } from '@/sync/metrics';
 import type { LanHistory, LanSessionLogEntry } from './types';
 
 export type DecryptedLanEntry = {
@@ -64,6 +65,7 @@ export async function decryptLanEntries(
     sessionKey: Uint8Array,
     entries: LanSessionLogEntry[]
 ): Promise<DecryptedLanEntry[]> {
+    bump('entriesDecrypted', entries.length);
     const decryptor = await encryption.openEncryption(sessionKey);
     const plaintexts = await decryptor.decrypt(entries.map((entry) => decodeBase64(entry.c, 'base64')));
 

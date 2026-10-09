@@ -7,6 +7,7 @@ import { ItemList } from '@/components/ItemList';
 import { useRouter } from 'expo-router';
 import Constants from 'expo-constants';
 import * as Application from 'expo-application';
+import { metrics, ratesSince, type MetricRates } from '@/sync/metrics';
 import { useDaemonSocketStatus, useLanSightings, useLocalSettingMutable, useRelayEndpoints, useRelaySightings, useSocketStatus } from '@/sync/storage';
 import { Modal } from '@/modal';
 import { sync } from '@/sync/sync';
@@ -14,6 +15,34 @@ import { getServerUrl, setServerUrl, validateServerUrl } from '@/sync/serverConf
 import { Switch } from '@/components/Switch';
 import { useUnistyles } from 'react-native-unistyles';
 import { setLastViewedVersion, getLatestVersion } from '@/changelog';
+
+/** One decimal for small rates, none for large: enough to tell "idle" from "working". */
+function formatRate(rate: number | undefined): string {
+    if (rate === undefined) return '·';
+    return rate >= 10 ? String(Math.round(rate)) : rate.toFixed(1);
+}
+
+/**
+ * Samples the sync counters once a second and reports per-second rates.
+ *
+ * Rates rather than totals: a total says how long the App has been running, a rate says what it is
+ * doing now — which is the question a device that gets warm raises.
+ */
+function useMetricRates(): MetricRates | null {
+    const [rates, setRates] = React.useState<MetricRates | null>(null);
+    React.useEffect(() => {
+        let previous = { ...metrics };
+        let at = Date.now();
+        const timer = setInterval(() => {
+            const now = Date.now();
+            setRates(ratesSince(previous, metrics, now - at));
+            previous = { ...metrics };
+            at = now;
+        }, 1_000);
+        return () => clearInterval(timer);
+    }, []);
+    return rates;
+}
 
 export default function DevScreen() {
     const router = useRouter();
@@ -24,6 +53,7 @@ export default function DevScreen() {
     const relaySocketStatus = useDaemonSocketStatus('relay');
     const lanSightingCount = Object.keys(useLanSightings()).length;
     const [channelPriority] = useLocalSettingMutable('channelPriority');
+    const rates = useMetricRates();
     const relayRouteCount = Object.keys(useRelayEndpoints()).length;
     const relaySightingCount = Object.keys(useRelaySightings()).length;
     const anonymousId = sync.encryption!.anonID;
@@ -338,6 +368,28 @@ export default function DevScreen() {
                     subtitle="View expoConfig, manifests, and system constants"
                     icon={<Ionicons name="information-circle-outline" size={28} color="#007AFF" />}
                     onPress={() => router.push('/dev/expo-constants')}
+                />
+            </ItemGroup>
+
+            {/* Load: what the sync engine is doing right now, which is what a warm device is
+                usually asking about. Counters, not a profiler — small enough to leave on. */}
+            <ItemGroup title="Load">
+                <Item
+                    title="Store writes"
+                    subtitle={`${formatRate(rates?.storeWrites)} writes/s · ${formatRate(rates?.messagesApplied)} messages/s applied`}
+                    showChevron={false}
+                />
+                <Item
+                    title="Daemon channel"
+                    subtitle={`${formatRate(rates?.socketFrames)} socket frames/s · ${formatRate(rates?.entriesDecrypted)} entries/s decrypted`}
+                    showChevron={false}
+                />
+                <Item
+                    title="Message cache"
+                    subtitle={rates
+                        ? `${formatRate(rates.cacheSaves)} saves/s · ${(rates.cacheBytes / 1024).toFixed(1)} KB/s of state serialised`
+                        : 'sampling…'}
+                    showChevron={false}
                 />
             </ItemGroup>
 

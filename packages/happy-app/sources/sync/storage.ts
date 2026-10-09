@@ -3,6 +3,7 @@ import { useShallow } from 'zustand/react/shallow'
 import { Session, Machine, GitStatus } from "./storageTypes";
 import { computeBitmap } from "./cacheSegment";
 import { createReducer, reducer, ReducerState } from "./reducer/reducer";
+import { bump } from './metrics';
 import { Message } from "./typesMessage";
 import { NormalizedMessage } from "./typesRaw";
 import { isMachineOnline } from '@/utils/machineUtils';
@@ -975,6 +976,8 @@ export const storage = create<StorageState>()((set, get) => {
             sessionListViewData: state.sessionListViewData ?? [],
         })),
         applyMessages: (sessionId: string, messages: NormalizedMessage[]) => {
+            bump('storeWrites');
+            bump('messagesApplied', messages.length);
             let changed = new Set<string>();
             let hasReadyEvent = false;
             set((state) => {
@@ -1176,6 +1179,8 @@ export const storage = create<StorageState>()((set, get) => {
             };
         }),
         applyWindow: (sessionId: string, messages: NormalizedMessage[], oldestSeq: number, newestSeq: number, hasOlderMessages: boolean) => set((state) => {
+            bump('storeWrites');
+            bump('messagesApplied', messages.length);
             // A fresh reducer over the page, because the window it replaces is gone: the previous
             // reducer state describes messages that are no longer held, and running the new page
             // through it would carry their tool state into a window that does not contain them.

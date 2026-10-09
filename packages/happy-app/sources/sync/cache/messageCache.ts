@@ -22,6 +22,7 @@ import type { ReducerState } from '../reducer/reducer';
 import type { Message } from '../typesMessage';
 import type { Session } from '../storageTypes';
 import { log } from '@/log';
+import { bump } from '../metrics';
 
 // ---------------------------------------------------------------------------
 // Guard: only Cursor sessions use the cache
@@ -198,18 +199,20 @@ export async function saveMessageCache(
 
     try {
         const db = getSessionCacheDB();
-        await db.saveSessionCache(
-            {
-                sessionId: session.id,
-                lastSeq,
-                oldestSeq,
-                hasOlderMessages,
-                schemaVersion: SERIALIZER_SCHEMA_VERSION,
-                cachedAt: Date.now(),
-                reducerStateJson: serializeReducerStateToJson(reducerState),
-            },
-            messages,
-        );
+        const row = {
+            sessionId: session.id,
+            lastSeq,
+            oldestSeq,
+            hasOlderMessages,
+            schemaVersion: SERIALIZER_SCHEMA_VERSION,
+            cachedAt: Date.now(),
+            reducerStateJson: serializeReducerStateToJson(reducerState),
+        };
+        await db.saveSessionCache(row, messages);
+        bump('cacheSaves');
+        // The state is serialised per save because it is a field of the same row; this is what makes
+        // its size visible, since it is the part of a save that scales with the window.
+        bump('cacheBytes', row.reducerStateJson.length);
         log.log(`📦 messageCache: saved ${messages.length} messages for ${session.id} (lastSeq=${lastSeq}, oldestSeq=${oldestSeq}, hasOlderMessages=${hasOlderMessages})`);
         notifyCachedLastSeq(session.id, lastSeq);
         return true;
