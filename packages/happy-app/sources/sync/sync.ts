@@ -3901,8 +3901,20 @@ class Sync {
             via: forceRoute ?? (channel === 'server' ? this.fallbackVia() : channel),
         });
         if (!read) {
+            // The route was tried and did not serve this session — the daemon has no log for it, or
+            // did not answer at all. Recording that is what keeps the next tick from choosing the
+            // same route and reporting the same thing, and what stops the UI from labelling the
+            // session with a channel that has never carried it.
+            const attempted = forceRoute ?? (channel === 'server' ? this.fallbackVia() : channel);
+            if (attempted === 'any') {
+                this.noteRouteFailure(sessionId, 'lan');
+                this.noteRouteFailure(sessionId, 'relay');
+            } else {
+                this.noteRouteFailure(sessionId, attempted);
+            }
             return null;
         }
+        this.clearRouteFailure(sessionId, read.connection.route);
         this.daemonLinks.set(sessionId, {
             machineId: read.machineId,
             cursor: read.cursor,
@@ -4007,6 +4019,55 @@ class Sync {
         return channel;
     }
 
+    /**
+     * Whether this device can reach a machine over one daemon route *now*.
+     *
+     * Three sources, all local: the discovery that found the machine (`lanSightings` from mDNS,
+     * `relaySightings` from a probe that got an answer), a live socket this App is holding to it,
+     * and — the strongest — a read of this very session that came back over that route. The last
+     * one is why a route that is working is not dropped between probes, and why a session pinned
+     * to a route it cannot be served on does not keep looking available.
+     */
+    private routeMeasured(sessionId: string, machineId: string, route: DaemonRoute): boolean {
+        const state = storage.getState();
+        const failedAt = this.routeFailures.get(sessionId)?.[route];
+        if (failedAt !== undefined && Date.now() - failedAt < Sync.ROUTE_FAILURE_TTL_MS) {
+            return false;
+        }
+        const known = route === 'lan' ? state.lanSightings[machineId]?.baseUrl : state.relayEndpoints[machineId]?.baseUrl;
+        if (!known) {
+            return false;
+        }
+        if (route === 'lan' ? state.lanSightings[machineId] : state.relaySightings[machineId]) {
+            return true;
+        }
+        if (this.daemonSockets.get(route)?.baseUrl === known) {
+            return true;
+        }
+        const link = this.daemonLinks.get(sessionId);
+        return !!link && link.machineId === machineId && link.connection.route === route;
+    }
+
+    /** A route that failed to serve this session. Ages out, since a daemon may log it later. */
+    private routeFailures = new Map<string, Partial<Record<DaemonRoute, number>>>();
+
+    /** Long enough that a route is not re-tried every tick, short enough to recover on its own. */
+    private static readonly ROUTE_FAILURE_TTL_MS = 90_000;
+
+    private noteRouteFailure(sessionId: string, route: DaemonRoute): void {
+        const failures = this.routeFailures.get(sessionId) ?? {};
+        failures[route] = Date.now();
+        this.routeFailures.set(sessionId, failures);
+    }
+
+    private clearRouteFailure(sessionId: string, route: DaemonRoute): void {
+        const failures = this.routeFailures.get(sessionId);
+        if (failures?.[route] !== undefined) {
+            delete failures[route];
+            this.routeFailures.set(sessionId, failures);
+        }
+    }
+
     private channelReasons = new Map<string, string>();
 
     /** Which channel a session is on right now, and why. The single source for logic and UI alike. */
@@ -4039,23 +4100,38 @@ class Sync {
             return ['server', 'no-machine-key'];
         }
         // The three channels are peers, ordered by the (debug-configurable) priority list; a
-        // channel that is switched off is simply not in it. The relay costs an extra hop and
-        // exposes metadata to its operator, so by default it sits last and, being gated on a fresh
-        // probe, is only chosen when it demonstrably works. A server counts as reachable unless
-        // its socket is known to be down.
+        // channel that is switched off is simply not in it.
+        //
+        // What a channel may be chosen on is *this device's own measurements*, never the session's
+        // claim that it supports one. A session declares the capability when it registers, which
+        // says what its daemon can do in principle — not that this device can reach it, and not
+        // that the daemon has anything to serve. So a daemon route is available only when the
+        // device has seen the machine on it, holds a live socket to it, or has read this session
+        // over it; and a route that has just failed to serve this session is not chosen again
+        // until that failure ages out. Anything else puts a WiFi icon on a device that never
+        // found a daemon on its network.
         const state = storage.getState();
         const priority = this.channelPriority();
         const serverDown = state.socketStatus === 'disconnected' || state.socketStatus === 'error';
-        const lanSeen = !!state.lanSightings[machineId];
-        const relaySeen = !!state.relaySightings[machineId];
-        const { channel, reachable } = pickChannel(priority, { lan: lanSeen, relay: relaySeen, server: !serverDown });
+        const available = {
+            lan: this.routeMeasured(sessionId, machineId, 'lan'),
+            relay: this.routeMeasured(sessionId, machineId, 'relay'),
+            server: !serverDown,
+        };
+        const { channel, reachable } = pickChannel(priority, available);
+        if (!reachable) {
+            // Nothing on this device has reached the machine. The session is not readable over any
+            // daemon route, so it stays on the server path — which is where the content on screen
+            // came from — rather than being labelled with a channel that was never established.
+            return ['server', 'not-on-network'];
+        }
         if (channel === 'lan') {
-            return ['lan', reachable ? 'reachable' : 'by-priority'];
+            return ['lan', 'reachable'];
         }
         if (channel === 'relay') {
-            return ['relay', serverDown && reachable ? 'server-down-relay' : 'by-priority'];
+            return ['relay', serverDown ? 'server-down-relay' : 'by-priority'];
         }
-        return ['server', priority.length === 1 || lanSeen || relaySeen ? 'by-priority' : 'not-on-network'];
+        return ['server', priority.length === 1 || available.lan || available.relay ? 'by-priority' : 'not-on-network'];
     }
 
     /** Which routes a server-channel read may fall back to: only those switched on. */
