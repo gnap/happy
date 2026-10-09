@@ -118,12 +118,13 @@ export async function fetchSessions(baseUrl: string, token: string): Promise<Lan
 }
 
 /**
- * Fetches a session's local history.
+ * Fetches one page of a session's local history.
  *
- * `since` is the cursor from the previous read; the daemon then returns only what was appended
- * after it. That matters more than it looks: without a cursor every poll re-sends and re-decrypts
- * the whole log, so the cost of a tick grows with the session's length and the channel gets
- * slower the longer it runs.
+ * `since` reads forward from a boundary — what following a session uses; `before` reads back from
+ * one, which is scrolling towards older messages; neither reads the newest page, which is what a
+ * reader that has just opened a session wants. A reader that starts from where it left off instead
+ * has to carry every entry written while it was away before it can show anything recent, and on a
+ * long session that never finishes.
  *
  * Returns null for 404, which the daemon uses for "this machine has no local history for that
  * session yet" — a retryable condition, deliberately distinct from the 401 an unauthorised
@@ -133,9 +134,16 @@ export async function fetchHistory(
     baseUrl: string,
     token: string,
     sessionId: string,
-    since?: string
+    page: { since: string } | { before: string } | Record<string, never> = {}
 ): Promise<LanHistory | null> {
-    const query = since ? `?since=${encodeURIComponent(since)}` : '';
+    const params = new URLSearchParams();
+    if ('since' in page && page.since) {
+        params.set('since', page.since);
+    }
+    if ('before' in page && page.before) {
+        params.set('before', page.before);
+    }
+    const query = params.size > 0 ? `?${params.toString()}` : '';
     const response = await request(
         `${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/history${query}`,
         { token, timeoutMs: HISTORY_TIMEOUT_MS }

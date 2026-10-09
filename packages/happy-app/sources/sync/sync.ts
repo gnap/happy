@@ -20,7 +20,7 @@ import { NormalizedMessage, normalizeRawMessage, RawRecord } from './typesRaw';
 import type { MessageMeta } from './typesMessageMeta';
 import { applySettings, Settings, settingsDefaults, settingsParse, SUPPORTED_SCHEMA_VERSION } from './settings';
 import { Profile, profileParse } from './profile';
-import { loadPendingSettings, savePendingSettings, loadWrappedMachineKeys, saveWrappedMachineKeys, loadLanCursors, saveLanCursors } from './persistence';
+import { loadPendingSettings, savePendingSettings, loadWrappedMachineKeys, saveWrappedMachineKeys } from './persistence';
 import { initializeTracking, tracking } from '@/track';
 import { parseToken } from '@/utils/parseToken';
 import { RevenueCat, LogLevel, PaywallResult } from './revenueCat';
@@ -80,6 +80,34 @@ type OutboxMessage = {
 };
 
 /** Why a session is on the channel it is on; the UI turns these into words. */
+/**
+ * What the last daemon read of a session established: the connection it used, the anchor that
+ * follows the log forward, and the one that walks back from the window it loaded. Runtime state
+ * only — a restart reads the newest page and establishes all three again.
+ */
+type LanLink = {
+    machineId: string;
+    cursor: string;
+    older: string;
+    hasOlder: boolean;
+    connection: LanConnection;
+};
+
+/**
+ * A message's seq when it has one. Log entries written before the server acknowledged them carry
+ * no seq, so the window's edges are best-effort on this channel — the anchors, not these, are what
+ * daemon paging actually uses.
+ */
+const minSeqOf = (messages: { seq?: number }[]): number => {
+    const seqs = messages.map((m) => m.seq).filter((seq): seq is number => seq !== undefined);
+    return seqs.length > 0 ? Math.min(...seqs) : 0;
+};
+
+const maxSeqOf = (messages: { seq?: number }[]): number => {
+    const seqs = messages.map((m) => m.seq).filter((seq): seq is number => seq !== undefined);
+    return seqs.length > 0 ? Math.max(...seqs) : 0;
+};
+
 export type ChannelReason =
     | 'pinned'
     | 'reachable'
@@ -214,16 +242,7 @@ class Sync {
      * Both are kept with the machine that issued them — a cursor addresses a position in one
      * machine's log, and a token only authenticates against that machine.
      */
-    private daemonLinks = new Map<
-        string,
-        { machineId: string; cursor: string; connection: LanConnection }
-    >();
-    /**
-     * Where each session's log read got to, across restarts. `daemonLinks` is runtime state and
-     * dies with the process; this is the half that has to survive it, or a cold start reads the
-     * whole log again — thousands of entries to fetch and decrypt before the session settles.
-     */
-    private lanCursors = loadLanCursors();
+    private daemonLinks = new Map<string, LanLink>();
     /** Pending coalesced cache writes, one per session. */
     private cacheSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
     /**
@@ -3095,6 +3114,14 @@ class Sync {
         const stateNow = storage.getState().sessionMessages[sessionId];
         if (!stateNow?.hasOlderMessages || stateNow.isLoadingOlder) return;
 
+        // A session on a daemon channel scrolls back through the daemon's log, not the server's.
+        // Same window, same prepend, different transport — the window fields and the UI gate are
+        // shared, so only the page request differs.
+        if (this.preferredChannel(sessionId) !== 'server') {
+            await this.fetchOlderViaDaemon(sessionId);
+            return;
+        }
+
         storage.getState().setLoadingOlder(sessionId, true);
 
         const lock = this.getSessionMessageLock(sessionId);
@@ -3154,6 +3181,67 @@ class Sync {
                 });
             } catch (err) {
                 log.log(`💬 fetchOlderMessages failed for ${sessionId}: ${err}`);
+                storage.getState().setLoadingOlder(sessionId, false);
+            } finally {
+                this.releaseMessageFetchSlot();
+            }
+        });
+    }
+
+    /**
+     * Scrolls back one page through the daemon's log.
+     *
+     * The anchor comes from the read that established the window — every daemon page carries both
+     * of its edges — so this needs no seq arithmetic: the log is addressed by position, and the
+     * position of the page before this one is what the last read already handed back. A session
+     * whose window came from the cache and has never been read in this process has no anchor yet,
+     * so the first scroll reads the newest page to establish one before walking back from it.
+     */
+    private async fetchOlderViaDaemon(sessionId: string): Promise<void> {
+        storage.getState().setLoadingOlder(sessionId, true);
+        const lock = this.getSessionMessageLock(sessionId);
+        await lock.inLock(async () => {
+            await this.acquireMessageFetchSlot();
+            try {
+                if (!this.daemonLinks.has(sessionId)) {
+                    await this.fetchSessionFromDaemon(sessionId);
+                }
+                const link = this.daemonLinks.get(sessionId);
+                const machineKey = link ? this.getMachineKey(link.machineId) : null;
+                if (!link || !link.hasOlder || !machineKey) {
+                    storage.getState().setLoadingOlder(sessionId, false);
+                    return;
+                }
+                const read = await readSessionOverLan({
+                    sessionId,
+                    machineId: link.machineId,
+                    accountPublicKey: this.encryption.contentDataKey,
+                    machineKey,
+                    encryption: this.encryption,
+                    page: { kind: 'older', before: link.older },
+                    connection: link.connection,
+                    relayBaseUrl: storage.getState().relayEndpoints[link.machineId]?.baseUrl,
+                    via: link.connection.route,
+                });
+                if (!read) {
+                    storage.getState().setLoadingOlder(sessionId, false);
+                    return;
+                }
+                this.daemonLinks.set(sessionId, { ...link, older: read.older, hasOlder: read.hasOlder });
+                if (read.messages.length > 0) {
+                    const oldestSeq = minSeqOf(read.messages);
+                    storage.getState().applyOlderMessages(sessionId, read.messages, oldestSeq, read.hasOlder);
+                    void this.saveSessionCache(sessionId, {
+                        lastSeq: this.sessionLastSeq.get(sessionId) ?? 0,
+                        oldestSeq,
+                        hasOlderMessages: read.hasOlder,
+                    });
+                } else {
+                    storage.getState().applyOlderMessages(sessionId, [], storage.getState().sessionMessages[sessionId]?.oldestSeq ?? 0, read.hasOlder);
+                }
+                log.log(`📡 fetchOlderViaDaemon: ${read.messages.length} older read for ${sessionId} (hasOlder=${read.hasOlder})`);
+            } catch (error) {
+                log.log(`📡 fetchOlderViaDaemon failed for ${sessionId}: ${String(error)}`);
                 storage.getState().setLoadingOlder(sessionId, false);
             } finally {
                 this.releaseMessageFetchSlot();
@@ -3892,17 +3980,13 @@ class Sync {
 
         const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
         const machineKey = machineId ? this.getMachineKey(machineId) : null;
-        // Resume where the last read stopped, and over the connection it used. Both matter: a
-        // cursor keeps each poll from re-reading and re-decrypting the whole log, and the
-        // connection keeps it from paying for an mDNS browse and a handshake on every tick.
+        // The first read of a session in this process asks for the *newest* page, and only later
+        // reads follow forward from where it ended. Resuming from the last position instead means
+        // carrying every entry written while the App was away before anything recent can be shown,
+        // which on a session this long never completes. The persisted anchor is not used for that
+        // reason: it is where the log was, not where the reader wants to be.
         const remembered = this.daemonLinks.get(sessionId);
         const resumable = remembered && remembered.machineId === machineId ? remembered : undefined;
-        // The persisted cursor is the restart's fallback. The connection is gone with the process,
-        // but the position is not — and resuming from it is the difference between reading the
-        // delta and reading the entire log.
-        const persisted = this.lanCursors[sessionId];
-        const since = resumable?.cursor
-            ?? (persisted && persisted.machineId === machineId ? persisted.cursor : undefined);
         // Each channel reads on its own route and only that route: a session on the relay does not
         // browse for a machine known to be elsewhere, and one on the LAN never goes through the
         // relay. Only the server-failure fallback, which has no channel of its own, tries both.
@@ -3914,7 +3998,7 @@ class Sync {
             accountPublicKey,
             machineKey,
             encryption: this.encryption,
-            since,
+            page: resumable ? { kind: 'follow', cursor: resumable.cursor } : { kind: 'tail' },
             connection: resumable?.connection,
             relayBaseUrl: relayEndpoint?.baseUrl,
             via: forceRoute ?? (channel === 'server' ? this.fallbackVia() : channel),
@@ -3934,13 +4018,18 @@ class Sync {
             return null;
         }
         this.clearRouteFailure(sessionId, read.connection.route);
-        this.daemonLinks.set(sessionId, {
-            machineId: read.machineId,
-            cursor: read.cursor,
-            connection: read.connection,
-        });
-        this.lanCursors[sessionId] = { machineId: read.machineId, cursor: read.cursor };
-        saveLanCursors(this.lanCursors);
+        // A follow read advances the forward anchor only. Its `older` edge belongs to the page it
+        // read, which is newer than the window the user may have scrolled back to: taking it would
+        // point the next "load older" at entries already on screen.
+        this.daemonLinks.set(sessionId, resumable
+            ? { ...resumable, cursor: read.cursor }
+            : {
+                machineId: read.machineId,
+                cursor: read.cursor,
+                older: read.older,
+                hasOlder: read.hasOlder,
+                connection: read.connection,
+            });
         // The machine answered, so bring the live channel up alongside the poll, on the route that
         // answered. Fire-and-forget: polling is what keeps the session readable, and the socket
         // only removes the delay between a message being written and being seen.
@@ -3949,17 +4038,34 @@ class Sync {
         }
 
         // Dedup inside the shared pipeline is what makes `reset` safe to ignore: a full log resent
-        // after a pruned cursor lands as "nothing new" rather than as duplicates.
+        // after a pruned anchor lands as "nothing new" rather than as duplicates.
         const fresh = this.ingestChannelRead(sessionId, {
             messages: read.messages,
             sessionKey: read.sessionKey,
         });
-        // No explicit persist here: `ingestChannelRead` schedules one when the store changed, and
-        // a tick with nothing new costs no write at 2s intervals.
+        // The window's left edge, which the shared pipeline does not carry: it appends and dedups,
+        // and knows nothing about what is on either side of what it holds. A daemon read is the
+        // only thing that can say whether there is older history, so it says it here — the same
+        // patch the server channel applies to its window after a cold page (`applyOlderMessages`
+        // with an empty batch). Only on the first read: later pages must not move a left edge the
+        // user has already scrolled back past.
+        if (!resumable) {
+            const oldestSeq = minSeqOf(read.messages);
+            storage.getState().applyOlderMessages(sessionId, [], oldestSeq, read.hasOlder);
+            storage.getState().setNewestSeq(sessionId, maxSeqOf(read.messages));
+            void this.saveSessionCache(sessionId, {
+                lastSeq: this.sessionLastSeq.get(sessionId) ?? 0,
+                oldestSeq,
+                hasOlderMessages: read.hasOlder,
+            });
+        }
+        // No explicit persist here otherwise: `ingestChannelRead` schedules one when the store
+        // changed, and a tick with nothing new costs no write at 2s intervals.
         log.log(
             `📡 fetchSessionFromDaemon: ${read.messages.length} read, ${fresh} new ` +
             `(${read.decryptedCount}/${read.total} decrypted, tag ${read.tag}` +
-            `${resumable ? `, since ${resumable.cursor}` : ''}${read.reset ? ', cursor reset' : ''})`
+            `${resumable ? `, since ${resumable.cursor}` : ', newest page'}` +
+            `${read.hasOlder ? ', older available' : ''}${read.reset ? ', anchor reset' : ''})`
         );
         return read;
     }

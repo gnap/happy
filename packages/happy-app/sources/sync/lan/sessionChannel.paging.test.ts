@@ -21,38 +21,59 @@ const base = {
 };
 const RELAY = 'https://1.2.3.4/r/' + 'b'.repeat(32);
 
-const page = (entries: any[], cursor: string, more: boolean) => ({
-    tag: 'x', dataEncryptionKey: '', entries, cursor, reset: false, more,
+const page = (over: Partial<Record<string, unknown>> = {}) => ({
+    tag: 'x', dataEncryptionKey: '', entries: [], cursor: '0:10', older: '0:0',
+    hasNewer: false, hasOlder: false, reset: false, ...over,
 });
 
 afterEach(() => { vi.clearAllMocks(); });
 
-describe('readSessionOverLan paging', () => {
-    it('reads pages until the daemon says the log is exhausted', async () => {
-        fetchHistory
-            .mockResolvedValueOnce(page([{ id: 'a' }], '0:1', true))
-            .mockResolvedValueOnce(page([{ id: 'b' }], '0:2', false));
-        decryptLanHistory.mockImplementation(async (_e: unknown, h: any) => ({
-            entries: h.entries.map((e: any) => ({ id: e.id })),
-            decryptedCount: h.entries.length,
-            sessionKey: new Uint8Array(32),
-        }));
+describe('readSessionOverLan pages', () => {
+    it('asks for the newest page when told to, with no anchor at all', async () => {
+        fetchHistory.mockResolvedValue(page({ hasOlder: true }));
+        decryptLanHistory.mockResolvedValue({ entries: [{ id: 'a' }], decryptedCount: 1, sessionKey: new Uint8Array(32) });
 
-        const read = await readSessionOverLan({ ...base, relayBaseUrl: RELAY });
-        expect(fetchHistory).toHaveBeenCalledTimes(2);
-        expect(fetchHistory.mock.calls[1][3]).toBe('0:1');
-        expect(read?.total).toBe(2);
-        expect(read?.cursor).toBe('0:2');
+        const read = await readSessionOverLan({ ...base, relayBaseUrl: RELAY, page: { kind: 'tail' } });
+
+        expect(fetchHistory.mock.calls[0][3]).toEqual({});
+        expect(read?.hasOlder).toBe(true);
+        expect(read?.older).toBe('0:0');
+        expect(read?.total).toBe(1);
     });
 
-    it('stops when a page does not advance the cursor, rather than looping forever', async () => {
-        // `more` stays true and the cursor never moves past the first real position, so a reader
-        // that trusted `more` alone would page until its ceiling.
-        fetchHistory.mockResolvedValue(page([], '0:1', true));
+    it('follows forward from the anchor it was given', async () => {
+        fetchHistory.mockResolvedValue(page());
         decryptLanHistory.mockResolvedValue({ entries: [], decryptedCount: 0, sessionKey: new Uint8Array(32) });
 
-        const read = await readSessionOverLan({ ...base, relayBaseUrl: RELAY });
+        await readSessionOverLan({ ...base, relayBaseUrl: RELAY, page: { kind: 'follow', cursor: '0:42' } });
+
+        expect(fetchHistory.mock.calls[0][3]).toEqual({ since: '0:42' });
+    });
+
+    it('reads back from the anchor it was given', async () => {
+        fetchHistory.mockResolvedValue(page());
+        decryptLanHistory.mockResolvedValue({ entries: [], decryptedCount: 0, sessionKey: new Uint8Array(32) });
+
+        await readSessionOverLan({ ...base, relayBaseUrl: RELAY, page: { kind: 'older', before: '0:42' } });
+
+        expect(fetchHistory.mock.calls[0][3]).toEqual({ before: '0:42' });
+    });
+
+    // Walking forward through a backlog is what leaves a reader minutes behind on a long session:
+    // it must carry every entry written while it was away before it can show anything recent. A
+    // follow read that comes back cut short means exactly that, so the answer is the newest page.
+    it('jumps to the newest page when a follow page comes back cut short', async () => {
+        fetchHistory
+            .mockResolvedValueOnce(page({ hasNewer: true, cursor: '1:500' }))
+            .mockResolvedValueOnce(page({ cursor: '9:9', older: '8:0', hasOlder: true }));
+        decryptLanHistory.mockResolvedValue({ entries: [], decryptedCount: 0, sessionKey: new Uint8Array(32) });
+
+        const read = await readSessionOverLan({ ...base, relayBaseUrl: RELAY, page: { kind: 'follow', cursor: '0:42' } });
+
         expect(fetchHistory).toHaveBeenCalledTimes(2);
-        expect(read?.cursor).toBe('0:1');
+        expect(fetchHistory.mock.calls[0][3]).toEqual({ since: '0:42' });
+        expect(fetchHistory.mock.calls[1][3]).toEqual({});
+        expect(read?.cursor).toBe('9:9');
+        expect(read?.hasOlder).toBe(true);
     });
 });

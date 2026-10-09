@@ -85,17 +85,18 @@ export type LanSessionLogEntry = {
 export type LanHistory = {
     tag: string;
     dataEncryptionKey: string;
-    /** Only the entries written after the `since` this read was made with, when one was sent. */
+    /** The page's entries, oldest first, whichever direction it was read in. */
     entries: LanSessionLogEntry[];
-    /** Opaque position to send back as `since` on the next read. */
+    /** Boundary after the last entry: send back as `since` to follow the log forward. */
     cursor: string;
-    /** True when `since` could not be honoured, so `entries` is the whole log, not a continuation. */
+    /** Boundary before the first entry: send back as `before` to read older. */
+    older: string;
+    /** The log continues past this page, so a reader's page was cut short rather than the log ending. */
+    hasNewer: boolean;
+    /** The log continues before this page — "there is older history", which is what the UI gates on. */
+    hasOlder: boolean;
+    /** True when `since` could not be honoured, so `entries` is the log from its start. */
     reset: boolean;
-    /**
-     * True when the log continues past this page. A daemon bounds each response so a long session
-     * cannot produce a frame its transport will not carry; the reader pages on with `cursor`.
-     */
-    more?: boolean;
 };
 
 export type LanIdentity = {

@@ -127,27 +127,6 @@ export function saveSessionDrafts(drafts: Record<string, string>) {
 }
 
 /**
- * Where each session's LAN log read got to, so a restart resumes instead of re-reading it.
- *
- * Kept per session and with the machine that issued it: a cursor is a `segment:offset` into one
- * machine's file, so it only means anything against the log it came from. Without this every cold
- * start reads and decrypts the whole log — which for a long session is thousands of entries and
- * is felt as the app hanging on open.
- */
-export function loadLanCursors(): Record<string, { machineId: string; cursor: string }> {
-    const cursors = mmkv.getString('lan-cursors');
-    if (cursors) {
-        try {
-            return JSON.parse(cursors);
-        } catch (e) {
-            console.error('Failed to parse LAN cursors', e);
-            return {};
-        }
-    }
-    return {};
-}
-
-/**
  * Relay routes outlive the process on purpose: they are learned from the server, and the case they
  * exist for is the server being down at the next cold start, when nothing could re-learn them.
  */
@@ -167,9 +146,6 @@ export function saveRelayEndpoints(endpoints: Record<string, RelayEndpoint>) {
     mmkv.set('relay-endpoints', JSON.stringify(endpoints));
 }
 
-export function saveLanCursors(cursors: Record<string, { machineId: string; cursor: string }>) {
-    mmkv.set('lan-cursors', JSON.stringify(cursors));
-}
 
 export function loadNewSessionDraft(): NewSessionDraft | null {
     const raw = mmkv.getString(NEW_SESSION_DRAFT_KEY);

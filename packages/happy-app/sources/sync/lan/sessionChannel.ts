@@ -4,8 +4,6 @@ import { discoverMachines } from './discovery';
 import { authenticate, fetchHistory, fetchSessions, LanRequestError } from './client';
 import { decryptLanEntries, decryptLanHistory, type DecryptedLanEntry } from './history';
 
-/** A ceiling on the paging loop, so a daemon that never advances the cursor cannot spin forever. */
-const MAX_HISTORY_PAGES = 500;
 import type { DaemonRoute, LanSessionSummary } from './types';
 
 /**
@@ -33,9 +31,13 @@ export type LanSessionRead = {
     /** How many log entries actually decrypted, against how many were returned. */
     decryptedCount: number;
     total: number;
-    /** Opaque position to pass back as `since` on the next read of this session. */
+    /** Boundary after this page's last entry: hand back as `follow` to keep up with the log. */
     cursor: string;
-    /** True when the cursor was not honoured and `messages` covers the whole log. */
+    /** Boundary before this page's first entry: hand back as `older` to read further back. */
+    older: string;
+    /** The log has entries before this page. The UI's "load older" gate. */
+    hasOlder: boolean;
+    /** True when the anchor was not honoured and `messages` covers the log from its start. */
     reset: boolean;
     /** Endpoint and token used, to hand back as `connection` on the next read. */
     connection: LanConnection;
@@ -211,8 +213,13 @@ export async function readSessionOverLan(options: {
     /** The machine key, used to answer the daemon's challenge. */
     machineKey: Uint8Array | null;
     encryption: Encryption;
-    /** Cursor from the previous read of this session; omit to read the whole log. */
-    since?: string;
+    /**
+     * Which page to read. `tail` is the newest page — what opening a session wants; `follow`
+     * continues forward from a boundary; `older` walks back from one. Every read is one bounded
+     * page: a reader that pages forward until it catches up is a reader that can be minutes behind
+     * on a long session, because it must carry every entry written while it was away.
+     */
+    page: { kind: 'tail' } | { kind: 'follow'; cursor: string } | { kind: 'older'; before: string };
     /**
      * Connection from the previous read. Reused while it is still valid, which is what keeps the
      * mDNS browse and the challenge-response out of every poll — a browse alone runs for its full
@@ -233,57 +240,45 @@ export async function readSessionOverLan(options: {
         return null;
     }
 
-    /** Reads one session from one machine; null means "this machine has no log for it yet". */
+    /**
+     * One page, one request. A follow read that comes back cut short means the reader is further
+     * behind than a page, and the answer to that is not to walk forward through the backlog — it is
+     * to jump to the newest page, which is the only part of it the reader can see anyway. That is
+     * what the server channel does when it anchors its window near the session's newest seq.
+     */
     const readFrom = async (connection: LanConnection): Promise<LanSessionRead | null> => {
-        const entries: DecryptedLanEntry[] = [];
-        let decryptedCount = 0;
-        let tag = '';
-        let sessionKey: Uint8Array | null = null;
-        let cursor = options.since ?? '';
-        let reset = false;
-        let since = options.since;
-
-        // A long session's log does not fit in one response — the daemon bounds each page so the
-        // frame stays within what the transport carries — so read pages until the daemon says the
-        // log is exhausted. The cursor moves every round; a page that left it where it was would
-        // repeat forever, so the loop stops there as well as at a ceiling.
-        for (let page = 0; page < MAX_HISTORY_PAGES; page += 1) {
-            const history = await fetchHistory(
+        const request = (page: typeof options.page) =>
+            fetchHistory(
                 connection.baseUrl,
                 connection.token,
                 options.sessionId,
-                since
+                page.kind === 'follow' ? { since: page.cursor } : page.kind === 'older' ? { before: page.before } : {},
             );
+        const decode = async (history: Awaited<ReturnType<typeof fetchHistory>>) => {
             if (!history) {
                 return null;
             }
             const decrypted = await decryptLanHistory(options.encryption, history);
-            entries.push(...decrypted.entries);
-            decryptedCount += decrypted.decryptedCount;
-            tag = history.tag;
-            sessionKey = decrypted.sessionKey;
-            cursor = history.cursor;
-            // `reset` describes the whole read, so it is the first page's answer that counts.
-            if (page === 0) {
-                reset = history.reset;
-            }
-            if (!history.more || history.cursor === since) {
-                break;
-            }
-            since = history.cursor;
-        }
-
-        return {
-            machineId: connection.machineId,
-            tag,
-            messages: toNormalizedMessages(entries),
-            decryptedCount,
-            total: entries.length,
-            cursor,
-            reset,
-            connection,
-            sessionKey: sessionKey as Uint8Array,
+            return {
+                machineId: connection.machineId,
+                tag: history.tag,
+                messages: toNormalizedMessages(decrypted.entries),
+                decryptedCount: decrypted.decryptedCount,
+                total: decrypted.entries.length,
+                cursor: history.cursor,
+                older: history.older,
+                hasOlder: history.hasOlder,
+                reset: history.reset,
+                connection,
+                sessionKey: decrypted.sessionKey as Uint8Array,
+            };
         };
+
+        const page = await request(options.page);
+        if (page && options.page.kind === 'follow' && page.hasNewer) {
+            return decode(await request({ kind: 'tail' }));
+        }
+        return decode(page);
     };
 
     // The connection from the previous read is tried first, because discovery is the expensive
