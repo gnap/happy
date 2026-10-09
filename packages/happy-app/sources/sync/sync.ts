@@ -1554,9 +1554,23 @@ class Sync {
             // Payload size comes from the header. This used to call JSON.stringify(data).length,
             // which re-serialised the entire (multi-hundred-KB) response on every fetch purely to
             // produce a log line.
+            //
+            // The header is not always there — the server answers chunked, so this logged 0KB and
+            // the largest cost in the app was invisible. Summing the encrypted field lengths is
+            // O(sessions) over strings already in memory, and gives a real number without
+            // re-serialising anything.
             const contentLength = response.headers.get('content-length');
             const respSizeKb = contentLength ? Math.round(parseInt(contentLength) / 1024) : 0;
-            const xferKb = respSizeKb;
+            const ciphertextKb = Math.round(
+                ((data.sessions as Array<{ metadata?: string | null; agentState?: string | null; dataEncryptionKey?: string | null; lastMessage?: { content?: { c?: string } } | null }> | undefined) ?? [])
+                    .reduce((total, s) =>
+                        total
+                        + (s.metadata?.length ?? 0)
+                        + (s.agentState?.length ?? 0)
+                        + (s.dataEncryptionKey?.length ?? 0)
+                        + (s.lastMessage?.content?.c?.length ?? 0), 0) / 1024,
+            );
+            const xferKb = respSizeKb || ciphertextKb;
             const parseMs = Math.round(performance.now() - parseStart);
             const rawSessions = data.sessions;
             if (!Array.isArray(rawSessions)) {
