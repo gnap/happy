@@ -249,6 +249,13 @@ type IncomingMessage = {
     localId?: string | null;
 };
 
+/**
+ * How often a session may tell LAN readers its log grew. Long enough that a burst of writes costs
+ * one hint instead of one per write, short enough that a reader which missed a frame recovers
+ * within a poll interval.
+ */
+const LOG_GROW_MIN_INTERVAL_MS = 2_000;
+
 export class ApiSessionClient extends EventEmitter {
     private readonly token: string;
     /** Server-assigned session id. Distinct from `sid` below. */
@@ -1951,9 +1958,39 @@ export class ApiSessionClient extends EventEmitter {
      * about agentState or metadata until the server's slow session list says so.
      */
     /** Tells LAN readers there is something new to read; the entries themselves stay in the log. */
+    /**
+     * Tells LAN readers that the log grew — at most once per window, plus one trailing hint.
+     *
+     * The entry itself is pushed as it is written (`log-entry`), so this is only the safety net for
+     * a reader that missed frames; acting on it costs that reader a full round trip. Sending one
+     * per append made every written entry cost every reader a fetch, and the fetch found nothing
+     * because the entry had already arrived — a session under load was read several times a second
+     * for no new bytes. The trailing hint matters more than the leading one: it is what a reader
+     * that missed the last frame recovers from, and it would be lost if coalescing only kept the
+     * first.
+     */
     private announceLogGrowth(): void {
-        forwardSessionEventToDaemon({ t: 'log-grew', id: this.sessionId });
+        const now = Date.now();
+        const since = now - this.lastLogGrewAt;
+        if (since >= LOG_GROW_MIN_INTERVAL_MS) {
+            this.lastLogGrewAt = now;
+            forwardSessionEventToDaemon({ t: 'log-grew', id: this.sessionId });
+            return;
+        }
+        if (this.logGrewTimer) {
+            return;
+        }
+        this.logGrewTimer = setTimeout(() => {
+            this.logGrewTimer = null;
+            this.lastLogGrewAt = Date.now();
+            forwardSessionEventToDaemon({ t: 'log-grew', id: this.sessionId });
+        }, LOG_GROW_MIN_INTERVAL_MS - since);
+        this.logGrewTimer.unref?.();
     }
+
+    /** When the last `log-grew` hint went out, and the pending trailing one. */
+    private lastLogGrewAt = 0;
+    private logGrewTimer: ReturnType<typeof setTimeout> | null = null;
 
     private mirrorStateToDaemon(change: { metadata?: { version: number; value: string }; agentState?: { version: number; value: string | null } }): void {
         forwardSessionEventToDaemon({ t: 'update-session', id: this.sessionId, ...change });
