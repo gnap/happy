@@ -133,13 +133,6 @@ interface StorageState {
      */
     lanSocketStatus: { baseUrl: string; connectedAt: number } | null;
     /**
-     * Sessions whose messages were last supplemented from the LAN, by sessionId, with when and how
-     * many. This is what makes the channel visible: without it a switch is indistinguishable from
-     * the server simply having answered, which is exactly the ambiguity the feature exists to
-     * remove. Cleared for a session when the server answers it again.
-     */
-    lanServed: Record<string, { at: number; messages: number }>;
-    /**
      * A per-session, manually forced channel. Absent means automatic: the server, falling back to
      * the LAN when it cannot answer.
      *
@@ -182,8 +175,6 @@ interface StorageState {
     applyLanSightings: (sightings: LanSighting[]) => void;
     /** Record the live LAN socket, or null once it is gone. */
     setLanSocketStatus: (status: { baseUrl: string; connectedAt: number } | null) => void;
-    /** Record that a session's messages came from the LAN. Pass null to clear (the server answered). */
-    markSessionServedOverLan: (sessionId: string, result: { messages: number } | null) => void;
     applyLoaded: () => void;
     applyReady: () => void;
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => { changed: string[], hasReadyEvent: boolean };
@@ -548,7 +539,6 @@ export const storage = create<StorageState>()((set, get) => {
         machines: {},
         lanSightings: {},
         lanSocketStatus: null,
-        lanServed: {},
         lanSessionList: {},
         channelOverride: {},
         artifacts: {},  // Initialize artifacts
@@ -1715,19 +1705,6 @@ export const storage = create<StorageState>()((set, get) => {
                 return { ...state, channelOverride: rest };
             }
             return { ...state, channelOverride: { ...state.channelOverride, [sessionId]: channel } };
-        }),
-        markSessionServedOverLan: (sessionId: string, result: { messages: number } | null) => set((state) => {
-            if (result === null) {
-                if (!(sessionId in state.lanServed)) {
-                    return state;
-                }
-                const { [sessionId]: _cleared, ...rest } = state.lanServed;
-                return { ...state, lanServed: rest };
-            }
-            return {
-                ...state,
-                lanServed: { ...state.lanServed, [sessionId]: { at: Date.now(), messages: result.messages } },
-            };
         }),
         // Artifact methods
         applyArtifacts: (artifacts: DecryptedArtifact[]) => set((state) => {

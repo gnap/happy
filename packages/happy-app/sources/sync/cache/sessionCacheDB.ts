@@ -378,6 +378,29 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
         if (!this.initialized) await this.initialize();
     }
 
+    /**
+     * expo-sqlite hands out a single connection and `withTransactionAsync` is not re-entrant, so
+     * two sessions saving at once nested their BEGINs and failed with "cannot start a transaction
+     * within a transaction" — then "cannot rollback - no transaction is active" when the loser
+     * rolled back. The cache never persisted while still paying the full cost of the write.
+     * Every statement now goes through one queue.
+     */
+    private writeQueue: Promise<unknown> = Promise.resolve();
+
+    private enqueueWrite<T>(work: () => Promise<T>): Promise<T> {
+        const run = this.writeQueue.then(work, work);
+        this.writeQueue = run.catch(() => {});
+        return run;
+    }
+
+    /**
+     * sessionId -> the exact message objects last written. A save diffs against this by identity
+     * (the store rebuilds its array per batch but reuses unchanged objects) so it can write only
+     * what changed. Rewriting 2000+ messages took ~1.5s and ran every few seconds; a streaming
+     * session only ever changes the last handful.
+     */
+    private persisted = new Map<string, Map<string, Message>>();
+
     async getSessionCache(sessionId: string): Promise<CachedSessionRow | null> {
         await this.ensureReady();
         const row = await this.db.getFirstAsync(
@@ -412,41 +435,84 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
                 // Skip malformed rows
             }
         }
+        // Seed the diff baseline: these are exactly the objects now on disk, so the next save
+        // writes only what changed since they were read.
+        this.persisted.set(sessionId, new Map(messages.map((message) => [message.id, message])));
         return messages;
     }
 
     async saveSessionCache(row: CachedSessionRow, messages: Message[]): Promise<void> {
         await this.ensureReady();
-
-        await this.db.withTransactionAsync(async () => {
-            await this.db.runAsync(
-                `INSERT OR REPLACE INTO session_cache
-                    (session_id, last_seq, oldest_seq, has_older_messages, schema_version, cached_at, reducer_state)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-                [row.sessionId, row.lastSeq, row.oldestSeq, row.hasOlderMessages ? 1 : 0, row.schemaVersion, row.cachedAt, row.reducerStateJson]
-            );
-
-            await this.db.runAsync(
-                'DELETE FROM session_messages WHERE session_id = ?',
-                [row.sessionId]
-            );
-
+        await this.enqueueWrite(async () => {
+            const started = Date.now();
+            const known = this.persisted.get(row.sessionId);
+            const next = new Map<string, Message>();
+            const dirty: Message[] = [];
             for (const message of messages) {
+                next.set(message.id, message);
+                if (!known || known.get(message.id) !== message) dirty.push(message);
+            }
+            // A shrinking set means messages went away, which an incremental write cannot express
+            // with INSERT OR REPLACE alone.
+            const rebuild = !known || messages.length < known.size;
+            const toWrite = rebuild ? messages : dirty;
+
+            // Serialised before the transaction opens, not inside it: stringifying would otherwise
+            // hold the write lock across the whole loop.
+            const encoded = toWrite.map((message) => JSON.stringify(message));
+            const stringifyMs = Date.now() - started;
+
+            await this.db.withTransactionAsync(async () => {
                 await this.db.runAsync(
-                    `INSERT OR REPLACE INTO session_messages
-                        (session_id, message_id, created_at, message_json)
-                     VALUES (?, ?, ?, ?)`,
-                    [row.sessionId, message.id, message.createdAt, JSON.stringify(message)]
+                    `INSERT OR REPLACE INTO session_cache
+                        (session_id, last_seq, oldest_seq, has_older_messages, schema_version, cached_at, reducer_state)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                    [row.sessionId, row.lastSeq, row.oldestSeq, row.hasOlderMessages ? 1 : 0, row.schemaVersion, row.cachedAt, row.reducerStateJson]
                 );
+
+                if (rebuild) {
+                    await this.db.runAsync(
+                        'DELETE FROM session_messages WHERE session_id = ?',
+                        [row.sessionId]
+                    );
+                }
+
+                // One round-trip per chunk instead of one per message. At 400+ messages the
+                // per-message await across the bridge was the bulk of the cost. 100 rows x 4
+                // columns stays well under SQLite's bound-parameter limit.
+                const CHUNK = 100;
+                for (let i = 0; i < toWrite.length; i += CHUNK) {
+                    const slice = toWrite.slice(i, i + CHUNK);
+                    const params: unknown[] = [];
+                    for (let j = 0; j < slice.length; j++) {
+                        params.push(row.sessionId, slice[j].id, slice[j].createdAt, encoded[i + j]);
+                    }
+                    await this.db.runAsync(
+                        `INSERT OR REPLACE INTO session_messages
+                            (session_id, message_id, created_at, message_json)
+                         VALUES ${slice.map(() => '(?, ?, ?, ?)').join(', ')}`,
+                        params
+                    );
+                }
+            });
+
+            this.persisted.set(row.sessionId, next);
+
+            const ms = Date.now() - started;
+            if (ms > 50) {
+                log.log(`📦 sessionCacheDB: wrote ${toWrite.length}/${messages.length} messages for ${row.sessionId} in ${ms}ms (stringify ${stringifyMs}ms${rebuild ? ', rebuild' : ''})`);
             }
         });
     }
 
     async clearSessionCache(sessionId: string): Promise<void> {
         await this.ensureReady();
-        await this.db.withTransactionAsync(async () => {
-            await this.db.runAsync('DELETE FROM session_cache WHERE session_id = ?', [sessionId]);
-            await this.db.runAsync('DELETE FROM session_messages WHERE session_id = ?', [sessionId]);
+        await this.enqueueWrite(async () => {
+            await this.db.withTransactionAsync(async () => {
+                await this.db.runAsync('DELETE FROM session_cache WHERE session_id = ?', [sessionId]);
+                await this.db.runAsync('DELETE FROM session_messages WHERE session_id = ?', [sessionId]);
+            });
+            this.persisted.delete(sessionId);
         });
     }
 
@@ -479,31 +545,38 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
 
     async saveSessionsListCache(row: CachedSessionListRow): Promise<void> {
         await this.ensureReady();
-        try {
-            await this.db.runAsync(
-                'INSERT OR REPLACE INTO sessions_list_cache (id, sessions_json, cached_at, encryption_keys_json) VALUES (1, ?, ?, ?)',
-                [row.sessionsJson, row.cachedAt, row.encryptionKeysJson ?? null]
-            );
-        } catch {
-            // Column encryption_keys_json may not exist yet — fall back.
-            await this.db.runAsync(
-                'INSERT OR REPLACE INTO sessions_list_cache (id, sessions_json, cached_at) VALUES (1, ?, ?)',
-                [row.sessionsJson, row.cachedAt]
-            );
-        }
+        await this.enqueueWrite(async () => {
+            try {
+                await this.db.runAsync(
+                    'INSERT OR REPLACE INTO sessions_list_cache (id, sessions_json, cached_at, encryption_keys_json) VALUES (1, ?, ?, ?)',
+                    [row.sessionsJson, row.cachedAt, row.encryptionKeysJson ?? null]
+                );
+            } catch {
+                // Column encryption_keys_json may not exist yet — fall back.
+                await this.db.runAsync(
+                    'INSERT OR REPLACE INTO sessions_list_cache (id, sessions_json, cached_at) VALUES (1, ?, ?)',
+                    [row.sessionsJson, row.cachedAt]
+                );
+            }
+        });
     }
 
     async clearSessionsListCache(): Promise<void> {
         await this.ensureReady();
-        await this.db.runAsync('DELETE FROM sessions_list_cache WHERE id = 1');
+        await this.enqueueWrite(async () => {
+            await this.db.runAsync('DELETE FROM sessions_list_cache WHERE id = 1');
+        });
     }
 
     async clearAllCaches(): Promise<void> {
         await this.ensureReady();
-        await this.db.withTransactionAsync(async () => {
-            await this.db.runAsync('DELETE FROM session_cache');
-            await this.db.runAsync('DELETE FROM session_messages');
-            await this.db.runAsync('DELETE FROM sessions_list_cache');
+        await this.enqueueWrite(async () => {
+            await this.db.withTransactionAsync(async () => {
+                await this.db.runAsync('DELETE FROM session_cache');
+                await this.db.runAsync('DELETE FROM session_messages');
+                await this.db.runAsync('DELETE FROM sessions_list_cache');
+            });
+            this.persisted.clear();
         });
     }
 }
