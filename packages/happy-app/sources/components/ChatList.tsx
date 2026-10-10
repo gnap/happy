@@ -117,7 +117,13 @@ const ChatListInternal = React.memo((props: {
         const clustered = computeMessageClusters(props.messages, clusterOptions);
         const now = Date.now();
         return clustered.map((node, index) => {
-            const older = index + 1 < clustered.length ? clustered[index + 1].createdAt : null;
+            // Both ends of the loaded window always carry one, for the same reason in opposite
+            // directions: the top is where the conversation continues past what is loaded, and the
+            // bottom is the time of the latest thing said — the first thing a reader looks for, and
+            // exactly what the pace rule hides while a conversation is moving.
+            const older = index === 0 || index + 1 >= clustered.length
+                ? null
+                : clustered[index + 1].createdAt;
             return { node, divider: dividerKindFor(node.createdAt, older, now) };
         });
     }, [props.messages, clusterOptions]);

@@ -22,9 +22,11 @@ const startOfDay = (at: number): number => {
  * Which divider belongs directly above the message at `at`, given the message below it in the
  * conversation and the current time.
  *
- * `previousAt` is the *older* neighbour, and null at the top of the loaded window — where a divider
- * always belongs, because above it the conversation continues into messages this device has not
- * loaded, and the reader needs to know where the loaded part begins.
+ * `previousAt` is the *older* neighbour, or null at either end of the loaded window — where a
+ * divider always belongs: at the top because the conversation continues above into messages this
+ * device has not loaded, and at the bottom because the time of the latest message is the first
+ * thing a reader looks for and the only one the pace rule would otherwise hide while the
+ * conversation is still moving.
  */
 export function dividerKindFor(at: number, previousAt: number | null, now: number): DividerKind {
     if (previousAt !== null && at - previousAt < DIVIDER_GAP_MS && startOfDay(at) === startOfDay(previousAt)) {

@@ -5,8 +5,9 @@ const at = (iso: string) => new Date(iso).getTime();
 const now = at('2026-10-10T12:00:00');
 
 describe('dividerKindFor', () => {
-    it('shows a clock divider at the top of the loaded window', () => {
-        // Above it the conversation continues into messages this device has not read.
+    it('always shows one at either end of the loaded window', () => {
+        // No older neighbour means an edge: the top, where the conversation continues past what is
+        // loaded, or the bottom, which is the time of the latest message.
         expect(dividerKindFor(at('2026-10-10T09:30:00'), null, now)).toBe('clock');
         expect(dividerKindFor(at('2026-08-01T09:30:00'), null, now)).toBe('date');
     });
