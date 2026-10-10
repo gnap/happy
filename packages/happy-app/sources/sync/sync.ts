@@ -236,6 +236,8 @@ class Sync {
     private sessionQueueProcessing = new Set<string>();
     private _loggedMissingSessionForSid = new Set<string>();
     private sessionMessageLocks = new Map<string, AsyncLock>();
+    /** Sessions whose persisted window has been consulted in this process. */
+    private hydratedSessions = new Set<string>();
     private sessionSendLocks = new Map<string, AsyncLock>();
     /** Limit concurrent message fetches to avoid network congestion (e.g. 150 sessions all requesting at once on reconnect). */
     private static readonly MAX_CONCURRENT_MESSAGE_FETCHES = 5;
@@ -3049,8 +3051,15 @@ class Sync {
                 // Load first — even if encryption isn't ready yet, cached messages provide instant
                 // display while the network fetch waits.
                 const session = storage.getState().sessions[sessionId];
-                const existingSessionMessages = storage.getState().sessionMessages[sessionId];
-                if (!existingSessionMessages?.isLoaded) {
+                // Asked once per session per process, and *this* is what answers it — not `isLoaded`.
+                // `isLoaded` means "there is something to render", and every path that applies
+                // messages sets it: a push over the daemon socket, a read the socket or the session
+                // list triggered while the user was elsewhere. On a phone with a daemon on the
+                // network that happens within seconds of launch, which used to make this gate skip
+                // the cache for every session — and a session opened afterwards showed only what
+                // had arrived since, with the persisted conversation never read at all.
+                if (!this.hydratedSessions.has(sessionId)) {
+                    this.hydratedSessions.add(sessionId);
                     const cached = await loadMessageCache(session);
                     if (cached) {
                         storage.getState().applyHydratedCache(
@@ -4171,11 +4180,14 @@ class Sync {
         // point of the channel — seeing the newest is.
         const plan = planDaemonRead(anchor);
         let read = await readPage(plan.page, knownConnection);
-        let replace = plan.replace;
-        if (read && !plan.replace && pageMovedTheLog(read)) {
-            // Either the log grew past one page while this App was away, or the anchor was pruned
-            // out from under it. Both mean the held window and the log's newest page are not
-            // adjacent, so the window is replaced rather than extended.
+        // Replacing a window throws the conversation away, so it is reserved for having nothing to
+        // throw away: no window held, or an anchor the log has pruned past (where what is held is
+        // older than anything the daemon can still serve, and no read can connect to it). A window
+        // that is merely behind is *extended* — the channel drains it in bounded pages, and the
+        // caller comes back for more while `hasNewer` holds — which is what the server path does
+        // with its own paging rather than jumping and leaving a gap.
+        let replace = plan.replace ? !hasWindow : false;
+        if (read && !replace && pageMovedTheLog(read) && read.reset) {
             const tail = await readPage({ kind: 'tail' }, read.connection);
             if (tail) {
                 read = tail;
@@ -4245,6 +4257,18 @@ class Sync {
                 storage.getState().setNewestSeq(sessionId, newestSeq);
             }
         }
+        // Still behind after a bounded drain: come back for the rest, throttled the same way the
+        // server path throttles its "still behind session.seq" re-invalidate. The window keeps what
+        // it already has, so catching up adds to the conversation instead of interrupting it.
+        if (read.hasNewer && !replace) {
+            const lastBehindAt = this.sessionLastFetchTime.get(sessionId) ?? 0;
+            if (Date.now() - lastBehindAt >= 2_000) {
+                this.sessionLastFetchTime.set(sessionId, Date.now());
+                log.log(`📡 fetchSessionFromDaemon: still behind for ${sessionId}; reading on`);
+                this.getMessagesSync(sessionId).invalidate();
+            }
+        }
+
         // The session key has to be registered on both paths: the live socket decrypts each pushed
         // entry with it, and a replaced window has had no `ingestChannelRead` to do it.
         if (read.sessionKey) {

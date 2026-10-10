@@ -59,21 +59,42 @@ describe('readSessionOverLan pages', () => {
         expect(fetchHistory.mock.calls[0][3]).toEqual({ before: '0:42' });
     });
 
-    // Walking forward through a backlog is what leaves a reader minutes behind on a long session:
-    // it must carry every entry written while it was away before it can show anything recent. A
-    // follow read that comes back cut short means exactly that, so the answer is the newest page.
-    it('jumps to the newest page when a follow page comes back cut short', async () => {
+    // The window is the conversation the user is looking at, so catching up adds to it. What is
+    // not acceptable is either jumping (which throws the window away) or one unbounded call (which
+    // the UI waits on): both ends are bounded, and the caller is told when there is more.
+    it('extends the window in bounded pages when a follow page comes back cut short', async () => {
         fetchHistory
-            .mockResolvedValueOnce(page({ hasNewer: true, cursor: '1:500' }))
-            .mockResolvedValueOnce(page({ cursor: '9:9', older: '8:0', hasOlder: true }));
-        decryptLanHistory.mockResolvedValue({ entries: [], decryptedCount: 0, sessionKey: new Uint8Array(32) });
+            .mockResolvedValueOnce(page({ hasNewer: true, cursor: '1:500', entries: [{ id: 'a' }] }))
+            .mockResolvedValueOnce(page({ hasNewer: false, cursor: '1:900', entries: [{ id: 'b' }] }));
+        decryptLanHistory.mockImplementation(async (_e: unknown, h: any) => ({
+            entries: h.entries,
+            decryptedCount: h.entries.length,
+            sessionKey: new Uint8Array(32),
+        }));
 
         const read = await readSessionOverLan({ ...base, relayBaseUrl: RELAY, page: { kind: 'follow', cursor: '0:42' } });
 
-        expect(fetchHistory).toHaveBeenCalledTimes(2);
         expect(fetchHistory.mock.calls[0][3]).toEqual({ since: '0:42' });
-        expect(fetchHistory.mock.calls[1][3]).toEqual({});
-        expect(read?.cursor).toBe('9:9');
-        expect(read?.hasOlder).toBe(true);
+        expect(fetchHistory.mock.calls[1][3]).toEqual({ since: '1:500' });
+        expect(read?.total).toBe(2);
+        expect(read?.cursor).toBe('1:900');
+        expect(read?.hasNewer).toBe(false);
+    });
+
+    it('stops at the page cap and reports that it is still behind', async () => {
+        // Four pages per call, then the caller comes back: a backlog is drained over several ticks
+        // rather than in one call nothing can interrupt.
+        let cursor = 0;
+        fetchHistory.mockImplementation(async () => page({ hasNewer: true, cursor: `1:${++cursor}`, entries: [{ id: `x${cursor}` }] }));
+        decryptLanHistory.mockImplementation(async (_e: unknown, h: any) => ({
+            entries: h.entries,
+            decryptedCount: h.entries.length,
+            sessionKey: new Uint8Array(32),
+        }));
+
+        const read = await readSessionOverLan({ ...base, relayBaseUrl: RELAY, page: { kind: 'follow', cursor: '0:0' } });
+
+        expect(fetchHistory).toHaveBeenCalledTimes(4);
+        expect(read?.hasNewer).toBe(true);
     });
 });

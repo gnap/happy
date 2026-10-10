@@ -7,6 +7,13 @@ import { decryptLanEntries, decryptLanHistory, type DecryptedLanEntry } from './
 import type { DaemonRoute, LanSessionSummary } from './types';
 
 /**
+ * How many pages one following read may take before it hands back. Each page is a round trip, and
+ * a window that is many pages behind is drained over several ticks rather than in one long call
+ * that the UI waits on.
+ */
+const MAX_FOLLOW_PAGES = 4;
+
+/**
  * Reads one session over the local network, producing messages in the same shape the server path
  * produces — so the two can be merged rather than living in parallel.
  *
@@ -246,10 +253,12 @@ export async function readSessionOverLan(options: {
     }
 
     /**
-     * One page, one request. A follow read that comes back cut short means the reader is further
-     * behind than a page, and the answer to that is not to walk forward through the backlog — it is
-     * to jump to the newest page, which is the only part of it the reader can see anyway. That is
-     * what the server channel does when it anchors its window near the session's newest seq.
+     * Following reads in bounded pages: a page that comes back cut short means the log is further
+     * ahead than one page, and the window is *extended* rather than abandoned — the messages the
+     * caller already holds are the conversation the user is looking at, so catching up must add to
+     * them, never replace them. `MAX_FOLLOW_PAGES` bounds one call; `hasNewer` stays on the result
+     * so the caller can come back for the rest, which is what the server channel's own "still
+     * behind → invalidate again" loop does.
      */
     const readFrom = async (connection: LanConnection): Promise<LanSessionRead | null> => {
         const request = (page: typeof options.page) =>
@@ -280,11 +289,30 @@ export async function readSessionOverLan(options: {
             };
         };
 
-        const page = await request(options.page);
-        if (page && options.page.kind === 'follow' && page.hasNewer) {
-            return decode(await request({ kind: 'tail' }));
+        const first = await decode(await request(options.page));
+        if (!first || options.page.kind !== 'follow' || !first.hasNewer) {
+            return first;
         }
-        return decode(page);
+
+        let drained = first;
+        for (let page = 1; page < MAX_FOLLOW_PAGES && drained.hasNewer; page += 1) {
+            const next = await decode(await request({ kind: 'follow', cursor: drained.cursor }));
+            // A page that does not move the cursor is a daemon that cannot answer the question; the
+            // alternative to stopping here is a loop that never ends.
+            if (!next || next.cursor === drained.cursor) {
+                break;
+            }
+            drained = {
+                ...next,
+                messages: [...drained.messages, ...next.messages],
+                decryptedCount: drained.decryptedCount + next.decryptedCount,
+                total: drained.total + next.total,
+                // The window's floor is where the *first* page started: following moves the top.
+                older: drained.older,
+                hasOlder: drained.hasOlder,
+            };
+        }
+        return drained;
     };
 
     // The connection from the previous read is tried first, because discovery is the expensive
