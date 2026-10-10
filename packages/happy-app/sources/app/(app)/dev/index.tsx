@@ -70,6 +70,7 @@ export default function DevScreen() {
     const lanSightingCount = Object.keys(useLanSightings()).length;
     const [channelPriority] = useLocalSettingMutable('channelPriority');
     const rates = useMetricRates();
+    const [relayUrl, setRelayUrl] = useLocalSettingMutable('relayUrl');
     const fetchPool = useFetchPoolStats();
     const relayRouteCount = Object.keys(useRelayEndpoints()).length;
     const relaySightingCount = Object.keys(useRelaySightings()).length;
@@ -468,6 +469,27 @@ export default function DevScreen() {
                     detail={channelPriority.map((c) => c === 'lan' ? 'LAN' : c === 'relay' ? 'Relay' : 'Server').join(' › ')}
                     icon={<Ionicons name="git-branch-outline" size={28} color="#007AFF" />}
                     onPress={() => router.push('/dev/channels')}
+                />
+                <Item
+                    title="Relay URL"
+                    subtitle={relayUrl
+                        ? 'Used to reach a machine with the server down, by deriving each machine\'s route from its key'
+                        : 'Not set — with the server off there is no relay route to try'}
+                    detail={relayUrl ?? 'unset'}
+                    icon={<Ionicons name="link-outline" size={28} color="#AF52DE" />}
+                    onPress={async () => {
+                        const entered = await Modal.prompt('Relay URL', 'Base URL of the public relay, e.g. https://relay.example', {
+                            defaultValue: relayUrl ?? '',
+                            placeholder: 'https://relay.example',
+                        });
+                        if (entered === null) {
+                            return; // cancelled
+                        }
+                        setRelayUrl(entered.trim() || null);
+                        // Routes are derived once at startup, so ask for them again now rather than
+                        // making the change wait for the next launch.
+                        void sync.deriveRelayRoutes();
+                    }}
                 />
                 <Item
                     title="Relay Routes"

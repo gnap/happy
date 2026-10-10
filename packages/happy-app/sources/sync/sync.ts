@@ -11,6 +11,10 @@ import { Session, Machine } from './storageTypes';
 import { InvalidateSync } from '@/utils/sync';
 import { ActivityUpdateAccumulator } from './reducer/activityUpdateAccumulator';
 import { randomUUID } from 'expo-crypto';
+import * as Crypto from 'expo-crypto';
+import { hmac_sha256 } from '@/encryption/hmac_sha256';
+import sodium from '@/encryption/libsodium.lib';
+import { relayBaseUrlFor, relayTagFor } from './lan/relayTag';
 import * as Notifications from 'expo-notifications';
 import * as Network from 'expo-network';
 import { registerPushToken } from './apiPush';
@@ -774,6 +778,7 @@ class Sync {
                 this.machineDataKeys.set(machineId, key);
             }
         }
+        void this.deriveRelayRoutes();
 
         // A machine on this network gets its live channel as soon as it is seen. Waiting for a
         // session to ask for the LAN was circular: the declaration that makes a session prefer it
@@ -4562,6 +4567,42 @@ class Sync {
      * pinned to the relay — and is closed once the server is back, so the relay does not carry a
      * second copy of traffic the server already delivers.
      */
+    /**
+     * Fill in each machine's relay route from its machine key.
+     *
+     * A route's usual source is the machine's published `daemonState`, which arrives through the
+     * server — so with the server switched off, which is the one case the relay exists for, the App
+     * has no address to try. It does not need one: the tag is a function of the machine key it has
+     * held since pairing, and the relay's own address is a setting. What the server publishes still
+     * wins where it exists, so this only fills a gap.
+     */
+    async deriveRelayRoutes(): Promise<void> {
+        const relayUrl = storage.getState().localSettings.relayUrl;
+        if (!relayUrl || this.machineDataKeys.size === 0) {
+            return;
+        }
+        for (const [machineId, machineKey] of this.machineDataKeys) {
+            if (storage.getState().relayEndpoints[machineId]) {
+                continue;
+            }
+            try {
+                const tag = await relayTagFor(machineKey, {
+                    hmacSha256: hmac_sha256,
+                    sha256: async (data) => new Uint8Array(await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, new Uint8Array(data))),
+                    signKeyPairFromSeed: (seed) => sodium.crypto_sign_seed_keypair(seed),
+                });
+                storage.getState().applyRelayEndpoint(machineId, {
+                    machineId,
+                    baseUrl: relayBaseUrlFor(relayUrl, tag),
+                    at: Date.now(),
+                });
+                log.log(`🔁 derived the relay route for ${machineId.slice(0, 8)} from its key`);
+            } catch (error) {
+                log.log(`🔁 could not derive a relay route for ${machineId.slice(0, 8)}: ${String(error)}`);
+            }
+        }
+    }
+
     /**
      * Say which daemon connections should exist. Everything else about them — opening, replacing,
      * reconnecting after a drop — belongs to the manager, so this is a statement of intent and
