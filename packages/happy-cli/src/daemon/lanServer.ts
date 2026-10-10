@@ -449,6 +449,16 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
         logger.debug(`[lan] socket frame dropped: not JSON bytes=${text.length}`);
         return;
       }
+      // A reader's heartbeat. The socket is already authenticated, so this needs nothing but a
+      // reply: what it is for is the reader knowing the connection is alive *now*, because a socket
+      // that died silently — the usual shape after iOS suspends an app — looks open from the client
+      // side and would otherwise never be noticed or reconnected. `idleTimeout` does not drop an
+      // idle reader (pings are answered by the client's own stack), so silence here means a dead
+      // path, not a quiet one.
+      if (frame.event === 'ping') {
+        socket.send(JSON.stringify({ event: 'pong' }));
+        return;
+      }
       if (frame.event !== 'send' || typeof frame.payload !== 'object' || frame.payload === null) {
         logger.debug(`[lan] socket frame ignored: event=${String(frame.event)}`);
         return;
