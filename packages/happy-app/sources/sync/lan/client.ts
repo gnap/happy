@@ -75,10 +75,38 @@ async function request(
 }
 
 /**
+ * The handshakes in flight, by daemon. Several paths ask at once — a read, the socket that read
+ * opens, and the retry after either fails — and each one used to run its own challenge and token
+ * exchange: four challenges and two exchanges inside a second, against a daemon that rate-limits
+ * exactly that. One handshake is enough for all of them, and they are asking for the same thing.
+ */
+const handshakes = new Map<string, Promise<{ token: string; expiresAt: number }>>();
+
+/**
  * Exchanges the machine key for a bearer token via the challenge-response pair.
  * Throws when the daemon is unreachable or rejects the proof.
  */
 export async function authenticate(
+    baseUrl: string,
+    machineKey: Uint8Array
+): Promise<{ token: string; expiresAt: number }> {
+    const inFlight = handshakes.get(baseUrl);
+    if (inFlight) {
+        return inFlight;
+    }
+    const started = authenticateOnce(baseUrl, machineKey);
+    handshakes.set(baseUrl, started);
+    try {
+        return await started;
+    } finally {
+        // Cleared either way: a failed handshake must not be handed to everyone who asks next.
+        if (handshakes.get(baseUrl) === started) {
+            handshakes.delete(baseUrl);
+        }
+    }
+}
+
+async function authenticateOnce(
     baseUrl: string,
     machineKey: Uint8Array
 ): Promise<{ token: string; expiresAt: number }> {

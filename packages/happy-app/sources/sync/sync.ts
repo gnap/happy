@@ -4838,8 +4838,25 @@ class Sync {
     /** A connection went away: whatever it was carrying has just lost its push. */
     private onDaemonConnectionDropped(_route: DaemonRoute, baseUrl: string): void {
         for (const [sessionId, channel] of this.daemonLinks) {
-            if (channel.connection.baseUrl === baseUrl) {
-                this.getMessagesSync(sessionId).invalidate();
+            if (channel.connection.baseUrl !== baseUrl) {
+                continue;
+            }
+            this.getMessagesSync(sessionId).invalidate();
+            // The connection that carried this token is gone, and a dropped connection is what a
+            // daemon restart looks like from here — which invalidates every token it ever issued,
+            // because the nonces it checks them against live in memory. Keeping the address and
+            // dropping the credential turns a request that would come back 401 into the challenge
+            // that follows it anyway.
+            this.daemonLinks.set(sessionId, {
+                ...channel,
+                // The address stays; the credential stops counting as live, so the next read
+                // challenges for a new one rather than spending a request on a 401.
+                connection: { ...channel.connection, expiresAt: 0 },
+            });
+        }
+        for (const [machineId, connection] of this.lanMachineConnections) {
+            if (connection.baseUrl === baseUrl) {
+                this.lanMachineConnections.delete(machineId);
             }
         }
     }
