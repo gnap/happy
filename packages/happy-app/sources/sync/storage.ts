@@ -11,6 +11,9 @@ import type { DaemonRoute, LanSighting, RelayEndpoint, SessionChannel } from './
 import type { RelayDirectoryEntry } from './lan/relayDirectory';
 import type { DaemonConnectionState } from './lan/daemonConnections';
 import { resolveMachinePresence, type MachinePresence } from './machinePresence';
+import { channelLinks, type ChannelLinkState } from './channelLinks';
+
+export { channelLinks, type ChannelFacts, type ChannelLinkState } from './channelLinks';
 import { applySettings, Settings } from "./settings";
 import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
@@ -2380,7 +2383,6 @@ export function useRealtimeMode(): 'idle' | 'speaking' {
     return storage(useShallow((state) => state.realtimeMode));
 }
 
-export type ChannelLinkState = 'connected' | 'connecting' | 'disconnected';
 
 /**
  * Per enabled channel, in priority order, how its link is doing. LAN is hidden until a daemon has
@@ -2395,29 +2397,9 @@ export function useChannelLinks(): { channel: SessionChannel; state: ChannelLink
         lanSeen: Object.keys(state.lanSightings).length > 0,
         relayConnected: state.relayHubConnected,
     })));
-    return React.useMemo(() => {
-        const links: { channel: SessionChannel; state: ChannelLinkState }[] = [];
-        for (const channel of priority) {
-            if (channel === 'server') {
-                links.push({
-                    channel,
-                    state: facts.serverStatus === 'connected' ? 'connected' : facts.serverStatus === 'connecting' ? 'connecting' : 'disconnected',
-                });
-            } else if (channel === 'lan') {
-                if (facts.lanSocket) links.push({ channel, state: 'connected' });
-                else if (facts.lanSeen) links.push({ channel, state: 'connecting' });
-            } else {
-                // The relay channel is its one connection to the relay, not the per-machine streams
-                // it carries: whether a stream exists depends on whether a session is being read
-                // right now, which is not a property of the channel. Connected means the relay is
-                // reachable; while it is switched on and not yet reached, the App is trying, and
-                // that is what the blue says.
-                links.push({ channel, state: facts.relayConnected ? 'connected' : 'connecting' });
-            }
-        }
-        return links;
-    }, [priority, facts]);
+    return React.useMemo(() => channelLinks(priority, facts), [priority, facts]);
 }
+
 
 export function useSocketStatus() {
     return storage(useShallow((state) => ({
