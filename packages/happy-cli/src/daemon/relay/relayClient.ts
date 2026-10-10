@@ -15,6 +15,15 @@ export type RelayClientOptions = {
   lanPort: number;
   /** Fired when registration succeeds / the connection drops. */
   onStatus?: (connected: boolean) => void;
+  /**
+   * What this daemon has, for the relay's directory.
+   *
+   * The relay answers "which machines, and what sessions" for every App that asks, the way the
+   * server does — and it can only do that because each daemon publishes its own summary. It is the
+   * same list the LAN API serves, so this says nothing the relay could not already fetch through
+   * itself; publishing it is what saves every App a per-machine round trip and a per-machine socket.
+   */
+  getSessions?: () => unknown[];
   minBackoffMs?: number;
   maxBackoffMs?: number;
 };
@@ -27,6 +36,15 @@ export type RelayClientHandle = {
 
 /** The relay closes a connection rather than deliver a frame larger than this. */
 const RELAY_MAX_FRAME_BYTES = 8 * 1024 * 1024;
+
+/**
+ * How often to check whether this daemon's session list changed.
+ *
+ * A poll rather than a hook into the session lifecycle: the list is already computed on demand for
+ * the LAN API, comparing it costs one stringify, and a session appearing is not urgent enough to
+ * justify threading a notification through every path that starts or ends one.
+ */
+const SESSIONS_PUBLISH_INTERVAL_MS = 5_000;
 const STRIP_REQUEST_HEADERS = new Set(['host', 'connection', 'content-length', 'accept-encoding']);
 const STRIP_RESPONSE_HEADERS = new Set(['content-length', 'content-encoding', 'transfer-encoding', 'connection']);
 
@@ -40,6 +58,34 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
   let socket: WebSocket | null = null;
   let backoff = minBackoff;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The summary last published, so an unchanged one is not re-sent every tick. */
+  let publishedSessions: string | null = null;
+  let sessionsTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * How to write to the *registered* connection, or null while there is none.
+   *
+   * Set once registration completes rather than captured per attempt: the session list is published
+   * on a timer that outlives any one connection, and writing through a stale socket would report
+   * success for a frame nobody received.
+   */
+  let publishFrame: ((frame: unknown) => void) | null = null;
+
+  /** Sends the session list the relay publishes, if it is different from the last one. */
+  const publishSessions = () => {
+    const send = publishFrame;
+    if (!send || stopped) return;
+    let sessions: unknown[];
+    try {
+      sessions = options.getSessions?.() ?? [];
+    } catch (error) {
+      logger.debug(`[relay] could not read the session list: ${String(error)}`);
+      return;
+    }
+    const encoded = JSON.stringify(sessions);
+    if (encoded === publishedSessions) return;
+    publishedSessions = encoded;
+    try { send({ t: 'sessions', sessions }); } catch { /* the close handler reconnects */ }
+  };
 
   const setConnected = (value: boolean) => {
     if (connected !== value) {
@@ -70,10 +116,23 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
         backoff = minBackoff;
         setConnected(true);
         logger.debug(`[relay] registered as ${identity.tag} via ${control}`);
+        // The directory the relay answers with is built from what daemons publish, so it is sent on
+        // registration and again whenever it changes — a session starting or ending is exactly the
+        // change an App wants to hear about.
+        publishFrame = send;
+        publishedSessions = null;
+        publishSessions();
+        if (sessionsTimer === null) {
+          sessionsTimer = setInterval(publishSessions, SESSIONS_PUBLISH_INTERVAL_MS);
+          (sessionsTimer as any).unref?.();
+        }
       } else if (msg.t === 'http') {
         // The query is part of the picture for a history read: `since` is what says whether the
-        // reader is taking pages or re-reading the log from the start every time.
-        logger.debug(`[relay] http ${msg.method} ${msg.path}`);
+        // reader is taking pages or re-reading the log from the start every time. The client
+        // address is what says *who*: every relayed request arrives from the relay's loopback, so
+        // without the forwarded address a handshake storm from four devices is indistinguishable
+        // from one device doing it four times as often.
+        logger.debug(`[relay] http ${msg.method} ${msg.path} from=${msg.ip ?? '-'}`);
         void forwardHttp(msg, options.lanPort).then((res) => {
           if (res && typeof res === 'object' && 'status' in res && (res as { status: number }).status >= 400) {
             logger.debug(`[relay] http-res ${(res as { status: number }).status} ${msg.method} ${msg.path}`);
@@ -88,7 +147,7 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
           send(res);
         });
       } else if (msg.t === 'ws-open') {
-        logger.debug(`[relay] ws-open ${String(msg.path).split('?')[0]}`);
+        logger.debug(`[relay] ws-open ${String(msg.path).split('?')[0]} from=${msg.ip ?? '-'}`);
         const local = new WebSocket(`ws://127.0.0.1:${options.lanPort}${msg.path}`);
         const entry = { ws: local, queue: [] as string[], open: false };
         locals.set(msg.id, entry);
@@ -122,6 +181,7 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
       logger.debug(`[relay] control closed code=${event?.code} reason=${event?.reason ?? ''} opened=${opened} wasCurrent=${socket === ws}`);
       if (socket !== ws) return;
       socket = null;
+      publishFrame = null;
       for (const entry of locals.values()) {
         try { entry.ws.close(); } catch { /* gone */ }
       }
@@ -145,6 +205,7 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     stop: () => {
       stopped = true;
       if (retryTimer) clearTimeout(retryTimer);
+      if (sessionsTimer) { clearInterval(sessionsTimer); sessionsTimer = null; }
       try { socket?.close(); } catch { /* gone */ }
       setConnected(false);
     },

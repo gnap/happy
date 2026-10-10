@@ -1324,7 +1324,27 @@ export async function startDaemon(): Promise<void> {
           // Captured here because the narrowing on `credentials.encryption` does not survive
           // into the callback below.
           const accountPublicKey = credentials.encryption.publicKey;
-          const started = await startLanServer({
+          /**
+         * What this daemon can say about the sessions it runs.
+         *
+         * One function, two consumers: the LAN API serves it to a reader that asks this machine
+         * directly, and the relay publishes it so an App can list every machine's sessions through
+         * the one relay connection it holds. Both want exactly the same summary.
+         */
+        const sessionSummaries = (): LanSessionSummary[] => [...pidToTrackedSession.values()]
+          .filter(session => session.happySessionId !== undefined)
+          .map(session => ({
+            happySessionId: session.happySessionId!,
+            directory: session.directory ?? '',
+            agent: session.agent ?? '',
+            startedBy: String(session.startedBy),
+            isAlive: session.exitTime
+              ? false
+              : (() => { try { process.kill(session.pid, 0); return true; } catch { return false; } })(),
+            lastHeartbeat: session.lastHeartbeat,
+          } satisfies LanSessionSummary));
+
+        const started = await startLanServer({
             secret: credentials.encryption.machineKey,
             machineId,
             accountFingerprint,
@@ -1346,18 +1366,7 @@ export async function startDaemon(): Promise<void> {
               }
               return frames;
             },
-            getSessions: () => [...pidToTrackedSession.values()]
-              .filter(session => session.happySessionId !== undefined)
-              .map(session => ({
-                happySessionId: session.happySessionId!,
-                directory: session.directory ?? '',
-                agent: session.agent ?? '',
-                startedBy: String(session.startedBy),
-                isAlive: session.exitTime
-                  ? false
-                  : (() => { try { process.kill(session.pid, 0); return true; } catch { return false; } })(),
-                lastHeartbeat: session.lastHeartbeat,
-              } satisfies LanSessionSummary)),
+            getSessions: sessionSummaries,
             onSend: ({ sessionId, localId, content }) => {
               // Hand it to the session that owns it. The session routes it exactly as a
               // server-delivered message, so its own outgoing sync then carries it to the server —
@@ -1414,6 +1423,9 @@ export async function startDaemon(): Promise<void> {
               relayUrl: configuration.relayUrl,
               machineKey: credentials.encryption.machineKey,
               lanPort: started.port,
+              // What the relay's directory says about this machine, so an App can list this
+              // machine's sessions without asking it, or holding a connection to it.
+              getSessions: sessionSummaries,
               // Republish as soon as the relay is (un)available rather than at the next slow tick.
               onStatus: () => { void endpointPublisher?.tick(); },
             });
