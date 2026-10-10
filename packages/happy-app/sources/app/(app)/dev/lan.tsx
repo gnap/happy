@@ -74,9 +74,12 @@ const LanDevScreen = React.memo(function LanDevScreen() {
                     push(line('discover', 'no machine has published a relay route (set HAPPY_RELAY_URL on the daemon)', false));
                     return;
                 }
-                const sighting = storage.getState().relaySightings;
+                // What the relay itself says it is holding, rather than a probe: a machine that
+                // dialled in is there, and one that did not is not — there is nothing to interpret.
+                const directory = storage.getState().relayDirectory;
                 for (const machine of discovered) {
-                    push(line('discover', `${machine.serviceName} -> ${machine.baseUrl} (${sighting[machine.machineId] ? 'probe ok' : 'no probe answer yet'})`, !!sighting[machine.machineId]));
+                    const entry = directory[machine.machineId];
+                    push(line('discover', `${machine.serviceName} -> ${machine.baseUrl} (${entry ? `relay holds it, ${entry.sessions.length} session(s)` : 'the relay is not holding it'})`, !!entry));
                 }
             } else {
                 discovered = await discoverMachines({ accountPublicKey });

@@ -8,7 +8,8 @@ import { useRouter } from 'expo-router';
 import Constants from 'expo-constants';
 import * as Application from 'expo-application';
 import { metrics, ratesSince, type MetricRates } from '@/sync/metrics';
-import { useDaemonSocketStatus, useLanSightings, useLocalSettingMutable, useRelayEndpoints, useRelaySightings, useSocketStatus } from '@/sync/storage';
+import type { DaemonConnectionState } from '@/sync/lan/daemonConnections';
+import { useDaemonSockets, useLanSightings, useLocalSettingMutable, useRelayDirectory, useRelayHubConnected, useRelayUnknownTags, useSocketStatus } from '@/sync/storage';
 import { Modal } from '@/modal';
 import { sync } from '@/sync/sync';
 import { getServerUrl, setServerUrl, validateServerUrl } from '@/sync/serverConfig';
@@ -77,21 +78,122 @@ function useMetricRates(): MetricRates | null {
     return rates;
 }
 
+/** How long ago, for a timestamp that may be missing. */
+function formatTimeAgo(timestamp: number | null | undefined): string {
+    if (!timestamp) {
+        return '';
+    }
+    const seconds = Math.floor((Date.now() - timestamp) / 1000);
+    if (seconds < 10) return 'Just now';
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return days < 7 ? `${days}d ago` : new Date(timestamp).toLocaleDateString();
+}
+
+/** The same indicator for every channel's connection state, so the rows can be compared. */
+const PhaseIndicator = React.memo(function PhaseIndicator({ phase }: { phase: DaemonConnectionState['phase'] }) {
+    const { theme } = useUnistyles();
+    switch (phase) {
+        case 'live':
+            return <Ionicons name="checkmark-circle" size={22} color="#34C759" />;
+        case 'opening':
+            return <ActivityIndicator size="small" color={theme.colors.textSecondary} />;
+        case 'retrying':
+            return <Ionicons name="close-circle" size={22} color="#FF9500" />;
+        default:
+            return <Ionicons name="ellipse-outline" size={22} color="#8E8E93" />;
+    }
+});
+
+/** What a set of connections amounts to, for a row that speaks for the whole route. */
+function aggregatePhase(connections: DaemonConnectionState[]): DaemonConnectionState['phase'] {
+    if (connections.some((state) => state.phase === 'live')) return 'live';
+    if (connections.some((state) => state.phase === 'opening')) return 'opening';
+    if (connections.some((state) => state.phase === 'retrying')) return 'retrying';
+    return 'idle';
+}
+
+/** What a connection is doing, in words short enough for a row. */
+function describePhase(state: DaemonConnectionState): string {
+    switch (state.phase) {
+        case 'live':
+            return `up ${formatTimeAgo(state.connectedAt)}`;
+        case 'retrying':
+            return `dropped ${state.attempt ?? 0}×`;
+        default:
+            return state.phase;
+    }
+}
+
+/** The relay itself: one connection, and what it is holding. */
+const RelayRow = React.memo(function RelayRow({
+    enabled,
+    connected,
+    address,
+    machines,
+    sessions,
+}: {
+    enabled: boolean;
+    connected: boolean;
+    address: string;
+    machines: number;
+    sessions: number;
+}) {
+    // Three situations that used to look identical — not switched on, not yet reached, reachable —
+    // and telling them apart is the difference between a setting and a fault.
+    const subtitle = !enabled
+        ? 'Switched off in Channel Priority'
+        : connected
+            ? `${address} · ${machines} machine${machines === 1 ? '' : 's'} · ${sessions} session${sessions === 1 ? '' : 's'}`
+            : `Connecting to ${address}…`;
+    return (
+        <Item
+            title="Relay"
+            subtitle={subtitle}
+            detail={!enabled ? 'off' : connected ? 'connected' : 'idle'}
+            rightElement={!enabled
+                ? <Ionicons name="remove-circle" size={22} color="#8E8E93" />
+                : <PhaseIndicator phase={connected ? 'live' : 'opening'} />}
+            showChevron={false}
+        />
+    );
+});
+
+/** A tag the relay holds that no key on this device matches. */
+const RelayUnknownRow = React.memo(function RelayUnknownRow({ tag }: { tag: string }) {
+    return (
+        <Item
+            title={`Relay · ${tag.slice(0, 8)}`}
+            subtitle="Held by the relay, but this device has no key for it"
+            detail="no key"
+            rightElement={<Ionicons name="help-circle" size={22} color="#FF9500" />}
+            showChevron={false}
+        />
+    );
+});
+
 export default function DevScreen() {
     const router = useRouter();
     const [debugMode, setDebugMode] = useLocalSettingMutable('debugMode');
     const [verboseLogging, setVerboseLogging] = React.useState(false);
     const socketStatus = useSocketStatus();
-    const lanSocketStatus = useDaemonSocketStatus('lan');
-    const relaySocketStatus = useDaemonSocketStatus('relay');
+    const daemonSockets = useDaemonSockets();
     const lanSightingCount = Object.keys(useLanSightings()).length;
+    const lanConnections = Object.values(daemonSockets).filter((state) => state.route === 'lan');
+    const lanConnectedCount = lanConnections.filter((state) => state.phase === 'live').length;
+    const lanPhase = aggregatePhase(lanConnections);
     const [channelPriority] = useLocalSettingMutable('channelPriority');
     const rates = useMetricRates();
-    const [relayUrl, setRelayUrl] = useLocalSettingMutable('relayUrl');
     const fetchPool = useFetchPoolStats();
     const diagnostics = useChannelDiagnostics();
-    const relayRouteCount = Object.keys(useRelayEndpoints()).length;
-    const relaySightingCount = Object.keys(useRelaySightings()).length;
+    const relayDirectory = useRelayDirectory();
+    const relayUnknownTags = useRelayUnknownTags();
+    const relayHubConnected = useRelayHubConnected();
+    const relayEnabled = channelPriority.includes('relay');
     const anonymousId = sync.encryption!.anonID;
     const { theme } = useUnistyles();
 
@@ -130,26 +232,6 @@ export default function DevScreen() {
         }
     };
 
-    // Helper function to format time ago
-    const formatTimeAgo = (timestamp: number | null): string => {
-        if (!timestamp) return '';
-
-        const now = Date.now();
-        const diff = now - timestamp;
-        const seconds = Math.floor(diff / 1000);
-        const minutes = Math.floor(seconds / 60);
-        const hours = Math.floor(minutes / 60);
-        const days = Math.floor(hours / 24);
-
-        if (seconds < 10) return 'Just now';
-        if (seconds < 60) return `${seconds}s ago`;
-        if (minutes < 60) return `${minutes}m ago`;
-        if (hours < 24) return `${hours}h ago`;
-        if (days < 7) return `${days}d ago`;
-
-        return new Date(timestamp).toLocaleDateString();
-    };
-
     // Helper function to get socket status subtitle
     const getSocketStatusSubtitle = (): string => {
         const { status, lastConnectedAt, lastDisconnectedAt } = socketStatus;
@@ -180,6 +262,9 @@ export default function DevScreen() {
                 return <Ionicons name="help-circle" size={22} color="#8E8E93" />;
         }
     };
+
+    const relayMachineCount = Object.keys(relayDirectory).length + relayUnknownTags.length;
+    const relaySessionCount = Object.values(relayDirectory).reduce((total, entry) => total + entry.sessions.length, 0);
 
     return (
         <ItemList>
@@ -464,25 +549,12 @@ export default function DevScreen() {
                     showChevron={false}
                 />
                 <Item
-                    title="LAN Discovery"
-                    subtitle={lanSightingCount > 0
-                        ? `${lanSightingCount} daemon${lanSightingCount === 1 ? '' : 's'} advertising on this network`
-                        : 'No daemon advertising on this network'}
-                    detail={String(lanSightingCount)}
-                    rightElement={lanSightingCount > 0
-                        ? <Ionicons name="checkmark-circle" size={22} color="#34C759" />
-                        : <Ionicons name="close-circle" size={22} color="#8E8E93" />}
-                    showChevron={false}
-                />
-                <Item
-                    title="LAN Socket"
-                    subtitle={lanSocketStatus
-                        ? `${lanSocketStatus.baseUrl} · up ${formatTimeAgo(lanSocketStatus.connectedAt)}`
-                        : 'Idle — opens when a session here can use it'}
-                    detail={lanSocketStatus ? 'live' : 'idle'}
-                    rightElement={lanSocketStatus
-                        ? <Ionicons name="checkmark-circle" size={22} color="#34C759" />
-                        : <Ionicons name="ellipse-outline" size={22} color="#8E8E93" />}
+                    title="LAN"
+                    subtitle={lanSightingCount === 0
+                        ? 'No daemon advertising on this network'
+                        : `${lanSightingCount} advertising · ${lanConnectedCount} connected`}
+                    detail={lanPhase}
+                    rightElement={<PhaseIndicator phase={lanSightingCount === 0 ? 'idle' : lanPhase} />}
                     showChevron={false}
                 />
                 <Item
@@ -498,49 +570,16 @@ export default function DevScreen() {
                     icon={<Ionicons name="git-branch-outline" size={28} color="#007AFF" />}
                     onPress={() => router.push('/dev/channels')}
                 />
-                <Item
-                    title="Relay URL"
-                    subtitle={relayUrl
-                        ? 'Used to reach a machine with the server down, by deriving each machine\'s route from its key'
-                        : 'Not set — with the server off there is no relay route to try'}
-                    detail={relayUrl ?? 'unset'}
-                    icon={<Ionicons name="link-outline" size={28} color="#AF52DE" />}
-                    onPress={async () => {
-                        const entered = await Modal.prompt('Relay URL', 'Base URL of the public relay, e.g. https://relay.example', {
-                            defaultValue: relayUrl ?? '',
-                            placeholder: 'https://relay.example',
-                        });
-                        if (entered === null) {
-                            return; // cancelled
-                        }
-                        setRelayUrl(entered.trim() || null);
-                        // Routes are derived once at startup, so ask for them again now rather than
-                        // making the change wait for the next launch.
-                        void sync.deriveRelayRoutes();
-                    }}
+                <RelayRow
+                    enabled={relayEnabled}
+                    connected={relayHubConnected}
+                    address={sync.relayAddress()}
+                    machines={relayMachineCount}
+                    sessions={relaySessionCount}
                 />
-                <Item
-                    title="Relay Routes"
-                    subtitle={relayRouteCount === 0
-                        ? 'No machine has published a relay route yet'
-                        : `${relaySightingCount} of ${relayRouteCount} route${relayRouteCount === 1 ? '' : 's'} answering a probe`}
-                    detail={`${relaySightingCount}/${relayRouteCount}`}
-                    rightElement={relaySightingCount > 0
-                        ? <Ionicons name="checkmark-circle" size={22} color="#34C759" />
-                        : <Ionicons name="close-circle" size={22} color="#8E8E93" />}
-                    showChevron={false}
-                />
-                <Item
-                    title="Relay Socket"
-                    subtitle={relaySocketStatus
-                        ? `${relaySocketStatus.baseUrl} · up ${formatTimeAgo(relaySocketStatus.connectedAt)}`
-                        : 'Idle — opens while the server is down or a session is pinned to the relay'}
-                    detail={relaySocketStatus ? 'live' : 'idle'}
-                    rightElement={relaySocketStatus
-                        ? <Ionicons name="checkmark-circle" size={22} color="#34C759" />
-                        : <Ionicons name="ellipse-outline" size={22} color="#8E8E93" />}
-                    showChevron={false}
-                />
+                {relayUnknownTags.map((tag) => (
+                    <RelayUnknownRow key={tag} tag={tag} />
+                ))}
                 <Item
                     title="Relay Round Trip"
                     subtitle="Through the public relay: authenticate, list sessions, read and decrypt history"
