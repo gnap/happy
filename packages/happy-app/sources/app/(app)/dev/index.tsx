@@ -23,6 +23,23 @@ function formatRate(rate: number | undefined): string {
 }
 
 /**
+ * The channel's state for whatever session is open, sampled like the rest.
+ *
+ * The point is to answer "why is this conversation missing messages" without guessing: whether the
+ * window covers the session, where the reader has read to, and where pushes have carried it.
+ */
+function useChannelDiagnostics(): ReturnType<typeof sync.channelDiagnostics> {
+    const [state, setState] = React.useState<ReturnType<typeof sync.channelDiagnostics>>(null);
+    React.useEffect(() => {
+        const sample = () => setState(sync.channelDiagnostics(sync.currentVisibleSessionId));
+        sample();
+        const timer = setInterval(sample, 1_000);
+        return () => clearInterval(timer);
+    }, []);
+    return state;
+}
+
+/**
  * The fetch pool, sampled with the same beat as the counters. Fetches that never release are what
  * stop a session refreshing after a suspension, and they are invisible from the outside: this is
  * what makes them show up as a number rather than as "the app is being weird".
@@ -72,6 +89,7 @@ export default function DevScreen() {
     const rates = useMetricRates();
     const [relayUrl, setRelayUrl] = useLocalSettingMutable('relayUrl');
     const fetchPool = useFetchPoolStats();
+    const diagnostics = useChannelDiagnostics();
     const relayRouteCount = Object.keys(useRelayEndpoints()).length;
     const relaySightingCount = Object.keys(useRelaySightings()).length;
     const anonymousId = sync.encryption!.anonID;
@@ -407,6 +425,16 @@ export default function DevScreen() {
                     subtitle={rates
                         ? `${formatRate(rates.cacheSaves)} saves/s · ${(rates.cacheBytes / 1024).toFixed(1)} KB/s of state serialised`
                         : 'sampling…'}
+                    showChevron={false}
+                />
+                <Item
+                    title="Open session channel"
+                    subtitle={diagnostics
+                        ? `${diagnostics.channel} · window ${diagnostics.window} · ${diagnostics.hasOlder ? 'older available' : 'complete'}`
+                        : 'No session is open'}
+                    detail={diagnostics
+                        ? `head ${diagnostics.logHead ?? '—'} · read ${diagnostics.readTo ?? '—'} · pushed ${diagnostics.pushedTo ?? '—'}`
+                        : undefined}
                     showChevron={false}
                 />
                 <Item

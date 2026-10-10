@@ -351,7 +351,7 @@ class Sync {
     private backgroundedAt: number | null = null;
     private appStateSubscription: ReturnType<typeof AppState.addEventListener> | null = null;
     private networkStateSubscription: ReturnType<typeof Network.addNetworkStateListener> | null = null;
-    private currentVisibleSessionId: string | null = null;
+    currentVisibleSessionId: string | null = null;
     private lastDesktopSessionRefreshAt = 0;
     private lastSessionRefreshAt = 0;
     /** Timestamp of the last successful session fetch; used as delta base. */
@@ -2920,6 +2920,40 @@ class Sync {
      * resume from inheriting those wedges: the timers all restart on 'active', and every one of
      * them would otherwise be a no-op against a lock that is still held.
      */
+    /**
+     * What the channel currently holds for a session, for the Dev Tools page.
+     *
+     * A conversation that is missing messages cannot be diagnosed from the outside: "delivered but
+     * not opened", "the window never covered it" and "the reader believes it is up to date" all look
+     * the same from a log of reads. These are the numbers that tell them apart.
+     */
+    channelDiagnostics(sessionId: string | null): {
+        channel: string;
+        window: string;
+        hasOlder: boolean;
+        readTo: string | null;
+        pushedTo: string | null;
+        logHead: string | null;
+        lastRead: string;
+    } | null {
+        if (!sessionId) {
+            return null;
+        }
+        const state = storage.getState();
+        const messages = state.sessionMessages[sessionId];
+        const link = this.daemonLinks.get(sessionId);
+        const lastRead = state.sessionMessages[sessionId]?.isFetching ? 'in flight' : 'idle';
+        return {
+            channel: this.preferredChannel(sessionId),
+            window: messages ? `${messages.oldestSeq}–${messages.newestSeq} (${messages.messages.length} messages)` : 'none',
+            hasOlder: messages?.hasOlderMessages ?? false,
+            readTo: link?.cursor ?? null,
+            pushedTo: this.pushedPositions.get(sessionId) ?? null,
+            logHead: this.lastHintHeads.get(sessionId) ?? null,
+            lastRead,
+        };
+    }
+
     /** The fetch pool as the Dev Tools page reads it: a stuck pool is otherwise invisible. */
     fetchSlotStats(): { inFlight: number; queued: number; oldestMs: number } {
         return {
@@ -4667,6 +4701,7 @@ class Sync {
             // nothing to do. Without this the App read the log every time anything was appended —
             // a round trip, a decrypt and a store write to learn that the entry had already arrived
             // over this very socket, which is a radio waking up every couple of seconds on a phone.
+            this.lastHintHeads.set(body.id, body.head ?? '(none)');
             if (this.isAtLogHead(body.id, body.head)) {
                 return;
             }
@@ -4720,6 +4755,9 @@ class Sync {
      * a read was what brought it.
      */
     private pushedPositions = new Map<string, string>();
+
+    /** The last head a hint reported, per session: what the positions above are compared against. */
+    private lastHintHeads = new Map<string, string>();
 
     private notePushedPosition(sessionId: string, anchor: string | undefined): void {
         if (!anchor || this.compareAnchors(anchor, this.pushedPositions.get(sessionId)) <= 0) {
