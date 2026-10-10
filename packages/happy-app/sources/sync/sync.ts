@@ -4653,16 +4653,24 @@ class Sync {
      */
     private onDaemonUpdate(route: DaemonRoute, payload: unknown): void {
         const body = (payload as {
-            body?: { t?: string; id?: string; entry?: LanSessionLogEntry };
+            body?: { t?: string; id?: string; entry?: LanSessionLogEntry; anchor?: string; head?: string };
         } | null)?.body;
         // The daemon's hint that a session's local log grew. It is not a server update, so it never
         // reaches handleUpdate: it only means "read now" instead of waiting for the next poll tick.
         // It stays even though entries are pushed as well — it is what recovers a frame the socket
         // missed while it was down.
         if (body?.t === 'log-grew' && body.id) {
-            if (this.preferredChannel(body.id) === route) {
-                this.messagesSync.get(body.id)?.invalidate();
+            if (this.preferredChannel(body.id) !== route) {
+                return;
             }
+            // The hint carries where the log now ends, so a reader that is already there has
+            // nothing to do. Without this the App read the log every time anything was appended —
+            // a round trip, a decrypt and a store write to learn that the entry had already arrived
+            // over this very socket, which is a radio waking up every couple of seconds on a phone.
+            if (this.isAtLogHead(body.id, body.head)) {
+                return;
+            }
+            this.messagesSync.get(body.id)?.invalidate();
             return;
         }
         // An entry the session wrote to its log, pushed as it was appended. Applying it here is what
@@ -4672,6 +4680,9 @@ class Sync {
         // applying both would be the one path the dedup is not set up to cover.
         if (body?.t === 'log-entry' && body.id && body.entry) {
             if (this.preferredChannel(body.id) === route) {
+                // The entry's position is recorded before it is applied, so the read that the next
+                // hint might otherwise trigger can see that this has already been delivered.
+                this.notePushedPosition(body.id, body.anchor);
                 void this.applyPushedDaemonEntry(body.id, body.entry);
             }
             return;
@@ -4704,6 +4715,60 @@ class Sync {
                 }
             }
         }
+    }
+
+    /**
+     * Where the App's reading of a session's log has got to, counting what has been pushed as well
+     * as what has been read: an entry delivered over the socket is one the App holds, whether or not
+     * a read was what brought it.
+     */
+    private pushedPositions = new Map<string, string>();
+
+    private notePushedPosition(sessionId: string, anchor: string | undefined): void {
+        if (!anchor || this.compareAnchors(anchor, this.pushedPositions.get(sessionId)) <= 0) {
+            return;
+        }
+        this.pushedPositions.set(sessionId, anchor);
+        // Follow forward from here rather than from wherever the last read stopped: the entries
+        // between are already applied, and re-fetching them only to dedup them away is the round
+        // trip this exists to avoid.
+        const link = this.daemonLinks.get(sessionId);
+        if (link && this.compareAnchors(anchor, link.cursor) > 0) {
+            this.daemonLinks.set(sessionId, { ...link, cursor: anchor });
+        }
+    }
+
+    /** `"<segment>:<byte>"`, compared as positions: the segment first, then the byte within it. */
+    private compareAnchors(a: string, b: string | undefined): number {
+        if (b === undefined) {
+            return 1;
+        }
+        const parse = (value: string) => value.split(':').map((part) => Number.parseInt(part, 10));
+        const [aSegment, aByte] = parse(a);
+        const [bSegment, bByte] = parse(b);
+        if (!Number.isFinite(aSegment) || !Number.isFinite(bSegment)) {
+            return 0;
+        }
+        return aSegment === bSegment ? aByte - bByte : aSegment - bSegment;
+    }
+
+    /**
+     * Whether this App already holds everything up to `head`.
+     *
+     * Only true with a window in place: without one there is nothing for a push to be a continuation
+     * of, and the read that establishes it has to happen before "up to date" can mean anything.
+     */
+    private isAtLogHead(sessionId: string, head: string | undefined): boolean {
+        if (!head || !this.daemonLinks.has(sessionId)) {
+            return false;
+        }
+        const position = this.pushedPositions.get(sessionId) ?? this.daemonLinks.get(sessionId)?.cursor;
+        const comparison = position ? this.compareAnchors(head, position) : 1;
+        if (comparison <= 0) {
+            log.log(`📡 log-grew for ${sessionId} is already covered; no read`);
+            return true;
+        }
+        return false;
     }
 
     /** The session's verdict on a message sent over its connection. */
