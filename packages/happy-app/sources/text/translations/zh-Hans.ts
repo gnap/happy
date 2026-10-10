@@ -94,6 +94,7 @@ export const zhHans: TranslationStructure = {
         justNow: '刚刚',
         minutesAgo: ({ count }: { count: number }) => `${count} 分钟前`,
         hoursAgo: ({ count }: { count: number }) => `${count} 小时前`,
+        yesterday: '昨天',
     },
 
     connect: {

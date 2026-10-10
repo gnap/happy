@@ -127,6 +127,7 @@ export const ja: TranslationStructure = {
         justNow: 'たった今',
         minutesAgo: ({ count }: { count: number }) => `${count}分前`,
         hoursAgo: ({ count }: { count: number }) => `${count}時間前`,
+        yesterday: '昨日',
     },
 
     connect: {

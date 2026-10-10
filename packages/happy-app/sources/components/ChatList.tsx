@@ -1,18 +1,42 @@
 import * as React from 'react';
 import { useSession, useSessionMessages } from "@/sync/storage";
-import { ActivityIndicator, FlatList, NativeScrollEvent, NativeSyntheticEvent, Platform, View } from 'react-native';
+import { ActivityIndicator, FlatList, NativeScrollEvent, NativeSyntheticEvent, Platform, StyleSheet, Text, View } from 'react-native';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useHeaderHeight } from '@/utils/responsive';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MessageView } from './MessageView';
 import { TaskListView } from './TaskListView';
-import { computeMessageClusters, ClusterOptions } from './clusterTimeline';
+import { computeMessageClusters, ClusterOptions, type TaskClusterMessage } from './clusterTimeline';
 import { Metadata, Session } from '@/sync/storageTypes';
 import { layout } from './layout';
 import { ChatFooter } from './ChatFooter';
 import { Message } from '@/sync/typesMessage';
 import { sync } from '@/sync/sync';
 import { useUnistyles } from 'react-native-unistyles';
+import { dividerKindFor, formatClock, formatDividerDate, type DividerKind } from '@/sync/messageDividers';
+import { t } from '@/text';
+
+/** One row of the list: the thing to draw, and the divider that belongs above it. */
+type ChatRow = { node: Message | TaskClusterMessage; divider: DividerKind };
+
+/**
+ * A time divider above a group of messages, the way a chat app marks "when" without repeating a
+ * clock on every bubble. Sits inside the row it belongs to, which on an inverted list is the row
+ * above the message it labels.
+ */
+const TimeDivider = React.memo(({ kind, at }: { kind: DividerKind; at: number }) => {
+    const { theme } = useUnistyles();
+    const label = kind === 'yesterday'
+        ? `${t('time.yesterday')} ${formatClock(at)}`
+        : kind === 'date'
+            ? `${formatDividerDate(at, Date.now())} ${formatClock(at)}`
+            : formatClock(at);
+    return (
+        <View style={styles.dividerRow}>
+            <Text style={[styles.dividerText, { color: theme.colors.textSecondary, backgroundColor: theme.colors.surfaceHigh }]}>{label}</Text>
+        </View>
+    );
+});
 
 export const ChatList = React.memo((props: { session: Session }) => {
     const { messages, hasOlderMessages, isLoadingOlder, isFetching } = useSessionMessages(props.session.id);
@@ -71,7 +95,7 @@ const ChatListInternal = React.memo((props: {
     isFetching: boolean,
     tasks: Session['tasks'],
 }) => {
-    const flatListRef = useRef<FlatList>(null);
+    const flatListRef = useRef<FlatList<ChatRow>>(null);
     // Track whether the user is near the visual bottom (newest messages).
     // In an inverted FlatList, offset 0 = visual bottom.
     const isNearBottomRef = useRef(true);
@@ -86,25 +110,42 @@ const ChatListInternal = React.memo((props: {
         return m.size > 0 ? { taskContentMap: m } : undefined;
     }, [props.tasks]);
 
-    const messagesWithTasks = useMemo(
-        () => computeMessageClusters(props.messages, clusterOptions),
-        [props.messages, clusterOptions],
-    );
+    // Each row carries the divider that belongs above it. The list renders newest first and is
+    // inverted, so the row *below* a message in the data is the older one — which is the neighbour
+    // the divider is decided against.
+    const rows = useMemo<ChatRow[]>(() => {
+        const clustered = computeMessageClusters(props.messages, clusterOptions);
+        const now = Date.now();
+        return clustered.map((node, index) => {
+            const older = index + 1 < clustered.length ? clustered[index + 1].createdAt : null;
+            return { node, divider: dividerKindFor(node.createdAt, older, now) };
+        });
+    }, [props.messages, clusterOptions]);
 
-    const keyExtractor = useCallback((item: any) => item.id, []);
-    const renderItem = useCallback(({ item }: { item: any }) => {
+    const keyExtractor = useCallback((row: ChatRow) => row.node.id, []);
+    const renderItem = useCallback(({ item: row }: { item: ChatRow }) => {
+        const item = row.node;
+        const divider = row.divider === 'none' ? null : <TimeDivider kind={row.divider} at={item.createdAt} />;
         if (item.kind === 'task-cluster') {
             return (
-                <View style={{ flexDirection: 'row', justifyContent: 'center' }}>
-                    <View style={{ flexDirection: 'column', flexGrow: 1, flexBasis: 0, maxWidth: layout.maxWidth }}>
-                        <View style={{ marginHorizontal: 8, marginBottom: 12 }}>
-                            <TaskListView tasks={item.tasks} />
+                <>
+                    {divider}
+                    <View style={{ flexDirection: 'row', justifyContent: 'center' }}>
+                        <View style={{ flexDirection: 'column', flexGrow: 1, flexBasis: 0, maxWidth: layout.maxWidth }}>
+                            <View style={{ marginHorizontal: 8, marginBottom: 12 }}>
+                                <TaskListView tasks={item.tasks} />
+                            </View>
                         </View>
                     </View>
-                </View>
+                </>
             );
         }
-        return <MessageView message={item} metadata={props.metadata} sessionId={props.sessionId} />;
+        return (
+            <>
+                {divider}
+                <MessageView message={item} metadata={props.metadata} sessionId={props.sessionId} />
+            </>
+        );
     }, [props.metadata, props.sessionId]);
 
     const handleEndReached = useCallback(() => {
@@ -125,7 +166,7 @@ const ChatListInternal = React.memo((props: {
         if (curr > prev && isNearBottomRef.current) {
             flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
         }
-    }, [messagesWithTasks]);
+    }, [rows]);
 
     // In an inverted FlatList:
     //   ListHeaderComponent → visual bottom (below newest message, above input)
@@ -146,9 +187,9 @@ const ChatListInternal = React.memo((props: {
     ), [props.isLoadingOlder]);
 
     return (
-        <FlatList
+        <FlatList<ChatRow>
             ref={flatListRef}
-            data={messagesWithTasks}
+            data={rows}
             inverted={true}
             keyExtractor={keyExtractor}
             // No maintainVisibleContentPosition here, deliberately. On an inverted list it defeats
@@ -180,4 +221,18 @@ const ChatListInternal = React.memo((props: {
             windowSize={7}
         />
     )
+});
+
+const styles = StyleSheet.create({
+    dividerRow: {
+        alignItems: 'center',
+        paddingVertical: 10,
+    },
+    dividerText: {
+        fontSize: 12,
+        paddingHorizontal: 8,
+        paddingVertical: 2,
+        borderRadius: 10,
+        overflow: 'hidden',
+    },
 });

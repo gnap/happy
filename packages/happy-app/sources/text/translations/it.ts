@@ -124,6 +124,7 @@ export const it: TranslationStructure = {
         justNow: 'proprio ora',
         minutesAgo: ({ count }: { count: number }) => `${count} ${count === 1 ? 'minuto' : 'minuti'} fa`,
         hoursAgo: ({ count }: { count: number }) => `${count} ${count === 1 ? 'ora' : 'ore'} fa`,
+        yesterday: 'ieri',
     },
 
     connect: {

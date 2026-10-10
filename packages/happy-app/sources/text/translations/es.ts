@@ -92,6 +92,7 @@ export const es: TranslationStructure = {
         justNow: 'ahora mismo',
         minutesAgo: ({ count }: { count: number }) => `hace ${count} minuto${count !== 1 ? 's' : ''}`,
         hoursAgo: ({ count }: { count: number }) => `hace ${count} hora${count !== 1 ? 's' : ''}`,
+        yesterday: 'ayer',
     },
 
     connect: {

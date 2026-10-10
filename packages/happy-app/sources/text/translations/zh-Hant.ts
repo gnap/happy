@@ -93,6 +93,7 @@ export const zhHant: TranslationStructure = {
         justNow: '剛剛',
         minutesAgo: ({ count }: { count: number }) => `${count} 分鐘前`,
         hoursAgo: ({ count }: { count: number }) => `${count} 小時前`,
+        yesterday: '昨天',
     },
 
     connect: {
