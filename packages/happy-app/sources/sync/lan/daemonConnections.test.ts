@@ -18,7 +18,7 @@ function makeManager() {
     const state: [string, unknown][] = [];
     const manager = new DaemonConnections({
         open: async (t, handlers) => {
-            const handle = { baseUrl: t.baseUrl, send: vi.fn(() => true), close: vi.fn() } as unknown as LanSocketHandle;
+            const handle = { baseUrl: t.baseUrl, send: vi.fn(() => true), ping: vi.fn(() => true), close: vi.fn() } as unknown as LanSocketHandle;
             opens.push({ target: t, handlers, handle });
             return handle;
         },
@@ -27,6 +27,7 @@ function makeManager() {
         onStateChange: (route, s) => { state.push([route, s]); },
         log: () => {},
         retryDelayMs: () => 0,
+        heartbeat: { intervalMs: 1, timeoutMs: 4 },
     });
     return { manager, opens, state };
 }
@@ -108,6 +109,32 @@ describe('DaemonConnections', () => {
         await tick();
         expect(manager.current('lan')?.baseUrl).toBe('http://10.0.0.9:55673');
         expect(opens).toHaveLength(2);
+    });
+
+    it('asks for a heartbeat, and ends the connection when the daemon stops answering', async () => {
+        // A socket killed silently — iOS suspending the App — stays open from this side, so this
+        // unanswered heartbeat is the only thing that notices it and reconnects.
+        const { manager, opens } = makeManager();
+        manager.want(target());
+        await tick();
+        expect(opens[0].handlers.onBeat).toBeTypeOf('function');
+
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        // Ended and replaced by a fresh connection, rather than left there looking alive.
+        expect(opens[0].handle.close).toHaveBeenCalled();
+        expect(opens.length).toBeGreaterThan(1);
+        expect(manager.current('lan')?.handle).toBe(opens[opens.length - 1].handle);
+    });
+
+    it('treats an answered heartbeat as the connection being alive', async () => {
+        const { manager, opens } = makeManager();
+        manager.want(target());
+        await tick();
+        const answered = setInterval(() => opens[opens.length - 1]?.handlers.onBeat(), 1);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        clearInterval(answered);
+        expect(manager.current('lan')).not.toBeNull();
+        expect(opens).toHaveLength(1);
     });
 
     it('drops every route not listed when asked for a set', async () => {

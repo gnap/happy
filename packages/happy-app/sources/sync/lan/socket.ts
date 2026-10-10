@@ -41,6 +41,11 @@ export type LanSocketHandle = {
      * must stay unreadable here and is decrypted only by the session that owns the key.
      */
     send: (message: { sessionId: string; localId: string; content: string }) => boolean;
+    /**
+     * Ask the daemon to prove the connection is alive. False when the socket is not open; a true
+     * return only means the frame was written, so liveness is the `onBeat` callback, not this.
+     */
+    ping: () => boolean;
     close: () => void;
 };
 
@@ -72,6 +77,12 @@ export async function openLanSocket(options: {
      * delivery, and only the session can say whether the message reached the agent.
      */
     onDelivered?: (result: { sessionId: string; localId: string; delivered: boolean }) => void;
+    /**
+     * The daemon answered a heartbeat. This is the only proof that the connection is alive *now*:
+     * a socket killed silently — the usual shape after iOS suspends an app — still reads as open
+     * from here, and without this nothing would ever notice, so pushes would simply stop arriving.
+     */
+    onBeat?: () => void;
 }): Promise<LanSocketHandle | null> {
     let nonce: string;
     try {
@@ -105,6 +116,10 @@ export async function openLanSocket(options: {
         }
         // An unknown event is ignored rather than guessed at, so a daemon that learns to push more
         // cannot make an older App misread it.
+        if (frame.event === 'pong') {
+            options.onBeat?.();
+            return;
+        }
         if (frame.event === 'update') {
             options.onUpdate(frame.payload);
             return;
@@ -158,6 +173,17 @@ export async function openLanSocket(options: {
 
     return {
         baseUrl: options.baseUrl,
+        ping: () => {
+            if (deliberatelyClosed || socket.readyState !== 1) {
+                return false;
+            }
+            try {
+                socket.send(JSON.stringify({ event: 'ping' }));
+                return true;
+            } catch {
+                return false;
+            }
+        },
         send: (message) => {
             // 1 = OPEN. Checked per send rather than once, because a socket can close between
             // sends and reporting success for a write nobody receives would lose the message.

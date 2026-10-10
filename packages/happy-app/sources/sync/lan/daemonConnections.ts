@@ -18,7 +18,17 @@ export type DaemonTarget = {
 
 export type DaemonConnectionState = { baseUrl: string; machineId: string; connectedAt: number };
 
-export type DaemonConnectionDeps = {
+type LiveConnection = {
+    handle: LanSocketHandle;
+    target: DaemonTarget;
+    /** When the outstanding heartbeat was sent, or null while the daemon has answered the last one. */
+    awaitingBeatSince: number | null;
+    beatTimer: ReturnType<typeof setTimeout> | null;
+};
+
+const DEFAULT_HEARTBEAT = { intervalMs: 15_000, timeoutMs: 45_000 };
+
+type DaemonConnectionDeps = {
     /** Opens one connection, or returns null when it could not be established. */
     open: (
         target: DaemonTarget,
@@ -26,6 +36,7 @@ export type DaemonConnectionDeps = {
             onUpdate: (payload: unknown) => void;
             onDelivered: (result: { sessionId: string; localId: string; delivered: boolean }) => void;
             onClosed: (info: { deliberate: boolean; code?: number; reason?: string }) => void;
+            onBeat: () => void;
         },
     ) => Promise<LanSocketHandle | null>;
     onUpdate: (target: DaemonTarget, payload: unknown) => void;
@@ -39,9 +50,14 @@ export type DaemonConnectionDeps = {
     log: (message: string) => void;
     /** Backstop for a connection that keeps dropping; production uses the default. */
     retryDelayMs?: (attempt: number) => number;
+    /**
+     * How often to ask a connection to prove it is alive, and how long an answer may take. A socket
+     * killed silently — iOS suspending the App is the usual way — still reads as open from this
+     * side, so without this the channel would simply stop delivering and nothing would notice.
+     */
+    heartbeat?: { intervalMs: number; timeoutMs: number };
 };
 
-type Live = { handle: LanSocketHandle; target: DaemonTarget; drops: number; retryTimer: ReturnType<typeof setTimeout> | null };
 
 /**
  * Holds one live connection per daemon route, and is the only thing that opens or closes one.
@@ -58,7 +74,7 @@ type Live = { handle: LanSocketHandle; target: DaemonTarget; drops: number; retr
  */
 export class DaemonConnections {
     private desired = new Map<DaemonRoute, DaemonTarget>();
-    private live = new Map<DaemonRoute, { handle: LanSocketHandle; target: DaemonTarget }>();
+    private live = new Map<DaemonRoute, LiveConnection>();
     private opening = new Map<DaemonRoute, Promise<void>>();
     /** Consecutive drops per route, for the reconnect backoff; cleared when a connection holds. */
     private drops = new Map<DaemonRoute, number>();
@@ -134,6 +150,9 @@ export class DaemonConnections {
         if (!live) {
             return;
         }
+        if (live.beatTimer) {
+            clearTimeout(live.beatTimer);
+        }
         this.live.delete(route);
         this.deps.onStateChange(route, null);
         this.deps.log(`🔌 closing the ${route} connection (${live.target.baseUrl}): ${reason}`);
@@ -153,6 +172,7 @@ export class DaemonConnections {
         const task = (async () => {
             const handle = await this.deps.open(target, {
                 onUpdate: (payload) => this.deps.onUpdate(target, payload),
+                onBeat: () => this.onBeat(target.route),
                 onDelivered: (result) => this.deps.onDelivered(target, result),
                 onClosed: (info) => this.onConnectionEnded(target, opened.handle, info),
             });
@@ -167,7 +187,7 @@ export class DaemonConnections {
                 handle.close();
                 return;
             }
-            this.live.set(target.route, { handle, target });
+            this.live.set(target.route, { handle, target, awaitingBeatSince: null, beatTimer: null });
             this.drops.delete(target.route);
             this.deps.onStateChange(target.route, {
                 baseUrl: target.baseUrl,
@@ -176,6 +196,7 @@ export class DaemonConnections {
             });
             this.deps.log(`🔌 ${target.route} connection live at ${target.baseUrl}`);
             this.deps.onReady?.(target);
+            this.beatLoop(target.route);
         })();
         this.opening.set(target.route, task);
         void task.finally(() => {
@@ -183,6 +204,73 @@ export class DaemonConnections {
                 this.opening.delete(target.route);
             }
         });
+    }
+
+    /** The daemon answered: the connection was alive when the heartbeat was sent. */
+    private onBeat(route: DaemonRoute): void {
+        const live = this.live.get(route);
+        if (live) {
+            live.awaitingBeatSince = null;
+        }
+    }
+
+    /**
+     * Ask, on a timer, whether the connection is still there.
+     *
+     * An unanswered heartbeat ends the connection and lets the ordinary reconnect path take over.
+     * That is the only way a silently dead socket is ever noticed: it is open as far as this side
+     * can tell, so nothing else would report it, and the session behind it would just go quiet.
+     */
+    private beatLoop(route: DaemonRoute): void {
+        const { intervalMs, timeoutMs } = this.deps.heartbeat ?? DEFAULT_HEARTBEAT;
+        const live = this.live.get(route);
+        if (!live) {
+            return;
+        }
+        const timer = setTimeout(() => {
+            const entry = this.live.get(route);
+            if (!entry || entry.handle !== live.handle) {
+                return;
+            }
+            entry.beatTimer = null;
+            if (entry.awaitingBeatSince !== null && Date.now() - entry.awaitingBeatSince >= timeoutMs) {
+                this.endConnection(route, entry.target, `no answer to a heartbeat within ${timeoutMs}ms`);
+                return;
+            }
+            if (entry.awaitingBeatSince === null) {
+                if (!entry.handle.ping()) {
+                    this.endConnection(route, entry.target, 'the socket would not take a heartbeat');
+                    return;
+                }
+                entry.awaitingBeatSince = Date.now();
+            }
+            this.beatLoop(route);
+        }, intervalMs);
+        (timer as unknown as { unref?: () => void }).unref?.();
+        live.beatTimer = timer;
+    }
+
+    /**
+     * End a connection this App decided to end, and reconnect if the route is still wanted. Kept
+     * apart from the peer-drop path because the socket has to be closed *deliberately* here: it is
+     * still open, and telling it to close is how it stops being a channel.
+     */
+    private endConnection(route: DaemonRoute, target: DaemonTarget, reason: string): void {
+        const live = this.live.get(route);
+        if (!live || live.target.baseUrl !== target.baseUrl) {
+            return;
+        }
+        this.live.delete(route);
+        if (live.beatTimer) {
+            clearTimeout(live.beatTimer);
+        }
+        this.deps.onStateChange(route, null);
+        this.deps.log(`🔌 closing the ${route} connection (${target.baseUrl}): ${reason}`);
+        this.deps.onDropped?.(target);
+        live.handle.close();
+        if (this.desired.get(route)?.baseUrl === target.baseUrl) {
+            this.start({ ...target });
+        }
     }
 
     /**
