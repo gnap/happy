@@ -165,6 +165,20 @@ describe('lanServer read-only API', () => {
         expect((await fetch(url('/lan/challenge'), { method: 'POST' })).status).toBe(429);
     });
 
+    it('answers a reachability question without minting a credential for it', async () => {
+        // A probe asks this every 30 seconds per machine per device and discards the answer. Answering
+        // it with a challenge spent a nonce each time — a credential issued to be thrown away, held in
+        // the nonce store until it expired, and counted against the flood limit above.
+        await start({ maxTrackedNonces: 1, maxChallengesPerWindow: 1 });
+        for (let i = 0; i < 5; i += 1) {
+            const res = await fetch(url('/lan/ping'));
+            expect(res.status).toBe(200);
+            expect(await res.json()).toMatchObject({ ok: true });
+        }
+        // The store and the challenge budget are untouched: a challenge still works afterwards.
+        expect((await fetch(url('/lan/challenge'), { method: 'POST' })).status).toBe(200);
+    });
+
     it('serves local history with the key wrapped for the account', async () => {
         await start();
         const token = await getToken();

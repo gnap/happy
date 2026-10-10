@@ -161,10 +161,10 @@ function safeEqual(a: Buffer, b: Buffer): boolean {
  * Origin is `*` deliberately. The caller's origin differs per build (the Metro dev server on
  * localhost, `tauri://localhost` once packaged), and an allowlist that misses one reinstates
  * exactly that silent failure. It is affordable here because nothing is cookie-authenticated:
- * every route but `/lan/challenge` requires a bearer token the caller can only obtain by proving
- * possession of the machine key, so a wildcard grants no ambient authority. A hostile page can
- * reach the challenge route and learn that a daemon is present; it cannot mint a token, and the
- * nonce it receives is useless without the key.
+ * every route but `/lan/challenge` and `/lan/ping` requires a bearer token the caller can only
+ * obtain by proving possession of the machine key, so a wildcard grants no ambient authority. A
+ * hostile page can reach the challenge route and learn that a daemon is present; it cannot mint a
+ * token, and the nonce it receives is useless without the key.
  */
 const CORS_HEADERS: Record<string, string> = {
   'access-control-allow-origin': '*',
@@ -294,12 +294,22 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     return record !== undefined && record.expiresAt > now;
   };
 
-  const requireToken = (request: { headers: Record<string, unknown> }): boolean => {
+  /**
+   * Whether this request carries a usable token, saying so in the log when it does not.
+   *
+   * A direct LAN request that is refused is otherwise completely invisible: the relay's own logging
+   * covers what arrives *through* the relay, so a client on the same network that is re-handshaking
+   * every few seconds looks, from this daemon's log, exactly like a client that is doing nothing.
+   * The address is what makes a storm attributable to one device.
+   */
+  const requireToken = (request: { headers: Record<string, unknown>; ip?: string; url?: string }): boolean => {
     const header = request.headers['authorization'];
-    if (typeof header !== 'string' || !header.startsWith('Bearer ')) {
-      return false;
+    const ok =
+      typeof header === 'string' && header.startsWith('Bearer ') && verifyToken(header.slice('Bearer '.length), Date.now());
+    if (!ok) {
+      logger.debug(`[lan] refused ${request.url ?? '-'} from=${clientAddress(request)}`);
     }
-    return verifyToken(header.slice('Bearer '.length), Date.now());
+    return ok;
   };
 
   /**
@@ -319,9 +329,21 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     return safeEqual(Buffer.from(proof), Buffer.from(expected)) ? record : null;
   };
 
+  /**
+   * Whether this daemon is answering on this route — and nothing else.
+   *
+   * A client that holds no key can only prove reachability by asking for something, and the only
+   * unauthenticated route used to be `/lan/challenge`. That made a pure reachability question cost
+   * a minted nonce: a credential issued and thrown away, counted against the very rate limit that
+   * exists to bound challenge floods, and retained in the nonce store until it expires. Answering
+   * this costs nothing and allocates nothing, so a periodic probe is free.
+   */
+  app.get('/lan/ping', async (_request, reply) => reply.send({ ok: true, v: LAN_PROTOCOL_VERSION }));
+
   app.post('/lan/challenge', async (request, reply) => {
     const now = Date.now();
     if (!underLimit(challenges, clientAddress(request), MAX_CHALLENGES, now)) {
+      logger.debug(`[lan] challenge refused (rate) from=${clientAddress(request)}`);
       return reply.code(429).send({ error: 'too many requests' });
     }
     pruneNonces(now);
@@ -333,12 +355,17 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     }
     const nonce = randomBytes(32).toString('base64url');
     nonces.set(nonce, { issuedAt: now, expiresAt: now + TOKEN_TTL_MS });
+    // Logged because the challenge count is the whole question when a device is re-authenticating
+    // more often than a 90-second token should require — and this route is unauthenticated, so the
+    // address is the only thing that says which device it is.
+    logger.debug(`[lan] challenge issued from=${clientAddress(request)}`);
     return reply.send({ nonce });
   });
 
   app.post('/lan/session', async (request, reply) => {
     const now = Date.now();
     if (!underLimit(sessionAttempts, clientAddress(request), MAX_SESSION_ATTEMPTS, now)) {
+      logger.debug(`[lan] session refused (rate) from=${clientAddress(request)}`);
       return reply.code(429).send({ error: 'too many requests' });
     }
     const body = request.body as { nonce?: unknown; proof?: unknown } | undefined;
@@ -354,10 +381,14 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     nonces.delete(nonce);
     if (!record) {
       // Never echo the proof or the secret into logs or the error body.
+      logger.debug(`[lan] proof rejected from=${clientAddress(request)}`);
       return reply.code(401).send({ error: 'invalid or expired nonce' });
     }
 
     nonces.set(nonce, record);
+    // The token exchange, logged with the address: pairing this against `challenge issued` is what
+    // separates "handshaking too often" from "minting nonces nobody redeems".
+    logger.debug(`[lan] session issued from=${clientAddress(request)}`);
     return reply.send({ token: issueToken(nonce, record.expiresAt), expiresAt: record.expiresAt });
   });
 
@@ -401,7 +432,7 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       `[lan] history ${sessionId} since=${since ?? '-'} before=${before ?? '-'} ` +
       `entries=${history.entries.length} bytes=${history.entries.reduce((n, e) => n + e.c.length, 0)} ` +
       `hasNewer=${history.hasNewer} hasOlder=${history.hasOlder} reset=${history.reset} ` +
-      `cursor=${history.cursor} older=${history.older}`,
+      `cursor=${history.cursor} older=${history.older} from=${clientAddress(request)}`,
     );
     return reply.send({ v: LAN_PROTOCOL_VERSION, ...history });
   });
@@ -419,6 +450,7 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       nonces.delete(nonce);
     }
     if (!record) {
+      logger.debug(`[lan] socket upgrade refused from=${clientAddress(request)}`);
       socket.close(4401, 'unauthorized');
       return;
     }
@@ -428,8 +460,12 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     for (const payload of opts.getSnapshot?.() ?? []) {
       socket.send(JSON.stringify({ event: 'update', payload }));
     }
-    socket.on('close', () => {
+    socket.on('close', (code: number, reason: Buffer) => {
       subscribers.delete(socket);
+      // Logged because a reader that is never removed is invisible otherwise: the count is the
+      // only evidence of whether closes propagate through the relay, and a socket that outlives
+      // its client is one the daemon keeps broadcasting to forever.
+      logger.debug('[lan] socket reader closed', { readers: subscribers.size, code, reason: reason?.toString() });
     });
 
     /**
