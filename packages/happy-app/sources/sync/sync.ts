@@ -2852,25 +2852,35 @@ class Sync {
      * bound to the connection, the socket, and the sightings that described the old network.
      */
     private onNetworkChanged(reason: 'lost' | 'regained' | 'switched'): void {
-        if (reason === 'lost') {
-            // Nothing daemon-side is reachable, and pretending otherwise leaves sessions pointed at
-            // a route that cannot answer.
-            this.closeDaemonSocket('lan');
-            this.closeDaemonSocket('relay');
+        // Only what is *known* about reaching a machine is discarded — the cached address and the
+        // token bound to it, and the sightings, which describe the network we were on. The sockets
+        // are deliberately left alone: a socket that the change actually broke will say so through
+        // its own close event, which is the same path that already clears it and reconnects, and a
+        // socket it did not break is still the channel. Tearing them down here made every network
+        // hiccup close and reopen the connection, and `expo-network` reports those hiccups often
+        // enough for that to be the bulk of the socket churn.
+        this.lanMachineConnections.clear();
+        if (reason !== 'regained') {
+            // A device that never lost connectivity may have moved networks without a gap — but a
+            // return to connectivity is the same network it left.
+            storage.getState().clearLanSightings();
+        }
+        // Rate-limited: the listener is chatty, and invalidating every session on each report is a
+        // storm of reads for information that has not changed twice.
+        const now = Date.now();
+        if (now - this.lastNetworkChangeHandledAt < Sync.NETWORK_CHANGE_COOLDOWN_MS) {
             return;
         }
-        this.lanMachineConnections.clear();
-        storage.getState().clearLanSightings();
-        this.closeDaemonSocket('lan');
-        this.closeDaemonSocket('relay');
-        // Re-evaluate which routes are wanted on the network we are on now, and make every session
-        // read again — which is also what discovers the machines and reopens their sockets, since a
-        // read is what finds an address.
+        this.lastNetworkChangeHandledAt = now;
         this.reconcileDaemonSockets();
         for (const syncer of this.messagesSync.values()) {
             syncer.invalidate();
         }
     }
+
+    /** A network report is a hint, not an event: several arrive for one change. */
+    private static readonly NETWORK_CHANGE_COOLDOWN_MS = 10_000;
+    private lastNetworkChangeHandledAt = 0;
 
     /**
      * Declares everything the App had in flight void, for a resume after iOS suspended it.
@@ -4602,6 +4612,13 @@ class Sync {
     private daemonSocketOpens = new Map<DaemonRoute, Promise<void>>();
 
     private async openDaemonSocket(route: DaemonRoute, baseUrl: string, machineId: string, machineKey: Uint8Array): Promise<void> {
+        // One connection per route is the invariant. Getting here with one already open means the
+        // route is moving to a different address, which is worth seeing in the log rather than
+        // inferring from counts.
+        const previous = this.daemonSockets.get(route);
+        if (previous) {
+            log.log(`📡 replacing the ${route} socket (${previous.baseUrl} → ${baseUrl})`);
+        }
         this.closeDaemonSocket(route);
 
         let opened: LanSocketHandle | null = null;
