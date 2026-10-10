@@ -16,8 +16,13 @@ import { useUnistyles } from 'react-native-unistyles';
 import { dividerKindFor, formatClock, formatDividerDate, type DividerKind } from '@/sync/messageDividers';
 import { t } from '@/text';
 
-/** One row of the list: the thing to draw, and the divider that belongs above it. */
-type ChatRow = { node: Message | TaskClusterMessage; divider: DividerKind };
+/**
+ * One row of the list: the thing to draw, and the divider that belongs to it. A row's divider is
+ * drawn above it, except for the newest message — whose time belongs *below* it, at the end of the
+ * content, so that it is out of the way while the conversation is being read and appears when the
+ * reader scrolls back.
+ */
+type ChatRow = { node: Message | TaskClusterMessage; divider: DividerKind; dividerBelow: boolean };
 
 /**
  * A time divider above a group of messages, the way a chat app marks "when" without repeating a
@@ -110,6 +115,9 @@ const ChatListInternal = React.memo((props: {
         return m.size > 0 ? { taskContentMap: m } : undefined;
     }, [props.tasks]);
 
+    /** Whether the list is resting at the newest message; the bottom time is hidden while it is. */
+    const [atBottom, setAtBottom] = React.useState(true);
+
     // Each row carries the divider that belongs above it. The list renders newest first and is
     // inverted, so the row *below* a message in the data is the older one — which is the neighbour
     // the divider is decided against.
@@ -117,25 +125,29 @@ const ChatListInternal = React.memo((props: {
         const clustered = computeMessageClusters(props.messages, clusterOptions);
         const now = Date.now();
         return clustered.map((node, index) => {
-            // Both ends of the loaded window always carry one, for the same reason in opposite
-            // directions: the top is where the conversation continues past what is loaded, and the
-            // bottom is the time of the latest thing said — the first thing a reader looks for, and
-            // exactly what the pace rule hides while a conversation is moving.
-            const older = index === 0 || index + 1 >= clustered.length
+            // Both ends of the loaded window always carry a divider, for the same reason in opposite
+            // directions: the top is where the conversation continues past what this device holds,
+            // and the bottom is the time of the latest thing said — the first thing a reader looks
+            // for, and exactly what the pace rule hides while a conversation is moving.
+            const newest = index === 0;
+            const older = newest || index + 1 >= clustered.length
                 ? null
                 : clustered[index + 1].createdAt;
-            return { node, divider: dividerKindFor(node.createdAt, older, now) };
+            return { node, divider: dividerKindFor(node.createdAt, older, now), dividerBelow: newest };
         });
     }, [props.messages, clusterOptions]);
 
     const keyExtractor = useCallback((row: ChatRow) => row.node.id, []);
     const renderItem = useCallback(({ item: row }: { item: ChatRow }) => {
         const item = row.node;
-        const divider = row.divider === 'none' ? null : <TimeDivider kind={row.divider} at={item.createdAt} />;
+        // The newest message's time is only drawn once the reader is not sitting at the end of the
+        // conversation: at rest it would be a label under the last bubble with nothing to say.
+        const wanted = row.divider !== 'none' && !(row.dividerBelow && atBottom);
+        const divider = wanted ? <TimeDivider kind={row.divider} at={item.createdAt} /> : null;
         if (item.kind === 'task-cluster') {
             return (
                 <>
-                    {divider}
+                    {!row.dividerBelow && divider}
                     <View style={{ flexDirection: 'row', justifyContent: 'center' }}>
                         <View style={{ flexDirection: 'column', flexGrow: 1, flexBasis: 0, maxWidth: layout.maxWidth }}>
                             <View style={{ marginHorizontal: 8, marginBottom: 12 }}>
@@ -143,16 +155,18 @@ const ChatListInternal = React.memo((props: {
                             </View>
                         </View>
                     </View>
+                {row.dividerBelow && divider}
                 </>
             );
         }
         return (
             <>
-                {divider}
+                {!row.dividerBelow && divider}
                 <MessageView message={item} metadata={props.metadata} sessionId={props.sessionId} />
+                {row.dividerBelow && divider}
             </>
         );
-    }, [props.metadata, props.sessionId]);
+    }, [props.metadata, props.sessionId, atBottom]);
 
     const handleEndReached = useCallback(() => {
         if (props.hasOlderMessages && !props.isLoadingOlder) {
@@ -161,7 +175,11 @@ const ChatListInternal = React.memo((props: {
     }, [props.hasOlderMessages, props.isLoadingOlder, props.sessionId]);
 
     const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
-        isNearBottomRef.current = event.nativeEvent.contentOffset.y < 80;
+        const near = event.nativeEvent.contentOffset.y < 80;
+        isNearBottomRef.current = near;
+        // Only when it changes: this runs on every scroll frame, and the bottom time is the only
+        // thing that depends on it.
+        setAtBottom((previous) => (previous === near ? previous : near));
     }, []);
 
     // Auto-scroll to newest messages when new ones arrive, if already near the bottom.

@@ -3393,8 +3393,11 @@ class Sync {
                 });
             } catch (err) {
                 log.log(`💬 fetchOlderMessages failed for ${sessionId}: ${err}`);
-                storage.getState().setLoadingOlder(sessionId, false);
             } finally {
+                // In `finally`, because a path that returns early — a window that no longer wants
+                // older messages — used to leave the flag set, and the spinner above the history
+                // then turned for the life of the session with nothing loading.
+                storage.getState().setLoadingOlder(sessionId, false);
                 this.releaseMessageFetchSlot(slot);
             }
         });
@@ -4830,10 +4833,13 @@ class Sync {
      * day it is needed.
      */
     private fetchMessagesViaDaemon = async (sessionId: string): Promise<void> => {
-        // Same flag the server path sets: it is what the session view reads to tell "nothing yet,
-        // still loading" from "this session has nothing". Without it a daemon session is the only
-        // one where the App cannot say which of the two it is looking at.
-        storage.getState().setFetching(sessionId, true);
+        // Only while this session has nothing to show: the flag is what the view reads to tell
+        // "nothing yet, still loading" from "this session has nothing", and setting it on every tick
+        // made the indicator at the bottom of the list flicker on a two-second poll — a loader that
+        // is on most of the time reads as one that never stops.
+        if (storage.getState().sessionMessages[sessionId]?.messages.length === 0) {
+            storage.getState().setFetching(sessionId, true);
+        }
         const read = await this.fetchSessionFromDaemon(sessionId);
         log.log(
             read
