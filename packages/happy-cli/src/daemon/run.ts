@@ -1332,9 +1332,15 @@ export async function startDaemon(): Promise<void> {
          * the one relay connection it holds. Both want exactly the same summary.
          */
         const sessionSummaries = (): LanSessionSummary[] => [...pidToTrackedSession.values()]
-          .filter(session => session.happySessionId !== undefined)
+          // A session is listed as soon as the daemon knows it, not once the server acknowledges
+          // it. It has a tag from spawn but no server id until the server answers -- and while the
+          // server is down that is exactly the session a reader most needs to see. Filtering on
+          // the id is what made a waiting session vanish from the LAN list, the relay hub and the
+          // App at once. Only a session with neither name is dropped: nothing could ask for it.
+          .filter(session => session.happySessionId !== undefined || session.sessionTag !== undefined)
           .map(session => ({
-            happySessionId: session.happySessionId!,
+            ...(session.happySessionId ? { happySessionId: session.happySessionId } : {}),
+            ...(session.sessionTag ? { tag: session.sessionTag } : {}),
             directory: session.directory ?? '',
             agent: session.agent ?? '',
             startedBy: String(session.startedBy),

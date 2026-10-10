@@ -52,7 +52,17 @@ const TOKEN_CONTEXT = 'v1.token';
 export const LAN_PROTOCOL_VERSION = 1;
 
 export type LanSessionSummary = {
-  happySessionId: string;
+  /**
+   * The id the server issued. Absent while the session is still waiting for the server — which
+   * is precisely when a reader most needs to see it, so this is not the field to key on.
+   */
+  happySessionId?: string;
+  /**
+   * The tag the CLI owns: set at spawn, so a session whose server id does not exist yet is still
+   * nameable, and `/lan/tags/:tag/history` can serve it. A session with neither is not listed at
+   * all — there would be no way for a reader to ask for it.
+   */
+  tag?: string;
   directory: string;
   agent: string;
   startedBy: string;
