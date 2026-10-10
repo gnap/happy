@@ -3060,6 +3060,11 @@ class Sync {
                 // had arrived since, with the persisted conversation never read at all.
                 if (!this.hydratedSessions.has(sessionId)) {
                     this.hydratedSessions.add(sessionId);
+                    // Timed because this is the whole of what the user waits for when they tap a
+                    // session: reading the window out of the cache, deserialising the reducer state
+                    // and handing it to the store. It is the one number that says whether opening a
+                    // conversation is instant or a hitch.
+                    const hydrationStartedAt = Date.now();
                     const cached = await loadMessageCache(session);
                     if (cached) {
                         storage.getState().applyHydratedCache(
@@ -3071,7 +3076,7 @@ class Sync {
                             cached.lastSeq,
                         );
                         this.sessionLastSeq.set(sessionId, cached.lastSeq);
-                        log.log(`💬 fetchMessages: hydrated from cache for ${sessionId} (lastSeq=${cached.lastSeq}, oldestSeq=${cached.oldestSeq}, ${cached.messages.length} messages)`);
+                        log.log(`💬 fetchMessages: hydrated ${cached.messages.length} messages for ${sessionId} in ${Date.now() - hydrationStartedAt}ms (lastSeq=${cached.lastSeq}, oldestSeq=${cached.oldestSeq})`);
                     } else {
                         log.log(`💬 fetchMessages: no cache for ${sessionId} (will fetch from server)`);
                     }
@@ -4569,6 +4574,34 @@ class Sync {
         if (this.daemonSockets.get(route)?.baseUrl === baseUrl) {
             return;
         }
+        // One open per route at a time. Opening is asynchronous, and the check above is not a lock:
+        // several sessions on the same machine are read together after a resume or a network change,
+        // and each one that passed the check while another was opening would open a socket of its
+        // own. Only the last is recorded, so the rest leak — the daemon keeps them as readers, and a
+        // send written to one of those is written into a socket whose peer is gone, which is how a
+        // message ends up never confirmed.
+        const opening = this.daemonSocketOpens.get(route);
+        if (opening) {
+            await opening;
+            if (this.daemonSockets.get(route)?.baseUrl === baseUrl) {
+                return;
+            }
+        }
+        const task = this.openDaemonSocket(route, baseUrl, machineId, machineKey);
+        this.daemonSocketOpens.set(route, task);
+        try {
+            await task;
+        } finally {
+            if (this.daemonSocketOpens.get(route) === task) {
+                this.daemonSocketOpens.delete(route);
+            }
+        }
+    }
+
+    /** How many sockets are mid-open per route; used only to keep them from racing. */
+    private daemonSocketOpens = new Map<DaemonRoute, Promise<void>>();
+
+    private async openDaemonSocket(route: DaemonRoute, baseUrl: string, machineId: string, machineKey: Uint8Array): Promise<void> {
         this.closeDaemonSocket(route);
 
         let opened: LanSocketHandle | null = null;
