@@ -50,6 +50,16 @@ export type RelayEndpoint = {
     machineId: string;
     /** `https://host[:port]/r/<tag>` — usable anywhere a LAN base URL is. */
     baseUrl: string;
+    /**
+     * Where this route came from, which decides what it proves.
+     *
+     * `published` — the machine put it in its own `daemonState`, so its daemon is configured with
+     * the relay and there is a route to try. `derived` — this device computed the tag from the
+     * machine key because nothing was published: every machine has such a tag, and having one says
+     * nothing about whether a relay client is running there. The address is worth trying either
+     * way; only the first is evidence the machine is on the relay at all.
+     */
+    source: 'published' | 'derived';
     /** When the daemon published it; the cache is a hint, not a lease. */
     at: number;
 };

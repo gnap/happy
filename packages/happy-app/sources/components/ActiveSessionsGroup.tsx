@@ -10,7 +10,7 @@ import { Avatar } from './Avatar';
 import { Typography } from '@/constants/Typography';
 import { SessionStatusDot } from './SessionStatusDot';
 import { MachinePresenceBadge } from './MachinePresenceBadge';
-import { useAllMachines, useSetting, useMachinesMap, useMachinePresenceMap, useLanSightings, useRelayEndpoints } from '@/sync/storage';
+import { useAllMachines, useSetting, useMachinesMap, useMachinePresenceMap, useLanSightings, useRelayDirectory, useRelayEndpoints } from '@/sync/storage';
 import { MACHINE_PRESENCE_COLORS } from '@/sync/machinePresence';
 import { StyleSheet } from 'react-native-unistyles';
 import { isMachineOnline } from '@/utils/machineUtils';
@@ -216,6 +216,7 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
     const machinesMap = useMachinesMap();
     const machinePresence = useMachinePresenceMap();
     const lanSightings = useLanSightings();
+    const relayDirectory = useRelayDirectory();
     const relayEndpoints = useRelayEndpoints();
 
     // Group sessions by project, then associate with machine
@@ -324,9 +325,15 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
                                 })()}
                                 {singleMachineId ? (
                                     <MachinePresenceBadge
-                                        presence={machinePresence[singleMachineId] ?? 'offline'}
-                                        lanReachable={!!lanSightings[singleMachineId]}
-                                        relayCapable={!!relayEndpoints[singleMachineId]}
+                                        reach={{
+                                            server: machinePresence[singleMachineId] === 'server',
+                                            lan: !!lanSightings[singleMachineId],
+                                            relay: !!relayDirectory[singleMachineId],
+                                        }}
+                                        capability={{
+                                            lan: !!lanSightings[singleMachineId],
+                                            relay: !!relayDirectory[singleMachineId] || relayEndpoints[singleMachineId]?.source === 'published',
+                                        }}
                                     />
                                 ) : null}
                             </View>

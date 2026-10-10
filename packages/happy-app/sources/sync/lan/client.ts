@@ -79,6 +79,9 @@ async function request(
  * opens, and the retry after either fails — and each one used to run its own challenge and token
  * exchange: four challenges and two exchanges inside a second, against a daemon that rate-limits
  * exactly that. One handshake is enough for all of them, and they are asking for the same thing.
+ *
+ * Callers that need a token to *keep* rather than one to use now go through `./credentials`, which
+ * caches on top of this; the coalescing here is what makes that cache's misses cheap.
  */
 const handshakes = new Map<string, Promise<{ token: string; expiresAt: number }>>();
 

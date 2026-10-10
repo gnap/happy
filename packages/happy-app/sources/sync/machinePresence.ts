@@ -68,29 +68,52 @@ export const CHANNEL_ICONS = {
 } as const;
 
 /**
- * Which channel icons to draw for a machine, in priority order, and whether each one is reaching
- * the machine *now* (green) or merely switched on and possible (grey).
+ * Whether a channel can reach the machine *now*, and whether it is one the machine can be reached
+ * over at all.
  *
- * Capability and reachability are separate questions and the two icons answer them differently:
- * the server icon is drawn whenever the server channel is on, since a server that does not report
- * the machine is still a channel the App could use; the relay icon is drawn when the machine
- * published a route, which is a claim its daemon made; the LAN icon is drawn only when this device
- * has actually seen the machine, because no daemon announces a LAN route it might be reachable on.
- * Colour is reachability in every case.
+ * Two separate questions, and conflating them is what made every relay icon grey: `MachinePresence`
+ * is a *single* answer — server, else lan, else relay — so colouring the relay icon by
+ * `presence === 'relay'` meant a machine that was online through the server could never show a
+ * working relay, however reachable it was over one. Each channel answers for itself here.
  */
+export type MachineReach = {
+    /** The server reports the machine active. */
+    server: boolean;
+    /** This device has seen the machine on its network — a sighting, or a live connection to it. */
+    lan: boolean;
+    /** The relay is holding the machine: it dialled in and the relay said so. */
+    relay: boolean;
+};
+
+/** Whether a channel is one this machine can be reached over at all, beyond being switched on. */
+export type MachineCapability = {
+    /** Undefined when the App has never seen the machine anywhere; only a sighting justifies the icon. */
+    lan: boolean;
+    /**
+     * A relay route the machine itself published, or the relay holding it.
+     *
+     * A tag derived locally from the machine key is *not* this: every machine has one, and it says
+     * nothing about whether its daemon runs a relay client. That is why hosts which have never
+     * published a route grew a relay icon they had not earned.
+     */
+    relay: boolean;
+};
+
 export function machineChannelIcons(
     priority: readonly SessionChannel[],
-    presence: MachinePresence,
-    lanReachable: boolean,
-    relayCapable: boolean,
+    reach: MachineReach,
+    capability: MachineCapability,
 ): { channel: SessionChannel; up: boolean }[] {
     return priority.flatMap((channel): { channel: SessionChannel; up: boolean }[] => {
         if (channel === 'server') {
-            return [{ channel, up: presence === 'server' }];
+            // Always drawn while switched on: a server that does not report the machine is still a
+            // channel the App could use, so grey is the honest colour rather than absent.
+            return [{ channel, up: reach.server }];
         }
         if (channel === 'lan') {
-            return lanReachable ? [{ channel, up: true }] : [];
+            return capability.lan ? [{ channel, up: reach.lan }] : [];
         }
-        return relayCapable || presence === 'relay' ? [{ channel, up: presence === 'relay' }] : [];
+        return capability.relay ? [{ channel, up: reach.relay }] : [];
     });
 }
+

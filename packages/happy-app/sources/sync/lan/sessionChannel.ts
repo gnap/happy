@@ -1,7 +1,8 @@
 import { normalizeRawMessage, type NormalizedMessage } from '@/sync/typesRaw';
 import { Encryption } from '@/sync/encryption/encryption';
 import { discoverMachines } from './discovery';
-import { authenticate, fetchHistory, fetchSessions, LanRequestError } from './client';
+import { fetchHistory, fetchSessions, LanRequestError } from './client';
+import { getLanCredential, invalidateLanCredential } from './credentials';
 import { decryptLanEntries, decryptLanHistory, type DecryptedLanEntry } from './history';
 
 import type { DaemonRoute, LanSessionSummary } from './types';
@@ -57,7 +58,7 @@ export type LanSessionRead = {
     hasOlder: boolean;
     /** True when the anchor was not honoured and `messages` covers the log from its start. */
     reset: boolean;
-    /** Endpoint and token used, to hand back as `connection` on the next read. */
+    /** Endpoint and route used, to hand back as `connection` on the next read. */
     connection: LanConnection;
     /**
      * The session key this read unwrapped, for the caller to register.
@@ -68,33 +69,18 @@ export type LanSessionRead = {
     sessionKey: Uint8Array;
 };
 
-/** A resolved daemon endpoint plus a live bearer token for it. */
+/**
+ * Where a daemon can be reached, and by which route.
+ *
+ * Deliberately not a credential: the address outlives any token, and a token belongs to the daemon
+ * rather than to whoever is reading it. `./credentials` holds the token, keyed by this address.
+ */
 export type LanConnection = {
     machineId: string;
     /** Which route this connection came in on: found on the network, or through the public relay. */
     route: DaemonRoute;
     baseUrl: string;
-    token: string;
-    /** Epoch ms. */
-    expiresAt: number;
 };
-
-/** Reuse a connection only while its token has real life left; expiring mid-read costs a handshake. */
-const CONNECTION_EXPIRY_MARGIN_MS = 15_000;
-
-/**
- * Whether a connection from an earlier read can still serve this one.
- *
- * A session whose machine is unknown is deliberately never cached: the read exists to probe
- * whichever daemon answers, and pinning it to the last winner would stop it finding the right one.
- */
-function isConnectionUsable(connection: LanConnection, machineId: string | undefined): boolean {
-    return (
-        machineId !== undefined &&
-        connection.machineId === machineId &&
-        connection.expiresAt - Date.now() > CONNECTION_EXPIRY_MARGIN_MS
-    );
-}
 
 /**
  * A record's own timestamp, falling back to when the CLI wrote it to its log.
@@ -198,7 +184,7 @@ export async function listSessionsOverLan(options: {
             continue;
         }
         try {
-            const { token } = await authenticate(machine.baseUrl, machineKey);
+            const { token } = await getLanCredential(machine.baseUrl, machineKey);
             answers.push({ machineId: machine.machineId, via: 'lan', sessions: await fetchSessions(machine.baseUrl, token) });
             answered.add(machine.machineId);
         } catch {
@@ -213,7 +199,7 @@ export async function listSessionsOverLan(options: {
             return;
         }
         try {
-            const { token } = await authenticate(relay.baseUrl, machineKey);
+            const { token } = await getLanCredential(relay.baseUrl, machineKey);
             answers.push({ machineId: relay.machineId, via: 'relay', sessions: await fetchSessions(relay.baseUrl, token) });
         } catch {
             // This relay route is down or its daemon is offline.
@@ -267,13 +253,35 @@ export async function readSessionOverLan(options: {
      * behind → invalidate again" loop does.
      */
     const readFrom = async (connection: LanConnection): Promise<LanSessionRead | null> => {
-        const request = (page: typeof options.page) =>
-            fetchHistory(
-                connection.baseUrl,
-                connection.token,
-                options.sessionId,
-                page.kind === 'follow' ? { since: page.cursor } : page.kind === 'older' ? { before: page.before } : {},
-            );
+        /**
+         * Every request takes its token from the daemon-wide credential rather than from the
+         * connection this read was handed. The connection says *where* to read; the credential is
+         * whoever's token is current for that address. Keeping a token per connection is what made
+         * each session's poll loop handshake on its own schedule, and made a token that had gone
+         * stale mid-read fail the read instead of being replaced underneath it.
+         */
+        const request = async (page: typeof options.page) => {
+            const query: { since: string } | { before: string } | Record<string, never> =
+                page.kind === 'follow' ? { since: page.cursor } : page.kind === 'older' ? { before: page.before } : {};
+            // Acquired outside the try: a rejected *proof* is a credential problem, not a token
+            // problem, and treating it as one would answer a wrong machine key with a second
+            // handshake it is going to fail anyway.
+            const current = await getLanCredential(connection.baseUrl, machineKey);
+            try {
+                return await fetchHistory(connection.baseUrl, current.token, options.sessionId, query);
+            } catch (error) {
+                // The daemon knows nothing about this token: it was minted by a process that is
+                // gone, which is what a daemon restart leaves behind. Dropping it and asking once
+                // more is the whole recovery — the read is idempotent, and a page is cheap
+                // compared to making the caller wait for the next tick and read it all again.
+                if (!(error instanceof LanRequestError) || error.status !== 401) {
+                    throw error;
+                }
+                invalidateLanCredential(connection.baseUrl);
+                const retry = await getLanCredential(connection.baseUrl, machineKey);
+                return await fetchHistory(connection.baseUrl, retry.token, options.sessionId, query);
+            }
+        };
         const decode = async (history: Awaited<ReturnType<typeof fetchHistory>>) => {
             if (!history) {
                 return null;
@@ -335,35 +343,22 @@ export async function readSessionOverLan(options: {
     // way round.
     const cachedMatchesRoute = options.via === 'any' || cached?.route === options.via;
     if (cached && cached.machineId === options.machineId && cachedMatchesRoute) {
-        if (isConnectionUsable(cached, options.machineId)) {
-            try {
-                const result = await readFrom(cached);
-                if (result) {
-                    return result;
-                }
-            } catch (error) {
-                // A token can expire or be revoked between reads; only that justifies a fresh
-                // handshake here. Anything else is a real failure and belongs to the caller.
-                if (!(error instanceof LanRequestError) || error.status !== 401) {
-                    throw error;
-                }
+        try {
+            const result = await readFrom(cached);
+            if (result) {
+                return result;
             }
-        } else {
-            // The bearer token aged out — it is 90s server-side and only counts as usable with
-            // 15s left, so this happens about every 75 seconds. The *address* is still good:
-            // discovery exists to find it, and we already have it, so re-ask the same host for a
-            // token instead of browsing again. A browse is not returned early, it collects until
-            // its timeout elapses, so rediscovering a machine we can already reach costs a flat
-            // 4s — on a channel polled every 2s, that is most of what it spends its time on.
-            // Only a host that has actually moved falls through to discovery below.
-            try {
-                const { token, expiresAt } = await authenticate(cached.baseUrl, machineKey);
-                const result = await readFrom({ ...cached, token, expiresAt });
-                if (result) {
-                    return result;
-                }
-            } catch {
-                // Unreachable or refused: fall through to a full browse.
+            // Null is the daemon saying it has no such session — right address, wrong machine, or
+            // a log that has not been written yet. Discovery is what tells those apart.
+        } catch (error) {
+            // The address is a memory, and what it names may have moved, gone, or restarted with a
+            // different port — so an address that does not answer is rediscovered rather than
+            // reported. A daemon that answered and refused is a different thing, and one this App
+            // cannot fix by looking around: a rejected proof or a server error belongs to the
+            // caller. The token's own expiry no longer reaches here at all; `getLanCredential`
+            // replaces a token before it dies and retries once after a rejection.
+            if (error instanceof LanRequestError && error.status !== 401 && error.status !== 403) {
+                throw error;
             }
         }
     }
@@ -386,14 +381,10 @@ export async function readSessionOverLan(options: {
     }
 
     for (const machine of candidates) {
-        const { token, expiresAt } = await authenticate(machine.baseUrl, machineKey);
-        const result = await readFrom({
-            machineId: machine.machineId,
-            route: machine.route,
-            baseUrl: machine.baseUrl,
-            token,
-            expiresAt,
-        });
+        // No handshake here: the read takes the credential for whatever address it is about to use,
+        // and only a candidate that can actually be authenticated gets that far. Proving the key
+        // before asking a question the daemon may answer with a 404 is a round trip per candidate.
+        const result = await readFrom(machine);
         if (result) {
             return result;
         }

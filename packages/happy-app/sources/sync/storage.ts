@@ -7,7 +7,9 @@ import { bump } from './metrics';
 import { Message } from "./typesMessage";
 import { NormalizedMessage } from "./typesRaw";
 import { isMachineOnline } from '@/utils/machineUtils';
-import type { DaemonRoute, LanSighting, RelayEndpoint, RelaySighting, SessionChannel } from './lan/types';
+import type { DaemonRoute, LanSighting, RelayEndpoint, SessionChannel } from './lan/types';
+import type { RelayDirectoryEntry } from './lan/relayDirectory';
+import type { DaemonConnectionState } from './lan/daemonConnections';
 import { resolveMachinePresence, type MachinePresence } from './machinePresence';
 import { applySettings, Settings } from "./settings";
 import { LocalSettings, applyLocalSettings } from "./localSettings";
@@ -134,12 +136,25 @@ interface StorageState {
     relayEndpoints: Record<string, RelayEndpoint>;
     applyRelayEndpoint: (machineId: string, endpoint: RelayEndpoint | null) => void;
     /**
-     * Relay routes that answered a probe, keyed by machineId: the relay counterpart of
-     * `lanSightings`, and like it a local observation that never touches the server. A cached
-     * endpoint says a route exists; a sighting says it works right now.
+     * What the relay says it is holding, keyed by machineId.
+     *
+     * This is the relay's own directory, not a local observation: the relay knows which daemons
+     * dialled in and what sessions each published, and it says so — including pushing an update
+     * when one comes or goes. So "the relay can reach this machine" is a fact the App is told,
+     * where it used to be a probe the App ran and had to interpret.
      */
-    relaySightings: Record<string, RelaySighting>;
-    applyRelaySightings: (sightings: RelaySighting[]) => void;
+    relayDirectory: Record<string, RelayDirectoryEntry>;
+    /**
+     * Tags the relay is holding that no key on this device matches.
+     *
+     * Worth keeping apart rather than dropping: a machine that is up and whose tag this App cannot
+     * name is a real thing to see — a machine paired on another device, or a key this one has lost.
+     */
+    relayUnknownTags: string[];
+    /** Whether the App's one relay connection is up. */
+    relayHubConnected: boolean;
+    applyRelayDirectory: (entries: RelayDirectoryEntry[], unknownTags: string[]) => void;
+    setRelayHubConnected: (connected: boolean) => void;
     /**
      * Forget what was seen on the network we were on.
      *
@@ -150,11 +165,16 @@ interface StorageState {
      */
     clearLanSightings: () => void;
     /**
-     * The live daemon socket per route, when one is open. Separate from the sightings on purpose:
-     * a sighting says a daemon is reachable, this says a channel to one is actually established —
-     * which is the thing that makes messages arrive without a poll.
+     * What each daemon connection is doing, keyed by `machineId:route` — a machine is a daemon with
+     * sessions on it, and a route is only how the bytes get there, so this is one entry per daemon
+     * per transport rather than one per transport.
+     *
+     * Each entry says live, opening, retrying after a drop, or idle because nothing wants it. The
+     * phase is always present because "nothing is connected" and "nothing is wanted" are different
+     * facts and the second is not a fault — showing both as one grey state is what made a channel
+     * stuck retrying look like a quiet one.
      */
-    daemonSockets: Record<DaemonRoute, { baseUrl: string; machineId: string; connectedAt: number } | null>;
+    daemonSockets: Record<string, DaemonConnectionState>;
     /**
      * A per-session, manually forced channel. Absent means automatic: the server, falling back to
      * the LAN when it cannot answer.
@@ -197,7 +217,7 @@ interface StorageState {
     /** Replace the LAN sighting set with the result of one scan. */
     applyLanSightings: (sightings: LanSighting[]) => void;
     /** Record the live LAN socket, or null once it is gone. */
-    setDaemonSocketStatus: (route: DaemonRoute, status: { baseUrl: string; machineId: string; connectedAt: number } | null) => void;
+    setDaemonSocketStatus: (id: string, status: DaemonConnectionState) => void;
     applyLoaded: () => void;
     applyReady: () => void;
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => { changed: string[], hasReadyEvent: boolean };
@@ -572,8 +592,10 @@ export const storage = create<StorageState>()((set, get) => {
         machines: {},
         lanSightings: {},
         relayEndpoints: loadRelayEndpoints(),
-        relaySightings: {},
-        daemonSockets: { lan: null, relay: null },
+        relayDirectory: {},
+        relayUnknownTags: [],
+        relayHubConnected: false,
+        daemonSockets: {},
         daemonSessionList: {},
         channelOverride: {},
         artifacts: {},  // Initialize artifacts
@@ -1743,24 +1765,24 @@ export const storage = create<StorageState>()((set, get) => {
                 sessionListViewData
             };
         }),
-        setDaemonSocketStatus: (route, status) => set((state) => ({
-            daemonSockets: { ...state.daemonSockets, [route]: status },
+        setDaemonSocketStatus: (id, status) => set((state) => ({
+            daemonSockets: { ...state.daemonSockets, [id]: status },
         })),
         clearLanSightings: () => set((state) => (Object.keys(state.lanSightings).length === 0 ? state : { ...state, lanSightings: {} })),
-        applyRelaySightings: (sightings: RelaySighting[]) => set((state) => {
-            const now = Date.now();
-            const next: Record<string, RelaySighting> = {};
-            // Same carry-over as the LAN: one failed probe must not flicker a machine to offline.
-            for (const [id, sighting] of Object.entries(state.relaySightings)) {
-                if (now - sighting.at < LAN_SIGHTING_TTL_MS) {
-                    next[id] = sighting;
-                }
+        // Replaced wholesale, unlike the LAN's sightings: the relay is answering a question rather
+        // than reporting one observation, so what it leaves out is genuinely gone — a machine that
+        // dropped is *not* still reachable, and carrying its entry over would keep offering a
+        // connection that cannot be made.
+        applyRelayDirectory: (entries, unknownTags) => set((state) => {
+            const next: Record<string, RelayDirectoryEntry> = {};
+            for (const entry of entries) {
+                next[entry.machineId] = entry;
             }
-            for (const sighting of sightings) {
-                next[sighting.machineId] = sighting;
-            }
-            return { ...state, relaySightings: next };
+            return { ...state, relayDirectory: next, relayUnknownTags: unknownTags };
         }),
+        setRelayHubConnected: (connected) => set((state) => (
+            state.relayHubConnected === connected ? state : { ...state, relayHubConnected: connected }
+        )),
         applyRelayEndpoint: (machineId: string, endpoint: RelayEndpoint | null) => set((state) => {
             const current = state.relayEndpoints[machineId];
             if (endpoint === null) {
@@ -2151,6 +2173,11 @@ export function useMachine(machineId: string): Machine | null {
     return storage(useShallow((state) => state.machines[machineId] ?? null));
 }
 
+/** Every machine the server has told this App about, by id. */
+export function useMachines(): Record<string, Machine> {
+    return storage(useShallow((state) => state.machines));
+}
+
 /**
  * Presence for every machine the app currently knows about, by machineId — the server's view
  * (`Machine.active`) joined with the LAN scanner's (`lanSightings`).
@@ -2171,13 +2198,43 @@ export function useLanSightings(): Record<string, LanSighting> {
  * The live socket on one daemon route, or null when none is open. Distinct from a sighting: a
  * sighting means a daemon is reachable, this means a channel to one is actually established.
  */
-export function useDaemonSocketStatus(route: DaemonRoute): { baseUrl: string; connectedAt: number } | null {
-    return storage(useShallow((state) => state.daemonSockets[route]));
+/** Everything that is connected (or trying to be), by `machineId:route`. */
+export function useDaemonSockets(): Record<string, DaemonConnectionState> {
+    return storage(useShallow((state) => state.daemonSockets));
 }
 
-/** Relay routes that answered a probe recently, by machineId. */
-export function useRelaySightings(): Record<string, RelaySighting> {
-    return storage(useShallow((state) => state.relaySightings));
+/**
+ * The connections over one route, by machineId.
+ *
+ * A route is a transport, so "is the LAN up?" is a question about the machines it reaches: several
+ * may be connected at once, and, since the unit is the daemon, none of them is *the* LAN connection.
+ */
+export function daemonConnectionsOn(
+    sockets: Record<string, DaemonConnectionState>,
+    route: DaemonRoute
+): Record<string, DaemonConnectionState> {
+    const on: Record<string, DaemonConnectionState> = {};
+    for (const [id, state] of Object.entries(sockets)) {
+        if (state.route === route) {
+            on[id] = state;
+        }
+    }
+    return on;
+}
+
+/** What the relay is holding, by machineId, with the sessions each machine published. */
+export function useRelayDirectory(): Record<string, RelayDirectoryEntry> {
+    return storage(useShallow((state) => state.relayDirectory));
+}
+
+/** Tags the relay holds that this device has no key for. */
+export function useRelayUnknownTags(): string[] {
+    return storage(useShallow((state) => state.relayUnknownTags));
+}
+
+/** Whether the App's one relay connection is up. */
+export function useRelayHubConnected(): boolean {
+    return storage((state) => state.relayHubConnected);
 }
 
 /** Public relay routes per machine id; presence means the machine published one. */
@@ -2207,7 +2264,7 @@ export function useMachinesMap(): Record<string, Machine> {
 export function useMachinePresenceMap(): Record<string, MachinePresence> {
     const machines = storage(useShallow((state) => state.machines));
     const sightings = storage(useShallow((state) => state.lanSightings));
-    const relaySightings = storage(useShallow((state) => state.relaySightings));
+    const relayDirectory = storage(useShallow((state) => state.relayDirectory));
     const priority = storage(useShallow((state) => state.localSettings.channelPriority));
     return React.useMemo(() => {
         // A channel switched off in the priority setting contributes nothing, so a machine is never
@@ -2216,11 +2273,11 @@ export function useMachinePresenceMap(): Record<string, MachinePresence> {
         const useLan = priority.includes('lan');
         const useRelay = priority.includes('relay');
         const map: Record<string, MachinePresence> = {};
-        for (const id of new Set([...Object.keys(machines), ...Object.keys(sightings), ...Object.keys(relaySightings)])) {
-            map[id] = resolveMachinePresence(useServer ? machines[id] : null, useLan && !!sightings[id], useRelay && !!relaySightings[id]);
+        for (const id of new Set([...Object.keys(machines), ...Object.keys(sightings), ...Object.keys(relayDirectory)])) {
+            map[id] = resolveMachinePresence(useServer ? machines[id] : null, useLan && !!sightings[id], useRelay && !!relayDirectory[id]);
         }
         return map;
-    }, [machines, sightings, relaySightings, priority]);
+    }, [machines, sightings, relayDirectory, priority]);
 }
 
 export function useSessionListViewData(): SessionListViewItem[] | null {
@@ -2334,10 +2391,9 @@ export function useChannelLinks(): { channel: SessionChannel; state: ChannelLink
     const priority = storage(useShallow((state) => state.localSettings.channelPriority));
     const facts = storage(useShallow((state) => ({
         serverStatus: state.socketStatus,
-        lanSocket: !!state.daemonSockets.lan,
+        lanSocket: Object.values(state.daemonSockets).some((s) => s.route === 'lan' && s.phase === 'live'),
         lanSeen: Object.keys(state.lanSightings).length > 0,
-        relaySocket: !!state.daemonSockets.relay,
-        relaySeen: Object.keys(state.relaySightings).length > 0,
+        relayConnected: state.relayHubConnected,
     })));
     return React.useMemo(() => {
         const links: { channel: SessionChannel; state: ChannelLinkState }[] = [];
@@ -2351,7 +2407,12 @@ export function useChannelLinks(): { channel: SessionChannel; state: ChannelLink
                 if (facts.lanSocket) links.push({ channel, state: 'connected' });
                 else if (facts.lanSeen) links.push({ channel, state: 'connecting' });
             } else {
-                links.push({ channel, state: facts.relaySocket || facts.relaySeen ? 'connected' : 'disconnected' });
+                // The relay channel is its one connection to the relay, not the per-machine streams
+                // it carries: whether a stream exists depends on whether a session is being read
+                // right now, which is not a property of the channel. Connected means the relay is
+                // reachable; while it is switched on and not yet reached, the App is trying, and
+                // that is what the blue says.
+                links.push({ channel, state: facts.relayConnected ? 'connected' : 'connecting' });
             }
         }
         return links;

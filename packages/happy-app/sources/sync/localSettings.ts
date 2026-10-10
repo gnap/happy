@@ -19,7 +19,6 @@ export const LocalSettingsSchema = z.object({
     lastUsedModelMode: z.string().nullable().describe('Last selected model mode for new sessions (device-local, not synced)'),
     lastUsedMaxMode: z.boolean().describe('Last Cursor max mode toggle for new sessions (device-local, not synced)'),
     channelPriority: z.array(z.enum(['lan', 'relay', 'server'])).describe('Enabled session channels in preference order (device-local debug setting)'),
-    relayUrl: z.string().nullable().describe('Public relay base URL (e.g. https://relay.example), used to reach a machine with the server down'),
 });
 
 //
@@ -46,7 +45,6 @@ export const localSettingsDefaults: LocalSettings = {
     lastUsedModelMode: null,
     lastUsedMaxMode: false,
     channelPriority: ['lan', 'server', 'relay'],
-    relayUrl: null,
 };
 Object.freeze(localSettingsDefaults);
 

@@ -7,7 +7,9 @@ const state = (endpoints: unknown[], at = 123) => ({ p2p: { v: 1, endpoints, at 
 describe('parseRelayEndpoint', () => {
     it('builds an https base URL, omitting the default port', () => {
         const ep = parseRelayEndpoint('m1', state([{ t: 'lan', addr: '10.0.0.2', port: 55673 }, { t: 'relay', addr: '47.80.241.214', port: 443, tag: TAG }]));
-        expect(ep).toEqual({ machineId: 'm1', baseUrl: `https://47.80.241.214/r/${TAG}`, at: 123 });
+        // `published`: the machine said so itself, which is the only thing that says its daemon
+        // runs a relay client — as opposed to a tag this device derived from the machine key.
+        expect(ep).toEqual({ machineId: 'm1', baseUrl: `https://47.80.241.214/r/${TAG}`, source: 'published', at: 123 });
     });
 
     it('keeps a non-default port', () => {

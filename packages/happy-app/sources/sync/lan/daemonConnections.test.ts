@@ -41,7 +41,7 @@ describe('DaemonConnections', () => {
         manager.want(target());
         await tick();
         expect(opens).toHaveLength(1);
-        expect(manager.has('lan')).toBe(true);
+        expect(manager.has('m1', 'lan')).toBe(true);
         expect(manager.connectedCount).toBe(1);
     });
 
@@ -64,22 +64,48 @@ describe('DaemonConnections', () => {
         await tick();
         expect(opens).toHaveLength(2);
         expect(opens[0].handle.close).toHaveBeenCalled();
-        expect(manager.current('lan')?.baseUrl).toBe('http://10.0.0.9:55673');
-        // Published as connected, then nothing, then connected again at the new address.
-        expect(state.map(([, s]) => (s as any)?.baseUrl ?? null)).toEqual([
-            'http://10.0.0.2:55673',
-            null,
-            'http://10.0.0.9:55673',
+        expect(manager.current('m1', 'lan')?.baseUrl).toBe('http://10.0.0.9:55673');
+        // Every transition is published with what the route is doing, so a reader can tell a channel
+        // being replaced from one that is idle or stuck: live at the old address, opening at the new
+        // one, then live there.
+        expect(state.map(([, s]) => [(s as { phase: string }).phase, (s as { baseUrl?: string }).baseUrl ?? null])).toEqual([
+            ['opening', 'http://10.0.0.2:55673'],
+            ['live', 'http://10.0.0.2:55673'],
+            ['opening', 'http://10.0.0.9:55673'],
+            ['live', 'http://10.0.0.9:55673'],
         ]);
+    });
+
+    it('keeps retrying a route whose open never produced a socket', async () => {
+        // `want` is idempotent, so a failed open used to be the end of it: the route stayed wanted
+        // and idle until something unrelated moved its address.
+        const failures: number[] = [];
+        let attempt = 0;
+        const manager = new DaemonConnections({
+            open: async () => {
+                attempt += 1;
+                failures.push(attempt);
+                return attempt <= 2 ? null : ({ baseUrl: 'x', send: () => true, ping: () => true, close: () => {} } as unknown as LanSocketHandle);
+            },
+            onUpdate: () => {},
+            onDelivered: () => {},
+            onStateChange: () => {},
+            log: () => {},
+            retryDelayMs: () => 1,
+        });
+        manager.want(target());
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        expect(failures.length).toBeGreaterThanOrEqual(3);
+        expect(manager.current('m1', 'lan')).not.toBeNull();
     });
 
     it('closes a connection that arrives after the route stopped being wanted', async () => {
         const { manager, opens } = makeManager();
         manager.want(target());
-        manager.unwant('lan', 'test');
+        manager.unwant('m1:lan', 'test');
         await tick();
         expect(opens[0].handle.close).toHaveBeenCalled();
-        expect(manager.current('lan')).toBeNull();
+        expect(manager.current('m1', 'lan')).toBeNull();
     });
 
     it('reconnects by itself after a drop, and stops when nothing wants it', async () => {
@@ -87,11 +113,11 @@ describe('DaemonConnections', () => {
         manager.want(target());
         await tick();
         opens[0].handlers.onClosed({ deliberate: false, code: 1006 });
-        expect(manager.current('lan')).toBeNull();
+        expect(manager.current('m1', 'lan')).toBeNull();
         await tick();
         expect(opens).toHaveLength(2);
 
-        manager.unwant('lan', 'test');
+        manager.unwant('m1:lan', 'test');
         opens[1].handlers.onClosed({ deliberate: false, code: 1006 });
         await tick();
         expect(opens).toHaveLength(2);
@@ -107,23 +133,68 @@ describe('DaemonConnections', () => {
         // The old handle reports a deliberate close, which must not disturb the live one.
         opens[0].handlers.onClosed({ deliberate: true });
         await tick();
-        expect(manager.current('lan')?.baseUrl).toBe('http://10.0.0.9:55673');
+        expect(manager.current('m1', 'lan')?.baseUrl).toBe('http://10.0.0.9:55673');
         expect(opens).toHaveLength(2);
     });
 
-    it('asks for a heartbeat, and ends the connection when the daemon stops answering', async () => {
-        // A socket killed silently — iOS suspending the App — stays open from this side, so this
-        // unanswered heartbeat is the only thing that notices it and reconnects.
-        const { manager, opens } = makeManager();
+    it('keeps a connection whose daemon never answers a heartbeat, and says so', async () => {
+        // A daemon whose CLI predates the heartbeat cannot answer one, and that is indistinguishable
+        // from a dead socket except by trying. Tearing it down on every timeout left a working
+        // connection flapping forever — the answer was never going to come — so it is learned once:
+        // the socket is kept, the caller is told, and the daemon is not asked again.
+        const unsupported: string[] = [];
+        const opens: any[] = [];
+        const manager = new DaemonConnections({
+            open: async (t) => {
+                const handle = { baseUrl: t.baseUrl, send: vi.fn(() => true), ping: vi.fn(() => true), close: vi.fn() } as unknown as LanSocketHandle;
+                opens.push(handle);
+                return handle;
+            },
+            onUpdate: () => {},
+            onDelivered: () => {},
+            onStateChange: () => {},
+            onHeartbeatUnsupported: (target) => unsupported.push(target.machineId),
+            log: () => {},
+            retryDelayMs: () => 0,
+            heartbeat: { intervalMs: 1, timeoutMs: 4 },
+        });
         manager.want(target());
         await tick();
-        expect(opens[0].handlers.onBeat).toBeTypeOf('function');
-
         await new Promise((resolve) => setTimeout(resolve, 30));
-        // Ended and replaced by a fresh connection, rather than left there looking alive.
-        expect(opens[0].handle.close).toHaveBeenCalled();
-        expect(opens.length).toBeGreaterThan(1);
-        expect(manager.current('lan')?.handle).toBe(opens[opens.length - 1].handle);
+
+        expect(unsupported).toEqual(['m1']);
+        // Kept, not replaced: one connection, still live, and no longer pinged.
+        expect(opens).toHaveLength(1);
+        expect(opens[0].close).not.toHaveBeenCalled();
+        expect(manager.current('m1', 'lan')).not.toBeNull();
+        expect(manager.trusted('m1', 'lan')).not.toBeNull();
+        expect(opens[0].ping).toHaveBeenCalledTimes(1);
+    });
+
+    it('still ends a connection whose socket will not take the heartbeat at all', async () => {
+        // The other half of the same question: a socket that cannot even be written to is not one to
+        // keep, and that is what the reconnect path is for.
+        let attempt = 0;
+        const manager = new DaemonConnections({
+            open: async (t) => {
+                attempt += 1;
+                return {
+                    baseUrl: t.baseUrl,
+                    send: () => true,
+                    ping: () => attempt > 1,
+                    close: vi.fn(),
+                } as unknown as LanSocketHandle;
+            },
+            onUpdate: () => {},
+            onDelivered: () => {},
+            onStateChange: () => {},
+            log: () => {},
+            retryDelayMs: () => 1,
+            heartbeat: { intervalMs: 1, timeoutMs: 4 },
+        });
+        manager.want(target());
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(attempt).toBeGreaterThan(1);
     });
 
     it('treats an answered heartbeat as the connection being alive', async () => {
@@ -133,18 +204,37 @@ describe('DaemonConnections', () => {
         const answered = setInterval(() => opens[opens.length - 1]?.handlers.onBeat(), 1);
         await new Promise((resolve) => setTimeout(resolve, 30));
         clearInterval(answered);
-        expect(manager.current('lan')).not.toBeNull();
+        expect(manager.current('m1', 'lan')).not.toBeNull();
         expect(opens).toHaveLength(1);
     });
 
-    it('drops every route not listed when asked for a set', async () => {
+    it('stops offering a connection to write on once a heartbeat goes unanswered', async () => {
+        // `current` still names it — it is open, and only the beat loop decides it is gone — but a
+        // send into a socket whose peer has vanished is accepted locally and goes nowhere, which is
+        // exactly how a message gets lost with the App believing it sent.
+        const { manager, opens } = makeManager();
+        manager.want(target());
+        await tick();
+        expect(manager.trusted('m1', 'lan')?.handle).toBe(opens[0].handle);
+
+        // A whole beat interval passes with no answer.
+        await new Promise((resolve) => setTimeout(resolve, 3));
+        expect(manager.trusted('m1', 'lan')).toBeNull();
+        expect(manager.current('m1', 'lan')).not.toBeNull();
+
+        // A late answer restores it: a slow pong must not cost a reconnect.
+        opens[0].handlers.onBeat();
+        expect(manager.trusted('m1', 'lan')?.handle).toBe(opens[0].handle);
+    });
+
+    it('drops every daemon not listed when asked for a set', async () => {
         const { manager, opens } = makeManager();
         manager.want(target());
         manager.want(target({ route: 'relay', baseUrl: 'https://relay.example/r/tag' }));
         await tick();
         manager.wantOnly([target({ route: 'relay', baseUrl: 'https://relay.example/r/tag' })]);
-        expect(manager.has('lan')).toBe(false);
-        expect(manager.has('relay')).toBe(true);
+        expect(manager.has('m1', 'lan')).toBe(false);
+        expect(manager.has('m1', 'relay')).toBe(true);
         expect(opens[0].handle.close).toHaveBeenCalled();
     });
 });

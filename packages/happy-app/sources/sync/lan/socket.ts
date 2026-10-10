@@ -1,4 +1,5 @@
 import { lanProofFor } from './client';
+import type { SocketLike } from './relayHub';
 import { bump } from '@/sync/metrics';
 
 /**
@@ -14,7 +15,8 @@ import { bump } from '@/sync/metrics';
  *
  * Authentication is a challenge proof spent at the upgrade — no bearer token, because a socket
  * does not need one: it authenticates once and then *is* the authenticated channel, so there is
- * no short-lived credential to leak or expire.
+ * no short-lived credential to leak or expire. It is deliberately not the read path's credential
+ * either; see `openLanSocket`.
  *
  * Recovery is deliberately blunt: any close or error simply means "not live right now". The
  * caller keeps its polling fallback, so a socket that cannot stay up degrades to what the channel
@@ -83,7 +85,22 @@ export async function openLanSocket(options: {
      * from here, and without this nothing would ever notice, so pushes would simply stop arriving.
      */
     onBeat?: () => void;
+    /**
+     * How to reach the daemon at this path, when it is not a plain WebSocket to `baseUrl`.
+     *
+     * The relay is one connection for every machine, so a socket to a machine behind it is a stream
+     * on that connection rather than its own TCP socket — the same protocol, a different transport.
+     * Given `path` and `query`, this returns whatever carries the frames; the default is a
+     * WebSocket to `baseUrl`, which is what the LAN and the relay's per-machine path both use.
+     */
+    connect?: (path: string, query: string) => SocketLike;
 }): Promise<LanSocketHandle | null> {
+    // A socket authenticates with a nonce rather than with the bearer token the read path holds,
+    // and the daemon spends that nonce at the upgrade. So this is a credential of its own — it
+    // cannot borrow the read path's, because the daemon refuses a token whose nonce is gone, and
+    // the upgrade is what removes it. One challenge here is the honest price of not having the
+    // socket able to invalidate every read on the machine; the way to make it cheap is to open
+    // sockets rarely, not to reuse a nonce that is still holding a token up.
     let nonce: string;
     try {
         const response = await fetch(`${options.baseUrl}/lan/challenge`, { method: 'POST' });
@@ -96,11 +113,13 @@ export async function openLanSocket(options: {
     }
 
     const proof = await lanProofFor(options.machineKey, nonce);
-    const url =
-        `${toWebSocketBase(options.baseUrl)}/lan/socket` +
-        `?nonce=${encodeURIComponent(nonce)}&proof=${encodeURIComponent(proof)}`;
-
-    const socket = new WebSocket(url);
+    const path = '/lan/socket';
+    const query = `?nonce=${encodeURIComponent(nonce)}&proof=${encodeURIComponent(proof)}`;
+    // A real WebSocket satisfies the transport this speaks (a cast only because the DOM type's
+    // event handlers are narrower than the four lines of the surface used here).
+    const socket: SocketLike = options.connect
+        ? options.connect(path, query)
+        : (new WebSocket(`${toWebSocketBase(options.baseUrl)}${path}${query}`) as unknown as SocketLike);
     let deliberatelyClosed = false;
 
     socket.onmessage = (event) => {

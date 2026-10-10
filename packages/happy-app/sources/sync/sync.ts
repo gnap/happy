@@ -40,7 +40,9 @@ import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
 import { readSessionOverLan, listSessionsOverLan, toNormalizedMessages, type LanConnection, type LanSessionRead } from './lan/sessionChannel';
 import { decryptLanEntries } from './lan/history';
-import { openLanSocket } from './lan/socket';
+import { openLanSocket, type LanSocketHandle } from './lan/socket';
+import { DEFAULT_RELAY_URL, RelayHub, relayHubUrl, relayOriginOf, type HubMachine, type SocketLike } from './lan/relayHub';
+import type { RelayDirectoryEntry } from './lan/relayDirectory';
 import { normalizeChannelPriority, pickChannel } from './lan/channelOrder';
 import { FetchSlots } from './fetchSlots';
 import { DaemonConnections, type DaemonTarget } from './lan/daemonConnections';
@@ -300,6 +302,26 @@ class Sync {
      * exactly as it does for the server channel.
      */
     /**
+     * How to reach one machine's daemon over the relay, or nothing when the hub cannot carry it.
+     *
+     * Returning nothing is deliberate rather than falling back to a per-machine socket: with the
+     * relay as the hub, a machine it is not holding is simply not reachable that way, and a socket
+     * opened around the hub would be a second, unmanaged path to the same daemon.
+     */
+    private relayStreamFor(machineId: string): ((path: string, query: string) => SocketLike) | undefined {
+        const hub = this.relayHub;
+        const tag = this.machineTags.get(machineId);
+        // Falling back to the per-machine path while the hub is down is deliberate: a relay that
+        // does not speak the hub protocol at all (an older deployment) would otherwise leave the
+        // channel unusable everywhere, and one connection per machine is still the shape that
+        // works. The hub is preferred the moment it is up, which is the normal case.
+        if (!hub || !tag || !hub.isConnected()) {
+            return undefined;
+        }
+        return (path, query) => hub.stream(tag, `${path}${query}`);
+    }
+
+    /**
      * The one connection per daemon route, and the only thing in the App that opens or closes one.
      * Everything here says what it wants; the manager makes that true (see `daemonConnections`).
      */
@@ -307,13 +329,20 @@ class Sync {
         open: (target, handlers) => openLanSocket({
             baseUrl: target.baseUrl,
             machineKey: target.machineKey,
+            // A machine behind the relay is reached on the hub's one connection, as a stream the
+            // relay routes to that machine. The protocol is identical — same upgrade path, same
+            // frames — because the transport is the only thing that differs.
+            connect: target.route === 'relay' ? this.relayStreamFor(target.machineId) : undefined,
             ...handlers,
         }),
         onUpdate: (target, payload) => { this.onDaemonUpdate(target.route, payload); },
         onDelivered: (_target, result) => { this.onLanDelivered(result); },
-        onReady: (target) => { this.onDaemonConnectionReady(target.route, target.baseUrl); },
-        onDropped: (target) => { this.onDaemonConnectionDropped(target.route, target.baseUrl); },
-        onStateChange: (route, state) => { storage.getState().setDaemonSocketStatus(route, state); },
+        onReady: (target) => { this.onDaemonConnectionReady(target); },
+        onDropped: (target) => { this.onDaemonConnectionDropped(target); },
+        onHeartbeatUnsupported: (target) => { this.onDaemonHeartbeatUnsupported(target); },
+        onStateChange: (id, state) => { storage.getState().setDaemonSocketStatus(id, state); },
+        // Only the LAN: over the relay the hub is the one that can see a daemon go, and it says so.
+        heartbeatRoutes: ['lan'],
         log: (message) => { log.log(message); },
     });
     /**
@@ -788,13 +817,14 @@ class Sync {
             this.daemonSocketWatch = storage.subscribe((state, previous) => {
                 if (
                     state.lanSightings !== previous.lanSightings ||
-                    state.relaySightings !== previous.relaySightings ||
                     state.socketStatus !== previous.socketStatus ||
                     state.channelOverride !== previous.channelOverride
                 ) {
                     this.reconcileDaemonSockets();
                 }
                 if (state.localSettings.channelPriority !== previous.localSettings.channelPriority) {
+                    // The relay being switched on or off is the hub's lifetime, not just a filter.
+                    this.ensureRelayHub();
                     // A new order changes where every session reads from, so re-resolve them now
                     // instead of at each one's next scheduled fetch.
                     const serverWas = previous.localSettings.channelPriority.includes('server');
@@ -2723,24 +2753,40 @@ class Sync {
             return;
         }
 
+        /**
+         * Entries leave the queue when they *settle*, not when they are written.
+         *
+         * A write is not an outcome. On the daemon channels it proves only that this side handed
+         * bytes to a socket — a socket whose peer may already be gone, in which case the write
+         * succeeds, the session never sees the message, and the entry used to be dropped from the
+         * queue here on the strength of that write alone. The user's next message then went
+         * through fine, which is what made this look like "the first message is always lost".
+         * Keeping it queued means a later flush — the delivery timer below, a fresh connection, or
+         * simply the next message — can send it again, and the session dedups repeats on `localId`,
+         * so sending it twice costs nothing.
+         */
+        const outstanding = pending.filter((msg) => storage.getState().outbox[msg.localId]?.status === 'sending');
+        if (outstanding.length !== pending.length) {
+            pending.length = 0;
+            pending.push(...outstanding);
+        }
+        if (pending.length === 0) {
+            this.pendingOutbox.delete(sessionId);
+            return;
+        }
         const batch = pending.slice();
 
         // A session on the LAN channel writes back over the LAN, the same way the server path
         // prefers its own socket. Both channels are chosen the same way and neither is written to
         // twice — keeping them in agreement is the CLI's job, since the message it receives is
         // synced onward by its ordinary outgoing path.
-        //
-        // Falling through when the socket is closed is deliberate: the outbox still holds the
-        // message, so an unavailable channel costs a retry rather than the message.
-        const sendChannel = this.preferredChannel(sessionId);
-        const daemon = sendChannel === 'server' ? null : this.connections.current(sendChannel);
+        const daemon = this.daemonSendTarget(sessionId);
         if (daemon) {
             const socket = daemon.handle;
             const allSent = batch.every((msg) =>
                 socket.send({ sessionId, localId: msg.localId, content: msg.content })
             );
             if (allSent) {
-                pending.splice(0, batch.length);
                 // Deliberately not marked acked here, unlike the server socket path. There the
                 // server echoes the message back, so a fast-ack is a claim the server will honour;
                 // here nothing confirms the write but the session itself, and treating the write as
@@ -4475,14 +4521,17 @@ class Sync {
         // opened by a read that worked, and it is still up. It also survives a sighting expiring,
         // which matters because sightings are refreshed by a browse on a timer — a working LAN was
         // otherwise dropped the moment a browse was missed, and the session moved off it.
-        if (this.connections.current(route)?.machineId === machineId) {
+        if (this.connections.current(machineId, route)) {
             return true;
         }
         const known = route === 'lan' ? state.lanSightings[machineId]?.baseUrl : state.relayEndpoints[machineId]?.baseUrl;
         if (!known) {
             return false;
         }
-        if (route === 'lan' ? state.lanSightings[machineId] : state.relaySightings[machineId]) {
+        // The relay says which machines are dialled in. That is the same kind of fact a sighting
+        // gives for the LAN — and a better one, since it is the relay's own registry rather than a
+        // probe that may not have run since the machine came up.
+        if (route === 'relay' ? this.relayMachines.has(machineId) : state.lanSightings[machineId]) {
             return true;
         }
         const link = this.daemonLinks.get(sessionId);
@@ -4600,13 +4649,88 @@ class Sync {
     private daemonSocketWatch: (() => void) | null = null;
 
     /**
-     * Brings the live daemon sockets in line with what is reachable, one per route.
+     * The one relay connection, when the relay is switched on.
      *
-     * The LAN socket opens as soon as a machine is sighted. The relay socket is the emergency
-     * path, so it exists only while something needs it — the server is down, or a session is
-     * pinned to the relay — and is closed once the server is back, so the relay does not carry a
-     * second copy of traffic the server already delivers.
+     * It replaces a per-machine socket, a per-machine address and a 30-second probe of each machine:
+     * the relay holds every daemon that dialled in and publishes what sessions each has, so being
+     * reachable is something the App is told rather than something it works out. `./lan/relayHub`
+     * has the protocol; this owns the lifetime.
      */
+    private relayHub: RelayHub | null = null;
+    /**
+     * The last directory the relay pushed, before this App has named its machines.
+     *
+     * The two halves arrive independently — the relay says which tags it holds, and the machine
+     * keys say which tag belongs to which machine — and either can be first: a cold start has no
+     * keys until the server answers, and no directory until the hub connects. Keeping the raw answer
+     * is what lets a tag learned later be matched against a directory that has already arrived,
+     * instead of leaving the hub connected and every machine in it unnamed.
+     */
+    private relayDirectoryRaw: HubMachine[] = [];
+    private relayHubWatch: (() => void) | null = null;
+    /** The relay address the current hub was opened for, so a new one is a new connection. */
+    private relayHubEndpoint: string | null = null;
+    /** Each machine's relay tag — the relay's name for it — derived from its key. */
+    private machineTags = new Map<string, string>();
+    /**
+     * Machines whose daemon does not answer heartbeats, so a live socket to them is not proof that
+     * anything is arriving.
+     *
+     * This is what keeps the polling fallback on: `stopDaemonPolling` is a claim that pushes are
+     * arriving, and it can only be made about a connection that has been proven alive since it came
+     * up. An old daemon — one whose CLI predates the heartbeat — is the case that is otherwise
+     * indistinguishable from a dead socket, and it would leave every session on that machine with
+     * neither a push nor a poll.
+     */
+    private unverifiedMachines = new Set<string>();
+
+    /**
+     * Names the machines the relay holds, now that both halves are known.
+     *
+     * Called from both directions — the directory arriving, and a machine key being learned — so a
+     * hub that connected before the keys did is not left with a directory it cannot read.
+     */
+    private mapRelayDirectory(): void {
+        this.relayMachines.clear();
+        const entries: RelayDirectoryEntry[] = [];
+        const unknownTags: string[] = [];
+        const at = Date.now();
+        for (const machine of this.relayDirectoryRaw) {
+            // The relay names machines by tag — a hash it cannot invert — and this App is the one
+            // that knows which machine a tag belongs to, because it derives the tag from the
+            // machine's own key. A tag nothing matches is reported rather than dropped: it is a
+            // machine that is up and that this device cannot name.
+            const machineId = this.machineIdForTag(machine.tag);
+            if (machineId) {
+                entries.push({
+                    machineId,
+                    tag: machine.tag,
+                    sessions: Array.isArray(machine.sessions) ? (machine.sessions as RelayDirectoryEntry['sessions']) : [],
+                    at,
+                });
+            } else {
+                unknownTags.push(machine.tag);
+            }
+        }
+        for (const entry of entries) {
+            this.relayMachines.set(entry.machineId, { tag: entry.tag, sessions: entry.sessions });
+        }
+        storage.getState().applyRelayDirectory(entries, unknownTags);
+        this.reconcileDaemonSockets();
+    }
+
+    /** Which machine a relay tag belongs to, or null when this device holds no key for it. */
+    private machineIdForTag(tag: string): string | null {
+        for (const [machineId, known] of this.machineTags) {
+            if (known === tag) {
+                return machineId;
+            }
+        }
+        return null;
+    }
+    /** The machines the relay is holding, by machineId, with what each published. */
+    private relayMachines = new Map<string, HubMachine>();
+
     /**
      * Fill in each machine's relay route from its machine key.
      *
@@ -4617,68 +4741,171 @@ class Sync {
      * wins where it exists, so this only fills a gap.
      */
     async deriveRelayRoutes(): Promise<void> {
-        const relayUrl = storage.getState().localSettings.relayUrl;
-        if (!relayUrl || this.machineDataKeys.size === 0) {
+        const relayUrl = this.relayOrigin();
+        // The hub is the relay *connection*: it comes up whether or not this device can name a
+        // machine yet, because the relay naming them is the point — and a cold start learns both
+        // halves independently.
+        this.ensureRelayHub();
+        if (this.machineDataKeys.size === 0) {
             return;
         }
         for (const [machineId, machineKey] of this.machineDataKeys) {
-            if (storage.getState().relayEndpoints[machineId]) {
-                continue;
-            }
             try {
                 const tag = await relayTagFor(machineKey, {
                     hmacSha256: hmac_sha256,
                     sha256: async (data) => new Uint8Array(await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, new Uint8Array(data))),
                     signKeyPairFromSeed: (seed) => sodium.crypto_sign_seed_keypair(seed),
                 });
-                storage.getState().applyRelayEndpoint(machineId, {
-                    machineId,
-                    baseUrl: relayBaseUrlFor(relayUrl, tag),
-                    at: Date.now(),
-                });
-                log.log(`🔁 derived the relay route for ${machineId.slice(0, 8)} from its key`);
+                this.machineTags.set(machineId, tag);
+                // The address is kept for reads, which are plain HTTPS requests to the relay and
+                // need one; the hub does not, since it addresses machines by tag. Marked `derived`
+                // because that is all it is: a route we computed, not one the machine published —
+                // it is worth trying, and it is not evidence the machine runs a relay client.
+                if (storage.getState().relayEndpoints[machineId]?.source !== 'published') {
+                    storage.getState().applyRelayEndpoint(machineId, {
+                        machineId,
+                        baseUrl: relayBaseUrlFor(relayUrl, tag),
+                        source: 'derived',
+                        at: Date.now(),
+                    });
+                    log.log(`🔁 derived the relay route for ${machineId.slice(0, 8)} from its key`);
+                }
             } catch (error) {
                 log.log(`🔁 could not derive a relay route for ${machineId.slice(0, 8)}: ${String(error)}`);
             }
         }
+        this.ensureRelayHub();
     }
 
     /**
-     * Say which daemon connections should exist. Everything else about them — opening, replacing,
-     * reconnecting after a drop — belongs to the manager, so this is a statement of intent and
-     * nothing more.
+     * Opens or closes the one relay connection, to match whether the relay is switched on.
+     *
+     * The hub is the relay channel's whole transport: with it up, a machine the relay is holding is
+     * reachable, and a machine it is not holding is not — no probe, no sighting, no per-machine
+     * address. With it down, the relay channel says so rather than being guessed at.
+     */
+    /**
+     * Where the relay is.
+     *
+     * Learned, not configured: a daemon knows the relay it dials out to and publishes the route it
+     * built from it, so the App reads the address off the machines it already has. The built-in
+     * default only covers a device that has not synced with the server yet — the one case where
+     * nothing has been published and there is still a relay to be reached.
+     */
+    private relayOrigin(): string {
+        for (const endpoint of Object.values(storage.getState().relayEndpoints)) {
+            const origin = relayOriginOf(endpoint.baseUrl);
+            if (origin) {
+                return origin;
+            }
+        }
+        return DEFAULT_RELAY_URL;
+    }
+
+    /** The relay this App is using. Learned from the machines; the built-in default until then. */
+    relayAddress(): string {
+        return this.relayOrigin();
+    }
+
+    private ensureRelayHub(): void {
+        const relayUrl = this.relayOrigin();
+        const priority = this.channelPriority();
+        const wanted = priority.includes('relay');
+        // Said out loud at startup, because "the relay is off in the priority" and "the relay cannot
+        // be reached" look identical everywhere else — a section with nothing connected either way.
+        log.log(
+            wanted
+                ? `🔁 relay hub: enabled, ${relayUrl} (priority ${priority.join('›')})`
+                : `🔁 relay hub: the relay channel is off in the priority (${priority.join('›')})`,
+        );
+        if (!wanted) {
+            this.relayHubWatch?.();
+            this.relayHubWatch = null;
+            this.relayHub?.close();
+            this.relayHub = null;
+            this.relayHubEndpoint = null;
+            this.relayMachines.clear();
+            this.reconcileDaemonSockets();
+            return;
+        }
+        const endpoint = relayHubUrl(relayUrl as string);
+        if (this.relayHub && this.relayHubEndpoint === endpoint) {
+            return;
+        }
+        // A different relay is a different connection: keeping the old one would leave the App
+        // talking to the relay it was told to stop using.
+        if (this.relayHub) {
+            this.relayHubWatch?.();
+            this.relayHubWatch = null;
+            this.relayHub.close();
+            this.relayHub = null;
+            this.relayMachines.clear();
+        }
+        this.relayHubEndpoint = endpoint;
+        const hub = new RelayHub(endpoint, (message) => { log.log(message); });
+        this.relayHub = hub;
+        this.relayHubWatch = hub.onMachines((machines) => {
+            this.relayDirectoryRaw = machines;
+            this.mapRelayDirectory();
+        });
+        const statusWatch = hub.onStatus((connected) => {
+            storage.getState().setRelayHubConnected(connected);
+        });
+        const machinesWatch = this.relayHubWatch;
+        this.relayHubWatch = () => { machinesWatch(); statusWatch(); };
+        hub.connect();
+        log.log(`🔁 relay hub connecting to ${endpoint}`);
+    }
+
+    /**
+     * Say which daemon connections should exist: one per machine this App can reach, per route.
+     *
+     * The App talks to every machine it has, the way it talks to the server — a machine is a daemon
+     * with sessions on it, and a route is only how the bytes get there. So both routes are wanted
+     * for as long as they are switched on and the machine is reachable over them, and neither
+     * depends on how the server is doing this second. The relay socket used to exist only while the
+     * server was down or a session was pinned to it, and there was only ever *one* socket per route,
+     * whose machine was chosen by whichever sighting came first in a map — so the App could talk to
+     * one of its machines at a time, replaced the connection whenever a different machine's session
+     * was read, and any message written in between went to a daemon that had no such session.
+     *
+     * A read is itself evidence that a machine is reachable, so the machines being read are wanted
+     * even between probes and scans: the connection a read established must not be torn down by the
+     * next scan failing to mention it.
      */
     private reconcileDaemonSockets(): void {
         const state = storage.getState();
         const routes = this.daemonRoutesEnabled();
-        const targets: DaemonTarget[] = [];
+        const targets = new Map<string, DaemonTarget>();
+        const add = (machineId: string, route: DaemonRoute, baseUrl: string) => {
+            const machineKey = this.getMachineKey(machineId);
+            if (machineKey) {
+                targets.set(`${machineId}:${route}`, { machineId, route, baseUrl, machineKey });
+            }
+        };
 
         if (routes.lan) {
             for (const sighting of Object.values(state.lanSightings)) {
-                const machineKey = this.getMachineKey(sighting.machineId);
-                if (machineKey) {
-                    targets.push({ route: 'lan', baseUrl: sighting.baseUrl, machineId: sighting.machineId, machineKey });
-                    break;
+                add(sighting.machineId, 'lan', sighting.baseUrl);
+            }
+        }
+
+        if (routes.relay) {
+            // The relay's own answer, not a sighting: these are the machines it is holding right
+            // now, which is exactly the set worth holding a connection to.
+            for (const machineId of this.relayMachines.keys()) {
+                const baseUrl = state.relayEndpoints[machineId]?.baseUrl;
+                if (baseUrl) {
+                    add(machineId, 'relay', baseUrl);
                 }
             }
         }
 
-        const serverDown = state.socketStatus === 'disconnected' || state.socketStatus === 'error';
-        const pinnedToRelay = Object.values(state.channelOverride).includes('relay');
-        const priority = this.channelPriority();
-        const relayAheadOfServer = !priority.includes('server') || priority.indexOf('relay') < priority.indexOf('server');
-        if (routes.relay && (serverDown || pinnedToRelay || relayAheadOfServer)) {
-            for (const sighting of Object.values(state.relaySightings)) {
-                const machineKey = this.getMachineKey(sighting.machineId);
-                // A machine that is also on the LAN is served there; the relay only covers the rest.
-                if (machineKey && (pinnedToRelay || !state.lanSightings[sighting.machineId])) {
-                    targets.push({ route: 'relay', baseUrl: sighting.baseUrl, machineId: sighting.machineId, machineKey });
-                    break;
-                }
-            }
+        for (const link of this.daemonLinks.values()) {
+            add(link.machineId, link.connection.route, link.connection.baseUrl);
         }
 
-        this.connections.wantOnly(targets);
+        this.connections.wantOnly([...targets.values()]);
     }
 
     /**
@@ -4827,37 +5054,65 @@ class Sync {
     }
 
     /** A connection came up: the sessions on that machine no longer need their polling fallback. */
-    private onDaemonConnectionReady(_route: DaemonRoute, baseUrl: string): void {
+    private onDaemonConnectionReady(target: DaemonTarget): void {
+        // A connection that is up is one worth asking again whether it can answer: a daemon that
+        // has been updated since the last attempt will say so, and one that has not is written off
+        // again after a single missed heartbeat.
+        this.unverifiedMachines.delete(target.machineId);
         for (const [sessionId, channel] of this.daemonLinks) {
-            if (channel.connection.baseUrl === baseUrl) {
+            if (channel.machineId === target.machineId && channel.connection.route === target.route) {
                 this.stopDaemonPolling(sessionId);
+            }
+        }
+        // Anything still waiting for a verdict may have been written into the socket this replaced.
+        // The queue still holds it, so a connection coming up is the moment to try it again — this
+        // is what turns "the message you sent while the channel was flapping" into a delay rather
+        // than a loss, without the user having to send a second one to notice.
+        const waiting = new Set<string>();
+        for (const entry of Object.values(storage.getState().outbox)) {
+            if (entry.status === 'sending') {
+                waiting.add(entry.sessionId);
+            }
+        }
+        for (const sessionId of waiting) {
+            this.resendOutbox(sessionId);
+        }
+    }
+
+    /**
+     * The daemon behind a live connection never answered a heartbeat: it is connected, but nothing
+     * proves it is still there, so the polling fallback stays on for its sessions.
+     */
+    private onDaemonHeartbeatUnsupported(target: DaemonTarget): void {
+        this.unverifiedMachines.add(target.machineId);
+        for (const [sessionId, channel] of this.daemonLinks) {
+            if (channel.machineId === target.machineId) {
+                this.startDaemonPolling(sessionId);
             }
         }
     }
 
     /** A connection went away: whatever it was carrying has just lost its push. */
-    private onDaemonConnectionDropped(_route: DaemonRoute, baseUrl: string): void {
+    private onDaemonConnectionDropped(target: DaemonTarget): void {
+        // Sessions that were being served at this address are told to read again, because the push
+        // they were relying on is gone. The *token* is deliberately not touched: a socket dying
+        // says nothing about a token the daemon still has on its books — the two are authenticated
+        // separately, and the daemon refuses a token only when it no longer knows the nonce behind
+        // it, which is a restart and not a dropped socket. Voiding on a drop made one socket's
+        // death cost a handshake from every reader sharing the address, against a rate limit that
+        // exists precisely to bound that. A token that really has gone stale is handled where it is
+        // discovered: the read that gets a 401 replaces it and retries.
+        // Named by the daemon, not by the address: a machine that dropped is the machine whose
+        // sessions lost their push, and with one connection per machine an address can no longer be
+        // standing in for that.
         for (const [sessionId, channel] of this.daemonLinks) {
-            if (channel.connection.baseUrl !== baseUrl) {
-                continue;
+            if (channel.machineId === target.machineId && channel.connection.route === target.route) {
+                this.getMessagesSync(sessionId).invalidate();
             }
-            this.getMessagesSync(sessionId).invalidate();
-            // The connection that carried this token is gone, and a dropped connection is what a
-            // daemon restart looks like from here — which invalidates every token it ever issued,
-            // because the nonces it checks them against live in memory. Keeping the address and
-            // dropping the credential turns a request that would come back 401 into the challenge
-            // that follows it anyway.
-            this.daemonLinks.set(sessionId, {
-                ...channel,
-                // The address stays; the credential stops counting as live, so the next read
-                // challenges for a new one rather than spending a request on a 401.
-                connection: { ...channel.connection, expiresAt: 0 },
-            });
         }
-        for (const [machineId, connection] of this.lanMachineConnections) {
-            if (connection.baseUrl === baseUrl) {
-                this.lanMachineConnections.delete(machineId);
-            }
+        const known = this.lanMachineConnections.get(target.machineId);
+        if (known && known.route === target.route) {
+            this.lanMachineConnections.delete(target.machineId);
         }
     }
 
@@ -4917,6 +5172,62 @@ class Sync {
     }
 
     /**
+     * The daemon socket this session's messages may be written on — its own machine's, or none.
+     *
+     * A route holds one socket, and that socket belongs to one machine. Writing a session's message
+     * to another machine's daemon is a message handed to a session that does not exist there: the
+     * daemon looks the id up, finds nothing, answers `delivered: false`, and the message is gone
+     * from every point of view except the outbox. That is exactly what the App did whenever its
+     * relay socket was pointed at a different machine than the session's — with several machines
+     * publishing routes, that was most of the time, and it read as "the first message is always
+     * lost, the second one arrives".
+     *
+     * So the route's socket is used only when it is the session's own machine's, and otherwise this
+     * says nothing is available: the caller falls back to the server, or leaves the message queued,
+     * which are both outcomes where the message still exists.
+     *
+     * `trusted` rather than `current`, for the other half of the same problem: a socket that has
+     * missed a heartbeat is one whose peer may be gone, and a write into it is accepted locally and
+     * goes nowhere.
+     */
+    private daemonSendTarget(sessionId: string): { handle: LanSocketHandle; baseUrl: string; machineId: string } | null {
+        const channel = this.preferredChannel(sessionId);
+        if (channel === 'server') {
+            return null;
+        }
+        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        if (!machineId) {
+            return null;
+        }
+        return this.connections.trusted(machineId, channel);
+    }
+
+    /**
+     * Writes the session's unconfirmed messages again over the daemon channel, if one is usable.
+     *
+     * Kept apart from `flushOutbox` on purpose. A flush is a claim about the whole queue — it
+     * records waits, falls back to the server, and can fail the entries — while this is the narrow
+     * repair for one possibility: the earlier write was accepted by a socket whose peer was already
+     * gone. Nothing here may start a wait cycle, or a message that never confirms would keep
+     * extending its own deadline instead of failing at it. Doing nothing when no daemon connection
+     * is usable is correct: the ordinary flush, on its next tick, is what reaches the other
+     * channels.
+     */
+    private resendOutbox(sessionId: string): void {
+        const pending = this.pendingOutbox.get(sessionId);
+        if (!pending || pending.length === 0) {
+            return;
+        }
+        const daemon = this.daemonSendTarget(sessionId);
+        if (!daemon) {
+            return;
+        }
+        for (const msg of pending) {
+            daemon.handle.send({ sessionId, localId: msg.localId, content: msg.content });
+        }
+    }
+
+    /**
      * Give the message a verdict, then proof, then let it fail.
      *
      * `settleReceivedMessages` settles an entry the moment the session's own log or a pushed entry
@@ -4933,6 +5244,14 @@ class Sync {
                 return; // settled elsewhere: the verdict, the echo, or a read
             }
             if (askAgain) {
+                // Send it again *and* look again. The look is what settles it when the message did
+                // arrive and only the confirmation was lost; the send is what covers the other
+                // case — a write into a socket whose peer was already gone, which reported success
+                // and went nowhere. A repeat is free: the session dedups on `localId`.
+                //
+                // The resend deliberately bypasses the ordinary flush, so it cannot register a wait
+                // cycle of its own: one message has one deadline, and this branch is its middle.
+                this.resendOutbox(entry.sessionId);
                 this.getMessagesSync(entry.sessionId).invalidate();
                 this.checkLanDelivery(localId, Sync.LAN_DELIVERY_PROOF_MS, false);
                 return;
@@ -4979,7 +5298,11 @@ class Sync {
         // reported: "no local history yet" is a 404 the daemon documents as retryable, and
         // treating it as final would strand the channel, since for a pinned session nothing else
         // would ever invalidate the sync.
-        if (read && this.connections.current(read.connection.route)?.baseUrl === read.connection.baseUrl) {
+        if (
+            read
+            && !this.unverifiedMachines.has(read.machineId)
+            && this.connections.current(read.machineId, read.connection.route)?.baseUrl === read.connection.baseUrl
+        ) {
             this.stopDaemonPolling(sessionId);
             return;
         }

@@ -29,6 +29,9 @@ export function parseRelayEndpoint(machineId: string, daemonState: unknown): Rel
         return {
             machineId,
             baseUrl: `https://${authority}/r/${tag}`,
+            // The machine's own claim about itself, which is the only thing that says a relay client
+            // is running there.
+            source: 'published',
             at: typeof p2p.at === 'number' ? p2p.at : Date.now(),
         };
     }
