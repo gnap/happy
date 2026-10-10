@@ -38,6 +38,12 @@ export type LanSessionRead = {
     /** How many log entries actually decrypted, against how many were returned. */
     decryptedCount: number;
     total: number;
+    /**
+     * The `localId`s of entries the session *received* — its own record that a user message reached
+     * it. This is the durable form of the delivery verdict, which arrives as one broadcast frame
+     * that a reconnecting socket can miss entirely.
+     */
+    received: string[];
     /** Boundary after this page's last entry: hand back as `follow` to keep up with the log. */
     cursor: string;
     /** Boundary before this page's first entry: hand back as `older` to read further back. */
@@ -277,6 +283,7 @@ export async function readSessionOverLan(options: {
                 machineId: connection.machineId,
                 tag: history.tag,
                 messages: toNormalizedMessages(decrypted.entries),
+                received: received(decrypted.entries),
                 decryptedCount: decrypted.decryptedCount,
                 total: decrypted.entries.length,
                 cursor: history.cursor,
@@ -288,6 +295,9 @@ export async function readSessionOverLan(options: {
                 sessionKey: decrypted.sessionKey as Uint8Array,
             };
         };
+
+        const received = (entries: DecryptedLanEntry[]): string[] =>
+            entries.filter((entry) => entry.dir === 'in' && entry.localId).map((entry) => entry.localId as string);
 
         const first = await decode(await request(options.page));
         if (!first || options.page.kind !== 'follow' || !first.hasNewer) {
@@ -305,6 +315,7 @@ export async function readSessionOverLan(options: {
             drained = {
                 ...next,
                 messages: [...drained.messages, ...next.messages],
+                received: [...drained.received, ...next.received],
                 decryptedCount: drained.decryptedCount + next.decryptedCount,
                 total: drained.total + next.total,
                 // The window's floor is where the *first* page started: following moves the top.

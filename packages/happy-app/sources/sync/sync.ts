@@ -322,6 +322,11 @@ class Sync {
 
     /** How long a LAN send waits for the session's verdict before it is treated as lost. */
     private static readonly LAN_DELIVERY_TIMEOUT_MS = 15_000;
+    /**
+     * The second look, after the verdict's window has passed: long enough for one read to come back
+     * with the session's own record that it took the message in.
+     */
+    private static readonly LAN_DELIVERY_PROOF_MS = 30_000;
     /** Accumulated base64 dataEncryptionKey values from all fetchSessions responses.
      *  Merged across delta fetches so the cache always has the full key set. */
     private sessionEncryptionKeySources = new Map<string, string>();
@@ -4249,6 +4254,7 @@ class Sync {
             return null;
         }
         this.clearRouteFailure(sessionId, read.connection.route);
+        this.settleReceivedMessages(read.received);
         const window = replace
             ? { cursor: read.cursor, older: read.older, hasOlder: read.hasOlder }
             : {
@@ -4626,6 +4632,33 @@ class Sync {
         void this.handleUpdate(payload);
     }
 
+    /**
+     * Mark everything the session has taken in as delivered.
+     *
+     * The explicit verdict is one frame on a socket that may have been replaced since, so a lost
+     * frame used to look like a lost message: the entry failed after its timeout while the session
+     * had it all along, and the user was told to send it again. The session writes its own record of
+     * what it received — `dir: 'in'` with the same `localId` — and that comes back on every read and
+     * every push, so it is the proof.
+     */
+    private settleReceivedMessages(localIds: string[]): void {
+        if (localIds.length === 0) {
+            return;
+        }
+        const outbox = storage.getState().outbox;
+        for (const localId of localIds) {
+            const entry = outbox[localId];
+            if (entry && entry.status === 'sending') {
+                storage.getState().markOutboxMessageDelivered(localId);
+                const timer = this.lanSendTimeouts.get(localId);
+                if (timer) {
+                    clearTimeout(timer);
+                    this.lanSendTimeouts.delete(localId);
+                }
+            }
+        }
+    }
+
     /** The session's verdict on a message sent over its connection. */
     private onLanDelivered(result: { sessionId: string; localId: string; delivered: boolean }): void {
         const timer = this.lanSendTimeouts.get(result.localId);
@@ -4678,6 +4711,9 @@ class Sync {
      * read delivers it.
      */
     private async applyPushedDaemonEntry(sessionId: string, entry: LanSessionLogEntry): Promise<void> {
+        if (entry.dir === 'in' && entry.localId) {
+            this.settleReceivedMessages([entry.localId]);
+        }
         const sessionKey = this.lanSessionKeys.get(sessionId);
         if (!sessionKey) {
             return;
@@ -4705,14 +4741,36 @@ class Sync {
         if (this.lanSendTimeouts.has(localId)) {
             return;
         }
+        this.checkLanDelivery(localId, Sync.LAN_DELIVERY_TIMEOUT_MS, true);
+    }
+
+    /**
+     * Give the message a verdict, then proof, then let it fail.
+     *
+     * `settleReceivedMessages` settles an entry the moment the session's own log or a pushed entry
+     * shows it was received — which is what the echo and the verdict also do. So this timer only has
+     * to decide what to do when nothing has said anything: ask once more (a read brings back the
+     * session's record even when the verdict frame was lost), and only then admit it did not arrive.
+     * Failing on the verdict alone told the user to resend messages the session already had.
+     */
+    private checkLanDelivery(localId: string, waitMs: number, askAgain: boolean): void {
         const timer = setTimeout(() => {
             this.lanSendTimeouts.delete(localId);
+            const entry = storage.getState().outbox[localId];
+            if (!entry || entry.status !== 'sending') {
+                return; // settled elsewhere: the verdict, the echo, or a read
+            }
+            if (askAgain) {
+                this.getMessagesSync(entry.sessionId).invalidate();
+                this.checkLanDelivery(localId, Sync.LAN_DELIVERY_PROOF_MS, false);
+                return;
+            }
             storage.getState().failOutboxEntries(
                 [localId],
                 'No confirmation that the session received this message.',
             );
-            log.log(`📡 LAN send ${localId} was never confirmed`);
-        }, Sync.LAN_DELIVERY_TIMEOUT_MS);
+            log.log(`📡 LAN send ${localId} was never confirmed, and the session's log does not show it`);
+        }, waitMs);
         (timer as unknown as { unref?: () => void }).unref?.();
         this.lanSendTimeouts.set(localId, timer);
     }
