@@ -1035,7 +1035,10 @@ class Sync {
         const lastSeq = watermark?.lastSeq ?? this.sessionLastSeq.get(sessionId) ?? 0;
         const oldestSeq = watermark?.oldestSeq ?? sessionMsgs.oldestSeq;
         const hasOlderMessages = watermark?.hasOlderMessages ?? sessionMsgs.hasOlderMessages ?? false;
-        const saved = await saveMessageCache(session, sessionMsgs.messages, sessionMsgs.reducerState, lastSeq, oldestSeq, hasOlderMessages);
+        // A session on a daemon channel is one the CLI keeps a log for, whatever the server has
+        // managed to tell us about it.
+        const servedByDaemon = this.preferredChannel(sessionId) !== 'server';
+        const saved = await saveMessageCache(session, sessionMsgs.messages, sessionMsgs.reducerState, lastSeq, oldestSeq, hasOlderMessages, servedByDaemon);
         // The window's anchors are written only once the messages they describe are on disk, and
         // never before. A crash between the two then leaves anchors *older* than the window they
         // belong to, which costs a re-read that dedup absorbs — the other order would leave them
@@ -3102,7 +3105,7 @@ class Sync {
                     // and handing it to the store. It is the one number that says whether opening a
                     // conversation is instant or a hitch.
                     const hydrationStartedAt = Date.now();
-                    const cached = await loadMessageCache(session);
+                    const cached = await loadMessageCache(session, this.preferredChannel(sessionId) !== 'server');
                     if (cached) {
                         storage.getState().applyHydratedCache(
                             sessionId,

@@ -29,10 +29,18 @@ import { bump } from '../metrics';
 // ---------------------------------------------------------------------------
 
 /**
- * Returns true if the message cache should be used for this session.
- * Currently restricted to sessions with flavor === 'cursor'.
+ * Whether the message cache should be used for this session.
+ *
+ * The flavor is what says the CLI keeps a local log worth caching, but it is a *server*-decrypted
+ * field: with the server channel switched off, a session learned from the daemon's own list has no
+ * metadata at all, and a gate that insists on the flavor then refuses to cache — or to read — a
+ * session the daemon is serving right now. Being served by a daemon is a reason in itself, and the
+ * only one the App can establish without the server.
  */
-export function isCacheEnabled(session: Session | null | undefined): boolean {
+export function isCacheEnabled(session: Session | null | undefined, servedByDaemon = false): boolean {
+    if (servedByDaemon) {
+        return true;
+    }
     const flavor = session?.metadata?.flavor;
     return flavor === 'cursor' || flavor === 'acp-cursor' || flavor === 'claude';
 }
@@ -74,12 +82,12 @@ export async function preloadSessionCacheDB(): Promise<void> {
  * Try to load the cached messages and reducer state for a session.
  * Returns null if the cache is empty, stale, or disabled for this session.
  */
-export async function loadMessageCache(session: Session): Promise<LoadedCache | null> {
+export async function loadMessageCache(session: Session, servedByDaemon = false): Promise<LoadedCache | null> {
     if (!session) {
         console.warn(`📦 messageCache: skip load (no session)`);
         return null;
     }
-    if (!isCacheEnabled(session)) {
+    if (!isCacheEnabled(session, servedByDaemon)) {
         console.warn(`📦 messageCache: skip load for ${session.id.slice(-8)} (flavor=${session.metadata?.flavor ?? 'none'})`);
         return null;
     }
@@ -191,8 +199,9 @@ export async function saveMessageCache(
     lastSeq: number,
     oldestSeq: number = 0,
     hasOlderMessages: boolean = false,
+    servedByDaemon = false,
 ): Promise<boolean> {
-    if (!isCacheEnabled(session)) {
+    if (!isCacheEnabled(session, servedByDaemon)) {
         log.log(`📦 messageCache: skip save for ${session.id} (flavor=${session.metadata?.flavor ?? 'none'}, not cursor)`);
         return false;
     }

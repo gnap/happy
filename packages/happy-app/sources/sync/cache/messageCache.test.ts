@@ -77,6 +77,15 @@ describe('isCacheEnabled', () => {
         expect(isCacheEnabled(makeSession('gemini'))).toBe(false);
     });
 
+    it('caches a session a daemon is serving, whatever the server has said about it', () => {
+        // With the server channel off, a session learned from the daemon's own list has no metadata
+        // and so no flavor — and refusing to cache it is how a conversation opened blank with a
+        // perfectly good local log behind it.
+        expect(isCacheEnabled(makeSession(undefined), true)).toBe(true);
+        expect(isCacheEnabled(null, true)).toBe(true);
+        expect(isCacheEnabled(makeSession(undefined), false)).toBe(false);
+    });
+
     it('returns false for sessions with no metadata', () => {
         expect(isCacheEnabled(makeSession(undefined))).toBe(false);
     });
