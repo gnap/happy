@@ -60,10 +60,17 @@ export function resolveMachinePresence(
     return 'offline';
 }
 
-/** Glyph per channel: wifi for the local link, a globe for the public server. */
+/**
+ * Glyph per channel: wifi for the local link, a globe for the public server, and two arrows for the
+ * relay — traffic that goes somewhere else and comes back.
+ *
+ * The relay's is `repeat` rather than `swap-horizontal` because these are drawn at 10px in a header
+ * that is near-black in the dark theme: two one-pixel strokes vanish into it, and an icon that
+ * cannot be seen is indistinguishable from a channel that is not there.
+ */
 export const CHANNEL_ICONS = {
     lan: 'wifi',
-    relay: 'swap-horizontal',
+    relay: 'repeat',
     server: 'globe-outline',
 } as const;
 
