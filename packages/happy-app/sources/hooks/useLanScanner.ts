@@ -15,14 +15,16 @@ import { discoverMachines, accountFingerprintOf } from '@/sync/lan/discovery';
  * from a screen would restart the cadence on every navigation.
  *
  * Cadence is deliberately modest: each browse occupies the multicast socket for roughly its
- * timeout, so a 4s browse every 30s keeps the duty cycle near 13% while still recovering from a
- * missed announcement. The `lanSightings` TTL is 3× the interval, so one lost scan never flickers
- * a machine between reachable and offline.
+ * timeout, and on a phone that 4s is most of what the radio does while a session sits open — so it
+ * runs once a minute rather than twice, halving the duty cycle. What makes the longer gap safe is
+ * that a sighting is not the only evidence of reachability: an open socket to a machine counts on
+ * its own (see `routeMeasured`), so a scan that is late or missed cannot move a working session
+ * off the LAN. The `lanSightings` TTL still bounds how long a departed machine is shown as seen.
  *
  * Scanning is suspended unless the app is foregrounded: iOS will not deliver multicast to a
  * backgrounded app, and waking to scan would just burn battery for an empty result.
  */
-const SCAN_INTERVAL_MS = 30_000;
+const SCAN_INTERVAL_MS = 60_000;
 const SCAN_TIMEOUT_MS = 4_000;
 
 export function useLanScanner(): void {

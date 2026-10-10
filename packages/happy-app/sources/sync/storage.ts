@@ -145,7 +145,7 @@ interface StorageState {
      * a sighting says a daemon is reachable, this says a channel to one is actually established —
      * which is the thing that makes messages arrive without a poll.
      */
-    daemonSockets: Record<DaemonRoute, { baseUrl: string; connectedAt: number } | null>;
+    daemonSockets: Record<DaemonRoute, { baseUrl: string; machineId: string; connectedAt: number } | null>;
     /**
      * A per-session, manually forced channel. Absent means automatic: the server, falling back to
      * the LAN when it cannot answer.
@@ -188,7 +188,7 @@ interface StorageState {
     /** Replace the LAN sighting set with the result of one scan. */
     applyLanSightings: (sightings: LanSighting[]) => void;
     /** Record the live LAN socket, or null once it is gone. */
-    setDaemonSocketStatus: (route: DaemonRoute, status: { baseUrl: string; connectedAt: number } | null) => void;
+    setDaemonSocketStatus: (route: DaemonRoute, status: { baseUrl: string; machineId: string; connectedAt: number } | null) => void;
     applyLoaded: () => void;
     applyReady: () => void;
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => { changed: string[], hasReadyEvent: boolean };

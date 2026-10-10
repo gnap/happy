@@ -29,7 +29,13 @@ export function useRelayProber(): void {
             if (endpoints.length === 0 || !storage.getState().localSettings.channelPriority.includes('relay')) {
                 return;
             }
-            const results = await Promise.all(endpoints.map(async (endpoint) => ({
+            // A machine this App already holds a relay socket to has answered something better than
+            // a probe can: it is being served through it right now. Probing it anyway is a round
+            // trip over the relay every half minute, which on a phone is the radio waking up to ask
+            // a question whose answer is in hand.
+            const socket = storage.getState().daemonSockets.relay;
+            const toProbe = socket ? endpoints.filter((endpoint) => endpoint.machineId !== socket.machineId) : endpoints;
+            const results = await Promise.all(toProbe.map(async (endpoint) => ({
                 endpoint,
                 ok: await probeRelay(endpoint.baseUrl),
             })));

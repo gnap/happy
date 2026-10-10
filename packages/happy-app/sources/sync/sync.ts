@@ -292,7 +292,7 @@ class Sync {
      * connection carries every session on that machine, and the App demultiplexes on `body.sid`
      * exactly as it does for the server channel.
      */
-    private daemonSockets = new Map<DaemonRoute, { baseUrl: string; handle: LanSocketHandle }>();
+    private daemonSockets = new Map<DaemonRoute, { baseUrl: string; machineId: string; handle: LanSocketHandle }>();
     /**
      * The session key each LAN read unwrapped, by session. The live socket is handed entries with
      * no read and no wrapped key around them, so this is the only place it can come from.
@@ -4174,7 +4174,7 @@ class Sync {
         // answered. Fire-and-forget: polling is what keeps the session readable, and the socket
         // only removes the delay between a message being written and being seen.
         if (machineKey) {
-            void this.ensureDaemonSocket(read.connection.route, read.connection.baseUrl, machineKey);
+            void this.ensureDaemonSocket(read.connection.route, read.connection.baseUrl, read.machineId, machineKey);
         }
 
         const oldestSeq = minSeqOf(read.messages);
@@ -4307,14 +4307,18 @@ class Sync {
         if (failedAt !== undefined && Date.now() - failedAt < Sync.ROUTE_FAILURE_TTL_MS) {
             return false;
         }
+        // A socket this App is holding open to that machine is the strongest of the three: it was
+        // opened by a read that worked, and it is still up. It also survives a sighting expiring,
+        // which matters because sightings are refreshed by a browse on a timer — a working LAN was
+        // otherwise dropped the moment a browse was missed, and the session moved off it.
+        if (this.daemonSockets.get(route)?.machineId === machineId) {
+            return true;
+        }
         const known = route === 'lan' ? state.lanSightings[machineId]?.baseUrl : state.relayEndpoints[machineId]?.baseUrl;
         if (!known) {
             return false;
         }
         if (route === 'lan' ? state.lanSightings[machineId] : state.relaySightings[machineId]) {
-            return true;
-        }
-        if (this.daemonSockets.get(route)?.baseUrl === known) {
             return true;
         }
         const link = this.daemonLinks.get(sessionId);
@@ -4449,7 +4453,7 @@ class Sync {
             for (const sighting of Object.values(state.lanSightings)) {
                 const machineKey = this.getMachineKey(sighting.machineId);
                 if (machineKey) {
-                    void this.ensureDaemonSocket('lan', sighting.baseUrl, machineKey);
+                    void this.ensureDaemonSocket('lan', sighting.baseUrl, sighting.machineId, machineKey);
                     break;
                 }
             }
@@ -4467,7 +4471,7 @@ class Sync {
                 const machineKey = this.getMachineKey(sighting.machineId);
                 // A machine that is also on the LAN is served there; the relay only covers the rest.
                 if (machineKey && (pinnedToRelay || !state.lanSightings[sighting.machineId])) {
-                    void this.ensureDaemonSocket('relay', sighting.baseUrl, machineKey);
+                    void this.ensureDaemonSocket('relay', sighting.baseUrl, sighting.machineId, machineKey);
                     break;
                 }
             }
@@ -4485,7 +4489,7 @@ class Sync {
      * Failure is not an error path: polling keeps running, so a socket that cannot open or cannot
      * stay open degrades to exactly what the channel did before it existed.
      */
-    private async ensureDaemonSocket(route: DaemonRoute, baseUrl: string, machineKey: Uint8Array): Promise<void> {
+    private async ensureDaemonSocket(route: DaemonRoute, baseUrl: string, machineId: string, machineKey: Uint8Array): Promise<void> {
         if (this.daemonSockets.get(route)?.baseUrl === baseUrl) {
             return;
         }
@@ -4562,8 +4566,8 @@ class Sync {
         });
         opened = handle;
         if (handle) {
-            this.daemonSockets.set(route, { baseUrl, handle });
-            storage.getState().setDaemonSocketStatus(route, { baseUrl, connectedAt: Date.now() });
+            this.daemonSockets.set(route, { baseUrl, machineId, handle });
+            storage.getState().setDaemonSocketStatus(route, { baseUrl, machineId, connectedAt: Date.now() });
             log.log(`📡 ${route} socket live at ${baseUrl}`);
             // Stop the fallback for the sessions this socket now covers, rather than waiting for
             // each one's next tick to notice. Any session on another machine keeps its timer.
