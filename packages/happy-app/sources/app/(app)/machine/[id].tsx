@@ -158,8 +158,11 @@ export default function MachineDetailScreen() {
 
     const handleRefresh = async () => {
         setIsRefreshing(true);
-        await sync.refreshMachines();
-        setIsRefreshing(false);
+        try {
+            await sync.refreshMachines();
+        } finally {
+            setIsRefreshing(false);
+        }
     };
 
     const handleRenameMachine = async () => {

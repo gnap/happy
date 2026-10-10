@@ -23,6 +23,22 @@ function formatRate(rate: number | undefined): string {
 }
 
 /**
+ * The fetch pool, sampled with the same beat as the counters. Fetches that never release are what
+ * stop a session refreshing after a suspension, and they are invisible from the outside: this is
+ * what makes them show up as a number rather than as "the app is being weird".
+ */
+function useFetchPoolStats(): { inFlight: number; queued: number; oldestMs: number } | null {
+    const [stats, setStats] = React.useState<{ inFlight: number; queued: number; oldestMs: number } | null>(null);
+    React.useEffect(() => {
+        const sample = () => setStats(sync.fetchSlotStats());
+        sample();
+        const timer = setInterval(sample, 1_000);
+        return () => clearInterval(timer);
+    }, []);
+    return stats;
+}
+
+/**
  * Samples the sync counters once a second and reports per-second rates.
  *
  * Rates rather than totals: a total says how long the App has been running, a rate says what it is
@@ -54,6 +70,7 @@ export default function DevScreen() {
     const lanSightingCount = Object.keys(useLanSightings()).length;
     const [channelPriority] = useLocalSettingMutable('channelPriority');
     const rates = useMetricRates();
+    const fetchPool = useFetchPoolStats();
     const relayRouteCount = Object.keys(useRelayEndpoints()).length;
     const relaySightingCount = Object.keys(useRelaySightings()).length;
     const anonymousId = sync.encryption!.anonID;
@@ -388,6 +405,13 @@ export default function DevScreen() {
                     title="Message cache"
                     subtitle={rates
                         ? `${formatRate(rates.cacheSaves)} saves/s · ${(rates.cacheBytes / 1024).toFixed(1)} KB/s of state serialised`
+                        : 'sampling…'}
+                    showChevron={false}
+                />
+                <Item
+                    title="Fetch pool"
+                    subtitle={fetchPool
+                        ? `${fetchPool.inFlight}/5 in flight · ${fetchPool.queued} queued${fetchPool.oldestMs > 5_000 ? ` · oldest held ${(fetchPool.oldestMs / 1000).toFixed(0)}s` : ''}`
                         : 'sampling…'}
                     showChevron={false}
                 />

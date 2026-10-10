@@ -38,6 +38,7 @@ import { readSessionOverLan, listSessionsOverLan, toNormalizedMessages, type Lan
 import { decryptLanEntries } from './lan/history';
 import { openLanSocket, type LanSocketHandle } from './lan/socket';
 import { normalizeChannelPriority, pickChannel } from './lan/channelOrder';
+import { FetchSlots } from './fetchSlots';
 import { pageMovedTheLog, planDaemonRead } from './lan/windowPlan';
 import type { DaemonRoute, LanSessionLogEntry, SessionChannel } from './lan/types';
 import { parseRelayEndpoint } from './lan/relay';
@@ -238,8 +239,19 @@ class Sync {
     private sessionSendLocks = new Map<string, AsyncLock>();
     /** Limit concurrent message fetches to avoid network congestion (e.g. 150 sessions all requesting at once on reconnect). */
     private static readonly MAX_CONCURRENT_MESSAGE_FETCHES = 5;
-    private messageFetchRunning = 0;
-    private messageFetchQueue: (() => void)[] = [];
+    /**
+     * Past every timeout on the read path (a LAN read is capped at 45s), so a slot still held after
+     * this is a fetch that will never release it — a suspended request whose abort was lost.
+     */
+    private static readonly MESSAGE_FETCH_LEASE_MS = 90_000;
+    /**
+     * How long a background trip has to last before what was in flight is treated as void. Matches
+     * the socket's own trust window: past it, iOS has certainly suspended the JS thread, and a
+     * fetch that was mid-request will not be resumed by anything this App can wait for.
+     */
+    private static readonly SUSPENDED_TRUST_MS = 45_000;
+    private messageFetchSlots = new FetchSlots(Sync.MAX_CONCURRENT_MESSAGE_FETCHES, Sync.MESSAGE_FETCH_LEASE_MS);
+    private messageFetchQueue: ((token: number) => void)[] = [];
     private sessionDataKeys = new Map<string, Uint8Array>(); // Store session data encryption keys internally
     private machineDataKeys = new Map<string, Uint8Array>(); // Store machine data encryption keys internally
     private artifactDataKeys = new Map<string, Uint8Array>(); // Store artifact data encryption keys internally
@@ -307,6 +319,8 @@ class Sync {
     private activityAccumulator: ActivityUpdateAccumulator;
     private pendingSettings: Partial<Settings> = loadPendingSettings();
     private appState: AppStateStatus = AppState.currentState;
+    /** When the App went to the background, so a resume can tell a hop from a suspension. */
+    private backgroundedAt: number | null = null;
     private appStateSubscription: ReturnType<typeof AppState.addEventListener> | null = null;
     private networkStateSubscription: ReturnType<typeof Network.addNetworkStateListener> | null = null;
     private currentVisibleSessionId: string | null = null;
@@ -384,6 +398,13 @@ class Sync {
                     this.failPendingOutboxMessages('Message failed to send in background after 30s. Please retry.');
                 }
                 log.log('📱 App became active');
+                // In-flight fetches cannot be trusted across a real suspension, and the timers that
+                // would have retried them are about to restart against locks they still hold.
+                const suspendedFor = this.backgroundedAt === null ? 0 : Date.now() - this.backgroundedAt;
+                this.backgroundedAt = null;
+                if (suspendedFor >= Sync.SUSPENDED_TRUST_MS) {
+                    this.recoverFetchesAfterSuspend();
+                }
                 // Probe the socket first — a live connection responds in < 200ms.
                 // If probe fails (1.5s timeout) a fresh connect is triggered.
                 // Only invalidate syncs after the probe settles so data fetches
@@ -401,6 +422,7 @@ class Sync {
                 log.log(`📱 App state changed to: ${nextAppState}`);
                 // A coalesced cache write may be waiting on a timer that suspension will not run.
                 // This is the last reliable moment before the App can be killed, so write now.
+                this.backgroundedAt = Date.now();
                 this.flushPendingCacheSaves();
                 // Stop reconnection timers while suspended to avoid waking the
                 // JS thread unnecessarily. A live connected socket is preserved so a short trip
@@ -2778,24 +2800,67 @@ class Sync {
         }
     }
 
-    private acquireMessageFetchSlot = (): Promise<void> => {
-        if (this.messageFetchRunning < Sync.MAX_CONCURRENT_MESSAGE_FETCHES) {
-            this.messageFetchRunning++;
-            return Promise.resolve();
+    private acquireMessageFetchSlot = (): Promise<number> => {
+        const token = this.messageFetchSlots.tryAcquire(Date.now());
+        if (token !== null) {
+            return Promise.resolve(token);
         }
-        return new Promise<void>((resolve) => {
+        return new Promise<number>((resolve) => {
             this.messageFetchQueue.push(resolve);
         });
     };
 
-    private releaseMessageFetchSlot = (): void => {
-        if (this.messageFetchQueue.length > 0) {
+    private releaseMessageFetchSlot = (token: number): void => {
+        // False means the lease was reclaimed while this fetch was still running: the slot already
+        // belongs to someone else, and freeing it again would let one more fetch through than the
+        // limit allows.
+        if (!this.messageFetchSlots.release(token)) {
+            return;
+        }
+        this.pumpMessageFetchQueue();
+    };
+
+    private pumpMessageFetchQueue = (): void => {
+        while (this.messageFetchQueue.length > 0) {
+            const token = this.messageFetchSlots.tryAcquire(Date.now());
+            if (token === null) {
+                return;
+            }
             const next = this.messageFetchQueue.shift();
-            if (next) next();
-        } else {
-            this.messageFetchRunning--;
+            if (!next) {
+                this.messageFetchSlots.release(token);
+                return;
+            }
+            next(token);
         }
     };
+
+    /**
+     * Declares everything the App had in flight void, for a resume after iOS suspended it.
+     *
+     * A fetch that was mid-request when the App was suspended may never see its abort, so neither
+     * its `finally` nor the lock it holds can be waited on. Clearing them here is what stops the
+     * resume from inheriting those wedges: the timers all restart on 'active', and every one of
+     * them would otherwise be a no-op against a lock that is still held.
+     */
+    /** The fetch pool as the Dev Tools page reads it: a stuck pool is otherwise invisible. */
+    fetchSlotStats(): { inFlight: number; queued: number; oldestMs: number } {
+        return {
+            inFlight: this.messageFetchSlots.inFlight,
+            queued: this.messageFetchQueue.length,
+            oldestMs: this.messageFetchSlots.oldestHeldFor(Date.now()),
+        };
+    }
+
+    recoverFetchesAfterSuspend(): void {
+        const waiting = this.messageFetchQueue.length;
+        this.messageFetchSlots.reset();
+        this.pumpMessageFetchQueue();
+        for (const lock of this.sessionMessageLocks.values()) {
+            lock.reset();
+        }
+        log.log(`📱 Cleared fetch state after a suspension (${waiting} queued, ${this.sessionMessageLocks.size} session locks)`);
+    }
 
     /**
      * Retry a previously failed outbox message identified by its localId.
@@ -2936,7 +3001,7 @@ class Sync {
         log.log(`💬 fetchMessages starting for session ${sessionId} - acquiring lock`);
         const lock = this.getSessionMessageLock(sessionId);
         await lock.inLock(async () => {
-            await this.acquireMessageFetchSlot();
+            const slot = await this.acquireMessageFetchSlot();
             log.log(`💬 fetchMessages: got lock for ${sessionId}`);
             try {
                 // --- Cache: cold-start hydration ---
@@ -3159,7 +3224,7 @@ class Sync {
                 }
             } finally {
                 storage.getState().applyMessagesLoaded(sessionId);
-                this.releaseMessageFetchSlot();
+                this.releaseMessageFetchSlot(slot);
             }
         });
     }
@@ -3184,7 +3249,7 @@ class Sync {
 
         const lock = this.getSessionMessageLock(sessionId);
         await lock.inLock(async () => {
-            await this.acquireMessageFetchSlot();
+            const slot = await this.acquireMessageFetchSlot();
             try {
                 const encryption = this.encryption.getSessionEncryption(sessionId);
                 if (!encryption) throw new Error(`Session encryption not ready for ${sessionId}`);
@@ -3241,7 +3306,7 @@ class Sync {
                 log.log(`💬 fetchOlderMessages failed for ${sessionId}: ${err}`);
                 storage.getState().setLoadingOlder(sessionId, false);
             } finally {
-                this.releaseMessageFetchSlot();
+                this.releaseMessageFetchSlot(slot);
             }
         });
     }
@@ -3259,7 +3324,7 @@ class Sync {
         storage.getState().setLoadingOlder(sessionId, true);
         const lock = this.getSessionMessageLock(sessionId);
         await lock.inLock(async () => {
-            await this.acquireMessageFetchSlot();
+            const slot = await this.acquireMessageFetchSlot();
             try {
                 if (!this.daemonLinks.has(sessionId)) {
                     await this.fetchSessionFromDaemon(sessionId);
@@ -3300,7 +3365,7 @@ class Sync {
                 log.log(`📡 fetchOlderViaDaemon failed for ${sessionId}: ${String(error)}`);
                 storage.getState().setLoadingOlder(sessionId, false);
             } finally {
-                this.releaseMessageFetchSlot();
+                this.releaseMessageFetchSlot(slot);
             }
         });
     }
