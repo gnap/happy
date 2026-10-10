@@ -4680,10 +4680,7 @@ class Sync {
         // applying both would be the one path the dedup is not set up to cover.
         if (body?.t === 'log-entry' && body.id && body.entry) {
             if (this.preferredChannel(body.id) === route) {
-                // The entry's position is recorded before it is applied, so the read that the next
-                // hint might otherwise trigger can see that this has already been delivered.
-                this.notePushedPosition(body.id, body.anchor);
-                void this.applyPushedDaemonEntry(body.id, body.entry);
+                void this.applyPushedDaemonEntry(body.id, body.entry, body.anchor);
             }
             return;
         }
@@ -4822,12 +4819,17 @@ class Sync {
      * likewise a delay rather than a loss — the entry is still in the session's log, so the next
      * read delivers it.
      */
-    private async applyPushedDaemonEntry(sessionId: string, entry: LanSessionLogEntry): Promise<void> {
+    private async applyPushedDaemonEntry(sessionId: string, entry: LanSessionLogEntry, anchor?: string): Promise<void> {
         if (entry.dir === 'in' && entry.localId) {
             this.settleReceivedMessages([entry.localId]);
         }
         const sessionKey = this.lanSessionKeys.get(sessionId);
         if (!sessionKey) {
+            // The key arrives with the first read, and until then this entry cannot be opened — so
+            // the position must not move either. Recording it here would say "I hold this entry"
+            // about one that was dropped, and the hint that follows would then find the reader
+            // already up to date and never fetch it: a message missing for good, which is what a
+            // turn that stops at a tool call looks like from the outside.
             return;
         }
         try {
@@ -4837,6 +4839,9 @@ class Sync {
                 const fresh = this.ingestChannelRead(sessionId, { messages });
                 log.log(`📡 LAN entry applied for ${sessionId}: ${fresh} new of ${messages.length} (over the socket)`);
             }
+            // Consumed, whether or not it produced a message the reducer keeps: an entry that
+            // normalises to nothing (an event, say) is still one the reader no longer needs.
+            this.notePushedPosition(sessionId, anchor);
         } catch (error) {
             log.log(`📡 LAN entry for ${sessionId} could not be applied: ${String(error)}`);
         }
