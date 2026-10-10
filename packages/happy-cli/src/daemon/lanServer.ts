@@ -168,10 +168,10 @@ function safeEqual(a: Buffer, b: Buffer): boolean {
  * Origin is `*` deliberately. The caller's origin differs per build (the Metro dev server on
  * localhost, `tauri://localhost` once packaged), and an allowlist that misses one reinstates
  * exactly that silent failure. It is affordable here because nothing is cookie-authenticated:
- * every route but `/lan/challenge` requires a bearer token the caller can only obtain by proving
- * possession of the machine key, so a wildcard grants no ambient authority. A hostile page can
- * reach the challenge route and learn that a daemon is present; it cannot mint a token, and the
- * nonce it receives is useless without the key.
+ * every route but `/lan/challenge` and `/lan/ping` requires a bearer token the caller can only
+ * obtain by proving possession of the machine key, so a wildcard grants no ambient authority. A
+ * hostile page can reach the challenge route and learn that a daemon is present; it cannot mint a
+ * token, and the nonce it receives is useless without the key.
  */
 const CORS_HEADERS: Record<string, string> = {
   'access-control-allow-origin': '*',
@@ -242,6 +242,22 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
   };
 
   /** Fixed-window limiter, itself bounded so it cannot become the memory-exhaustion vector. */
+  /**
+   * The address to count this request against.
+   *
+   * A relayed request arrives from loopback with the client's own address in a header, because the
+   * relay is the only thing on loopback: taking the header from anyone else would let a LAN client
+   * pick its own bucket, and taking loopback at face value would put every relayed client in one.
+   */
+  const clientAddress = (request: { ip?: string; headers: Record<string, unknown> }): string => {
+    const peer = request.ip ?? 'unknown';
+    const forwarded = request.headers['x-happy-client-ip'];
+    if (peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1') {
+      return typeof forwarded === 'string' && forwarded.length > 0 ? forwarded : peer;
+    }
+    return peer;
+  };
+
   const underLimit = (store: Map<string, RateRecord>, address: string, max: number, now: number): boolean => {
     const record = store.get(address);
     if (!record || now - record.windowStart >= RATE_LIMIT_WINDOW_MS) {
@@ -285,12 +301,22 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     return record !== undefined && record.expiresAt > now;
   };
 
-  const requireToken = (request: { headers: Record<string, unknown> }): boolean => {
+  /**
+   * Whether this request carries a usable token, saying so in the log when it does not.
+   *
+   * A direct LAN request that is refused is otherwise completely invisible: the relay's own logging
+   * covers what arrives *through* the relay, so a client on the same network that is re-handshaking
+   * every few seconds looks, from this daemon's log, exactly like a client that is doing nothing.
+   * The address is what makes a storm attributable to one device.
+   */
+  const requireToken = (request: { headers: Record<string, unknown>; ip?: string; url?: string }): boolean => {
     const header = request.headers['authorization'];
-    if (typeof header !== 'string' || !header.startsWith('Bearer ')) {
-      return false;
+    const ok =
+      typeof header === 'string' && header.startsWith('Bearer ') && verifyToken(header.slice('Bearer '.length), Date.now());
+    if (!ok) {
+      logger.debug(`[lan] refused ${request.url ?? '-'} from=${clientAddress(request)}`);
     }
-    return verifyToken(header.slice('Bearer '.length), Date.now());
+    return ok;
   };
 
   /**
@@ -310,9 +336,21 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     return safeEqual(Buffer.from(proof), Buffer.from(expected)) ? record : null;
   };
 
+  /**
+   * Whether this daemon is answering on this route — and nothing else.
+   *
+   * A client that holds no key can only prove reachability by asking for something, and the only
+   * unauthenticated route used to be `/lan/challenge`. That made a pure reachability question cost
+   * a minted nonce: a credential issued and thrown away, counted against the very rate limit that
+   * exists to bound challenge floods, and retained in the nonce store until it expires. Answering
+   * this costs nothing and allocates nothing, so a periodic probe is free.
+   */
+  app.get('/lan/ping', async (_request, reply) => reply.send({ ok: true, v: LAN_PROTOCOL_VERSION }));
+
   app.post('/lan/challenge', async (request, reply) => {
     const now = Date.now();
-    if (!underLimit(challenges, request.ip, MAX_CHALLENGES, now)) {
+    if (!underLimit(challenges, clientAddress(request), MAX_CHALLENGES, now)) {
+      logger.debug(`[lan] challenge refused (rate) from=${clientAddress(request)}`);
       return reply.code(429).send({ error: 'too many requests' });
     }
     pruneNonces(now);
@@ -324,12 +362,17 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     }
     const nonce = randomBytes(32).toString('base64url');
     nonces.set(nonce, { issuedAt: now, expiresAt: now + TOKEN_TTL_MS });
+    // Logged because the challenge count is the whole question when a device is re-authenticating
+    // more often than a 90-second token should require — and this route is unauthenticated, so the
+    // address is the only thing that says which device it is.
+    logger.debug(`[lan] challenge issued from=${clientAddress(request)}`);
     return reply.send({ nonce });
   });
 
   app.post('/lan/session', async (request, reply) => {
     const now = Date.now();
-    if (!underLimit(sessionAttempts, request.ip, MAX_SESSION_ATTEMPTS, now)) {
+    if (!underLimit(sessionAttempts, clientAddress(request), MAX_SESSION_ATTEMPTS, now)) {
+      logger.debug(`[lan] session refused (rate) from=${clientAddress(request)}`);
       return reply.code(429).send({ error: 'too many requests' });
     }
     const body = request.body as { nonce?: unknown; proof?: unknown } | undefined;
@@ -345,10 +388,14 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     nonces.delete(nonce);
     if (!record) {
       // Never echo the proof or the secret into logs or the error body.
+      logger.debug(`[lan] proof rejected from=${clientAddress(request)}`);
       return reply.code(401).send({ error: 'invalid or expired nonce' });
     }
 
     nonces.set(nonce, record);
+    // The token exchange, logged with the address: pairing this against `challenge issued` is what
+    // separates "handshaking too often" from "minting nonces nobody redeems".
+    logger.debug(`[lan] session issued from=${clientAddress(request)}`);
     return reply.send({ token: issueToken(nonce, record.expiresAt), expiresAt: record.expiresAt });
   });
 
@@ -417,7 +464,7 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       `[lan] history ${sessionId} since=${since ?? '-'} before=${before ?? '-'} ` +
       `entries=${history.entries.length} bytes=${history.entries.reduce((n, e) => n + e.c.length, 0)} ` +
       `hasNewer=${history.hasNewer} hasOlder=${history.hasOlder} reset=${history.reset} ` +
-      `cursor=${history.cursor} older=${history.older}`,
+      `cursor=${history.cursor} older=${history.older} from=${clientAddress(request)}`,
     );
     return reply.send({ v: LAN_PROTOCOL_VERSION, ...history });
   });
@@ -435,6 +482,7 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       nonces.delete(nonce);
     }
     if (!record) {
+      logger.debug(`[lan] socket upgrade refused from=${clientAddress(request)}`);
       socket.close(4401, 'unauthorized');
       return;
     }
@@ -444,8 +492,12 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     for (const payload of opts.getSnapshot?.() ?? []) {
       socket.send(JSON.stringify({ event: 'update', payload }));
     }
-    socket.on('close', () => {
+    socket.on('close', (code: number, reason: Buffer) => {
       subscribers.delete(socket);
+      // Logged because a reader that is never removed is invisible otherwise: the count is the
+      // only evidence of whether closes propagate through the relay, and a socket that outlives
+      // its client is one the daemon keeps broadcasting to forever.
+      logger.debug('[lan] socket reader closed', { readers: subscribers.size, code, reason: reason?.toString() });
     });
 
     /**
@@ -471,21 +523,36 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
             ? raw
             : null;
       if (text === null) {
+        logger.debug('[lan] socket frame dropped: not a text frame');
         return;
       }
       let frame: { event?: unknown; payload?: unknown };
       try {
         frame = JSON.parse(text) as { event?: unknown; payload?: unknown };
       } catch {
+        logger.debug(`[lan] socket frame dropped: not JSON bytes=${text.length}`);
+        return;
+      }
+      // A reader's heartbeat. The socket is already authenticated, so this needs nothing but a
+      // reply: what it is for is the reader knowing the connection is alive *now*, because a socket
+      // that died silently — the usual shape after iOS suspends an app — looks open from the client
+      // side and would otherwise never be noticed or reconnected. `idleTimeout` does not drop an
+      // idle reader (pings are answered by the client's own stack), so silence here means a dead
+      // path, not a quiet one.
+      if (frame.event === 'ping') {
+        socket.send(JSON.stringify({ event: 'pong' }));
         return;
       }
       if (frame.event !== 'send' || typeof frame.payload !== 'object' || frame.payload === null) {
+        logger.debug(`[lan] socket frame ignored: event=${String(frame.event)}`);
         return;
       }
       const { sessionId, localId, content } = frame.payload as Record<string, unknown>;
       if (typeof sessionId !== 'string' || typeof localId !== 'string' || typeof content !== 'string') {
+        logger.debug('[lan] socket send dropped: malformed payload');
         return;
       }
+      logger.debug(`[lan] socket send received session=${sessionId} localId=${localId}`);
       opts.onSend({ sessionId, localId, content });
     });
     socket.on('error', () => socket.close());

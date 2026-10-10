@@ -22,7 +22,7 @@
 
 import { chmodSync, existsSync, mkdirSync, openSync, closeSync, readdirSync, readFileSync, readSync, statSync, truncateSync, unlinkSync, writeSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { configuration } from '@/configuration';
 import { logger } from '@/ui/logger';
 
@@ -120,7 +120,12 @@ function truncateTornTail(path: string): void {
   }
 }
 
-export function appendSessionLog(tag: string, site: string | undefined, entry: SessionLogEntry): void {
+/**
+ * Append one entry, returning the position *after* it — the same kind of boundary a read names, so
+ * a reader that is being pushed entries can be told where the log now ends and skip a read it would
+ * otherwise make just to find out that it is already up to date.
+ */
+export function appendSessionLog(tag: string, site: string | undefined, entry: SessionLogEntry): string | null {
   const dir = sessionLogDir(tag, site);
   try {
     if (!existsSync(dir)) {
@@ -146,9 +151,10 @@ export function appendSessionLog(tag: string, site: string | undefined, entry: S
     truncateTornTail(active);
 
     // One write of one complete line: a partial write is therefore always a partial tail.
+    const line = `${JSON.stringify(entry)}\n`;
     const fd = openSync(active, 'a', 0o600);
     try {
-      writeSync(fd, `${JSON.stringify(entry)}\n`);
+      writeSync(fd, line);
     } finally {
       closeSync(fd);
     }
@@ -157,9 +163,14 @@ export function appendSessionLog(tag: string, site: string | undefined, entry: S
     if (rotated) {
       pruneToKeepSegments(dir);
     }
+
+    // The size is read back rather than assumed: a previous run may have left the segment at any
+    // length, and this is the number a reader will compare its own position against.
+    return `${segmentIndexOf(basename(active))}:${statSync(active).size}`;
   } catch (error) {
     // Losing a log line must never break sending or routing.
     logWarning('failed to append', { tag, error: String(error) });
+    return null;
   }
 }
 
@@ -203,12 +214,16 @@ export type SessionLogPage = {
 const DEFAULT_PAGE_MAX_BYTES = 1024 * 1024;
 
 /**
- * A boundary in the log: `"<segmentIndex>:<lineOffset>"` means *after* that line, so line 0 is the
- * start of the segment. The same value reads in either direction — `since=S:L` is everything after
- * that boundary, `before=S:L` is everything up to it — which is what lets a page be described by
- * its two edges and nothing else.
+ * A boundary in the log: `"<segmentIndex>:<byteOffset>"`, meaning *after* that byte, so 0 is the
+ * start of the segment. The same value reads in either direction — `since=S:B` is everything after
+ * the boundary, `before=S:B` is everything up to it — which is what lets a page be described by its
+ * two edges and nothing else.
+ *
+ * Bytes rather than lines because the *writer* has to be able to name a position too: it knows how
+ * large the segment was when it finished appending, and nothing else. A line number would mean
+ * counting the whole file on the append path.
  */
-type Anchor = { segment: number; line: number };
+type Anchor = { segment: number; byte: number };
 
 /** Anything that is not a pair of integers is unusable, not "no anchor". */
 function parseAnchor(value: string | undefined): Anchor | null {
@@ -216,23 +231,41 @@ function parseAnchor(value: string | undefined): Anchor | null {
     return null;
   }
   const match = /^(\d+):(\d+)$/.exec(value);
-  return match ? { segment: Number(match[1]), line: Number(match[2]) } : null;
+  return match ? { segment: Number(match[1]), byte: Number(match[2]) } : null;
 }
 
-const formatAnchor = (anchor: Anchor): string => `${anchor.segment}:${anchor.line}`;
+const formatAnchor = (anchor: Anchor): string => `${anchor.segment}:${anchor.byte}`;
 
 /** Segments are named with a zero-padded index, so lexicographic order is numeric order. */
 const segmentIndexOf = (name: string): number => Number.parseInt(name.slice(0, 10), 10);
 
-/** The non-empty lines of a segment, in order — index 0 is line 1 of the anchor encoding. */
-function readSegmentLines(dir: string, name: string): string[] | null {
-  let contents: string;
+/** A segment's bytes, or null when it cannot be read. Bytes, because the anchors count bytes. */
+function readSegment(dir: string, name: string): Buffer | null {
   try {
-    contents = readFileSync(join(dir, name), 'utf8');
+    return readFileSync(join(dir, name));
   } catch {
     return null;
   }
-  return contents.split('\n').filter((line) => line !== '');
+}
+
+/**
+ * The segment's lines with the byte range each occupies, `end` being the byte *after* its newline —
+ * which is the boundary a cursor names. Empty lines are skipped so a stray newline cannot become an
+ * entry.
+ */
+function segmentLines(buffer: Buffer): { text: string; start: number; end: number }[] {
+  const lines: { text: string; start: number; end: number }[] = [];
+  let start = 0;
+  while (start < buffer.length) {
+    const newline = buffer.indexOf(0x0a, start);
+    const end = newline === -1 ? buffer.length : newline + 1;
+    const text = buffer.subarray(start, newline === -1 ? buffer.length : newline).toString('utf8');
+    if (text !== '') {
+      lines.push({ text, start, end });
+    }
+    start = end;
+  }
+  return lines;
 }
 
 export type SessionLogQuery = {
@@ -248,12 +281,6 @@ export type SessionLogQuery = {
 /**
  * Reads one page of a session's log.
  *
- * The anchor is a *position* — segment index and line offset — rather than a timestamp. `at` is a
- * local write time that NTP jumps and session resumptions move around, so it cannot order the
- * log; positions can, because segments are append-only and rotate into new files. Only whole old
- * segments are ever dropped, which is what `reset` reports to a forward reader: it must then treat
- * the page as the whole log instead of a continuation.
- *
  * Three reads, and they are the same walk in different directions:
  *
  * - `since` — everything after a boundary. This is following a session that is already open.
@@ -268,8 +295,8 @@ export type SessionLogQuery = {
  * Going backwards the same line has to be stepped over instead — stopping there would make every
  * older page unreachable — and the page simply does not contain it.
  *
- * Either walk also stops at `maxBytes`. A page leaves this process as one frame, and a frame can
- * be too large for the transport to carry at all; `hasNewer`/`hasOlder` say whether that is why it
+ * Either walk also stops at `maxBytes`. A page leaves this process as one frame, and a frame can be
+ * too large for the transport to carry at all; `hasNewer`/`hasOlder` say whether that is why it
  * ended, so the caller knows a page was cut rather than the log running out.
  */
 export function readSessionLogPage(query: SessionLogQuery): SessionLogPage {
@@ -279,114 +306,133 @@ export function readSessionLogPage(query: SessionLogQuery): SessionLogPage {
   if (names.length === 0) {
     return { entries: [], cursor: '0:0', older: '0:0', hasNewer: false, hasOlder: false, reset: false };
   }
+  const indices = names.map(segmentIndexOf);
 
   const since = parseAnchor(query.since);
-  const pruned = since !== null && !names.some((name) => segmentIndexOf(name) === since.segment);
+  const pruned = since !== null && !indices.includes(since.segment);
   const reset = query.since !== undefined && (since === null || pruned);
 
   const before = parseAnchor(query.before);
   if (before !== null || (query.since === undefined && query.before === undefined)) {
-    return readPage(dir, names, { backwards: true, before, reset, maxBytes });
+    return readBackwards(dir, names, indices, before, maxBytes);
   }
-  return readPage(dir, names, { backwards: false, since, reset, maxBytes });
+  return readForwards(dir, names, indices, since, reset, maxBytes);
 }
 
-function readPage(
+function readForwards(
   dir: string,
   names: string[],
-  options:
-    | { backwards: true; before: Anchor | null; reset: boolean; maxBytes: number }
-    | { backwards: false; since: Anchor | null; reset: boolean; maxBytes: number },
+  indices: number[],
+  since: Anchor | null,
+  reset: boolean,
+  maxBytes: number,
 ): SessionLogPage {
-  const indices = names.map(segmentIndexOf);
   const firstIndex = indices[0];
-  const lastIndex = indices[indices.length - 1];
+  const from = reset || since === null ? firstIndex : since.segment;
+  const fromByte = reset || since === null ? 0 : since.byte;
 
-  // Collected newest-last either way, so the page is ordered the same whichever way it was read.
-  const pages: { entry: SessionLogEntry; segment: number; line: number }[] = [];
+  const entries: SessionLogEntry[] = [];
   let bytes = 0;
   let cut = false;
+  let torn = false;
+  let firstLine: { segment: number; start: number } | null = null;
+  let lastLine: { segment: number; end: number } | null = null;
 
-  if (!options.backwards) {
-    const from = options.reset || options.since === null ? firstIndex : options.since.segment;
-    const skip = options.reset || options.since === null ? 0 : options.since.line;
-    let started = false;
-    let torn = false;
-    for (let i = 0; i < names.length && !cut && !torn; i += 1) {
-      const index = indices[i];
-      if (index < from) {
+  for (const name of names) {
+    const index = segmentIndexOf(name);
+    if (index < from || cut || torn) {
+      continue;
+    }
+    const buffer = readSegment(dir, name);
+    if (buffer === null) {
+      break;
+    }
+    for (const line of segmentLines(buffer)) {
+      // Only lines that *end* after the boundary: a boundary always names the end of a line, so a
+      // line ending at or before it is one the reader already has.
+      if (index === from && line.end <= fromByte) {
         continue;
       }
-      const lines = readSegmentLines(dir, names[i]);
-      if (lines === null) {
+      const size = line.end - line.start;
+      if (entries.length > 0 && bytes + size > maxBytes) {
+        cut = true;
         break;
       }
-      const skipHere = index === from ? skip : 0;
-      for (let line = skipHere; line < lines.length; line += 1) {
-        const size = lines[line].length + 1;
-        if (pages.length > 0 && bytes + size > options.maxBytes) {
-          cut = true;
-          break;
-        }
-        let entry: SessionLogEntry;
-        try {
-          entry = JSON.parse(lines[line]) as SessionLogEntry;
-        } catch {
-          torn = true; // Torn middle: stop *before* it so the next read retries this line.
-          break;
-        }
-        pages.push({ entry, segment: index, line: line + 1 });
-        bytes += size;
-        started = true;
+      try {
+        entries.push(JSON.parse(line.text) as SessionLogEntry);
+      } catch {
+        torn = true; // Torn middle: stop *before* it so the next read retries this line.
+        break;
       }
+      bytes += size;
+      if (firstLine === null) {
+        firstLine = { segment: index, start: line.start };
+      }
+      lastLine = { segment: index, end: line.end };
     }
-    const first = pages[0];
-    const last = pages[pages.length - 1];
-    // A page that began at the very start of the log has nothing before it; anything else has the
-    // entries the reader already holds, which is all `hasOlder` means here.
-    const beganAtStart = (options.reset || options.since === null) ||
-      (options.since.segment === firstIndex && options.since.line === 0);
-    return {
-      entries: pages.map((p) => p.entry),
-      cursor: last ? formatAnchor({ segment: last.segment, line: last.line }) : formatAnchor(options.reset || options.since === null ? { segment: firstIndex, line: 0 } : options.since),
-      older: first ? formatAnchor({ segment: first.segment, line: first.line - 1 }) : formatAnchor(options.reset || options.since === null ? { segment: firstIndex, line: 0 } : options.since),
-      hasNewer: cut || torn,
-      hasOlder: !beganAtStart && started,
-      reset: options.reset,
-    };
   }
 
-  // Backwards: from the boundary down to the start of the log, newest lines first.
-  const from = options.before ?? { segment: lastIndex, line: Number.MAX_SAFE_INTEGER };
-  const newest = options.before === null;
-  let exhausted = true;
-  for (let i = indices.length - 1; i >= 0 && !cut; i -= 1) {
-    const index = indices[i];
+  // A page that began at the very start of the log has nothing before it; anything else has the
+  // entries the reader already holds, which is all `hasOlder` means here.
+  const startedAt = reset || since === null ? { segment: firstIndex, byte: 0 } : since;
+  const anchor = lastLine
+    ? formatAnchor({ segment: lastLine.segment, byte: lastLine.end })
+    : formatAnchor(startedAt);
+  const beganAtStart = startedAt.segment === firstIndex && startedAt.byte === 0;
+  return {
+    entries,
+    cursor: anchor,
+    older: firstLine ? formatAnchor({ segment: firstLine.segment, byte: firstLine.start }) : anchor,
+    hasNewer: cut || torn,
+    hasOlder: !beganAtStart && entries.length > 0,
+    reset,
+  };
+}
+
+function readBackwards(
+  dir: string,
+  names: string[],
+  indices: number[],
+  before: Anchor | null,
+  maxBytes: number,
+): SessionLogPage {
+  const lastIndex = indices[indices.length - 1];
+  // No boundary means the newest page: start at the end of the last segment.
+  const from = before ?? { segment: lastIndex, byte: Number.MAX_SAFE_INTEGER };
+
+  const pages: { entry: SessionLogEntry; start: number; end: number; segment: number }[] = [];
+  let bytes = 0;
+  let cut = false;
+  let exhausted = false;
+
+  for (let at = indices.length - 1; at >= 0 && !cut; at -= 1) {
+    const index = indices[at];
     if (index > from.segment) {
       continue;
     }
-    const lines = readSegmentLines(dir, names[i]);
-    if (lines === null) {
-      exhausted = false;
+    const buffer = readSegment(dir, names[at]);
+    if (buffer === null) {
       break;
     }
-    const limit = index === from.segment ? Math.min(from.line, lines.length) : lines.length;
-    for (let line = limit; line >= 1; line -= 1) {
-      const size = lines[line - 1].length + 1;
-      if (pages.length > 0 && bytes + size > options.maxBytes) {
+    const limit = index === from.segment ? Math.min(from.byte, buffer.length) : buffer.length;
+    const lines = segmentLines(buffer).filter((line) => line.end <= limit);
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const line = lines[i];
+      const size = line.end - line.start;
+      if (pages.length > 0 && bytes + size > maxBytes) {
         cut = true;
         break;
       }
       let entry: SessionLogEntry;
       try {
-        entry = JSON.parse(lines[line - 1]) as SessionLogEntry;
+        entry = JSON.parse(line.text) as SessionLogEntry;
       } catch {
         continue; // Stepped over, not stopped at: an older page must stay reachable past it.
       }
-      pages.push({ entry, segment: index, line });
+      pages.push({ entry, start: line.start, end: line.end, segment: index });
       bytes += size;
     }
-    if (!cut && i === 0) {
+    if (!cut && at === 0) {
       exhausted = true;
     }
   }
@@ -394,30 +440,30 @@ function readPage(
   pages.reverse(); // Oldest first, like every other page.
   const first = pages[0];
   const last = pages[pages.length - 1];
-  // Anything at or after the boundary is newer than this page. The segment we were pointed into
-  // tells us for free whether it has lines past it; if it ends there, a later segment would.
-  const newerInAnchorSegment = !newest && linesPastBoundary(dir, names, indices, from);
+  const anchor = last
+    ? formatAnchor({ segment: last.segment, byte: last.end })
+    : formatAnchor({ segment: from.segment, byte: from.byte === Number.MAX_SAFE_INTEGER ? 0 : from.byte });
   return {
-    entries: pages.map((p) => p.entry),
-    cursor: last ? formatAnchor({ segment: last.segment, line: last.line }) : formatAnchor(from),
-    older: first ? formatAnchor({ segment: first.segment, line: first.line - 1 }) : formatAnchor(from),
-    hasNewer: newest ? false : newerInAnchorSegment,
+    entries: pages.map((page) => page.entry),
+    cursor: anchor,
+    older: first ? formatAnchor({ segment: first.segment, byte: first.start }) : anchor,
+    hasNewer: before !== null && hasNewerThan(dir, names, indices, from),
     hasOlder: cut || !exhausted,
     reset: false,
   };
 }
 
-/** Whether the log has a line at or after `anchor`, without reading past the segment it names. */
-function linesPastBoundary(dir: string, names: string[], indices: number[], anchor: Anchor): boolean {
+/** Whether the log holds anything at or after `anchor`, for a backwards read's `hasNewer`. */
+function hasNewerThan(dir: string, names: string[], indices: number[], anchor: Anchor): boolean {
   if (indices.some((index) => index > anchor.segment)) {
     return true;
   }
-  const at = names.findIndex((name) => segmentIndexOf(name) === anchor.segment);
+  const at = indices.indexOf(anchor.segment);
   if (at === -1) {
     return false;
   }
-  const lines = readSegmentLines(dir, names[at]);
-  return lines !== null && lines.length > anchor.line;
+  const buffer = readSegment(dir, names[at]);
+  return buffer !== null && buffer.length > anchor.byte;
 }
 
 /**

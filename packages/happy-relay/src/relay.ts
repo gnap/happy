@@ -1,11 +1,21 @@
 /**
- * A stateless relay for the daemon's LAN API.
+ * A relay for the daemon's LAN API, addressed two ways.
  *
  * A daemon dials out to `/daemon` and proves ownership of a tag (the hash of an ed25519 public key
- * derived from its machine key). An App then talks to `/r/<tag>/<lan path>` and the relay forwards
- * each HTTP request / WebSocket frame down that one control connection. The relay stores nothing and
- * never holds a credential: the LAN protocol's own HMAC challenge-response still decides access, and
- * session content is ciphertext end to end.
+ * derived from its machine key). From there:
+ *
+ * - `/r/<tag>/<lan path>` — one connection per tag, which is how an App reaches one machine. This
+ *   is the original shape and is kept exactly as it was.
+ * - `/client` — **one** connection for the whole App, which addresses any machine on it with
+ *   `{t:'open', tag, path}` and asks for the directory with `{t:'machines'}`. This is the shape the
+ *   App wants: the relay is a hub over machines and their sessions, the way the server is, so the
+ *   App does not have to hold a connection per machine, probe each one to find out whether it is
+ *   up, or derive per-machine addresses.
+ *
+ * The relay still stores nothing durable and never holds a credential: the LAN protocol's own HMAC
+ * challenge-response decides access, session content is ciphertext end to end, and what it caches is
+ * only what the daemons themselves publish as a directory (session ids and their summary lines —
+ * the same thing `GET /lan/sessions` already returns through this relay).
  */
 import nacl from 'tweetnacl';
 import { createHash, randomBytes } from 'node:crypto';
@@ -32,19 +42,37 @@ export type RelayOptions = {
 
 export type RelayHandle = { port: number; stop: () => void; daemonCount: () => number };
 
-type Pending = { resolve: (res: Response) => void; timer: ReturnType<typeof setTimeout> };
+/** An HTTP request awaiting its answer. One of the two consumers owns the reply. */
+type Pending = {
+    timer: ReturnType<typeof setTimeout>;
+    /** The `/r/<tag>/…` path answers by resolving the fetch with a Response. */
+    resolve?: (res: Response) => void;
+    /** The hub path answers by sending the daemon's own response object back to its client. */
+    hub?: { client: any; clientId: number };
+};
 
 type Daemon = {
     tag: string;
     ws: any;
     pending: Map<number, Pending>;
+    /** Proxied sockets opened through `/r/<tag>/…`, keyed by the id this relay handed the daemon. */
     clients: Map<number, any>;
+    /** Streams opened through `/hub`, keyed the same way, each remembering which client wants it. */
+    hub: Map<number, { client: any; clientId: number }>;
+    /** The session summary this daemon last published, for the directory. */
+    sessions: unknown[];
     nextId: number;
 };
 
 type SocketData =
     | { kind: 'daemon'; nonce: string; tag: string | null }
-    | { kind: 'client'; tag: string; id: number; path: string; ip: string };
+    | { kind: 'client'; tag: string; id: number; path: string; ip: string }
+    | {
+          kind: 'hub';
+          ip: string;
+          /** Every stream this client has open, by the id *it* chose: where its frames go. */
+          streams: Map<number, { tag: string; daemonId: number }>;
+      };
 
 export function tagOfPublicKey(pub: Uint8Array): string {
     return createHash('sha256').update(pub).digest('hex').slice(0, 32);
@@ -59,6 +87,8 @@ export function startRelay(options: RelayOptions): RelayHandle {
     const httpTimeout = options.httpTimeoutMs ?? 15_000;
     const rate = options.ratePerMinute ?? 600;
     const daemons = new Map<string, Daemon>();
+    /** Hub connections, so the directory can be pushed the moment a machine comes or goes. */
+    const hubClients = new Set<any>();
     const hits = new Map<string, { count: number; reset: number }>();
 
     const limited = (ip: string): boolean => {
@@ -93,6 +123,11 @@ export function startRelay(options: RelayOptions): RelayHandle {
 
             if (url.pathname === '/health') {
                 return json(200, { ok: true, daemons: daemons.size });
+            }
+            if (url.pathname === '/client') {
+                if (limited(ip)) return json(429, { error: 'rate' });
+                const ok = srv.upgrade(req, { data: { kind: 'hub', ip, streams: new Map() } as SocketData });
+                return ok ? undefined : json(400, { error: 'upgrade' });
             }
             if (url.pathname === '/daemon') {
                 if (limited(ip)) return json(429, { error: 'rate' });
@@ -161,6 +196,14 @@ export function startRelay(options: RelayOptions): RelayHandle {
                     setTimeout(() => { if (ws.data.kind === 'daemon' && !ws.data.tag) ws.close(4401, 'auth timeout'); }, 5_000);
                     return;
                 }
+                if (data.kind === 'hub') {
+                    // The connection itself carries no credential — the daemons authenticate every
+                    // request that reaches them — so there is nothing to prove here and nothing to
+                    // wait for. The directory comes first because it is what a client is for.
+                    hubClients.add(ws);
+                    ws.send(JSON.stringify({ t: 'ok', machines: directory() }));
+                    return;
+                }
                 const daemon = daemons.get(data.tag);
                 if (!daemon) {
                     ws.close(4502, 'offline');
@@ -176,6 +219,13 @@ export function startRelay(options: RelayOptions): RelayHandle {
                     const daemon = daemons.get(data.tag);
                     if (!daemon || typeof raw !== 'string') return;
                     daemon.ws.send(JSON.stringify({ t: 'ws-msg', id: data.id, data: raw }));
+                    return;
+                }
+                if (data.kind === 'hub') {
+                    if (typeof raw !== 'string') return;
+                    let frame: any;
+                    try { frame = JSON.parse(raw); } catch { return; }
+                    hubFrame(ws, data, frame);
                     return;
                 }
                 let msg: any;
@@ -198,7 +248,7 @@ export function startRelay(options: RelayOptions): RelayHandle {
                     // The signature proves key ownership, so a newer connection from the same key
                     // legitimately replaces a stale one (daemon restart / NAT rebinding).
                     const previous = daemons.get(tag);
-                    const daemon: Daemon = { tag, ws, pending: new Map(), clients: new Map(), nextId: 1 };
+                    const daemon: Daemon = { tag, ws, pending: new Map(), clients: new Map(), hub: new Map(), sessions: [], nextId: 1 };
                     daemons.set(tag, daemon);
                     data.tag = tag;
                     if (previous && previous.ws !== ws) {
@@ -206,6 +256,9 @@ export function startRelay(options: RelayOptions): RelayHandle {
                         try { previous.ws.close(4000, 'replaced'); } catch { /* gone */ }
                     }
                     ws.send(JSON.stringify({ t: 'ok', tag }));
+                    // A machine coming online is the event an App is waiting for, so it is pushed
+                    // rather than left for the client to notice on a timer.
+                    broadcastDirectory();
                     return;
                 }
 
@@ -216,21 +269,63 @@ export function startRelay(options: RelayOptions): RelayHandle {
                     if (!p) return;
                     clearTimeout(p.timer);
                     daemon.pending.delete(msg.id);
+                    if (p.hub) {
+                        try {
+                            p.hub.client.send(JSON.stringify({
+                                t: 'http-res',
+                                id: p.hub.clientId,
+                                status: Number(msg.status) || 502,
+                                headers: msg.headers ?? {},
+                                body: msg.body ?? null,
+                            }));
+                        } catch { /* the client is gone; its own close handler cleans up */ }
+                        return;
+                    }
                     const headers = new Headers(msg.headers ?? {});
                     headers.set('access-control-allow-origin', '*');
                     headers.delete('content-length');
                     const body = msg.body ? Buffer.from(String(msg.body), 'base64') : null;
-                    p.resolve(new Response(body, { status: Number(msg.status) || 502, headers }));
+                    p.resolve?.(new Response(body, { status: Number(msg.status) || 502, headers }));
                 } else if (msg.t === 'ws-msg') {
+                    const stream = daemon.hub.get(msg.id);
+                    if (stream) {
+                        try { stream.client.send(JSON.stringify({ t: 'msg', id: stream.clientId, data: msg.data })); } catch { /* gone */ }
+                        return;
+                    }
                     daemon.clients.get(msg.id)?.send(String(msg.data));
                 } else if (msg.t === 'ws-close') {
+                    const stream = daemon.hub.get(msg.id);
+                    if (stream) {
+                        daemon.hub.delete(msg.id);
+                        try { stream.client.send(JSON.stringify({ t: 'close', id: stream.clientId, code: msg.code, reason: msg.reason })); } catch { /* gone */ }
+                        return;
+                    }
                     const c = daemon.clients.get(msg.id);
                     daemon.clients.delete(msg.id);
                     try { c?.close(Number(msg.code) >= 4000 ? Number(msg.code) : 1000, String(msg.reason ?? '')); } catch { /* gone */ }
+                } else if (msg.t === 'sessions') {
+                    // What the machine publishes for the directory. It is the daemon's own summary of
+                    // its sessions — no content, nothing this relay could not already read off the
+                    // wire — and it is what lets an App list sessions without asking each machine.
+                    daemon.sessions = Array.isArray(msg.sessions) ? msg.sessions : [];
+                    broadcastDirectory();
                 }
             },
             close(ws) {
                 const data = ws.data;
+                if (data.kind === 'hub') {
+                    hubClients.delete(ws);
+                    // Every stream this client opened is a socket on some daemon; the daemon has to be
+                    // told, or it keeps a reader that will never be read from again.
+                    for (const stream of data.streams.values()) {
+                        const daemon = daemons.get(stream.tag);
+                        if (!daemon) continue;
+                        daemon.hub.delete(stream.daemonId);
+                        try { daemon.ws.send(JSON.stringify({ t: 'ws-close', id: stream.daemonId })); } catch { /* gone */ }
+                    }
+                    data.streams.clear();
+                    return;
+                }
                 if (data.kind === 'client') {
                     const daemon = daemons.get(data.tag);
                     if (daemon?.clients.delete(data.id)) {
@@ -243,18 +338,127 @@ export function startRelay(options: RelayOptions): RelayHandle {
                     if (daemon && daemon.ws === ws) {
                         daemons.delete(data.tag);
                         teardown(daemon);
+                        broadcastDirectory();
                     }
                 }
             },
         },
     });
 
+    /** What a client can reach: every daemon that is dialled in, with the sessions it published. */
+    function directory(): { tag: string; sessions: unknown[] }[] {
+        return [...daemons.values()].map((daemon) => ({ tag: daemon.tag, sessions: daemon.sessions }));
+    }
+
+    /**
+     * Tells every hub client the directory changed.
+     *
+     * Pushed rather than left to be polled: a machine coming online is exactly the event an App
+     * wants to hear about, and asking for it on a timer is the probing this connection exists to
+     * replace.
+     */
+    function broadcastDirectory(): void {
+        if (hubClients.size === 0) return;
+        const frame = JSON.stringify({ t: 'machines', machines: directory() });
+        for (const client of hubClients) {
+            try { client.send(frame); } catch { /* gone */ }
+        }
+    }
+
+    function hubFrame(ws: any, data: { ip: string; streams: Map<number, { tag: string; daemonId: number }> }, frame: any): void {
+        const reply = (body: unknown) => { try { ws.send(JSON.stringify(body)); } catch { /* gone */ } };
+
+        if (frame.t === 'machines') {
+            reply({ t: 'machines', machines: directory() });
+            return;
+        }
+
+        // The client's own liveness check on this one connection. A machine's liveness is this
+        // relay's business, not the client's — it holds the daemon's connection — but whether the
+        // client's own connection is still carrying anything is only knowable here.
+        if (frame.t === 'ping') {
+            reply({ t: 'pong' });
+            return;
+        }
+
+        if (frame.t === 'open' && typeof frame.id === 'number' && typeof frame.tag === 'string' && typeof frame.path === 'string') {
+            const daemon = daemons.get(frame.tag);
+            if (!daemon) {
+                reply({ t: 'close', id: frame.id, code: 4502, reason: 'offline' });
+                return;
+            }
+            const daemonId = daemon.nextId++;
+            daemon.hub.set(daemonId, { client: ws, clientId: frame.id });
+            data.streams.set(frame.id, { tag: frame.tag, daemonId });
+            daemon.ws.send(JSON.stringify({ t: 'ws-open', id: daemonId, path: frame.path, ip: data.ip }));
+            return;
+        }
+
+        if (frame.t === 'msg' && typeof frame.id === 'number' && typeof frame.data === 'string') {
+            const stream = data.streams.get(frame.id);
+            const daemon = stream ? daemons.get(stream.tag) : undefined;
+            if (!stream || !daemon) {
+                reply({ t: 'close', id: frame.id, code: 4502, reason: 'offline' });
+                return;
+            }
+            daemon.ws.send(JSON.stringify({ t: 'ws-msg', id: stream.daemonId, data: frame.data }));
+            return;
+        }
+
+        if (frame.t === 'close' && typeof frame.id === 'number') {
+            const stream = data.streams.get(frame.id);
+            data.streams.delete(frame.id);
+            const daemon = stream ? daemons.get(stream.tag) : undefined;
+            if (!stream || !daemon) return;
+            daemon.hub.delete(stream.daemonId);
+            daemon.ws.send(JSON.stringify({ t: 'ws-close', id: stream.daemonId, code: frame.code, reason: frame.reason }));
+            return;
+        }
+
+        if (frame.t === 'http' && typeof frame.id === 'number' && typeof frame.tag === 'string' && typeof frame.path === 'string') {
+            const daemon = daemons.get(frame.tag);
+            if (!daemon) {
+                reply({ t: 'http-res', id: frame.id, status: 502, headers: {}, body: null });
+                return;
+            }
+            const daemonId = daemon.nextId++;
+            const timer = setTimeout(() => {
+                daemon.pending.delete(daemonId);
+                reply({ t: 'http-res', id: frame.id, status: 504, headers: {}, body: null });
+            }, httpTimeout);
+            daemon.pending.set(daemonId, { timer, hub: { client: ws, clientId: frame.id } });
+            try {
+                daemon.ws.send(JSON.stringify({
+                    t: 'http',
+                    id: daemonId,
+                    method: String(frame.method ?? 'GET'),
+                    path: frame.path,
+                    headers: frame.headers ?? {},
+                    ip: data.ip,
+                    body: frame.body ?? null,
+                }));
+            } catch {
+                clearTimeout(timer);
+                daemon.pending.delete(daemonId);
+                reply({ t: 'http-res', id: frame.id, status: 502, headers: {}, body: null });
+            }
+        }
+    }
+
     function teardown(daemon: Daemon) {
         for (const p of daemon.pending.values()) {
             clearTimeout(p.timer);
-            p.resolve(json(502, { error: 'offline' }));
+            if (p.hub) {
+                try { p.hub.client.send(JSON.stringify({ t: 'http-res', id: p.hub.clientId, status: 502, headers: {}, body: null })); } catch { /* gone */ }
+                continue;
+            }
+            p.resolve?.(json(502, { error: 'offline' }));
         }
         daemon.pending.clear();
+        for (const stream of daemon.hub.values()) {
+            try { stream.client.send(JSON.stringify({ t: 'close', id: stream.clientId, code: 4502, reason: 'offline' })); } catch { /* gone */ }
+        }
+        daemon.hub.clear();
         for (const c of daemon.clients.values()) {
             try { c.close(4502, 'offline'); } catch { /* gone */ }
         }
