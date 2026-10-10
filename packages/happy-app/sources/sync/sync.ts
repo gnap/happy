@@ -4129,7 +4129,15 @@ class Sync {
         // What this App holds of the session's log, from this process or the last one. Without it a
         // restart has no way to tell whether the newest page abuts what it already holds, and a
         // window and a page that are not adjacent must never be joined.
-        const persisted = this.lanWindows[sessionId];
+        //
+        // The persisted anchor is only usable together with the window it describes: it says "I
+        // hold everything up to here", and a read from it returns only what came after. If the
+        // cache is gone — cleared, never written, a fresh install — that anchor is a claim about
+        // messages that are not there, and reading from it produces a window holding nothing but
+        // whatever was appended since, which is to say a blank conversation with a live socket.
+        const loadedWindow = storage.getState().sessionMessages[sessionId];
+        const hasWindow = !!loadedWindow?.isLoaded && loadedWindow.messages.length > 0;
+        const persisted = hasWindow ? this.lanWindows[sessionId] : undefined;
         const anchor = inMemory
             ? { cursor: inMemory.cursor, older: inMemory.older, hasOlder: inMemory.hasOlder }
             : persisted && persisted.machineId === machineId
@@ -4173,6 +4181,15 @@ class Sync {
                 read = tail;
                 replace = true;
             }
+        }
+        if (read && replace && read.messages.length === 0 && hasWindow) {
+            // A replacement is the whole window, so an empty page would empty the conversation. An
+            // empty page is not evidence that the session has no messages — it is evidence that
+            // this read learned nothing — so it is treated as a failed read instead, which leaves
+            // what is held intact and lets the backoff try again.
+            log.log(`📡 fetchSessionFromDaemon: empty replacement page for ${sessionId}; keeping the window`);
+            this.noteRouteFailure(sessionId, read.connection.route);
+            return null;
         }
         if (!read) {
             // The route was tried and did not serve this session — the daemon has no log for it, or
