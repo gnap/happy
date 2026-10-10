@@ -235,6 +235,22 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
   };
 
   /** Fixed-window limiter, itself bounded so it cannot become the memory-exhaustion vector. */
+  /**
+   * The address to count this request against.
+   *
+   * A relayed request arrives from loopback with the client's own address in a header, because the
+   * relay is the only thing on loopback: taking the header from anyone else would let a LAN client
+   * pick its own bucket, and taking loopback at face value would put every relayed client in one.
+   */
+  const clientAddress = (request: { ip?: string; headers: Record<string, unknown> }): string => {
+    const peer = request.ip ?? 'unknown';
+    const forwarded = request.headers['x-happy-client-ip'];
+    if (peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1') {
+      return typeof forwarded === 'string' && forwarded.length > 0 ? forwarded : peer;
+    }
+    return peer;
+  };
+
   const underLimit = (store: Map<string, RateRecord>, address: string, max: number, now: number): boolean => {
     const record = store.get(address);
     if (!record || now - record.windowStart >= RATE_LIMIT_WINDOW_MS) {
@@ -305,7 +321,7 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
 
   app.post('/lan/challenge', async (request, reply) => {
     const now = Date.now();
-    if (!underLimit(challenges, request.ip, MAX_CHALLENGES, now)) {
+    if (!underLimit(challenges, clientAddress(request), MAX_CHALLENGES, now)) {
       return reply.code(429).send({ error: 'too many requests' });
     }
     pruneNonces(now);
@@ -322,7 +338,7 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
 
   app.post('/lan/session', async (request, reply) => {
     const now = Date.now();
-    if (!underLimit(sessionAttempts, request.ip, MAX_SESSION_ATTEMPTS, now)) {
+    if (!underLimit(sessionAttempts, clientAddress(request), MAX_SESSION_ATTEMPTS, now)) {
       return reply.code(429).send({ error: 'too many requests' });
     }
     const body = request.body as { nonce?: unknown; proof?: unknown } | undefined;

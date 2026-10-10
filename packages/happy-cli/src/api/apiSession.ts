@@ -988,13 +988,13 @@ export class ApiSessionClient extends EventEmitter {
         // them, so a message that arrives on the socket fast path and is later re-fetched over
         // HTTP would otherwise be logged twice.
         if (incoming.ct) {
-            appendSessionLog(this.sid, this.site, {
+            this.noteLogHead(appendSessionLog(this.sid, this.site, {
                 id: incoming.id ?? incoming.localId ?? String(seq ?? ''),
                 localId: incoming.localId ?? null,
                 dir: 'in',
                 at: Date.now(),
                 c: incoming.ct,
-            });
+            }));
             this.announceLogGrowth();
         }
 
@@ -1666,7 +1666,8 @@ export class ApiSessionClient extends EventEmitter {
         };
         // Same synchronous block and the same ciphertext string as the outbox push, so the two
         // stores can never disagree about what the bytes were.
-        appendSessionLog(this.sid, this.site, entry);
+        const anchor = appendSessionLog(this.sid, this.site, entry);
+        this.noteLogHead(anchor);
         // The entry itself, not only the hint that one exists. `log-grew` tells a LAN reader there
         // is something to read, which still costs it a round trip to find out what — so a session
         // on the LAN would trail one on the server by a fetch for every message, and an agent
@@ -1678,7 +1679,10 @@ export class ApiSessionClient extends EventEmitter {
         // that reads it from the log converge on identical bytes; `localId` is what they dedupe on.
         // Addressed by the server session id, not the tag the log is filed under: the App demuxes
         // the machine-wide socket on it, exactly as it does for the server channel.
-        forwardSessionEventToDaemon({ t: 'log-entry', id: this.sessionId, entry });
+        // The position travels with the entry, so a reader can say "I am up to date" without
+        // asking: the daemon's own log is the authority on where it ends, and the reader has just
+        // been told.
+        forwardSessionEventToDaemon({ t: 'log-entry', id: this.sessionId, entry, anchor });
         this.announceLogGrowth();
         this.persistOutboxNow();
         if (invalidate) {
@@ -2016,12 +2020,21 @@ export class ApiSessionClient extends EventEmitter {
      * that missed the last frame recovers from, and it would be lost if coalescing only kept the
      * first.
      */
+    /** The end of the log, as the last append named it; what a hint reports as the head. */
+    private lastLogAnchor: string | null = null;
+
+    private noteLogHead(anchor: string | null): void {
+        if (anchor) {
+            this.lastLogAnchor = anchor;
+        }
+    }
+
     private announceLogGrowth(): void {
         const now = Date.now();
         const since = now - this.lastLogGrewAt;
         if (since >= LOG_GROW_MIN_INTERVAL_MS) {
             this.lastLogGrewAt = now;
-            forwardSessionEventToDaemon({ t: 'log-grew', id: this.sessionId });
+            forwardSessionEventToDaemon({ t: 'log-grew', id: this.sessionId, head: this.lastLogAnchor });
             return;
         }
         if (this.logGrewTimer) {
@@ -2030,7 +2043,7 @@ export class ApiSessionClient extends EventEmitter {
         this.logGrewTimer = setTimeout(() => {
             this.logGrewTimer = null;
             this.lastLogGrewAt = Date.now();
-            forwardSessionEventToDaemon({ t: 'log-grew', id: this.sessionId });
+            forwardSessionEventToDaemon({ t: 'log-grew', id: this.sessionId, head: this.lastLogAnchor });
         }, LOG_GROW_MIN_INTERVAL_MS - since);
         this.logGrewTimer.unref?.();
     }

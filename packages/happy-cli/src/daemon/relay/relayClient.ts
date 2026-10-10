@@ -157,6 +157,12 @@ async function forwardHttp(msg: any, lanPort: number): Promise<unknown> {
     for (const [k, v] of Object.entries(msg.headers ?? {})) {
       if (!STRIP_REQUEST_HEADERS.has(k.toLowerCase())) headers[k] = String(v);
     }
+    // The request is replayed from loopback, so without this the LAN server sees every relayed
+    // client as 127.0.0.1 — and its per-address rate limits then share one bucket between every
+    // device arriving through the relay, which is enough to lock a client out of its own daemon.
+    if (msg.ip) {
+      headers['x-happy-client-ip'] = String(msg.ip);
+    }
     const res = await fetch(`http://127.0.0.1:${lanPort}${msg.path}`, {
       method: msg.method,
       headers,
