@@ -194,7 +194,7 @@ function SessionInfoContent({ session }: { session: Session }) {
             { text: t('common.cancel'), style: 'cancel' },
         ]);
     }, [channel.pinned, channel.channel, session.id]);
-    const { cachedBitmap } = useSessionMessages(session.id);
+    const { cachedBitmap, oldestSeq, newestSeq } = useSessionMessages(session.id);
     
     // Check if CLI version is outdated
     const isCliOutdated = session.metadata?.version && !isVersionSupported(session.metadata.version, MINIMUM_CLI_VERSION);
@@ -444,15 +444,24 @@ function SessionInfoContent({ session }: { session: Session }) {
                         <Item
                             title={t('sessionInfo.sequence')}
                             subtitle={t('sessionInfo.sequenceSubtitle')}
-                            detail={cachedLastSeq != null && cachedLastSeq !== session.seq ? `${cachedLastSeq}/${session.seq}` : session.seq.toString()}
+                            // The server's counter when there is one, and what this device has actually
+                            // loaded when there is not: a session the server cannot describe (the server
+                            // channel is off) would otherwise read as a permanent 0.
+                            detail={session.seq > 0
+                                ? (cachedLastSeq != null && cachedLastSeq !== session.seq ? `${cachedLastSeq}/${session.seq}` : session.seq.toString())
+                                : (newestSeq > 0 ? `loaded ${oldestSeq}–${newestSeq}` : '—')}
                             icon={<Ionicons name="git-commit-outline" size={29} color="#007AFF" />}
                             showChevron={false}
                             showDivider={false}
                         />
-                        <CacheProgressBar
-                            totalSeq={session.seq}
-                            cachedBitmap={cachedBitmap}
-                        />
+                        {/* The bar is drawn from the server's counter, so it has nothing to say when
+                            there is not one. */}
+                        {session.seq > 0 && (
+                            <CacheProgressBar
+                                totalSeq={session.seq}
+                                cachedBitmap={cachedBitmap}
+                            />
+                        )}
                     </View>
                 </ItemGroup>
 

@@ -4728,6 +4728,10 @@ class Sync {
      * day it is needed.
      */
     private fetchMessagesViaDaemon = async (sessionId: string): Promise<void> => {
+        // Same flag the server path sets: it is what the session view reads to tell "nothing yet,
+        // still loading" from "this session has nothing". Without it a daemon session is the only
+        // one where the App cannot say which of the two it is looking at.
+        storage.getState().setFetching(sessionId, true);
         const read = await this.fetchSessionFromDaemon(sessionId);
         log.log(
             read

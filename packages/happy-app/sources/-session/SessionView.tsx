@@ -170,7 +170,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const [attachments, setAttachments] = React.useState<PickedImage[]>([]);
     const { pickImage } = useImagePicker();
     const realtimeStatus = useRealtimeStatus();
-    const { messages, isLoaded } = useSessionMessages(sessionId);
+    const { messages, isLoaded, isFetching } = useSessionMessages(sessionId);
     const acknowledgedCliVersions = useLocalSetting('acknowledgedCliVersions');
 
     // Check if CLI version is outdated and not already acknowledged
@@ -327,7 +327,11 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     );
     const placeholder = messages.length === 0 ? (
         <>
-            {isLoaded && session.seq <= 0 ? (
+            {/* `session.seq` is the *server's* count of what a session has said, and it is 0 for a
+                session the server cannot describe — which is every session when the server channel is
+                switched off. Reading that as "this session has nothing" showed the empty state over a
+                load that was still running, so a read in flight now wins over it. */}
+            {isLoaded && !isFetching && session.seq <= 0 ? (
                 <EmptyMessages session={session} />
             ) : (
                 <ActivityIndicator size="small" color={theme.colors.textSecondary} />
