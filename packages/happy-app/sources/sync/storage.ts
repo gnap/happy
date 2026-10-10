@@ -141,6 +141,15 @@ interface StorageState {
     relaySightings: Record<string, RelaySighting>;
     applyRelaySightings: (sightings: RelaySighting[]) => void;
     /**
+     * Forget what was seen on the network we were on.
+     *
+     * `applyLanSightings([])` deliberately carries recent sightings over, because mDNS is lossy and
+     * one missed scan should not flicker a machine. A network change is the opposite case: what was
+     * seen belongs to the old network, and keeping it would have the App reach for an address that
+     * the device is no longer on.
+     */
+    clearLanSightings: () => void;
+    /**
      * The live daemon socket per route, when one is open. Separate from the sightings on purpose:
      * a sighting says a daemon is reachable, this says a channel to one is actually established —
      * which is the thing that makes messages arrive without a poll.
@@ -1737,6 +1746,7 @@ export const storage = create<StorageState>()((set, get) => {
         setDaemonSocketStatus: (route, status) => set((state) => ({
             daemonSockets: { ...state.daemonSockets, [route]: status },
         })),
+        clearLanSightings: () => set((state) => (Object.keys(state.lanSightings).length === 0 ? state : { ...state, lanSightings: {} })),
         applyRelaySightings: (sightings: RelaySighting[]) => set((state) => {
             const now = Date.now();
             const next: Record<string, RelaySighting> = {};

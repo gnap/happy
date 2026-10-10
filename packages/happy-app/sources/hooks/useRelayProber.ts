@@ -1,5 +1,6 @@
 import * as React from 'react';
-import { AppState, type AppStateStatus } from 'react-native';
+import { AppState, Platform, type AppStateStatus } from 'react-native';
+import * as Network from 'expo-network';
 import { storage } from '@/sync/storage';
 import { probeRelay } from '@/sync/lan/relayProbe';
 
@@ -91,11 +92,28 @@ export function useRelayProber(): void {
             }
         });
 
+        // Same reasoning as the LAN scanner: whether a relay answers can change with the network
+        // under it, and the socket that was serving a machine lives on the old one. Probing now is
+        // what re-establishes the route rather than up to a minute from now.
+        const networkSubscription = Platform.OS === 'web'
+            ? null
+            : Network.addNetworkStateListener(({ isConnected }) => {
+                if (isConnected === false) {
+                    stop();
+                    return;
+                }
+                if (appState === 'active') {
+                    start();
+                    void probeOnce();
+                }
+            });
+
         return () => {
             cancelled = true;
             stop();
             unsubscribe();
             subscription.remove();
+            networkSubscription?.remove();
         };
     }, []);
 }

@@ -453,15 +453,18 @@ class Sync {
                 if (connected && !prevConnected) {
                     log.log('🌐 Network became reachable, triggering reconnect');
                     apiSocket.resumeReconnection();
+                    this.onNetworkChanged('regained');
                 } else if (!connected && prevConnected) {
                     log.log('🌐 Network lost, pausing reconnection');
                     apiSocket.pauseReconnection();
+                    this.onNetworkChanged('lost');
                 } else if (connected && type !== prevType) {
                     // Network interface switched (e.g. WiFi → Cellular) while staying
                     // connected. The underlying TCP connection may have been silently
                     // dropped; probe immediately to confirm liveness.
                     log.log(`🌐 Network interface changed (${prevType} → ${type}), probing connection`);
                     apiSocket.resumeReconnection();
+                    this.onNetworkChanged('switched');
                 }
             });
         }
@@ -2834,6 +2837,38 @@ class Sync {
             next(token);
         }
     };
+
+    /**
+     * The daemon channel's reaction to the network moving under it.
+     *
+     * The server channel hears about a network change twice over — socket.io's transport fails on
+     * its own, and this listener probes — but a daemon socket is a plain WebSocket to an address
+     * that belongs to the network we were on. On WiFi → cellular that address is not reachable and
+     * the socket is not told; worse, a session whose socket still looks alive has neither a push
+     * (the socket is dead) nor a poll (polling stops while a socket is up), so it simply goes
+     * quiet. What is stale is everything about *how* to reach a machine: the address, the token
+     * bound to the connection, the socket, and the sightings that described the old network.
+     */
+    private onNetworkChanged(reason: 'lost' | 'regained' | 'switched'): void {
+        if (reason === 'lost') {
+            // Nothing daemon-side is reachable, and pretending otherwise leaves sessions pointed at
+            // a route that cannot answer.
+            this.closeDaemonSocket('lan');
+            this.closeDaemonSocket('relay');
+            return;
+        }
+        this.lanMachineConnections.clear();
+        storage.getState().clearLanSightings();
+        this.closeDaemonSocket('lan');
+        this.closeDaemonSocket('relay');
+        // Re-evaluate which routes are wanted on the network we are on now, and make every session
+        // read again — which is also what discovers the machines and reopens their sockets, since a
+        // read is what finds an address.
+        this.reconcileDaemonSockets();
+        for (const syncer of this.messagesSync.values()) {
+            syncer.invalidate();
+        }
+    }
 
     /**
      * Declares everything the App had in flight void, for a resume after iOS suspended it.

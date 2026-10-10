@@ -1,5 +1,6 @@
 import * as React from 'react';
-import { AppState, type AppStateStatus } from 'react-native';
+import { AppState, Platform, type AppStateStatus } from 'react-native';
+import * as Network from 'expo-network';
 import { sync } from '@/sync/sync';
 import { storage } from '@/sync/storage';
 import { discoverMachines, accountFingerprintOf } from '@/sync/lan/discovery';
@@ -131,10 +132,29 @@ export function useLanScanner(): void {
             }
         });
 
+        // A browse is the only thing that finds an address, and a network change invalidates every
+        // address this App has — including the ones the sockets were opened to. Waiting up to a
+        // minute for the next tick is the difference between a session that moves to the LAN and
+        // one that sits on the server. Nothing is browsed while the device has no network: there is
+        // no multicast to hear.
+        const networkSubscription = Platform.OS === 'web'
+            ? null
+            : Network.addNetworkStateListener(({ isConnected }) => {
+                if (isConnected === false) {
+                    stop();
+                    return;
+                }
+                if (appState === 'active') {
+                    start();
+                    void scanOnce();
+                }
+            });
+
         return () => {
             cancelled = true;
             stop();
             subscription.remove();
+            networkSubscription?.remove();
         };
     }, []);
 }
