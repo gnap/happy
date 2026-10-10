@@ -36,9 +36,10 @@ import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
 import { readSessionOverLan, listSessionsOverLan, toNormalizedMessages, type LanConnection, type LanSessionRead } from './lan/sessionChannel';
 import { decryptLanEntries } from './lan/history';
-import { openLanSocket, type LanSocketHandle } from './lan/socket';
+import { openLanSocket } from './lan/socket';
 import { normalizeChannelPriority, pickChannel } from './lan/channelOrder';
 import { FetchSlots } from './fetchSlots';
+import { DaemonConnections, type DaemonTarget } from './lan/daemonConnections';
 import { pageMovedTheLog, planDaemonRead } from './lan/windowPlan';
 import type { DaemonRoute, LanSessionLogEntry, SessionChannel } from './lan/types';
 import { parseRelayEndpoint } from './lan/relay';
@@ -294,7 +295,23 @@ class Sync {
      * connection carries every session on that machine, and the App demultiplexes on `body.sid`
      * exactly as it does for the server channel.
      */
-    private daemonSockets = new Map<DaemonRoute, { baseUrl: string; machineId: string; handle: LanSocketHandle }>();
+    /**
+     * The one connection per daemon route, and the only thing in the App that opens or closes one.
+     * Everything here says what it wants; the manager makes that true (see `daemonConnections`).
+     */
+    private connections = new DaemonConnections({
+        open: (target, handlers) => openLanSocket({
+            baseUrl: target.baseUrl,
+            machineKey: target.machineKey,
+            ...handlers,
+        }),
+        onUpdate: (target, payload) => { this.onDaemonUpdate(target.route, payload); },
+        onDelivered: (_target, result) => { this.onLanDelivered(result); },
+        onReady: (target) => { this.onDaemonConnectionReady(target.route, target.baseUrl); },
+        onDropped: (target) => { this.onDaemonConnectionDropped(target.route, target.baseUrl); },
+        onStateChange: (route, state) => { storage.getState().setDaemonSocketStatus(route, state); },
+        log: (message) => { log.log(message); },
+    });
     /**
      * The session key each LAN read unwrapped, by session. The live socket is handed entries with
      * no read and no wrapped key around them, so this is the only place it can come from.
@@ -2703,9 +2720,9 @@ class Sync {
         // Falling through when the socket is closed is deliberate: the outbox still holds the
         // message, so an unavailable channel costs a retry rather than the message.
         const sendChannel = this.preferredChannel(sessionId);
-        const daemonSocket = sendChannel === 'server' ? undefined : this.daemonSockets.get(sendChannel);
-        if (daemonSocket) {
-            const socket = daemonSocket.handle;
+        const daemon = sendChannel === 'server' ? null : this.connections.current(sendChannel);
+        if (daemon) {
+            const socket = daemon.handle;
             const allSent = batch.every((msg) =>
                 socket.send({ sessionId, localId: msg.localId, content: msg.content })
             );
@@ -4253,7 +4270,12 @@ class Sync {
         // answered. Fire-and-forget: polling is what keeps the session readable, and the socket
         // only removes the delay between a message being written and being seen.
         if (machineKey) {
-            void this.ensureDaemonSocket(read.connection.route, read.connection.baseUrl, read.machineId, machineKey);
+            this.connections.want({
+                route: read.connection.route,
+                baseUrl: read.connection.baseUrl,
+                machineId: read.machineId,
+                machineKey,
+            });
         }
 
         const oldestSeq = minSeqOf(read.messages);
@@ -4402,7 +4424,7 @@ class Sync {
         // opened by a read that worked, and it is still up. It also survives a sighting expiring,
         // which matters because sightings are refreshed by a browse on a timer — a working LAN was
         // otherwise dropped the moment a browse was missed, and the session moved off it.
-        if (this.daemonSockets.get(route)?.machineId === machineId) {
+        if (this.connections.current(route)?.machineId === machineId) {
             return true;
         }
         const known = route === 'lan' ? state.lanSightings[machineId]?.baseUrl : state.relayEndpoints[machineId]?.baseUrl;
@@ -4534,17 +4556,21 @@ class Sync {
      * pinned to the relay — and is closed once the server is back, so the relay does not carry a
      * second copy of traffic the server already delivers.
      */
+    /**
+     * Say which daemon connections should exist. Everything else about them — opening, replacing,
+     * reconnecting after a drop — belongs to the manager, so this is a statement of intent and
+     * nothing more.
+     */
     private reconcileDaemonSockets(): void {
         const state = storage.getState();
-
         const routes = this.daemonRoutesEnabled();
-        if (!routes.lan) {
-            this.closeDaemonSocket('lan');
-        } else if (!this.daemonSockets.has('lan')) {
+        const targets: DaemonTarget[] = [];
+
+        if (routes.lan) {
             for (const sighting of Object.values(state.lanSightings)) {
                 const machineKey = this.getMachineKey(sighting.machineId);
                 if (machineKey) {
-                    void this.ensureDaemonSocket('lan', sighting.baseUrl, sighting.machineId, machineKey);
+                    targets.push({ route: 'lan', baseUrl: sighting.baseUrl, machineId: sighting.machineId, machineKey });
                     break;
                 }
             }
@@ -4554,153 +4580,86 @@ class Sync {
         const pinnedToRelay = Object.values(state.channelOverride).includes('relay');
         const priority = this.channelPriority();
         const relayAheadOfServer = !priority.includes('server') || priority.indexOf('relay') < priority.indexOf('server');
-        const relayWanted = routes.relay && (serverDown || pinnedToRelay || relayAheadOfServer);
-        if (!relayWanted) {
-            this.closeDaemonSocket('relay');
-        } else if (!this.daemonSockets.has('relay')) {
+        if (routes.relay && (serverDown || pinnedToRelay || relayAheadOfServer)) {
             for (const sighting of Object.values(state.relaySightings)) {
                 const machineKey = this.getMachineKey(sighting.machineId);
                 // A machine that is also on the LAN is served there; the relay only covers the rest.
                 if (machineKey && (pinnedToRelay || !state.lanSightings[sighting.machineId])) {
-                    void this.ensureDaemonSocket('relay', sighting.baseUrl, sighting.machineId, machineKey);
+                    targets.push({ route: 'relay', baseUrl: sighting.baseUrl, machineId: sighting.machineId, machineKey });
                     break;
                 }
             }
         }
+
+        this.connections.wantOnly(targets);
     }
 
     /**
-     * Opens the live channel for a machine on one route, if it is not already up.
-     *
-     * Frames go straight to `handleUpdate` — the same handler the server socket feeds — because
-     * the daemon emits the server's own envelope shape. That is the whole point: this channel adds
-     * no second way to interpret an update, so nothing downstream has to know which one delivered
-     * it.
-     *
-     * Failure is not an error path: polling keeps running, so a socket that cannot open or cannot
-     * stay open degrades to exactly what the channel did before it existed.
+     * What a route's connection pushes at us: the daemon's two hints, and everything else straight
+     * to `handleUpdate`, which is the same handler the server socket feeds.
      */
-    private async ensureDaemonSocket(route: DaemonRoute, baseUrl: string, machineId: string, machineKey: Uint8Array): Promise<void> {
-        if (this.daemonSockets.get(route)?.baseUrl === baseUrl) {
+    private onDaemonUpdate(route: DaemonRoute, payload: unknown): void {
+        const body = (payload as {
+            body?: { t?: string; id?: string; entry?: LanSessionLogEntry };
+        } | null)?.body;
+        // The daemon's hint that a session's local log grew. It is not a server update, so it never
+        // reaches handleUpdate: it only means "read now" instead of waiting for the next poll tick.
+        // It stays even though entries are pushed as well — it is what recovers a frame the socket
+        // missed while it was down.
+        if (body?.t === 'log-grew' && body.id) {
+            if (this.preferredChannel(body.id) === route) {
+                this.messagesSync.get(body.id)?.invalidate();
+            }
             return;
         }
-        // One open per route at a time. Opening is asynchronous, and the check above is not a lock:
-        // several sessions on the same machine are read together after a resume or a network change,
-        // and each one that passed the check while another was opening would open a socket of its
-        // own. Only the last is recorded, so the rest leak — the daemon keeps them as readers, and a
-        // send written to one of those is written into a socket whose peer is gone, which is how a
-        // message ends up never confirmed.
-        const opening = this.daemonSocketOpens.get(route);
-        if (opening) {
-            await opening;
-            if (this.daemonSockets.get(route)?.baseUrl === baseUrl) {
-                return;
+        // An entry the session wrote to its log, pushed as it was appended. Applying it here is what
+        // makes the LAN channel deliver a message rather than announce one: no round trip, and dedup
+        // on `localId` means the overlapping read cannot double it. Only for sessions that resolve
+        // to this route — a session pinned to the server reads the same bytes from there, and
+        // applying both would be the one path the dedup is not set up to cover.
+        if (body?.t === 'log-entry' && body.id && body.entry) {
+            if (this.preferredChannel(body.id) === route) {
+                void this.applyPushedDaemonEntry(body.id, body.entry);
             }
+            return;
         }
-        const task = this.openDaemonSocket(route, baseUrl, machineId, machineKey);
-        this.daemonSocketOpens.set(route, task);
-        try {
-            await task;
-        } finally {
-            if (this.daemonSocketOpens.get(route) === task) {
-                this.daemonSocketOpens.delete(route);
+        void this.handleUpdate(payload);
+    }
+
+    /** The session's verdict on a message sent over its connection. */
+    private onLanDelivered(result: { sessionId: string; localId: string; delivered: boolean }): void {
+        const timer = this.lanSendTimeouts.get(result.localId);
+        if (timer) {
+            clearTimeout(timer);
+            this.lanSendTimeouts.delete(result.localId);
+        }
+        // A write is not a delivery, and the App cannot see whether the session could read the
+        // message — so this verdict is the only thing separating a dropped message from one that
+        // looks sent forever.
+        if (result.delivered) {
+            storage.getState().markOutboxMessageAcked(result.localId);
+        } else {
+            storage.getState().failOutboxEntries(
+                [result.localId],
+                'The session could not read this message.',
+            );
+        }
+    }
+
+    /** A connection came up: the sessions on that machine no longer need their polling fallback. */
+    private onDaemonConnectionReady(_route: DaemonRoute, baseUrl: string): void {
+        for (const [sessionId, channel] of this.daemonLinks) {
+            if (channel.connection.baseUrl === baseUrl) {
+                this.stopDaemonPolling(sessionId);
             }
         }
     }
 
-    /** How many sockets are mid-open per route; used only to keep them from racing. */
-    private daemonSocketOpens = new Map<DaemonRoute, Promise<void>>();
-
-    private async openDaemonSocket(route: DaemonRoute, baseUrl: string, machineId: string, machineKey: Uint8Array): Promise<void> {
-        // One connection per route is the invariant. Getting here with one already open means the
-        // route is moving to a different address, which is worth seeing in the log rather than
-        // inferring from counts.
-        const previous = this.daemonSockets.get(route);
-        if (previous) {
-            log.log(`📡 replacing the ${route} socket (${previous.baseUrl} → ${baseUrl})`);
-        }
-        this.closeDaemonSocket(route);
-
-        let opened: LanSocketHandle | null = null;
-        const handle = await openLanSocket({
-            baseUrl,
-            machineKey,
-            onUpdate: (payload) => {
-                const body = (payload as {
-                    body?: { t?: string; id?: string; entry?: LanSessionLogEntry };
-                } | null)?.body;
-                // The daemon's hint that a session's local log grew. It is not a server update, so
-                // it never reaches handleUpdate: it only means "read now" instead of waiting for
-                // the next poll tick. It stays even though entries are pushed as well — it is what
-                // recovers a frame the socket missed while it was down.
-                if (body?.t === 'log-grew' && body.id) {
-                    if (this.preferredChannel(body.id) === route) {
-                        this.messagesSync.get(body.id)?.invalidate();
-                    }
-                    return;
-                }
-                // An entry the session wrote to its log, pushed as it was appended. Applying it
-                // here is what makes the LAN channel deliver a message rather than announce one:
-                // no round trip, and dedup on `localId` means the overlapping read cannot double
-                // it. Only for sessions that resolve to the LAN — a session pinned to the server
-                // reads the same bytes from there, and applying both would be the one path the
-                // dedup is not set up to cover.
-                if (body?.t === 'log-entry' && body.id && body.entry) {
-                    if (this.preferredChannel(body.id) === route) {
-                        void this.applyPushedDaemonEntry(body.id, body.entry);
-                    }
-                    return;
-                }
-                void this.handleUpdate(payload);
-            },
-            onDelivered: (result) => {
-                const timer = this.lanSendTimeouts.get(result.localId);
-                if (timer) {
-                    clearTimeout(timer);
-                    this.lanSendTimeouts.delete(result.localId);
-                }
-                // A write is not a delivery, and the App cannot see whether the session could read
-                // the message — so this verdict is the only thing separating a dropped message from
-                // one that looks sent forever.
-                if (result.delivered) {
-                    storage.getState().markOutboxMessageAcked(result.localId);
-                } else {
-                    storage.getState().failOutboxEntries(
-                        [result.localId],
-                        'The session could not read this message.',
-                    );
-                }
-            },
-            onClosed: () => {
-                // Only clear the entry this handle owns: a replacement may already be in place.
-                // `opened` is null until the open completes, so a drop during the handshake is
-                // ignored here — that case is reported as a null return instead.
-                if (opened && this.daemonSockets.get(route)?.handle === opened) {
-                    log.log(`📡 ${route} socket dropped (${baseUrl}); falling back to polling until it reopens`);
-                    this.daemonSockets.delete(route);
-                    storage.getState().setDaemonSocketStatus(route, null);
-                    // This socket was carrying every session on that machine, so they have just lost
-                    // their push. Invalidating them is what puts polling back: it runs
-                    // `fetchMessages`, which restarts the timer now that no socket backs the read.
-                    for (const [sessionId, channel] of this.daemonLinks) {
-                        if (channel.connection.baseUrl === baseUrl) {
-                            this.getMessagesSync(sessionId).invalidate();
-                        }
-                    }
-                }
-            },
-        });
-        opened = handle;
-        if (handle) {
-            this.daemonSockets.set(route, { baseUrl, machineId, handle });
-            storage.getState().setDaemonSocketStatus(route, { baseUrl, machineId, connectedAt: Date.now() });
-            log.log(`📡 ${route} socket live at ${baseUrl}`);
-            // Stop the fallback for the sessions this socket now covers, rather than waiting for
-            // each one's next tick to notice. Any session on another machine keeps its timer.
-            for (const [sessionId, channel] of this.daemonLinks) {
-                if (channel.connection.baseUrl === baseUrl) {
-                    this.stopDaemonPolling(sessionId);
-                }
+    /** A connection went away: whatever it was carrying has just lost its push. */
+    private onDaemonConnectionDropped(_route: DaemonRoute, baseUrl: string): void {
+        for (const [sessionId, channel] of this.daemonLinks) {
+            if (channel.connection.baseUrl === baseUrl) {
+                this.getMessagesSync(sessionId).invalidate();
             }
         }
     }
@@ -4758,16 +4717,6 @@ class Sync {
         this.lanSendTimeouts.set(localId, timer);
     }
 
-    private closeDaemonSocket(route: DaemonRoute): void {
-        const socket = this.daemonSockets.get(route);
-        if (!socket) {
-            return;
-        }
-        this.daemonSockets.delete(route);
-        socket.handle.close();
-        storage.getState().setDaemonSocketStatus(route, null);
-    }
-
     /**
      * One tick of the LAN channel, run inside the same session lock and fetch slot the server path
      * takes — which polling used to bypass by calling the LAN read directly, so two ticks could
@@ -4793,7 +4742,7 @@ class Sync {
         // reported: "no local history yet" is a 404 the daemon documents as retryable, and
         // treating it as final would strand the channel, since for a pinned session nothing else
         // would ever invalidate the sync.
-        if (read && this.daemonSockets.get(read.connection.route)?.baseUrl === read.connection.baseUrl) {
+        if (read && this.connections.current(read.connection.route)?.baseUrl === read.connection.baseUrl) {
             this.stopDaemonPolling(sessionId);
             return;
         }

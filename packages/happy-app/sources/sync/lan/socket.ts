@@ -60,7 +60,13 @@ export async function openLanSocket(options: {
     /** Called for every `update` payload the daemon pushes. */
     onUpdate: (payload: unknown) => void;
     /** Called once the socket closes, for any reason; the caller decides whether to reopen. */
-    onClosed?: () => void;
+    /**
+     * The socket ended, and how. `deliberate` is this App's own close; otherwise the code and
+     * reason are what the peer sent — 1006 with no reason means the connection died without one,
+     * which is what a network change or a suspension looks like from here, while any other code is
+     * the far end saying something.
+     */
+    onClosed?: (info: { deliberate: boolean; code?: number; reason?: string }) => void;
     /**
      * Called with the session's verdict on a message the App sent this way. A write is not a
      * delivery, and only the session can say whether the message reached the agent.
@@ -143,15 +149,11 @@ export async function openLanSocket(options: {
     }
 
     // Open, so from here a close is a drop rather than a failed handshake.
-    socket.onclose = () => {
-        if (!deliberatelyClosed) {
-            options.onClosed?.();
-        }
+    socket.onclose = (event) => {
+        options.onClosed?.({ deliberate: deliberatelyClosed, code: event?.code, reason: event?.reason });
     };
     socket.onerror = () => {
-        if (!deliberatelyClosed) {
-            options.onClosed?.();
-        }
+        // An error is followed by a close; reporting both would double-count the same drop.
     };
 
     return {
