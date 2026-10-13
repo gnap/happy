@@ -309,6 +309,8 @@ export const zhHans: TranslationStructure = {
     session: {
         inputPlaceholder: '输入消息...',
         encrypting: '连接中…',
+        backgroundTasks: '后台任务',
+        backgroundTaskCount: ({ count }: { count: number }) => `${count} 个任务在运行`,
     },
 
     commandPalette: {

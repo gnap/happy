@@ -342,6 +342,8 @@ export const ja: TranslationStructure = {
     session: {
         inputPlaceholder: 'メッセージを入力...',
         encrypting: '接続を確立中…',
+        backgroundTasks: 'バックグラウンドタスク',
+        backgroundTaskCount: ({ count }: { count: number }) => `${count} 件のタスクを実行中`,
     },
 
     commandPalette: {

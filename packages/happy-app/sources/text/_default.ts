@@ -306,6 +306,9 @@ export const en = {
     session: {
         inputPlaceholder: 'Type a message ...',
         encrypting: 'handshaking…',
+        backgroundTasks: 'Background tasks',
+        backgroundTaskCount: ({ count }: { count: number }) =>
+            count === 1 ? '1 task running' : `${count} tasks running`,
     },
 
     commandPalette: {

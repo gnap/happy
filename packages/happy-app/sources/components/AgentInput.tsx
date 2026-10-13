@@ -25,6 +25,7 @@ import { useSetting } from '@/sync/storage';
 import { hackMode, hackModes } from '@/sync/modeHacks';
 import { Theme } from '@/theme';
 import { t } from '@/text';
+import { Modal } from '@/modal';
 import { Metadata } from '@/sync/storageTypes';
 
 import { AIBackendProfile, getProfileEnvironmentVariables, validateProfileForAgent } from '@/sync/settings';
@@ -71,6 +72,14 @@ interface AgentInputProps {
         };
         /** Current /goal condition, when the session has one. */
         goal?: { status: GoalStatus; condition: string } | null;
+        /**
+         * Background tasks the CLI is still running, so the turn is still open.
+         *
+         * The status line otherwise says the turn finished, because a result did arrive — the CLI
+         * just cannot end the stream while these are live. Showing them is what separates "waiting
+         * on something" from "stopped answering".
+         */
+        backgroundTasks?: Array<{ id: string; type: string; status: string; description: string }> | null;
     };
     autocompletePrefixes: string[];
     autocompleteSuggestions: (query: string) => Promise<{ key: string, text: string, component: React.ElementType }[]>;
@@ -998,6 +1007,32 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                                 {props.connectionStatus.goal.condition}
                                             </Text>
                                         </View>
+                                    )}
+                                    {!!props.connectionStatus.backgroundTasks?.length && (
+                                        <Pressable
+                                            onPress={() => {
+                                                const tasks = props.connectionStatus?.backgroundTasks ?? [];
+                                                Modal.alert(
+                                                    t('session.backgroundTasks'),
+                                                    tasks.map((task) => `• ${task.description || task.type}`).join('\n'),
+                                                    [{ text: t('common.ok'), style: 'cancel' }],
+                                                );
+                                            }}
+                                            style={{ flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 1 }}
+                                        >
+                                            <Ionicons name="sync-outline" size={12} color={theme.colors.textSecondary} />
+                                            <Text
+                                                numberOfLines={1}
+                                                style={{
+                                                    fontSize: 11,
+                                                    color: theme.colors.textSecondary,
+                                                    flexShrink: 1,
+                                                    ...Typography.default()
+                                                }}
+                                            >
+                                                {t('session.backgroundTaskCount', { count: props.connectionStatus?.backgroundTasks?.length ?? 0 })}
+                                            </Text>
+                                        </Pressable>
                                     )}
                                 </>
                             )}

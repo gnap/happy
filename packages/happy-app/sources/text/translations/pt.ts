@@ -307,6 +307,8 @@ export const pt: TranslationStructure = {
     session: {
         inputPlaceholder: 'Digite uma mensagem ...',
         encrypting: 'estabelecendo conexão…',
+        backgroundTasks: 'Tarefas em segundo plano',
+        backgroundTaskCount: ({ count }: { count: number }) => `${count} tarefas em execução`,
     },
 
     commandPalette: {
