@@ -6,12 +6,12 @@ import { Image } from 'expo-image';
 import { layout } from './layout';
 import { MultiTextInput, KeyPressEvent } from './MultiTextInput';
 import { Typography } from '@/constants/Typography';
-import { GOAL_STATUS_ICONS, type GoalStatus } from '@/utils/goalUtils';
 import { PermissionMode, ModelMode } from './PermissionModeSelector';
 import { hapticsLight, hapticsError } from './haptics';
 import { Shaker, ShakeInstance } from './Shaker';
 import { StatusDot } from './StatusDot';
 import { CHANNEL_ICONS } from '@/sync/machinePresence';
+import type { GoalStatus } from '@/utils/goalUtils';
 import { SessionActivityBadges } from '@/components/SessionActivityBadges';
 import { useActiveWord } from './autocomplete/useActiveWord';
 import { useActiveSuggestions } from './autocomplete/useActiveSuggestions';
@@ -70,8 +70,6 @@ interface AgentInputProps {
             cursor?: boolean | null;
             gemini?: boolean | null;
         };
-        /** Current /goal condition, when the session has one. */
-        goal?: { status: GoalStatus; condition: string } | null;
         /**
          * Background tasks the CLI is still running, so the turn is still open.
          *
@@ -80,6 +78,8 @@ interface AgentInputProps {
          * on something" from "stopped answering".
          */
         backgroundTasks?: Array<{ id: string; type: string; status: string; description: string }> | null;
+        /** Current /goal condition, when the session has one. Shown inside the activity badge. */
+        goal?: { status: GoalStatus; condition: string } | null;
     };
     autocompletePrefixes: string[];
     autocompleteSuggestions: (query: string) => Promise<{ key: string, text: string, component: React.ElementType }[]>;
@@ -988,33 +988,12 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                             )}
                                         </>
                                     )}
-                                    {props.connectionStatus.goal && (
-                                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 1 }}>
-                                            <Ionicons
-                                                name={GOAL_STATUS_ICONS[props.connectionStatus.goal.status].icon}
-                                                size={12}
-                                                color={GOAL_STATUS_ICONS[props.connectionStatus.goal.status].color}
-                                            />
-                                            <Text
-                                                numberOfLines={1}
-                                                style={{
-                                                    fontSize: 11,
-                                                    color: theme.colors.textSecondary,
-                                                    flexShrink: 1,
-                                                    ...Typography.default()
-                                                }}
-                                            >
-                                                {props.connectionStatus.goal.condition}
-                                            </Text>
-                                        </View>
-                                    )}
-                                    {/* The goal keeps its own chip here — it shows the condition in
-                                        full, which a count cannot — so the badges cover only what is
-                                        still running. */}
+                                    {/* Everything the session has in flight — the goal it is aiming
+                                        at and the work it started — as one count; the details are a
+                                        hover (desktop) or a long press (phone) away. */}
                                     <SessionActivityBadges
                                         tasks={props.connectionStatus.backgroundTasks}
                                         goal={props.connectionStatus.goal}
-                                        showGoal={false}
                                     />
                                 </>
                             )}

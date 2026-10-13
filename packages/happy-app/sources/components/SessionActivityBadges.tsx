@@ -51,24 +51,27 @@ function taskLines(tasks: ActivityTask[]): string {
 }
 
 /**
- * The details panel: every kind that is running, as a heading, with its tasks under it.
+ * The details panel: the goal if there is one, then every kind that is running, each as a heading
+ * with its own lines under it.
  *
  * The badge is one number because a row has room for one; what that number is made of is exactly
- * what someone opening the panel is asking, so the breakdown belongs here.
+ * what someone opening the panel is asking, so the breakdown belongs here rather than on the badge.
  */
-function breakdown(groups: ActivityGroup[]): string {
-    return groups
-        .map((group) => [KIND_LABELS[group.type]?.() ?? group.type, taskLines(group.tasks)].join('\n'))
-        .join('\n\n');
+function breakdown(groups: ActivityGroup[], goal: ActivityGoal | null): string {
+    const sections = groups.map((group) => [KIND_LABELS[group.type]?.() ?? group.type, taskLines(group.tasks)].join('\n'));
+    if (goal) {
+        sections.unshift([t('session.activityGoals'), goalLines(goal)].join('\n'));
+    }
+    return sections.join('\n\n');
 }
 
 function goalLines(goal: ActivityGoal): string {
-    const lines = [`• ${goal.condition}`, `  ${goal.status}`];
+    const lines = [`  • ${goal.status} · ${goal.condition}`];
     if (goal.reason) {
-        lines.push(`  ${goal.reason}`);
+        lines.push(`    ${goal.reason}`);
     }
     if (goal.iterations !== undefined) {
-        lines.push(`  ${goal.iterations}`);
+        lines.push(`    ${goal.iterations}`);
     }
     return lines.join('\n');
 }
@@ -122,52 +125,42 @@ function useDetailsGesture(show: () => void): React.ComponentProps<typeof Pressa
 export const SessionActivityBadges = React.memo(function SessionActivityBadges({
     tasks,
     goal,
-    /**
-     * Whether the goal belongs in this group. The input bar draws it separately with its condition
-     * in full, which is more useful there than a count of one.
-     */
-    showGoal = true,
     /** Row-sized rather than input-bar-sized. */
     compact = false,
 }: {
     tasks?: ActivityTask[] | null;
     goal?: ActivityGoal | null;
-    showGoal?: boolean;
     compact?: boolean;
 }) {
     const styles = stylesheet;
     const { theme } = useUnistyles();
     const groups = groupActivityTasks(tasks);
     const running = groups.reduce((total, group) => total + group.tasks.length, 0);
-    const goalVisible = showGoal && goal !== null && goal !== undefined;
-    const goalStatus = goalVisible ? GOAL_STATUS_ICONS[(goal as ActivityGoal).status] : null;
-    const runningGesture = useDetailsGesture(() => showDetails(t('session.backgroundTasks'), breakdown(groups)));
-    const goalGesture = useDetailsGesture(() => {
-        if (goal) {
-            showDetails(t('session.activityGoals'), goalLines(goal));
-        }
-    });
-
-    if (running === 0 && !goalVisible) {
+    const active = goal ?? null;
+    // The goal is one of the things in flight — the session is working toward it — so it counts,
+    // and the panel says what it is. Its own glyph and colour are kept for the case where it is the
+    // only thing in flight: a met goal must still read as met at a glance.
+    const total = running + (active ? 1 : 0);
+    const gesture = useDetailsGesture(() => showDetails(t('session.backgroundTasks'), breakdown(groups, active)));
+    if (total === 0) {
         return null;
     }
+    const onlyGoal = running === 0 && active !== null;
+    const glyph = onlyGoal ? GOAL_STATUS_ICONS[active.status] : null;
     return (
         <View style={styles.row}>
-            {running > 0 ? (
-                <Pressable {...runningGesture} hitSlop={6} style={[styles.badge, compact && styles.badgeCompact]}>
-                    <Ionicons name="sync-outline" size={compact ? 10 : 12} color={theme.colors.textSecondary} />
-                    <Text style={styles.count}>{running}</Text>
-                </Pressable>
-            ) : null}
-            {goalVisible && goalStatus ? (
-                <Pressable
-                    {...goalGesture}
-                    hitSlop={6}
-                    style={[styles.badge, compact && styles.badgeCompact, { backgroundColor: `${goalStatus.color}1F` }]}
-                >
-                    <Ionicons name={goalStatus.icon} size={compact ? 12 : 14} color={goalStatus.color} />
-                </Pressable>
-            ) : null}
+            <Pressable
+                {...gesture}
+                hitSlop={6}
+                style={[styles.badge, compact && styles.badgeCompact, glyph ? { backgroundColor: `${glyph.color}1F` } : null]}
+            >
+                <Ionicons
+                    name={glyph ? glyph.icon : 'sync-outline'}
+                    size={glyph ? (compact ? 12 : 14) : compact ? 10 : 12}
+                    color={glyph ? glyph.color : theme.colors.textSecondary}
+                />
+                <Text style={[styles.count, glyph ? { color: glyph.color } : null]}>{total}</Text>
+            </Pressable>
         </View>
     );
 });
