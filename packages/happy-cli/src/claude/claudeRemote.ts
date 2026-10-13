@@ -90,6 +90,14 @@ export async function claudeRemote(opts: {
     isAborted: (toolCallId: string) => boolean,
     /** Called with session_crons from the Stop hook so the launcher can schedule wakeups. */
     onSessionCrons?: (crons: Array<{ id: string; schedule: string; recurring: boolean; prompt: string }>) => void,
+    /**
+     * Called with the background tasks still running, whenever that set changes.
+     *
+     * The turn deliberately cannot end while these are live — the SDK stream has to stay open to
+     * service them — so without this the App sees a turn that reported itself finished while the
+     * session goes quiet, with nothing to explain the wait.
+     */
+    onBackgroundTasks?: (tasks: Array<{ id: string; type: string; status: string; description: string }>) => void,
     /** Called immediately before stopSignal is resolved on a normal result, so the
      *  launcher can mark itself as "stopping" and avoid fetching a new message from
      *  the queue that would then be discarded by the inputLoop race. */
@@ -283,6 +291,15 @@ export async function claudeRemote(opts: {
             Stop: [{
                 hooks: [async (input) => {
                     if (input.hook_event_name !== 'Stop') return { continue: false };
+                    // The authoritative "what is still running" snapshot, offered at the one moment
+                    // it is needed: deciding whether this turn can end. It is also what lets the set
+                    // drain — a task whose completion frame went missing is simply not in here.
+                    applyBackgroundTasks((input.background_tasks ?? []).map((task) => ({
+                        id: task.id,
+                        type: task.type,
+                        status: task.status,
+                        description: task.description,
+                    })));
                     const crons = input.session_crons ?? [];
                     if (crons.length > 0) {
                         logger.debug(`[claudeRemote] Stop hook: ${crons.length} pending crons`);
@@ -351,11 +368,14 @@ export async function claudeRemote(opts: {
      *  stream closed on its own after the input stream ended. */
     const outputDone = new Future<void>();
 
-    /** Live background task ids, mirrored from the SDK's background_tasks_changed
-     *  messages (they carry the full set). While this is non-empty Claude Code holds
-     *  the query stream open to service the tasks and may run further turns on its
-     *  own, so ending the input stream would strand the session with no way to
-     *  accept user messages — the stream cannot be reopened once ended. */
+    /** Live background task ids. While this is non-empty Claude Code holds the query stream open
+     *  to service the tasks and may run further turns on its own, so ending the input stream would
+     *  strand the session with no way to accept user messages — the stream cannot be reopened once
+     *  ended.
+     *
+     *  Filled from three places, because no single one is sufficient on this CLI: the Stop hook's
+     *  `background_tasks` is the authoritative snapshot at each turn end (`applyBackgroundTasks`),
+     *  `task_started` adds between snapshots, and `task_notification` removes. */
     const liveBackgroundTasks = new Set<string>();
     /** A normal result arrived while background tasks were still running; the stop
      *  is replayed once they drain. */
@@ -381,6 +401,34 @@ export async function claudeRemote(opts: {
             stopDeferred = false;
             requestStop();
         }, DEFERRED_STOP_DEBOUNCE_MS);
+    }
+
+    /** What the App is shown about each live task, keyed the same way the drain logic keys ids. */
+    type LiveBackgroundTask = { id: string; type: string; status: string; description: string };
+    const backgroundTaskSummaries = new Map<string, LiveBackgroundTask>();
+
+    function emitBackgroundTasks(): void {
+        opts.onBackgroundTasks?.([...backgroundTaskSummaries.values()]);
+    }
+
+    /**
+     * Replaces the live set with the SDK's own view of what is still running.
+     *
+     * The authoritative form, and the reason the defer below can be trusted: a task whose
+     * completion frame was missed is simply absent from the next snapshot, so the set always
+     * drains. Growing it incrementally alone would leave a finished task holding the turn open
+     * forever, which is the failure the old comment on `liveBackgroundTasks` describes.
+     */
+    function applyBackgroundTasks(tasks: readonly LiveBackgroundTask[]): void {
+        liveBackgroundTasks.clear();
+        backgroundTaskSummaries.clear();
+        for (const task of tasks) {
+            liveBackgroundTasks.add(task.id);
+            backgroundTaskSummaries.set(task.id, task);
+        }
+        logger.debug(`[claudeRemote] background tasks live: ${liveBackgroundTasks.size}`);
+        emitBackgroundTasks();
+        if (stopDeferred && liveBackgroundTasks.size === 0) scheduleDeferredStop();
     }
 
     // Input Loop: continuously reads user messages from the queue
@@ -480,12 +528,18 @@ export async function claudeRemote(opts: {
                     logger.debug(`[claudeRemote] SYSTEM subtype=${sysMsg.subtype} tool_use_id=${sysMsg.tool_use_id} task_id=${sysMsg.task_id} status=${sysMsg.status}`);
                 }
 
+                // Some CLI builds push the full set as a stream message. This one does not — the
+                // string appears nowhere in the bundled binary — so what actually feeds the set
+                // here is the Stop hook, plus the per-task events below. Kept anyway: the two are
+                // not mutually exclusive, and a newer CLI may well resume sending it.
                 if (message.type === 'system' && (message as Record<string, unknown>).subtype === 'background_tasks_changed') {
-                    const tasks = (message as Record<string, unknown>).tasks as Array<{ task_id: string }> | undefined;
-                    liveBackgroundTasks.clear();
-                    for (const task of tasks ?? []) liveBackgroundTasks.add(task.task_id);
-                    logger.debug(`[claudeRemote] background tasks live: ${liveBackgroundTasks.size}`);
-                    if (stopDeferred && liveBackgroundTasks.size === 0) scheduleDeferredStop();
+                    const tasks = (message as Record<string, unknown>).tasks as Array<{ task_id: string; type?: string; status?: string; description?: string }> | undefined;
+                    applyBackgroundTasks((tasks ?? []).map((task) => ({
+                        id: task.task_id,
+                        type: task.type ?? '',
+                        status: task.status ?? '',
+                        description: task.description ?? '',
+                    })));
                 }
 
                 opts.onMessage(message);
@@ -520,6 +574,31 @@ export async function claudeRemote(opts: {
                         || message.subtype === 'task_started'
                         || message.subtype === 'task_progress')) {
                     opts.onMessage(message);
+                }
+
+                // Keep the live set current between snapshots, so a task that starts mid-turn is
+                // already accounted for by the time the result arrives. Both events carry the same
+                // `task_id` space as the Stop hook's snapshot, so the three sources agree.
+                if (message.type === 'system' && message.subtype === 'task_started') {
+                    const started = message as { task_id?: string; description?: string; subagent_type?: string; task_type?: string };
+                    if (started.task_id) {
+                        liveBackgroundTasks.add(started.task_id);
+                        backgroundTaskSummaries.set(started.task_id, {
+                            id: started.task_id,
+                            type: started.task_type ?? started.subagent_type ?? 'task',
+                            status: 'running',
+                            description: started.description ?? '',
+                        });
+                        emitBackgroundTasks();
+                    }
+                }
+                if (message.type === 'system' && message.subtype === 'task_notification') {
+                    const settled = (message as { task_id?: string }).task_id;
+                    if (settled && liveBackgroundTasks.delete(settled)) {
+                        backgroundTaskSummaries.delete(settled);
+                        emitBackgroundTasks();
+                        if (stopDeferred && liveBackgroundTasks.size === 0) scheduleDeferredStop();
+                    }
                 }
 
                 // Wake Claude on background task completion so it can process

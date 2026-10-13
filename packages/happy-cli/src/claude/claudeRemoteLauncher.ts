@@ -844,6 +844,13 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         session.client.updateAgentState(s => ({ ...s, crons: cronState }));
                         logger.debug(`[remote] stored ${crons.length} crons from Stop hook`);
                     },
+                    onBackgroundTasks: (tasks) => {
+                        // Rides in agentState because that is what the App already subscribes to and
+                        // keeps current. Without it a turn that reported itself finished while the
+                        // SDK stream stays open for background work is indistinguishable from an
+                        // idle session that has stopped answering.
+                        session.client.updateAgentState(s => ({ ...s, backgroundTasks: tasks }));
+                    },
                     onBeforeStop: () => { turnStopping = true; },
                     tryConsumeInboxTurn: () => {
                         const inboxHooks = session.a2aInboxTurn;
