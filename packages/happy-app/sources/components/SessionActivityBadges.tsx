@@ -6,7 +6,7 @@ import { Text } from '@/components/StyledText';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
 import { GOAL_STATUS_ICONS, type GoalStatus } from '@/utils/goalUtils';
-import { groupActivityTasks, type ActivityGroup, type ActivityTask } from '@/utils/activityTasks';
+import { activityTaskText, groupActivityTasks, type ActivityGroup, type ActivityTask } from '@/utils/activityTasks';
 import { ActivityBubble, type ActivityDetailSection } from '@/components/ActivityBubble';
 
 export type { ActivityTask } from '@/utils/activityTasks';
@@ -58,7 +58,10 @@ const KIND_LABELS: Record<string, () => string> = {
 const taskSections = (groups: ActivityGroup[]): ActivityDetailSection[] =>
     groups.map((group) => ({
         label: KIND_LABELS[group.type]?.() ?? group.type,
-        lines: group.tasks.map((task) => ({ status: task.status, text: task.description || task.type })),
+        lines: group.tasks.map((task) => {
+            const { title, detail } = activityTaskText(task);
+            return { status: task.status, text: title, detail };
+        }),
     }));
 
 const goalSections = (goal: ActivityGoal): ActivityDetailSection[] => [{

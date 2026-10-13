@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { groupActivityTasks, type ActivityTask } from './activityTasks';
+import { activityTaskText, groupActivityTasks, type ActivityTask } from './activityTasks';
 
 const task = (type: string, id = type): ActivityTask => ({ id, type, status: 'running', description: `${type} thing` });
 
@@ -27,5 +27,33 @@ describe('groupActivityTasks', () => {
         expect(groupActivityTasks(null)).toEqual([]);
         expect(groupActivityTasks(undefined)).toEqual([]);
         expect(groupActivityTasks([])).toEqual([]);
+    });
+});
+
+describe('activityTaskText', () => {
+    const base = { id: 't1', type: 'shell', status: 'running', description: '' };
+
+    it('shows the name Claude Code gave the task, with the command underneath', () => {
+        expect(activityTaskText({ ...base, description: 'Sleep 45 seconds', command: 'sleep 45' }))
+            .toEqual({ title: 'Sleep 45 seconds', detail: 'sleep 45' });
+    });
+
+    it('does not repeat itself when the name is the command', () => {
+        // What Claude Code reports when the model gave the tool no description of its own.
+        expect(activityTaskText({ ...base, description: 'sleep 45', command: 'sleep 45' }))
+            .toEqual({ title: 'sleep 45' });
+    });
+
+    it('names a nameless task by what it runs rather than by its type', () => {
+        expect(activityTaskText({ ...base, description: '', command: 'bun test' }))
+            .toEqual({ title: 'bun test' });
+        expect(activityTaskText({ ...base, description: '   ' })).toEqual({ title: 'shell' });
+    });
+
+    it('has a detail for the kinds that have no command', () => {
+        expect(activityTaskText({ ...base, type: 'subagent', description: 'Audit the parser', agentType: 'code-reviewer' }))
+            .toEqual({ title: 'Audit the parser', detail: 'code-reviewer' });
+        expect(activityTaskText({ ...base, type: 'monitor', description: 'Watch CI', server: 'github', tool: 'checks' }))
+            .toEqual({ title: 'Watch CI', detail: 'github · checks' });
     });
 });

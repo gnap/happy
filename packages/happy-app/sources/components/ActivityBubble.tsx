@@ -20,8 +20,8 @@ import { FloatingOverlay } from '@/components/FloatingOverlay';
  * was opened from.
  */
 
-/** One item: the state it is in, and what it is. */
-export type ActivityDetailLine = { status: string; text: string };
+/** One item: the state it is in, what it is, and — for a background command — what it runs. */
+export type ActivityDetailLine = { status: string; text: string; detail?: string };
 
 /** A group of items under a heading — the heading is the kind of work, as the CLI named it. */
 export type ActivityDetailSection = { label: string; lines: ActivityDetailLine[] };
@@ -50,7 +50,14 @@ export const ActivityBubble = React.memo(function ActivityBubble({
                         {section.lines.map((line, index) => (
                             <View key={`${section.label}:${index}`} style={styles.line}>
                                 <Text style={styles.status}>{line.status}</Text>
-                                <Text style={styles.text}>{line.text}</Text>
+                                <View style={styles.lineBody}>
+                                    <Text style={styles.text}>{line.text}</Text>
+                                    {line.detail !== undefined ? (
+                                        <Text style={styles.detail} numberOfLines={2}>
+                                            {line.detail}
+                                        </Text>
+                                    ) : null}
+                                </View>
                             </View>
                         ))}
                     </View>
@@ -100,10 +107,18 @@ const stylesheet = StyleSheet.create((theme) => ({
         color: theme.colors.textSecondary,
         ...Typography.default(),
     },
-    text: {
+    lineBody: {
         flex: 1,
+    },
+    text: {
         fontSize: 12,
         color: theme.colors.text,
+        ...Typography.default(),
+    },
+    detail: {
+        fontSize: 11,
+        color: theme.colors.textSecondary,
+        marginTop: 1,
         ...Typography.default(),
     },
 }));

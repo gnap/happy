@@ -12,8 +12,62 @@
  * running.
  */
 
-/** A background task as the CLI publishes it. */
-export type ActivityTask = { id: string; type: string; status: string; description: string };
+/**
+ * A background task as the CLI publishes it.
+ *
+ * `description` is Claude Code's name for the task. For a background command that name is sometimes
+ * the command line itself — the model gave the tool no description of its own — which is why the
+ * command travels beside it rather than inside it: the UI shows the name it was given and the
+ * command underneath, so a task with no name of its own still reads as something other than a wall
+ * of shell.
+ */
+export type ActivityTask = {
+    id: string;
+    type: string;
+    status: string;
+    description: string;
+    /** Shell tasks: the command line. */
+    command?: string;
+    /** Subagent tasks: which agent definition it runs. */
+    agentType?: string;
+    /** Monitor / MCP tasks: where it watches. */
+    server?: string;
+    tool?: string;
+    /** Workflow tasks. */
+    name?: string;
+};
+
+/**
+ * The one piece of detail worth showing under a task's name, by kind: what a command runs, which
+ * agent definition a subagent uses, what a monitor watches.
+ */
+function detailOf(task: ActivityTask): string | undefined {
+    const candidates = [task.command, task.agentType, task.server && task.tool ? `${task.server} · ${task.tool}` : undefined, task.name];
+    for (const candidate of candidates) {
+        const trimmed = candidate?.trim();
+        if (trimmed !== undefined && trimmed.length > 0) {
+            return trimmed;
+        }
+    }
+    return undefined;
+}
+
+/**
+ * The line to show for a task, and the detail underneath it, when there is one.
+ *
+ * The name Claude Code gave the task comes first because that is the readable thing; the detail is
+ * suppressed when it says the same thing, which is common for a background command whose name *is*
+ * its command line. A task with no name at all is named by its detail instead, so nothing is ever
+ * shown as a bare type.
+ */
+export function activityTaskText(task: ActivityTask): { title: string; detail?: string } {
+    const title = task.description.trim();
+    const detail = detailOf(task);
+    if (title.length === 0) {
+        return { title: detail ?? task.type, detail: undefined };
+    }
+    return detail !== undefined && detail !== title ? { title, detail } : { title };
+}
 
 /** A group of tasks of one type, as the UI draws one badge per group. */
 export type ActivityGroup = {

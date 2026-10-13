@@ -113,7 +113,14 @@ export const AgentStateSchema = z.object({
         id: z.string(),
         type: z.string(),
         status: z.string(),
+        /** Claude Code's own name for the task: usually a title, sometimes the command. */
         description: z.string(),
+        /** The type-specific detail the CLI forwards alongside — the command for a shell task. */
+        command: z.string().optional(),
+        agentType: z.string().optional(),
+        server: z.string().optional(),
+        tool: z.string().optional(),
+        name: z.string().optional(),
     })).optional(),
     /**
      * Declared by a CLI that can serve this session over the LAN socket — it keeps the message log
