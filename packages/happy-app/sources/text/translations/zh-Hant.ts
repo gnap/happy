@@ -308,6 +308,8 @@ export const zhHant: TranslationStructure = {
     session: {
         inputPlaceholder: '輸入訊息...',
         encrypting: '正在建立連線…',
+        backgroundTasks: '後台任務',
+        backgroundTaskCount: ({ count }: { count: number }) => `${count} 個任務在執行`,
     },
 
     commandPalette: {

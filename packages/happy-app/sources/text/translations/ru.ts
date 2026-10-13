@@ -426,6 +426,8 @@ export const ru: TranslationStructure = {
     session: {
         inputPlaceholder: 'Введите сообщение...',
         encrypting: 'установка соединения…',
+        backgroundTasks: 'Фоновые задачи',
+        backgroundTaskCount: ({ count }: { count: number }) => `Выполняется задач: ${count}`,
     },
 
     commandPalette: {

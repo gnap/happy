@@ -318,6 +318,8 @@ export const pl: TranslationStructure = {
     session: {
         inputPlaceholder: 'Wpisz wiadomość...',
         encrypting: 'nawiązywanie połączenia…',
+        backgroundTasks: 'Zadania w tle',
+        backgroundTaskCount: ({ count }: { count: number }) => `Zadań w toku: ${count}`,
     },
 
     commandPalette: {

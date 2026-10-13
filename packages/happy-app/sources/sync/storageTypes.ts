@@ -103,6 +103,19 @@ export const AgentStateSchema = z.object({
         recurring: z.boolean(),
     })).optional(),
     /**
+     * Background tasks still running, synced from CLI agentState.
+     *
+     * The CLI keeps the turn open while these are live — the SDK stream has to stay open to service
+     * them — so a turn that reported itself finished while the session goes quiet is explained by
+     * this rather than being indistinguishable from a session that stopped answering.
+     */
+    backgroundTasks: z.array(z.object({
+        id: z.string(),
+        type: z.string(),
+        status: z.string(),
+        description: z.string(),
+    })).optional(),
+    /**
      * Declared by a CLI that can serve this session over the LAN socket — it keeps the message log
      * the LAN reads from and can take a message delivered back over it.
      *

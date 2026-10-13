@@ -365,6 +365,9 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             connectionStatus={(() => {
                 // /goal status is independent of the connection, so it rides along in both branches.
                 const goal = getActiveGoal(session);
+                // Likewise the background tasks: they say why the turn is still open, which is
+                // worth saying even while encryption is still being set up.
+                const backgroundTasks = session.agentState?.backgroundTasks ?? null;
                 const hasEncryption = sync.encryption.getSessionEncryption(sessionId);
                 if (!hasEncryption) {
                     return {
@@ -373,6 +376,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                         dotColor: theme.colors.warning,
                         isPulsing: true,
                         goal,
+                        backgroundTasks,
                     };
                 }
                 return {
@@ -382,6 +386,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                     isPulsing: sessionStatus.isPulsing,
                     channel: { kind: sessionChannel.channel, pinned: sessionChannel.pinned },
                     goal,
+                    backgroundTasks,
                 };
             })()}
             onSend={() => {
