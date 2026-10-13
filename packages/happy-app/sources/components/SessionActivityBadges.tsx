@@ -30,6 +30,12 @@ export type { ActivityTask } from '@/utils/activityTasks';
  *
  * Props rather than the session, because the same badges are drawn from two places that hold
  * different things: the session row has the session, the input bar has only what it was handed.
+ *
+ * Only one of those places is interactive. In the session list a badge is a *display*: the row
+ * belongs to opening a conversation, and a badge that answered a press or a hover would take that
+ * away from it — a list where hovering a number opens panels is a list that fights the pointer. On
+ * the session page the bubble is what the badge is for, and nothing else is competing for the same
+ * gesture.
  */
 
 /** The goal a session is aiming at, as mirrored into `agentState.activeGoal`. */
@@ -77,10 +83,13 @@ export const SessionActivityBadges = React.memo(function SessionActivityBadges({
     goal,
     /** Row-sized rather than input-bar-sized. */
     compact = false,
+    /** Whether the badges answer a gesture and open a bubble. Off in the session list, where the row owns them. */
+    interactive = false,
 }: {
     tasks?: ActivityTask[] | null;
     goal?: ActivityGoal | null;
     compact?: boolean;
+    interactive?: boolean;
 }) {
     const styles = stylesheet;
     const { theme } = useUnistyles();
@@ -150,24 +159,41 @@ export const SessionActivityBadges = React.memo(function SessionActivityBadges({
             : {}),
     });
 
+    const runningBadge = (
+        <>
+            <Ionicons name="sync-outline" size={compact ? 10 : 12} color={theme.colors.textSecondary} />
+            <Text style={styles.count}>{running}</Text>
+        </>
+    );
+    const goalBadge = active ? (
+        <Ionicons
+            name={GOAL_STATUS_ICONS[active.status].icon}
+            size={compact ? 13 : 15}
+            color={GOAL_STATUS_ICONS[active.status].color}
+        />
+    ) : null;
+
     return (
         <View style={styles.row}>
             {running > 0 ? (
-                <Pressable {...gesture('tasks')} hitSlop={6} style={[styles.badge, compact && styles.badgeCompact]}>
-                    <Ionicons name="sync-outline" size={compact ? 10 : 12} color={theme.colors.textSecondary} />
-                    <Text style={styles.count}>{running}</Text>
-                </Pressable>
+                interactive ? (
+                    <Pressable {...gesture('tasks')} hitSlop={6} style={[styles.badge, compact && styles.badgeCompact]}>
+                        {runningBadge}
+                    </Pressable>
+                ) : (
+                    <View style={[styles.badge, compact && styles.badgeCompact]}>{runningBadge}</View>
+                )
             ) : null}
             {active ? (
-                <Pressable {...gesture('goal')} hitSlop={6} style={styles.goal}>
-                    <Ionicons
-                        name={GOAL_STATUS_ICONS[active.status].icon}
-                        size={compact ? 13 : 15}
-                        color={GOAL_STATUS_ICONS[active.status].color}
-                    />
-                </Pressable>
+                interactive ? (
+                    <Pressable {...gesture('goal')} hitSlop={6} style={styles.goal}>
+                        {goalBadge}
+                    </Pressable>
+                ) : (
+                    <View style={styles.goal}>{goalBadge}</View>
+                )
             ) : null}
-            {open !== null ? (
+            {interactive && open !== null ? (
                 <>
                     {/* Anything outside the bubble closes it. The input bar's own bubble does this too:
                         on the web a pointer leaving is the dismissal, and a finger needs a target. */}
