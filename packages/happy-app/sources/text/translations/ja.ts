@@ -347,6 +347,8 @@ export const ja: TranslationStructure = {
         activityAgents: 'エージェント',
         activityMonitors: 'モニター',
         activityGoals: 'ゴール',
+        activityShell: 'バックグラウンドコマンド',
+        activityWorkflows: 'ワークフロー',
     },
 
     commandPalette: {

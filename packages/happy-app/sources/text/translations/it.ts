@@ -344,6 +344,8 @@ export const it: TranslationStructure = {
         activityAgents: 'Agenti',
         activityMonitors: 'Monitor',
         activityGoals: 'Obiettivi',
+        activityShell: 'Comandi in background',
+        activityWorkflows: 'Workflow',
     },
 
     commandPalette: {

@@ -312,6 +312,8 @@ export const ca: TranslationStructure = {
         activityAgents: 'Agents',
         activityMonitors: 'Monitors',
         activityGoals: 'Objectius',
+        activityShell: 'Comandes en segon pla',
+        activityWorkflows: 'Fluxos de treball',
     },
 
     commandPalette: {

@@ -328,6 +328,8 @@ export const en: TranslationStructure = {
         activityAgents: 'Agents',
         activityMonitors: 'Monitors',
         activityGoals: 'Goals',
+        activityShell: 'Background commands',
+        activityWorkflows: 'Workflows',
     },
 
     commandPalette: {
