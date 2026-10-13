@@ -428,6 +428,9 @@ export const ru: TranslationStructure = {
         encrypting: 'установка соединения…',
         backgroundTasks: 'Фоновые задачи',
         backgroundTaskCount: ({ count }: { count: number }) => `Выполняется задач: ${count}`,
+        activityAgents: 'Агенты',
+        activityMonitors: 'Мониторы',
+        activityGoals: 'Цели',
     },
 
     commandPalette: {

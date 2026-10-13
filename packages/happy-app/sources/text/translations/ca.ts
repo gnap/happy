@@ -309,6 +309,9 @@ export const ca: TranslationStructure = {
         encrypting: 'establint connexió…',
         backgroundTasks: 'Tasques en segon pla',
         backgroundTaskCount: ({ count }: { count: number }) => `${count} tasques en execució`,
+        activityAgents: 'Agents',
+        activityMonitors: 'Monitors',
+        activityGoals: 'Objectius',
     },
 
     commandPalette: {

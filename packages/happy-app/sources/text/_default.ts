@@ -309,6 +309,9 @@ export const en = {
         backgroundTasks: 'Background tasks',
         backgroundTaskCount: ({ count }: { count: number }) =>
             count === 1 ? '1 task running' : `${count} tasks running`,
+        activityAgents: 'Agents',
+        activityMonitors: 'Monitors',
+        activityGoals: 'Goals',
     },
 
     commandPalette: {

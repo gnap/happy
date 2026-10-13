@@ -344,6 +344,9 @@ export const ja: TranslationStructure = {
         encrypting: '接続を確立中…',
         backgroundTasks: 'バックグラウンドタスク',
         backgroundTaskCount: ({ count }: { count: number }) => `${count} 件のタスクを実行中`,
+        activityAgents: 'エージェント',
+        activityMonitors: 'モニター',
+        activityGoals: 'ゴール',
     },
 
     commandPalette: {
