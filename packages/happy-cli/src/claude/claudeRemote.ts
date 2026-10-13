@@ -25,6 +25,28 @@ const DEFERRED_STOP_DEBOUNCE_MS = 2000;
 const STREAM_CLOSE_GRACE_MS = 10_000;
 
 /**
+ * The snapshot's view of a task, keeping the better of the two names for it.
+ *
+ * The snapshot is authoritative about *what is running* and about the command line, but not about
+ * what to call the task: when the model gave the tool no `description` of its own, Claude Code
+ * reports the command as the description too. The `task_started` frame that introduced the task
+ * carries a readable title in that same case, so a name worth reading is already in hand and would
+ * be thrown away by a plain replace.
+ */
+export function withBestTitle(
+    known: BackgroundTaskForApp | undefined,
+    task: BackgroundTaskForApp,
+): BackgroundTaskForApp {
+    if (!known || known.description.length === 0) return task;
+    const incoming = task.description.trim();
+    const command = task.command?.trim();
+    if (incoming.length === 0 || (command !== undefined && incoming === command)) {
+        return { ...task, description: known.description };
+    }
+    return task;
+}
+
+/**
  * What the App is told about one background task the session has running.
  *
  * `description` is Claude Code's own name for the task — normally a readable title, and the thing
@@ -439,25 +461,6 @@ export async function claudeRemote(opts: {
 
     function emitBackgroundTasks(): void {
         opts.onBackgroundTasks?.([...backgroundTaskSummaries.values()]);
-    }
-
-    /**
-     * The snapshot's view of a task, keeping the better of the two names for it.
-     *
-     * The snapshot is authoritative about *what is running* and about the command line, but not
-     * about what to call the task: when the model gave the tool no `description` of its own, Claude
-     * Code reports the command as the description too. The `task_started` frame that introduced the
-     * task carries a readable title in that same case, so a name worth reading is already in hand
-     * and would be thrown away by a plain replace.
-     */
-    function withBestTitle(known: LiveBackgroundTask | undefined, task: LiveBackgroundTask): LiveBackgroundTask {
-        if (!known || known.description.length === 0) return task;
-        const incoming = task.description.trim();
-        const command = task.command?.trim();
-        if (incoming.length === 0 || (command !== undefined && incoming === command)) {
-            return { ...task, description: known.description };
-        }
-        return task;
     }
 
     /**
