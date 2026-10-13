@@ -7,7 +7,7 @@ import { Typography } from '@/constants/Typography';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import { GOAL_STATUS_ICONS, type GoalStatus } from '@/utils/goalUtils';
-import { ACTIVITY_KINDS, groupActivityTasks, type ActivityKind, type ActivityTask } from '@/utils/activityTasks';
+import { groupActivityTasks, type ActivityTask } from '@/utils/activityTasks';
 
 export type { ActivityTask } from '@/utils/activityTasks';
 
@@ -28,17 +28,27 @@ export type { ActivityTask } from '@/utils/activityTasks';
 export type ActivityGoal = { condition: string; status: GoalStatus; reason?: string; iterations?: number };
 
 /**
- * The three kinds of background work, and the glyph and colour each is drawn with.
+ * How each kind of background work is drawn: a glyph and a colour, and the label its details panel
+ * is titled with.
  *
- * `type` comes from the CLI's own task summary, which distinguishes a subagent from a monitor from
- * a plain background command; anything else it learns to run falls in with the commands rather than
- * being hidden, because "something is still running" is the fact that matters.
+ * Indexed by the CLI's own task type, so the badge a reader sees is the kind the CLI reported. A
+ * type that is not listed here still gets a badge — with the generic glyph and its own raw name as
+ * the title — because the CLI learns kinds of work on its own schedule and a count must never omit
+ * something that is running.
  */
-const KIND_STYLE: Record<ActivityKind, { icon: 'people-outline' | 'pulse-outline' | 'terminal-outline'; color: string; label: () => string }> = {
-    agents: { icon: 'people-outline', color: '#AF52DE', label: () => t('session.activityAgents') },
-    monitors: { icon: 'pulse-outline', color: '#FF9500', label: () => t('session.activityMonitors') },
-    tasks: { icon: 'terminal-outline', color: '#8E8E93', label: () => t('session.backgroundTasks') },
+type KindStyle = { icon: React.ComponentProps<typeof Ionicons>['name']; color: string; label: () => string };
+
+const KIND_STYLES: Record<string, KindStyle> = {
+    subagent: { icon: 'people-outline', color: '#AF52DE', label: () => t('session.activityAgents') },
+    monitor: { icon: 'pulse-outline', color: '#FF9500', label: () => t('session.activityMonitors') },
+    shell: { icon: 'terminal-outline', color: '#8E8E93', label: () => t('session.activityShell') },
+    workflow: { icon: 'git-branch-outline', color: '#007AFF', label: () => t('session.activityWorkflows') },
 };
+
+const FALLBACK_STYLE: Omit<KindStyle, 'label'> = { icon: 'ellipsis-horizontal-outline', color: '#8E8E93' };
+
+/** The glyph for a kind, with the kind's own name standing in as its label when it is a new one. */
+const styleFor = (type: string): KindStyle => KIND_STYLES[type] ?? { ...FALLBACK_STYLE, label: () => type };
 
 /** One line per item, for the details panel. Status is the protocol's own word. */
 function taskLines(tasks: ActivityTask[]): string {
@@ -81,29 +91,25 @@ export const SessionActivityBadges = React.memo(function SessionActivityBadges({
     compact?: boolean;
 }) {
     const styles = stylesheet;
-    const byKind = groupActivityTasks(tasks);
+    const groups = groupActivityTasks(tasks);
     const goalVisible = showGoal && goal !== null && goal !== undefined;
-    if (!goalVisible && ACTIVITY_KINDS.every((kind) => byKind[kind].length === 0)) {
+    if (!goalVisible && groups.length === 0) {
         return null;
     }
     return (
         <View style={styles.row}>
-            {ACTIVITY_KINDS.map((kind) => {
-                const items = byKind[kind];
-                if (items.length === 0) {
-                    return null;
-                }
-                const { icon, color, label } = KIND_STYLE[kind];
+            {groups.map((group) => {
+                const { icon, color, label } = styleFor(group.type);
                 return (
                     <Pressable
-                        key={kind}
-                        onLongPress={() => showDetails(label(), taskLines(items))}
+                        key={group.type}
+                        onLongPress={() => showDetails(label(), taskLines(group.tasks))}
                         delayLongPress={350}
                         hitSlop={6}
                         style={[styles.badge, compact && styles.badgeCompact, { backgroundColor: `${color}1F` }]}
                     >
                         <Ionicons name={icon} size={compact ? 10 : 12} color={color} />
-                        <Text style={[styles.count, { color }]}>{items.length}</Text>
+                        <Text style={[styles.count, { color }]}>{group.tasks.length}</Text>
                     </Pressable>
                 );
             })}

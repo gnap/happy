@@ -312,6 +312,8 @@ export const en = {
         activityAgents: 'Agents',
         activityMonitors: 'Monitors',
         activityGoals: 'Goals',
+        activityShell: 'Background commands',
+        activityWorkflows: 'Workflows',
     },
 
     commandPalette: {

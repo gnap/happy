@@ -2,35 +2,51 @@
  * What a session is doing besides answering, grouped the way the UI shows it.
  *
  * The CLI publishes one flat list of background tasks (`agentState.backgroundTasks`), each with the
- * `type` it was recorded under — `subagent`, `monitor`, `shell`, `workflow`. That list is the
- * source of truth and it changes whenever the SDK learns a new kind of work, so the grouping here
- * is deliberately forgiving: anything that is not a subagent or a monitor counts as a background
- * task, because "something is still running" is the fact a reader needs, and a kind nobody has
- * taught this file about must not vanish from the count.
+ * `type` it was recorded under — `subagent`, `monitor`, `shell`, `workflow`. Every type is its own
+ * group here: a subagent is an agent that can be addressed and answered, a monitor is a watch, a
+ * shell command is neither, and counting them together would say "three things are running" without
+ * saying which — which is the question the count exists to answer.
+ *
+ * A type this file has never heard of still gets its own group, because the CLI learns kinds of
+ * work on its own schedule and the one thing a count must never do is omit something that is
+ * running.
  */
 
 /** A background task as the CLI publishes it. */
 export type ActivityTask = { id: string; type: string; status: string; description: string };
 
-/** The kinds the App shows counts for. */
-export const ACTIVITY_KINDS = ['agents', 'monitors', 'tasks'] as const;
-export type ActivityKind = (typeof ACTIVITY_KINDS)[number];
+/** A group of tasks of one type, as the UI draws one badge per group. */
+export type ActivityGroup = {
+    /** The CLI's own name for the kind, which the UI uses to pick a glyph and a label. */
+    type: string;
+    tasks: ActivityTask[];
+};
 
-export function activityKindOf(task: ActivityTask): ActivityKind {
-    if (task.type === 'subagent') {
-        return 'agents';
-    }
-    if (task.type === 'monitor') {
-        return 'monitors';
-    }
-    return 'tasks';
-}
+/**
+ * The order groups are drawn in, highest first.
+ *
+ * Fixed rather than derived from the data so a badge does not move when a task of another kind
+ * starts: what a reader scans down the session list is badges that stay put.
+ */
+const TYPE_ORDER = ['subagent', 'monitor', 'shell', 'workflow'] as const;
 
-/** The tasks of a session, by kind. Every kind is present, empty when the session has none. */
-export function groupActivityTasks(tasks: readonly ActivityTask[] | null | undefined): Record<ActivityKind, ActivityTask[]> {
-    const grouped: Record<ActivityKind, ActivityTask[]> = { agents: [], monitors: [], tasks: [] };
+const orderOf = (type: string): number => {
+    const at = (TYPE_ORDER as readonly string[]).indexOf(type);
+    return at === -1 ? TYPE_ORDER.length : at;
+};
+
+/** The tasks of a session, one group per type present, in a stable order. */
+export function groupActivityTasks(tasks: readonly ActivityTask[] | null | undefined): ActivityGroup[] {
+    const byType = new Map<string, ActivityTask[]>();
     for (const task of tasks ?? []) {
-        grouped[activityKindOf(task)].push(task);
+        const group = byType.get(task.type);
+        if (group) {
+            group.push(task);
+        } else {
+            byType.set(task.type, [task]);
+        }
     }
-    return grouped;
+    return [...byType.entries()]
+        .map(([type, group]) => ({ type, tasks: group }))
+        .sort((a, b) => orderOf(a.type) - orderOf(b.type) || a.type.localeCompare(b.type));
 }

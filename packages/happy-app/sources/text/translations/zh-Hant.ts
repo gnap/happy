@@ -313,6 +313,8 @@ export const zhHant: TranslationStructure = {
         activityAgents: '代理',
         activityMonitors: '監控',
         activityGoals: '目標',
+        activityShell: '後台命令',
+        activityWorkflows: '工作流程',
     },
 
     commandPalette: {

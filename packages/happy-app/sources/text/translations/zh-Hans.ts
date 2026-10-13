@@ -314,6 +314,8 @@ export const zhHans: TranslationStructure = {
         activityAgents: '代理',
         activityMonitors: '监控',
         activityGoals: '目标',
+        activityShell: '后台命令',
+        activityWorkflows: '工作流',
     },
 
     commandPalette: {
