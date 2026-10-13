@@ -24,6 +24,31 @@ const DEFERRED_STOP_DEBOUNCE_MS = 2000;
  *  forcing it. Only ever reached when background tasks hold the stream open. */
 const STREAM_CLOSE_GRACE_MS = 10_000;
 
+/**
+ * What the App is told about one background task the session has running.
+ *
+ * `description` is Claude Code's own name for the task — normally a readable title, and the thing
+ * the App shows first. The fields below it are the type-specific detail the SDK carries alongside
+ * (`BackgroundTaskSummary` in `sdk.d.ts`), forwarded rather than dropped: for a background command
+ * the title is sometimes the command line itself, and then the command is all there is to show
+ * underneath.
+ */
+export type BackgroundTaskForApp = {
+    id: string;
+    type: string;
+    status: string;
+    description: string;
+    /** Shell tasks: the command line. */
+    command?: string;
+    /** Subagent tasks: which agent definition it runs. */
+    agentType?: string;
+    /** Monitor / MCP tasks: where it watches. */
+    server?: string;
+    tool?: string;
+    /** Workflow tasks. */
+    name?: string;
+};
+
 /** Find the system Claude binary for use with the Agent SDK. */
 function resolveClaudeBinaryPath(): string {
     // 1. Explicit override
@@ -97,7 +122,7 @@ export async function claudeRemote(opts: {
      * service them — so without this the App sees a turn that reported itself finished while the
      * session goes quiet, with nothing to explain the wait.
      */
-    onBackgroundTasks?: (tasks: Array<{ id: string; type: string; status: string; description: string }>) => void,
+    onBackgroundTasks?: (tasks: BackgroundTaskForApp[]) => void,
     /** Called immediately before stopSignal is resolved on a normal result, so the
      *  launcher can mark itself as "stopping" and avoid fetching a new message from
      *  the queue that would then be discarded by the inputLoop race. */
@@ -299,6 +324,11 @@ export async function claudeRemote(opts: {
                         type: task.type,
                         status: task.status,
                         description: task.description,
+                        command: task.command,
+                        agentType: task.agent_type,
+                        server: task.server,
+                        tool: task.tool,
+                        name: task.name,
                     })));
                     const crons = input.session_crons ?? [];
                     if (crons.length > 0) {
@@ -404,11 +434,30 @@ export async function claudeRemote(opts: {
     }
 
     /** What the App is shown about each live task, keyed the same way the drain logic keys ids. */
-    type LiveBackgroundTask = { id: string; type: string; status: string; description: string };
+    type LiveBackgroundTask = BackgroundTaskForApp;
     const backgroundTaskSummaries = new Map<string, LiveBackgroundTask>();
 
     function emitBackgroundTasks(): void {
         opts.onBackgroundTasks?.([...backgroundTaskSummaries.values()]);
+    }
+
+    /**
+     * The snapshot's view of a task, keeping the better of the two names for it.
+     *
+     * The snapshot is authoritative about *what is running* and about the command line, but not
+     * about what to call the task: when the model gave the tool no `description` of its own, Claude
+     * Code reports the command as the description too. The `task_started` frame that introduced the
+     * task carries a readable title in that same case, so a name worth reading is already in hand
+     * and would be thrown away by a plain replace.
+     */
+    function withBestTitle(known: LiveBackgroundTask | undefined, task: LiveBackgroundTask): LiveBackgroundTask {
+        if (!known || known.description.length === 0) return task;
+        const incoming = task.description.trim();
+        const command = task.command?.trim();
+        if (incoming.length === 0 || (command !== undefined && incoming === command)) {
+            return { ...task, description: known.description };
+        }
+        return task;
     }
 
     /**
@@ -420,11 +469,12 @@ export async function claudeRemote(opts: {
      * forever, which is the failure the old comment on `liveBackgroundTasks` describes.
      */
     function applyBackgroundTasks(tasks: readonly LiveBackgroundTask[]): void {
+        const previous = new Map(backgroundTaskSummaries);
         liveBackgroundTasks.clear();
         backgroundTaskSummaries.clear();
         for (const task of tasks) {
             liveBackgroundTasks.add(task.id);
-            backgroundTaskSummaries.set(task.id, task);
+            backgroundTaskSummaries.set(task.id, withBestTitle(previous.get(task.id), task));
         }
         logger.debug(`[claudeRemote] background tasks live: ${liveBackgroundTasks.size}`);
         emitBackgroundTasks();
