@@ -51,7 +51,9 @@ export const ActivityBubble = React.memo(function ActivityBubble({
                             <View key={`${section.label}:${index}`} style={styles.line}>
                                 <Text style={styles.status}>{line.status}</Text>
                                 <View style={styles.lineBody}>
-                                    <Text style={styles.text}>{line.text}</Text>
+                                    <Text style={styles.text} numberOfLines={2}>
+                                        {line.text}
+                                    </Text>
                                     {line.detail !== undefined ? (
                                         <Text style={styles.detail} numberOfLines={2}>
                                             {line.detail}
