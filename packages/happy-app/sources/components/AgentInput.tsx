@@ -994,6 +994,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                     <SessionActivityBadges
                                         tasks={props.connectionStatus.backgroundTasks}
                                         goal={props.connectionStatus.goal}
+                                        interactive
                                     />
                                 </>
                             )}
