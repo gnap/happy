@@ -320,6 +320,9 @@ export const pl: TranslationStructure = {
         encrypting: 'nawiązywanie połączenia…',
         backgroundTasks: 'Zadania w tle',
         backgroundTaskCount: ({ count }: { count: number }) => `Zadań w toku: ${count}`,
+        activityAgents: 'Agenci',
+        activityMonitors: 'Monitory',
+        activityGoals: 'Cele',
     },
 
     commandPalette: {

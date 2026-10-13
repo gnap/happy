@@ -309,6 +309,9 @@ export const pt: TranslationStructure = {
         encrypting: 'estabelecendo conexão…',
         backgroundTasks: 'Tarefas em segundo plano',
         backgroundTaskCount: ({ count }: { count: number }) => `${count} tarefas em execução`,
+        activityAgents: 'Agentes',
+        activityMonitors: 'Monitores',
+        activityGoals: 'Objetivos',
     },
 
     commandPalette: {

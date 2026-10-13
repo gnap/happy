@@ -12,6 +12,7 @@ import { hapticsLight, hapticsError } from './haptics';
 import { Shaker, ShakeInstance } from './Shaker';
 import { StatusDot } from './StatusDot';
 import { CHANNEL_ICONS } from '@/sync/machinePresence';
+import { SessionActivityBadges } from '@/components/SessionActivityBadges';
 import { useActiveWord } from './autocomplete/useActiveWord';
 import { useActiveSuggestions } from './autocomplete/useActiveSuggestions';
 import { AgentInputAutocomplete } from './AgentInputAutocomplete';
@@ -25,7 +26,6 @@ import { useSetting } from '@/sync/storage';
 import { hackMode, hackModes } from '@/sync/modeHacks';
 import { Theme } from '@/theme';
 import { t } from '@/text';
-import { Modal } from '@/modal';
 import { Metadata } from '@/sync/storageTypes';
 
 import { AIBackendProfile, getProfileEnvironmentVariables, validateProfileForAgent } from '@/sync/settings';
@@ -1008,32 +1008,14 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                             </Text>
                                         </View>
                                     )}
-                                    {!!props.connectionStatus.backgroundTasks?.length && (
-                                        <Pressable
-                                            onPress={() => {
-                                                const tasks = props.connectionStatus?.backgroundTasks ?? [];
-                                                Modal.alert(
-                                                    t('session.backgroundTasks'),
-                                                    tasks.map((task) => `• ${task.description || task.type}`).join('\n'),
-                                                    [{ text: t('common.ok'), style: 'cancel' }],
-                                                );
-                                            }}
-                                            style={{ flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 1 }}
-                                        >
-                                            <Ionicons name="sync-outline" size={12} color={theme.colors.textSecondary} />
-                                            <Text
-                                                numberOfLines={1}
-                                                style={{
-                                                    fontSize: 11,
-                                                    color: theme.colors.textSecondary,
-                                                    flexShrink: 1,
-                                                    ...Typography.default()
-                                                }}
-                                            >
-                                                {t('session.backgroundTaskCount', { count: props.connectionStatus?.backgroundTasks?.length ?? 0 })}
-                                            </Text>
-                                        </Pressable>
-                                    )}
+                                    {/* The goal keeps its own chip here — it shows the condition in
+                                        full, which a count cannot — so the badges cover only what is
+                                        still running. */}
+                                    <SessionActivityBadges
+                                        tasks={props.connectionStatus.backgroundTasks}
+                                        goal={props.connectionStatus.goal}
+                                        showGoal={false}
+                                    />
                                 </>
                             )}
                             {(contextWarning || props.usageData?.contextSize) && (

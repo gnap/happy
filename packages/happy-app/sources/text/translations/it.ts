@@ -341,6 +341,9 @@ export const it: TranslationStructure = {
         encrypting: 'handshaking…',
         backgroundTasks: 'Attività in background',
         backgroundTaskCount: ({ count }: { count: number }) => `${count} attività in esecuzione`,
+        activityAgents: 'Agenti',
+        activityMonitors: 'Monitor',
+        activityGoals: 'Obiettivi',
     },
 
     commandPalette: {
