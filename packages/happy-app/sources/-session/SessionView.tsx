@@ -1,5 +1,5 @@
 import { AgentContentView } from '@/components/AgentContentView';
-import { AgentInput } from '@/components/AgentInput';
+import { AgentInput, type SandboxIsolationLevel } from '@/components/AgentInput';
 import {
     getAvailableModels,
     getAvailablePermissionModes,
@@ -280,8 +280,11 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         sync.applySettings({ lastUsedProfile: profileId });
     }, [sessionId]);
 
-    const sandboxIsolation = session.sandboxIsolation ?? 'off';
-    const updateSandboxIsolation = React.useCallback((isolation: string) => {
+    // `session.sandboxIsolation` is persisted as a plain string; the values only ever come
+    // from the picker in AgentInput, so narrow to its union here rather than widening the
+    // stored type.
+    const sandboxIsolation = (session.sandboxIsolation ?? 'off') as SandboxIsolationLevel;
+    const updateSandboxIsolation = React.useCallback((isolation: SandboxIsolationLevel) => {
         storage.getState().updateSessionSandboxIsolation(sessionId, isolation);
     }, [sessionId]);
 
@@ -435,7 +438,6 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             })()}
             alwaysShowContextSize={alwaysShowContextSize}
             maxContextSize={maxContextSize}
-            sandboxIsolation={sandboxIsolation}
         />
     );
 

@@ -265,6 +265,15 @@ class ApiSocket {
     getLastError = (): Error | null => this.lastError;
     isAuthFailure = (): boolean => this.currentStatus === 'auth_error';
 
+    /**
+     * Whether the socket is connected right now. Distinct from `isConnectionHealthy()`,
+     * which is a rolling-uptime heuristic — callers deciding whether to take the
+     * WebSocket send path need the current state, not the recent history.
+     */
+    get isConnected(): boolean {
+        return this.currentStatus === 'connected';
+    }
+
     //
     // Message Handling
     //

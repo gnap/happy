@@ -948,8 +948,13 @@ describe('Zod Transform - WOLOG Content Normalization', () => {
 
             expect(result.success).toBe(true);
             if (result.success && result.data.role === 'user') {
-                expect(result.data.content.type).toBe('text');
-                expect(result.data.content.text).toBe('User input message');
+                const content = result.data.content;
+                expect(content.type).toBe('text');
+                // Narrow for the compiler — `expect(...)` doesn't narrow. The assertion above
+                // already fails the test if this branch isn't the plain-text variant.
+                if (content.type === 'text') {
+                    expect(content.text).toBe('User input message');
+                }
             }
         });
     });

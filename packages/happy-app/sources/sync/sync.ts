@@ -3278,7 +3278,10 @@ class Sync {
                     // Session envelopes carry their own server-assigned localId (different from
                     // the original user message localId), so resolve by text for ALL user messages.
                     if (normalized.role === 'user') {
-                        const claimedLocalId = this.resolveLocalIdForIncoming(sessionId, normalized.id, normalized.content.text, decrypted.localId);
+                        // A user message can be plain text or a block list (file attachments), and
+                        // only the former carries `text` — read it through the discriminant.
+                        const previewText = normalized.content.type === 'text' ? normalized.content.text : '';
+                        const claimedLocalId = this.resolveLocalIdForIncoming(sessionId, normalized.id, previewText, decrypted.localId);
                         if (claimedLocalId) {
                             normalized = { ...normalized, localId: claimedLocalId };
                         }
@@ -3691,7 +3694,9 @@ class Sync {
                                 this.claimedServerMessageIds.set(lastMessage.id, echoedId);
                             }
                         } else if (lastMessage && lastMessage.role === 'user') {
-                            const claimedLocalId = this.resolveLocalIdForIncoming(sid, lastMessage.id, lastMessage.content.text, decrypted.localId);
+                            // See the block-list note above: only the plain-text variant has `text`.
+                            const previewText = lastMessage.content.type === 'text' ? lastMessage.content.text : '';
+                            const claimedLocalId = this.resolveLocalIdForIncoming(sid, lastMessage.id, previewText, decrypted.localId);
                             if (claimedLocalId) {
                                 lastMessage = { ...lastMessage, localId: claimedLocalId };
                             }
