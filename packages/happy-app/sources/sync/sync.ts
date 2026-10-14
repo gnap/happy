@@ -3384,7 +3384,15 @@ class Sync {
                         }
                     } catch (lanError) {
                         // The LAN is best-effort. A failure here must not mask the original error.
-                        log.log(`📡 fetchMessages: LAN fallback failed for ${sessionId}: ${String(lanError)}`);
+                        //
+                        // Which endpoint was tried, because "Load failed" is what a webview says for
+                        // every transport-level refusal — no CORS headers on the far side, an address
+                        // on a network this device is not on, a port that is closed — and the three
+                        // have nothing in common but the message. The route is what tells them apart.
+                        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+                        const relay = machineId ? storage.getState().relayEndpoints[machineId]?.baseUrl : undefined;
+                        const lan = machineId ? this.lanMachineConnections.get(machineId)?.baseUrl : undefined;
+                        log.log(`📡 fetchMessages: fallback failed for ${sessionId} (machine ${machineId ?? '?'}, relay ${relay ?? '-'}, lan ${lan ?? '-'}, via ${this.preferredChannel(sessionId)}): ${String(lanError)}`);
                     }
                     // Still re-throw: the LAN log only covers what that process has seen since it
                     // started, so it supplements the server rather than replacing it, and the
