@@ -308,7 +308,6 @@ export const ca: TranslationStructure = {
         inputPlaceholder: 'Escriu un missatge...',
         encrypting: 'establint connexió…',
         backgroundTasks: 'Tasques en segon pla',
-        backgroundTaskCount: ({ count }: { count: number }) => `${count} tasques en execució`,
         activityAgents: 'Agents',
         activityMonitors: 'Monitors',
         activityGoals: 'Objectius',

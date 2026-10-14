@@ -310,7 +310,6 @@ export const zhHans: TranslationStructure = {
         inputPlaceholder: '输入消息...',
         encrypting: '连接中…',
         backgroundTasks: '后台任务',
-        backgroundTaskCount: ({ count }: { count: number }) => `${count} 个任务在运行`,
         activityAgents: '代理',
         activityMonitors: '监控',
         activityGoals: '目标',

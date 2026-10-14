@@ -323,8 +323,6 @@ export const en: TranslationStructure = {
         inputPlaceholder: 'Type a message ...',
         encrypting: 'handshaking…',
         backgroundTasks: 'Background tasks',
-        backgroundTaskCount: ({ count }: { count: number }) =>
-            count === 1 ? '1 task running' : `${count} tasks running`,
         activityAgents: 'Agents',
         activityMonitors: 'Monitors',
         activityGoals: 'Goals',

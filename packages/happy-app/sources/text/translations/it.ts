@@ -340,7 +340,6 @@ export const it: TranslationStructure = {
         inputPlaceholder: 'Scrivi un messaggio ...',
         encrypting: 'handshaking…',
         backgroundTasks: 'Attività in background',
-        backgroundTaskCount: ({ count }: { count: number }) => `${count} attività in esecuzione`,
         activityAgents: 'Agenti',
         activityMonitors: 'Monitor',
         activityGoals: 'Obiettivi',

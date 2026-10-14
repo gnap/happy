@@ -427,7 +427,6 @@ export const ru: TranslationStructure = {
         inputPlaceholder: 'Введите сообщение...',
         encrypting: 'установка соединения…',
         backgroundTasks: 'Фоновые задачи',
-        backgroundTaskCount: ({ count }: { count: number }) => `Выполняется задач: ${count}`,
         activityAgents: 'Агенты',
         activityMonitors: 'Мониторы',
         activityGoals: 'Цели',
