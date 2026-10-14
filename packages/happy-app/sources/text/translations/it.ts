@@ -564,14 +564,6 @@ export const it: TranslationStructure = {
         noMachinesAvailable: 'Nessuna macchina',
     },
 
-        sandbox: {
-            isolationTitle: 'Sandbox Isolation',
-            off: 'Off',
-            strict: 'Strict (project only)',
-            workspace: 'Workspace',
-            custom: 'Custom',
-        },
-
     machineLauncher: {
         showLess: 'Mostra meno',
         showAll: ({ count }: { count: number }) => `Mostra tutto (${count} percorsi)`,
