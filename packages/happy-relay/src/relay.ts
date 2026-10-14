@@ -109,8 +109,16 @@ export function startRelay(options: RelayOptions): RelayHandle {
     }, 60_000);
     sweep.unref?.();
 
+    /** The headers a browser needs to be allowed to make the request at all. On every response. */
+    const CORS = {
+        'access-control-allow-origin': '*',
+        'access-control-allow-headers': 'authorization,content-type',
+        'access-control-allow-methods': 'GET,POST,OPTIONS',
+        'access-control-max-age': '600',
+    };
+
     const json = (status: number, body: unknown) =>
-        new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', 'access-control-allow-origin': '*' } });
+        new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...CORS } });
 
     const server = Bun.serve<SocketData>({
         port: options.port,
@@ -120,6 +128,16 @@ export function startRelay(options: RelayOptions): RelayHandle {
         async fetch(req, srv) {
             const url = new URL(req.url);
             const ip = srv.requestIP(req)?.address ?? 'unknown';
+
+            // A preflight is a question about the origin, not about a route, and it is asked before
+            // the request it is about — including for paths this relay does not serve, and for tags
+            // it has never heard of. Answering it only on the routes that exist refuses the request
+            // in the browser, so the client sees an opaque network failure where the truth was a
+            // 404 or a 502, and a read that would have been retried on a real answer instead looks
+            // like a dead channel.
+            if (req.method === 'OPTIONS') {
+                return new Response(null, { status: 204, headers: CORS });
+            }
 
             if (url.pathname === '/health') {
                 return json(200, { ok: true, daemons: daemons.size });
@@ -141,16 +159,6 @@ export function startRelay(options: RelayOptions): RelayHandle {
             const rest = (match[2] ?? '/') + url.search;
             if (!TAG_RE.test(tag)) return json(404, { error: 'not found' });
 
-            if (req.method === 'OPTIONS') {
-                return new Response(null, {
-                    status: 204,
-                    headers: {
-                        'access-control-allow-origin': '*',
-                        'access-control-allow-headers': 'authorization,content-type',
-                        'access-control-allow-methods': 'GET,POST,OPTIONS',
-                    },
-                });
-            }
             if (limited(ip)) return json(429, { error: 'rate' });
             const daemon = daemons.get(tag);
             if (!daemon) return json(502, { error: 'offline' });

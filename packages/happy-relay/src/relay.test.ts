@@ -24,6 +24,39 @@ async function connectDaemon(port: number, pair = nacl.sign.keyPair(), sign = tr
 const until = async (fn: () => boolean) => { for (let i = 0; i < 100 && !fn(); i++) await Bun.sleep(20); };
 
 describe('relay', () => {
+    /**
+     * The preflight has to be answered wherever it is asked, because that is where a browser asks
+     * it: before the request, for whatever URL the client is about to use. Answering only the paths
+     * that happen to exist turns every other URL into a network failure in the browser — which is
+     * indistinguishable from a relay that is down, and is what a session read did when it went out
+     * over a route the relay did not recognise.
+     */
+    it('answers a preflight for a path it does not serve, and for a tag it does not know', async () => {
+        relay = startRelay({ port: 0 });
+        for (const path of ['/lan/challenge', `/r/${'a'.repeat(32)}/anything`, '/r/not-a-tag/lan/identity']) {
+            const res = await fetch(`http://127.0.0.1:${relay.port}${path}`, {
+                method: 'OPTIONS',
+                headers: {
+                    origin: 'http://localhost:8081',
+                    'access-control-request-method': 'GET',
+                    'access-control-request-headers': 'authorization',
+                },
+            });
+            expect(res.status, path).toBe(204);
+            expect(res.headers.get('access-control-allow-headers'), path).toContain('authorization');
+            expect(res.headers.get('access-control-allow-origin'), path).toBe('*');
+        }
+    });
+
+    it('carries the CORS headers on the errors it answers itself', async () => {
+        relay = startRelay({ port: 0 });
+        const res = await fetch(`http://127.0.0.1:${relay.port}/not-a-route`, { headers: { origin: 'http://localhost:8081' } });
+        expect(res.status).toBe(404);
+        // Without these a browser cannot read the answer, so a 404 is delivered as a network error.
+        expect(res.headers.get('access-control-allow-origin')).toBe('*');
+        expect(res.headers.get('access-control-allow-headers')).toContain('authorization');
+    });
+
     it('returns offline quickly when no daemon is registered', async () => {
         relay = startRelay({ port: 0 });
         const res = await fetch(`http://127.0.0.1:${relay.port}/r/${'a'.repeat(32)}/lan/identity`);
