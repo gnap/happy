@@ -61,7 +61,7 @@ export const MachinePresenceBadge = React.memo(function MachinePresenceBadge({
     return (
         <View style={styles.container}>
             {icons.map(({ channel, up }) => (
-                <Ionicons key={channel} name={CHANNEL_ICONS[channel]} size={11} color={up ? CONNECTED : DOWN} />
+                <Ionicons key={channel} name={CHANNEL_ICONS[channel]} size={13} color={up ? CONNECTED : DOWN} />
             ))}
         </View>
     );
