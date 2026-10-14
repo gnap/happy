@@ -29,7 +29,9 @@ export function useSessionStatus(session: Session): SessionStatus {
      * is a page that contradicts the messages arriving on it.
      */
     const daemonSessions = useLanSessionList();
-    const isOnline = session.presence === "online" || daemonSessions[session.id]?.isAlive === true;
+    // Optional at every step: the store is empty until a daemon has answered, and a status line is
+    // not worth a crash in the one case it exists for.
+    const isOnline = session.presence === "online" || daemonSessions?.[session.id]?.isAlive === true;
     const hasPermissions = (session.agentState?.requests && Object.keys(session.agentState.requests).length > 0 ? true : false);
 
     const vibingMessage = React.useMemo(() => {
