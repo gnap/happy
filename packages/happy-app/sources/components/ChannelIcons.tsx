@@ -61,7 +61,7 @@ export const ChannelIcons = React.memo(() => {
                 <Ionicons
                     key={channel}
                     name={CHANNEL_ICONS[channel]}
-                    size={10}
+                    size={13}
                     color={linkColor(state, theme).color}
                     style={{ opacity: linkColor(state, theme).opacity }}
                 />
@@ -74,7 +74,10 @@ const styles = StyleSheet.create({
     row: {
         flexDirection: 'row',
         alignItems: 'center',
-        gap: 2,
-        marginRight: 4,
+        // Big enough to be read as three icons rather than as noise beside the status text: at 10px
+        // on the dark header the relay's arrows were a blue smudge, which is what "the icon is
+        // hidden" looked like from the outside.
+        gap: 3,
+        marginRight: 6,
     },
 });
