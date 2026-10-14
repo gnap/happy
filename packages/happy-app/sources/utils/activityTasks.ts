@@ -64,10 +64,18 @@ export function activityTaskText(task: ActivityTask): { title: string; detail?: 
     const title = task.description.trim();
     const detail = detailOf(task);
     if (title.length === 0) {
-        return { title: detail ?? task.type, detail: undefined };
+        return { title: detail === undefined ? canonicalActivityType(task.type) : command(detail), detail: undefined };
     }
-    return detail !== undefined && detail !== title ? { title, detail } : { title };
+    if (detail === title) {
+        // Claude Code named the task after what it runs: there is no name to show, so the line says
+        // it is a command rather than dressing a command up as one.
+        return { title: command(title), detail: undefined };
+    }
+    return detail !== undefined ? { title, detail } : { title };
 }
+
+/** A command, marked as a command, so a line that is one is never read as a name. */
+const command = (line: string): string => `$ ${line}`;
 
 /** A group of tasks of one type, as the UI draws one badge per group. */
 export type ActivityGroup = {
@@ -75,6 +83,31 @@ export type ActivityGroup = {
     type: string;
     tasks: ActivityTask[];
 };
+
+/**
+ * The names Claude Code uses for the same kinds of work, folded onto one.
+ *
+ * It reports a task twice over its life and does not use the same word both times: the
+ * `task_started` frame introduces it as `local_bash` / `local_agent`, and the snapshot at the end of
+ * the turn calls the very same task (`task_id` and all) a `shell` or a `subagent`. Grouping by the
+ * raw value would split one task into two kinds, relabel it mid-flight, and — worse — make the count
+ * move without anything having started or stopped.
+ *
+ * The aliases are also what an older CLI on another machine sends, which is why the vocabulary is
+ * accepted on this side rather than only normalised where it is written.
+ */
+const TYPE_ALIASES: Record<string, string> = {
+    local_bash: 'shell',
+    local_agent: 'subagent',
+    local_monitor: 'monitor',
+    local_workflow: 'workflow',
+    agent: 'subagent',
+};
+
+/** The kind a task belongs to, whatever the CLI called it. */
+export function canonicalActivityType(type: string): string {
+    return TYPE_ALIASES[type] ?? type;
+}
 
 /**
  * The order groups are drawn in, highest first.
@@ -93,11 +126,12 @@ const orderOf = (type: string): number => {
 export function groupActivityTasks(tasks: readonly ActivityTask[] | null | undefined): ActivityGroup[] {
     const byType = new Map<string, ActivityTask[]>();
     for (const task of tasks ?? []) {
-        const group = byType.get(task.type);
+        const type = canonicalActivityType(task.type);
+        const group = byType.get(type);
         if (group) {
             group.push(task);
         } else {
-            byType.set(task.type, [task]);
+            byType.set(type, [task]);
         }
     }
     return [...byType.entries()]

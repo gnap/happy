@@ -4,6 +4,13 @@ import { activityTaskText, groupActivityTasks, type ActivityTask } from './activ
 const task = (type: string, id = type): ActivityTask => ({ id, type, status: 'running', description: `${type} thing` });
 
 describe('groupActivityTasks', () => {
+    it('folds the two names Claude Code gives the same task onto one group', () => {
+        // `task_started` says local_bash, the snapshot at the end of the turn says shell — for the
+        // same task_id. Two groups here would mean a count that moves without anything changing.
+        const groups = groupActivityTasks([task('local_bash', 'a'), task('shell', 'b'), task('local_agent', 'c')]);
+        expect(groups.map((g) => [g.type, g.tasks.length])).toEqual([['subagent', 1], ['shell', 2]]);
+    });
+
     it('gives every type its own group', () => {
         // Counting a subagent and a background command as one number says how much is running
         // without saying what — and a subagent is the one you can talk to.
@@ -38,16 +45,19 @@ describe('activityTaskText', () => {
             .toEqual({ title: 'Sleep 45 seconds', detail: 'sleep 45' });
     });
 
-    it('does not repeat itself when the name is the command', () => {
-        // What Claude Code reports when the model gave the tool no description of its own.
+    it('marks a line that is a command as one instead of pretending it is a name', () => {
+        // What Claude Code reports when the model gave the tool no description of its own: there is
+        // no name to be had, so the line says what it is.
         expect(activityTaskText({ ...base, description: 'sleep 45', command: 'sleep 45' }))
-            .toEqual({ title: 'sleep 45' });
+            .toEqual({ title: '$ sleep 45' });
+        expect(activityTaskText({ ...base, description: '', command: 'bun test' }))
+            .toEqual({ title: '$ bun test' });
     });
 
-    it('names a nameless task by what it runs rather than by its type', () => {
-        expect(activityTaskText({ ...base, description: '', command: 'bun test' }))
-            .toEqual({ title: 'bun test' });
+    it('falls back to the kind only when there is nothing to run either', () => {
         expect(activityTaskText({ ...base, description: '   ' })).toEqual({ title: 'shell' });
+        expect(activityTaskText({ id: 't9', type: 'local_bash', status: 'running', description: '' }))
+            .toEqual({ title: 'shell' });
     });
 
     it('has a detail for the kinds that have no command', () => {
