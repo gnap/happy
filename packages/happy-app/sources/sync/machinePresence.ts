@@ -61,17 +61,22 @@ export function resolveMachinePresence(
 }
 
 /**
- * Glyph per channel: wifi for the local link, a cloud for the relay, a globe for the public server.
+ * Glyph per channel: wifi for the local link, two arrows for the relay, a globe for the public
+ * server.
  *
- * All three are the *filled* Ionicons, deliberately. These are drawn at 10–11px in a header that is
- * near-black in the dark theme, where a hairline glyph is an outline of nothing: `repeat` and
- * `globe-outline` — the two this used to draw — are stroked shapes, and at that size on that
- * background they read as a channel that is not there rather than as one that is not connected.
- * `wifi`, `cloud` and `globe` are solid at any size, which is the property that matters here.
+ * Two arrows are what a relay *is* — traffic leaves one way and comes back the other, through
+ * something in the middle — and `swap-horizontal-sharp` is the only cut of that idea that survives
+ * where these are drawn: 10–11px, on a header that is near-black in the dark theme.
+ *
+ * Cut, not concept, is what went wrong twice here. Ionicons draws the same shape in three weights
+ * and the plain ones are hairlines: at that size `swap-horizontal` and `repeat` are a smudge, which
+ * reads as a channel that is not there rather than one that is not connected. `-sharp` is the solid
+ * cut, and so are `wifi` and `globe`. (Rendered side by side at 10px to settle it rather than
+ * guessed at: the hairlines blur into a dot, the solid cuts do not.)
  */
 export const CHANNEL_ICONS = {
     lan: 'wifi',
-    relay: 'cloud',
+    relay: 'swap-horizontal-sharp',
     server: 'globe',
 } as const;
 
