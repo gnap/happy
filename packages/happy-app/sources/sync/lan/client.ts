@@ -22,6 +22,21 @@ import type { LanHistory, LanIdentity, LanSessionSummary } from './types';
 
 /** A challenge is worthless once the daemon's nonce expires; don't hang on a wedged host. */
 const REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * What a *read* through the public relay is allowed, where a read crosses three hops — this device
+ * to the relay, the relay's own socket to the daemon, the daemon's server — and the daemon may be
+ * on a connection that is slow, saturated, or being re-established after a network change.
+ *
+ * Only reads, and longer than the LAN's own budget rather than shorter: the hops are added, not
+ * replaced. The handshake keeps its ten seconds, because a nonce is worthless once the daemon's
+ * window on it has passed and waiting longer would mint a token out of a dead challenge.
+ */
+const RELAY_HISTORY_TIMEOUT_MS = 60_000;
+
+/** A relayed route is identifiable by its path: `/r/<tag>/…` is only ever served that way. */
+const historyTimeoutFor = (url: string): number =>
+    url.includes('/r/') ? RELAY_HISTORY_TIMEOUT_MS : HISTORY_TIMEOUT_MS;
 /**
  * Reading history is not like the other calls: the response is a page of a session's log, measured
  * in megabytes when the reader is catching up, and it may travel over the relay to a phone on
@@ -177,7 +192,7 @@ export async function fetchHistory(
     const query = params.size > 0 ? `?${params.toString()}` : '';
     const response = await request(
         `${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/history${query}`,
-        { token, timeoutMs: HISTORY_TIMEOUT_MS }
+        { token, timeoutMs: historyTimeoutFor(baseUrl) }
     );
     if (response.status === 404) {
         return null;
