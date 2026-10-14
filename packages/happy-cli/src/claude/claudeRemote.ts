@@ -25,6 +25,51 @@ const DEFERRED_STOP_DEBOUNCE_MS = 2000;
 const STREAM_CLOSE_GRACE_MS = 10_000;
 
 /**
+ * The names Claude Code uses for the same kinds of work, folded onto one.
+ *
+ * It reports a task twice over its life and does not use the same word both times: the
+ * `task_started` frame introduces it as `local_bash` / `local_agent`, and the end-of-turn snapshot
+ * calls the very same task (`task_id` and all) a `shell` or a `subagent`. Passing both through
+ * would relabel a task mid-flight and move the App's counts without anything having started.
+ */
+const TASK_TYPE_ALIASES: Record<string, string> = {
+    local_bash: 'shell',
+    local_agent: 'subagent',
+    local_monitor: 'monitor',
+    local_workflow: 'workflow',
+    agent: 'subagent',
+};
+
+export function normalizeTaskType(type: string): string {
+    return TASK_TYPE_ALIASES[type] ?? type;
+}
+
+/** The kind of work each tool starts, where the tool is the more precise answer. */
+const TASK_TYPE_BY_TOOL: Record<string, string> = {
+    Bash: 'shell',
+    Monitor: 'monitor',
+    Agent: 'subagent',
+    Task: 'subagent',
+    Workflow: 'workflow',
+};
+
+/**
+ * What kind of work a task is, preferring the tool that started it over the name Claude Code
+ * reports.
+ *
+ * It reports a Monitor task as `local_bash` in the stream and as `shell` in the snapshot — the same
+ * words it uses for a background command — so the reported type cannot tell a watch from a command.
+ * The tool call can: the task names the call that started it, and the call says what it was.
+ */
+export function taskTypeOf(tool: string | undefined, reported: string): string {
+    const byTool = tool === undefined ? undefined : TASK_TYPE_BY_TOOL[tool];
+    return byTool ?? normalizeTaskType(reported);
+}
+
+/** How specific a kind is, so a coarse name never replaces a precise one. */
+const SPECIFICITY: Record<string, number> = { monitor: 2, subagent: 2, workflow: 2, shell: 1 };
+
+/**
  * The snapshot's view of a task, keeping the better of the two names for it.
  *
  * The snapshot is authoritative about *what is running* and about the command line, but not about
@@ -33,17 +78,19 @@ const STREAM_CLOSE_GRACE_MS = 10_000;
  * carries a readable title in that same case, so a name worth reading is already in hand and would
  * be thrown away by a plain replace.
  */
-export function withBestTitle(
+export function mergeTask(
     known: BackgroundTaskForApp | undefined,
     task: BackgroundTaskForApp,
 ): BackgroundTaskForApp {
-    if (!known || known.description.length === 0) return task;
+    if (!known) return task;
+    const type = (SPECIFICITY[task.type] ?? 0) > (SPECIFICITY[known.type] ?? 0) ? task.type : known.type;
+    if (known.description.length === 0) return type === task.type ? task : { ...task, type };
     const incoming = task.description.trim();
     const command = task.command?.trim();
     if (incoming.length === 0 || (command !== undefined && incoming === command)) {
-        return { ...task, description: known.description };
+        return { ...task, type, description: known.description };
     }
-    return task;
+    return type === task.type ? task : { ...task, type };
 }
 
 /**
@@ -343,7 +390,7 @@ export async function claudeRemote(opts: {
                     // drain — a task whose completion frame went missing is simply not in here.
                     applyBackgroundTasks((input.background_tasks ?? []).map((task) => ({
                         id: task.id,
-                        type: task.type,
+                        type: normalizeTaskType(task.type),
                         status: task.status,
                         description: task.description,
                         command: task.command,
@@ -458,6 +505,8 @@ export async function claudeRemote(opts: {
     /** What the App is shown about each live task, keyed the same way the drain logic keys ids. */
     type LiveBackgroundTask = BackgroundTaskForApp;
     const backgroundTaskSummaries = new Map<string, LiveBackgroundTask>();
+    /** Which tool each `tool_use` call was, so a task can be attributed to the tool that started it. */
+    const toolNamesByCallId = new Map<string, string>();
 
     function emitBackgroundTasks(): void {
         opts.onBackgroundTasks?.([...backgroundTaskSummaries.values()]);
@@ -477,7 +526,7 @@ export async function claudeRemote(opts: {
         backgroundTaskSummaries.clear();
         for (const task of tasks) {
             liveBackgroundTasks.add(task.id);
-            backgroundTaskSummaries.set(task.id, withBestTitle(previous.get(task.id), task));
+            backgroundTaskSummaries.set(task.id, mergeTask(previous.get(task.id), task));
         }
         logger.debug(`[claudeRemote] background tasks live: ${liveBackgroundTasks.size}`);
         emitBackgroundTasks();
@@ -552,6 +601,11 @@ export async function claudeRemote(opts: {
                 if (message.type === 'assistant') {
                     const ac = (message as any).message?.content;
                     if (Array.isArray(ac)) {
+                        for (const block of ac) {
+                            if (block?.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string') {
+                                toolNamesByCallId.set(block.id, block.name);
+                            }
+                        }
                         const names = ac.map((b: any) => `${b.type}:${b.name ?? '?'}`).join(', ');
                         logger.debug(`[claudeRemote] ASSISTANT blocks: ${names}`);
                     }
@@ -633,12 +687,12 @@ export async function claudeRemote(opts: {
                 // already accounted for by the time the result arrives. Both events carry the same
                 // `task_id` space as the Stop hook's snapshot, so the three sources agree.
                 if (message.type === 'system' && message.subtype === 'task_started') {
-                    const started = message as { task_id?: string; description?: string; subagent_type?: string; task_type?: string };
+                    const started = message as { task_id?: string; tool_use_id?: string; description?: string; subagent_type?: string; task_type?: string };
                     if (started.task_id) {
                         liveBackgroundTasks.add(started.task_id);
                         backgroundTaskSummaries.set(started.task_id, {
                             id: started.task_id,
-                            type: started.task_type ?? started.subagent_type ?? 'task',
+                            type: taskTypeOf(started.tool_use_id ? toolNamesByCallId.get(started.tool_use_id) : undefined, started.task_type ?? started.subagent_type ?? 'task'),
                             status: 'running',
                             description: started.description ?? '',
                         });
