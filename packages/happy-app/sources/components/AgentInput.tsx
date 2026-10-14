@@ -13,6 +13,7 @@ import { StatusDot } from './StatusDot';
 import { CHANNEL_ICONS } from '@/sync/machinePresence';
 import type { GoalStatus } from '@/utils/goalUtils';
 import { SessionActivityBadges } from '@/components/SessionActivityBadges';
+import type { ActivityTask } from '@/utils/activityTasks';
 import { useActiveWord } from './autocomplete/useActiveWord';
 import { useActiveSuggestions } from './autocomplete/useActiveSuggestions';
 import { AgentInputAutocomplete } from './AgentInputAutocomplete';
@@ -76,8 +77,12 @@ interface AgentInputProps {
          * The status line otherwise says the turn finished, because a result did arrive — the CLI
          * just cannot end the stream while these are live. Showing them is what separates "waiting
          * on something" from "stopped answering".
+         *
+         * The full task shape, because the kinds differ in what they carry — a shell task has a
+         * command, a subagent an agent type — and a narrower type here would read as though those
+         * were never sent, when the CLI forwards them.
          */
-        backgroundTasks?: Array<{ id: string; type: string; status: string; description: string }> | null;
+        backgroundTasks?: ActivityTask[] | null;
         /** Current /goal condition, when the session has one. Shown inside the activity badge. */
         goal?: { status: GoalStatus; condition: string } | null;
     };
