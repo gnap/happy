@@ -61,7 +61,7 @@ export const ChannelIcons = React.memo(() => {
                 <Ionicons
                     key={channel}
                     name={CHANNEL_ICONS[channel]}
-                    size={12}
+                    size={10}
                     color={linkColor(state, theme).color}
                     style={{ opacity: linkColor(state, theme).opacity }}
                 />
