@@ -308,6 +308,7 @@ export const SettingsView = React.memo(function SettingsView() {
                                 }
                                 rightElement={
                                     <MachinePresenceBadge
+                                        machineId={machine.id}
                                         reach={{
                                             server: isOnline,
                                             lan: !!lanSightings[machine.id],

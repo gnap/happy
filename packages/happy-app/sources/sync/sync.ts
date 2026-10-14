@@ -4727,7 +4727,8 @@ class Sync {
         // relay icon and no relay route, and it looks exactly like a machine that is not on the
         // relay at all. The count of unnamed tags is the difference, and the reason is always the
         // same one — the tag is a hash, and only the machine's key turns it back into a machine.
-        log.log(`📡 relay directory: ${this.relayDirectoryRaw.length} machine(s) held by the relay, ${entries.length} named, ${unknownTags.length} unnamed`); 
+        const named = entries.map((entry) => entry.machineId.slice(0, 8)).join(' ');
+        log.log(`📡 relay directory: ${this.relayDirectoryRaw.length} machine(s) held by the relay, ${entries.length} named, ${unknownTags.length} unnamed${named ? ` — ${named}` : ''}`);
         storage.getState().applyRelayDirectory(entries, unknownTags);
         this.reconcileDaemonSockets();
     }
