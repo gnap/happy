@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { useSession, useSessionMessages } from "@/sync/storage";
 import { ActivityIndicator, FlatList, NativeScrollEvent, NativeSyntheticEvent, Platform, StyleSheet, Text, View } from 'react-native';
-import Animated, { useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useHeaderHeight } from '@/utils/responsive';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -17,14 +16,11 @@ import { useUnistyles } from 'react-native-unistyles';
 import { dividerKindFor, formatClock, formatDividerDate, type DividerKind } from '@/sync/messageDividers';
 import { t } from '@/text';
 
-/** How long the newest message's time stays out after the pull that revealed it settles. */
-const SETTLE_HOLD_MS = 1200;
-
 /**
  * One row of the list: the thing to draw, and the divider that belongs to it. A row's divider is
  * drawn above it, except for the newest message — whose time belongs *below* it, at the end of the
- * content, so that it is out of the way while the conversation is being read and appears when the
- * reader scrolls back.
+ * content, where it reads as the end of the conversation rather than as a heading for the message
+ * that happens to be last.
  */
 type ChatRow = { node: Message | TaskClusterMessage; divider: DividerKind; dividerBelow: boolean };
 
@@ -33,25 +29,17 @@ type ChatRow = { node: Message | TaskClusterMessage; divider: DividerKind; divid
  * clock on every bubble. Sits inside the row it belongs to, which on an inverted list is the row
  * above the message it labels.
  */
-const TimeDivider = React.memo(({ kind, at, hidden = false }: { kind: DividerKind; at: number; hidden?: boolean }) => {
+const TimeDivider = React.memo(({ kind, at }: { kind: DividerKind; at: number }) => {
     const { theme } = useUnistyles();
-    const opacity = useSharedValue(hidden ? 0 : 1);
-    useEffect(() => {
-        opacity.value = withTiming(hidden ? 0 : 1, { duration: 160 });
-    }, [hidden, opacity]);
-    const fade = useAnimatedStyle(() => ({ opacity: opacity.value }));
     const label = kind === 'yesterday'
         ? `${t('time.yesterday')} ${formatClock(at)}`
         : kind === 'date'
             ? `${formatDividerDate(at, Date.now())} ${formatClock(at)}`
             : formatClock(at);
     return (
-        // `hidden` rather than unmounted: the label below the newest message holds its place whether
-        // or not it is being shown, so a reader taking hold of the list does not see the last bubble
-        // shift by the height of a label that appeared under their finger.
-        <Animated.View style={[styles.dividerRow, fade]}>
+        <View style={styles.dividerRow}>
             <Text style={[styles.dividerText, { color: theme.colors.textSecondary, backgroundColor: theme.colors.surfaceHigh }]}>{label}</Text>
-        </Animated.View>
+        </View>
     );
 });
 
@@ -127,24 +115,6 @@ const ChatListInternal = React.memo((props: {
         return m.size > 0 ? { taskContentMap: m } : undefined;
     }, [props.tasks]);
 
-    /**
-     * Whether the time below the newest message is being shown.
-     *
-     * It is a thing the reader *asks for*, and the ask is the pull that goes past the end of the
-     * conversation — on iOS the rubber band that is that gesture's own feedback. An inverted list
-     * cannot be asked "are you near the end" to find this: at rest and at the bottom of a pull both
-     * read as `y < 80`. The pull itself is unmistakable, though — the offset goes *past* zero —
-     * which is the one signal that separates the two.
-     *
-     * Once it is out it stays for a beat after the pull settles, because the time is the thing the
-     * reader pulled for and a label that vanishes with the bounce is one they have to pull again to
-     * read.
-     */
-    const [revealed, setRevealed] = React.useState(false);
-    const revealedRef = useRef(false);
-    const draggingRef = useRef(false);
-    const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
     // Each row carries the divider that belongs above it. The list renders newest first and is
     // inverted, so the row *below* a message in the data is the older one — which is the neighbour
     // the divider is decided against.
@@ -167,13 +137,7 @@ const ChatListInternal = React.memo((props: {
     const keyExtractor = useCallback((row: ChatRow) => row.node.id, []);
     const renderItem = useCallback(({ item: row }: { item: ChatRow }) => {
         const item = row.node;
-        // A divider above a row is there for the message it labels, so it lives and dies with it.
-        // The newest message's time is the reader's to ask for, so it is always mounted and shown
-        // only when they do — see `revealed`.
         const divider = row.divider !== 'none' ? <TimeDivider kind={row.divider} at={item.createdAt} /> : null;
-        const bottomDivider = row.divider !== 'none'
-            ? <TimeDivider kind={row.divider} at={item.createdAt} hidden={!revealed} />
-            : null;
         if (item.kind === 'task-cluster') {
             return (
                 <>
@@ -185,7 +149,7 @@ const ChatListInternal = React.memo((props: {
                             </View>
                         </View>
                     </View>
-                {row.dividerBelow && bottomDivider}
+                {row.dividerBelow && divider}
                 </>
             );
         }
@@ -193,10 +157,10 @@ const ChatListInternal = React.memo((props: {
             <>
                 {!row.dividerBelow && divider}
                 <MessageView message={item} metadata={props.metadata} sessionId={props.sessionId} />
-                {row.dividerBelow && bottomDivider}
+                {row.dividerBelow && divider}
             </>
         );
-    }, [props.metadata, props.sessionId, revealed]);
+    }, [props.metadata, props.sessionId]);
 
     const handleEndReached = useCallback(() => {
         if (props.hasOlderMessages && !props.isLoadingOlder) {
@@ -210,65 +174,9 @@ const ChatListInternal = React.memo((props: {
      * Long enough to read a clock, short enough that it is gone by the time the reader is reading
      * the conversation again — the label is a peek, not a resident.
      */
-    /**
-     * Shows or hides the time, once per change.
-     *
-     * The scroll handler runs on every frame of every gesture, so the state is set only when it
-     * differs from what is already on screen — and the log line rides on that same edge, which makes
-     * the log a record of the reader's gesture rather than of the scroll position.
-     */
-    const setReveal = useCallback((next: boolean, why: string) => {
-        if (revealedRef.current === next) {
-            return;
-        }
-        revealedRef.current = next;
-        console.log(`🕘 chat bottom time: ${next ? 'shown' : 'hidden'} (${why})`);
-        setRevealed(next);
-    }, []);
-
-    const clearSettleTimer = useCallback(() => {
-        if (settleTimerRef.current !== null) {
-            clearTimeout(settleTimerRef.current);
-            settleTimerRef.current = null;
-        }
-    }, []);
-
-    const scheduleSettle = useCallback(() => {
-        if (settleTimerRef.current !== null) {
-            return;
-        }
-        settleTimerRef.current = setTimeout(() => {
-            settleTimerRef.current = null;
-            setReveal(false, 'settled at the end');
-        }, SETTLE_HOLD_MS);
-    }, [setReveal]);
-
-    useEffect(() => clearSettleTimer, [clearSettleTimer]);
-
-    const handleDragBegin = useCallback(() => {
-        draggingRef.current = true;
-    }, []);
-
-    const handleDragEnd = useCallback(() => {
-        draggingRef.current = false;
-    }, []);
-
     const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
-        const y = event.nativeEvent.contentOffset.y;
-        const near = y < 80;
-        isNearBottomRef.current = near;
-        // Past the end: the offset leaves zero in the direction there is no content in. On an
-        // inverted list that is `y < 0` — the rubber band — and where a list does not bounce, a
-        // finger held at the end is the same gesture seen from further away.
-        const pulled = y < -4 || (draggingRef.current && y < 8);
-        // Only on a change, and only the direction that matters: this runs on every scroll frame.
-        if (pulled || !near) {
-            clearSettleTimer();
-            setReveal(true, pulled ? `pulled past the end, y=${Math.round(y)}` : `scrolled back, y=${Math.round(y)}`);
-        } else {
-            scheduleSettle();
-        }
-    }, [clearSettleTimer, scheduleSettle, setReveal]);
+        isNearBottomRef.current = event.nativeEvent.contentOffset.y < 80;
+    }, []);
 
     // Auto-scroll to newest messages when new ones arrive, if already near the bottom.
     useEffect(() => {
@@ -318,9 +226,6 @@ const ChatListInternal = React.memo((props: {
             onEndReached={handleEndReached}
             onEndReachedThreshold={0.3}
             onScroll={handleScroll}
-            onScrollBeginDrag={handleDragBegin}
-            onScrollEndDrag={handleDragEnd}
-            onMomentumScrollEnd={handleDragEnd}
             scrollEventThrottle={100}
             ListHeaderComponent={listHeader}
             ListFooterComponent={listFooter}
