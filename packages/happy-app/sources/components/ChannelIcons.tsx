@@ -24,10 +24,10 @@ function linkColor(
         // progress" looks like against its own header.
         return { color: theme.colors.status.connecting, opacity: 1 };
     }
-    // The header's own foreground, dimmed. A fixed grey is a different thing against a white
-    // header than against a near-black one — and against the dark one it is a speck, which reads
-    // as an icon that is not there rather than one that is not connected.
-    return { color: theme.colors.header.tint, opacity: 0.45 };
+    // The header's own foreground, dimmed — but not into invisibility. At 0.45 on a near-black
+    // header a channel that is merely down looked like a channel that had been left out, which is
+    // the one thing the icons exist to distinguish.
+    return { color: theme.colors.header.tint, opacity: 0.65 };
 }
 
 /** The last set this logged, so the line appears when it changes rather than on every render. */
