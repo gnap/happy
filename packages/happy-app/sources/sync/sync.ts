@@ -4723,6 +4723,11 @@ class Sync {
         for (const entry of entries) {
             this.relayMachines.set(entry.machineId, { tag: entry.tag, sessions: entry.sessions });
         }
+        // Worth a line of its own: a machine the relay is holding but this App cannot name has no
+        // relay icon and no relay route, and it looks exactly like a machine that is not on the
+        // relay at all. The count of unnamed tags is the difference, and the reason is always the
+        // same one — the tag is a hash, and only the machine's key turns it back into a machine.
+        log.log(`📡 relay directory: ${this.relayDirectoryRaw.length} machine(s) held by the relay, ${entries.length} named, ${unknownTags.length} unnamed`); 
         storage.getState().applyRelayDirectory(entries, unknownTags);
         this.reconcileDaemonSockets();
     }
