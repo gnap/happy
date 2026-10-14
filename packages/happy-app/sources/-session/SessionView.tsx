@@ -369,12 +369,18 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                 // worth saying even while encryption is still being set up.
                 const backgroundTasks = session.agentState?.backgroundTasks ?? null;
                 const hasEncryption = sync.encryption.getSessionEncryption(sessionId);
+                // The channel is known whether or not the key is: it is how the App is reaching the
+                // session, and while a key is being fetched that is exactly what a reader wants to
+                // see — a page that says only "handshaking" cannot be told apart from one whose
+                // channel is dead, which is the state this text is most often mistaken for.
+                const channel = { kind: sessionChannel.channel, pinned: sessionChannel.pinned };
                 if (!hasEncryption) {
                     return {
                         text: t('session.encrypting'),
                         color: theme.colors.warning,
                         dotColor: theme.colors.warning,
                         isPulsing: true,
+                        channel,
                         goal,
                         backgroundTasks,
                     };
@@ -384,7 +390,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                     color: sessionStatus.statusColor,
                     dotColor: sessionStatus.statusDotColor,
                     isPulsing: sessionStatus.isPulsing,
-                    channel: { kind: sessionChannel.channel, pinned: sessionChannel.pinned },
+                    channel,
                     goal,
                     backgroundTasks,
                 };
