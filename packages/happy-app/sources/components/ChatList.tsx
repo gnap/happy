@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { useSession, useSessionMessages } from "@/sync/storage";
 import { ActivityIndicator, FlatList, NativeScrollEvent, NativeSyntheticEvent, Platform, StyleSheet, Text, View } from 'react-native';
+import Animated, { useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useHeaderHeight } from '@/utils/responsive';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -15,6 +16,9 @@ import { sync } from '@/sync/sync';
 import { useUnistyles } from 'react-native-unistyles';
 import { dividerKindFor, formatClock, formatDividerDate, type DividerKind } from '@/sync/messageDividers';
 import { t } from '@/text';
+
+/** How long the newest message's time stays out after the pull that revealed it settles. */
+const SETTLE_HOLD_MS = 1200;
 
 /**
  * One row of the list: the thing to draw, and the divider that belongs to it. A row's divider is
@@ -31,6 +35,11 @@ type ChatRow = { node: Message | TaskClusterMessage; divider: DividerKind; divid
  */
 const TimeDivider = React.memo(({ kind, at, hidden = false }: { kind: DividerKind; at: number; hidden?: boolean }) => {
     const { theme } = useUnistyles();
+    const opacity = useSharedValue(hidden ? 0 : 1);
+    useEffect(() => {
+        opacity.value = withTiming(hidden ? 0 : 1, { duration: 160 });
+    }, [hidden, opacity]);
+    const fade = useAnimatedStyle(() => ({ opacity: opacity.value }));
     const label = kind === 'yesterday'
         ? `${t('time.yesterday')} ${formatClock(at)}`
         : kind === 'date'
@@ -40,9 +49,9 @@ const TimeDivider = React.memo(({ kind, at, hidden = false }: { kind: DividerKin
         // `hidden` rather than unmounted: the label below the newest message holds its place whether
         // or not it is being shown, so a reader taking hold of the list does not see the last bubble
         // shift by the height of a label that appeared under their finger.
-        <View style={[styles.dividerRow, hidden && styles.dividerHidden]}>
+        <Animated.View style={[styles.dividerRow, fade]}>
             <Text style={[styles.dividerText, { color: theme.colors.textSecondary, backgroundColor: theme.colors.surfaceHigh }]}>{label}</Text>
-        </View>
+        </Animated.View>
     );
 });
 
@@ -121,15 +130,20 @@ const ChatListInternal = React.memo((props: {
     /**
      * Whether the time below the newest message is being shown.
      *
-     * It is a thing the reader *asks for*: at rest the conversation reads as a conversation, and the
-     * label appears when they take hold of the end of the list. The gesture that asks for it moves
-     * the offset *past* the resting place rather than away from it — pulling the end of an inverted
-     * list drags the offset negative — so "near the end" is true both at rest and at the bottom of a
-     * pull, and a rule written that way can never reveal anything. Holding the list is the signal
-     * that survives that, and the offset decides the rest once the finger is off.
+     * It is a thing the reader *asks for*, and the ask is the pull that goes past the end of the
+     * conversation — on iOS the rubber band that is that gesture's own feedback. An inverted list
+     * cannot be asked "are you near the end" to find this: at rest and at the bottom of a pull both
+     * read as `y < 80`. The pull itself is unmistakable, though — the offset goes *past* zero —
+     * which is the one signal that separates the two.
+     *
+     * Once it is out it stays for a beat after the pull settles, because the time is the thing the
+     * reader pulled for and a label that vanishes with the bounce is one they have to pull again to
+     * read.
      */
     const [revealed, setRevealed] = React.useState(false);
+    const revealedRef = useRef(false);
     const draggingRef = useRef(false);
+    const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     // Each row carries the divider that belongs above it. The list renders newest first and is
     // inverted, so the row *below* a message in the data is the older one — which is the neighbour
@@ -190,29 +204,71 @@ const ChatListInternal = React.memo((props: {
         }
     }, [props.hasOlderMessages, props.isLoadingOlder, props.sessionId]);
 
-    const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
-        const near = event.nativeEvent.contentOffset.y < 80;
-        isNearBottomRef.current = near;
-        // While a finger is down the label is out, whatever the offset says — an inverted list keeps
-        // reporting "at the end" through the whole of a pull, so the offset cannot be asked until
-        // the finger is off. Only on a change: this runs on every scroll frame.
-        if (!draggingRef.current) {
-            setRevealed((previous) => (previous === !near ? previous : !near));
+    /**
+     * How long the time stays out after the pull settles.
+     *
+     * Long enough to read a clock, short enough that it is gone by the time the reader is reading
+     * the conversation again — the label is a peek, not a resident.
+     */
+    /**
+     * Shows or hides the time, once per change.
+     *
+     * The scroll handler runs on every frame of every gesture, so the state is set only when it
+     * differs from what is already on screen — and the log line rides on that same edge, which makes
+     * the log a record of the reader's gesture rather than of the scroll position.
+     */
+    const setReveal = useCallback((next: boolean, why: string) => {
+        if (revealedRef.current === next) {
+            return;
+        }
+        revealedRef.current = next;
+        console.log(`🕘 chat bottom time: ${next ? 'shown' : 'hidden'} (${why})`);
+        setRevealed(next);
+    }, []);
+
+    const clearSettleTimer = useCallback(() => {
+        if (settleTimerRef.current !== null) {
+            clearTimeout(settleTimerRef.current);
+            settleTimerRef.current = null;
         }
     }, []);
 
+    const scheduleSettle = useCallback(() => {
+        if (settleTimerRef.current !== null) {
+            return;
+        }
+        settleTimerRef.current = setTimeout(() => {
+            settleTimerRef.current = null;
+            setReveal(false, 'settled at the end');
+        }, SETTLE_HOLD_MS);
+    }, [setReveal]);
+
+    useEffect(() => clearSettleTimer, [clearSettleTimer]);
+
     const handleDragBegin = useCallback(() => {
         draggingRef.current = true;
-        setRevealed(true);
-        console.log('🕘 chat bottom time: revealed by drag');
     }, []);
 
     const handleDragEnd = useCallback(() => {
         draggingRef.current = false;
-        const reveal = !isNearBottomRef.current;
-        setRevealed(reveal);
-        console.log(`🕘 chat bottom time: drag ended, ${reveal ? 'left revealed' : 'hidden at the end'}`);
     }, []);
+
+    const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+        const y = event.nativeEvent.contentOffset.y;
+        const near = y < 80;
+        isNearBottomRef.current = near;
+        // Past the end: the offset leaves zero in the direction there is no content in. On an
+        // inverted list that is `y < 0` — the rubber band — and where a list does not bounce, a
+        // finger held at the end is the same gesture seen from further away.
+        const pulled = y < -4 || (draggingRef.current && y < 8);
+        // Only on a change, and only the direction that matters: this runs on every scroll frame.
+        if (pulled || !near) {
+            clearSettleTimer();
+            setReveal(true, pulled ? `pulled past the end, y=${Math.round(y)}` : `scrolled back, y=${Math.round(y)}`);
+        } else {
+            scheduleSettle();
+        }
+    }, [clearSettleTimer, scheduleSettle, setReveal]);
 
     // Auto-scroll to newest messages when new ones arrive, if already near the bottom.
     useEffect(() => {
@@ -283,9 +339,6 @@ const ChatListInternal = React.memo((props: {
 });
 
 const styles = StyleSheet.create({
-    dividerHidden: {
-        opacity: 0,
-    },
     dividerRow: {
         alignItems: 'center',
         paddingVertical: 10,
