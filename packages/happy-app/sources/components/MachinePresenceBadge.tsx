@@ -8,6 +8,31 @@ import { useLocalSetting } from '@/sync/storage';
 const CONNECTED = '#34C759';
 const DOWN = '#8E8E93';
 
+/** The last set this logged, so the line appears when a decision changes rather than on every render. */
+let lastLogged: string | null = null;
+
+/**
+ * Says which icons were drawn, and which channels were left out for not being on this machine.
+ *
+ * An icon that is missing and an icon that was never considered look the same on screen, and the
+ * difference is exactly what a machine expected to be reachable over a channel it has not announced
+ * turns on.
+ */
+function logDecision(
+    priority: readonly string[],
+    reach: MachineReach,
+    capability: MachineCapability,
+    icons: { channel: string; up: boolean }[],
+): void {
+    const drew = icons.map((icon) => `${icon.channel}:${icon.up ? 'up' : 'down'}`).join(' ') || '(none)';
+    const reached = [reach.lan ? 'lan' : '', reach.relay ? 'relay' : '', reach.server ? 'server' : ''].filter(Boolean).join(' ') || 'none';
+    const summary = `${priority.join('>')} | drew ${drew} | capable lan=${capability.lan} relay=${capability.relay} | reach ${reached}`;
+    if (summary !== lastLogged) {
+        lastLogged = summary;
+        console.log(`📡 machine channels: ${summary}`);
+    }
+}
+
 /**
  * How a machine is reachable: one icon per enabled channel in priority order, green when that
  * channel reaches the machine now, grey when it does not.
@@ -27,6 +52,7 @@ export const MachinePresenceBadge = React.memo(function MachinePresenceBadge({
 }) {
     const priority = useLocalSetting('channelPriority');
     const icons = machineChannelIcons(priority, reach, capability);
+    logDecision(priority, reach, capability, icons);
 
     return (
         <View style={styles.container}>

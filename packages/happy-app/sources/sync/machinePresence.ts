@@ -61,17 +61,18 @@ export function resolveMachinePresence(
 }
 
 /**
- * Glyph per channel: wifi for the local link, a globe for the public server, and two arrows for the
- * relay — traffic that goes somewhere else and comes back.
+ * Glyph per channel: wifi for the local link, a cloud for the relay, a globe for the public server.
  *
- * The relay's is `repeat` rather than `swap-horizontal` because these are drawn at 10px in a header
- * that is near-black in the dark theme: two one-pixel strokes vanish into it, and an icon that
- * cannot be seen is indistinguishable from a channel that is not there.
+ * All three are the *filled* Ionicons, deliberately. These are drawn at 10–11px in a header that is
+ * near-black in the dark theme, where a hairline glyph is an outline of nothing: `repeat` and
+ * `globe-outline` — the two this used to draw — are stroked shapes, and at that size on that
+ * background they read as a channel that is not there rather than as one that is not connected.
+ * `wifi`, `cloud` and `globe` are solid at any size, which is the property that matters here.
  */
 export const CHANNEL_ICONS = {
     lan: 'wifi',
-    relay: 'repeat',
-    server: 'globe-outline',
+    relay: 'cloud',
+    server: 'globe',
 } as const;
 
 /**
