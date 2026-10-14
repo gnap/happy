@@ -53,7 +53,7 @@ function fieldMatch(pattern: string, value: number, _min: number, _max: number):
 }
 import { RemoteModeDisplay } from "@/ui/ink/RemoteModeDisplay";
 import React from "react";
-import { claudeRemote } from "./claudeRemote";
+import { claudeRemote, endClaudeSessions } from "./claudeRemote";
 import { PermissionHandler } from "./utils/permissionHandler";
 import { Future } from "@/utils/future";
 import { SDKAssistantMessage, SDKMessage, SDKUserMessage } from "./sdk";
@@ -551,6 +551,9 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             turnSucceeded = false;
             try {
                 const remoteResult = await claudeRemote({
+                    // The process belongs to the happy session, not to the turn: this is what the
+                    // next turn looks the running process up by.
+                    processKey: session.client.sessionId,
                     sessionId: session.sessionId,
                     path: session.path,
                     allowedTools: session.allowedTools ?? [],
@@ -934,6 +937,10 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             }
         }
     } finally {
+
+        // The launcher is done with these sessions; their processes were kept alive across turns
+        // and would otherwise outlive the CLI that spawned them.
+        endClaudeSessions();
 
         // Clean up permission handler
         permissionHandler.reset();
