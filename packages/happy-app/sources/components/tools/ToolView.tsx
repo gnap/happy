@@ -218,8 +218,10 @@ export const ToolView = ((props: ToolViewProps) => {
                     // full results are available in the detail page on press.
                     //
                     // AskUserQuestion always shows its interactive form — it has no
-                    // children but its content IS the user-facing question UI.
-                    if (!hasChildren && tool.name !== 'AskUserQuestion' && tool.state !== 'error') {
+                    // children but its content IS the user-facing question UI. ListAgents is the
+                    // same shape of thing: its answer is the content, and a card that hid it would
+                    // make the reader open the message page to learn nothing happened.
+                    if (!hasChildren && tool.name !== 'AskUserQuestion' && tool.name !== 'ListAgents' && tool.state !== 'error') {
                         return null;
                     }
                     return (
