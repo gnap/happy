@@ -73,7 +73,16 @@ config.server.rewriteRequestUrl = (url) => {
 // watcher filter on. So a cargo build writing tens of thousands of files into src-tauri/target
 // does not churn the watcher — no CARGO_TARGET_DIR redirect needed, and the build output stays
 // in the worktree like every other variant.
-config.resolver.blockList = [/src-tauri[/\\]target[/\\].*/];
+// Appended, not assigned. `getDefaultConfig` already excludes `.expo/types` — a *generated*
+// declaration file, rewritten whenever the route tree changes, which any branch operation does —
+// expressly to stop it causing refreshes. Assigning here replaced that entire default list with
+// this one pattern, so a merge or checkout rewrote router.d.ts, Metro saw a watched file change,
+// and the app refreshed with no source edit behind it. `ios/Pods` and `android/app/build` were
+// dropped the same way.
+config.resolver.blockList = [
+    ...config.resolver.blockList,
+    /src-tauri[/\\]target[/\\].*/,
+];
 
 
 // Add support for .wasm files (required by Skia for all platforms)
