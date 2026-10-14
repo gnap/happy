@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { Session } from '@/sync/storageTypes';
+import { useLanSessionList } from '@/sync/storage';
 import { t } from '@/text';
 
 export type SessionState = 'disconnected' | 'thinking' | 'waiting' | 'permission_required';
@@ -19,7 +20,16 @@ export interface SessionStatus {
  * Uses centralized session state from storage.ts
  */
 export function useSessionStatus(session: Session): SessionStatus {
-    const isOnline = session.presence === "online";
+    /**
+     * What the daemon that owns this session last said about it.
+     *
+     * Only ever populated when the server could not answer — and that is exactly the case this
+     * matters in: `session.presence` is the server's view, so a session being read and written over
+     * the LAN right now reads as "last seen 20 minutes ago" the moment the server goes quiet, which
+     * is a page that contradicts the messages arriving on it.
+     */
+    const daemonSessions = useLanSessionList();
+    const isOnline = session.presence === "online" || daemonSessions[session.id]?.isAlive === true;
     const hasPermissions = (session.agentState?.requests && Object.keys(session.agentState.requests).length > 0 ? true : false);
 
     const vibingMessage = React.useMemo(() => {
