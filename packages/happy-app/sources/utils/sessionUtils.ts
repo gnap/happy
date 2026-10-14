@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { Session } from '@/sync/storageTypes';
-import { useLanSessionList } from '@/sync/storage';
+import { useDaemonSockets, useLanSessionList } from '@/sync/storage';
 import { t } from '@/text';
 
 export type SessionState = 'disconnected' | 'thinking' | 'waiting' | 'permission_required';
@@ -29,9 +29,23 @@ export function useSessionStatus(session: Session): SessionStatus {
      * is a page that contradicts the messages arriving on it.
      */
     const daemonSessions = useLanSessionList();
+    /**
+     * Whether a channel is carrying this session right now.
+     *
+     * The authority on that is the channel itself, and this is the check that gives it: while the
+     * App holds a live connection to the machine that owns this session, the session is reachable,
+     * whatever the server last said. The server's view is only consulted when nothing is connected
+     * — it is a report about the past, and a report about the past must not overwrite what is
+     * happening now.
+     */
+    const daemonSockets = useDaemonSockets();
+    const machineId = session.metadata?.machineId;
+    const servedNow = machineId
+        ? Object.entries(daemonSockets).some(([key, socket]) => key.startsWith(`${machineId}:`) && socket.phase === 'live')
+        : false;
     // Optional at every step: the store is empty until a daemon has answered, and a status line is
     // not worth a crash in the one case it exists for.
-    const isOnline = session.presence === "online" || daemonSessions?.[session.id]?.isAlive === true;
+    const isOnline = session.presence === "online" || servedNow || daemonSessions?.[session.id]?.isAlive === true;
     const hasPermissions = (session.agentState?.requests && Object.keys(session.agentState.requests).length > 0 ? true : false);
 
     const vibingMessage = React.useMemo(() => {
