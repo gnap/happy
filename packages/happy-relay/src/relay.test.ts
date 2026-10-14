@@ -25,6 +25,34 @@ const until = async (fn: () => boolean) => { for (let i = 0; i < 100 && !fn(); i
 
 describe('relay', () => {
     /**
+     * A machine whose network went away leaves a socket that still looks open, and the relay used to
+     * keep it: it stayed in the directory, and every request sent to it hung until the client gave
+     * up. That is indistinguishable, from the client's side, from a relay that is broken.
+     */
+    it('drops a daemon that stops answering, and answers the requests that were waiting on it', async () => {
+        relay = startRelay({ port: 0, daemonHeartbeatMs: 25 });
+        const pair = nacl.sign.keyPair();
+        const tag = tagOfPublicKey(pair.publicKey);
+        const ws = new WebSocket(`ws://127.0.0.1:${relay.port}/daemon`);
+        await new Promise<void>((resolve, reject) => {
+            ws.addEventListener('open', () => resolve());
+            ws.addEventListener('close', () => reject(new Error('refused')));
+        });
+        // Register, then go quiet: this is the half-open daemon, still connected as far as the
+        // socket is concerned and answering nothing.
+        ws.send(JSON.stringify({ t: 'register', tag, proof: 'x' }));
+        await new Promise((r) => setTimeout(r, 50));
+
+        const waiting = fetch(`http://127.0.0.1:${relay.port}/r/${tag}/lan/identity`).then((res) => res.status);
+        await new Promise((r) => setTimeout(r, 200));
+
+        // The request was waiting on a daemon that is gone; it now gets an answer rather than a hang.
+        expect(await waiting).toBe(502);
+        const health = (await (await fetch(`http://127.0.0.1:${relay.port}/health`)).json()) as { daemons: number };
+        expect(health.daemons).toBe(0);
+    });
+
+    /**
      * The preflight has to be answered wherever it is asked, because that is where a browser asks
      * it: before the request, for whatever URL the client is about to use. Answering only the paths
      * that happen to exist turns every other URL into a network failure in the browser — which is

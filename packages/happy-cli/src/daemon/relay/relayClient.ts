@@ -109,7 +109,12 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
       let msg: any;
       try { msg = JSON.parse(String(event.data)); } catch { return; }
 
-      if (msg.t === 'challenge') {
+      if (msg.t === 'ping') {
+        // The relay asks this to tell a live daemon from a socket that only looks open — a machine
+        // whose network went away leaves one behind, and the relay would otherwise keep advertising
+        // it and keep sending it requests that go nowhere.
+        send({ t: 'pong' });
+      } else if (msg.t === 'challenge') {
         send({ t: 'register', pub: Buffer.from(identity.publicKey).toString('base64'), sig: signRegistration(identity, msg.nonce) });
       } else if (msg.t === 'ok') {
         opened = true;

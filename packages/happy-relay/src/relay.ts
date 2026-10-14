@@ -36,6 +36,8 @@ export type RelayOptions = {
      */
     maxFrameBytes?: number;
     httpTimeoutMs?: number;
+    /** How often each daemon is asked whether it is still there. */
+    daemonHeartbeatMs?: number;
     /** Requests per IP per minute on the public side. */
     ratePerMinute?: number;
 };
@@ -62,6 +64,8 @@ type Daemon = {
     /** The session summary this daemon last published, for the directory. */
     sessions: unknown[];
     nextId: number;
+    /** Heartbeats sent without an answer; anything from the daemon clears it. */
+    awaitingPong: number;
 };
 
 type SocketData =
@@ -85,6 +89,7 @@ export function startRelay(options: RelayOptions): RelayHandle {
     const maxBody = options.maxBodyBytes ?? 4 * 1024 * 1024;
     const maxFrame = options.maxFrameBytes ?? 8 * 1024 * 1024;
     const httpTimeout = options.httpTimeoutMs ?? 15_000;
+    const daemonHeartbeatMs = options.daemonHeartbeatMs ?? 20_000;
     const rate = options.ratePerMinute ?? 600;
     const daemons = new Map<string, Daemon>();
     /** Hub connections, so the directory can be pushed the moment a machine comes or goes. */
@@ -101,6 +106,34 @@ export function startRelay(options: RelayOptions): RelayHandle {
         entry.count += 1;
         return entry.count > rate;
     };
+    /**
+     * How many unanswered heartbeats a daemon gets before the relay lets it go.
+     *
+     * More than one, because a heartbeat is a question about liveness and a machine that is merely
+     * busy — or a CLI too old to answer — must not be dropped for being slow. Three at the default
+     * interval is a minute of silence.
+     */
+    const HEARTBEAT_MISSES = 3;
+
+    const heartbeat = setInterval(() => {
+        for (const [tag, daemon] of daemons) {
+            if (daemon.awaitingPong >= HEARTBEAT_MISSES) {
+                // A socket that answers nothing is a socket that is not there: a machine whose
+                // network went away leaves one behind, and every request sent to it would hang
+                // until its client gave up. Dropping it answers those requests (teardown does) and
+                // takes it out of the directory, which is what stops the next client from trying.
+                daemons.delete(tag);
+                teardown(daemon);
+                try { daemon.ws.close(4408, 'no heartbeat'); } catch { /* already gone */ }
+                broadcastDirectory();
+                continue;
+            }
+            daemon.awaitingPong += 1;
+            try { daemon.ws.send(JSON.stringify({ t: 'ping' })); } catch { /* close handles it */ }
+        }
+    }, daemonHeartbeatMs);
+    heartbeat.unref?.();
+
     const sweep = setInterval(() => {
         const now = Date.now();
         for (const [ip, e] of hits) {
@@ -256,7 +289,7 @@ export function startRelay(options: RelayOptions): RelayHandle {
                     // The signature proves key ownership, so a newer connection from the same key
                     // legitimately replaces a stale one (daemon restart / NAT rebinding).
                     const previous = daemons.get(tag);
-                    const daemon: Daemon = { tag, ws, pending: new Map(), clients: new Map(), hub: new Map(), sessions: [], nextId: 1 };
+                    const daemon: Daemon = { tag, ws, pending: new Map(), clients: new Map(), hub: new Map(), sessions: [], nextId: 1, awaitingPong: 0 };
                     daemons.set(tag, daemon);
                     data.tag = tag;
                     if (previous && previous.ws !== ws) {
@@ -272,6 +305,9 @@ export function startRelay(options: RelayOptions): RelayHandle {
 
                 const daemon = daemons.get(data.tag);
                 if (!daemon || daemon.ws !== ws) return;
+                // Anything at all from the daemon is proof it is there, and it is proof before the
+                // pong arrives — a daemon that is answering requests does not need to be asked.
+                daemon.awaitingPong = 0;
                 if (msg.t === 'http-res') {
                     const p = daemon.pending.get(msg.id);
                     if (!p) return;
