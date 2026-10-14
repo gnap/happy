@@ -9,6 +9,16 @@ export const DEFAULT_CHANNEL_PRIORITY: SessionChannel[] = ['lan', 'server', 'rel
  * order, so omitting one is how it is switched off — which is what lets a single channel be
  * isolated for debugging.
  */
+/**
+ * The list as it was stored before the relay existed as a channel.
+ *
+ * A list like this is not a decision about the relay — the channel was not there to decide about —
+ * and the stored list is the set of *enabled* channels, so treating it as one turned the relay off
+ * on every device that had not been asked since. It is the old default, so it is migrated rather
+ * than honoured.
+ */
+const PRE_RELAY_PRIORITY: SessionChannel[] = ['lan', 'server'];
+
 export function normalizeChannelPriority(raw: unknown): SessionChannel[] {
     const valid: SessionChannel[] = [];
     if (Array.isArray(raw)) {
@@ -18,7 +28,13 @@ export function normalizeChannelPriority(raw: unknown): SessionChannel[] {
             }
         }
     }
-    return valid.length > 0 ? valid : [...DEFAULT_CHANNEL_PRIORITY];
+    if (valid.length === 0) {
+        return [...DEFAULT_CHANNEL_PRIORITY];
+    }
+    if (valid.length === PRE_RELAY_PRIORITY.length && valid.every((channel, index) => channel === PRE_RELAY_PRIORITY[index])) {
+        return [...DEFAULT_CHANNEL_PRIORITY];
+    }
+    return valid;
 }
 
 /**

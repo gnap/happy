@@ -8,7 +8,19 @@ describe('normalizeChannelPriority', () => {
         expect(normalizeChannelPriority(['relay', 'lan'])).toEqual(['relay', 'lan']);
     });
     it('drops unknown and repeated entries', () => {
-        expect(normalizeChannelPriority(['lan', 'x', 'lan', 'server'])).toEqual(['lan', 'server']);
+        expect(normalizeChannelPriority(['relay', 'x', 'relay', 'server'])).toEqual(['relay', 'server']);
+    });
+
+    /**
+     * The stored list is the set of *enabled* channels, so an omitted one is a channel the user
+     * turned off — which means a list stored before the relay existed reads as "relay off" on every
+     * device that has not been asked since. It is the old default, not a decision, and it migrates.
+     */
+    it('migrates the list stored before the relay was a channel', () => {
+        expect(normalizeChannelPriority(['lan', 'server'])).toEqual(DEFAULT_CHANNEL_PRIORITY);
+        // A list that is *not* that old default is still taken at its word.
+        expect(normalizeChannelPriority(['lan', 'server', 'relay'])).toEqual(['lan', 'server', 'relay']);
+        expect(normalizeChannelPriority(['server', 'lan'])).toEqual(['server', 'lan']);
     });
     it('falls back to the default when nothing usable is left', () => {
         expect(normalizeChannelPriority([])).toEqual(DEFAULT_CHANNEL_PRIORITY);
