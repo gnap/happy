@@ -325,6 +325,7 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
                                 })()}
                                 {singleMachineId ? (
                                     <MachinePresenceBadge
+                                        machineId={singleMachineId}
                                         reach={{
                                             server: machinePresence[singleMachineId] === 'server',
                                             lan: !!lanSightings[singleMachineId],

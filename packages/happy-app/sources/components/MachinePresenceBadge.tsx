@@ -19,6 +19,7 @@ let lastLogged: string | null = null;
  * turns on.
  */
 function logDecision(
+    machineId: string | undefined,
     priority: readonly string[],
     reach: MachineReach,
     capability: MachineCapability,
@@ -26,7 +27,7 @@ function logDecision(
 ): void {
     const drew = icons.map((icon) => `${icon.channel}:${icon.up ? 'up' : 'down'}`).join(' ') || '(none)';
     const reached = [reach.lan ? 'lan' : '', reach.relay ? 'relay' : '', reach.server ? 'server' : ''].filter(Boolean).join(' ') || 'none';
-    const summary = `${priority.join('>')} | drew ${drew} | capable lan=${capability.lan} relay=${capability.relay} | reach ${reached}`;
+    const summary = `${machineId ?? '?'} | ${priority.join('>')} | drew ${drew} | capable lan=${capability.lan} relay=${capability.relay} | reach ${reached}`;
     if (summary !== lastLogged) {
         lastLogged = summary;
         console.log(`📡 machine channels: ${summary}`);
@@ -46,13 +47,16 @@ function logDecision(
 export const MachinePresenceBadge = React.memo(function MachinePresenceBadge({
     reach,
     capability,
+    /** Which machine this is about, for the log line only — an icon's absence has to be traceable. */
+    machineId,
 }: {
     reach: MachineReach;
     capability: MachineCapability;
+    machineId?: string;
 }) {
     const priority = useLocalSetting('channelPriority');
     const icons = machineChannelIcons(priority, reach, capability);
-    logDecision(priority, reach, capability, icons);
+    logDecision(machineId, priority, reach, capability, icons);
 
     return (
         <View style={styles.container}>
