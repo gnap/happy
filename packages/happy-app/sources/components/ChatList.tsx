@@ -29,7 +29,7 @@ type ChatRow = { node: Message | TaskClusterMessage; divider: DividerKind; divid
  * clock on every bubble. Sits inside the row it belongs to, which on an inverted list is the row
  * above the message it labels.
  */
-const TimeDivider = React.memo(({ kind, at }: { kind: DividerKind; at: number }) => {
+const TimeDivider = React.memo(({ kind, at, hidden = false }: { kind: DividerKind; at: number; hidden?: boolean }) => {
     const { theme } = useUnistyles();
     const label = kind === 'yesterday'
         ? `${t('time.yesterday')} ${formatClock(at)}`
@@ -37,7 +37,10 @@ const TimeDivider = React.memo(({ kind, at }: { kind: DividerKind; at: number })
             ? `${formatDividerDate(at, Date.now())} ${formatClock(at)}`
             : formatClock(at);
     return (
-        <View style={styles.dividerRow}>
+        // `hidden` rather than unmounted: the label below the newest message holds its place whether
+        // or not it is being shown, so a reader taking hold of the list does not see the last bubble
+        // shift by the height of a label that appeared under their finger.
+        <View style={[styles.dividerRow, hidden && styles.dividerHidden]}>
             <Text style={[styles.dividerText, { color: theme.colors.textSecondary, backgroundColor: theme.colors.surfaceHigh }]}>{label}</Text>
         </View>
     );
@@ -115,8 +118,18 @@ const ChatListInternal = React.memo((props: {
         return m.size > 0 ? { taskContentMap: m } : undefined;
     }, [props.tasks]);
 
-    /** Whether the list is resting at the newest message; the bottom time is hidden while it is. */
-    const [atBottom, setAtBottom] = React.useState(true);
+    /**
+     * Whether the time below the newest message is being shown.
+     *
+     * It is a thing the reader *asks for*: at rest the conversation reads as a conversation, and the
+     * label appears when they take hold of the end of the list. The gesture that asks for it moves
+     * the offset *past* the resting place rather than away from it — pulling the end of an inverted
+     * list drags the offset negative — so "near the end" is true both at rest and at the bottom of a
+     * pull, and a rule written that way can never reveal anything. Holding the list is the signal
+     * that survives that, and the offset decides the rest once the finger is off.
+     */
+    const [revealed, setRevealed] = React.useState(false);
+    const draggingRef = useRef(false);
 
     // Each row carries the divider that belongs above it. The list renders newest first and is
     // inverted, so the row *below* a message in the data is the older one — which is the neighbour
@@ -140,10 +153,13 @@ const ChatListInternal = React.memo((props: {
     const keyExtractor = useCallback((row: ChatRow) => row.node.id, []);
     const renderItem = useCallback(({ item: row }: { item: ChatRow }) => {
         const item = row.node;
-        // The newest message's time is only drawn once the reader is not sitting at the end of the
-        // conversation: at rest it would be a label under the last bubble with nothing to say.
-        const wanted = row.divider !== 'none' && !(row.dividerBelow && atBottom);
-        const divider = wanted ? <TimeDivider kind={row.divider} at={item.createdAt} /> : null;
+        // A divider above a row is there for the message it labels, so it lives and dies with it.
+        // The newest message's time is the reader's to ask for, so it is always mounted and shown
+        // only when they do — see `revealed`.
+        const divider = row.divider !== 'none' ? <TimeDivider kind={row.divider} at={item.createdAt} /> : null;
+        const bottomDivider = row.divider !== 'none'
+            ? <TimeDivider kind={row.divider} at={item.createdAt} hidden={!revealed} />
+            : null;
         if (item.kind === 'task-cluster') {
             return (
                 <>
@@ -155,7 +171,7 @@ const ChatListInternal = React.memo((props: {
                             </View>
                         </View>
                     </View>
-                {row.dividerBelow && divider}
+                {row.dividerBelow && bottomDivider}
                 </>
             );
         }
@@ -163,10 +179,10 @@ const ChatListInternal = React.memo((props: {
             <>
                 {!row.dividerBelow && divider}
                 <MessageView message={item} metadata={props.metadata} sessionId={props.sessionId} />
-                {row.dividerBelow && divider}
+                {row.dividerBelow && bottomDivider}
             </>
         );
-    }, [props.metadata, props.sessionId, atBottom]);
+    }, [props.metadata, props.sessionId, revealed]);
 
     const handleEndReached = useCallback(() => {
         if (props.hasOlderMessages && !props.isLoadingOlder) {
@@ -177,9 +193,25 @@ const ChatListInternal = React.memo((props: {
     const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
         const near = event.nativeEvent.contentOffset.y < 80;
         isNearBottomRef.current = near;
-        // Only when it changes: this runs on every scroll frame, and the bottom time is the only
-        // thing that depends on it.
-        setAtBottom((previous) => (previous === near ? previous : near));
+        // While a finger is down the label is out, whatever the offset says — an inverted list keeps
+        // reporting "at the end" through the whole of a pull, so the offset cannot be asked until
+        // the finger is off. Only on a change: this runs on every scroll frame.
+        if (!draggingRef.current) {
+            setRevealed((previous) => (previous === !near ? previous : !near));
+        }
+    }, []);
+
+    const handleDragBegin = useCallback(() => {
+        draggingRef.current = true;
+        setRevealed(true);
+        console.log('🕘 chat bottom time: revealed by drag');
+    }, []);
+
+    const handleDragEnd = useCallback(() => {
+        draggingRef.current = false;
+        const reveal = !isNearBottomRef.current;
+        setRevealed(reveal);
+        console.log(`🕘 chat bottom time: drag ended, ${reveal ? 'left revealed' : 'hidden at the end'}`);
     }, []);
 
     // Auto-scroll to newest messages when new ones arrive, if already near the bottom.
@@ -230,6 +262,9 @@ const ChatListInternal = React.memo((props: {
             onEndReached={handleEndReached}
             onEndReachedThreshold={0.3}
             onScroll={handleScroll}
+            onScrollBeginDrag={handleDragBegin}
+            onScrollEndDrag={handleDragEnd}
+            onMomentumScrollEnd={handleDragEnd}
             scrollEventThrottle={100}
             ListHeaderComponent={listHeader}
             ListFooterComponent={listFooter}
@@ -248,6 +283,9 @@ const ChatListInternal = React.memo((props: {
 });
 
 const styles = StyleSheet.create({
+    dividerHidden: {
+        opacity: 0,
+    },
     dividerRow: {
         alignItems: 'center',
         paddingVertical: 10,
