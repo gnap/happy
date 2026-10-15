@@ -187,9 +187,6 @@ function SessionInfoContent({ session }: { session: Session }) {
      * place the rest of the App's picture of that machine comes from.
      */
     const daemonVersions = useDaemonVersions();
-    const machineVersions = session.metadata?.machineId ? daemonVersions[session.metadata.machineId] : undefined;
-    const availableBuild = machineVersions?.onDisk ?? machineVersions?.running;
-    const restartWouldUpgrade = !!availableBuild && !!session.metadata?.version && session.metadata.version !== availableBuild;
     const channel = useSessionChannel(session.id);
     const channelSubtitle = channel.pinned
         ? t('sessionInfo.channelPinned')
@@ -258,10 +255,20 @@ function SessionInfoContent({ session }: { session: Session }) {
 
     // Check if the session was spanwed by an older CLI than the machine currently runs.
     const machine = useMachine(session.metadata?.machineId ?? '');
-    const sessionNeedsRestart = isSessionRestartRecommended(
-        session.metadata?.version,
-        machine?.metadata?.happyCliVersion,
-    );
+    /**
+     * What the machine says it is running, which is the baseline the session is judged against.
+     *
+     * Asked for over the channel in use, and failing that read from the machine's own record — the
+     * daemon writes that field, so it is a report rather than the server's opinion of one. What it
+     * used to be judged against was `machine.metadata.happyCliVersion`, the server's copy, and a
+     * copy that is missing or stale makes the rule answer "no restart needed" for a session that is
+     * older than everything around it.
+     */
+    const machineVersions = session.metadata?.machineId ? daemonVersions[session.metadata.machineId] : undefined;
+    const daemonBuild = machineVersions?.running
+        ?? machine?.daemonState?.startedWithCliVersion
+        ?? machine?.metadata?.happyCliVersion;
+    const sessionNeedsRestart = isSessionRestartRecommended(session.metadata?.version, daemonBuild);
 
     // Use HappyAction for restart
     const [restartingSession, doRestartSession] = useHappyAction(async () => {
@@ -494,7 +501,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                         needed updating and why nobody could tell what the rule was. */}
                     <Item
                         title={t('sessionInfo.restartSession')}
-                        subtitle={restartWouldUpgrade ? t('sessionInfo.restartSessionSubtitle') : undefined}
+                        subtitle={sessionNeedsRestart ? t('sessionInfo.restartSessionSubtitle') : undefined}
                         icon={<Ionicons name="sync-circle-outline" size={29} color="#FF9500" />}
                         onPress={handleRestartSession}
                     />
