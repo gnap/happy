@@ -343,7 +343,9 @@ function dominantMachineId(sessions: Session[]): string | undefined {
 // Helper function to build unified list view data from sessions and machines
 function buildSessionListViewData(
     sessions: Record<string, Session>,
-    machines: Record<string, { metadata?: { happyCliVersion?: string } | null }>,
+    machines: Record<string, { metadata?: { happyCliVersion?: string } | null; daemonState?: { startedWithCliVersion?: string } | null }>,
+    /** What each machine said it is running, asked over whichever channel that machine answered on. */
+    daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }> = {},
 ): SessionListViewItem[] {
     // Separate active and inactive sessions
     const activeSessions: Session[] = [];
@@ -364,13 +366,26 @@ function buildSessionListViewData(
     // Inactive sessions sort by last activity so the date headers make sense.
     inactiveSessions.sort((a, b) => b.updatedAt - a.updatedAt);
 
-    // Helper: check if a session's CLI version differs from its machine's current version
+    /**
+     * Whether restarting this session would change its build.
+     *
+     * The baseline is the machine's own report, the same one the session page uses and in the same
+     * order: the build on disk (what a restart would spawn), then the build the daemon is running,
+     * then the fields written by the daemon, and only last the server's copy of the machine — which
+     * is the one that goes stale on its own, and the one this rule used to be built on. A copy that
+     * is missing or old makes "the versions differ" false, so sessions older than their machine read
+     * as up to date, which is what made this decision look arbitrary.
+     */
     const getNeedsRestart = (s: Session): boolean => {
         const machineId = s.metadata?.machineId;
         if (!machineId) return false;
         const machine = machines[machineId];
         const sessionVersion = s.metadata?.version;
-        const machineVersion = machine?.metadata?.happyCliVersion;
+        const live = daemonVersions[machineId];
+        const machineVersion = live?.onDisk
+            ?? live?.running
+            ?? machine?.daemonState?.startedWithCliVersion
+            ?? machine?.metadata?.happyCliVersion;
         return !!(sessionVersion && machineVersion && sessionVersion !== machineVersion);
     };
 
@@ -981,6 +996,7 @@ export const storage = create<StorageState>()((set, get) => {
             const sessionListViewData = buildSessionListViewData(
                 mergedSessions,
                 state.machines,
+                state.daemonVersions,
             );
 
             // Update project manager with current sessions and machines
@@ -1470,6 +1486,7 @@ export const storage = create<StorageState>()((set, get) => {
             const sessionListViewData = buildSessionListViewData(
                 updatedSessions,
                 state.machines,
+                            state.daemonVersions,
             );
 
             return {
@@ -1765,6 +1782,7 @@ export const storage = create<StorageState>()((set, get) => {
             const sessionListViewData = buildSessionListViewData(
                 state.sessions,
                 state.machines,
+                            state.daemonVersions,
             );
 
             return {
@@ -1937,7 +1955,7 @@ export const storage = create<StorageState>()((set, get) => {
             saveSessionProfileIds(profileIds);
 
             // Rebuild sessionListViewData without the deleted session
-            const sessionListViewData = buildSessionListViewData(remainingSessions, state.machines);
+            const sessionListViewData = buildSessionListViewData(remainingSessions, state.machines, state.daemonVersions);
             
             return {
                 ...state,
