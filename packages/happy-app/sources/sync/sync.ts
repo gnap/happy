@@ -49,6 +49,7 @@ import { normalizeChannelPriority, pickChannel } from './lan/channelOrder';
 import { channelEnabled, enabledChannels } from '@/utils/enabledChannels';
 import { channelDrivers as buildChannelDrivers } from './channels/measure';
 import { channelAvailability } from './channels/resolve';
+import { sendOverDaemonSocket, sendOverServerHttp, sendOverServerSocket } from './channels/ops';
 import type { ChannelDriver, ChannelReason } from './channels/types';
 import { FetchSlots } from './fetchSlots';
 import { DaemonConnections, type DaemonTarget } from './lan/daemonConnections';
@@ -79,15 +80,6 @@ type V3GetSessionMessagesResponse = {
     hasMore: boolean;
 };
 
-type V3PostSessionMessagesResponse = {
-    messages: Array<{
-        id: string;
-        seq: number;
-        localId: string | null;
-        createdAt: number;
-        updatedAt: number;
-    }>;
-};
 
 type OutboxMessage = {
     localId: string;
@@ -2819,89 +2811,72 @@ class Sync {
         // synced onward by its ordinary outgoing path.
         const daemon = this.daemonSendTarget(sessionId);
         if (daemon) {
-            const socket = daemon.handle;
-            const allSent = batch.every((msg) =>
-                socket.send({ sessionId, localId: msg.localId, content: msg.content })
-            );
-            if (allSent) {
+            const outcome = sendOverDaemonSocket({
+                socket: daemon.handle,
+                sessionId,
+                batch,
                 // Deliberately not marked acked here, unlike the server socket path. There the
                 // server echoes the message back, so a fast-ack is a claim the server will honour;
                 // here nothing confirms the write but the session itself, and treating the write as
                 // the delivery is exactly what hides a dropped message. Each entry waits for that
                 // verdict, and fails if it never arrives.
+                awaitVerdict: (localId) => this.awaitLanDelivery(localId),
+            });
+            if (outcome.kind === 'unconfirmed') {
                 for (const msg of batch) {
-                    this.awaitLanDelivery(msg.localId);
+                    outcome.awaitVerdict(msg.localId);
                 }
                 return;
+            }
+            if (outcome.kind === 'failed') {
+                throw outcome.error;
             }
         }
 
         // Prefer WebSocket send — same path as CLI. No HTTP round-trip, no
         // Tauri HTTP plugin issues. Server echoes back via new-message WS
         // event, which handleUpdate already fast-acks.
-        if (apiSocket.isConnected) {
-            try {
-                for (const msg of batch) {
-                    apiSocket.send('message', {
-                        sid: sessionId,
-                        message: msg.content,
-                        localId: msg.localId,
-                    });
-                }
-                pending.splice(0, batch.length);
-                for (const msg of batch) {
-                    storage.getState().markOutboxMessageAcked(msg.localId);
-                }
-                // WS send has no seq ack — pull receive cursor forward via HTTP.
-                this.getMessagesSync(sessionId).invalidate();
-                return;
-            } catch (_err) {
-                // WS send failed — fall through to HTTP POST below.
+        const overSocket = sendOverServerSocket({ transport: apiSocket, sessionId, batch });
+        if (overSocket.kind === 'acked') {
+            pending.splice(0, batch.length);
+            for (const msg of batch) {
+                storage.getState().markOutboxMessageAcked(msg.localId);
             }
+            // WS send has no seq ack — pull receive cursor forward via HTTP.
+            this.getMessagesSync(sessionId).invalidate();
+            return;
         }
+        // Anything else — never connected, or the write threw mid-batch — falls through to the HTTP
+        // route below, which is idempotent on `localId`. A genuinely unusable server is reported by
+        // that attempt failing, not by this one declining to try.
 
         const controller = new AbortController();
         this.sendAbortControllers.set(sessionId, controller);
         try {
-            const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages`, {
-                method: 'POST',
-                body: JSON.stringify({
-                    messages: batch.map((message) => ({
-                        localId: message.localId,
-                        content: message.content
-                    }))
-                }),
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                signal: controller.signal
+            const outcome = await sendOverServerHttp({
+                transport: apiSocket,
+                sessionId,
+                batch,
+                signal: controller.signal,
             });
-            if (!response.ok) {
-                throw new Error(`Failed to send messages for ${sessionId}: ${response.status}`);
+            // The one path that says where the session now stands: the server answered with the seqs
+            // it assigned, so the receive cursor moves with it rather than being pulled.
+            if (outcome.kind === 'failed') {
+                this.maybeStartBackgroundSendWatchdog();
+                throw outcome.error;
             }
-
-            const data = await response.json() as V3PostSessionMessagesResponse;
             pending.splice(0, batch.length);
-
             // Server confirmed – mark as acked (green check). The echo
             // (fast-ack or text-matched session-protocol echo) will remove it.
             for (const msg of batch) {
                 storage.getState().markOutboxMessageAcked(msg.localId);
             }
-
-            if (Array.isArray(data.messages) && data.messages.length > 0) {
+            if (outcome.kind === 'acked' && outcome.advanceTo !== undefined) {
                 const currentLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
-                let maxSeq = currentLastSeq;
-                for (const message of data.messages) {
-                    if (message.seq > maxSeq) {
-                        maxSeq = message.seq;
-                    }
+                if (outcome.advanceTo > currentLastSeq) {
+                    this.sessionLastSeq.set(sessionId, outcome.advanceTo);
                 }
-                this.sessionLastSeq.set(sessionId, maxSeq);
             }
-        } catch (error) {
-            this.maybeStartBackgroundSendWatchdog();
-            throw error;
         } finally {
             this.sendAbortControllers.delete(sessionId);
         }
