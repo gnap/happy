@@ -46,7 +46,12 @@ export function normalizeChannelPriority(raw: unknown): SessionChannel[] {
  */
 export function pickChannel(
     priority: SessionChannel[],
-    available: Record<SessionChannel, boolean>
+    /**
+     * What is measured, per channel — partial on purpose. A channel nobody measured is one this
+     * device has no evidence for, which reads as not available rather than as a missing answer to
+     * be filled in.
+     */
+    available: Partial<Record<SessionChannel, boolean>>
 ): { channel: SessionChannel; reachable: boolean } {
     for (const channel of priority) {
         if (available[channel]) {

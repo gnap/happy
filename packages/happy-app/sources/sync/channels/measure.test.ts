@@ -88,18 +88,33 @@ describe('what the drivers say about a machine', () => {
         expect(machineOf({ daemonSockets: { 'machine-1:lan': socket('lan', 'live') } }, 'lan')).toEqual({ reachable: true, alive: true });
     });
 
-    it('needs the relay to be carrying the machine, not merely to have an address for it', () => {
+    it('tells a relay that is carrying the machine apart from one that merely has an address for it', () => {
         // Every machine key on this device derives a relay address whether or not that machine's
-        // daemon ever dialled the hub. A derived address is how the App would try; it is not
-        // evidence that anything is there.
-        expect(machineOf({ relayEndpoints: { 'machine-1': { source: 'derived' } } }, 'relay')).toBeNull();
-        expect(machineOf({ relayEndpoints: { 'machine-1': { source: 'published' } } }, 'relay')).toEqual({ reachable: true, alive: true });
-        expect(machineOf({ relayDirectory: { 'machine-1': { at: 0, sessions: [] } } }, 'relay')).toEqual({ reachable: true, alive: true });
+        // daemon ever dialled the hub. That address is worth *trying* — it is a route — but it is
+        // not evidence that anything is there, so it routes without making the machine alive.
+        expect(machineOf({ relayEndpoints: { 'machine-1': { source: 'derived' } } }, 'relay'))
+            .toEqual({ reachable: true, alive: false });
+        expect(machineOf({ relayEndpoints: { 'machine-1': { source: 'published' } } }, 'relay'))
+            .toEqual({ reachable: true, alive: true });
+        expect(machineOf({ relayDirectory: { 'machine-1': { at: 0, sessions: [] } } }, 'relay'))
+            .toEqual({ reachable: true, alive: true });
+        expect(machineOf({}, 'relay')).toBeNull();
     });
 
-    it('needs the server connected and the machine known to it', () => {
-        expect(machineOf({ machines: { 'machine-1': { active: true } } }, 'server')).toEqual({ reachable: true, alive: true });
-        expect(machineOf({ socketStatus: 'disconnected', machines: { 'machine-1': {} } }, 'server')).toBeNull();
-        expect(machineOf({}, 'server')).toBeNull();
+    it('separates what the server can route from what it knows about the machine', () => {
+        // Reachable is the App's own connection being usable: the server holds every session it has
+        // been told about, so a machine it has never heard of is still routable through it. Alive
+        // is the server's record of the machine, which is what a spawn needs and a dot means.
+        expect(machineOf({ machines: { 'machine-1': { active: true } } }, 'server'))
+            .toEqual({ reachable: true, alive: true });
+        expect(machineOf({ machines: { 'machine-1': { active: false } } }, 'server'))
+            .toEqual({ reachable: true, alive: false });
+        expect(machineOf({}, 'server')).toEqual({ reachable: true, alive: false });
+        // "Connecting" is on its way and an auth failure is a credential the App still holds, so
+        // neither is the server being down.
+        expect(machineOf({ socketStatus: 'connecting' }, 'server')?.reachable).toBe(true);
+        expect(machineOf({ socketStatus: 'auth_error' }, 'server')?.reachable).toBe(true);
+        expect(machineOf({ socketStatus: 'disconnected' }, 'server')?.reachable).toBe(false);
+        expect(machineOf({ socketStatus: 'error' }, 'server')?.reachable).toBe(false);
     });
 });

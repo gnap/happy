@@ -48,7 +48,14 @@ export type ChannelSessionReport = {
  * machine that stopped is still reachable over the server; it is not alive.
  */
 export type ChannelMachineReport = {
-    /** Whether this channel could carry a session on that machine right now. */
+    /**
+     * Whether this channel could carry traffic for that machine right now — the routing question.
+     *
+     * Deliberately weaker evidence than `alive`: a relay address this device *derived* from the
+     * machine key counts here, because the App can try it, while it says nothing about any daemon
+     * having dialled the hub. Choosing a channel wants "could this work"; a status dot wants "is it
+     * there".
+     */
     reachable: boolean;
     /** Whether the machine itself is up, as far as this channel knows. */
     alive: boolean;
@@ -103,3 +110,21 @@ export type SessionReach = {
     /** When the session was last heard from, from whichever channel knew, for a "last seen" line. */
     seenAt?: number;
 };
+
+/**
+ * Why a session ended up on the channel it did.
+ *
+ * Moved here from the sync engine verbatim, because it is a statement about channels rather than
+ * about syncing, and because it is user-visible: the session's info page and the dev pages print
+ * it, and a reason that stops being produced is a diagnostic that quietly disappears.
+ */
+export type ChannelReason =
+    | 'pinned'
+    | 'reachable'
+    | 'session-not-loaded'
+    | 'not-declared'
+    | 'no-machine-id'
+    | 'no-machine-key'
+    | 'not-on-network'
+    | 'server-down-relay'
+    | 'by-priority';

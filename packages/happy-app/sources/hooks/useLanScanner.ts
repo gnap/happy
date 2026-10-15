@@ -20,7 +20,7 @@ import { discoverMachines, accountFingerprintOf } from '@/sync/lan/discovery';
  * timeout, and on a phone that 4s is most of what the radio does while a session sits open — so it
  * runs once a minute rather than twice, halving the duty cycle. What makes the longer gap safe is
  * that a sighting is not the only evidence of reachability: an open socket to a machine counts on
- * its own (see `routeMeasured`), so a scan that is late or missed cannot move a working session
+ * its own (see `channels/resolve`), so a scan that is late or missed cannot move a working session
  * off the LAN. The `lanSightings` TTL still bounds how long a departed machine is shown as seen.
  *
  * Scanning is suspended unless the app is foregrounded: iOS will not deliver multicast to a

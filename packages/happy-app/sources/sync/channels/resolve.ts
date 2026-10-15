@@ -6,6 +6,7 @@
  * transport does, and the answer here changes when this device's *preferences* do.
  */
 
+import type { SessionChannel } from '@/sync/lan/types';
 import type { ChannelDriver, SessionReach } from './types';
 
 /**
@@ -49,21 +50,58 @@ export function resolveSessionReach(
 }
 
 /**
- * Which channels could carry this machine right now.
+ * How long a route that failed to serve this session is left out of the running.
  *
- * The shape `pickChannel` takes, and deliberately not an answer of its own: choosing between
- * channels is one policy with one implementation (`channelOrder.pickChannel`), and a second
- * "which channel for this machine" that answered *null* where that one answers "the first by
- * priority, unreachable" would be a second policy wearing the same name.
+ * Long enough that a route is not re-tried every tick, short enough that it recovers on its own —
+ * a daemon may log the session later, and nothing else would ever bring the route back.
  */
-export function machineAvailability(
-    machineId: string,
-    drivers: readonly ChannelDriver[],
-    now: number = Date.now(),
-): Record<string, boolean> {
-    const available: Record<string, boolean> = {};
-    for (const driver of drivers) {
-        available[driver.channel] = driver.machine(machineId, now)?.reachable === true;
+export const ROUTE_FAILURE_TTL_MS = 90_000;
+
+/** Whether a route's failure for this session is recent enough to keep it out of the running. */
+export function routeFailedRecently(
+    failedAt: number | undefined,
+    now: number,
+    ttlMs: number = ROUTE_FAILURE_TTL_MS,
+): boolean {
+    return failedAt !== undefined && now - failedAt < ttlMs;
+}
+
+/**
+ * Which channels could serve this session right now.
+ *
+ * The one place this is decided, so that what the App draws and what it does cannot disagree about
+ * the same session — they were computed separately, and the header would show a channel as up that
+ * the resolver would not use.
+ *
+ * The evidence is the *device's own*, never the session's claim that it supports a channel: a
+ * session declares that when it registers, which says what its daemon can do in principle, not
+ * that this device can reach it. So a channel is available when this device has seen the machine
+ * on it, or is holding a connection to it, or has read this very session over it. The last of those
+ * is the strongest — it is the reason a working route is not dropped when a browse is missed — and
+ * it is why this takes a session rather than only a machine.
+ *
+ * A route that has just failed to serve this session is out until that failure ages out, which is
+ * what stops a broken channel being chosen again on every tick.
+ */
+export function channelAvailability(args: {
+    drivers: readonly ChannelDriver[];
+    sessionId: string;
+    machineId: string;
+    /** When each route last failed for this session, from the caller's own memory. */
+    failedAt?: Record<string, number | undefined>;
+    /** The channel this session was last read over, if it has been. */
+    lastReadRoute?: SessionChannel;
+    now?: number;
+}): Partial<Record<SessionChannel, boolean>> {
+    const now = args.now ?? Date.now();
+    const available: Partial<Record<SessionChannel, boolean>> = {};
+    for (const driver of args.drivers) {
+        if (routeFailedRecently(args.failedAt?.[driver.channel], now)) {
+            available[driver.channel] = false;
+            continue;
+        }
+        const measured = driver.machine(args.machineId, now)?.reachable === true;
+        available[driver.channel] = measured || args.lastReadRoute === driver.channel;
     }
     return available;
 }

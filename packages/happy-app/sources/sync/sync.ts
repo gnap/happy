@@ -47,6 +47,9 @@ import { DEFAULT_RELAY_URL, RelayHub, relayHubUrl, relayOriginOf, type HubMachin
 import type { RelayDirectoryEntry } from './lan/relayDirectory';
 import { normalizeChannelPriority, pickChannel } from './lan/channelOrder';
 import { channelEnabled, enabledChannels } from '@/utils/enabledChannels';
+import { channelDrivers as buildChannelDrivers } from './channels/measure';
+import { channelAvailability } from './channels/resolve';
+import type { ChannelDriver, ChannelReason } from './channels/types';
 import { FetchSlots } from './fetchSlots';
 import { DaemonConnections, type DaemonTarget } from './lan/daemonConnections';
 import { pageMovedTheLog, planDaemonRead } from './lan/windowPlan';
@@ -122,16 +125,7 @@ const maxSeqOf = (messages: { seq?: number }[]): number => {
     return seqs.length > 0 ? Math.max(...seqs) : 0;
 };
 
-export type ChannelReason =
-    | 'pinned'
-    | 'reachable'
-    | 'session-not-loaded'
-    | 'not-declared'
-    | 'no-machine-id'
-    | 'no-machine-key'
-    | 'not-on-network'
-    | 'server-down-relay'
-    | 'by-priority';
+export type { ChannelReason } from './channels/types';
 
 /**
  * Frame-level tracing for the update pipeline, off unless the dev page turns debug mode on.
@@ -4694,46 +4688,40 @@ class Sync {
     }
 
     /**
-     * Whether this device can reach a machine over one daemon route *now*.
+     * The channel drivers for the state and priority in hand.
      *
-     * Three sources, all local: the discovery that found the machine (`lanSightings` from mDNS,
-     * `relaySightings` from a probe that got an answer), a live socket this App is holding to it,
-     * and — the strongest — a read of this very session that came back over that route. The last
-     * one is why a route that is working is not dropped between probes, and why a session pinned
-     * to a route it cannot be served on does not keep looking available.
+     * Rebuilt only when something a driver reads has moved: `resolveChannel` runs on paths that can
+     * be hit per frame — the fast-ack path asks which channel a session is on — and building three
+     * drivers per call would scan the socket map on every one of them.
      */
-    private routeMeasured(sessionId: string, machineId: string, route: DaemonRoute): boolean {
+    private channelDrivers(): ChannelDriver[] {
         const state = storage.getState();
-        const failedAt = this.routeFailures.get(sessionId)?.[route];
-        if (failedAt !== undefined && Date.now() - failedAt < Sync.ROUTE_FAILURE_TTL_MS) {
-            return false;
+        const priority = state.localSettings.channelPriority;
+        const key = [
+            state.socketStatus,
+            state.daemonSockets,
+            state.lanSightings,
+            state.relayEndpoints,
+            state.relayDirectory,
+            state.relayHubConnected,
+            state.sessions,
+            state.machines,
+            state.daemonSessionList,
+            priority,
+        ];
+        const cached = this.channelDriversCache;
+        if (cached && cached.key.length === key.length && cached.key.every((part, index) => part === key[index])) {
+            return cached.drivers;
         }
-        // A socket this App is holding open to that machine is the strongest of the three: it was
-        // opened by a read that worked, and it is still up. It also survives a sighting expiring,
-        // which matters because sightings are refreshed by a browse on a timer — a working LAN was
-        // otherwise dropped the moment a browse was missed, and the session moved off it.
-        if (this.connections.current(machineId, route)) {
-            return true;
-        }
-        const known = route === 'lan' ? state.lanSightings[machineId]?.baseUrl : state.relayEndpoints[machineId]?.baseUrl;
-        if (!known) {
-            return false;
-        }
-        // The relay says which machines are dialled in. That is the same kind of fact a sighting
-        // gives for the LAN — and a better one, since it is the relay's own registry rather than a
-        // probe that may not have run since the machine came up.
-        if (route === 'relay' ? this.relayMachines.has(machineId) : state.lanSightings[machineId]) {
-            return true;
-        }
-        const link = this.daemonLinks.get(sessionId);
-        return !!link && link.machineId === machineId && link.connection.route === route;
+        const drivers = buildChannelDrivers(state, priority);
+        this.channelDriversCache = { key, drivers };
+        return drivers;
     }
+
+    private channelDriversCache: { key: unknown[]; drivers: ChannelDriver[] } | null = null;
 
     /** A route that failed to serve this session. Ages out, since a daemon may log it later. */
     private routeFailures = new Map<string, Partial<Record<DaemonRoute, number>>>();
-
-    /** Long enough that a route is not re-tried every tick, short enough to recover on its own. */
-    private static readonly ROUTE_FAILURE_TTL_MS = 90_000;
 
     private noteRouteFailure(sessionId: string, route: DaemonRoute): void {
         const failures = this.routeFailures.get(sessionId) ?? {};
@@ -4794,11 +4782,16 @@ class Sync {
         const state = storage.getState();
         const priority = this.channelPriority();
         const serverDown = state.socketStatus === 'disconnected' || state.socketStatus === 'error';
-        const available = {
-            lan: this.routeMeasured(sessionId, machineId, 'lan'),
-            relay: this.routeMeasured(sessionId, machineId, 'relay'),
-            server: !serverDown,
-        };
+        // Which channels could serve this session, from the same rule the header and the badges are
+        // drawn from — they used to be worked out separately, and disagreed about the same session.
+        const lastRead = this.daemonLinks.get(sessionId);
+        const available = channelAvailability({
+            drivers: this.channelDrivers(),
+            sessionId,
+            machineId,
+            failedAt: this.routeFailures.get(sessionId),
+            lastReadRoute: lastRead && lastRead.machineId === machineId ? lastRead.connection.route : undefined,
+        });
         const { channel, reachable } = pickChannel(priority, available);
         if (!reachable) {
             // Nothing on this device has reached the machine. The session is not readable over any

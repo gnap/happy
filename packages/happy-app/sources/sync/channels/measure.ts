@@ -56,13 +56,15 @@ function serverDriver(state: ChannelState): ChannelDriver {
             : state.socketStatus === 'connecting' ? 'connecting'
                 : 'off'),
         machine: (machineId) => {
-            if (state.socketStatus !== 'connected' || !(machineId in state.machines)) {
-                return null;
-            }
-            // The server can serve a machine's sessions after the machine has gone, so reachable
-            // says nothing about the machine being up: that is what the server's own record is for.
+            // Reachable asks only whether the App's connection to the server is usable — the server
+            // holds every session it has been told about, so a machine it has never heard of is
+            // still routable through it. "Connecting" and an auth failure are not "down": the first
+            // is on its way, and the second is a credential the App is still holding.
+            const reachable = state.socketStatus !== 'disconnected' && state.socketStatus !== 'error';
+            // Alive is the server's own record of the machine, and it says nothing about
+            // reachability: the server can serve a machine's sessions long after the machine went.
             const machine = state.machines[machineId] as { active?: boolean } | undefined;
-            return { reachable: true, alive: machine?.active === true };
+            return { reachable, alive: reachable && machine?.active === true };
         },
         // The server is always a channel this machine has while it is switched on: a server that
         // does not report the machine is still a channel the App could use.
@@ -142,8 +144,12 @@ function relayDriver(state: ChannelState): ChannelDriver {
         // relay glyph they had not earned.
         capable: (machineId) => carrying(machineId),
         machine: (machineId) => {
-            const carried = carrying(machineId) || heldSocket(state, machineId, 'relay');
-            return carried ? { reachable: true, alive: true } : null;
+            // Alive: the relay is holding it, or this App has a stream to it. Reachable is wider on
+            // purpose — an address derived from the machine key is one the App can *try*, which is
+            // what choosing a channel needs, even though it is not evidence anything is there.
+            const held = carrying(machineId) || heldSocket(state, machineId, 'relay');
+            const tryable = held || machineId in state.relayEndpoints;
+            return tryable ? { reachable: true, alive: held } : null;
         },
         session: (sessionId, machineId) => {
             const answered = state.daemonSessionList[sessionId];

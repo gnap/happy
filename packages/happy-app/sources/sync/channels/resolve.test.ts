@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { machineAvailability, resolveSessionReach } from './resolve';
+import { channelAvailability, resolveSessionReach, routeFailedRecently } from './resolve';
 import type { ChannelDriver } from './types';
 
 /** A driver that says the same thing about everything it is asked. */
@@ -72,24 +72,59 @@ describe('resolveSessionReach', () => {
     });
 });
 
-describe('machineAvailability', () => {
-    it('reports, per channel, whether that channel could carry the machine', () => {
-        // The shape the one channel-choosing policy takes (`channelOrder.pickChannel`), rather than
-        // an answer of its own: a second "which channel for this machine" that answered null where
-        // that one answers "the first by priority" would be a second policy wearing the same name.
-        const reachable = (channel: ChannelDriver['channel'], yes: boolean): ChannelDriver =>
-            driver(channel, () => null, () => (yes ? { reachable: true, alive: true } : null));
-        expect(machineAvailability('machine-1', [
-            reachable('lan', false),
-            reachable('relay', true),
-            reachable('server', true),
-        ])).toEqual({ lan: false, relay: true, server: true });
+describe('channelAvailability', () => {
+    const machineReachable = (channel: ChannelDriver['channel'], yes: boolean): ChannelDriver =>
+        driver(channel, () => null, () => (yes ? { reachable: true, alive: true } : null));
+
+    it('is what the device has measured, per channel', () => {
+        expect(channelAvailability({
+            drivers: [machineReachable('lan', true), machineReachable('relay', false), machineReachable('server', true)],
+            sessionId: 'sess-1',
+            machineId: 'machine-1',
+        })).toEqual({ lan: true, relay: false, server: true });
     });
 
-    it('says nothing about a machine no channel can carry', () => {
-        expect(machineAvailability('machine-1', [
-            driver('lan', () => null),
-            driver('server', () => null),
-        ])).toEqual({ lan: false, server: false });
+    it('counts a channel this session was read over even when the measurement has gone quiet', () => {
+        // The strongest evidence there is: a read of this very session came back over that route.
+        // It is why a working route is not dropped the moment a browse is missed.
+        expect(channelAvailability({
+            drivers: [machineReachable('lan', false), machineReachable('relay', true)],
+            sessionId: 'sess-1',
+            machineId: 'machine-1',
+            lastReadRoute: 'lan',
+        })).toEqual({ lan: true, relay: true });
+    });
+
+    it('leaves out a route that has just failed, so it is not chosen again on every tick', () => {
+        const now = 1_000_000;
+        expect(channelAvailability({
+            drivers: [machineReachable('lan', true), machineReachable('relay', true)],
+            sessionId: 'sess-1',
+            machineId: 'machine-1',
+            failedAt: { lan: now - 1_000 },
+            now,
+        })).toEqual({ lan: false, relay: true });
+        // A failure also beats the read that came over it: the read was before the failure.
+        expect(channelAvailability({
+            drivers: [machineReachable('lan', true)],
+            sessionId: 'sess-1',
+            machineId: 'machine-1',
+            failedAt: { lan: now - 1_000 },
+            lastReadRoute: 'lan',
+            now,
+        })).toEqual({ lan: false });
+    });
+
+    it('brings the route back once the failure has aged out', () => {
+        const failedAt = { lan: 1_000_000 };
+        expect(routeFailedRecently(failedAt.lan, 1_000_000 + 89_999)).toBe(true);
+        expect(routeFailedRecently(failedAt.lan, 1_000_000 + 90_000)).toBe(false);
+        expect(channelAvailability({
+            drivers: [machineReachable('lan', true)],
+            sessionId: 'sess-1',
+            machineId: 'machine-1',
+            failedAt,
+            now: 1_000_000 + 90_000,
+        })).toEqual({ lan: true });
     });
 });
