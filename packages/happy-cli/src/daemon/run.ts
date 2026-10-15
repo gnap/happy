@@ -28,6 +28,8 @@ import { stripProfileManagedEnv } from '@/utils/profileEnv';
 import { fetchSessionProfileMeta, PROFILE_META_DEADLINE_MS } from './fetchSessionProfileMeta';
 import { delay } from '@/utils/time';
 import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSessionSummary } from './lanServer';
+import { RESTARTING_TTL_MS, expiredRestarting } from './restartTracker';
+import type { UpdateSessionBody } from '@slopus/happy-wire';
 import { versionStateOf } from './versionState';
 import { BUILD_VERSION } from '../version';
 import type { ApiMachineClient } from '@/api/apiMachine';
@@ -1081,8 +1083,82 @@ export async function startDaemon(): Promise<void> {
       return removed;
     };
 
-    // Restart a session: kill existing process and spawn a new one reconnecting to the same server session
+    /**
+     * Sessions this daemon is in the middle of restarting, by session id, and when it started.
+     *
+     * A restart is invisible from outside: the session stops reporting, which is what an ended
+     * session looks like too. This daemon is the only party that knows the difference, so it says
+     * so — as a change to *that session's* state, pushed the same way every other session state
+     * change is, so a reader applies it where it already keeps the session's state and needs to
+     * know nothing new.
+     *
+     * This map is the daemon's own working state, not a store anybody reads: what readers see is
+     * the push, the summary it lists the session in, and the snapshot a reader gets on connect.
+     */
+    const restartingStartedAt = new Map<string, number>();
+
+    /**
+     * The LAN/relay fan-out. Declared here, above the restart path that pushes through it: a
+     * `let` read before its declaration throws, and a restart can be asked for from the moment the
+     * control server is up, which is earlier than the LAN listener is.
+     */
+    let lanServer: LanServerHandle | null = null;
+    /** Only has to make the envelope's `id` unique; the App does not key on it. */
+    let lanEventCounter = 0;
+
+    /**
+     * Tells every reader of this session that it is, or is no longer, being restarted.
+     *
+     * A session state change, in the server's own envelope shape, so the App's update handler runs
+     * against it unchanged — the same path a session's own metadata and agentState take when the
+     * session forwards them here. What is different is only who is speaking: those are the session
+     * saying something about itself, and this is the daemon saying the one thing about a session it
+     * is in a position to know and the session cannot say, because it is the process being
+     * replaced.
+     *
+     * Deliberately not awaited and not stored: the restart must not wait on it, and a reader that
+     * misses the frame has two other ways to learn the same fact — the session summary it lists,
+     * and the snapshot a reader is handed when it connects.
+     */
+    const announceRestarting = (sessionId: string, startedAt: number | null): void => {
+      logger.debug(`[DAEMON RUN] ${startedAt === null ? 'Restart finished' : 'Restarting'}: ${sessionId}`);
+      const body: UpdateSessionBody = {
+        t: 'update-session',
+        id: sessionId,
+        restartingAt: startedAt,
+      };
+      lanServer?.broadcast('update', {
+        id: `lan-${++lanEventCounter}`,
+        seq: 0,
+        body,
+        createdAt: Date.now(),
+      });
+    };
+
+    /**
+     * Restart a session, announcing it for exactly as long as it takes.
+     *
+     * The announcement brackets the work rather than outliving it: readers are told when it starts
+     * and told again when it is over, so what they draw is the machine's own timing instead of a
+     * grace they have to guess at. The grace still exists behind it, for a daemon that dies
+     * mid-restart and so never gets to say it finished.
+     */
     const restartSession = async (sessionId: string, sandboxConfig?: any): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
+      const startedAt = Date.now();
+      restartingStartedAt.set(sessionId, startedAt);
+      announceRestarting(sessionId, startedAt);
+      try {
+        return await performRestart(sessionId, sandboxConfig);
+      } finally {
+        // Called off once there is an answer, whatever the answer was: the new process is up and
+        // has registered, or the restart did not happen. Either way nothing is in flight.
+        restartingStartedAt.delete(sessionId);
+        announceRestarting(sessionId, null);
+      }
+    };
+
+    // Kill existing process and spawn a new one reconnecting to the same server session
+    const performRestart = async (sessionId: string, sandboxConfig?: any): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
       logger.debug(`[DAEMON RUN] Restart session: ${sessionId}`);
       const persistedState = await readDaemonState();
 
@@ -1301,9 +1377,6 @@ export async function startDaemon(): Promise<void> {
     // (loopback is its only protection) and can spawn/stop sessions. This one only reads,
     // so widening it to the network does not widen the control surface.
     //
-    let lanServer: LanServerHandle | null = null;
-    /** Only has to make the envelope's `id` unique; the App does not key on it. */
-    let lanEventCounter = 0;
     /**
      * The latest `update-session` state each session has mirrored to us, so a LAN reader that
      * connects late still gets the current agentState/metadata instead of waiting for the server.
@@ -1341,32 +1414,57 @@ export async function startDaemon(): Promise<void> {
          * directly, and the relay publishes it so an App can list every machine's sessions through
          * the one relay connection it holds. Both want exactly the same summary.
          */
-        const sessionSummaries = (): LanSessionSummary[] => [...pidToTrackedSession.values()]
-          // A session is listed as soon as the daemon knows it, not once the server acknowledges
-          // it. It has a tag from spawn but no server id until the server answers -- and while the
-          // server is down that is exactly the session a reader most needs to see. Filtering on
-          // the id is what made a waiting session vanish from the LAN list, the relay hub and the
-          // App at once. Only a session with neither name is dropped: nothing could ask for it.
-          .filter(session => session.happySessionId !== undefined || session.sessionTag !== undefined)
-          .map(session => ({
-            ...(session.happySessionId ? { happySessionId: session.happySessionId } : {}),
-            ...(session.sessionTag ? { tag: session.sessionTag } : {}),
-            directory: session.directory ?? '',
-            agent: session.agent ?? '',
-            startedBy: String(session.startedBy),
-            // The session's own metadata, mirrored here when it last updated, and only when the
-            // server has named the session — there is nothing mirrored before that.
-            ...(session.happySessionId && lanSessionState.get(session.happySessionId)?.metadata
-              ? {
-                  metadataVersion: lanSessionState.get(session.happySessionId)!.metadata!.version,
-                  metadata: lanSessionState.get(session.happySessionId)!.metadata!.value,
-                }
-              : {}),
-            isAlive: session.exitTime
-              ? false
-              : (() => { try { process.kill(session.pid, 0); return true; } catch { return false; } })(),
-            lastHeartbeat: session.lastHeartbeat,
-          } satisfies LanSessionSummary));
+        const sessionSummaries = (): LanSessionSummary[] => {
+          const summaries: LanSessionSummary[] = [...pidToTrackedSession.values()]
+            // A session is listed as soon as the daemon knows it, not once the server acknowledges
+            // it. It has a tag from spawn but no server id until the server answers -- and while
+            // the server is down that is exactly the session a reader most needs to see. Filtering
+            // on the id is what made a waiting session vanish from the LAN list, the relay hub and
+            // the App at once. Only a session with neither name is dropped: nothing could ask for it.
+            .filter(session => session.happySessionId !== undefined || session.sessionTag !== undefined)
+            .map((session): LanSessionSummary => ({
+              ...(session.happySessionId ? { happySessionId: session.happySessionId } : {}),
+              ...(session.sessionTag ? { tag: session.sessionTag } : {}),
+              directory: session.directory ?? '',
+              agent: session.agent ?? '',
+              startedBy: String(session.startedBy),
+              // The session's own metadata, mirrored here when it last updated, and only when the
+              // server has named the session — there is nothing mirrored before that.
+              ...(session.happySessionId && lanSessionState.get(session.happySessionId)?.metadata
+                ? {
+                    metadataVersion: lanSessionState.get(session.happySessionId)!.metadata!.version,
+                    metadata: lanSessionState.get(session.happySessionId)!.metadata!.value,
+                  }
+                : {}),
+              isAlive: session.exitTime
+                ? false
+                : (() => { try { process.kill(session.pid, 0); return true; } catch { return false; } })(),
+              lastHeartbeat: session.lastHeartbeat,
+              ...(session.happySessionId && restartingStartedAt.has(session.happySessionId)
+                ? { restartingSince: restartingStartedAt.get(session.happySessionId)! }
+                : {}),
+            }));
+          // A session being restarted is not tracked for part of that: the old process has been
+          // signalled and the new one has not registered yet. Left out, it would vanish from the
+          // list — and vanishing is how a restart reads from outside, which is the reading this
+          // exists to replace. So the ones this daemon is restarting are added back, not alive and
+          // saying why.
+          const tracked = new Set(summaries.map(summary => summary.happySessionId));
+          const now = Date.now();
+          for (const [id, at] of restartingStartedAt) {
+            if (now - at < RESTARTING_TTL_MS && !tracked.has(id)) {
+              summaries.push({
+                happySessionId: id,
+                directory: '',
+                agent: '',
+                startedBy: 'daemon',
+                isAlive: false,
+                restartingSince: at,
+              });
+            }
+          }
+          return summaries;
+        };
 
         const started = await startLanServer({
             secret: credentials.encryption.machineKey,
@@ -1385,6 +1483,17 @@ export async function startDaemon(): Promise<void> {
                   id: `lan-${++lanEventCounter}`,
                   seq: 0,
                   body: { t: 'update-session', id, ...state },
+                  createdAt: Date.now(),
+                });
+              }
+              // A reader that connects in the middle of a restart would otherwise never hear about
+              // it: the push went out before it was listening. Same fact, same shape, handed over
+              // with the rest of the session state instead of waited for.
+              for (const id of restartingStartedAt.keys()) {
+                frames.push({
+                  id: `lan-${++lanEventCounter}`,
+                  seq: 0,
+                  body: { t: 'update-session', id, restartingAt: restartingStartedAt.get(id) } satisfies UpdateSessionBody,
                   createdAt: Date.now(),
                 });
               }
@@ -1937,6 +2046,14 @@ export async function startDaemon(): Promise<void> {
 
       if (process.env.DEBUG) {
         logger.debug(`[DAEMON RUN] Health check started at ${new Date().toLocaleString()}`);
+      }
+
+      // A restart whose grace has run out and which never said it finished is called off here —
+      // a daemon that died mid-restart, say, or one whose new process never came back. Readers age
+      // it out on their own, so this is what stops them being told about it at all, and what keeps
+      // a session id per restart from accumulating for the life of the daemon.
+      for (const sessionId of expiredRestarting(restartingStartedAt)) {
+        announceRestarting(sessionId, null);
       }
 
       // Prune stale sessions

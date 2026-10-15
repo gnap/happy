@@ -80,6 +80,15 @@ export type LanSessionSummary = {
    */
   metadataVersion?: number;
   metadata?: string;
+  /**
+   * When this daemon began restarting the session, if it is restarting it.
+   *
+   * A timestamp rather than a flag, and for the same reason the daemon's published state carries
+   * one: a reader applies a grace to it, so an entry that outlived the restart it described goes
+   * stale on its own. Without it, a restart reads as a session that has ended — which is what it
+   * looks like from anywhere else, because nothing reports the session while it happens.
+   */
+  restartingSince?: number;
 };
 
 /** How a reader names a session: by the id the server issued, or by the tag the CLI owns. */
