@@ -532,14 +532,6 @@ export const ca: TranslationStructure = {
         noMachinesAvailable: 'Sense màquines',
     },
 
-        sandbox: {
-            isolationTitle: 'Sandbox Isolation',
-            off: 'Off',
-            strict: 'Strict (project only)',
-            workspace: 'Workspace',
-            custom: 'Custom',
-        },
-
     machineLauncher: {
         showLess: 'Mostra menys',
         showAll: ({ count }: { count: number }) => `Mostra tots (${count} camins)`,

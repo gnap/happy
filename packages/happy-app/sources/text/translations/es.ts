@@ -532,14 +532,6 @@ export const es: TranslationStructure = {
         noMachinesAvailable: 'Sin máquinas',
     },
 
-        sandbox: {
-            isolationTitle: 'Sandbox Isolation',
-            off: 'Off',
-            strict: 'Strict (project only)',
-            workspace: 'Workspace',
-            custom: 'Custom',
-        },
-
     machineLauncher: {
         showLess: 'Mostrar menos',
         showAll: ({ count }: { count: number }) => `Mostrar todos (${count} rutas)`,
