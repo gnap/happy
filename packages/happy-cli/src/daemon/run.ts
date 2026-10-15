@@ -1391,6 +1391,10 @@ export async function startDaemon(): Promise<void> {
               return frames;
             },
             getSessions: sessionSummaries,
+            // The same handler the control server and the server route call, so a restart means one
+            // thing however it was asked for — including every refusal, which is where the rules
+            // about archived sessions and sessions with live processes live.
+            restartSession,
             // The daemon is the only party that knows both what it is running and what is on disk,
             // and the two differ whenever the bundle was rebuilt under it. Read per request, since
             // rebuilding is exactly what happens while it runs.

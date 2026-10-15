@@ -147,6 +147,20 @@ export type LanServerOptions = {
    */
   onSend: (message: { sessionId: string; localId: string; content: string }) => void;
   /**
+   * Restart the session process, with the build now on disk.
+   *
+   * The one write this API offers that is not a message. It is here because the reason a session
+   * is restarted is that its machine has been rebuilt — and the machine's own channel is the one
+   * that is up when that is true, while the server's is not necessarily. Without it the App could
+   * only ask the server to do it, so a restart failed with "socket disconnected" while the machine
+   * sat there answering reads on the LAN.
+   *
+   * Session-scoped, like the control server's own handler: it starts one session's process again
+   * and touches nothing else on the machine. Absent means this daemon does not offer it, and a
+   * caller falls back to whatever route it has left.
+   */
+  restartSession?: (sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
+  /**
    * Update envelopes to send to a socket reader as soon as it connects, before any live frame.
    * A reader that joins after a session changed its state would otherwise never see that change:
    * the live mirror only carries what happens while it is listening.
@@ -475,6 +489,32 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       `entries=${history.entries.length} hasNewer=${history.hasNewer} hasOlder=${history.hasOlder} reset=${history.reset}`,
     );
     return reply.send({ v: LAN_PROTOCOL_VERSION, ...history });
+  });
+
+  /**
+   * Restart the session process on this machine.
+   *
+   * A POST because it changes something, and session-scoped because that is as far as it reaches:
+   * no daemon stop, no shutdown, nothing about any other session. What it can do is bounded by what
+   * the caller already holds — the machine key, which is only ever handed to a device the user
+   * paired — and by the daemon refusing anything it would refuse the server route.
+   *
+   * Always 200 when this daemon offers the route at all, including a refusal, so the caller can
+   * tell "this machine says no" from "this machine cannot be asked": the second is what sends it
+   * to the server instead, and a refusal must not read as a reason to ask someone else.
+   */
+  app.post('/lan/sessions/:sessionId/restart', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (!opts.restartSession) {
+      return reply.code(404).send({ error: 'this daemon does not restart sessions' });
+    }
+    const { sessionId } = request.params as { sessionId: string };
+    logger.debug(`[lan] restart ${sessionId} from=${clientAddress(request)}`);
+    const result = await opts.restartSession(sessionId);
+    logger.debug(`[lan] restart ${sessionId} success=${result.success}${result.error ? ` error=${result.error}` : ''}`);
+    return reply.send({ v: LAN_PROTOCOL_VERSION, ...result });
   });
 
   app.get('/lan/sessions/:sessionId/history', async (request, reply) => {

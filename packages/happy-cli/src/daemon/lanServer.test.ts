@@ -33,6 +33,10 @@ let lastQuery: { since?: string; before?: string } | undefined;
 let lastAddress: { sessionId?: string; tag?: string } | undefined;
 /** Messages the socket handed to the daemon, in order. */
 let sent: { sessionId: string; localId: string; content: string }[] = [];
+/** Sessions the restart route asked to restart. */
+let restarted: string[] = [];
+/** Left unset by default, which is how a daemon that predates the route behaves. */
+let restartHandler: ((sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>) | undefined;
 
 let server: LanServerHandle | null = null;
 /** What a socket reader should be handed on connect; mutable so one test can set it. */
@@ -52,6 +56,9 @@ async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
         onSend: (message) => {
             sent.push(message);
         },
+        // Only when a test asked for it: a daemon without the handler is a daemon from before the
+        // route existed, and the 404 it answers is what sends a caller to the server instead.
+        ...(restartHandler ? { restartSession: restartHandler } : {}),
         getSnapshot: () => snapshot,
         host: '127.0.0.1',
         port: 0,
@@ -88,6 +95,8 @@ afterEach(async () => {
     vi.useRealTimers();
     await server?.stop();
     server = null;
+    restarted = [];
+    restartHandler = undefined;
 });
 
 describe('lanServer read-only API', () => {
@@ -235,17 +244,78 @@ describe('lanServer read-only API', () => {
         history = HISTORY;
     });
 
-    it('exposes no mutating route', async () => {
+    it('exposes no machine-level control route', async () => {
         await start();
         const token = await getToken();
 
-        // The daemon's control server has these unauthenticated on loopback; none of them
-        // may exist here. This is the load-bearing assertion that the control surface was
-        // not widened by this feature.
+        // The daemon's control server has these unauthenticated on loopback; none of them may
+        // exist here. What this pins is that the surface stops at the session: nothing reachable
+        // from here starts a session that was not already one, stops the daemon, or shuts the
+        // machine down. The one session-scoped action that does exist is tested below.
         for (const path of ['/lan/spawn-session', '/lan/stop-session', '/lan/stop', '/lan/restart-session']) {
             const res = await fetch(url(path), { method: 'POST', ...authorized(token) });
             expect(res.status, `${path} must not exist`).toBe(404);
         }
+    });
+
+    describe('restarting a session', () => {
+        it('hands the session to the daemon and returns its verdict', async () => {
+            restartHandler = async (sessionId) => {
+                restarted.push(sessionId);
+                return { success: true, newSessionId: 'sess-1-restarted' };
+            };
+            await start();
+            const token = await getToken();
+
+            const res = await fetch(url('/lan/sessions/sess-1/restart'), { method: 'POST', ...authorized(token) });
+
+            expect(res.status).toBe(200);
+            expect(await res.json()).toEqual({ v: 1, success: true, newSessionId: 'sess-1-restarted' });
+            expect(restarted).toEqual(['sess-1']);
+        });
+
+        it('reports a refusal as an answer, not as an unroutable request', async () => {
+            // A refusal is this machine's verdict and the caller must not go and ask the server the
+            // same question: the two routes call the same handler, so it would come back the same
+            // way, and in between a restart that was refused would look like one that was attempted.
+            restartHandler = async () => ({ success: false, error: 'Session has been archived and cannot be restarted' });
+            await start();
+            const token = await getToken();
+
+            const res = await fetch(url('/lan/sessions/sess-1/restart'), { method: 'POST', ...authorized(token) });
+
+            expect(res.status).toBe(200);
+            expect(await res.json()).toEqual({
+                v: 1,
+                success: false,
+                error: 'Session has been archived and cannot be restarted',
+            });
+        });
+
+        it('is not reachable without a token', async () => {
+            restartHandler = async (sessionId) => {
+                restarted.push(sessionId);
+                return { success: true };
+            };
+            await start();
+
+            const res = await fetch(url('/lan/sessions/sess-1/restart'), { method: 'POST' });
+
+            expect(res.status).toBe(401);
+            expect(restarted).toEqual([]);
+        });
+
+        it('says so when the daemon does not offer it, so the caller can use the server instead', async () => {
+            // The shape an older daemon has. A 404 here is not "no such session" — it is "this
+            // build has no such route", which is a reason to try another route rather than to
+            // report a failure.
+            await start();
+            const token = await getToken();
+
+            const res = await fetch(url('/lan/sessions/sess-1/restart'), { method: 'POST', ...authorized(token) });
+
+            expect(res.status).toBe(404);
+        });
     });
 
     describe('incremental history', () => {
