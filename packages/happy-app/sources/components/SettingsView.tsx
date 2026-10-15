@@ -17,7 +17,7 @@ import { isUsingCustomServer } from '@/sync/serverConfig';
 import { trackPaywallButtonClicked, trackWhatsNewClicked } from '@/track';
 import { Modal } from '@/modal';
 import { useMultiClick } from '@/hooks/useMultiClick';
-import { useAllMachines, useMachinesMap, useMachinePresenceMap, useLanSightings, useRelayDirectory, useRelayEndpoints } from '@/sync/storage';
+import { useAllMachines, useMachinesMap, useMachinePresenceMap, useLanSightings, useRelayDirectory, useRelayEndpoints, useMachineBadgeInputs } from '@/sync/storage';
 import { MachinePresenceBadge } from '@/components/MachinePresenceBadge';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { useUnistyles } from 'react-native-unistyles';
@@ -69,6 +69,8 @@ export const SettingsView = React.memo(function SettingsView() {
         [machinesById]
     );
     const machinePresence = useMachinePresenceMap();
+    /** What a machine's glyphs should show, from the channels — the same source the session list uses. */
+    const badgeInputs = useMachineBadgeInputs();
     const lanSightings = useLanSightings();
     const relayDirectory = useRelayDirectory();
     const relayEndpoints = useRelayEndpoints();
@@ -325,18 +327,7 @@ export const SettingsView = React.memo(function SettingsView() {
                                 rightElement={
                                     <MachinePresenceBadge
                                         machineId={machine.id}
-                                        reach={{
-                                            server: isOnline,
-                                            lan: !!lanSightings[machine.id],
-                                            // The relay vouches for what it is holding. A route we
-                                            // derived from the key is not evidence its daemon runs a
-                                            // relay client, so it does not colour this green.
-                                            relay: !!relayDirectory[machine.id],
-                                        }}
-                                        capability={{
-                                            lan: !!lanSightings[machine.id],
-                                            relay: !!relayDirectory[machine.id] || relayEndpoints[machine.id]?.source === 'published',
-                                        }}
+                                        {...badgeInputs(machine.id)}
                                     />
                                 }
                                 onPress={() => router.push(`/machine/${machine.id}`)}

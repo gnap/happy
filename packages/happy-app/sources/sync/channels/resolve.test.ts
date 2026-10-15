@@ -7,7 +7,7 @@ const driver = (
     channel: ChannelDriver['channel'],
     session: ChannelDriver['session'],
     machine: ChannelDriver['machine'] = () => null,
-): ChannelDriver => ({ channel, session, machine, link: () => null });
+): ChannelDriver => ({ channel, session, machine, link: () => null, capable: () => false });
 
 const says = (channel: ChannelDriver['channel'], reaching: boolean, seenAt?: number): ChannelDriver =>
     driver(channel, () => ({ reaching, seenAt }));
@@ -78,7 +78,7 @@ describe('machineAvailability', () => {
         // an answer of its own: a second "which channel for this machine" that answered null where
         // that one answers "the first by priority" would be a second policy wearing the same name.
         const reachable = (channel: ChannelDriver['channel'], yes: boolean): ChannelDriver =>
-            driver(channel, () => null, () => (yes ? { reachable: true } : null));
+            driver(channel, () => null, () => (yes ? { reachable: true, alive: true } : null));
         expect(machineAvailability('machine-1', [
             reachable('lan', false),
             reachable('relay', true),

@@ -22,7 +22,7 @@ import type { ChannelDriver } from './types';
 export type ChannelState = {
     socketStatus: string;
     sessions: Record<string, { active: boolean; activeAt: number }>;
-    machines: Record<string, unknown>;
+    machines: Record<string, { active?: boolean } | undefined>;
     daemonSockets: Record<string, DaemonConnectionState>;
     daemonSessionList: Record<string, { isAlive: boolean; via: string; at: number }>;
     lanSightings: Record<string, unknown>;
@@ -55,9 +55,18 @@ function serverDriver(state: ChannelState): ChannelDriver {
         link: () => (state.socketStatus === 'connected' ? 'connected'
             : state.socketStatus === 'connecting' ? 'connecting'
                 : 'off'),
-        machine: (machineId) => (state.socketStatus === 'connected' && machineId in state.machines
-            ? { reachable: true }
-            : null),
+        machine: (machineId) => {
+            if (state.socketStatus !== 'connected' || !(machineId in state.machines)) {
+                return null;
+            }
+            // The server can serve a machine's sessions after the machine has gone, so reachable
+            // says nothing about the machine being up: that is what the server's own record is for.
+            const machine = state.machines[machineId] as { active?: boolean } | undefined;
+            return { reachable: true, alive: machine?.active === true };
+        },
+        // The server is always a channel this machine has while it is switched on: a server that
+        // does not report the machine is still a channel the App could use.
+        capable: () => true,
         session: (sessionId) => {
             const session = state.sessions[sessionId];
             if (!session) {
@@ -84,9 +93,16 @@ function lanDriver(state: ChannelState): ChannelDriver {
         link: () => (anySocket() ? 'connected'
             : Object.keys(state.lanSightings).length > 0 ? 'connecting'
                 : null),
-        machine: (machineId) => (machineId in state.lanSightings || heldSocket(state, machineId, 'lan')
-            ? { reachable: true }
-            : null),
+        machine: (machineId) => {
+            // A daemon advertising itself, or a socket this App is holding to it, are both the
+            // machine being up on this network — and the socket term is the one that survives a
+            // browse being missed, which is why the two callers that only read sightings disagreed
+            // with the resolver about the same machine.
+            const seen = machineId in state.lanSightings || heldSocket(state, machineId, 'lan');
+            return seen ? { reachable: true, alive: true } : null;
+        },
+        // Seen once on this network is what earns the glyph, whether or not it is up now.
+        capable: (machineId) => machineId in state.lanSightings,
         session: (sessionId, machineId) => {
             const answered = state.daemonSessionList[sessionId];
             if (answered?.via === 'lan') {
@@ -120,9 +136,15 @@ function relayDriver(state: ChannelState): ChannelDriver {
         // The relay is its one connection to the hub, not the per-machine streams it carries: while
         // it is switched on and not yet reached, the App is trying, which is the blue.
         link: () => (state.relayHubConnected ? 'connected' : 'connecting'),
-        machine: (machineId) => (carrying(machineId) || heldSocket(state, machineId, 'relay')
-            ? { reachable: true }
-            : null),
+        // The relay vouches for what it is holding, and the machine vouches for a route it
+        // published itself. A route derived from the machine key is not evidence its daemon runs a
+        // relay client — every machine has one — which is why hosts that never published grew a
+        // relay glyph they had not earned.
+        capable: (machineId) => carrying(machineId),
+        machine: (machineId) => {
+            const carried = carrying(machineId) || heldSocket(state, machineId, 'relay');
+            return carried ? { reachable: true, alive: true } : null;
+        },
         session: (sessionId, machineId) => {
             const answered = state.daemonSessionList[sessionId];
             if (answered?.via === 'relay') {

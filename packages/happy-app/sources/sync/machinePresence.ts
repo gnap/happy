@@ -1,5 +1,5 @@
-import type { Machine } from './storageTypes';
 import type { SessionChannel } from './lan/types';
+import type { ChannelDriver } from './channels/types';
 
 /**
  * How a machine is currently reachable from this device.
@@ -39,23 +39,27 @@ export const MACHINE_PRESENCE_COLORS: Record<MachinePresence, string> = {
 };
 
 /**
- * Resolve a machine's presence. `machine` may be null when the server has never told us about
- * this machine id at all — a LAN-only sighting still resolves to `lan` in that case, which is
- * what makes a daemon we have no server record for visible rather than silently dropped.
+ * Resolve a machine's presence, from what the channels say about it.
+ *
+ * The first channel — in the order this device prefers them — that reports the machine *alive* is
+ * the answer. Alive rather than reachable, because that is what the dot has always meant: the
+ * server can still serve a machine's sessions after the machine itself has gone, so a machine that
+ * stopped would read as green if reachability were the question.
+ *
+ * Which channels are asked, and in what order, comes from the drivers' own priority: this used to
+ * be decided here from the priority setting, while the header and the resolver decided it
+ * elsewhere, and the three disagreed about a machine with a live socket and an expired sighting.
  */
 export function resolveMachinePresence(
-    machine: Machine | null | undefined,
-    lanReachable: boolean,
-    relayReachable = false
+    drivers: readonly ChannelDriver[],
+    machineId: string,
+    now: number = Date.now(),
 ): MachinePresence {
-    if (machine?.active) {
-        return 'server';
-    }
-    if (lanReachable) {
-        return 'lan';
-    }
-    if (relayReachable) {
-        return 'relay';
+    for (const driver of drivers) {
+        if (driver.machine(machineId, now)?.alive === true) {
+            // The driver's channel is one of the three presence states, by construction.
+            return driver.channel as MachinePresence;
+        }
     }
     return 'offline';
 }
@@ -111,6 +115,33 @@ export type MachineCapability = {
      */
     relay: boolean;
 };
+
+/**
+ * What a machine's per-channel glyphs should show.
+ *
+ * Built here rather than at each call site. Both callers built it inline and disagreed about the
+ * server term — one read the machine presence, the other the server's own active flag — and neither
+ * counted a live socket, so a machine this App was holding open over the LAN showed grey because a
+ * browse had been missed. One question, one place.
+ */
+export function machineBadgeInputs(
+    drivers: readonly ChannelDriver[],
+    machineId: string,
+    now: number = Date.now(),
+): { reach: MachineReach; capability: MachineCapability } {
+    const reach: MachineReach = { server: false, lan: false, relay: false };
+    const capability: MachineCapability = { lan: false, relay: false };
+    for (const driver of drivers) {
+        if (driver.channel === 'server') {
+            reach.server = driver.machine(machineId, now)?.alive === true;
+            continue;
+        }
+        // Reaching it *now* is the colour; having it at all is whether the glyph is drawn.
+        reach[driver.channel] = driver.machine(machineId, now)?.alive === true;
+        capability[driver.channel] = driver.capable(machineId);
+    }
+    return { reach, capability };
+}
 
 export function machineChannelIcons(
     priority: readonly SessionChannel[],

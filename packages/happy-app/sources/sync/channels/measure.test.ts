@@ -83,9 +83,9 @@ describe('what the drivers say about a machine', () => {
 
     it('reaches a machine the LAN has seen, or is holding a socket to', () => {
         expect(machineOf({}, 'lan')).toBeNull();
-        expect(machineOf({ lanSightings: { 'machine-1': {} } }, 'lan')).toEqual({ reachable: true });
+        expect(machineOf({ lanSightings: { 'machine-1': {} } }, 'lan')).toEqual({ reachable: true, alive: true });
         expect(machineOf({ daemonSockets: { 'machine-1:lan': socket('lan', 'opening') } }, 'lan')).toBeNull();
-        expect(machineOf({ daemonSockets: { 'machine-1:lan': socket('lan', 'live') } }, 'lan')).toEqual({ reachable: true });
+        expect(machineOf({ daemonSockets: { 'machine-1:lan': socket('lan', 'live') } }, 'lan')).toEqual({ reachable: true, alive: true });
     });
 
     it('needs the relay to be carrying the machine, not merely to have an address for it', () => {
@@ -93,12 +93,12 @@ describe('what the drivers say about a machine', () => {
         // daemon ever dialled the hub. A derived address is how the App would try; it is not
         // evidence that anything is there.
         expect(machineOf({ relayEndpoints: { 'machine-1': { source: 'derived' } } }, 'relay')).toBeNull();
-        expect(machineOf({ relayEndpoints: { 'machine-1': { source: 'published' } } }, 'relay')).toEqual({ reachable: true });
-        expect(machineOf({ relayDirectory: { 'machine-1': { at: 0, sessions: [] } } }, 'relay')).toEqual({ reachable: true });
+        expect(machineOf({ relayEndpoints: { 'machine-1': { source: 'published' } } }, 'relay')).toEqual({ reachable: true, alive: true });
+        expect(machineOf({ relayDirectory: { 'machine-1': { at: 0, sessions: [] } } }, 'relay')).toEqual({ reachable: true, alive: true });
     });
 
     it('needs the server connected and the machine known to it', () => {
-        expect(machineOf({ machines: { 'machine-1': {} } }, 'server')).toEqual({ reachable: true });
+        expect(machineOf({ machines: { 'machine-1': { active: true } } }, 'server')).toEqual({ reachable: true, alive: true });
         expect(machineOf({ socketStatus: 'disconnected', machines: { 'machine-1': {} } }, 'server')).toBeNull();
         expect(machineOf({}, 'server')).toBeNull();
     });

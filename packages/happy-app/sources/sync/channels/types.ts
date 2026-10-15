@@ -38,10 +38,20 @@ export type ChannelSessionReport = {
     seenAt?: number;
 };
 
-/** What a driver is allowed to say it knows about one machine. */
+/**
+ * What a driver is allowed to say it knows about one machine.
+ *
+ * Two facts, because they are two questions and the App asks both. *Reachable* is whether this
+ * channel could carry traffic for the machine — what choosing a channel needs, and true of the
+ * server for a machine that has gone, because the server still holds its sessions. *Alive* is
+ * whether the machine itself is up over this channel — what a status dot means, and narrower: a
+ * machine that stopped is still reachable over the server; it is not alive.
+ */
 export type ChannelMachineReport = {
     /** Whether this channel could carry a session on that machine right now. */
     reachable: boolean;
+    /** Whether the machine itself is up, as far as this channel knows. */
+    alive: boolean;
 };
 
 /**
@@ -70,6 +80,15 @@ export type ChannelDriver = {
     session(sessionId: string, machineId: string | undefined, now: number): ChannelSessionReport | null;
     /** Whether this channel could carry a session on that machine at all right now. */
     machine(machineId: string, now: number): ChannelMachineReport | null;
+    /**
+     * Whether this machine has this channel at all, whether or not it is up at the moment.
+     *
+     * A different question from `machine()`, and the one the per-channel glyphs ask: a channel this
+     * machine has never had is *absent* from its badge, while one it has and is not currently
+     * reaching is grey. The two callers of that badge used to answer this inline, and disagreed
+     * about which machines had earned a relay glyph.
+     */
+    capable(machineId: string): boolean;
 };
 
 /** The one answer anything above the drivers needs about a session. */
