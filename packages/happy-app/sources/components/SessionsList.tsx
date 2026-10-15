@@ -290,7 +290,7 @@ export function SessionsList() {
                 continue;
             }
             if (skipUntilNextProject) continue;
-            if (item.type === 'session' && hideOffline && currentHost && !item.session.active) continue;
+            if (item.type === 'session' && hideOffline && currentHost && !item.online) continue;
             result.push(item);
         }
         return result;

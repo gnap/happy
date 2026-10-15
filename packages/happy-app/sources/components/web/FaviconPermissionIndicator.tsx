@@ -1,5 +1,6 @@
 import React from 'react';
 import { Platform } from 'react-native';
+import { channelDrivers, resolveSessionReach } from '@/sync/reachability';
 import { storage } from '@/sync/storage';
 import { updateFaviconWithNotification, resetFavicon } from '@/utils/web/faviconGenerator';
 
@@ -13,11 +14,14 @@ export const FaviconPermissionIndicator = React.memo(() => {
     }
 
     const hasOnlineSessionWithPermissions = storage((state) => {
+        // Asked of the channels, not read off the session: whether a session is being reached is
+        // not a property the session carries, and the server's own flag says a session the LAN is
+        // serving is away.
+        const drivers = channelDrivers(state, state.localSettings.channelPriority);
         return Object.values(state.sessions).some(session => {
-            // Use centralized presence logic - only "online" sessions matter
-            const isOnline = session.presence === 'online';
+            const isOnline = resolveSessionReach(session.id, session.metadata?.machineId, drivers).online;
 
-            const hasPermissions = session.agentState?.requests && 
+            const hasPermissions = session.agentState?.requests &&
                 Object.keys(session.agentState.requests).length > 0;
 
             return isOnline && hasPermissions;

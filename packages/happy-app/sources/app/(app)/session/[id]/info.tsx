@@ -7,7 +7,7 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Avatar } from '@/components/Avatar';
-import { useDaemonVersions, useSession, useIsDataReady, useSessionMessages, useMachine, useSessionRestartReports } from '@/sync/storage';
+import { useDaemonVersions, useSession, useIsDataReady, useSessionMessages, useMachine } from '@/sync/storage';
 import { sync, type ChannelReason } from '@/sync/sync';
 import { useSessionChannel } from '@/hooks/useSessionChannel';
 import { CHANNEL_ICONS } from '@/sync/machinePresence';
@@ -188,7 +188,6 @@ function SessionInfoContent({ session }: { session: Session }) {
      * place the rest of the App's picture of that machine comes from.
      */
     const daemonVersions = useDaemonVersions();
-    const restartReports = useSessionRestartReports(session.id, session.metadata?.machineId);
     const channel = useSessionChannel(session.id);
     const channelSubtitle = channel.pinned
         ? t('sessionInfo.channelPinned')
@@ -275,7 +274,7 @@ function SessionInfoContent({ session }: { session: Session }) {
         ?? machine?.daemonState?.startedWithCliVersion
         ?? machine?.metadata?.happyCliVersion;
     const sessionNeedsRestart = isSessionRestartRecommended(session.metadata?.version, daemonBuild)
-        && !sessionIsRestarting(session.id, restartReports);
+        && !sessionIsRestarting(session);
     /**
      * What the connection row says, and how it is tinted.
      *

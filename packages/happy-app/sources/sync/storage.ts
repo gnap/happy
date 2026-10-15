@@ -12,7 +12,8 @@ import type { RelayDirectoryEntry } from './lan/relayDirectory';
 import type { DaemonConnectionState } from './lan/daemonConnections';
 import { resolveMachinePresence, type MachinePresence } from './machinePresence';
 import { channelLinks, type ChannelLinkState } from './channelLinks';
-import { restartWithinGrace, sessionIsRestarting, type RestartReports } from '@/utils/sessionRestart';
+import { sessionIsRestarting } from '@/utils/sessionRestart';
+import { channelDrivers, resolveMachineReach, resolveSessionReach, type ChannelDriver, type SessionReach } from './reachability';
 
 export { channelLinks, type ChannelFacts, type ChannelLinkState } from './channelLinks';
 import { applySettings, Settings } from "./settings";
@@ -42,14 +43,6 @@ const REALTIME_MODE_DEBOUNCE_MS = 150;
 function resolveSessionOnlineState(session: { active: boolean; activeAt: number }): "online" | number {
     // Session is online if the active flag is true
     return session.active ? "online" : session.activeAt;
-}
-
-/**
- * Checks if a session should be shown in the active sessions group
- */
-function isSessionActive(session: { active: boolean; activeAt: number }): boolean {
-    // Use the active flag directly, no timeout checks
-    return session.active;
 }
 
 function isSandboxEnabled(metadata: Session['metadata'] | null | undefined): boolean {
@@ -102,7 +95,20 @@ export type SessionListViewItem =
     | { type: 'project-group'; displayPath: string; machine: Machine }
     | { type: 'worktree-group'; projectPath: string; homeDir?: string; branch?: string }
     | { type: 'host-group'; projectPath: string; host: string; machineId?: string; onlineCount: number; totalCount: number }
-    | { type: 'session'; session: Session; variant?: 'default' | 'no-path'; needsRestart?: boolean };
+    | {
+        type: 'session';
+        session: Session;
+        variant?: 'default' | 'no-path';
+        needsRestart?: boolean;
+        /**
+         * Whether anything is reaching this session, decided when the list was built.
+         *
+         * Carried on the item rather than asked again by whoever draws or filters it, because the
+         * answer depends on the channels and not on the session alone — and a filter that reads
+         * `session.active` instead puts a session the LAN is serving below the "offline" divider.
+         */
+        online?: boolean;
+    };
 
 // Legacy type for backward compatibility - to be removed
 export type SessionListItem = string | Session;
@@ -197,17 +203,6 @@ interface StorageState {
     daemonSessionList: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; at: number; restartingSince?: number }>;
     /** What each machine last said it was running, asked over a channel it answered on. */
     daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }>;
-    /**
-     * Sessions this App has asked a machine to restart, by session id, and when it asked.
-     *
-     * A restart leaves a gap in which nothing reports the session, and a gap looks the same whether
-     * the session is coming back or has ended. Only the party that asked knows which it is — see
-     * `sessionIsRestarting` — and this is where it remembers asking.
-     */
-    restartingSessions: Record<string, number>;
-    markSessionRestarting: (sessionId: string) => void;
-    /** For a restart that was refused or never got out: it is not in progress. */
-    forgetSessionRestarting: (sessionId: string) => void;
     /** Replace the daemons' view. Pass null to clear it (the server answered). */
     /** Records what a machine said it is running. Null forgets it, for a machine that moved. */
     applyDaemonVersion: (machineId: string, versions: { running: string; onDisk: string | null; restartRequired: boolean } | null) => void;
@@ -377,17 +372,13 @@ export function sessionNeedsRestart(
     session: Session,
     machines: Record<string, {
         metadata?: { happyCliVersion?: string } | null;
-        daemonState?: { startedWithCliVersion?: string; restartingSessions?: unknown } | null;
+        daemonState?: { startedWithCliVersion?: string } | null;
     }>,
     daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }> = {},
-    restartingSessions: Record<string, number> = {},
 ): boolean {
     const machineId = session.metadata?.machineId;
     if (!machineId) return false;
-    // Two of the three sources, deliberately: a daemon's own answer only exists when the server
-    // could not answer, and a server that could not answer has no versions to compare either — so
-    // there is no mark here for that source to suppress.
-    if (sessionIsRestarting(session.id, { asked: restartingSessions, machine: machines[machineId] })) return false;
+    if (sessionIsRestarting(session)) return false;
     const machine = machines[machineId];
     const sessionVersion = session.metadata?.version;
     const live = daemonVersions[machineId];
@@ -403,15 +394,26 @@ function buildSessionListViewData(
     machines: Record<string, { metadata?: { happyCliVersion?: string } | null; daemonState?: { startedWithCliVersion?: string } | null }>,
     /** What each machine said it is running, asked over whichever channel that machine answered on. */
     daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }> = {},
-    /** Restarts this App has asked for and is waiting on, which the restart mark has to yield to. */
-    restartingSessions: Record<string, number> = {},
+    /**
+     * The channels this device has, in the order it prefers them.
+     *
+     * Passed in rather than read here, because this function is given the pieces of the store it
+     * builds from and not the store itself. What it is for is the one question this list asks about
+     * a session and used to answer wrongly: whether anything is reaching it. It read the server's
+     * `active` flag, so a session being served over the LAN while the server had not heard from it
+     * was counted offline — in the same row that showed it online, and in the count directly above.
+     */
+    drivers: readonly ChannelDriver[] = [],
 ): SessionListViewItem[] {
+    /** Whether anything is reaching this session, from any channel, the way the rest of the App asks. */
+    const reached = (session: Session) => resolveSessionReach(session.id, session.metadata?.machineId, drivers).online;
+
     // Separate active and inactive sessions
     const activeSessions: Session[] = [];
     const inactiveSessions: Session[] = [];
 
     Object.values(sessions).forEach(session => {
-        if (isSessionActive(session)) {
+        if (reached(session)) {
             activeSessions.push(session);
         } else {
             inactiveSessions.push(session);
@@ -436,7 +438,7 @@ function buildSessionListViewData(
      * as up to date, which is what made this decision look arbitrary.
      */
     const getNeedsRestart = (s: Session): boolean => {
-        const marked = sessionNeedsRestart(s, machines, daemonVersions, restartingSessions);
+        const marked = sessionNeedsRestart(s, machines, daemonVersions);
         // The mark's inputs, once per change: three sources feed this baseline and a log is the only
         // way to tell a rule that decided wrongly from one that was handed nothing.
         const machineId = s.metadata?.machineId;
@@ -475,12 +477,12 @@ function buildSessionListViewData(
         // Standard sessions sort by last activity for the date headers.
         standard.sort((a, b) => b.updatedAt - a.updatedAt);
         for (const s of standard) {
-            listData.push({ type: 'session', session: s, needsRestart: getNeedsRestart(s) });
+            listData.push({ type: 'session', session: s, needsRestart: getNeedsRestart(s), online: reached(s) });
         }
         // Sort project groups by newest createdAt in each group (stable)
         const sortedProjects = [...byProject.entries()].sort(([, a], [, b]) => {
-            const aOnline = a.some(s => s.active);
-            const bOnline = b.some(s => s.active);
+            const aOnline = a.some(reached);
+            const bOnline = b.some(reached);
             if (aOnline !== bOnline) return aOnline ? -1 : 1;
             const aMax = Math.max(...a.map(s => s.createdAt));
             const bMax = Math.max(...b.map(s => s.createdAt));
@@ -513,10 +515,10 @@ function buildSessionListViewData(
                     if (aWt !== bWt) return aWt ? 1 : -1;
                     return b.createdAt - a.createdAt;
                 });
-                const onlineCount = hostSessions.filter(s => s.active).length;
+                const onlineCount = hostSessions.filter(reached).length;
                 listData.push({ type: 'host-group', projectPath, host, machineId: dominantMachineId(hostSessions), onlineCount, totalCount: hostSessions.length });
                 for (const s of hostSessions) {
-                    listData.push({ type: 'session', session: s, needsRestart: getNeedsRestart(s) });
+                    listData.push({ type: 'session', session: s, needsRestart: getNeedsRestart(s), online: reached(s) });
                 }
             }
         }
@@ -546,8 +548,8 @@ function buildSessionListViewData(
         }
         // Sort project groups by newest createdAt in each group (stable)
         const sortedProjects = [...byProject.entries()].sort(([, a], [, b]) => {
-            const aOnline = a.some(s => s.active);
-            const bOnline = b.some(s => s.active);
+            const aOnline = a.some(reached);
+            const bOnline = b.some(reached);
             if (aOnline !== bOnline) return aOnline ? -1 : 1;
             const aMax = Math.max(...a.map(s => s.createdAt));
             const bMax = Math.max(...b.map(s => s.createdAt));
@@ -578,10 +580,10 @@ function buildSessionListViewData(
                     if (aWt !== bWt) return aWt ? 1 : -1;
                     return b.createdAt - a.createdAt;
                 });
-                const onlineCount = hostSessions.filter(s => s.active).length;
+                const onlineCount = hostSessions.filter(reached).length;
                 toList.push({ type: 'host-group', projectPath, host, machineId: dominantMachineId(hostSessions), onlineCount, totalCount: hostSessions.length });
                 for (const s of hostSessions) {
-                    toList.push({ type: 'session', session: s, needsRestart: getNeedsRestart(s) });
+                    toList.push({ type: 'session', session: s, needsRestart: getNeedsRestart(s), online: reached(s) });
                 }
             }
         }
@@ -679,7 +681,6 @@ export const storage = create<StorageState>()((set, get) => {
         relayUnknownTags: [],
         relayHubConnected: false,
         daemonSockets: {},
-        restartingSessions: {},
         daemonSessionList: {},
         daemonVersions: {},
         channelOverride: {},
@@ -830,7 +831,11 @@ export const storage = create<StorageState>()((set, get) => {
         },
         getActiveSessions: () => {
             const state = get();
-            return Object.values(state.sessions).filter(s => s.active);
+            // "Active" here feeds the voice hooks — a session that has gone away, and one that has
+            // come back — so it has to mean what the rest of the App means by online, not what the
+            // server last managed to hear.
+            const drivers = channelDrivers(state, state.localSettings.channelPriority);
+            return Object.values(state.sessions).filter(s => resolveSessionReach(s.id, s.metadata?.machineId, drivers).online);
         },
         applySessions: (sessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[], fullRefresh?: boolean) => set((state) => {
             // Drafts: only from MMKV on initial load. Permission/model: read MMKV every time so restart/refresh keeps selection (metadata first, then existing, then MMKV, then server).
@@ -904,6 +909,17 @@ export const storage = create<StorageState>()((set, get) => {
                 // list fetches do not overwrite; replay will update session.todos when that session's messages load.
                 const existingTodos = existing?.todos;
                 const resolvedTodos = existingTodos ?? session.todos ?? undefined;
+                // Not from the server at all: this is what the machine pushed over its own channel,
+                // and a sessions fetch carries no opinion about it — so a fetch keeps what is held,
+                // or the field would be wiped every time one ran, and a restart lasts longer than
+                // the gap between fetches.
+                //
+                // The payload wins when it *does* have an opinion, which is how a push is carried
+                // in: including an explicit null, which is the machine calling a restart off. Reading
+                // it the other way round would make that clear arrive and be ignored.
+                const resolvedRestartingAt = session.restartingAt !== undefined
+                    ? session.restartingAt
+                    : existing?.restartingAt ?? null;
 
                 mergedSessions[session.id] = {
                     ...session,
@@ -914,14 +930,18 @@ export const storage = create<StorageState>()((set, get) => {
                     maxMode: resolvedMaxMode,
                     profileId: resolvedProfileId,
                     sandboxIsolation: resolvedSandboxIsolation,
-                    todos: resolvedTodos
+                    todos: resolvedTodos,
+                    restartingAt: resolvedRestartingAt
                 };
             });
 
-            // Build active set from all sessions (including existing ones)
+            // Build active set from all sessions (including existing ones), by the same answer the
+            // rows are drawn from: this is what puts a session above the "offline" divider in the
+            // list, and the server's flag alone put one there while the LAN was serving it.
+            const drivers = channelDrivers(state, state.localSettings.channelPriority);
             const activeSet = new Set<string>();
             Object.values(mergedSessions).forEach(session => {
-                if (isSessionActive(session)) {
+                if (resolveSessionReach(session.id, session.metadata?.machineId, drivers).online) {
                     activeSet.add(session.id);
                 }
             });
@@ -1059,7 +1079,7 @@ export const storage = create<StorageState>()((set, get) => {
                 mergedSessions,
                 state.machines,
                 state.daemonVersions,
-                state.restartingSessions,
+                channelDrivers(state, state.localSettings.channelPriority),
             );
 
             // Update project manager with current sessions and machines
@@ -1550,7 +1570,7 @@ export const storage = create<StorageState>()((set, get) => {
                 updatedSessions,
                 state.machines,
                             state.daemonVersions,
-                            state.restartingSessions,
+                            channelDrivers(state, state.localSettings.channelPriority),
             );
 
             return {
@@ -1847,7 +1867,7 @@ export const storage = create<StorageState>()((set, get) => {
                 state.sessions,
                 state.machines,
                             state.daemonVersions,
-                            state.restartingSessions,
+                            channelDrivers(state, state.localSettings.channelPriority),
             );
 
             return {
@@ -1924,32 +1944,9 @@ export const storage = create<StorageState>()((set, get) => {
                     state.sessions,
                     state.machines,
                     daemonVersions,
-                    state.restartingSessions,
+                    channelDrivers(state, state.localSettings.channelPriority),
                 ),
             };
-        }),
-        markSessionRestarting: (sessionId: string) => set((state) => {
-            const now = Date.now();
-            // Anything whose grace has run out is dropped here rather than on a timer, because this
-            // is the only moment anything is written: an entry nobody would draw is one nobody
-            // needs, and a map that only grows keeps a session id per restart for the life of the
-            // process.
-            const restartingSessions: Record<string, number> = {};
-            for (const [id, askedAt] of Object.entries(state.restartingSessions)) {
-                if (restartWithinGrace(askedAt, now)) {
-                    restartingSessions[id] = askedAt;
-                }
-            }
-            restartingSessions[sessionId] = now;
-            return { ...state, restartingSessions };
-        }),
-        forgetSessionRestarting: (sessionId: string) => set((state) => {
-            if (!(sessionId in state.restartingSessions)) {
-                return state;
-            }
-            const restartingSessions = { ...state.restartingSessions };
-            delete restartingSessions[sessionId];
-            return { ...state, restartingSessions };
         }),
         applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute; restartingSince?: number }[] | null) => set((state) => {
             if (sessions === null) {
@@ -1960,6 +1957,10 @@ export const storage = create<StorageState>()((set, get) => {
             }
             const at = Date.now();
             const next: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; at: number; restartingSince?: number }> = {};
+            // The same fact the daemon pushes, arriving the other way: a device that reads a
+            // listing instead of holding a socket has to be told, and a restarting session is
+            // listed with no live process — which is why the field travels with the listing at all.
+            const withRestarts = { ...state.sessions };
             for (const session of sessions) {
                 next[session.happySessionId] = {
                     isAlive: session.isAlive,
@@ -1967,13 +1968,14 @@ export const storage = create<StorageState>()((set, get) => {
                     agent: session.agent,
                     via: session.via,
                     at,
-                    // A session the daemon is restarting is listed though it has no live process —
-                    // that is the whole reason the field is here, and dropping it would leave the
-                    // reader with "not alive" and nothing to explain it.
                     ...(session.restartingSince !== undefined ? { restartingSince: session.restartingSince } : {}),
                 };
+                const known = withRestarts[session.happySessionId];
+                if (known && session.restartingSince !== undefined) {
+                    withRestarts[session.happySessionId] = { ...known, restartingAt: session.restartingSince };
+                }
             }
-            return { ...state, daemonSessionList: next };
+            return { ...state, sessions: withRestarts, daemonSessionList: next };
         }),
         setSessionChannelOverride: (sessionId: string, channel: SessionChannel | null) => set((state) => {
             if (channel === null) {
@@ -2061,7 +2063,7 @@ export const storage = create<StorageState>()((set, get) => {
             saveSessionProfileIds(profileIds);
 
             // Rebuild sessionListViewData without the deleted session
-            const sessionListViewData = buildSessionListViewData(remainingSessions, state.machines, state.daemonVersions, state.restartingSessions);
+            const sessionListViewData = buildSessionListViewData(remainingSessions, state.machines, state.daemonVersions, channelDrivers(state, state.localSettings.channelPriority));
             
             return {
                 ...state,
@@ -2247,15 +2249,29 @@ export const storage = create<StorageState>()((set, get) => {
  * Every writer is covered here instead of one at a time. The inputs are compared by
  * identity, so a rebuild that only writes the list does not trigger another one.
  *
- * A restart this App has asked for is one of those inputs now: it is what makes the row stop
- * showing the restart mark, and that has to happen when the tap happens, not when the new process
- * gets around to reporting its build.
+ * The session's own restarting state rides on the sessions themselves, so a push that changes it
+ * is already a change to one of these inputs. What a channel is reaching is not on a session, so
+ * the channel state is compared here too — a LAN socket coming up is the difference between a row
+ * that reads offline and the same row reading online.
  */
-const builtFrom: { sessions: unknown; machines: unknown; daemonVersions: unknown; restartingSessions: unknown } = {
+const builtFrom: {
+    sessions: unknown;
+    machines: unknown;
+    daemonVersions: unknown;
+    daemonSockets: unknown;
+    lanSightings: unknown;
+    relayDirectory: unknown;
+    socketStatus: unknown;
+    daemonSessionList: unknown;
+} = {
     sessions: null,
     machines: null,
     daemonVersions: null,
-    restartingSessions: null,
+    daemonSockets: null,
+    lanSightings: null,
+    relayDirectory: null,
+    socketStatus: null,
+    daemonSessionList: null,
 };
 
 storage.subscribe((state) => {
@@ -2263,15 +2279,30 @@ storage.subscribe((state) => {
         builtFrom.sessions === state.sessions
         && builtFrom.machines === state.machines
         && builtFrom.daemonVersions === state.daemonVersions
-        && builtFrom.restartingSessions === state.restartingSessions
+        && builtFrom.daemonSockets === state.daemonSockets
+        && builtFrom.lanSightings === state.lanSightings
+        && builtFrom.relayDirectory === state.relayDirectory
+        && builtFrom.socketStatus === state.socketStatus
+        && builtFrom.daemonSessionList === state.daemonSessionList
     ) {
         return;
     }
     builtFrom.sessions = state.sessions;
     builtFrom.machines = state.machines;
     builtFrom.daemonVersions = state.daemonVersions;
-    builtFrom.restartingSessions = state.restartingSessions;
-    storage.setState({ sessionListViewData: buildSessionListViewData(state.sessions, state.machines, state.daemonVersions, state.restartingSessions) });
+    builtFrom.daemonSockets = state.daemonSockets;
+    builtFrom.lanSightings = state.lanSightings;
+    builtFrom.relayDirectory = state.relayDirectory;
+    builtFrom.socketStatus = state.socketStatus;
+    builtFrom.daemonSessionList = state.daemonSessionList;
+    storage.setState({
+        sessionListViewData: buildSessionListViewData(
+            state.sessions,
+            state.machines,
+            state.daemonVersions,
+            channelDrivers(state, state.localSettings.channelPriority),
+        ),
+    });
 });
 
 export function useSessions() {
@@ -2379,29 +2410,33 @@ export function useLanSightings(): Record<string, LanSighting> {
  * sighting means a daemon is reachable, this means a channel to one is actually established.
  */
 /** Everything that is connected (or trying to be), by `machineId:route`. */
+/**
+ * How this App is reaching this session right now: whether anything is, and over which channel.
+ *
+ * One answer for the whole app. Everything that draws a session or counts it asks this, so a badge,
+ * a status line, a group's "2/3 online" and the sort order cannot disagree about the same session —
+ * which they did, because each of them worked it out from the raw channel state on its own.
+ */
+export function useSessionReach(sessionId: string, machineId: string | undefined): SessionReach {
+    return storage(useShallow((state) => resolveSessionReach(
+        sessionId,
+        machineId,
+        channelDrivers(state, state.localSettings.channelPriority),
+    )));
+}
+
+/** Which channel could carry this machine right now, or null when none can. */
+export function useMachineReach(machineId: string | undefined): SessionChannel | null {
+    return storage(useShallow((state) => (machineId
+        ? resolveMachineReach(machineId, channelDrivers(state, state.localSettings.channelPriority))
+        : null)));
+}
+
 /** What each machine last said it is running. Empty until a machine has answered on a channel. */
 export function useDaemonVersions(): Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }> {
     return storage(useShallow((state) => state.daemonVersions));
 }
 
-/** Sessions this App has asked a machine to restart, and when. */
-export function useRestartingSessions(): Record<string, number> {
-    return storage(useShallow((state) => state.restartingSessions));
-}
-
-/**
- * Everything this App can know about a session being restarted, from every source that can know it.
- *
- * A hook rather than three selectors at each call site, because the sources have to be gathered the
- * same way everywhere for the answer to be the same everywhere — the same reason the mark itself
- * became one exported rule. Read it with `sessionIsRestarting`.
- */
-export function useSessionRestartReports(sessionId: string, machineId: string | undefined): RestartReports {
-    const asked = storage(useShallow((state) => state.restartingSessions));
-    const machine = storage(useShallow((state) => (machineId ? state.machines[machineId] ?? null : null)));
-    const daemon = storage(useShallow((state) => state.daemonSessionList[sessionId] ?? null));
-    return React.useMemo(() => ({ asked, machine, daemon }), [asked, machine, daemon]);
-}
 
 export function useDaemonSockets(): Record<string, DaemonConnectionState> {
     return storage(useShallow((state) => state.daemonSockets));

@@ -59,6 +59,21 @@ export const UpdateSessionBodySchema = z.object({
   id: z.string(),
   metadata: VersionedEncryptedValueSchema.nullish(),
   agentState: VersionedNullableEncryptedValueSchema.nullish(),
+  /**
+   * When the machine that owns this session began restarting it, or null once it is not.
+   *
+   * A session state change like the two above, and pushed the same way — but the one a *machine*
+   * may author. Everything else about a session is encrypted with a key only the session process
+   * holds, so a daemon has nothing to say about a session except this: whether it is in the middle
+   * of replacing that process. It has to say it, because a restart looks exactly like an ending
+   * from outside — the session stops reporting — and the daemon is the only party that knows which
+   * one it is.
+   *
+   * A timestamp rather than a flag, so a reader can age it out: a push that never arrived, or a
+   * clear that never arrived, goes stale on its own instead of leaving a session reading as
+   * restarting for good.
+   */
+  restartingAt: z.number().nullish(),
 });
 export type UpdateSessionBody = z.infer<typeof UpdateSessionBodySchema>;
 

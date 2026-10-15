@@ -17,7 +17,7 @@ import { useDraft } from '@/hooks/useDraft';
 import { Modal } from '@/modal';
 import { gitStatusSync } from '@/sync/gitStatusSync';
 import { sessionAbort } from '@/sync/ops';
-import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionRestartReports, useSessionMessages, useSessionUsage, useSetting } from '@/sync/storage';
+import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionMessages, useSessionReach, useSessionUsage, useSetting } from '@/sync/storage';
 import { useSession } from '@/sync/storage';
 import { Session } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
@@ -53,9 +53,8 @@ export const SessionView = React.memo((props: { id: string }) => {
     const headerHeight = useHeaderHeight();
     const realtimeStatus = useRealtimeStatus();
     const isTablet = useIsTablet();
-
-    /** Restarts in flight, which the header must not draw as an ended session. */
-    const restartReports = useSessionRestartReports(props.id, session?.metadata?.machineId);
+    /** How this session is being reached, which the header draws from. */
+    const reach = useSessionReach(sessionId, session?.metadata?.machineId);
 
     // Compute header props based on session state
     const headerProps = useMemo(() => {
@@ -84,10 +83,9 @@ export const SessionView = React.memo((props: { id: string }) => {
         }
 
         // Normal state - show session info
-        const isOnline = session.presence === 'online';
-        // A restart in flight is not an ended session: this App asked for it, and the avatar losing
-        // its colour is exactly how an ended one reads.
-        const isLive = isOnline || sessionIsRestarting(session.id, restartReports);
+        // The same question the status line below asks, so the header and the input bar cannot
+        // disagree about whether this session is being reached.
+        const isLive = reach.online || sessionIsRestarting(session);
         return {
             title: getSessionName(session),
             subtitle: session.metadata?.path ? formatPathRelativeToHome(session.metadata.path, session.metadata?.homeDir) : undefined,
@@ -98,7 +96,7 @@ export const SessionView = React.memo((props: { id: string }) => {
             flavor: session.metadata?.flavor || null,
             tintColor: isLive ? '#000' : '#8E8E93'
         };
-    }, [session, isDataReady, sessionId, router, restartReports]);
+    }, [session, isDataReady, sessionId, router, reach]);
 
     return (
         <>
