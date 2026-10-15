@@ -1,6 +1,6 @@
 import { EnhancedMode } from "./loop";
 import { query, type QueryOptions, type SDKMessage, type SDKSystemMessage, AbortError, SDKUserMessage, type SDKResultMessage } from '@/claude/sdk'
-import type { Options as SdkOptions, CanUseTool } from '@anthropic-ai/claude-agent-sdk';
+import type { Options as SdkOptions, CanUseTool, Query } from '@anthropic-ai/claude-agent-sdk';
 import { mapToClaudeMode } from "./utils/permissionMode";
 import { claudeCheckSession } from "./utils/claudeCheckSession";
 import { join } from 'node:path';
@@ -164,6 +164,15 @@ function resolveClaudeBinaryPath(): string {
 export type ClaudeSessionOpts = {
 
     // Fixed parameters
+    /**
+     * Which happy session this process belongs to — stable for the life of that session.
+     *
+     * Not `sessionId`: that is the *Claude* conversation, and it is null on a session's first turn
+     * and only learned from the process's own init frame. Keying a live process by it would look up
+     * a different key on the second turn than the first and spawn again, which is the thing this
+     * whole arrangement exists to stop.
+     */
+    processKey?: string,
     sessionId: string | null,
     path: string,
     mcpServers?: Record<string, any>,
@@ -229,14 +238,131 @@ export type ClaudeSessionOpts = {
 };
 
 export class ClaudeSession {
+    /** False once the session's process has been let go; the loops are what set it back. */
+    private alive = false;
+    /** True while a turn is being served: a session serves one turn at a time. */
+    private busy = false;
+    /** Hands the running loops the opts of the turn now being served. */
+    private serve: ((opts: ClaudeSessionOpts) => void) | null = null;
+    /** Resolves the turn the caller is waiting on. */
+    private resolveTurn: (() => void) | null = null;
+    /** Resolved when the current turn is over, so the input loop stops reading the queue for it. */
+    private turnOver = new Future<void>();
+    /** Resolved when the next turn is served, so a paused input loop knows to read the queue again. */
+    private turnReady: (() => void) | null = null;
+    /** Resolved when the session, not the turn, is over. */
+    private sessionEnded = new Future<void>();
+    /** The SDK process, kept so a turn's stop can interrupt it rather than end it. */
+    private response: Query | null = null;
+    /** The abort listener of the turn in flight, so the next turn's replaces it. */
+    private turnAbort: { signal: AbortSignal; listener: () => void } | null = null;
+    /** Whether the turn in flight has already been ended, so it is ended once. */
+    private turnStopRequested = false;
+    /** Clears what the turn being served left behind, before the next one is served. */
+    private resetTurnState: (() => void) | null = null;
+    /** The conversation this process is holding, learned from its own init frame. */
+    private conversationId: string | null = null;
+
     constructor(private readonly initialOpts: ClaudeSessionOpts) {}
 
     /**
-     * Runs the session. Resolves when the process is finished with, which — with a long-lived
-     * process — is when the session ends rather than when a turn does.
+     * Whether this session's process can serve another turn.
+     *
+     * `runTurn` is the only thing that sets these, and it sets them around the turn it is serving,
+     * so the answer is "yes" exactly between turns — which is when the launcher asks, on its way
+     * into the next one.
+     */
+    isAlive(): boolean {
+        return this.alive;
+    }
+
+    /**
+     * Whether this process can serve the turn being asked of it.
+     *
+     * The conversation has to be the same one, or the turn would land in the wrong history: a
+     * session that was reset (`--resume` dropped, `/clear`) asks for a conversation this process is
+     * not holding and must get a new process. A caller that asks for no conversation at all — the
+     * first turn of a session, before the id is known — is asking for whatever is running.
+     */
+    acceptsTurn(opts: ClaudeSessionOpts): boolean {
+        if (!this.alive || this.busy) {
+            return false;
+        }
+        if (opts.sessionId === null) {
+            return true;
+        }
+        return this.conversationId === null || this.conversationId === opts.sessionId;
+    }
+
+    /**
+     * Lets the process go.
+     *
+     * Not immediate: a turn in flight is interrupted first, because the point of the session was to
+     * serve turns and killing one mid-sentence loses work that the App has already been shown.
+     */
+    end(): void {
+        this.sessionEnded.resolve();
+        this.response?.interrupt().catch(() => { /* the process may already be gone */ });
+    }
+
+    /**
+     * Serves one turn: the same process as the last one, with this turn's callbacks and signal.
+     *
+     * The message that starts the turn is not pushed here. The input loop reads it from the queue
+     * with this turn's `nextMessage` — the same path mid-turn messages take — so everything the
+     * launcher does when it hands over a message (echoes, permission-mode changes, deferrals) keeps
+     * happening exactly once, in one place.
+     */
+    async runTurn(opts: ClaudeSessionOpts): Promise<void> {
+        if (!this.alive) {
+            this.alive = true;
+            // Deliberately not awaited: this runs until the session ends, while the caller waits on
+            // the turn below.
+            void this.run();
+        }
+        this.turnOver = new Future<void>();
+        this.turnStopRequested = false;
+        this.resetTurnState?.();
+        this.serve?.(opts);
+        this.busy = true;
+        const ready = this.turnReady;
+        this.turnReady = null;
+        ready?.();
+        this.bindTurnAbort(opts.signal ?? null);
+        await new Promise<void>((resolve) => { this.resolveTurn = resolve; });
+        this.busy = false;
+    }
+
+    /** A turn's stop is an interrupt of that turn, not the end of the process the next one uses. */
+    private bindTurnAbort(signal: AbortSignal | null): void {
+        if (this.turnAbort) {
+            this.turnAbort.signal.removeEventListener('abort', this.turnAbort.listener);
+            this.turnAbort = null;
+        }
+        if (!signal) {
+            return;
+        }
+        const listener = () => {
+            this.response?.interrupt().catch(() => { /* the process may already be gone */ });
+        };
+        this.turnAbort = { signal, listener };
+        if (signal.aborted) {
+            listener();
+        } else {
+            signal.addEventListener('abort', listener, { once: true });
+        }
+    }
+
+    /**
+     * Runs the session until it is ended: one process, however many turns.
+     *
+     * The loops are the ones that used to run for a single turn. What changed is who they belong
+     * to: they read `opts` from whichever turn is being served, so a turn's callbacks are in force
+     * while that turn runs and no longer, and the process underneath is untouched by the exchange.
      */
     async run(): Promise<void> {
-        const opts = this.initialOpts;
+        let opts = this.initialOpts;
+        this.serve = (next) => { opts = next; };
 
 
     let currentGeneration = opts.claudeEnvVarsGeneration;
@@ -336,12 +462,9 @@ export class ClaudeSession {
             ? initial.mode.appendSystemPrompt + '\n\n' + systemPrompt
             : systemPrompt;
 
-    // Build abort controller from the caller's signal.
+    // The SDK's abort controller ends the process, so it belongs to the session: a turn's stop is
+    // an interrupt of that turn (bound in `runTurn`), not the end of the process the next turn uses.
     const abortController = new AbortController();
-    if (opts.signal) {
-        if (opts.signal.aborted) abortController.abort();
-        else opts.signal.addEventListener('abort', () => abortController.abort(), { once: true });
-    }
 
     const sdkOptions: SdkOptions = {
         cwd: opts.path,
@@ -473,16 +596,9 @@ export class ClaudeSession {
     });
 
     updateThinking(true);
+    this.response = response;
 
-    // When the caller aborts (user clicked stop), send an interrupt to Claude Code
-    // so it stops the current turn immediately rather than finishing the tool call.
-    if (opts.signal) {
-        opts.signal.addEventListener('abort', () => {
-            response.interrupt().catch(() => { /* ignore if process already exited */ });
-        }, { once: true });
-    }
-
-    const stopSignal = new Future<void>();
+    const stopSignal = this.sessionEnded;
     /** Resolved when outputLoop finishes, so inputLoop can tell whether the SDK
      *  stream closed on its own after the input stream ended. */
     const outputDone = new Future<void>();
@@ -499,15 +615,30 @@ export class ClaudeSession {
     /** A normal result arrived while background tasks were still running; the stop
      *  is replayed once they drain. */
     let stopDeferred = false;
-    let stopRequested = false;
     let deferredStopTimer: ReturnType<typeof setTimeout> | null = null;
 
-    function requestStop(): void {
-        if (stopRequested) return;
-        stopRequested = true;
+    /**
+     * Ends the turn being served, leaving the process for the next one.
+     *
+     * `onBeforeStop` first, and only once: the launcher uses it to know that a message fetched
+     * right now would be discarded, and to stash it instead of losing it.
+     */
+    const endTurn = () => {
+        if (this.turnStopRequested) return;
+        this.turnStopRequested = true;
         opts.onBeforeStop?.();
-        stopSignal.resolve();
-    }
+        this.turnOver.resolve();
+        const done = this.resolveTurn;
+        this.resolveTurn = null;
+        done?.();
+    };
+    this.resetTurnState = () => {
+        stopDeferred = false;
+        if (deferredStopTimer) {
+            clearTimeout(deferredStopTimer);
+            deferredStopTimer = null;
+        }
+    };
 
     function scheduleDeferredStop(): void {
         if (deferredStopTimer) clearTimeout(deferredStopTimer);
@@ -518,7 +649,7 @@ export class ClaudeSession {
             if (thinking) return;
             logger.debug('[claudeRemote] background tasks drained — completing deferred stop');
             stopDeferred = false;
-            requestStop();
+            endTurn();
         }, DEFERRED_STOP_DEBOUNCE_MS);
     }
 
@@ -555,13 +686,35 @@ export class ClaudeSession {
 
     // Input Loop: continuously reads user messages from the queue
     // and pushes them to the SDK. Independent of output processing.
+    const session = this;
+    /** True when the loop below stopped because the session is over, not to re-spawn for a change. */
+    let inputExitedForSession = false;
     async function inputLoop(): Promise<void> {
         while (true) {
-            const next = await Promise.race([
-                opts.nextMessage(),
-                stopSignal.promise.then(() => null),
+            // Between turns nobody is waiting for a message: the launcher hands the next one over
+            // when it calls runTurn, which is what wakes this loop. Reading the queue here in the
+            // meantime would start a turn with no one to serve it.
+            if (!session.busy) {
+                await new Promise<void>((resolve) => { session.turnReady = resolve; });
+            }
+            const endOfTurn = session.turnOver;
+            const raced = await Promise.race([
+                opts.nextMessage().then((message) => ({ kind: 'message' as const, message })),
+                endOfTurn.promise.then(() => ({ kind: 'turn' as const })),
+                stopSignal.promise.then(() => ({ kind: 'session' as const })),
             ]);
-            if (next === null || next === undefined) break;
+            if (raced.kind === 'session') {
+                inputExitedForSession = true;
+                break;
+            }
+            // The turn is over; wait for the next one rather than reading the queue for this one.
+            if (raced.kind === 'turn') continue;
+            const next = raced.message;
+            if (next === null || next === undefined) {
+                // The queue itself says there is nothing more to wait for.
+                inputExitedForSession = true;
+                break;
+            }
 
             const latestGeneration = opts.getClaudeEnvVarsGeneration();
             if (latestGeneration !== currentGeneration) {
@@ -598,7 +751,7 @@ export class ClaudeSession {
         // stop, so nothing has told Claude Code to wind down. With background tasks
         // alive it keeps the stream open indefinitely and claudeRemote() would never
         // return. Force it — background tasks do not survive a re-spawn anyway.
-        if (stopRequested || liveBackgroundTasks.size === 0) return;
+        if (inputExitedForSession || liveBackgroundTasks.size === 0) return;
         let timer: ReturnType<typeof setTimeout> | undefined;
         const closed = await Promise.race([
             outputDone.promise.then(() => true),
@@ -645,7 +798,7 @@ export class ClaudeSession {
                     const content: string = (message as any).content ?? '';
                     logger.debug('[claudeRemote] /context local_command output intercepted');
                     opts.onContextOutput?.(content);
-                    stopSignal.resolve();
+                    endTurn();
                     continue;
                 }
 
@@ -676,6 +829,7 @@ export class ClaudeSession {
                     const systemInit = message as SDKSystemMessage;
 
                     if (systemInit.model && systemInit.session_id) {
+                        session.conversationId = systemInit.session_id;
                         opts.onModelInit?.({
                             model: systemInit.model,
                             version: (systemInit as any).claude_code_version || '',
@@ -815,10 +969,10 @@ export class ClaudeSession {
                         continue;
                     }
 
-                    // Signal inputLoop to exit so claudeRemote() returns
-                    // and the outer launcher loop can peek inbox / pick
-                    // up the next queued message.
-                    requestStop();
+                    // The turn is over. The input loop stops reading the queue for it and waits for
+                    // the next turn; the process stays where it is, for that turn to use.
+                    logger.debug('[claudeRemote] Turn complete — keeping the process for the next turn');
+                    endTurn();
                 }
 
                 // Abort check
@@ -848,12 +1002,16 @@ export class ClaudeSession {
         }
     }
 
-    // Run both loops concurrently
+    // Run both loops concurrently. They are the session's now, not a turn's: this resolves when the
+    // session is ended, however many turns have been served in the meantime.
     try {
         await Promise.all([inputLoop(), outputLoop()]);
     } finally {
         messages.end();
         updateThinking(false);
+        this.alive = false;
+        this.response = null;
+        this.turnAbort = null;
     }
     }
 }
