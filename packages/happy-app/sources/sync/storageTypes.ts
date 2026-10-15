@@ -163,6 +163,15 @@ export interface Session {
     thinking: boolean,
     thinkingAt: number,
     presence: "online" | number, // "online" when active, timestamp when last seen
+    /**
+     * When the machine began restarting this session, or null once it is not.
+     *
+     * The session's own state, pushed as a session state change and kept here rather than in a
+     * store of its own: it is one more thing about a session, and a reader asking "is this one
+     * being restarted" should have to look in one place, not two. Absent means "nothing has said",
+     * which reads the same as null.
+     */
+    restartingAt?: number | null,
     todos?: Array<{
         content: string;
         status: 'pending' | 'in_progress' | 'completed';

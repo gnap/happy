@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { Session } from '@/sync/storageTypes';
-import { useDaemonSockets, useLanSessionList, useSessionRestartReports } from '@/sync/storage';
+import { useSessionReach } from '@/sync/storage';
 import { sessionIsRestarting } from '@/utils/sessionRestart';
 import { t } from '@/text';
 
@@ -30,34 +30,13 @@ export interface SessionStatus {
  * Uses centralized session state from storage.ts
  */
 export function useSessionStatus(session: Session): SessionStatus {
-    /**
-     * What the daemon that owns this session last said about it.
-     *
-     * Only ever populated when the server could not answer — and that is exactly the case this
-     * matters in: `session.presence` is the server's view, so a session being read and written over
-     * the LAN right now reads as "last seen 20 minutes ago" the moment the server goes quiet, which
-     * is a page that contradicts the messages arriving on it.
-     */
-    const daemonSessions = useLanSessionList();
-    /**
-     * Whether a channel is carrying this session right now.
-     *
-     * The authority on that is the channel itself, and this is the check that gives it: while the
-     * App holds a live connection to the machine that owns this session, the session is reachable,
-     * whatever the server last said. The server's view is only consulted when nothing is connected
-     * — it is a report about the past, and a report about the past must not overwrite what is
-     * happening now.
-     */
-    const daemonSockets = useDaemonSockets();
-    const machineId = session.metadata?.machineId;
-    const servedNow = machineId
-        ? Object.entries(daemonSockets).some(([key, socket]) => key.startsWith(`${machineId}:`) && socket.phase === 'live')
-        : false;
-    // Optional at every step: the store is empty until a daemon has answered, and a status line is
-    // not worth a crash in the one case it exists for.
-    const isOnline = session.presence === "online" || servedNow || daemonSessions?.[session.id]?.isAlive === true;
+    // Whether anything is reaching it, and over which channel — asked once, of every channel this
+    // device has, rather than worked out here from the particular channel state this file happened
+    // to know about. The server's view is consulted only when nothing nearer can answer: it is a
+    // report about the past, and a report about the past must not overwrite what is happening now.
+    const reach = useSessionReach(session.id, session.metadata?.machineId);
+    const isOnline = reach.online;
     const hasPermissions = (session.agentState?.requests && Object.keys(session.agentState.requests).length > 0 ? true : false);
-    const restartReports = useSessionRestartReports(session.id, session.metadata?.machineId);
 
     const vibingMessage = React.useMemo(() => {
         return vibingMessages[Math.floor(Math.random() * vibingMessages.length)].toLowerCase() + '…';
@@ -65,15 +44,16 @@ export function useSessionStatus(session: Session): SessionStatus {
 
     if (!isOnline) {
         /**
-         * A restart this App asked for is not an offline session, and the two look identical from
-         * here: the session stops reporting, and "not reporting" is what an ended session looks
-         * like too. The difference is that this App knows it asked, and while a restart could
-         * still be running, saying one is happening is the honest thing to say.
+         * A session being restarted is not an offline one, and from here the two look identical:
+         * it stops reporting, and "not reporting" is what an ended session looks like too. The
+         * difference is that the machine doing it says so, and it says so about the session — so
+         * this reads the session, and the answer is the same on every device rather than only on
+         * the one that asked.
          *
          * Only ever consulted here, for a session that is not reporting itself. A session that
-         * answers again is drawn from what it says, whatever this App remembers asking.
+         * answers again is drawn from what it says.
          */
-        if (sessionIsRestarting(session.id, restartReports)) {
+        if (sessionIsRestarting(session)) {
             return {
                 state: 'restarting',
                 isConnected: false,
@@ -215,21 +195,6 @@ export function getSessionSubtitle(session: Session): string {
     return t('status.unknown');
 }
 
-/**
- * Checks if a session is currently online based on the active flag.
- * A session is considered online if the active flag is true.
- */
-export function isSessionOnline(session: Session): boolean {
-    return session.active;
-}
-
-/**
- * Checks if a session should be shown in the active sessions group.
- * Uses the active flag directly.
- */
-export function isSessionActive(session: Session): boolean {
-    return session.active;
-}
 
 /**
  * Formats OS platform string into a more readable format

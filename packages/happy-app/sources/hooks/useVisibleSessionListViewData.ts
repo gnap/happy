@@ -30,7 +30,7 @@ export function useVisibleSessionListViewData(): SessionListViewItem[] | null {
             }
 
             if (item.type === 'session') {
-                if (item.session.active) {
+                if (item.online) {
                     if (pendingProjectGroup) {
                         filtered.push(pendingProjectGroup);
                         pendingProjectGroup = null;

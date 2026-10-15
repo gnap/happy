@@ -3914,9 +3914,18 @@ class Sync {
                     ? await sessionEncryption.decryptMetadata(updateData.body.metadata.version, updateData.body.metadata.value)
                     : session.metadata;
 
+                // What the machine may say about a session, which no amount of the session's own
+                // state can express: everything else here is ciphertext from the session process,
+                // and during a restart there is no session process to send any. Absent means this
+                // update says nothing about restarting — only an explicit null calls one off.
+                const restartingAt = updateData.body.restartingAt !== undefined
+                    ? updateData.body.restartingAt ?? null
+                    : session.restartingAt;
+
                 // Do not set seq from updateData.seq (global); keep session.seq as session-internal so it matches GET /v1/sessions
                 this.applySessions([{
                     ...session,
+                    restartingAt,
                     agentState,
                     agentStateVersion: updateData.body.agentState
                         ? updateData.body.agentState.version
