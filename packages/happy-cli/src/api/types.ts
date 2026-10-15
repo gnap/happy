@@ -163,6 +163,16 @@ export const DaemonStateSchema = z.object({
       z.string() // Forward compatibility
     ]).optional(),
   /**
+   * The build this daemon is running, and whether the one on disk is a different one.
+   *
+   * Declared here because this schema is the gate: zod keeps what it is told about and drops the
+   * rest, so the daemon can put its build into the state it uploads and have it arrive as nothing.
+   * It is also the only place the App can read a machine's build from when it has no route to that
+   * machine — the local state file knows it, but nothing outside the machine can read that file.
+   */
+  startedWithCliVersion: z.string().optional(),
+  restartRequired: z.boolean().optional(),
+  /**
    * Where this machine can be reached on the LAN, published so a client can cache it while
    * the server is healthy and fall back to it when the server is not. Only populated when
    * the LAN API is enabled.

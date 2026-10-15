@@ -1730,12 +1730,26 @@ export async function startDaemon(): Promise<void> {
     writeDaemonState(fileState);
     logger.debug('[DAEMON RUN] Daemon state written');
 
-    // Prepare initial daemon state
+    // Prepare initial daemon state.
+    //
+    // The build is part of it because the record the App reads is the only place the rest of the
+    // world can learn what this daemon is running: the local state file knows it too, but nothing
+    // else can read that file, and a session judged against a machine's build needs an answer that
+    // exists on the other side. `restartRequired` rides along for the same reason — this process is
+    // the only one that can compare what it is running with what is on the disk.
     const initialDaemonState: DaemonState = {
       status: 'offline',
       pid: process.pid,
       httpPort: controlPort,
-      startedAt: Date.now()
+      startedAt: Date.now(),
+      startedWithCliVersion: BUILD_VERSION,
+      restartRequired: versionStateOf(BUILD_VERSION, versionArtifacts(), (path) => {
+        try {
+          return readFileSync(path, 'utf-8');
+        } catch {
+          return null;
+        }
+      }).restartRequired,
     };
 
     // Create API client
