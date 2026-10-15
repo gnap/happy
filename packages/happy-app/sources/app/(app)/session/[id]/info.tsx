@@ -515,7 +515,15 @@ function SessionInfoContent({ session }: { session: Session }) {
                         needed updating and why nobody could tell what the rule was. */}
                     <Item
                         title={t('sessionInfo.restartSession')}
-                        subtitle={sessionNeedsRestart ? t('sessionInfo.restartSessionSubtitle') : undefined}
+                        subtitle={(() => {
+                            // The value the row is actually handed, next to the decision itself: the two
+                            // disagreeing is a rendering question, and agreeing is a question about the
+                            // decision — which is the difference between looking at the wrong place and
+                            // looking at the wrong rule.
+                            const subtitle = sessionNeedsRestart ? t('sessionInfo.restartSessionSubtitle') : undefined;
+                            console.log(`🔄 restart row: needsRestart=${sessionNeedsRestart} subtitle=${subtitle ? 'set' : 'none'}`);
+                            return subtitle;
+                        })()}
                         icon={<Ionicons name="sync-circle-outline" size={29} color="#FF9500" />}
                         onPress={handleRestartSession}
                     />
