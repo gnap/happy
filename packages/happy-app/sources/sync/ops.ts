@@ -334,8 +334,30 @@ export async function machineUpdateMetadata(
 /**
  * Abort the current session operation
  */
+/**
+ * Hands a control call to the machine's own channel first, and to the server when it has none.
+ *
+ * The parameters are encrypted once, here, and then travel either way: the daemon cannot read them
+ * and does not need to — it forwards them to the session, whose key opens them. So the two routes
+ * are the same request down two paths, and the App does not care which one carried it.
+ */
+async function sessionControl<T>(
+    sessionId: string,
+    method: 'abort' | 'permission',
+    params: unknown,
+): Promise<T> {
+    const sessionEncryption = sync.encryption?.getSessionEncryption(sessionId);
+    if (sessionEncryption) {
+        const encrypted = await sessionEncryption.encryptRaw(params);
+        if (await sync.sessionControl(sessionId, method, encrypted)) {
+            return undefined as T;
+        }
+    }
+    return apiSocket.sessionRPC<T, unknown>(sessionId, method, params);
+}
+
 export async function sessionAbort(sessionId: string): Promise<void> {
-    await apiSocket.sessionRPC(sessionId, 'abort', {
+    await sessionControl(sessionId, 'abort', {
         reason: `The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.`
     });
 }
@@ -345,7 +367,7 @@ export async function sessionAbort(sessionId: string): Promise<void> {
  */
 export async function sessionAllow(sessionId: string, id: string, mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan', allowedTools?: string[], decision?: 'approved' | 'approved_for_session', updatedInput?: Record<string, unknown>): Promise<void> {
     const request: SessionPermissionRequest = { id, approved: true, mode, allowTools: allowedTools, decision, updatedInput };
-    await apiSocket.sessionRPC(sessionId, 'permission', request);
+    await sessionControl(sessionId, 'permission', request);
 }
 
 /**
@@ -353,7 +375,7 @@ export async function sessionAllow(sessionId: string, id: string, mode?: 'defaul
  */
 export async function sessionDeny(sessionId: string, id: string, mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan', allowedTools?: string[], decision?: 'denied' | 'abort'): Promise<void> {
     const request: SessionPermissionRequest = { id, approved: false, mode, allowTools: allowedTools, decision };
-    await apiSocket.sessionRPC(sessionId, 'permission', request);
+    await sessionControl(sessionId, 'permission', request);
 }
 
 /**

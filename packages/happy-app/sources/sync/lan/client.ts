@@ -236,3 +236,29 @@ export async function restartSessionAt(
     }
     return (await response.json()) as LanRestartVerdict;
 }
+
+/**
+ * Asks a daemon to forward a control call to one of its sessions.
+ *
+ * The parameters are the same ciphertext the server route carries — the session's own key opens
+ * them, and neither the daemon nor the relay holds it — so this walks the same bytes down a shorter
+ * path. True means the daemon has a live session by that id and handed it over; false means there is
+ * nobody here to ask, and the caller should ask the server instead.
+ */
+export async function sessionControlAt(
+    baseUrl: string,
+    token: string,
+    sessionId: string,
+    method: 'abort' | 'permission',
+    params: string
+): Promise<boolean> {
+    const response = await request(`${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/control`, {
+        method: 'POST',
+        token,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ method, params }),
+        // Not a read: the daemon answers as soon as the session's socket has taken it.
+        timeoutMs: REQUEST_TIMEOUT_MS,
+    });
+    return response.ok;
+}
