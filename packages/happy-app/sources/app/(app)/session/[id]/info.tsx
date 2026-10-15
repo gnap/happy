@@ -265,10 +265,24 @@ function SessionInfoContent({ session }: { session: Session }) {
      * older than everything around it.
      */
     const machineVersions = session.metadata?.machineId ? daemonVersions[session.metadata.machineId] : undefined;
-    const daemonBuild = machineVersions?.running
+    // The build on disk first, because that is what a restart produces: the daemon spawns the next
+    // session from the file, not from the process it happens to be running. Then the daemon's own
+    // build, then the two record fields, oldest source last.
+    const daemonBuild = machineVersions?.onDisk
+        ?? machineVersions?.running
         ?? machine?.daemonState?.startedWithCliVersion
         ?? machine?.metadata?.happyCliVersion;
     const sessionNeedsRestart = isSessionRestartRecommended(session.metadata?.version, daemonBuild);
+    // What the decision was made of, once per session: an answer nobody can check is how this
+    // question became a mystery in the first place.
+    const loggedDecision = React.useRef<string | null>(null);
+    const decision = `session ${session.id} version=${session.metadata?.version ?? '-'} machine=${session.metadata?.machineId?.slice(0, 8) ?? '-'} onDisk=${machineVersions?.onDisk ?? '-'} running=${machineVersions?.running ?? '-'} record=${machine?.daemonState?.startedWithCliVersion ?? '-'} server=${machine?.metadata?.happyCliVersion ?? '-'} needsRestart=${sessionNeedsRestart}`;
+    React.useEffect(() => {
+        if (loggedDecision.current !== decision) {
+            loggedDecision.current = decision;
+            console.log(`🔄 restart decision: ${decision}`);
+        }
+    }, [decision]);
 
     // Use HappyAction for restart
     const [restartingSession, doRestartSession] = useHappyAction(async () => {
