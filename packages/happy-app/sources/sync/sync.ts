@@ -38,7 +38,7 @@ import { AsyncLock } from '@/utils/lock';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
-import { fetchIdentity, restartSessionAt } from './lan/client';
+import { fetchIdentity, restartSessionAt, sessionControlAt } from './lan/client';
 import { getLanCredential } from './lan/credentials';
 import { readSessionOverLan, listSessionsOverLan, toNormalizedMessages, type LanConnection, type LanSessionRead } from './lan/sessionChannel';
 import { decryptLanEntries } from './lan/history';
@@ -4544,6 +4544,55 @@ class Sync {
      * moved since. Neither is discovered afresh: a restart is a rare, deliberate act and one that has
      * already failed is better reported than turned into a browse.
      */
+    /**
+     * Hands a control call to the session over a channel this App already has to its machine.
+     *
+     * Null when there is none, or when the machine has no live session by that id — and the caller
+     * asks the server, which is where every one of these went before. The reason to prefer the
+     * machine's own channel is the same one restart has: the session is running on that machine, and
+     * the channel that is up is not always the server's.
+     *
+     * `params` is the ciphertext `sessionRPC` would have sent. The daemon forwards it without being
+     * able to read it — which is why this can be offered over a plain-HTTP channel at all.
+     */
+    async sessionControl(
+        sessionId: string,
+        method: 'abort' | 'permission',
+        params: string,
+    ): Promise<boolean> {
+        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        const machineKey = machineId ? this.getMachineKey(machineId) : null;
+        if (!machineId || !machineKey) {
+            return false;
+        }
+        // The same decision the session's messages are read over, so a control call goes the way the
+        // session is already being talked to.
+        const preferred = this.preferredChannel(sessionId);
+        if (preferred === 'server') {
+            return false;
+        }
+        const routes = this.daemonRoutesEnabled();
+        const addresses = this.knownMachineAddresses().filter((address) => address.machineId === machineId);
+        const order: DaemonRoute[] = preferred === 'lan' ? ['lan', 'relay'] : ['relay', 'lan'];
+        for (const route of order) {
+            const address = addresses.find((candidate) => candidate.route === route);
+            if (!address || !routes[route]) {
+                continue;
+            }
+            try {
+                const { token } = await getLanCredential(address.baseUrl, machineKey);
+                if (await sessionControlAt(address.baseUrl, token, sessionId, method, params)) {
+                    log.log(`🔄 ${method} ${sessionId} over ${route}: handed to the session`);
+                    return true;
+                }
+            } catch {
+                // The next route, and then the server: an address that does not answer is a reason to
+                // try another, not a failure to hand back.
+            }
+        }
+        return false;
+    }
+
     async restartSession(sessionId: string, machineId: string): Promise<{ success: boolean; newSessionId?: string; error?: string } | null> {
         const machineKey = this.getMachineKey(machineId);
         if (!machineKey) {
