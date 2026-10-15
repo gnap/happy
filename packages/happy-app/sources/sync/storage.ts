@@ -341,6 +341,9 @@ function dominantMachineId(sessions: Session[]): string | undefined {
 }
 
 // Helper function to build unified list view data from sessions and machines
+/** The last mark logged per session, so the line appears when it changes rather than per rebuild. */
+const listMarkLogged = new Map<string, string>();
+
 function buildSessionListViewData(
     sessions: Record<string, Session>,
     machines: Record<string, { metadata?: { happyCliVersion?: string } | null; daemonState?: { startedWithCliVersion?: string } | null }>,
@@ -386,7 +389,15 @@ function buildSessionListViewData(
             ?? live?.running
             ?? machine?.daemonState?.startedWithCliVersion
             ?? machine?.metadata?.happyCliVersion;
-        return !!(sessionVersion && machineVersion && sessionVersion !== machineVersion);
+        const marked = !!(sessionVersion && machineVersion && sessionVersion !== machineVersion);
+        // The mark's inputs, once per change: three sources feed this baseline and a log is the only
+        // way to tell a rule that decided wrongly from one that was handed nothing.
+        const summary = `${s.id} session=${sessionVersion ?? '-'} onDisk=${live?.onDisk ?? '-'} running=${live?.running ?? '-'} record=${machine?.daemonState?.startedWithCliVersion ?? '-'} server=${machine?.metadata?.happyCliVersion ?? '-'} marked=${marked}`;
+        if (listMarkLogged.get(s.id) !== summary) {
+            listMarkLogged.set(s.id, summary);
+            console.log(`🔄 list restart mark: ${summary}`);
+        }
+        return marked;
     };
 
     // Helper: emit a date group, inserting project-group headers with host sub-groups.
