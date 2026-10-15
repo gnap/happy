@@ -358,7 +358,7 @@ class Sync {
             // answer is most likely to have changed.
             if (state.phase === 'live') {
                 const machineId = id.split(':')[0];
-                void this.refreshDaemonVersions([{ machineId, baseUrl: this.lanMachineConnections.get(machineId)?.baseUrl ?? '' }], true);
+                void this.refreshDaemonVersions([{ machineId, baseUrl: this.lanMachineConnections.get(machineId)?.baseUrl ?? '' }]);
             }
         },
         // Only the LAN: over the relay the hub is the one that can see a daemon go, and it says so.
@@ -581,7 +581,7 @@ class Sync {
             if (Date.now() - lastMachineVersionSweep > Sync.MACHINE_VERSION_SWEEP_MS
                 && storage.getState().socketStatus === 'connected') {
                 lastMachineVersionSweep = Date.now();
-                void this.refreshDaemonVersions(this.machinesWithNoLiveChannel(), true);
+                void this.refreshDaemonVersions(this.machinesWithNoLiveChannel());
             }
 
             const idleMs = Date.now() - this.lastUserActivityAt;
@@ -4332,16 +4332,18 @@ class Sync {
         ));
     }
 
-    /** Asks each machine what build it is running, and records it. Never fatal. */
-    private async refreshDaemonVersions(machines: { machineId: string; baseUrl: string }[], force = false): Promise<void> {
+    /**
+     * Asks each machine what build it is running, and records it. Never fatal.
+     *
+     * Asked on occasions, never on a schedule of its own: the caller decides, and each of the three
+     * callers is something that happened — a socket came live, the server could not answer, or the
+     * long server-channel sweep came round. A machine is asked once per occasion, with nothing
+     * remembered about when it last answered, because there is no such thing as holding this answer
+     * too freshly: whoever asks has a reason to.
+     */
+    private async refreshDaemonVersions(machines: { machineId: string; baseUrl: string }[]): Promise<void> {
         for (const machine of machines) {
             if (!machine.baseUrl || this.daemonVersionChecks.has(machine.machineId)) {
-                continue;
-            }
-            // Asked again only when what we hold is old enough to be worth doubting: a version
-            // changes when someone rebuilds, which is not something a poll interval should chase.
-            const held = storage.getState().daemonVersions[machine.machineId];
-            if (!force && held && Date.now() - held.at < 30_000) {
                 continue;
             }
             this.daemonVersionChecks.add(machine.machineId);
@@ -4572,11 +4574,12 @@ class Sync {
         }
         // The same handshake that just read this machine's sessions can tell us what it is running —
         // the one fact about a machine that the server's copy of it cannot keep current, because a
-        // version is a build id that changes whenever anything is rebuilt.
+        // version is a build id that changes whenever anything is rebuilt. The address is the one
+        // that answered, so a machine reached over its relay is asked there too rather than being
+        // looked for on a network it is not on.
         void this.refreshDaemonVersions(answers.map((answer) => ({
             machineId: answer.machineId,
-            // Whatever this machine was last reached over: the same address the read just used.
-            baseUrl: this.lanMachineConnections.get(answer.machineId)?.baseUrl ?? '',
+            baseUrl: answer.baseUrl,
         })));
         return sessions.length;
     }

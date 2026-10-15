@@ -166,8 +166,8 @@ export async function listSessionsOverLan(options: {
     relays?: { machineId: string; baseUrl: string }[];
     /** Browse the local network. Off when the LAN channel is switched off. */
     browseLan?: boolean;
-}): Promise<{ machineId: string; via: DaemonRoute; sessions: LanSessionSummary[] }[]> {
-    const answers: { machineId: string; via: DaemonRoute; sessions: LanSessionSummary[] }[] = [];
+}): Promise<{ machineId: string; via: DaemonRoute; baseUrl: string; sessions: LanSessionSummary[] }[]> {
+    const answers: { machineId: string; via: DaemonRoute; baseUrl: string; sessions: LanSessionSummary[] }[] = [];
     const answered = new Set<string>();
     const discovered = options.browseLan === false
         ? []
@@ -185,7 +185,7 @@ export async function listSessionsOverLan(options: {
         }
         try {
             const { token } = await getLanCredential(machine.baseUrl, machineKey);
-            answers.push({ machineId: machine.machineId, via: 'lan', sessions: await fetchSessions(machine.baseUrl, token) });
+            answers.push({ machineId: machine.machineId, via: 'lan', baseUrl: machine.baseUrl, sessions: await fetchSessions(machine.baseUrl, token) });
             answered.add(machine.machineId);
         } catch {
             // This daemon refused or dropped; the relay (or another machine) may still answer.
@@ -200,7 +200,7 @@ export async function listSessionsOverLan(options: {
         }
         try {
             const { token } = await getLanCredential(relay.baseUrl, machineKey);
-            answers.push({ machineId: relay.machineId, via: 'relay', sessions: await fetchSessions(relay.baseUrl, token) });
+            answers.push({ machineId: relay.machineId, via: 'relay', baseUrl: relay.baseUrl, sessions: await fetchSessions(relay.baseUrl, token) });
         } catch {
             // This relay route is down or its daemon is offline.
         }
