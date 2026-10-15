@@ -1,66 +1,56 @@
 import { describe, expect, it } from 'vitest';
-import { channelLinks, type ChannelFacts } from './channelLinks';
+import { channelLinks } from './channelLinks';
+import type { ChannelDriver, ChannelLinkState } from './channels/types';
 
-const facts = (over: Partial<ChannelFacts> = {}): ChannelFacts => ({
-    serverStatus: 'connected',
-    lanSocket: false,
-    lanSeen: false,
-    relayConnected: false,
-    ...over,
+/** A channel that says exactly this about its own link. */
+const driver = (channel: ChannelDriver['channel'], state: ChannelLinkState | null): ChannelDriver => ({
+    channel,
+    link: () => state,
+    session: () => null,
+    machine: () => null,
+    capable: () => false,
+    supports: () => true,
 });
 
 describe('channelLinks', () => {
-    it('shows the relay whenever it is switched on, because that is the channel being on', () => {
-        // The relay icon is the App's one connection to the relay — not the per-machine streams it
-        // carries, which exist only while a session is being read over one. Reporting it as absent
-        // whenever no stream happened to be open is what made the relay look eaten.
-        expect(channelLinks(['lan', 'relay', 'server'], facts({ relayConnected: true }))).toEqual([
+    it('draws each channel the way that channel says it is doing', () => {
+        expect(channelLinks([
+            driver('relay', 'connected'),
+            driver('server', 'connected'),
+        ])).toEqual([
             { channel: 'relay', state: 'connected' },
             { channel: 'server', state: 'connected' },
         ]);
-        expect(channelLinks(['lan', 'relay', 'server'], facts())).toEqual([
+    });
+
+    it('keeps the order it was handed', () => {
+        // The order is the priority setting, applied when the drivers are built — this only draws.
+        expect(channelLinks([
+            driver('relay', 'connecting'),
+            driver('lan', 'connected'),
+            driver('server', 'connected'),
+        ]).map((l) => l.channel)).toEqual(['relay', 'lan', 'server']);
+    });
+
+    it('leaves out a channel that has nothing to say about itself', () => {
+        // Not the same as "off": a channel that says null has no business being drawn at all — the
+        // LAN, on a network nothing has been seen on. An icon there would claim a channel that has
+        // never had anything to talk to.
+        expect(channelLinks([
+            driver('lan', null),
+            driver('server', 'connected'),
+        ])).toEqual([{ channel: 'server', state: 'connected' }]);
+    });
+
+    it('draws a channel that is switched on and not yet reached', () => {
+        // The relay is its one connection to the hub: while it is on and not yet reached, the App is
+        // trying, which is the blue rather than the grey.
+        expect(channelLinks([
+            driver('relay', 'connecting'),
+            driver('server', 'off'),
+        ])).toEqual([
             { channel: 'relay', state: 'connecting' },
-            { channel: 'server', state: 'connected' },
+            { channel: 'server', state: 'off' },
         ]);
-    });
-
-    it('keeps the order the priority setting gives', () => {
-        expect(channelLinks(['relay', 'lan', 'server'], facts({ relayConnected: true, lanSeen: true })).map((l) => l.channel))
-            .toEqual(['relay', 'lan', 'server']);
-    });
-
-    it('hides the LAN icon until this device has seen a machine on the network', () => {
-        // Spelled out in full, because the two-channel list is the one `channelOrder` migrates:
-        // `['lan', 'server']` is the pre-relay default, not a decision about the LAN.
-        expect(channelLinks(['lan', 'server', 'relay'], facts()).map((l) => l.channel)).toEqual(['server', 'relay']);
-        expect(channelLinks(['lan', 'server', 'relay'], facts({ lanSeen: true }))).toEqual([
-            { channel: 'lan', state: 'connecting' },
-            { channel: 'server', state: 'connected' },
-            { channel: 'relay', state: 'connecting' },
-        ]);
-        expect(channelLinks(['lan', 'server', 'relay'], facts({ lanSocket: true }))[0]).toEqual({ channel: 'lan', state: 'connected' });
-    });
-
-    it('treats the pre-relay list as never having decided about the relay', () => {
-        // A device that saved the old default has not switched the relay off: the channel did not
-        // exist when it saved. Honouring the list literally turned the relay off on every device
-        // that had not been asked since, which reads as the channel having been removed.
-        expect(channelLinks(['lan', 'server'], facts()).map((l) => l.channel)).toEqual(['server', 'relay']);
-    });
-
-    it('falls back to the default set rather than showing no channels at all', () => {
-        // The stored value is what a device last saved; blanked or unreadable, the header still has
-        // to say something, or a channel that is on looks like a channel that does not exist.
-        // The LAN entry is still hidden — nothing has been seen on this network — but the relay and
-        // the server are there, which is the point: the channels that are on must not vanish.
-        // The default order is lan › server › relay, and the LAN entry is still hidden because
-        // nothing has been seen on this network.
-        expect(channelLinks([], facts({ relayConnected: true })).map((l) => l.channel)).toEqual(['server', 'relay']);
-        expect(channelLinks(['nonsense'] as never, facts()).map((l) => l.channel)).toEqual(['server', 'relay']);
-    });
-
-    it('reports the server channel as down when the socket is not up', () => {
-        expect(channelLinks(['server'], facts({ serverStatus: 'connecting' }))).toEqual([{ channel: 'server', state: 'connecting' }]);
-        expect(channelLinks(['server'], facts({ serverStatus: 'error' }))).toEqual([{ channel: 'server', state: 'disconnected' }]);
     });
 });

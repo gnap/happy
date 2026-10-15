@@ -2,7 +2,7 @@ import React from 'react';
 import { View, Text, Platform, Pressable, useWindowDimensions, ScrollView, TextInput } from 'react-native';
 import Constants from 'expo-constants';
 import { Typography } from '@/constants/Typography';
-import { useAllMachines, storage, useSetting, useSettingMutable, useSessions, useLocalSetting } from '@/sync/storage';
+import { useAllMachines, storage, useMachinePresenceMap, useSetting, useSettingMutable, useSessions, useLocalSetting } from '@/sync/storage';
 import { Ionicons, Octicons } from '@expo/vector-icons';
 import { ItemGroup } from '@/components/ItemGroup';
 import { Item } from '@/components/Item';
@@ -37,7 +37,7 @@ import { useEnvironmentVariables, resolveEnvVarSubstitution, extractEnvVarRefere
 import { formatPathRelativeToHome } from '@/utils/sessionUtils';
 import { resolveAbsolutePath } from '@/utils/pathUtils';
 import { MultiTextInput } from '@/components/MultiTextInput';
-import { isMachineOnline } from '@/utils/machineUtils';
+import { machineIsReachable } from '@/utils/machineUtils';
 import { StatusDot } from '@/components/StatusDot';
 import { SearchableListSelector, SelectorConfig } from '@/components/SearchableListSelector';
 import { clearNewSessionDraft, loadNewSessionDraft, saveNewSessionDraft } from '@/sync/persistence';
@@ -1125,9 +1125,10 @@ function NewSessionWizard() {
     const screenWidth = useWindowDimensions().width;
 
     // Machine online status for AgentInput (DRY - reused in info box too)
+    const machinePresence = useMachinePresenceMap();
     const connectionStatus = React.useMemo(() => {
         if (!selectedMachine) return undefined;
-        const isOnline = isMachineOnline(selectedMachine);
+        const isOnline = machineIsReachable(machinePresence[selectedMachine.id] ?? 'offline');
 
         // Include CLI status only when in wizard AND detection completed
         const includeCLI = selectedMachineId && cliAvailability.timestamp > 0;
@@ -1144,7 +1145,7 @@ function NewSessionWizard() {
                 ...(experimentsEnabled && { gemini: cliAvailability.gemini }),
             } : undefined,
         };
-    }, [selectedMachine, selectedMachineId, cliAvailability, experimentsEnabled, theme]);
+    }, [selectedMachine, selectedMachineId, cliAvailability, experimentsEnabled, theme, machinePresence]);
 
     // Persist the current wizard state so it survives remounts and screen navigation
     // Uses debouncing to avoid excessive writes
@@ -1808,7 +1809,7 @@ function NewSessionWizard() {
                                         />
                                     ),
                                     getItemStatus: (machine) => {
-                                        const offline = !isMachineOnline(machine);
+                                        const offline = !machineIsReachable(machinePresence[machine.id] ?? 'offline');
                                         return {
                                             text: offline ? 'offline' : 'online',
                                             color: offline ? theme.colors.status.disconnected : theme.colors.status.connected,

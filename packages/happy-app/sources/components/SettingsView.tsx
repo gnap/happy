@@ -17,9 +17,9 @@ import { isUsingCustomServer } from '@/sync/serverConfig';
 import { trackPaywallButtonClicked, trackWhatsNewClicked } from '@/track';
 import { Modal } from '@/modal';
 import { useMultiClick } from '@/hooks/useMultiClick';
-import { useAllMachines, useMachinesMap, useMachinePresenceMap, useLanSightings, useRelayDirectory, useRelayEndpoints } from '@/sync/storage';
+import { useAllMachines, useMachinesMap, useMachinePresenceMap, useLanSightings, useRelayDirectory, useRelayEndpoints, useMachineBadgeInputs } from '@/sync/storage';
 import { MachinePresenceBadge } from '@/components/MachinePresenceBadge';
-import { isMachineOnline } from '@/utils/machineUtils';
+import { machineIsReachable } from '@/utils/machineUtils';
 import { useUnistyles } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
 import { useHappyAction } from '@/hooks/useHappyAction';
@@ -61,7 +61,10 @@ export const SettingsView = React.memo(function SettingsView() {
      */
     const allMachines = React.useMemo(
         () => Object.values(machinesById).sort((a, b) => {
-            const online = (isMachineOnline(b) ? 1 : 0) - (isMachineOnline(a) ? 1 : 0);
+            // Online-first, where online means anything is reaching it — the server's own flag is
+            // the spawn question, and a machine on the LAN sorted below an unreachable one.
+            const online = (machineIsReachable(machinePresence[b.id] ?? 'offline') ? 1 : 0)
+                - (machineIsReachable(machinePresence[a.id] ?? 'offline') ? 1 : 0);
             if (online !== 0) return online;
             const byName = machineSortName(a).localeCompare(machineSortName(b));
             return byName !== 0 ? byName : a.id.localeCompare(b.id);
@@ -69,6 +72,8 @@ export const SettingsView = React.memo(function SettingsView() {
         [machinesById]
     );
     const machinePresence = useMachinePresenceMap();
+    /** What a machine's glyphs should show, from the channels — the same source the session list uses. */
+    const badgeInputs = useMachineBadgeInputs();
     const lanSightings = useLanSightings();
     const relayDirectory = useRelayDirectory();
     const relayEndpoints = useRelayEndpoints();
@@ -292,7 +297,7 @@ export const SettingsView = React.memo(function SettingsView() {
             {allMachines.length > 0 && (
                 <ItemGroup title={t('settings.machines')}>
                     {[...allMachines].map((machine) => {
-                        const isOnline = isMachineOnline(machine);
+                        const isOnline = machineIsReachable(machinePresence[machine.id] ?? 'offline');
                         const host = machine.metadata?.host || 'Unknown';
                         const displayName = machine.metadata?.displayName;
                         const platform = machine.metadata?.platform || '';
@@ -325,18 +330,7 @@ export const SettingsView = React.memo(function SettingsView() {
                                 rightElement={
                                     <MachinePresenceBadge
                                         machineId={machine.id}
-                                        reach={{
-                                            server: isOnline,
-                                            lan: !!lanSightings[machine.id],
-                                            // The relay vouches for what it is holding. A route we
-                                            // derived from the key is not evidence its daemon runs a
-                                            // relay client, so it does not colour this green.
-                                            relay: !!relayDirectory[machine.id],
-                                        }}
-                                        capability={{
-                                            lan: !!lanSightings[machine.id],
-                                            relay: !!relayDirectory[machine.id] || relayEndpoints[machine.id]?.source === 'published',
-                                        }}
+                                        {...badgeInputs(machine.id)}
                                     />
                                 }
                                 onPress={() => router.push(`/machine/${machine.id}`)}

@@ -1,4 +1,24 @@
 /**
+ * Refuse an action this App cannot carry out on any channel it has switched on, saying why.
+ *
+ * Every machine action *except* a restart goes through the server: the daemon's own API reads a
+ * session, takes a message for one and restarts its process, and refuses to start sessions or run
+ * anything inside them (a test on the CLI side pins that boundary). So a machine this device is
+ * reaching perfectly well over the LAN is still not spawnable when the server channel is switched
+ * off — and that used to surface as whatever the thrown socket error happened to say, which reads
+ * as the App being broken rather than as a setting.
+ *
+ * Asked before the attempt, so the answer is about the channels rather than about a failure.
+ */
+function requireChannelFor(operation: ChannelOperation): void {
+    const state = storage.getState();
+    const drivers = channelDrivers(state, state.localSettings.channelPriority);
+    if (!operationSupported(drivers, operation)) {
+        throw new HappyError(t('errors.channelCannotServeAction'), false);
+    }
+}
+
+/**
  * Session operations for remote procedure calls
  * Provides strictly typed functions for all session-related RPC operations
  */
@@ -7,6 +27,11 @@ import { apiSocket } from './apiSocket';
 import { sync } from './sync';
 import { storage } from './storage';
 import type { MachineMetadata } from './storageTypes';
+import { channelDrivers } from './channels/measure';
+import { operationSupported } from './channels/resolve';
+import type { ChannelOperation } from './channels/types';
+import { HappyError } from '@/utils/errors';
+import { t } from '@/text';
 
 // Strict type definitions for all operations
 
@@ -162,6 +187,7 @@ export interface SpawnSessionOptions {
  * Spawn a new remote session on a specific machine
  */
 export async function machineSpawnNewSession(options: SpawnSessionOptions): Promise<SpawnSessionResult> {
+    requireChannelFor('spawn');
 
     const { machineId, directory, approvedNewDirectoryCreation = false, token, agent, environmentVariables, sandboxConfig } = options;
 
@@ -193,6 +219,7 @@ export async function machineSpawnNewSession(options: SpawnSessionOptions): Prom
  * Stop the daemon on a specific machine
  */
 export async function machineStopDaemon(machineId: string): Promise<{ message: string }> {
+    requireChannelFor('stop');
     const result = await apiSocket.machineRPC<{ message: string }, {}>(
         machineId,
         'stop-daemon',
@@ -522,6 +549,7 @@ export async function sessionRestart(sessionId: string, machineId: string): Prom
 
 export async function sessionKill(sessionId: string, machineId: string): Promise<SessionKillResponse> {
     try {
+        requireChannelFor('stop');
         const response = await apiSocket.machineRPC<SessionKillResponse, { sessionId: string }>(
             machineId,
             'killSession',

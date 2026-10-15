@@ -1,3 +1,4 @@
+import { channelEnabled } from '@/utils/enabledChannels';
 import * as React from 'react';
 import { ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -193,7 +194,7 @@ export default function DevScreen() {
     const relayDirectory = useRelayDirectory();
     const relayUnknownTags = useRelayUnknownTags();
     const relayHubConnected = useRelayHubConnected();
-    const relayEnabled = channelPriority.includes('relay');
+    const relayEnabled = channelEnabled(channelPriority, 'relay');
     const anonymousId = sync.encryption!.anonID;
     const { theme } = useUnistyles();
 

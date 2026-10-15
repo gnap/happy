@@ -2,9 +2,10 @@ import React from 'react';
 import { View, Text } from 'react-native';
 import { Stack, useRouter, useLocalSearchParams } from 'expo-router';
 import { Typography } from '@/constants/Typography';
-import { useAllMachines, useSessions } from '@/sync/storage';
+import { useAllMachines, useMachinePresenceMap, useSessions } from '@/sync/storage';
 import { Ionicons } from '@expo/vector-icons';
-import { isMachineOnline } from '@/utils/machineUtils';
+import { machineIsReachable } from '@/utils/machineUtils';
+import type { MachinePresence } from '@/sync/machinePresence';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 import { ItemList } from '@/components/ItemList';
@@ -36,6 +37,8 @@ export default function MachinePickerScreen() {
     const router = useRouter();
     const params = useLocalSearchParams<{ selectedId?: string }>();
     const machines = useAllMachines();
+    /** How each of them is being reached, from the channels — the row's status, not the server's flag. */
+    const presence = useMachinePresenceMap();
     const sessions = useSessions();
 
     const selectedMachine = machines.find(m => m.id === params.selectedId) || null;
@@ -121,7 +124,7 @@ export default function MachinePickerScreen() {
                             />
                         ),
                         getItemStatus: (machine) => {
-                            const offline = !isMachineOnline(machine);
+                            const offline = !machineIsReachable(presence[machine.id] ?? 'offline');
                             return {
                                 text: offline ? 'offline' : 'online',
                                 color: offline ? theme.colors.status.disconnected : theme.colors.status.connected,

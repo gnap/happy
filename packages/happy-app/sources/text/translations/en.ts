@@ -234,6 +234,7 @@ export const en: TranslationStructure = {
         networkError: 'Network error occurred',
         serverError: 'Server error occurred',
         unknownError: 'An unknown error occurred',
+        channelCannotServeAction: 'This action goes through the server, which is switched off in your channel settings',
         connectionTimeout: 'Connection timed out',
         authenticationFailed: 'Authentication failed',
         permissionDenied: 'Permission denied',
@@ -546,14 +547,6 @@ export const en: TranslationStructure = {
         },
         noMachinesAvailable: 'No machines',
     },
-
-        sandbox: {
-            isolationTitle: 'Sandbox Isolation',
-            off: 'Off',
-            strict: 'Strict (project only)',
-            workspace: 'Workspace',
-            custom: 'Custom',
-        },
 
     machineLauncher: {
         showLess: 'Show less',

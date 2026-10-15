@@ -219,6 +219,7 @@ export const es: TranslationStructure = {
         networkError: 'Error de conexión',
         serverError: 'Error del servidor',
         unknownError: 'Error desconocido',
+        channelCannotServeAction: 'Esta acción pasa por el servidor, que está desactivado en tus ajustes de canales',
         connectionTimeout: 'Se agotó el tiempo de conexión',
         authenticationFailed: 'Falló la autenticación',
         permissionDenied: 'Permiso denegado',
@@ -531,14 +532,6 @@ export const es: TranslationStructure = {
         },
         noMachinesAvailable: 'Sin máquinas',
     },
-
-        sandbox: {
-            isolationTitle: 'Sandbox Isolation',
-            off: 'Off',
-            strict: 'Strict (project only)',
-            workspace: 'Workspace',
-            custom: 'Custom',
-        },
 
     machineLauncher: {
         showLess: 'Mostrar menos',

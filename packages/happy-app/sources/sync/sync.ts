@@ -46,9 +46,14 @@ import { openLanSocket, type LanSocketHandle } from './lan/socket';
 import { DEFAULT_RELAY_URL, RelayHub, relayHubUrl, relayOriginOf, type HubMachine, type SocketLike } from './lan/relayHub';
 import type { RelayDirectoryEntry } from './lan/relayDirectory';
 import { normalizeChannelPriority, pickChannel } from './lan/channelOrder';
+import { channelEnabled, enabledChannels } from '@/utils/enabledChannels';
+import { channelDrivers as buildChannelDrivers } from './channels/measure';
+import { channelAvailability } from './channels/resolve';
+import { sendOverDaemonSocket, sendOverServerHttp, sendOverServerSocket } from './channels/ops';
+import type { ChannelDriver, ChannelReason } from './channels/types';
 import { FetchSlots } from './fetchSlots';
 import { DaemonConnections, type DaemonTarget } from './lan/daemonConnections';
-import { pageMovedTheLog, planDaemonRead } from './lan/windowPlan';
+import { judgeDaemonPage, pageMovedTheLog, planDaemonRead } from './lan/windowPlan';
 import type { DaemonRoute, LanSessionLogEntry, SessionChannel } from './lan/types';
 import { parseRelayEndpoint } from './lan/relay';
 import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
@@ -75,15 +80,6 @@ type V3GetSessionMessagesResponse = {
     hasMore: boolean;
 };
 
-type V3PostSessionMessagesResponse = {
-    messages: Array<{
-        id: string;
-        seq: number;
-        localId: string | null;
-        createdAt: number;
-        updatedAt: number;
-    }>;
-};
 
 type OutboxMessage = {
     localId: string;
@@ -121,16 +117,7 @@ const maxSeqOf = (messages: { seq?: number }[]): number => {
     return seqs.length > 0 ? Math.max(...seqs) : 0;
 };
 
-export type ChannelReason =
-    | 'pinned'
-    | 'reachable'
-    | 'session-not-loaded'
-    | 'not-declared'
-    | 'no-machine-id'
-    | 'no-machine-key'
-    | 'not-on-network'
-    | 'server-down-relay'
-    | 'by-priority';
+export type { ChannelReason } from './channels/types';
 
 /**
  * Frame-level tracing for the update pipeline, off unless the dev page turns debug mode on.
@@ -869,8 +856,8 @@ class Sync {
                     this.ensureRelayHub();
                     // A new order changes where every session reads from, so re-resolve them now
                     // instead of at each one's next scheduled fetch.
-                    const serverWas = previous.localSettings.channelPriority.includes('server');
-                    const serverNow = state.localSettings.channelPriority.includes('server');
+                    const serverWas = channelEnabled(previous.localSettings.channelPriority, 'server');
+                    const serverNow = channelEnabled(state.localSettings.channelPriority, 'server');
                     if (serverWas !== serverNow) {
                         // Switching the server off has to drop the connection, not just stop
                         // choosing it: until the socket is gone the App is still talking to
@@ -1731,7 +1718,7 @@ class Sync {
         // is asked of the daemons that can be reached instead. Without this the request below would
         // still go out and fail, which is the connection the setting exists to stop — the fallback
         // in the catch would reach the same place, but only after trying.
-        if (!this.channelPriority().includes('server')) {
+        if (!channelEnabled(this.channelPriority(), 'server')) {
             await this.fetchSessionListFromDaemons().catch((error) => {
                 log.log(`📡 fetchSessions: daemon session list failed: ${String(error)}`);
             });
@@ -2824,89 +2811,72 @@ class Sync {
         // synced onward by its ordinary outgoing path.
         const daemon = this.daemonSendTarget(sessionId);
         if (daemon) {
-            const socket = daemon.handle;
-            const allSent = batch.every((msg) =>
-                socket.send({ sessionId, localId: msg.localId, content: msg.content })
-            );
-            if (allSent) {
+            const outcome = sendOverDaemonSocket({
+                socket: daemon.handle,
+                sessionId,
+                batch,
                 // Deliberately not marked acked here, unlike the server socket path. There the
                 // server echoes the message back, so a fast-ack is a claim the server will honour;
                 // here nothing confirms the write but the session itself, and treating the write as
                 // the delivery is exactly what hides a dropped message. Each entry waits for that
                 // verdict, and fails if it never arrives.
+                awaitVerdict: (localId) => this.awaitLanDelivery(localId),
+            });
+            if (outcome.kind === 'unconfirmed') {
                 for (const msg of batch) {
-                    this.awaitLanDelivery(msg.localId);
+                    outcome.awaitVerdict(msg.localId);
                 }
                 return;
+            }
+            if (outcome.kind === 'failed') {
+                throw outcome.error;
             }
         }
 
         // Prefer WebSocket send — same path as CLI. No HTTP round-trip, no
         // Tauri HTTP plugin issues. Server echoes back via new-message WS
         // event, which handleUpdate already fast-acks.
-        if (apiSocket.isConnected) {
-            try {
-                for (const msg of batch) {
-                    apiSocket.send('message', {
-                        sid: sessionId,
-                        message: msg.content,
-                        localId: msg.localId,
-                    });
-                }
-                pending.splice(0, batch.length);
-                for (const msg of batch) {
-                    storage.getState().markOutboxMessageAcked(msg.localId);
-                }
-                // WS send has no seq ack — pull receive cursor forward via HTTP.
-                this.getMessagesSync(sessionId).invalidate();
-                return;
-            } catch (_err) {
-                // WS send failed — fall through to HTTP POST below.
+        const overSocket = sendOverServerSocket({ transport: apiSocket, sessionId, batch });
+        if (overSocket.kind === 'acked') {
+            pending.splice(0, batch.length);
+            for (const msg of batch) {
+                storage.getState().markOutboxMessageAcked(msg.localId);
             }
+            // WS send has no seq ack — pull receive cursor forward via HTTP.
+            this.getMessagesSync(sessionId).invalidate();
+            return;
         }
+        // Anything else — never connected, or the write threw mid-batch — falls through to the HTTP
+        // route below, which is idempotent on `localId`. A genuinely unusable server is reported by
+        // that attempt failing, not by this one declining to try.
 
         const controller = new AbortController();
         this.sendAbortControllers.set(sessionId, controller);
         try {
-            const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages`, {
-                method: 'POST',
-                body: JSON.stringify({
-                    messages: batch.map((message) => ({
-                        localId: message.localId,
-                        content: message.content
-                    }))
-                }),
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                signal: controller.signal
+            const outcome = await sendOverServerHttp({
+                transport: apiSocket,
+                sessionId,
+                batch,
+                signal: controller.signal,
             });
-            if (!response.ok) {
-                throw new Error(`Failed to send messages for ${sessionId}: ${response.status}`);
+            // The one path that says where the session now stands: the server answered with the seqs
+            // it assigned, so the receive cursor moves with it rather than being pulled.
+            if (outcome.kind === 'failed') {
+                this.maybeStartBackgroundSendWatchdog();
+                throw outcome.error;
             }
-
-            const data = await response.json() as V3PostSessionMessagesResponse;
             pending.splice(0, batch.length);
-
             // Server confirmed – mark as acked (green check). The echo
             // (fast-ack or text-matched session-protocol echo) will remove it.
             for (const msg of batch) {
                 storage.getState().markOutboxMessageAcked(msg.localId);
             }
-
-            if (Array.isArray(data.messages) && data.messages.length > 0) {
+            if (outcome.kind === 'acked' && outcome.advanceTo !== undefined) {
                 const currentLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
-                let maxSeq = currentLastSeq;
-                for (const message of data.messages) {
-                    if (message.seq > maxSeq) {
-                        maxSeq = message.seq;
-                    }
+                if (outcome.advanceTo > currentLastSeq) {
+                    this.sessionLastSeq.set(sessionId, outcome.advanceTo);
                 }
-                this.sessionLastSeq.set(sessionId, maxSeq);
             }
-        } catch (error) {
-            this.maybeStartBackgroundSendWatchdog();
-            throw error;
         } finally {
             this.sendAbortControllers.delete(sessionId);
         }
@@ -3320,7 +3290,10 @@ class Sync {
                     // Session envelopes carry their own server-assigned localId (different from
                     // the original user message localId), so resolve by text for ALL user messages.
                     if (normalized.role === 'user') {
-                        const claimedLocalId = this.resolveLocalIdForIncoming(sessionId, normalized.id, normalized.content.text, decrypted.localId);
+                        // A user message can be plain text or a block list (file attachments), and
+                        // only the former carries `text` — read it through the discriminant.
+                        const previewText = normalized.content.type === 'text' ? normalized.content.text : '';
+                        const claimedLocalId = this.resolveLocalIdForIncoming(sessionId, normalized.id, previewText, decrypted.localId);
                         if (claimedLocalId) {
                             normalized = { ...normalized, localId: claimedLocalId };
                         }
@@ -3741,7 +3714,9 @@ class Sync {
                                 this.claimedServerMessageIds.set(lastMessage.id, echoedId);
                             }
                         } else if (lastMessage && lastMessage.role === 'user') {
-                            const claimedLocalId = this.resolveLocalIdForIncoming(sid, lastMessage.id, lastMessage.content.text, decrypted.localId);
+                            // See the block-list note above: only the plain-text variant has `text`.
+                            const previewText = lastMessage.content.type === 'text' ? lastMessage.content.text : '';
+                            const claimedLocalId = this.resolveLocalIdForIncoming(sid, lastMessage.id, previewText, decrypted.localId);
                             if (claimedLocalId) {
                                 lastMessage = { ...lastMessage, localId: claimedLocalId };
                             }
@@ -4431,25 +4406,29 @@ class Sync {
         // point of the channel — seeing the newest is.
         const plan = planDaemonRead(anchor);
         let read = await readPage(plan.page, knownConnection);
-        // Replacing a window throws the conversation away, so it is reserved for having nothing to
-        // throw away: no window held, or an anchor the log has pruned past (where what is held is
-        // older than anything the daemon can still serve, and no read can connect to it). A window
-        // that is merely behind is *extended* — the channel drains it in bounded pages, and the
-        // caller comes back for more while `hasNewer` holds — which is what the server path does
-        // with its own paging rather than jumping and leaving a gap.
-        let replace = plan.replace ? !hasWindow : false;
-        if (read && !replace && pageMovedTheLog(read) && read.reset) {
-            const tail = await readPage({ kind: 'tail' }, read.connection);
-            if (tail) {
-                read = tail;
-                replace = true;
-            }
+        // Whether a window is replaced, re-read from the newest end, or merely extended — and the
+        // refusal to empty a conversation on the strength of an empty page. Both invariants live in
+        // `judgeDaemonPage`, where they are stated once and tested, rather than inline here.
+        let verdict = judgeDaemonPage({
+            planned: plan,
+            hasWindow,
+            read: read ? { reset: read.reset } : null,
+        });
+        if (verdict.kind === 'replace-from-tail') {
+            read = await readPage({ kind: 'tail' }, read!.connection);
+            verdict = judgeDaemonPage({
+                planned: { replace: true },
+                hasWindow: true,
+                read: read ? { reset: read.reset } : null,
+            });
         }
+        const replace = verdict.kind === 'replace';
         if (read && replace && read.messages.length === 0 && hasWindow) {
-            // A replacement is the whole window, so an empty page would empty the conversation. An
+            // A replacement is the whole window, so an empty one would empty the conversation. An
             // empty page is not evidence that the session has no messages — it is evidence that
             // this read learned nothing — so it is treated as a failed read instead, which leaves
-            // what is held intact and lets the backoff try again.
+            // what is held intact and lets the backoff try again. Only when a window is held: with
+            // nothing to lose, an empty page is simply what the tail is.
             log.log(`📡 fetchSessionFromDaemon: empty replacement page for ${sessionId}; keeping the window`);
             this.noteRouteFailure(sessionId, read.connection.route);
             return null;
@@ -4688,46 +4667,40 @@ class Sync {
     }
 
     /**
-     * Whether this device can reach a machine over one daemon route *now*.
+     * The channel drivers for the state and priority in hand.
      *
-     * Three sources, all local: the discovery that found the machine (`lanSightings` from mDNS,
-     * `relaySightings` from a probe that got an answer), a live socket this App is holding to it,
-     * and — the strongest — a read of this very session that came back over that route. The last
-     * one is why a route that is working is not dropped between probes, and why a session pinned
-     * to a route it cannot be served on does not keep looking available.
+     * Rebuilt only when something a driver reads has moved: `resolveChannel` runs on paths that can
+     * be hit per frame — the fast-ack path asks which channel a session is on — and building three
+     * drivers per call would scan the socket map on every one of them.
      */
-    private routeMeasured(sessionId: string, machineId: string, route: DaemonRoute): boolean {
+    private channelDrivers(): ChannelDriver[] {
         const state = storage.getState();
-        const failedAt = this.routeFailures.get(sessionId)?.[route];
-        if (failedAt !== undefined && Date.now() - failedAt < Sync.ROUTE_FAILURE_TTL_MS) {
-            return false;
+        const priority = state.localSettings.channelPriority;
+        const key = [
+            state.socketStatus,
+            state.daemonSockets,
+            state.lanSightings,
+            state.relayEndpoints,
+            state.relayDirectory,
+            state.relayHubConnected,
+            state.sessions,
+            state.machines,
+            state.daemonSessionList,
+            priority,
+        ];
+        const cached = this.channelDriversCache;
+        if (cached && cached.key.length === key.length && cached.key.every((part, index) => part === key[index])) {
+            return cached.drivers;
         }
-        // A socket this App is holding open to that machine is the strongest of the three: it was
-        // opened by a read that worked, and it is still up. It also survives a sighting expiring,
-        // which matters because sightings are refreshed by a browse on a timer — a working LAN was
-        // otherwise dropped the moment a browse was missed, and the session moved off it.
-        if (this.connections.current(machineId, route)) {
-            return true;
-        }
-        const known = route === 'lan' ? state.lanSightings[machineId]?.baseUrl : state.relayEndpoints[machineId]?.baseUrl;
-        if (!known) {
-            return false;
-        }
-        // The relay says which machines are dialled in. That is the same kind of fact a sighting
-        // gives for the LAN — and a better one, since it is the relay's own registry rather than a
-        // probe that may not have run since the machine came up.
-        if (route === 'relay' ? this.relayMachines.has(machineId) : state.lanSightings[machineId]) {
-            return true;
-        }
-        const link = this.daemonLinks.get(sessionId);
-        return !!link && link.machineId === machineId && link.connection.route === route;
+        const drivers = buildChannelDrivers(state, priority);
+        this.channelDriversCache = { key, drivers };
+        return drivers;
     }
+
+    private channelDriversCache: { key: unknown[]; drivers: ChannelDriver[] } | null = null;
 
     /** A route that failed to serve this session. Ages out, since a daemon may log it later. */
     private routeFailures = new Map<string, Partial<Record<DaemonRoute, number>>>();
-
-    /** Long enough that a route is not re-tried every tick, short enough to recover on its own. */
-    private static readonly ROUTE_FAILURE_TTL_MS = 90_000;
 
     private noteRouteFailure(sessionId: string, route: DaemonRoute): void {
         const failures = this.routeFailures.get(sessionId) ?? {};
@@ -4788,11 +4761,16 @@ class Sync {
         const state = storage.getState();
         const priority = this.channelPriority();
         const serverDown = state.socketStatus === 'disconnected' || state.socketStatus === 'error';
-        const available = {
-            lan: this.routeMeasured(sessionId, machineId, 'lan'),
-            relay: this.routeMeasured(sessionId, machineId, 'relay'),
-            server: !serverDown,
-        };
+        // Which channels could serve this session, from the same rule the header and the badges are
+        // drawn from — they used to be worked out separately, and disagreed about the same session.
+        const lastRead = this.daemonLinks.get(sessionId);
+        const available = channelAvailability({
+            drivers: this.channelDrivers(),
+            sessionId,
+            machineId,
+            failedAt: this.routeFailures.get(sessionId),
+            lastReadRoute: lastRead && lastRead.machineId === machineId ? lastRead.connection.route : undefined,
+        });
         const { channel, reachable } = pickChannel(priority, available);
         if (!reachable) {
             // Nothing on this device has reached the machine. The session is not readable over any
@@ -4800,7 +4778,7 @@ class Sync {
             // came from — rather than being labelled with a channel that was never established.
             // Unless the server is switched off, in which case that path is not this App's to
             // take either: the session is simply unreachable, and says so.
-            return [priority.includes('server') ? 'server' : priority[0], 'not-on-network'];
+            return [enabledChannels(priority).server ? 'server' : priority[0], 'not-on-network'];
         }
         if (channel === 'lan') {
             return ['lan', 'reachable'];
@@ -4808,7 +4786,7 @@ class Sync {
         if (channel === 'relay') {
             // "Server unreachable" only describes a server that is meant to be there. One switched
             // off in the setting was not unreachable, it was not used.
-            const serverOff = !priority.includes('server');
+            const serverOff = !enabledChannels(priority).server;
             return ['relay', serverDown && !serverOff ? 'server-down-relay' : 'by-priority'];
         }
         return ['server', priority.length === 1 || available.lan || available.relay ? 'by-priority' : 'not-on-network'];
@@ -4827,8 +4805,8 @@ class Sync {
 
     /** Whether any daemon route (LAN or relay) is switched on; with neither, the server is the only path. */
     private daemonRoutesEnabled(): { lan: boolean; relay: boolean } {
-        const priority = this.channelPriority();
-        return { lan: priority.includes('lan'), relay: priority.includes('relay') };
+        const enabled = enabledChannels(this.channelPriority());
+        return { lan: enabled.lan, relay: enabled.relay };
     }
 
     private daemonSocketWatch: (() => void) | null = null;
@@ -5001,7 +4979,7 @@ class Sync {
     private ensureRelayHub(): void {
         const relayUrl = this.relayOrigin();
         const priority = this.channelPriority();
-        const wanted = priority.includes('relay');
+        const wanted = enabledChannels(priority).relay;
         // Said out loud at startup, because "the relay is off in the priority" and "the relay cannot
         // be reached" look identical everywhere else — a section with nothing connected either way.
         log.log(
@@ -5788,6 +5766,6 @@ async function syncInit(credentials: AuthCredentials, restore: boolean) {
     const API_ENDPOINT = getServerUrl();
     // Set before initialising: a server the setting has switched off must not be connected to even
     // for the instant it takes the first connect to come back.
-    apiSocket.setServerEnabled(storage.getState().localSettings.channelPriority.includes('server'));
+    apiSocket.setServerEnabled(channelEnabled(storage.getState().localSettings.channelPriority, 'server'));
     apiSocket.initialize({ endpoint: API_ENDPOINT, token: credentials.token }, encryption);
 }

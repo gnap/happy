@@ -1,6 +1,7 @@
 import React from 'react';
 import { Platform } from 'react-native';
-import { channelDrivers, resolveSessionReach } from '@/sync/reachability';
+import { channelDrivers } from '@/sync/channels/measure';
+import { resolveSessionReach } from '@/sync/channels/resolve';
 import { storage } from '@/sync/storage';
 import { updateFaviconWithNotification, resetFavicon } from '@/utils/web/faviconGenerator';
 

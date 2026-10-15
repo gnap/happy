@@ -251,6 +251,7 @@ export const it: TranslationStructure = {
         networkError: 'Si è verificato un errore di rete',
         serverError: 'Si è verificato un errore del server',
         unknownError: 'Si è verificato un errore sconosciuto',
+        channelCannotServeAction: 'Questa azione passa dal server, disattivato nelle impostazioni dei canali',
         connectionTimeout: 'Connessione scaduta',
         authenticationFailed: 'Autenticazione non riuscita',
         permissionDenied: 'Permesso negato',
@@ -563,14 +564,6 @@ export const it: TranslationStructure = {
         },
         noMachinesAvailable: 'Nessuna macchina',
     },
-
-        sandbox: {
-            isolationTitle: 'Sandbox Isolation',
-            off: 'Off',
-            strict: 'Strict (project only)',
-            workspace: 'Workspace',
-            custom: 'Custom',
-        },
 
     machineLauncher: {
         showLess: 'Mostra meno',

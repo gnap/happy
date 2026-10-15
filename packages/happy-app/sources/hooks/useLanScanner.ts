@@ -2,6 +2,7 @@ import * as React from 'react';
 import { AppState, Platform, type AppStateStatus } from 'react-native';
 import * as Network from 'expo-network';
 import { sync } from '@/sync/sync';
+import { channelEnabled } from '@/utils/enabledChannels';
 import { storage } from '@/sync/storage';
 import { discoverMachines, accountFingerprintOf } from '@/sync/lan/discovery';
 
@@ -19,7 +20,7 @@ import { discoverMachines, accountFingerprintOf } from '@/sync/lan/discovery';
  * timeout, and on a phone that 4s is most of what the radio does while a session sits open — so it
  * runs once a minute rather than twice, halving the duty cycle. What makes the longer gap safe is
  * that a sighting is not the only evidence of reachability: an open socket to a machine counts on
- * its own (see `routeMeasured`), so a scan that is late or missed cannot move a working session
+ * its own (see `channels/resolve`), so a scan that is late or missed cannot move a working session
  * off the LAN. The `lanSightings` TTL still bounds how long a departed machine is shown as seen.
  *
  * Scanning is suspended unless the app is foregrounded: iOS will not deliver multicast to a
@@ -45,7 +46,7 @@ export function useLanScanner(): void {
             // been derived; the account public key is the input the discovery filter needs.
             const accountPublicKey = sync.encryption?.contentDataKey;
             // Switched off in the channel priority setting: do not browse at all.
-            if (!storage.getState().localSettings.channelPriority.includes('lan')) {
+            if (!channelEnabled(storage.getState().localSettings.channelPriority, 'lan')) {
                 return;
             }
             if (!accountPublicKey || cancelled) {

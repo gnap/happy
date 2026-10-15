@@ -6,16 +6,19 @@ import { createReducer, reducer, ReducerState } from "./reducer/reducer";
 import { bump } from './metrics';
 import { Message } from "./typesMessage";
 import { NormalizedMessage } from "./typesRaw";
-import { isMachineOnline } from '@/utils/machineUtils';
 import type { DaemonRoute, LanSighting, RelayEndpoint, SessionChannel } from './lan/types';
 import type { RelayDirectoryEntry } from './lan/relayDirectory';
 import type { DaemonConnectionState } from './lan/daemonConnections';
-import { resolveMachinePresence, type MachinePresence } from './machinePresence';
-import { channelLinks, type ChannelLinkState } from './channelLinks';
+import { machineBadgeInputs, resolveMachinePresence, type MachineCapability, type MachinePresence, type MachineReach } from './machinePresence';
+import { channelLinks } from './channelLinks';
+import { enabledChannels } from '@/utils/enabledChannels';
 import { sessionIsRestarting } from '@/utils/sessionRestart';
-import { channelDrivers, resolveMachineReach, resolveSessionReach, type ChannelDriver, type SessionReach } from './reachability';
+import { channelDrivers, type ChannelState } from './channels/measure';
+import type { ChannelDriver, ChannelLinkState, SessionReach } from './channels/types';
+import { resolveSessionReach } from './channels/resolve';
 
-export { channelLinks, type ChannelFacts, type ChannelLinkState } from './channelLinks';
+export { channelLinks, type ChannelLink } from './channelLinks';
+export type { ChannelLinkState } from './channels/types';
 import { applySettings, Settings } from "./settings";
 import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
@@ -2422,14 +2425,8 @@ export function useSessionReach(sessionId: string, machineId: string | undefined
         sessionId,
         machineId,
         channelDrivers(state, state.localSettings.channelPriority),
+        Date.now(),
     )));
-}
-
-/** Which channel could carry this machine right now, or null when none can. */
-export function useMachineReach(machineId: string | undefined): SessionChannel | null {
-    return storage(useShallow((state) => (machineId
-        ? resolveMachineReach(machineId, channelDrivers(state, state.localSettings.channelPriority))
-        : null)));
 }
 
 /** What each machine last said it is running. Empty until a machine has answered on a channel. */
@@ -2500,23 +2497,50 @@ export function useMachinesMap(): Record<string, Machine> {
     return storage(useShallow((state) => state.machines));
 }
 
+/** How a machine is being reached right now, from the channels. */
+export function useMachinePresence(machineId: string | undefined): MachinePresence {
+    const presence = useMachinePresenceMap();
+    return machineId ? presence[machineId] ?? 'offline' : 'offline';
+}
+
 export function useMachinePresenceMap(): Record<string, MachinePresence> {
     const machines = storage(useShallow((state) => state.machines));
-    const sightings = storage(useShallow((state) => state.lanSightings));
-    const relayDirectory = storage(useShallow((state) => state.relayDirectory));
+    const channelState = storage(useShallow(selectChannelState));
     const priority = storage(useShallow((state) => state.localSettings.channelPriority));
     return React.useMemo(() => {
-        // A channel switched off in the priority setting contributes nothing, so a machine is never
-        // shown as reachable over a path this device has been told not to use.
-        const useServer = priority.includes('server');
-        const useLan = priority.includes('lan');
-        const useRelay = priority.includes('relay');
+        // The channels that are switched on, in the order this device prefers them — decided in one
+        // place now instead of here, in the header and in the resolver, each slightly differently.
+        const drivers = channelDrivers(channelState, priority);
+        // A machine is listed if anything knows about it, including one the server has never heard
+        // of: a daemon advertising on this network is a machine, and dropping it would be a machine
+        // that exists everywhere except the list.
+        const ids = new Set([
+            ...Object.keys(machines),
+            ...Object.keys(channelState.lanSightings),
+            ...Object.keys(channelState.relayDirectory),
+        ]);
         const map: Record<string, MachinePresence> = {};
-        for (const id of new Set([...Object.keys(machines), ...Object.keys(sightings), ...Object.keys(relayDirectory)])) {
-            map[id] = resolveMachinePresence(useServer ? machines[id] : null, useLan && !!sightings[id], useRelay && !!relayDirectory[id]);
+        for (const id of ids) {
+            map[id] = resolveMachinePresence(drivers, id);
         }
         return map;
-    }, [machines, sightings, relayDirectory, priority]);
+    }, [machines, channelState, priority]);
+}
+
+/**
+ * A builder for a machine's per-channel glyphs, from the channels themselves.
+ *
+ * A builder rather than a hook per machine, because both callers draw badges *inside* a list of
+ * machines, where a hook cannot be called per row. One question, asked of the same drivers, from
+ * whatever row is being drawn.
+ */
+export function useMachineBadgeInputs(): (machineId: string) => { reach: MachineReach; capability: MachineCapability } {
+    const channelState = storage(useShallow(selectChannelState));
+    const priority = storage(useShallow((state) => state.localSettings.channelPriority));
+    return React.useCallback(
+        (machineId: string) => machineBadgeInputs(channelDrivers(channelState, priority), machineId),
+        [channelState, priority],
+    );
 }
 
 export function useSessionListViewData(): SessionListViewItem[] | null {
@@ -2621,19 +2645,36 @@ export function useRealtimeMode(): 'idle' | 'speaking' {
 
 
 /**
+ * The slice of the store every channel answer is built from.
+ *
+ * One selector rather than the same nine fields listed at each call site: what the drivers read is
+ * a fact about the channel layer, and a hook that named a different subset would be answering from
+ * a different picture of the same store.
+ */
+const selectChannelState = (state: StorageState): ChannelState => ({
+    socketStatus: state.socketStatus,
+    sessions: state.sessions,
+    machines: state.machines,
+    daemonSockets: state.daemonSockets,
+    daemonSessionList: state.daemonSessionList,
+    lanSightings: state.lanSightings,
+    relayEndpoints: state.relayEndpoints,
+    relayDirectory: state.relayDirectory,
+    relayHubConnected: state.relayHubConnected,
+});
+
+/**
  * Per enabled channel, in priority order, how its link is doing. LAN is hidden until a daemon has
  * been discovered, since it only exists on the local network; the server and the relay always
  * show, grey when down.
  */
 export function useChannelLinks(): { channel: SessionChannel; state: ChannelLinkState }[] {
     const priority = storage(useShallow((state) => state.localSettings.channelPriority));
-    const facts = storage(useShallow((state) => ({
-        serverStatus: state.socketStatus,
-        lanSocket: Object.values(state.daemonSockets).some((s) => s.route === 'lan' && s.phase === 'live'),
-        lanSeen: Object.keys(state.lanSightings).length > 0,
-        relayConnected: state.relayHubConnected,
-    })));
-    return React.useMemo(() => channelLinks(priority, facts), [priority, facts]);
+    // Built from the same state every other channel answer is built from, so the header cannot say a
+    // channel is up that the rest of the App would not use — which is what happened while it read
+    // the store's fields itself and the resolver read its own.
+    const channelState = storage(useShallow(selectChannelState));
+    return React.useMemo(() => channelLinks(channelDrivers(channelState, priority)), [channelState, priority]);
 }
 
 

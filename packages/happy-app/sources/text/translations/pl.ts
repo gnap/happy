@@ -230,6 +230,7 @@ export const pl: TranslationStructure = {
         networkError: 'Wystąpił błąd sieci',
         serverError: 'Wystąpił błąd serwera',
         unknownError: 'Wystąpił nieznany błąd',
+        channelCannotServeAction: 'Ta czynność idzie przez serwer, który jest wyłączony w ustawieniach kanałów',
         connectionTimeout: 'Przekroczono czas oczekiwania na połączenie',
         authenticationFailed: 'Uwierzytelnienie nie powiodło się',
         permissionDenied: 'Brak uprawnień',
@@ -541,14 +542,6 @@ export const pl: TranslationStructure = {
         },
         noMachinesAvailable: 'Brak maszyn',
     },
-
-        sandbox: {
-            isolationTitle: 'Sandbox Isolation',
-            off: 'Off',
-            strict: 'Strict (project only)',
-            workspace: 'Workspace',
-            custom: 'Custom',
-        },
 
     machineLauncher: {
         showLess: 'Pokaż mniej',

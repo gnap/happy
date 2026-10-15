@@ -10,10 +10,9 @@ import { Avatar } from './Avatar';
 import { Typography } from '@/constants/Typography';
 import { SessionStatusDot } from './SessionStatusDot';
 import { MachinePresenceBadge } from './MachinePresenceBadge';
-import { useAllMachines, useSetting, useMachinesMap, useMachinePresenceMap, useLanSightings, useRelayDirectory, useRelayEndpoints } from '@/sync/storage';
+import { useAllMachines, useSetting, useMachinesMap, useMachinePresenceMap, useLanSightings, useRelayDirectory, useRelayEndpoints, useMachineBadgeInputs } from '@/sync/storage';
 import { MACHINE_PRESENCE_COLORS } from '@/sync/machinePresence';
 import { StyleSheet } from 'react-native-unistyles';
-import { isMachineOnline } from '@/utils/machineUtils';
 import { machineSpawnNewSession, sessionKill } from '@/sync/ops';
 import { storage } from '@/sync/storage';
 import { Modal } from '@/modal';
@@ -221,6 +220,8 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
     const relayEndpoints = useRelayEndpoints();
     /** The same baseline the other list uses, so the mark means one thing in both. */
     const daemonVersions = useDaemonVersions();
+    /** What a machine's glyphs should show, from the channels — one source for every badge. */
+    const badgeInputs = useMachineBadgeInputs();
 
     // Group sessions by project, then associate with machine
     const projectGroups = React.useMemo(() => {
@@ -329,15 +330,11 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
                                 {singleMachineId ? (
                                     <MachinePresenceBadge
                                         machineId={singleMachineId}
-                                        reach={{
-                                            server: machinePresence[singleMachineId] === 'server',
-                                            lan: !!lanSightings[singleMachineId],
-                                            relay: !!relayDirectory[singleMachineId],
-                                        }}
-                                        capability={{
-                                            lan: !!lanSightings[singleMachineId],
-                                            relay: !!relayDirectory[singleMachineId] || relayEndpoints[singleMachineId]?.source === 'published',
-                                        }}
+                                        // Asked of the channels, not assembled here: this badge and
+                                        // the settings row built their inputs separately and
+                                        // disagreed about which machines had earned a relay glyph,
+                                        // and neither counted a socket this App was holding.
+                                        {...badgeInputs(singleMachineId)}
                                     />
                                 ) : null}
                             </View>
