@@ -5,7 +5,7 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Typography } from '@/constants/Typography';
-import { useSessions, useAllMachines, useMachine } from '@/sync/storage';
+import { useSessions, useAllMachines, useMachine, useDaemonVersions } from '@/sync/storage';
 import { Ionicons, Octicons } from '@expo/vector-icons';
 import type { Session } from '@/sync/storageTypes';
 import { machineStopDaemon, machineUpdateMetadata } from '@/sync/ops';
@@ -66,6 +66,8 @@ export default function MachineDetailScreen() {
     const { theme } = useUnistyles();
     const { id: machineId } = useLocalSearchParams<{ id: string }>();
     const router = useRouter();
+    /** What this machine last said it is running, which is the only current version there is. */
+    const daemonVersions = useDaemonVersions();
     const sessions = useSessions();
     const machine = useMachine(machineId!);
     const navigateToSession = useNavigateToSession();
@@ -475,18 +477,26 @@ export default function MachineDetailScreen() {
                                         subtitle={new Date(machine.daemonState.startTime).toLocaleString()}
                                     />
                                 )}
-                                {(machine.daemonState.startedWithCliVersion || machine.metadata?.happyCliVersion) && (
-                                    <Item
-                                        title={t('machine.cliVersion')}
-                                        // The daemon's own report first: it is the one that came from the machine
-                                        // just now, and the version is a build id that changes with every build —
-                                        // so the server's copy of it is stale the moment anything is rebuilt.
-                                        // The pid and port beside it are read the same way, which is why reading
-                                        // this one from the other source made a live machine look like an old one.
-                                        subtitle={machine.daemonState.startedWithCliVersion || machine.metadata?.happyCliVersion || ''}
-                                        subtitleStyle={{ fontFamily: 'Menlo', fontSize: 13 }}
-                                    />
-                                )}
+                                {(() => {
+                                    // What the machine says it is running now, if it has answered; the two
+                                    // fallbacks are records of the past, kept for a machine that never has.
+                                    const live = daemonVersions[machine.id];
+                                    const version = live?.running || machine.daemonState.startedWithCliVersion || machine.metadata?.happyCliVersion;
+                                    if (!version) return null;
+                                    return (
+                                        <Item
+                                            title={t('machine.cliVersion')}
+                                            subtitle={version}
+                                            subtitleStyle={{ fontFamily: 'Menlo', fontSize: 13 }}
+                                            rightElement={live?.restartRequired ? (
+                                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                                                    <Ionicons name="refresh-outline" size={16} color="#FF9500" />
+                                                    <Text style={{ fontSize: 12, color: '#FF9500' }}>{t('machine.restartRequired')}</Text>
+                                                </View>
+                                            ) : undefined}
+                                        />
+                                    );
+                                })()}
                             </>
                         )}
                         <Item

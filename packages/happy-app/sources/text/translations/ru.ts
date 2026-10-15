@@ -836,6 +836,7 @@ export const ru: TranslationStructure = {
         lastKnownHttpPort: 'Последний известный HTTP порт',
         startedAt: 'Запущен в',
         cliVersion: 'Версия CLI',
+        restartRequired: 'Требуется перезапуск',
         daemonStateVersion: 'Версия состояния daemon',
         activeSessions: ({ count }: { count: number }) => `Активные сессии (${count})`,
         machineGroup: 'Машина',

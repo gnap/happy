@@ -194,7 +194,11 @@ interface StorageState {
      * can confirm which sessions exist and which are alive, but it cannot build a session row.
      */
     daemonSessionList: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; at: number }>;
+    /** What each machine last said it was running, asked over a channel it answered on. */
+    daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }>;
     /** Replace the daemons' view. Pass null to clear it (the server answered). */
+    /** Records what a machine said it is running. Null forgets it, for a machine that moved. */
+    applyDaemonVersion: (machineId: string, versions: { running: string; onDisk: string | null; restartRequired: boolean } | null) => void;
     applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute }[] | null) => void;
     channelOverride: Record<string, SessionChannel>;
     /** Pass null to return the session to automatic. */
@@ -600,6 +604,7 @@ export const storage = create<StorageState>()((set, get) => {
         relayHubConnected: false,
         daemonSockets: {},
         daemonSessionList: {},
+        daemonVersions: {},
         channelOverride: {},
         artifacts: {},  // Initialize artifacts
         friends: {},  // Initialize relationships cache
@@ -1816,6 +1821,16 @@ export const storage = create<StorageState>()((set, get) => {
             }
             return { ...state, lanSightings: next };
         }),
+        applyDaemonVersion: (machineId: string, versions: { running: string; onDisk: string | null; restartRequired: boolean } | null) => set((state) => {
+            const at = Date.now();
+            if (versions === null) {
+                if (!(machineId in state.daemonVersions)) return state;
+                const next = { ...state.daemonVersions };
+                delete next[machineId];
+                return { ...state, daemonVersions: next };
+            }
+            return { ...state, daemonVersions: { ...state.daemonVersions, [machineId]: { ...versions, at } } };
+        }),
         applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute }[] | null) => set((state) => {
             if (sessions === null) {
                 if (Object.keys(state.daemonSessionList).length === 0) {
@@ -2202,6 +2217,11 @@ export function useLanSightings(): Record<string, LanSighting> {
  * sighting means a daemon is reachable, this means a channel to one is actually established.
  */
 /** Everything that is connected (or trying to be), by `machineId:route`. */
+/** What each machine last said it is running. Empty until a machine has answered on a channel. */
+export function useDaemonVersions(): Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }> {
+    return storage(useShallow((state) => state.daemonVersions));
+}
+
 export function useDaemonSockets(): Record<string, DaemonConnectionState> {
     return storage(useShallow((state) => state.daemonSockets));
 }

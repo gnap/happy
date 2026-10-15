@@ -873,6 +873,7 @@ export const ja: TranslationStructure = {
         lastKnownHttpPort: '最後に確認されたHTTPポート',
         startedAt: '開始時刻',
         cliVersion: 'CLIバージョン',
+        restartRequired: '再起動が必要',
         daemonStateVersion: 'デーモン状態バージョン',
         activeSessions: ({ count }: { count: number }) => `アクティブセッション (${count})`,
         machineGroup: 'マシン',

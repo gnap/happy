@@ -38,6 +38,8 @@ import { AsyncLock } from '@/utils/lock';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
+import { fetchIdentity } from './lan/client';
+import { getLanCredential } from './lan/credentials';
 import { readSessionOverLan, listSessionsOverLan, toNormalizedMessages, type LanConnection, type LanSessionRead } from './lan/sessionChannel';
 import { decryptLanEntries } from './lan/history';
 import { openLanSocket, type LanSocketHandle } from './lan/socket';
@@ -4261,6 +4263,33 @@ class Sync {
      * Returns null when there is nothing to read over the LAN — see `readSessionOverLan` for the
      * cases that covers.
      */
+    /** Asks each machine what build it is running, and records it. Never fatal. */
+    private async refreshDaemonVersions(machines: { machineId: string; baseUrl: string }[]): Promise<void> {
+        for (const machine of machines) {
+            if (!machine.baseUrl || this.daemonVersionChecks.has(machine.machineId)) {
+                continue;
+            }
+            this.daemonVersionChecks.add(machine.machineId);
+            try {
+                const key = this.getMachineKey(machine.machineId);
+                if (!key) continue;
+                const { token } = await getLanCredential(machine.baseUrl, key);
+                const identity = await fetchIdentity(machine.baseUrl, token) as { versions?: { running: string; onDisk: string | null; restartRequired: boolean } };
+                if (identity.versions) {
+                    storage.getState().applyDaemonVersion(machine.machineId, identity.versions);
+                    log.log(`📡 daemon ${machine.machineId.slice(0, 8)} is running ${identity.versions.running}${identity.versions.restartRequired ? ' (restart required)' : ''}`);
+                }
+            } catch {
+                // Best effort: a machine that will not answer is reported by its silence elsewhere.
+            } finally {
+                this.daemonVersionChecks.delete(machine.machineId);
+            }
+        }
+    }
+
+    /** Machines whose version has been asked for, so a burst of reads does not ask repeatedly. */
+    private daemonVersionChecks = new Set<string>();
+
     async fetchSessionFromDaemon(sessionId: string, forceRoute?: DaemonRoute): Promise<LanSessionRead | null> {
         const accountPublicKey = this.encryption?.contentDataKey;
         if (!accountPublicKey) {
@@ -4466,6 +4495,14 @@ class Sync {
         for (const answer of answers) {
             log.log(`📡 fetchSessions: server unreachable — daemon ${answer.machineId.slice(0, 8)} reports ${answer.sessions.length} session(s) via ${answer.via}`);
         }
+        // The same handshake that just read this machine's sessions can tell us what it is running —
+        // the one fact about a machine that the server's copy of it cannot keep current, because a
+        // version is a build id that changes whenever anything is rebuilt.
+        void this.refreshDaemonVersions(answers.map((answer) => ({
+            machineId: answer.machineId,
+            // Whatever this machine was last reached over: the same address the read just used.
+            baseUrl: this.lanMachineConnections.get(answer.machineId)?.baseUrl ?? '',
+        })));
         return sessions.length;
     }
 
