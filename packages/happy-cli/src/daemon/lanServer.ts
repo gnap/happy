@@ -68,6 +68,18 @@ export type LanSessionSummary = {
   startedBy: string;
   isAlive: boolean;
   lastHeartbeat?: number;
+  /**
+   * The session's own metadata, exactly as the server hands it out (`Session.metadata`).
+   *
+   * A reader that can open it — the App holds the account key — can therefore read what the session
+   * says about itself without the server: its CLI version above all, which is a build id and changes
+   * with every build, so a reader that cannot refresh it shows whichever version it last heard and
+   * reports a mismatch it has no way to confirm or clear.
+   *
+   * The blob rather than a parsed version, because parsing it is the reader's job and it already has
+   * the code: the same bytes arrive by the same name on the other channel.
+   */
+  metadata?: string;
 };
 
 /** How a reader names a session: by the id the server issued, or by the tag the CLI owns. */

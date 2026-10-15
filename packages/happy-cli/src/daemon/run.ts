@@ -1344,6 +1344,11 @@ export async function startDaemon(): Promise<void> {
             directory: session.directory ?? '',
             agent: session.agent ?? '',
             startedBy: String(session.startedBy),
+            // The session's own metadata, mirrored here when it last updated, and only when the
+            // server has named the session — there is nothing mirrored before that.
+            ...(session.happySessionId && lanSessionState.get(session.happySessionId)?.metadata?.value
+              ? { metadata: lanSessionState.get(session.happySessionId)!.metadata!.value }
+              : {}),
             isAlive: session.exitTime
               ? false
               : (() => { try { process.kill(session.pid, 0); return true; } catch { return false; } })(),
