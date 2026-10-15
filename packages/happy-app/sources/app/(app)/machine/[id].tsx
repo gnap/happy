@@ -475,10 +475,15 @@ export default function MachineDetailScreen() {
                                         subtitle={new Date(machine.daemonState.startTime).toLocaleString()}
                                     />
                                 )}
-                                {(machine.metadata?.happyCliVersion || machine.daemonState.startedWithCliVersion) && (
+                                {(machine.daemonState.startedWithCliVersion || machine.metadata?.happyCliVersion) && (
                                     <Item
                                         title={t('machine.cliVersion')}
-                                        subtitle={machine.metadata?.happyCliVersion || machine.daemonState.startedWithCliVersion || ''}
+                                        // The daemon's own report first: it is the one that came from the machine
+                                        // just now, and the version is a build id that changes with every build —
+                                        // so the server's copy of it is stale the moment anything is rebuilt.
+                                        // The pid and port beside it are read the same way, which is why reading
+                                        // this one from the other source made a live machine look like an old one.
+                                        subtitle={machine.daemonState.startedWithCliVersion || machine.metadata?.happyCliVersion || ''}
                                         subtitleStyle={{ fontFamily: 'Menlo', fontSize: 13 }}
                                     />
                                 )}
