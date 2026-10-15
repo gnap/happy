@@ -7,7 +7,7 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Avatar } from '@/components/Avatar';
-import { useSession, useIsDataReady, useSessionMessages, useMachine } from '@/sync/storage';
+import { useDaemonVersions, useSession, useIsDataReady, useSessionMessages, useMachine } from '@/sync/storage';
 import { sync, type ChannelReason } from '@/sync/sync';
 import { useSessionChannel } from '@/hooks/useSessionChannel';
 import { CHANNEL_ICONS } from '@/sync/machinePresence';
@@ -179,6 +179,17 @@ function SessionInfoContent({ session }: { session: Session }) {
     const devModeEnabled = __DEV__;
     const sessionName = getSessionName(session);
     const sessionStatus = useSessionStatus(session);
+    /**
+     * Whether restarting this session would actually change its build.
+     *
+     * The baseline is the machine's own report — the build it has on disk, or the one it is running
+     * when it has not said — asked for over the channel in use, so the answer comes from the same
+     * place the rest of the App's picture of that machine comes from.
+     */
+    const daemonVersions = useDaemonVersions();
+    const machineVersions = session.metadata?.machineId ? daemonVersions[session.metadata.machineId] : undefined;
+    const availableBuild = machineVersions?.onDisk ?? machineVersions?.running;
+    const restartWouldUpgrade = !!availableBuild && !!session.metadata?.version && session.metadata.version !== availableBuild;
     const channel = useSessionChannel(session.id);
     const channelSubtitle = channel.pinned
         ? t('sessionInfo.channelPinned')
@@ -475,10 +486,15 @@ function SessionInfoContent({ session }: { session: Session }) {
                             onPress={() => router.push(`/machine/${session.metadata?.machineId}`)}
                         />
                     )}
-                    {/* Restart: always available regardless of connection status */}
+                    {/* Restart is always available; what is not always true is that a newer build is
+                        waiting. That claim is only made when the session's build differs from the one the
+                        machine says it has, read from the machine itself over whichever channel is in
+                        use — the same baseline the machine page shows. A label that is always on says
+                        nothing, which is how a session running the current build came to be told it
+                        needed updating and why nobody could tell what the rule was. */}
                     <Item
                         title={t('sessionInfo.restartSession')}
-                        subtitle={t('sessionInfo.restartSessionSubtitle')}
+                        subtitle={restartWouldUpgrade ? t('sessionInfo.restartSessionSubtitle') : undefined}
                         icon={<Ionicons name="sync-circle-outline" size={29} color="#FF9500" />}
                         onPress={handleRestartSession}
                     />
