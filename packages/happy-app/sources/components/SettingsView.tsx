@@ -19,7 +19,7 @@ import { Modal } from '@/modal';
 import { useMultiClick } from '@/hooks/useMultiClick';
 import { useAllMachines, useMachinesMap, useMachinePresenceMap, useLanSightings, useRelayDirectory, useRelayEndpoints, useMachineBadgeInputs } from '@/sync/storage';
 import { MachinePresenceBadge } from '@/components/MachinePresenceBadge';
-import { isMachineOnline } from '@/utils/machineUtils';
+import { machineIsReachable } from '@/utils/machineUtils';
 import { useUnistyles } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
 import { useHappyAction } from '@/hooks/useHappyAction';
@@ -61,7 +61,10 @@ export const SettingsView = React.memo(function SettingsView() {
      */
     const allMachines = React.useMemo(
         () => Object.values(machinesById).sort((a, b) => {
-            const online = (isMachineOnline(b) ? 1 : 0) - (isMachineOnline(a) ? 1 : 0);
+            // Online-first, where online means anything is reaching it — the server's own flag is
+            // the spawn question, and a machine on the LAN sorted below an unreachable one.
+            const online = (machineIsReachable(machinePresence[b.id] ?? 'offline') ? 1 : 0)
+                - (machineIsReachable(machinePresence[a.id] ?? 'offline') ? 1 : 0);
             if (online !== 0) return online;
             const byName = machineSortName(a).localeCompare(machineSortName(b));
             return byName !== 0 ? byName : a.id.localeCompare(b.id);
@@ -294,7 +297,7 @@ export const SettingsView = React.memo(function SettingsView() {
             {allMachines.length > 0 && (
                 <ItemGroup title={t('settings.machines')}>
                     {[...allMachines].map((machine) => {
-                        const isOnline = isMachineOnline(machine);
+                        const isOnline = machineIsReachable(machinePresence[machine.id] ?? 'offline');
                         const host = machine.metadata?.host || 'Unknown';
                         const displayName = machine.metadata?.displayName;
                         const platform = machine.metadata?.platform || '';

@@ -6,7 +6,6 @@ import { createReducer, reducer, ReducerState } from "./reducer/reducer";
 import { bump } from './metrics';
 import { Message } from "./typesMessage";
 import { NormalizedMessage } from "./typesRaw";
-import { isMachineOnline } from '@/utils/machineUtils';
 import type { DaemonRoute, LanSighting, RelayEndpoint, SessionChannel } from './lan/types';
 import type { RelayDirectoryEntry } from './lan/relayDirectory';
 import type { DaemonConnectionState } from './lan/daemonConnections';
@@ -2496,6 +2495,12 @@ export function useLanSessionList(): Record<string, { isAlive: boolean; director
  */
 export function useMachinesMap(): Record<string, Machine> {
     return storage(useShallow((state) => state.machines));
+}
+
+/** How a machine is being reached right now, from the channels. */
+export function useMachinePresence(machineId: string | undefined): MachinePresence {
+    const presence = useMachinePresenceMap();
+    return machineId ? presence[machineId] ?? 'offline' : 'offline';
 }
 
 export function useMachinePresenceMap(): Record<string, MachinePresence> {

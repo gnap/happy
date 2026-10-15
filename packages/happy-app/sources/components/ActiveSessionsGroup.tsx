@@ -13,7 +13,6 @@ import { MachinePresenceBadge } from './MachinePresenceBadge';
 import { useAllMachines, useSetting, useMachinesMap, useMachinePresenceMap, useLanSightings, useRelayDirectory, useRelayEndpoints, useMachineBadgeInputs } from '@/sync/storage';
 import { MACHINE_PRESENCE_COLORS } from '@/sync/machinePresence';
 import { StyleSheet } from 'react-native-unistyles';
-import { isMachineOnline } from '@/utils/machineUtils';
 import { machineSpawnNewSession, sessionKill } from '@/sync/ops';
 import { storage } from '@/sync/storage';
 import { Modal } from '@/modal';

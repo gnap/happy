@@ -5,13 +5,13 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Typography } from '@/constants/Typography';
-import { useSessions, useAllMachines, useMachine, useDaemonVersions } from '@/sync/storage';
+import { useSessions, useAllMachines, useMachine, useDaemonVersions, useMachinePresence } from '@/sync/storage';
 import { Ionicons, Octicons } from '@expo/vector-icons';
 import type { Session } from '@/sync/storageTypes';
 import { machineStopDaemon, machineUpdateMetadata } from '@/sync/ops';
 import { Modal } from '@/modal';
 import { formatPathRelativeToHome, getSessionName, getSessionSubtitle } from '@/utils/sessionUtils';
-import { isMachineOnline } from '@/utils/machineUtils';
+import { machineConnectedToServer, machineIsReachable } from '@/utils/machineUtils';
 import { sync } from '@/sync/sync';
 import { useUnistyles, StyleSheet } from 'react-native-unistyles';
 import { t } from '@/text';
@@ -70,6 +70,15 @@ export default function MachineDetailScreen() {
     const daemonVersions = useDaemonVersions();
     const sessions = useSessions();
     const machine = useMachine(machineId!);
+    /**
+     * Whether anything is reaching this machine, from the channels.
+     *
+     * What every status on this page is drawn from. The server's own connection is a different
+     * question — it is what a *spawn* needs, because a spawn is an RPC the server forwards — and
+     * reading it as "online" made a machine this device was talking to over the LAN look stopped.
+     */
+    const reachable = machineIsReachable(useMachinePresence(machineId));
+
     const navigateToSession = useNavigateToSession();
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [isStoppingDaemon, setIsStoppingDaemon] = useState(false);
@@ -121,9 +130,11 @@ export default function MachineDetailScreen() {
             return 'stopped';
         }
 
-        // Use machine online status as proxy for daemon status
-        return isMachineOnline(machine) ? 'likely alive' : 'stopped';
-    }, [machine]);
+        // What the channels are reaching it over. The server's own connection is the spawn question,
+        // not this one: a daemon this device is talking to over the LAN is alive while the server has
+        // no connection to it.
+        return reachable ? 'likely alive' : 'stopped';
+    }, [machine, reachable]);
 
     const handleStopDaemon = async () => {
         // Show confirmation modal using alert with buttons
@@ -213,7 +224,7 @@ export default function MachineDetailScreen() {
         if (!machine || !machineId) return;
         try {
             const pathToUse = (customPath.trim() || '~');
-            if (!isMachineOnline(machine)) return;
+            if (!machineConnectedToServer(machine)) return;
             setIsSpawning(true);
             const absolutePath = resolveAbsolutePath(pathToUse, machine?.metadata?.homeDir);
             const result = await machineSpawnNewSession({
@@ -277,7 +288,7 @@ export default function MachineDetailScreen() {
     const metadata = machine.metadata;
     const machineName = metadata?.displayName || metadata?.host || 'unknown machine';
 
-    const spawnButtonDisabled = !customPath.trim() || isSpawning || !isMachineOnline(machine!);
+    const spawnButtonDisabled = !customPath.trim() || isSpawning || !machineConnectedToServer(machine!);
 
     return (
         <>
@@ -302,14 +313,14 @@ export default function MachineDetailScreen() {
                                     width: 6,
                                     height: 6,
                                     borderRadius: 3,
-                                    backgroundColor: isMachineOnline(machine) ? '#34C759' : '#999',
+                                    backgroundColor: reachable ? '#34C759' : '#999',
                                     marginRight: 4
                                 }} />
                                 <Text style={[Typography.default(), {
                                     fontSize: 12,
-                                    color: isMachineOnline(machine) ? '#34C759' : '#999'
+                                    color: reachable ? '#34C759' : '#999'
                                 }]}>
-                                    {isMachineOnline(machine) ? t('status.online') : t('status.offline')}
+                                    {reachable ? t('status.online') : t('status.offline')}
                                 </Text>
                             </View>
                         </View>
@@ -345,7 +356,7 @@ export default function MachineDetailScreen() {
                 {/* Launch section */}
                 {machine && (
                     <>
-                        {!isMachineOnline(machine) && (
+                        {!reachable && (
                             <ItemGroup>
                                 <Item
                                     title={t('machine.offlineUnableToSpawn')}
@@ -356,7 +367,7 @@ export default function MachineDetailScreen() {
                             </ItemGroup>
                         )}
                         <ItemGroup title={t('machine.launchNewSessionInDirectory')}>
-                        <View style={{ opacity: isMachineOnline(machine) ? 1 : 0.5 }}>
+                        <View style={{ opacity: reachable ? 1 : 0.5 }}>
                             <View style={styles.pathInputContainer}>
                                 <View style={[styles.pathInput, { paddingVertical: 8 }]}>
                                     <MultiTextInput
@@ -397,11 +408,11 @@ export default function MachineDetailScreen() {
                                         key={path}
                                         title={display}
                                         leftElement={<Ionicons name="folder-outline" size={18} color={theme.colors.textSecondary} />}
-                                        onPress={isMachineOnline(machine) ? () => {
+                                        onPress={machineConnectedToServer(machine) ? () => {
                                             setCustomPath(display);
                                             setTimeout(() => inputRef.current?.focus(), 50);
                                         } : undefined}
-                                        disabled={!isMachineOnline(machine)}
+                                        disabled={!machineConnectedToServer(machine)}
                                         selected={isSelected}
                                         showChevron={false}
                                         pressableStyle={isSelected ? { backgroundColor: theme.colors.surfaceSelected } : undefined}
