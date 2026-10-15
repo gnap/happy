@@ -937,7 +937,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             logger.debug('[START] Ignoring broken pipe (uncaught exception):', error);
             return;
         }
-        logger.debug('[START] Uncaught exception:', error);
+        logger.debug('[START] Uncaught exception:', error, (error as Error)?.stack);
         void cleanup(false);
     });
 
@@ -946,7 +946,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             logger.debug('[START] Ignoring broken pipe (unhandled rejection):', reason, (reason as Error)?.stack);
             return;
         }
-        logger.debug('[START] Unhandled rejection:', reason);
+        logger.debug('[START] Unhandled rejection:', reason, (reason as Error)?.stack);
         void cleanup(false);
     });
 

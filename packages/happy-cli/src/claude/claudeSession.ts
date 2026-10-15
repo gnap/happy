@@ -193,7 +193,7 @@ export type ClaudeSessionOpts = {
     jsRuntime?: JsRuntime,
 
     // Dynamic parameters
-    nextMessage: () => Promise<{ message: string, mode: EnhancedMode, meta?: unknown } | null>,
+    nextMessage: (signal?: AbortSignal) => Promise<{ message: string, mode: EnhancedMode, meta?: unknown } | null>,
     onReady: (result: SDKResultMessage) => void,
     /** Called with accurate context size (and optional breakdown) from the running process after each normal turn. */
     onContextUsage?: (usage: { totalTokens: number; maxTokens: number; breakdown?: { systemPrompt: number; systemTools: number; customAgents: number; skills: number; messages: number; freeSpace: number } }) => void,
@@ -286,12 +286,17 @@ export class ClaudeSession {
      */
     acceptsTurn(opts: ClaudeSessionOpts): boolean {
         if (!this.alive || this.busy) {
+            logger.debug(`[claudeRemote] session declines the turn: alive=${this.alive} busy=${this.busy}`);
             return false;
         }
         if (opts.sessionId === null) {
             return true;
         }
-        return this.conversationId === null || this.conversationId === opts.sessionId;
+        if (this.conversationId !== null && this.conversationId !== opts.sessionId) {
+            logger.debug(`[claudeRemote] session declines the turn: holds conversation=${this.conversationId} asked=${opts.sessionId}`);
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -303,6 +308,12 @@ export class ClaudeSession {
     end(): void {
         this.sessionEnded.resolve();
         this.response?.interrupt().catch(() => { /* the process may already be gone */ });
+        // A session going away takes its turn with it: the caller waiting on that turn has to be
+        // released, or it waits for a turn this process is never going to serve.
+        this.turnOver.resolve();
+        const done = this.resolveTurn;
+        this.resolveTurn = null;
+        done?.();
     }
 
     /**
@@ -317,8 +328,10 @@ export class ClaudeSession {
         if (!this.alive) {
             this.alive = true;
             // Deliberately not awaited: this runs until the session ends, while the caller waits on
-            // the turn below.
-            void this.run();
+            // the turn below. Caught, because a loop failing is this session's to absorb: unhandled
+            // it reaches the process-level rejection handler, which ends the whole CLI — every
+            // other session on the machine — over one turn that a stop would have merely interrupted.
+            void this.run().catch((error) => this.fail(error));
         }
         this.turnOver = new Future<void>();
         this.turnStopRequested = false;
@@ -331,6 +344,13 @@ export class ClaudeSession {
         this.bindTurnAbort(opts.signal ?? null);
         await new Promise<void>((resolve) => { this.resolveTurn = resolve; });
         this.busy = false;
+    }
+
+    /** Ends the session after its loops failed, releasing a turn that would otherwise wait forever. */
+    private fail(error: unknown): void {
+        logger.debug('[claudeRemote] session loops failed:', error, (error as Error)?.stack);
+        this.alive = false;
+        this.end();
     }
 
     /** A turn's stop is an interrupt of that turn, not the end of the process the next one uses. */
@@ -624,8 +644,14 @@ export class ClaudeSession {
      * right now would be discarded, and to stash it instead of losing it.
      */
     const endTurn = () => {
-        if (this.turnStopRequested) return;
+        if (this.turnStopRequested) {
+            logger.debug('[claudeRemote] endTurn ignored: this turn was already ended');
+            return;
+        }
         this.turnStopRequested = true;
+        // No turn is in flight from here, which is what tells the input loop to wait for the next
+        // one instead of racing the boundary it has just crossed.
+        this.busy = false;
         opts.onBeforeStop?.();
         this.turnOver.resolve();
         const done = this.resolveTurn;
@@ -694,15 +720,35 @@ export class ClaudeSession {
             // Between turns nobody is waiting for a message: the launcher hands the next one over
             // when it calls runTurn, which is what wakes this loop. Reading the queue here in the
             // meantime would start a turn with no one to serve it.
-            if (!session.busy) {
-                await new Promise<void>((resolve) => { session.turnReady = resolve; });
+            // Wait for a turn to be in flight before reading the queue. The race below pits the
+            // queue read against this turn's end, so entering it without a turn — against the
+            // *previous* turn's already-resolved `turnOver` — settles the race at once and throws
+            // away the message just claimed, leaving it in the launcher's pending with nothing
+            // left to ask for it. The session ending here has to wake this wait too: nothing else
+            // will, and a loop that never returns keeps the process alive for good.
+            let sessionOver = false;
+            while (!session.busy) {
+                sessionOver = await Promise.race([
+                    new Promise<void>((resolve) => { session.turnReady = resolve; }).then(() => false),
+                    stopSignal.promise.then(() => true),
+                ]);
+                if (sessionOver) break;
+            }
+            if (sessionOver) {
+                inputExitedForSession = true;
+                break;
             }
             const endOfTurn = session.turnOver;
+            // This read is the loop's own, and the race below can be won by a boundary instead of by
+            // a message. Leaving it running would park it in the queue holding the place the next
+            // read needs, so an abandoned read is torn down here rather than left behind.
+            const read = new AbortController();
             const raced = await Promise.race([
-                opts.nextMessage().then((message) => ({ kind: 'message' as const, message })),
+                opts.nextMessage(read.signal).then((message) => ({ kind: 'message' as const, message })),
                 endOfTurn.promise.then(() => ({ kind: 'turn' as const })),
                 stopSignal.promise.then(() => ({ kind: 'session' as const })),
             ]);
+            if (raced.kind !== 'message') read.abort();
             if (raced.kind === 'session') {
                 inputExitedForSession = true;
                 break;
@@ -711,15 +757,25 @@ export class ClaudeSession {
             if (raced.kind === 'turn') continue;
             const next = raced.message;
             if (next === null || next === undefined) {
-                // The queue itself says there is nothing more to wait for.
-                inputExitedForSession = true;
-                break;
+                // Null ends *this turn*, not the session: the launcher answers it when it has kept
+                // the message back for the next one — an isolated command (/compact), a mode
+                // change, a stop already in flight. The stream belongs to the session now, so
+                // closing it here would take away the session's ability to send anything ever
+                // again; end the turn and wait to be woken for the next one.
+                logger.debug(`[claudeRemote] null from nextMessage — ending the turn (busy=${session.busy}, turnStopRequested=${session.turnStopRequested}, alive=${session.isAlive()})`);
+                endTurn();
+                continue;
             }
 
             const latestGeneration = opts.getClaudeEnvVarsGeneration();
             if (latestGeneration !== currentGeneration) {
                 logger.debug(`[claudeRemote] Profile env changed (gen ${currentGeneration} → ${latestGeneration}), returning to re-spawn`);
                 opts.onEnvChanged?.({ message: next.message, mode: next.mode });
+                // A process built with the other env is the only thing that can serve this message,
+                // so this session is done, not interrupted. Ending it is also what lets the launcher
+                // reach that replacement — a session that went away with a turn still open would
+                // leave the launcher waiting on it for good.
+                session.end();
                 break;
             }
             currentGeneration = latestGeneration;
@@ -1004,9 +1060,11 @@ export class ClaudeSession {
 
     // Run both loops concurrently. They are the session's now, not a turn's: this resolves when the
     // session is ended, however many turns have been served in the meantime.
+    logger.debug('[claudeRemote] session loops starting');
     try {
         await Promise.all([inputLoop(), outputLoop()]);
     } finally {
+        logger.debug('[claudeRemote] session loops ended');
         messages.end();
         updateThinking(false);
         this.alive = false;
