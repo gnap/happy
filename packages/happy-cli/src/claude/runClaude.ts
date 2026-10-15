@@ -335,6 +335,16 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         // Report the outcome either way. A rejection is the one case the App cannot otherwise
         // learn about, and it must not be left showing a message as sent.
         reportLanDelivery(payload.localId, delivered);
+    }, (rpc) => {
+        // The same handlers the server's rpc-call reaches, reached from the daemon instead. Nothing
+        // is answered back over this path on purpose: abort and permission have no verdict the App
+        // reads, so the daemon's acceptance is the whole of what it needs.
+        // Prefixed here rather than by the sender: the prefix is the session's own id, and the
+        // daemon is not the party that owns it.
+        void session.rpcHandlerManager.handleRequest({
+            method: `${response.id}:${rpc.method}`,
+            params: rpc.params ?? '',
+        });
     });
     // Cleanup socket on graceful exit
     process.on('beforeExit', () => stopSocketClient());

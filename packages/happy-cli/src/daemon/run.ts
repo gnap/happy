@@ -1504,6 +1504,18 @@ export async function startDaemon(): Promise<void> {
             // thing however it was asked for — including every refusal, which is where the rules
             // about archived sessions and sessions with live processes live.
             restartSession,
+            // Control calls that act *inside* a running session, forwarded to its own process over
+            // the socket it already holds open. The daemon adds nothing but the routing: it cannot
+            // read the parameters, and the handlers are the same ones the server's rpc-call reaches,
+            // so a permission answered over the LAN is answered exactly as one answered over the
+            // server. Refused when no live session has that id — the one thing the caller needs told
+            // apart, since it cannot otherwise know whether anybody was asked.
+            onSessionControl: ({ sessionId, method, params }) => {
+              if (activeSessionsBySessionId(sessionId).length === 0) {
+                return false;
+              }
+              return sendToSession(sessionId, { type: 'rpc', rpc: { method, params } });
+            },
             // The daemon is the only party that knows both what it is running and what is on disk,
             // and the two differ whenever the bundle was rebuilt under it. Read per request, since
             // rebuilding is exactly what happens while it runs.

@@ -170,6 +170,18 @@ export type LanServerOptions = {
    */
   restartSession?: (sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
   /**
+   * A control call the *session* acts on, forwarded to its process: abort the turn in flight, or
+   * answer a permission request it is waiting on.
+   *
+   * The parameters travel as the same ciphertext the server route carries — the session's own key
+   * is what opens them, and this side never holds it — so what the daemon needs from the caller is
+   * only which session and which method. `params` is opaque here and stays opaque.
+   *
+   * Returns false when this machine has no live session by that id, which is the one thing the
+   * caller has to be told: it is the difference between "the session acted" and "nobody was asked".
+   */
+  onSessionControl?: (request: { sessionId: string; method: string; params: string }) => boolean;
+  /**
    * Update envelopes to send to a socket reader as soon as it connects, before any live frame.
    * A reader that joins after a session changed its state would otherwise never see that change:
    * the live mirror only carries what happens while it is listening.
@@ -524,6 +536,41 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     const result = await opts.restartSession(sessionId);
     logger.debug(`[lan] restart ${sessionId} success=${result.success}${result.error ? ` error=${result.error}` : ''}`);
     return reply.send({ v: LAN_PROTOCOL_VERSION, ...result });
+  });
+
+  /**
+   * Control calls that act inside a session that already exists.
+   *
+   * Deliberately one route with the methods named here rather than one route per operation: what
+   * this surface may do is then a list somebody can read, and the list is the point — the daemon's
+   * own API starts sessions, stops them and runs things inside them, and none of that is reachable
+   * from here. Aborting a turn and answering a prompt are the two that only move a session along
+   * that is already running, which is the same boundary a restart sits on.
+   */
+  const SESSION_CONTROL_METHODS = new Set(['abort', 'permission']);
+  app.post('/lan/sessions/:sessionId/control', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (!opts.onSessionControl) {
+      return reply.code(404).send({ error: 'this daemon does not forward session control' });
+    }
+    const { sessionId } = request.params as { sessionId: string };
+    const body = request.body as { method?: unknown; params?: unknown } | null;
+    const method = typeof body?.method === 'string' ? body.method : null;
+    if (method === null || !SESSION_CONTROL_METHODS.has(method)) {
+      logger.debug(`[lan] control refused: method=${String(body?.method)}`);
+      return reply.code(400).send({ error: 'that is not a control this API forwards' });
+    }
+    if (typeof body?.params !== 'string') {
+      return reply.code(400).send({ error: 'params must be the ciphertext the session can open' });
+    }
+    const delivered = opts.onSessionControl({ sessionId, method, params: body.params });
+    logger.debug(`[lan] control ${method} ${sessionId} from=${clientAddress(request)} delivered=${delivered}`);
+    if (!delivered) {
+      return reply.code(404).send({ error: 'no live session by that id on this machine' });
+    }
+    return reply.send({ v: LAN_PROTOCOL_VERSION });
   });
 
   app.get('/lan/sessions/:sessionId/history', async (request, reply) => {

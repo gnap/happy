@@ -35,6 +35,10 @@ let lastAddress: { sessionId?: string; tag?: string } | undefined;
 let sent: { sessionId: string; localId: string; content: string }[] = [];
 /** Sessions the restart route asked to restart. */
 let restarted: string[] = [];
+/** Control calls the route forwarded, in order. */
+let controlled: { sessionId: string; method: string; params: string }[] = [];
+/** Whether the wired daemon claims a live session for the id it is handed. */
+let liveSessions: Set<string> = new Set(['sess-1']);
 /** Left unset by default, which is how a daemon that predates the route behaves. */
 let restartHandler: ((sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>) | undefined;
 
@@ -59,6 +63,13 @@ async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
         // Only when a test asked for it: a daemon without the handler is a daemon from before the
         // route existed, and the 404 it answers is what sends a caller to the server instead.
         ...(restartHandler ? { restartSession: restartHandler } : {}),
+        onSessionControl: ({ sessionId, method, params }) => {
+            if (!liveSessions.has(sessionId)) {
+                return false;
+            }
+            controlled.push({ sessionId, method, params });
+            return true;
+        },
         getSnapshot: () => snapshot,
         host: '127.0.0.1',
         port: 0,
@@ -96,6 +107,8 @@ afterEach(async () => {
     await server?.stop();
     server = null;
     restarted = [];
+    controlled = [];
+    liveSessions = new Set(['sess-1']);
     restartHandler = undefined;
 });
 
@@ -462,5 +475,59 @@ describe('lanServer read-only API', () => {
 
             expect(res.status).toBe(200);
         });
+    });
+});
+
+describe('control calls inside a running session', () => {
+    const control = (token: string, sessionId: string, body: unknown) => fetch(url(`/lan/sessions/${sessionId}/control`), {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+
+    it('forwards an abort or a permission answer to the session, ciphertext and all', async () => {
+        await start();
+        const token = await getToken();
+
+        expect((await control(token, 'sess-1', { method: 'abort', params: 'AAA' })).status).toBe(200);
+        expect((await control(token, 'sess-1', { method: 'permission', params: 'BBB' })).status).toBe(200);
+        // What the daemon was handed and what it forwards are the same bytes: it never holds the
+        // session's key, so the parameters stay the caller's ciphertext all the way through.
+        expect(controlled).toEqual([
+            { sessionId: 'sess-1', method: 'abort', params: 'AAA' },
+            { sessionId: 'sess-1', method: 'permission', params: 'BBB' },
+        ]);
+    });
+
+    it('says so when no live session has that id, rather than looking like it acted', async () => {
+        // The one thing the caller has to be told apart: it cannot otherwise tell "the session did
+        // it" from "nobody was asked", and the way it finds out is by asking the server instead.
+        await start();
+        const token = await getToken();
+
+        expect((await control(token, 'sess-unknown', { method: 'abort', params: 'AAA' })).status).toBe(404);
+        expect(controlled).toEqual([]);
+    });
+
+    it('refuses a method this API does not forward, which is where the boundary is written', async () => {
+        // The daemon's own API starts sessions, stops them and runs things inside them — and none of
+        // that is reachable from here. Aborting a turn and answering a prompt are the ones that only
+        // move a session that is already running.
+        await start();
+        const token = await getToken();
+
+        for (const method of ['spawn', 'stop', 'exec', 'switch']) {
+            expect((await control(token, 'sess-1', { method, params: 'AAA' })).status, method).toBe(400);
+        }
+        expect(controlled).toEqual([]);
+    });
+
+    it('is not reachable without a token, and insists on parameters it can forward', async () => {
+        await start();
+        const token = await getToken();
+
+        expect((await fetch(url('/lan/sessions/sess-1/control'), { method: 'POST' })).status).toBe(401);
+        expect((await control(token, 'sess-1', { method: 'abort' })).status).toBe(400);
+        expect(controlled).toEqual([]);
     });
 });
