@@ -69,16 +69,16 @@ export type LanSessionSummary = {
   isAlive: boolean;
   lastHeartbeat?: number;
   /**
-   * The session's own metadata, exactly as the server hands it out (`Session.metadata`).
+   * The session's own metadata, in the two pieces the reader needs to open it: the revision the
+   * ciphertext was sealed at, and the ciphertext — `Session.metadataVersion` and
+   * `Session.metadata`, under those names, because the reader already holds the code for them.
    *
    * A reader that can open it — the App holds the account key — can therefore read what the session
    * says about itself without the server: its CLI version above all, which is a build id and changes
    * with every build, so a reader that cannot refresh it shows whichever version it last heard and
    * reports a mismatch it has no way to confirm or clear.
-   *
-   * The blob rather than a parsed version, because parsing it is the reader's job and it already has
-   * the code: the same bytes arrive by the same name on the other channel.
    */
+  metadataVersion?: number;
   metadata?: string;
 };
 
@@ -114,6 +114,8 @@ export type LanHistory = {
   hasOlder: boolean;
 };
 
+import type { VersionState } from './versionState';
+
 export type LanServerOptions = {
   /** The machine key: a 32-byte symmetric secret shared with the App via the machine record. */
   secret: Uint8Array;
@@ -121,6 +123,13 @@ export type LanServerOptions = {
   /** Stable non-secret fingerprint of the account, so a client can filter before probing. */
   accountFingerprint: string;
   getSessions: () => LanSessionSummary[];
+  /**
+   * What this machine is running against what it has on disk.
+   *
+   * Asked per request rather than captured at startup, because the answer changes while the daemon
+   * runs — that is the whole point of it.
+   */
+  versionState?: () => VersionState;
   /**
    * Local history for a session, or null when this machine has none — the session may not
    * have reported its tag yet, or its key may be gone. Injected so this module keeps knowing
@@ -431,6 +440,8 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       accountFingerprint: opts.accountFingerprint,
       hostname: hostname(),
       platform: platform(),
+      // Which build this machine is running, and whether the one on disk is a different one.
+      versions: opts.versionState?.(),
     });
   });
 

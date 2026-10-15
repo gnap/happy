@@ -20,7 +20,7 @@ import { cleanupDaemonState, checkIfDaemonRunningAndCleanupStaleState } from './
 import { startDaemonControlServer } from './controlServer';
 import { startUnixSocketServer } from './unixSocketServer';
 import { readFileSync } from 'fs';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { projectPath } from '@/projectPath';
 import { getTmuxUtilities, isTmuxAvailable, parseTmuxSessionIdentifier, formatTmuxSessionIdentifier } from '@/utils/tmux';
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
@@ -28,6 +28,8 @@ import { stripProfileManagedEnv } from '@/utils/profileEnv';
 import { fetchSessionProfileMeta, PROFILE_META_DEADLINE_MS } from './fetchSessionProfileMeta';
 import { delay } from '@/utils/time';
 import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSessionSummary } from './lanServer';
+import { versionStateOf } from './versionState';
+import { BUILD_VERSION } from '../version';
 import type { ApiMachineClient } from '@/api/apiMachine';
 import { readSessionKey } from '@/api/sessionKeyPersistence';
 import { readSessionLogPage } from '@/api/sessionLog';
@@ -121,6 +123,14 @@ async function getProfileEnvironmentVariablesForAgent(
     logger.debug('[DAEMON RUN] Failed to get profile environment variables:', error);
     return {};
   }
+}
+
+/** Where a build leaves its version, from the bundle's own location outwards. */
+function versionArtifacts(): string[] {
+  // `argv[1]` is the bundle this daemon was started from: `bun …/dist/index.bun.mjs`.
+  const bundlePath = process.argv[1] ?? '';
+  const bundleDir = dirname(bundlePath);
+  return [join(bundleDir, 'version.json'), join(dirname(bundleDir), 'src', 'version.ts')];
 }
 
 export async function startDaemon(): Promise<void> {
@@ -1346,8 +1356,11 @@ export async function startDaemon(): Promise<void> {
             startedBy: String(session.startedBy),
             // The session's own metadata, mirrored here when it last updated, and only when the
             // server has named the session — there is nothing mirrored before that.
-            ...(session.happySessionId && lanSessionState.get(session.happySessionId)?.metadata?.value
-              ? { metadata: lanSessionState.get(session.happySessionId)!.metadata!.value }
+            ...(session.happySessionId && lanSessionState.get(session.happySessionId)?.metadata
+              ? {
+                  metadataVersion: lanSessionState.get(session.happySessionId)!.metadata!.version,
+                  metadata: lanSessionState.get(session.happySessionId)!.metadata!.value,
+                }
               : {}),
             isAlive: session.exitTime
               ? false
@@ -1378,6 +1391,16 @@ export async function startDaemon(): Promise<void> {
               return frames;
             },
             getSessions: sessionSummaries,
+            // The daemon is the only party that knows both what it is running and what is on disk,
+            // and the two differ whenever the bundle was rebuilt under it. Read per request, since
+            // rebuilding is exactly what happens while it runs.
+            versionState: () => versionStateOf(BUILD_VERSION, versionArtifacts(), (path) => {
+              try {
+                return readFileSync(path, 'utf-8');
+              } catch {
+                return null;
+              }
+            }),
             onSend: ({ sessionId, localId, content }) => {
               // Hand it to the session that owns it. The session routes it exactly as a
               // server-delivered message, so its own outgoing sync then carries it to the server —
