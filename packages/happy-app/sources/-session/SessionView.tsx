@@ -17,7 +17,7 @@ import { useDraft } from '@/hooks/useDraft';
 import { Modal } from '@/modal';
 import { gitStatusSync } from '@/sync/gitStatusSync';
 import { sessionAbort } from '@/sync/ops';
-import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useRestartingSessions, useSessionMessages, useSessionUsage, useSetting } from '@/sync/storage';
+import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionRestartReports, useSessionMessages, useSessionUsage, useSetting } from '@/sync/storage';
 import { useSession } from '@/sync/storage';
 import { Session } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
@@ -54,8 +54,8 @@ export const SessionView = React.memo((props: { id: string }) => {
     const realtimeStatus = useRealtimeStatus();
     const isTablet = useIsTablet();
 
-    /** Restarts this App has asked for, which the header must not draw as an ended session. */
-    const restartingSessions = useRestartingSessions();
+    /** Restarts in flight, which the header must not draw as an ended session. */
+    const restartReports = useSessionRestartReports(props.id, session?.metadata?.machineId);
 
     // Compute header props based on session state
     const headerProps = useMemo(() => {
@@ -87,7 +87,7 @@ export const SessionView = React.memo((props: { id: string }) => {
         const isOnline = session.presence === 'online';
         // A restart in flight is not an ended session: this App asked for it, and the avatar losing
         // its colour is exactly how an ended one reads.
-        const isLive = isOnline || sessionIsRestarting(session.id, restartingSessions);
+        const isLive = isOnline || sessionIsRestarting(session.id, restartReports);
         return {
             title: getSessionName(session),
             subtitle: session.metadata?.path ? formatPathRelativeToHome(session.metadata.path, session.metadata?.homeDir) : undefined,
@@ -98,7 +98,7 @@ export const SessionView = React.memo((props: { id: string }) => {
             flavor: session.metadata?.flavor || null,
             tintColor: isLive ? '#000' : '#8E8E93'
         };
-    }, [session, isDataReady, sessionId, router, restartingSessions]);
+    }, [session, isDataReady, sessionId, router, restartReports]);
 
     return (
         <>

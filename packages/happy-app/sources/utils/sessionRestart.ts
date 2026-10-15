@@ -1,11 +1,23 @@
 /**
- * A restart this App asked for, and whether it is still in flight.
+ * Whether a session is being restarted — asked of every source that can know.
  *
  * A restart is not instant: the old process is signalled and waited for, a new one starts,
- * authenticates, resumes the session. For that stretch nothing reports the session at all — and
- * "nothing is reporting it" is exactly what a session that has *stopped* looks like. The party
- * that can tell the two apart is the one that asked, so it remembers asking, for as long as a
- * restart could plausibly take and no longer.
+ * authenticates, resumes. For that stretch nothing reports the session at all — and "nothing is
+ * reporting it" is exactly what a session that has *stopped* looks like. So the answer has to come
+ * from somewhere other than the session, and there are three such places, none of which is
+ * sufficient on its own:
+ *
+ * - **The machine doing it.** It publishes what it is restarting in its own state, which the server
+ *   hands to every device it has, and in the session summaries it answers with on its own channels.
+ *   This is what makes the state the same on every device: the party that knows is the party that
+ *   says so, and nobody has to guess.
+ * - **This device, if it is the one that asked.** Its own mark, so the tap has an effect on screen
+ *   without waiting for a round trip — and so a device that cannot currently read the machine's
+ *   state at all still knows what it just asked for.
+ *
+ * Every source is a *timestamp*, never a flag, and every one is read through the same grace. That
+ * is what makes each of them safe to lose: a write that never landed, or a clear that never landed,
+ * simply goes stale instead of leaving a session reading as restarting forever.
  *
  * The awkward part — how long "in flight" lasts — is here, apart from the store, so it can be
  * pinned down without one.
@@ -26,9 +38,43 @@
  */
 export const RESTART_GRACE_MS = 90_000;
 
-/** Whether a restart asked for at this time is still within its grace. */
-export function restartWithinGrace(askedAt: number | undefined, now: number = Date.now()): boolean {
-    return askedAt !== undefined && now - askedAt < RESTART_GRACE_MS;
+/**
+ * What each source says about restarts, as this App currently holds it.
+ *
+ * Each is optional because each is knowable at a different time: the machine's state arrives with
+ * the machine, and a daemon's own answer only exists when the App has had to ask one directly.
+ */
+export type RestartReports = {
+    /** This device's own asks, by session id. */
+    asked?: Record<string, number> | null;
+    /**
+     * The machine that owns the session, as the server has it. Its daemon state is where the
+     * machine says which sessions it is restarting — the same place it says which build it runs.
+     */
+    machine?: { daemonState?: { restartingSessions?: unknown } | null } | null;
+    /** What a daemon answered directly, when the server could not answer. */
+    daemon?: { restartingSince?: number } | null;
+};
+
+/** Whether a restart written at this time is still within its grace. */
+export function restartWithinGrace(startedAt: number | undefined, now: number = Date.now()): boolean {
+    return startedAt !== undefined && now - startedAt < RESTART_GRACE_MS;
+}
+
+/**
+ * Whether the machine says it is restarting this session, as of `now`.
+ *
+ * Read defensively: the state this comes out of is written by another process and crosses a wire,
+ * so a field that is missing, empty, or not the shape this build expects means "nothing is being
+ * restarted" rather than an error. An older daemon simply never says it.
+ */
+export function machineIsRestartingSession(machine: RestartReports['machine'], sessionId: string): number | undefined {
+    const reported = machine?.daemonState?.restartingSessions;
+    if (typeof reported !== 'object' || reported === null) {
+        return undefined;
+    }
+    const startedAt = (reported as Record<string, unknown>)[sessionId];
+    return typeof startedAt === 'number' ? startedAt : undefined;
 }
 
 /**
@@ -41,8 +87,10 @@ export function restartWithinGrace(askedAt: number | undefined, now: number = Da
  */
 export function sessionIsRestarting(
     sessionId: string,
-    restarting: Record<string, number>,
+    reports: RestartReports,
     now: number = Date.now()
 ): boolean {
-    return restartWithinGrace(restarting[sessionId], now);
+    return restartWithinGrace(reports.asked?.[sessionId], now)
+        || restartWithinGrace(machineIsRestartingSession(reports.machine, sessionId), now)
+        || restartWithinGrace(reports.daemon?.restartingSince, now);
 }
