@@ -154,6 +154,15 @@ class Sync {
     private static readonly SESSION_REFRESH_INTERVAL_MS = 300_000; // 5 min
     /** Interval between full (non-delta) session list refreshes to clean up stale cache. */
     private static readonly FULL_REFRESH_INTERVAL_MS = 600_000; // 10 min
+    /**
+     * How often machines the server channel is carrying are asked what build they run.
+     *
+     * Deliberately far apart. This is the one question the App cannot be told the answer to — a
+     * rebuild on disk is invisible until someone asks — and the answer changes only when a person
+     * changes it, so the cost of being late is a restart mark that appears a few minutes later,
+     * against a poll that would otherwise be permanent.
+     */
+    private static readonly MACHINE_VERSION_SWEEP_MS = 10 * 60_000;
     /** Ignore stale ephemeral thinking=false shortly after turn-start (debounced session-alive). */
     private static readonly TURN_START_EPHEMERAL_GRACE_MS = 8_000;
 
@@ -548,10 +557,32 @@ class Sync {
         // Cooldown in fetchSessions prevents this from running back-to-back
         // with event-driven invalidations.
         // Skips refresh when the user has been idle for > 10 minutes (desktop).
+        /**
+         * The last time the machines reached through the server were asked what they run.
+         *
+         * The daemon's own channels notify: a connection coming live is the moment the App is
+         * talking to that machine anyway, and that is when it asks. The server channel has no such
+         * moment — it cannot tell the App that a machine was rebuilt and restarted, because to the
+         * server a machine that changed looks exactly like one that has been sitting still. So on
+         * the server channel the question is asked on a timer instead, and the timer is long: a
+         * build changes when a person changes it, not on any schedule worth polling for.
+         */
+        let lastMachineVersionSweep = Date.now();
+
         this.sessionsRefreshInterval = setInterval(() => {
             // Check socket health first — a silent TCP drop (socket.connected === true
             // but no data flowing) won't self-recover without a nudge.
             apiSocket.checkHealthAndReconnect();
+
+            // Only while the server channel is carrying the App at all — that is the channel with
+            // nothing to notify with. A machine on a live LAN or relay socket has already been
+            // asked, by that socket coming live, and asking it again on a timer would be the poll
+            // this is trying not to be.
+            if (Date.now() - lastMachineVersionSweep > Sync.MACHINE_VERSION_SWEEP_MS
+                && storage.getState().socketStatus === 'connected') {
+                lastMachineVersionSweep = Date.now();
+                void this.refreshDaemonVersions(this.machinesWithNoLiveChannel(), true);
+            }
 
             const idleMs = Date.now() - this.lastUserActivityAt;
             if (idleMs > 600_000) {
@@ -4284,6 +4315,21 @@ class Sync {
             }
         }
         return addresses;
+    }
+
+    /**
+     * The machines this App can reach but is not on a live socket with.
+     *
+     * Those are the ones nothing has told us about: a machine the server channel is carrying, or
+     * one whose own socket has dropped. A machine on a live LAN or relay socket is left out, since
+     * that socket coming live is what asked it, and the answer it gave then is the freshest thing
+     * anyone could have.
+     */
+    private machinesWithNoLiveChannel(): { machineId: string; baseUrl: string }[] {
+        const sockets = Object.entries(storage.getState().daemonSockets);
+        return this.knownMachineAddresses().filter((machine) => !sockets.some(
+            ([key, socket]) => key.startsWith(`${machine.machineId}:`) && socket.phase === 'live'
+        ));
     }
 
     /** Asks each machine what build it is running, and records it. Never fatal. */
