@@ -553,11 +553,6 @@ class Sync {
             // but no data flowing) won't self-recover without a nudge.
             apiSocket.checkHealthAndReconnect();
 
-            // What each machine is running, asked of the machines themselves: a rebuild under a
-            // daemon is something the server's copy of that machine cannot follow, and it is the
-            // one fact about it that goes stale on its own.
-            void this.refreshDaemonVersions(this.knownMachineAddresses());
-
             const idleMs = Date.now() - this.lastUserActivityAt;
             if (idleMs > 600_000) {
                 log.log(`🕐 Skipping periodic session refresh — idle for ${Math.round(idleMs / 1000)}s`);
