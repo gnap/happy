@@ -31,6 +31,7 @@ import axios from 'axios';
 import { resolveSessionLastSeq } from './sessionLastSeq';
 import { loadOutbox, outboxPath, pruneOutboxes, saveOutbox } from './outboxPersistence';
 import { appendSessionLog, pruneSessionLogs, sessionLogDir, type SessionLogEntry } from './sessionLog';
+import { rememberSessionMetadata } from './sessionBinding';
 import {
     buildAgentMessagePayload,
     buildCodexPayload,
@@ -786,6 +787,7 @@ export class ApiSessionClient extends EventEmitter {
                         const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.metadata.value));
                         this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
                         this.metadataVersion = data.body.metadata.version;
+                        rememberSessionMetadata(this.sid, data.body.metadata.value, data.body.metadata.version);
                         this.emit('metadata-updated', this.metadata);
                         // First metadata push after (re)connect: now safe to sync static fields
                         // without clobbering App-side fields that arrived in this push.
@@ -1985,6 +1987,7 @@ export class ApiSessionClient extends EventEmitter {
                     const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
                     this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
                     this.metadataVersion = answer.version;
+                    rememberSessionMetadata(this.sid, answer.metadata, answer.version);
                     this.mirrorStateToDaemon({ metadata: { version: answer.version, value: answer.metadata } });
                     this.emit('metadata-updated', this.metadata);
                 } else if (answer.result === 'version-mismatch') {
@@ -1992,6 +1995,7 @@ export class ApiSessionClient extends EventEmitter {
                         this.metadataVersion = answer.version;
                         const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
                         this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
+                        rememberSessionMetadata(this.sid, answer.metadata, answer.version);
                         this.emit('metadata-updated', this.metadata);
                     }
                     throw new Error('Metadata version mismatch');

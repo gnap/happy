@@ -20,7 +20,7 @@ vi.mock('@/ui/logger', () => ({
   logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
 }));
 
-import { loadSessionBinding, saveSessionBinding, sessionBindingPath, type SessionBinding } from './sessionBinding';
+import { loadSessionBinding, rememberSessionMetadata, saveSessionBinding, sessionBindingPath, type SessionBinding } from './sessionBinding';
 
 const BINDING: SessionBinding = {
   id: 'cm-server-id',
@@ -62,5 +62,23 @@ describe('sessionBinding', () => {
     expect(loadSessionBinding('tag-1')).toBeNull();
     writeFileSync(sessionBindingPath('tag-1'), JSON.stringify({ id: 'x' }));
     expect(loadSessionBinding('tag-1')).toBeNull();
+  });
+
+  it('remembers metadata that moved after the create, such as the conversation a restart resumes', () => {
+    saveSessionBinding('tag-1', BINDING);
+    rememberSessionMetadata('tag-1', 'bmV3ZXI=', 8);
+    expect(loadSessionBinding('tag-1')).toEqual({ ...BINDING, metadata: 'bmV3ZXI=', metadataVersion: 8 });
+  });
+
+  it('never lets an older metadata version replace a newer one', () => {
+    saveSessionBinding('tag-1', BINDING);
+    rememberSessionMetadata('tag-1', 'b2xkZXI=', 7);
+    rememberSessionMetadata('tag-1', 'b2xkZXI=', 6);
+    expect(loadSessionBinding('tag-1')).toEqual(BINDING);
+  });
+
+  it('does not invent a binding for a tag the server has not answered', () => {
+    rememberSessionMetadata('never-seen', 'bWV0YQ==', 1);
+    expect(loadSessionBinding('never-seen')).toBeNull();
   });
 });

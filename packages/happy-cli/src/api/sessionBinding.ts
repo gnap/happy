@@ -80,3 +80,19 @@ export function loadSessionBinding(tag: string): SessionBinding | null {
     return null;
   }
 }
+
+/**
+ * Fold a newer metadata ciphertext into the stored binding.
+ *
+ * The binding is written when the server answers a create, but metadata keeps moving after that --
+ * notably `claudeSessionId`, which only exists once the first turn has run. A restart that starts
+ * from a binding written before then resumes no conversation at all, so every metadata version this
+ * process adopts is remembered too. Only a newer version replaces the stored one.
+ */
+export function rememberSessionMetadata(tag: string, metadata: string, metadataVersion: number): void {
+  const binding = loadSessionBinding(tag);
+  if (!binding || binding.metadataVersion >= metadataVersion) {
+    return;
+  }
+  saveSessionBinding(tag, { ...binding, metadata, metadataVersion });
+}
