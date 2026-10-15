@@ -62,6 +62,35 @@ export type ChannelMachineReport = {
 };
 
 /**
+ * Something the App asks a channel to do.
+ *
+ * Declared per channel rather than assumed, because the channels genuinely differ and the
+ * difference is not a defect to be smoothed over: a machine's own channels can read its sessions,
+ * carry a message and restart a process, while *starting* a session is an RPC the server forwards
+ * to the daemon — the daemon's own API refuses it, by design and with a test that says so.
+ *
+ * Naming the operations is what turns "this only works over the server" from something each call
+ * site discovers by failing into something the App can say before it tries.
+ */
+export type ChannelOperation =
+    /** Read a session's messages. */
+    | 'read'
+    /** Hand a user message to a session. */
+    | 'send'
+    /** Replace a session's process with a newer build. */
+    | 'restart'
+    /** Ask a machine what it is running. */
+    | 'identity'
+    /** Ask a machine which sessions it has. */
+    | 'listSessions'
+    /** Start a new session on a machine. */
+    | 'spawn'
+    /** Stop a session, or the daemon. */
+    | 'stop'
+    /** Run something inside a session — a shell command, a file operation. */
+    | 'exec';
+
+/**
  * One channel, as far as anything above it is concerned.
  *
  * Everything channel-shaped stops here: which socket is open, which sightings exist, whose
@@ -96,6 +125,14 @@ export type ChannelDriver = {
      * about which machines had earned a relay glyph.
      */
     capable(machineId: string): boolean;
+    /**
+     * Whether this channel can carry an operation at all.
+     *
+     * A capability, not a measurement: it does not depend on whether the machine is up, only on
+     * what this kind of channel is able to do. Whether it can be done *now* is a separate question,
+     * asked of the same drivers' measurements.
+     */
+    supports(operation: ChannelOperation): boolean;
 };
 
 /** The one answer anything above the drivers needs about a session. */

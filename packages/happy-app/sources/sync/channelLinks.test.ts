@@ -9,6 +9,7 @@ const driver = (channel: ChannelDriver['channel'], state: ChannelLinkState | nul
     session: () => null,
     machine: () => null,
     capable: () => false,
+    supports: () => true,
 });
 
 describe('channelLinks', () => {

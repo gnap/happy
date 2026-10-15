@@ -220,6 +220,7 @@ export const zhHant: TranslationStructure = {
         networkError: '發生網路錯誤',
         serverError: '發生伺服器錯誤',
         unknownError: '發生未知錯誤',
+        channelCannotServeAction: '這個操作要走伺服器，而你在通道設定裡把它關掉了',
         connectionTimeout: '連線逾時',
         authenticationFailed: '驗證失敗',
         permissionDenied: '權限被拒絕',

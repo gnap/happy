@@ -219,6 +219,7 @@ export const pt: TranslationStructure = {
         networkError: 'Ocorreu um erro de rede',
         serverError: 'Ocorreu um erro do servidor',
         unknownError: 'Ocorreu um erro desconhecido',
+        channelCannotServeAction: 'Esta ação passa pelo servidor, que está desativado nas suas configurações de canais',
         connectionTimeout: 'Tempo limite da conexão esgotado',
         authenticationFailed: 'Falha na autenticação',
         permissionDenied: 'Permissão negada',

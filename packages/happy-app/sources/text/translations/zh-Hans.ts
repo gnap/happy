@@ -221,6 +221,7 @@ export const zhHans: TranslationStructure = {
         networkError: '发生网络错误',
         serverError: '发生服务器错误',
         unknownError: '发生未知错误',
+        channelCannotServeAction: '这个操作要走服务器，而你在通道设置里把它关掉了',
         connectionTimeout: '连接超时',
         authenticationFailed: '认证失败',
         permissionDenied: '权限被拒绝',

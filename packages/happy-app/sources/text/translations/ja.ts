@@ -254,6 +254,7 @@ export const ja: TranslationStructure = {
         networkError: 'ネットワークエラーが発生しました',
         serverError: 'サーバーエラーが発生しました',
         unknownError: '不明なエラーが発生しました',
+        channelCannotServeAction: 'この操作はサーバー経由ですが、チャンネル設定でオフになっています',
         connectionTimeout: '接続がタイムアウトしました',
         authenticationFailed: '認証に失敗しました',
         permissionDenied: '権限がありません',

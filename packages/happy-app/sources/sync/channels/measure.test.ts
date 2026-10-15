@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { channelDrivers, type ChannelState } from './measure';
+import { channelsFor, operationSupported } from './resolve';
 import type { ChannelDriver } from './types';
 import type { DaemonConnectionState } from '@/sync/lan/daemonConnections';
 
@@ -116,5 +117,38 @@ describe('what the drivers say about a machine', () => {
         expect(machineOf({ socketStatus: 'auth_error' }, 'server')?.reachable).toBe(true);
         expect(machineOf({ socketStatus: 'disconnected' }, 'server')?.reachable).toBe(false);
         expect(machineOf({ socketStatus: 'error' }, 'server')?.reachable).toBe(false);
+    });
+});
+
+describe('what each channel can do', () => {
+    const channels = (priority: ('lan' | 'relay' | 'server')[]) => channelDrivers(state(), priority);
+
+    it('lets a machine serve its own sessions', () => {
+        // The daemon's API reads a session, takes a message for one, restarts its process and says
+        // what it is running. Those are the four things the LAN and the relay can do.
+        const drivers = channels(['lan', 'relay']);
+        for (const operation of ['read', 'send', 'restart', 'identity', 'listSessions'] as const) {
+            expect(operationSupported(drivers, operation), operation).toBe(true);
+        }
+    });
+
+    it('leaves starting a session to the server, and says so when the server is off', () => {
+        // Not a defect to be smoothed over: starting a session is an RPC the server forwards to the
+        // daemon, and the daemon's own API refuses it. The point of naming the operations is that
+        // the App can say this *before* trying, instead of reporting whatever the failure looked
+        // like — which is how "the server is switched off" read as an unknown error.
+        const withoutServer = channels(['lan', 'relay']);
+        expect(operationSupported(withoutServer, 'spawn')).toBe(false);
+        expect(operationSupported(withoutServer, 'stop')).toBe(false);
+        expect(operationSupported(withoutServer, 'exec')).toBe(false);
+        expect(channelsFor(withoutServer, 'spawn')).toEqual([]);
+        // And with the server on, it is the only channel that offers them.
+        expect(channelsFor(channels(['lan', 'server']), 'spawn')).toEqual(['server']);
+    });
+
+    it('offers a restart over both kinds of channel, which is what makes it survivable', () => {
+        // The action this whole layer was first built for: a session is restarted because its
+        // machine has been rebuilt, and the machine's own channel is the one that is up then.
+        expect(channelsFor(channels(['lan', 'relay', 'server']), 'restart')).toEqual(['lan', 'relay', 'server']);
     });
 });

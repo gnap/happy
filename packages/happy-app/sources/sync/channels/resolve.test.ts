@@ -7,7 +7,7 @@ const driver = (
     channel: ChannelDriver['channel'],
     session: ChannelDriver['session'],
     machine: ChannelDriver['machine'] = () => null,
-): ChannelDriver => ({ channel, session, machine, link: () => null, capable: () => false });
+): ChannelDriver => ({ channel, session, machine, link: () => null, capable: () => false, supports: () => true });
 
 const says = (channel: ChannelDriver['channel'], reaching: boolean, seenAt?: number): ChannelDriver =>
     driver(channel, () => ({ reaching, seenAt }));

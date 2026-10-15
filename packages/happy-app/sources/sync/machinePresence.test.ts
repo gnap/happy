@@ -6,7 +6,7 @@ import type { ChannelDriver } from './channels/types';
 const driver = (
     channel: ChannelDriver['channel'],
     report: { reachable: boolean; alive: boolean } | null,
-): ChannelDriver => ({ channel, link: () => null, session: () => null, machine: () => report, capable: () => true });
+): ChannelDriver => ({ channel, link: () => null, session: () => null, machine: () => report, capable: () => true, supports: () => true });
 
 describe('resolveMachinePresence', () => {
     it('answers with the first channel, in priority order, that reports it alive', () => {

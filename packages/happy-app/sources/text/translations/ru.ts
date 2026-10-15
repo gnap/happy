@@ -196,6 +196,7 @@ export const ru: TranslationStructure = {
         networkError: 'Произошла ошибка сети',
         serverError: 'Произошла ошибка сервера',
         unknownError: 'Произошла неизвестная ошибка',
+        channelCannotServeAction: 'Это действие идёт через сервер, а он отключён в настройках каналов',
         connectionTimeout: 'Время соединения истекло',
         authenticationFailed: 'Ошибка авторизации',
         permissionDenied: 'Доступ запрещен',

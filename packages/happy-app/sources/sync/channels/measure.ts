@@ -11,7 +11,7 @@
 import { normalizeChannelPriority } from '@/sync/lan/channelOrder';
 import type { DaemonConnectionState } from '@/sync/lan/daemonConnections';
 import type { SessionChannel } from '@/sync/lan/types';
-import type { ChannelDriver } from './types';
+import type { ChannelDriver, ChannelOperation } from './types';
 
 /**
  * The slice of the store the drivers read.
@@ -30,6 +30,22 @@ export type ChannelState = {
     relayDirectory: Record<string, { at: number; sessions: { happySessionId: string; isAlive: boolean }[] }>;
     relayHubConnected: boolean;
 };
+
+/**
+ * What a machine's own API can do.
+ *
+ * The daemon serves reads, takes a message for a session it already has, restarts that session's
+ * process, and says what it is running — and refuses to start sessions or run things inside them.
+ * `packages/happy-cli/src/daemon/lanServer.test.ts` asserts the refusals, so this list and that
+ * test are the two halves of one boundary.
+ */
+const DAEMON_OPERATIONS: ReadonlySet<ChannelOperation> = new Set([
+    'read',
+    'send',
+    'restart',
+    'identity',
+    'listSessions',
+]);
 
 /** A connection this App is holding to a machine, on any route. */
 const heldSocket = (state: ChannelState, machineId: string, route: SessionChannel): boolean =>
@@ -69,6 +85,10 @@ function serverDriver(state: ChannelState): ChannelDriver {
         // The server is always a channel this machine has while it is switched on: a server that
         // does not report the machine is still a channel the App could use.
         capable: () => true,
+        // Everything. A machine's own channels cannot start a session — the daemon's API refuses it
+        // on purpose, because starting one is the server's record to keep — and that is the whole
+        // reason this axis exists.
+        supports: () => true,
         session: (sessionId) => {
             const session = state.sessions[sessionId];
             if (!session) {
@@ -105,6 +125,10 @@ function lanDriver(state: ChannelState): ChannelDriver {
         },
         // Seen once on this network is what earns the glyph, whether or not it is up now.
         capable: (machineId) => machineId in state.lanSightings,
+        // A machine can serve its own sessions: read them, take a message, restart a process, say
+        // what it is running. What it cannot do is start one, or act inside one — those are the
+        // server's, and the daemon's API is built that way.
+        supports: (operation) => DAEMON_OPERATIONS.has(operation),
         session: (sessionId, machineId) => {
             const answered = state.daemonSessionList[sessionId];
             if (answered?.via === 'lan') {
@@ -138,6 +162,8 @@ function relayDriver(state: ChannelState): ChannelDriver {
         // The relay is its one connection to the hub, not the per-machine streams it carries: while
         // it is switched on and not yet reached, the App is trying, which is the blue.
         link: () => (state.relayHubConnected ? 'connected' : 'connecting'),
+        // Same operations as the LAN: it is the same daemon and the same API, reached the other way.
+        supports: (operation) => DAEMON_OPERATIONS.has(operation),
         // The relay vouches for what it is holding, and the machine vouches for a route it
         // published itself. A route derived from the machine key is not evidence its daemon runs a
         // relay client — every machine has one — which is why hosts that never published grew a

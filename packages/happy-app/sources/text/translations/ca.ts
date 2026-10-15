@@ -219,6 +219,7 @@ export const ca: TranslationStructure = {
         networkError: 'Error de connexió',
         serverError: 'Error del servidor',
         unknownError: 'Error desconegut',
+        channelCannotServeAction: 'Aquesta acció passa pel servidor, que està desactivat a la configuració de canals',
         connectionTimeout: 'S\'ha esgotat el temps de connexió',
         authenticationFailed: 'L\'autenticació ha fallat',
         permissionDenied: 'Permís denegat',

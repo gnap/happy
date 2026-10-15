@@ -7,7 +7,7 @@
  */
 
 import type { SessionChannel } from '@/sync/lan/types';
-import type { ChannelDriver, SessionReach } from './types';
+import type { ChannelDriver, ChannelOperation, SessionReach } from './types';
 
 /**
  * How this session is being reached, from the channel that is reaching it.
@@ -104,4 +104,20 @@ export function channelAvailability(args: {
         available[driver.channel] = measured || args.lastReadRoute === driver.channel;
     }
     return available;
+}
+
+/**
+ * The channels that can carry an operation at all, in this device's order of preference.
+ *
+ * Empty means the App cannot do this to this machine however it tries: every channel that could
+ * have was switched off. That is a different thing from "it failed", and worth being able to say
+ * before anything is attempted.
+ */
+export function channelsFor(drivers: readonly ChannelDriver[], operation: ChannelOperation): SessionChannel[] {
+    return drivers.filter((driver) => driver.supports(operation)).map((driver) => driver.channel);
+}
+
+/** Whether any channel this device has switched on can carry this operation. */
+export function operationSupported(drivers: readonly ChannelDriver[], operation: ChannelOperation): boolean {
+    return drivers.some((driver) => driver.supports(operation));
 }
