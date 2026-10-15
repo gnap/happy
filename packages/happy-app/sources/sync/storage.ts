@@ -1847,7 +1847,20 @@ export const storage = create<StorageState>()((set, get) => {
                 delete next[machineId];
                 return { ...state, daemonVersions: next };
             }
-            return { ...state, daemonVersions: { ...state.daemonVersions, [machineId]: { ...versions, at } } };
+            const daemonVersions = { ...state.daemonVersions, [machineId]: { ...versions, at } };
+            // The list is built by an action, not by a selector, so nothing else recomputes it when
+            // this arrives — and the row's restart mark is decided inside that build. Recording a
+            // version without rebuilding the list would leave the mark computed from a snapshot in
+            // which the machine had never answered.
+            return {
+                ...state,
+                daemonVersions,
+                sessionListViewData: buildSessionListViewData(
+                    state.sessions,
+                    state.machines,
+                    daemonVersions,
+                ),
+            };
         }),
         applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute }[] | null) => set((state) => {
             if (sessions === null) {
