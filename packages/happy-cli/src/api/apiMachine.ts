@@ -387,7 +387,9 @@ export class ApiMachineClient {
 
             const localMetadata = getLocalMachineMetadata();
 
-            if (shouldSyncMachineMetadata(this.machine.metadata, localMetadata)) {
+            // metadataVersion 0 means registration fell back to offline mode: our copy is the
+            // local metadata, not the server's, which may still name a previous CLI version.
+            if (this.machine.metadataVersion === 0 || shouldSyncMachineMetadata(this.machine.metadata, localMetadata)) {
                 logger.debug('[API MACHINE] Local machine metadata changed, syncing static metadata');
                 this.updateMachineMetadata((metadata) => buildSyncedMachineMetadata(metadata, localMetadata)).catch((error) => {
                     logger.debug('[API MACHINE] Failed to sync machine metadata on connect:', error);
