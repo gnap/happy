@@ -2177,6 +2177,37 @@ export const storage = create<StorageState>()((set, get) => {
     }
 });
 
+/**
+ * Keeps the list view data in step with what it is built from.
+ *
+ * The list is built by hand, inside whichever action remembered to build it, so a change that
+ * arrived by a path nobody thought about — a session update delivered over the daemon channel, say
+ * — left the rows showing whatever they were last built with. That is how a session that had just
+ * been restarted kept its "restart needed" mark: the state was new, the list was old.
+ *
+ * Every writer is covered here instead of one at a time. The three inputs are compared by
+ * identity, so a rebuild that only writes the list does not trigger another one.
+ */
+const builtFrom: { sessions: unknown; machines: unknown; daemonVersions: unknown } = {
+    sessions: null,
+    machines: null,
+    daemonVersions: null,
+};
+
+storage.subscribe((state) => {
+    if (
+        builtFrom.sessions === state.sessions
+        && builtFrom.machines === state.machines
+        && builtFrom.daemonVersions === state.daemonVersions
+    ) {
+        return;
+    }
+    builtFrom.sessions = state.sessions;
+    builtFrom.machines = state.machines;
+    builtFrom.daemonVersions = state.daemonVersions;
+    storage.setState({ sessionListViewData: buildSessionListViewData(state.sessions, state.machines, state.daemonVersions) });
+});
+
 export function useSessions() {
     return storage(useShallow((state) => state.isDataReady ? state.sessionsData : null));
 }
