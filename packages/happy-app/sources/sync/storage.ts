@@ -11,11 +11,15 @@ import type { DaemonRoute, LanSighting, RelayEndpoint, SessionChannel } from './
 import type { RelayDirectoryEntry } from './lan/relayDirectory';
 import type { DaemonConnectionState } from './lan/daemonConnections';
 import { resolveMachinePresence, type MachinePresence } from './machinePresence';
-import { channelLinks, type ChannelLinkState } from './channelLinks';
+import { channelLinks } from './channelLinks';
+import { enabledChannels } from '@/utils/enabledChannels';
 import { sessionIsRestarting } from '@/utils/sessionRestart';
-import { channelDrivers, resolveMachineReach, resolveSessionReach, type ChannelDriver, type SessionReach } from './reachability';
+import { channelDrivers, type ChannelState } from './channels/measure';
+import type { ChannelDriver, ChannelLinkState, SessionReach } from './channels/types';
+import { resolveSessionReach } from './channels/resolve';
 
-export { channelLinks, type ChannelFacts, type ChannelLinkState } from './channelLinks';
+export { channelLinks, type ChannelLink } from './channelLinks';
+export type { ChannelLinkState } from './channels/types';
 import { applySettings, Settings } from "./settings";
 import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
@@ -2422,14 +2426,8 @@ export function useSessionReach(sessionId: string, machineId: string | undefined
         sessionId,
         machineId,
         channelDrivers(state, state.localSettings.channelPriority),
+        Date.now(),
     )));
-}
-
-/** Which channel could carry this machine right now, or null when none can. */
-export function useMachineReach(machineId: string | undefined): SessionChannel | null {
-    return storage(useShallow((state) => (machineId
-        ? resolveMachineReach(machineId, channelDrivers(state, state.localSettings.channelPriority))
-        : null)));
 }
 
 /** What each machine last said it is running. Empty until a machine has answered on a channel. */
@@ -2508,9 +2506,7 @@ export function useMachinePresenceMap(): Record<string, MachinePresence> {
     return React.useMemo(() => {
         // A channel switched off in the priority setting contributes nothing, so a machine is never
         // shown as reachable over a path this device has been told not to use.
-        const useServer = priority.includes('server');
-        const useLan = priority.includes('lan');
-        const useRelay = priority.includes('relay');
+        const { server: useServer, lan: useLan, relay: useRelay } = enabledChannels(priority);
         const map: Record<string, MachinePresence> = {};
         for (const id of new Set([...Object.keys(machines), ...Object.keys(sightings), ...Object.keys(relayDirectory)])) {
             map[id] = resolveMachinePresence(useServer ? machines[id] : null, useLan && !!sightings[id], useRelay && !!relayDirectory[id]);
@@ -2627,13 +2623,24 @@ export function useRealtimeMode(): 'idle' | 'speaking' {
  */
 export function useChannelLinks(): { channel: SessionChannel; state: ChannelLinkState }[] {
     const priority = storage(useShallow((state) => state.localSettings.channelPriority));
-    const facts = storage(useShallow((state) => ({
-        serverStatus: state.socketStatus,
-        lanSocket: Object.values(state.daemonSockets).some((s) => s.route === 'lan' && s.phase === 'live'),
-        lanSeen: Object.keys(state.lanSightings).length > 0,
-        relayConnected: state.relayHubConnected,
+    // Built from the same state every other channel answer is built from, so the header cannot say a
+    // channel is up that the rest of the App would not use — which is what happened while it read
+    // the store's fields itself and the resolver read its own.
+    // The whole slice the drivers read, rather than the four fields this happens to need: a
+    // narrower object would have to be cast back into shape, and the fields the links do not read
+    // are inert here — `channelLinks` asks each driver about its own link and nothing else.
+    const channelState = storage(useShallow((state) => ({
+        socketStatus: state.socketStatus,
+        sessions: state.sessions,
+        machines: state.machines,
+        daemonSockets: state.daemonSockets,
+        daemonSessionList: state.daemonSessionList,
+        lanSightings: state.lanSightings,
+        relayEndpoints: state.relayEndpoints,
+        relayDirectory: state.relayDirectory,
+        relayHubConnected: state.relayHubConnected,
     })));
-    return React.useMemo(() => channelLinks(priority, facts), [priority, facts]);
+    return React.useMemo(() => channelLinks(channelDrivers(channelState, priority)), [channelState, priority]);
 }
 
 

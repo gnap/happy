@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { resolveMachineReach, resolveSessionReach, type ChannelDriver } from './reachability';
+import { machineAvailability, resolveSessionReach } from './resolve';
+import type { ChannelDriver } from './types';
 
 /** A driver that says the same thing about everything it is asked. */
 const driver = (
     channel: ChannelDriver['channel'],
     session: ChannelDriver['session'],
-    machine: ChannelDriver['machine'] = () => false,
-): ChannelDriver => ({ channel, session, machine });
+    machine: ChannelDriver['machine'] = () => null,
+): ChannelDriver => ({ channel, session, machine, link: () => null });
 
 const says = (channel: ChannelDriver['channel'], reaching: boolean, seenAt?: number): ChannelDriver =>
     driver(channel, () => ({ reaching, seenAt }));
@@ -71,15 +72,24 @@ describe('resolveSessionReach', () => {
     });
 });
 
-describe('resolveMachineReach', () => {
-    it('reports the first channel that could carry the machine', () => {
-        expect(resolveMachineReach('machine-1', [
-            driver('lan', () => null, () => false),
-            driver('relay', () => null, () => true),
-        ])).toBe('relay');
+describe('machineAvailability', () => {
+    it('reports, per channel, whether that channel could carry the machine', () => {
+        // The shape the one channel-choosing policy takes (`channelOrder.pickChannel`), rather than
+        // an answer of its own: a second "which channel for this machine" that answered null where
+        // that one answers "the first by priority" would be a second policy wearing the same name.
+        const reachable = (channel: ChannelDriver['channel'], yes: boolean): ChannelDriver =>
+            driver(channel, () => null, () => (yes ? { reachable: true } : null));
+        expect(machineAvailability('machine-1', [
+            reachable('lan', false),
+            reachable('relay', true),
+            reachable('server', true),
+        ])).toEqual({ lan: false, relay: true, server: true });
     });
 
-    it('reports nothing when no channel can', () => {
-        expect(resolveMachineReach('machine-1', [driver('lan', () => null), driver('server', () => null)])).toBeNull();
+    it('says nothing about a machine no channel can carry', () => {
+        expect(machineAvailability('machine-1', [
+            driver('lan', () => null),
+            driver('server', () => null),
+        ])).toEqual({ lan: false, server: false });
     });
 });

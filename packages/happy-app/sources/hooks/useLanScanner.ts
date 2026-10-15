@@ -2,6 +2,7 @@ import * as React from 'react';
 import { AppState, Platform, type AppStateStatus } from 'react-native';
 import * as Network from 'expo-network';
 import { sync } from '@/sync/sync';
+import { channelEnabled } from '@/utils/enabledChannels';
 import { storage } from '@/sync/storage';
 import { discoverMachines, accountFingerprintOf } from '@/sync/lan/discovery';
 
@@ -45,7 +46,7 @@ export function useLanScanner(): void {
             // been derived; the account public key is the input the discovery filter needs.
             const accountPublicKey = sync.encryption?.contentDataKey;
             // Switched off in the channel priority setting: do not browse at all.
-            if (!storage.getState().localSettings.channelPriority.includes('lan')) {
+            if (!channelEnabled(storage.getState().localSettings.channelPriority, 'lan')) {
                 return;
             }
             if (!accountPublicKey || cancelled) {

@@ -46,6 +46,7 @@ import { openLanSocket, type LanSocketHandle } from './lan/socket';
 import { DEFAULT_RELAY_URL, RelayHub, relayHubUrl, relayOriginOf, type HubMachine, type SocketLike } from './lan/relayHub';
 import type { RelayDirectoryEntry } from './lan/relayDirectory';
 import { normalizeChannelPriority, pickChannel } from './lan/channelOrder';
+import { channelEnabled, enabledChannels } from '@/utils/enabledChannels';
 import { FetchSlots } from './fetchSlots';
 import { DaemonConnections, type DaemonTarget } from './lan/daemonConnections';
 import { pageMovedTheLog, planDaemonRead } from './lan/windowPlan';
@@ -869,8 +870,8 @@ class Sync {
                     this.ensureRelayHub();
                     // A new order changes where every session reads from, so re-resolve them now
                     // instead of at each one's next scheduled fetch.
-                    const serverWas = previous.localSettings.channelPriority.includes('server');
-                    const serverNow = state.localSettings.channelPriority.includes('server');
+                    const serverWas = channelEnabled(previous.localSettings.channelPriority, 'server');
+                    const serverNow = channelEnabled(state.localSettings.channelPriority, 'server');
                     if (serverWas !== serverNow) {
                         // Switching the server off has to drop the connection, not just stop
                         // choosing it: until the socket is gone the App is still talking to
@@ -1731,7 +1732,7 @@ class Sync {
         // is asked of the daemons that can be reached instead. Without this the request below would
         // still go out and fail, which is the connection the setting exists to stop — the fallback
         // in the catch would reach the same place, but only after trying.
-        if (!this.channelPriority().includes('server')) {
+        if (!channelEnabled(this.channelPriority(), 'server')) {
             await this.fetchSessionListFromDaemons().catch((error) => {
                 log.log(`📡 fetchSessions: daemon session list failed: ${String(error)}`);
             });
@@ -4800,7 +4801,7 @@ class Sync {
             // came from — rather than being labelled with a channel that was never established.
             // Unless the server is switched off, in which case that path is not this App's to
             // take either: the session is simply unreachable, and says so.
-            return [priority.includes('server') ? 'server' : priority[0], 'not-on-network'];
+            return [enabledChannels(priority).server ? 'server' : priority[0], 'not-on-network'];
         }
         if (channel === 'lan') {
             return ['lan', 'reachable'];
@@ -4808,7 +4809,7 @@ class Sync {
         if (channel === 'relay') {
             // "Server unreachable" only describes a server that is meant to be there. One switched
             // off in the setting was not unreachable, it was not used.
-            const serverOff = !priority.includes('server');
+            const serverOff = !enabledChannels(priority).server;
             return ['relay', serverDown && !serverOff ? 'server-down-relay' : 'by-priority'];
         }
         return ['server', priority.length === 1 || available.lan || available.relay ? 'by-priority' : 'not-on-network'];
@@ -4827,8 +4828,8 @@ class Sync {
 
     /** Whether any daemon route (LAN or relay) is switched on; with neither, the server is the only path. */
     private daemonRoutesEnabled(): { lan: boolean; relay: boolean } {
-        const priority = this.channelPriority();
-        return { lan: priority.includes('lan'), relay: priority.includes('relay') };
+        const enabled = enabledChannels(this.channelPriority());
+        return { lan: enabled.lan, relay: enabled.relay };
     }
 
     private daemonSocketWatch: (() => void) | null = null;
@@ -5001,7 +5002,7 @@ class Sync {
     private ensureRelayHub(): void {
         const relayUrl = this.relayOrigin();
         const priority = this.channelPriority();
-        const wanted = priority.includes('relay');
+        const wanted = enabledChannels(priority).relay;
         // Said out loud at startup, because "the relay is off in the priority" and "the relay cannot
         // be reached" look identical everywhere else — a section with nothing connected either way.
         log.log(
@@ -5788,6 +5789,6 @@ async function syncInit(credentials: AuthCredentials, restore: boolean) {
     const API_ENDPOINT = getServerUrl();
     // Set before initialising: a server the setting has switched off must not be connected to even
     // for the instant it takes the first connect to come back.
-    apiSocket.setServerEnabled(storage.getState().localSettings.channelPriority.includes('server'));
+    apiSocket.setServerEnabled(channelEnabled(storage.getState().localSettings.channelPriority, 'server'));
     apiSocket.initialize({ endpoint: API_ENDPOINT, token: credentials.token }, encryption);
 }
