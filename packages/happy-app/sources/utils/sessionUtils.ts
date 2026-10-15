@@ -42,31 +42,32 @@ export function useSessionStatus(session: Session): SessionStatus {
         return vibingMessages[Math.floor(Math.random() * vibingMessages.length)].toLowerCase() + '…';
     }, [isOnline, hasPermissions, session.thinking]);
 
+    /**
+     * A restart in flight, which the machine announces as a change to this session's state and
+     * calls off when the new process is up.
+     *
+     * Asked before anything else, and deliberately not only for a session that looks offline: a
+     * restart does not stop the App reaching the session — the socket it holds is the machine's,
+     * and stays up across the swap — so "is anything reaching it" stays true the whole way through
+     * and this would never be reached. Nothing else can see the swap, which is why the machine says
+     * it, and why it is believed rather than inferred.
+     */
+    if (sessionIsRestarting(session)) {
+        return {
+            state: 'restarting',
+            isConnected: isOnline,
+            isLive: true,
+            statusText: t('status.restarting'),
+            shouldShowStatus: true,
+            // The same blue as a session that is working: a restart is something happening, and
+            // the grey that means "stopped" is the one thing it must not be mistaken for.
+            statusColor: '#007AFF',
+            statusDotColor: '#007AFF',
+            isPulsing: true
+        };
+    }
+
     if (!isOnline) {
-        /**
-         * A session being restarted is not an offline one, and from here the two look identical:
-         * it stops reporting, and "not reporting" is what an ended session looks like too. The
-         * difference is that the machine doing it says so, and it says so about the session — so
-         * this reads the session, and the answer is the same on every device rather than only on
-         * the one that asked.
-         *
-         * Only ever consulted here, for a session that is not reporting itself. A session that
-         * answers again is drawn from what it says.
-         */
-        if (sessionIsRestarting(session)) {
-            return {
-                state: 'restarting',
-                isConnected: false,
-                isLive: true,
-                statusText: t('status.restarting'),
-                shouldShowStatus: true,
-                // The same blue as a session that is working: a restart is something happening, and
-                // the grey that means "stopped" is the one thing it must not be mistaken for.
-                statusColor: '#007AFF',
-                statusDotColor: '#007AFF',
-                isPulsing: true
-            };
-        }
         return {
             state: 'disconnected',
             isConnected: false,
