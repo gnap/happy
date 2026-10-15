@@ -30,12 +30,22 @@ describe('channelLinks', () => {
     });
 
     it('hides the LAN icon until this device has seen a machine on the network', () => {
-        expect(channelLinks(['lan', 'server'], facts()).map((l) => l.channel)).toEqual(['server']);
-        expect(channelLinks(['lan', 'server'], facts({ lanSeen: true }))).toEqual([
+        // Spelled out in full, because the two-channel list is the one `channelOrder` migrates:
+        // `['lan', 'server']` is the pre-relay default, not a decision about the LAN.
+        expect(channelLinks(['lan', 'server', 'relay'], facts()).map((l) => l.channel)).toEqual(['server', 'relay']);
+        expect(channelLinks(['lan', 'server', 'relay'], facts({ lanSeen: true }))).toEqual([
             { channel: 'lan', state: 'connecting' },
             { channel: 'server', state: 'connected' },
+            { channel: 'relay', state: 'connecting' },
         ]);
-        expect(channelLinks(['lan', 'server'], facts({ lanSocket: true }))[0]).toEqual({ channel: 'lan', state: 'connected' });
+        expect(channelLinks(['lan', 'server', 'relay'], facts({ lanSocket: true }))[0]).toEqual({ channel: 'lan', state: 'connected' });
+    });
+
+    it('treats the pre-relay list as never having decided about the relay', () => {
+        // A device that saved the old default has not switched the relay off: the channel did not
+        // exist when it saved. Honouring the list literally turned the relay off on every device
+        // that had not been asked since, which reads as the channel having been removed.
+        expect(channelLinks(['lan', 'server'], facts()).map((l) => l.channel)).toEqual(['server', 'relay']);
     });
 
     it('falls back to the default set rather than showing no channels at all', () => {

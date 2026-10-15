@@ -38,7 +38,7 @@ import { AsyncLock } from '@/utils/lock';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
-import { fetchIdentity } from './lan/client';
+import { fetchIdentity, restartSessionAt } from './lan/client';
 import { getLanCredential } from './lan/credentials';
 import { readSessionOverLan, listSessionsOverLan, toNormalizedMessages, type LanConnection, type LanSessionRead } from './lan/sessionChannel';
 import { decryptLanEntries } from './lan/history';
@@ -358,7 +358,7 @@ class Sync {
             // answer is most likely to have changed.
             if (state.phase === 'live') {
                 const machineId = id.split(':')[0];
-                void this.refreshDaemonVersions([{ machineId, baseUrl: this.lanMachineConnections.get(machineId)?.baseUrl ?? '' }], true);
+                void this.refreshDaemonVersions([{ machineId, baseUrl: this.lanMachineConnections.get(machineId)?.baseUrl ?? '' }]);
             }
         },
         // Only the LAN: over the relay the hub is the one that can see a daemon go, and it says so.
@@ -581,7 +581,7 @@ class Sync {
             if (Date.now() - lastMachineVersionSweep > Sync.MACHINE_VERSION_SWEEP_MS
                 && storage.getState().socketStatus === 'connected') {
                 lastMachineVersionSweep = Date.now();
-                void this.refreshDaemonVersions(this.machinesWithNoLiveChannel(), true);
+                void this.refreshDaemonVersions(this.machinesWithNoLiveChannel());
             }
 
             const idleMs = Date.now() - this.lastUserActivityAt;
@@ -4303,15 +4303,15 @@ class Sync {
      * Returns null when there is nothing to read over the LAN — see `readSessionOverLan` for the
      * cases that covers.
      */
-    /** Every machine this App can reach, with the address it last reached it over. */
-    private knownMachineAddresses(): { machineId: string; baseUrl: string }[] {
-        const addresses: { machineId: string; baseUrl: string }[] = [];
+    /** Every machine this App can reach, with the address it last reached it over and by which route. */
+    private knownMachineAddresses(): { machineId: string; baseUrl: string; route: DaemonRoute }[] {
+        const addresses: { machineId: string; baseUrl: string; route: DaemonRoute }[] = [];
         for (const [machineId, connection] of this.lanMachineConnections) {
-            if (connection?.baseUrl) addresses.push({ machineId, baseUrl: connection.baseUrl });
+            if (connection?.baseUrl) addresses.push({ machineId, baseUrl: connection.baseUrl, route: connection.route });
         }
         for (const [machineId, endpoint] of Object.entries(storage.getState().relayEndpoints)) {
-            if (endpoint?.baseUrl && !addresses.some((entry) => entry.machineId === machineId)) {
-                addresses.push({ machineId, baseUrl: endpoint.baseUrl });
+            if (endpoint?.baseUrl && !addresses.some((entry) => entry.machineId === machineId && entry.route === 'relay')) {
+                addresses.push({ machineId, baseUrl: endpoint.baseUrl, route: 'relay' });
             }
         }
         return addresses;
@@ -4325,23 +4325,25 @@ class Sync {
      * that socket coming live is what asked it, and the answer it gave then is the freshest thing
      * anyone could have.
      */
-    private machinesWithNoLiveChannel(): { machineId: string; baseUrl: string }[] {
+    private machinesWithNoLiveChannel(): { machineId: string; baseUrl: string; route: DaemonRoute }[] {
         const sockets = Object.entries(storage.getState().daemonSockets);
         return this.knownMachineAddresses().filter((machine) => !sockets.some(
             ([key, socket]) => key.startsWith(`${machine.machineId}:`) && socket.phase === 'live'
         ));
     }
 
-    /** Asks each machine what build it is running, and records it. Never fatal. */
-    private async refreshDaemonVersions(machines: { machineId: string; baseUrl: string }[], force = false): Promise<void> {
+    /**
+     * Asks each machine what build it is running, and records it. Never fatal.
+     *
+     * Asked on occasions, never on a schedule of its own: the caller decides, and each of the three
+     * callers is something that happened — a socket came live, the server could not answer, or the
+     * long server-channel sweep came round. A machine is asked once per occasion, with nothing
+     * remembered about when it last answered, because there is no such thing as holding this answer
+     * too freshly: whoever asks has a reason to.
+     */
+    private async refreshDaemonVersions(machines: { machineId: string; baseUrl: string }[]): Promise<void> {
         for (const machine of machines) {
             if (!machine.baseUrl || this.daemonVersionChecks.has(machine.machineId)) {
-                continue;
-            }
-            // Asked again only when what we hold is old enough to be worth doubting: a version
-            // changes when someone rebuilds, which is not something a poll interval should chase.
-            const held = storage.getState().daemonVersions[machine.machineId];
-            if (!force && held && Date.now() - held.at < 30_000) {
                 continue;
             }
             this.daemonVersionChecks.add(machine.machineId);
@@ -4541,6 +4543,59 @@ class Sync {
     }
 
     /**
+     * Asks a machine to restart one of its sessions, over a channel this App already has to it.
+     *
+     * Null when there is no such channel — no machine key, no address, or an address that did not
+     * answer — and the caller then asks the server, which is what every restart used to do. That
+     * single route is why a restart failed with "socket disconnected" while the machine was sitting
+     * there answering reads on the LAN: what makes a session need restarting is that its machine has
+     * been rebuilt, and at that moment the machine's own channel is the one that is up.
+     *
+     * The address tried first is the one this session was last reached over, because it is the only
+     * address known to work for this machine; the relay is tried after it, for when that address has
+     * moved since. Neither is discovered afresh: a restart is a rare, deliberate act and one that has
+     * already failed is better reported than turned into a browse.
+     */
+    async restartSession(sessionId: string, machineId: string): Promise<{ success: boolean; newSessionId?: string; error?: string } | null> {
+        const machineKey = this.getMachineKey(machineId);
+        if (!machineKey) {
+            return null;
+        }
+        // The same decision that governs where this session's messages are read from, because a
+        // restart and a read are about the same machine over the same routes: a session pinned to
+        // one channel is restarted on it, and one the App is reading over the LAN is restarted
+        // there. "The server" is not this method's business — the caller is holding it.
+        const preferred = this.preferredChannel(sessionId);
+        if (preferred === 'server') {
+            return null;
+        }
+        const routes = this.daemonRoutesEnabled();
+        const addresses = this.knownMachineAddresses().filter((address) => address.machineId === machineId);
+        // The chosen route first, then the other one: an address that has moved is worth one more
+        // try before the restart is handed to a channel the App is not otherwise using.
+        const order: DaemonRoute[] = preferred === 'lan' ? ['lan', 'relay'] : ['relay', 'lan'];
+        for (const route of order) {
+            const address = addresses.find((candidate) => candidate.route === route);
+            if (!address || !routes[route]) {
+                continue;
+            }
+            try {
+                const { token } = await getLanCredential(address.baseUrl, machineKey);
+                const verdict = await restartSessionAt(address.baseUrl, token, sessionId);
+                if (verdict) {
+                    log.log(`🔄 restart ${sessionId} over ${route}: ${verdict.success ? 'accepted' : verdict.error ?? 'refused'}`);
+                    return verdict;
+                }
+            } catch {
+                // The next route, and then the server: an address that does not answer is a reason
+                // to try another, not a failure to hand back.
+            }
+        }
+        log.log(`🔄 restart ${sessionId}: no daemon channel answered, asking the server`);
+        return null;
+    }
+
+    /**
      * Asks the daemons what sessions they have, over the LAN and the relay, and records it.
      *
      * Called when the server cannot answer. The LAN summary carries no metadata — that is
@@ -4572,11 +4627,12 @@ class Sync {
         }
         // The same handshake that just read this machine's sessions can tell us what it is running —
         // the one fact about a machine that the server's copy of it cannot keep current, because a
-        // version is a build id that changes whenever anything is rebuilt.
+        // version is a build id that changes whenever anything is rebuilt. The address is the one
+        // that answered, so a machine reached over its relay is asked there too rather than being
+        // looked for on a network it is not on.
         void this.refreshDaemonVersions(answers.map((answer) => ({
             machineId: answer.machineId,
-            // Whatever this machine was last reached over: the same address the read just used.
-            baseUrl: this.lanMachineConnections.get(answer.machineId)?.baseUrl ?? '',
+            baseUrl: answer.baseUrl,
         })));
         return sessions.length;
     }

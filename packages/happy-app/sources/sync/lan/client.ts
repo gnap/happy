@@ -202,3 +202,37 @@ export async function fetchHistory(
     }
     return (await response.json()) as LanHistory;
 }
+
+/** What a daemon says about a restart it was asked to perform. */
+export type LanRestartVerdict = { success: boolean; newSessionId?: string; error?: string };
+
+/**
+ * Asks a daemon to restart a session, on the daemon's own API.
+ *
+ * Returns null when this daemon cannot be asked to do it — which is the 404 of a build that
+ * predates the route, and also every other refusal to answer, because they mean the same thing to
+ * a caller: no verdict came from here, so it should ask someone who might give one. A daemon that
+ * *did* answer says so in the body, including when the answer is no.
+ *
+ * The daemon's whole reason for the route is that a session is restarted because its machine has
+ * been rebuilt, and the machine's own channel is the one that is up at that moment — the server's
+ * is not necessarily, which is how a restart came to fail with "socket disconnected" while the
+ * machine sat there answering reads on the LAN.
+ */
+export async function restartSessionAt(
+    baseUrl: string,
+    token: string,
+    sessionId: string
+): Promise<LanRestartVerdict | null> {
+    const response = await request(`${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/restart`, {
+        method: 'POST',
+        token,
+        // A restart kills a process and starts another. It is not slow, but it is not a read
+        // either, and the shortest timeout in this file is for questions that are one round trip.
+        timeoutMs: historyTimeoutFor(baseUrl),
+    });
+    if (!response.ok) {
+        return null;
+    }
+    return (await response.json()) as LanRestartVerdict;
+}

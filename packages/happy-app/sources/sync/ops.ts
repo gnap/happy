@@ -490,14 +490,20 @@ interface SessionRestartResponse {
 /**
  * Restart a session via daemon RPC, reconnecting to the same server session
  * with the newer CLI version.  Returns the new session ID on success.
+ *
+ * The machine's own channel is asked first when this App has one. Restarting exists to pick up a
+ * build that is on disk, so the machine is the party that has to be told — and its own channel is
+ * the one that is up then, while the server's is not necessarily. Falling back to the server keeps
+ * the old behaviour for the case the channel cannot serve: no address, or one that did not answer.
  */
 export async function sessionRestart(sessionId: string, machineId: string): Promise<SessionRestartResponse> {
     try {
-        const response = await apiSocket.machineRPC<SessionRestartResponse, { sessionId: string }>(
-            machineId,
-            'restartSession',
-            { sessionId }
-        );
+        const response = await sync.restartSession(sessionId, machineId)
+            ?? await apiSocket.machineRPC<SessionRestartResponse, { sessionId: string }>(
+                machineId,
+                'restartSession',
+                { sessionId }
+            );
         if (response.success) {
             // The new process reports its build when it gets around to it, which is minutes later —
             // and until it does, a session that has just been restarted still reads as stale. The
