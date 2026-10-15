@@ -17,7 +17,7 @@ import { useDraft } from '@/hooks/useDraft';
 import { Modal } from '@/modal';
 import { gitStatusSync } from '@/sync/gitStatusSync';
 import { sessionAbort } from '@/sync/ops';
-import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionMessages, useSessionUsage, useSetting } from '@/sync/storage';
+import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useRestartingSessions, useSessionMessages, useSessionUsage, useSetting } from '@/sync/storage';
 import { useSession } from '@/sync/storage';
 import { Session } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
@@ -38,6 +38,7 @@ import { useMemo } from 'react';
 import { ActivityIndicator, Platform, Pressable, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useUnistyles } from 'react-native-unistyles';
+import { sessionIsRestarting } from '@/utils/sessionRestart';
 import type { ModelMode, PermissionMode } from '@/components/PermissionModeSelector';
 
 export const SessionView = React.memo((props: { id: string }) => {
@@ -53,6 +54,9 @@ export const SessionView = React.memo((props: { id: string }) => {
     const realtimeStatus = useRealtimeStatus();
     const isTablet = useIsTablet();
 
+    /** Restarts this App has asked for, which the header must not draw as an ended session. */
+    const restartingSessions = useRestartingSessions();
+
     // Compute header props based on session state
     const headerProps = useMemo(() => {
         if (!isDataReady) {
@@ -62,7 +66,7 @@ export const SessionView = React.memo((props: { id: string }) => {
                 subtitle: undefined,
                 avatarId: undefined,
                 onAvatarPress: undefined,
-                isConnected: false,
+                isLive: false,
                 flavor: null
             };
         }
@@ -74,24 +78,27 @@ export const SessionView = React.memo((props: { id: string }) => {
                 subtitle: undefined,
                 avatarId: undefined,
                 onAvatarPress: undefined,
-                isConnected: false,
+                isLive: false,
                 flavor: null
             };
         }
 
         // Normal state - show session info
-        const isConnected = session.presence === 'online';
+        const isOnline = session.presence === 'online';
+        // A restart in flight is not an ended session: this App asked for it, and the avatar losing
+        // its colour is exactly how an ended one reads.
+        const isLive = isOnline || sessionIsRestarting(session.id, restartingSessions);
         return {
             title: getSessionName(session),
             subtitle: session.metadata?.path ? formatPathRelativeToHome(session.metadata.path, session.metadata?.homeDir) : undefined,
             rightSubtitle: session.metadata?.contextUsage?.model || session.metadata?.sessionModel || undefined,
             avatarId: getSessionAvatarId(session),
             onAvatarPress: () => router.push(`/session/${sessionId}/info`),
-            isConnected: isConnected,
+            isLive,
             flavor: session.metadata?.flavor || null,
-            tintColor: isConnected ? '#000' : '#8E8E93'
+            tintColor: isLive ? '#000' : '#8E8E93'
         };
-    }, [session, isDataReady, sessionId, router]);
+    }, [session, isDataReady, sessionId, router, restartingSessions]);
 
     return (
         <>

@@ -94,6 +94,7 @@ export const pl: TranslationStructure = {
         offline: 'offline',
         lastSeen: ({ time }: { time: string }) => `ostatnio widziano ${time}`,
         permissionRequired: 'wymagane uprawnienie',
+        restarting: 'Restartowanie…',
         activeNow: 'Aktywny teraz',
         unknown: 'nieznane',
         creating: 'Tworzenie…',

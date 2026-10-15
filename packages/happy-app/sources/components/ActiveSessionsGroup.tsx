@@ -25,7 +25,7 @@ import { useIsTablet } from '@/utils/responsive';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { HappyError } from '@/utils/errors';
 import { SessionRowStatusIndicators } from './SessionRowStatusIndicators';
-import { sessionNeedsRestart, useDaemonVersions } from '@/sync/storage';
+import { sessionNeedsRestart, useDaemonVersions, useRestartingSessions } from '@/sync/storage';
 
 const stylesheet = StyleSheet.create((theme, runtime) => ({
     container: {
@@ -221,6 +221,8 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
     const relayEndpoints = useRelayEndpoints();
     /** The same baseline the other list uses, so the mark means one thing in both. */
     const daemonVersions = useDaemonVersions();
+    /** A restart this App asked for hides the mark: the build only changes when the new process says so. */
+    const restartingSessions = useRestartingSessions();
 
     // Group sessions by project, then associate with machine
     const projectGroups = React.useMemo(() => {
@@ -352,7 +354,7 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
                                     <View key={`${projectPath}-${machineId}`}>
                                         {machineGroup.sessions.map((session, index) => (
                                             <CompactSessionRow
-                                                needsRestart={sessionNeedsRestart(session, machinesMap, daemonVersions)}
+                                                needsRestart={sessionNeedsRestart(session, machinesMap, daemonVersions, restartingSessions)}
                                                 key={session.id}
                                                 session={session}
                                                 selected={selectedSessionId === session.id}
@@ -426,7 +428,7 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder, needsRest
             }}
         >
             <View style={styles.avatarContainer}>
-                <Avatar id={avatarId} size={48} monochrome={!sessionStatus.isConnected} flavor={session.metadata?.flavor} />
+                <Avatar id={avatarId} size={48} monochrome={!sessionStatus.isLive} flavor={session.metadata?.flavor} />
             </View>
             <View style={styles.sessionContent}>
                 {/* Title line */}
@@ -434,7 +436,7 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder, needsRest
                     <Text
                         style={[
                             styles.sessionTitle,
-                            sessionStatus.isConnected ? styles.sessionTitleConnected : styles.sessionTitleDisconnected
+                            sessionStatus.isLive ? styles.sessionTitleConnected : styles.sessionTitleDisconnected
                         ]}
                         numberOfLines={2}
                     >

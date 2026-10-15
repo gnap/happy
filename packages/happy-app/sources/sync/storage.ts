@@ -12,6 +12,7 @@ import type { RelayDirectoryEntry } from './lan/relayDirectory';
 import type { DaemonConnectionState } from './lan/daemonConnections';
 import { resolveMachinePresence, type MachinePresence } from './machinePresence';
 import { channelLinks, type ChannelLinkState } from './channelLinks';
+import { restartWithinGrace, sessionIsRestarting } from '@/utils/sessionRestart';
 
 export { channelLinks, type ChannelFacts, type ChannelLinkState } from './channelLinks';
 import { applySettings, Settings } from "./settings";
@@ -196,6 +197,17 @@ interface StorageState {
     daemonSessionList: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; at: number }>;
     /** What each machine last said it was running, asked over a channel it answered on. */
     daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }>;
+    /**
+     * Sessions this App has asked a machine to restart, by session id, and when it asked.
+     *
+     * A restart leaves a gap in which nothing reports the session, and a gap looks the same whether
+     * the session is coming back or has ended. Only the party that asked knows which it is — see
+     * `sessionIsRestarting` — and this is where it remembers asking.
+     */
+    restartingSessions: Record<string, number>;
+    markSessionRestarting: (sessionId: string) => void;
+    /** For a restart that was refused or never got out: it is not in progress. */
+    forgetSessionRestarting: (sessionId: string) => void;
     /** Replace the daemons' view. Pass null to clear it (the server answered). */
     /** Records what a machine said it is running. Null forgets it, for a machine that moved. */
     applyDaemonVersion: (machineId: string, versions: { running: string; onDisk: string | null; restartRequired: boolean } | null) => void;
@@ -353,6 +365,11 @@ const listMarkLogged = new Map<string, string>();
  * used to be built on. A copy that is missing or old makes "the versions differ" false, so sessions
  * older than their machine read as up to date.
  *
+ * A restart in flight hides the mark, and that is not a special case bolted on: the mark is about
+ * the *build*, and the build only changes when the new process says so — which is after the restart,
+ * not at the tap. Without this the row would say "needs a restart" for the whole of the restart it
+ * is already doing, which is the contradiction this mark was fixed for once before.
+ *
  * Exported because two lists draw this mark and each had its own idea of when: one had the rule and
  * the other had none, so the same session showed a restart in one list and nothing in the other.
  */
@@ -360,9 +377,11 @@ export function sessionNeedsRestart(
     session: Session,
     machines: Record<string, { metadata?: { happyCliVersion?: string } | null; daemonState?: { startedWithCliVersion?: string } | null }>,
     daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }> = {},
+    restartingSessions: Record<string, number> = {},
 ): boolean {
     const machineId = session.metadata?.machineId;
     if (!machineId) return false;
+    if (sessionIsRestarting(session.id, restartingSessions)) return false;
     const machine = machines[machineId];
     const sessionVersion = session.metadata?.version;
     const live = daemonVersions[machineId];
@@ -378,6 +397,8 @@ function buildSessionListViewData(
     machines: Record<string, { metadata?: { happyCliVersion?: string } | null; daemonState?: { startedWithCliVersion?: string } | null }>,
     /** What each machine said it is running, asked over whichever channel that machine answered on. */
     daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }> = {},
+    /** Restarts this App has asked for and is waiting on, which the restart mark has to yield to. */
+    restartingSessions: Record<string, number> = {},
 ): SessionListViewItem[] {
     // Separate active and inactive sessions
     const activeSessions: Session[] = [];
@@ -409,7 +430,7 @@ function buildSessionListViewData(
      * as up to date, which is what made this decision look arbitrary.
      */
     const getNeedsRestart = (s: Session): boolean => {
-        const marked = sessionNeedsRestart(s, machines, daemonVersions);
+        const marked = sessionNeedsRestart(s, machines, daemonVersions, restartingSessions);
         // The mark's inputs, once per change: three sources feed this baseline and a log is the only
         // way to tell a rule that decided wrongly from one that was handed nothing.
         const machineId = s.metadata?.machineId;
@@ -652,6 +673,7 @@ export const storage = create<StorageState>()((set, get) => {
         relayUnknownTags: [],
         relayHubConnected: false,
         daemonSockets: {},
+        restartingSessions: {},
         daemonSessionList: {},
         daemonVersions: {},
         channelOverride: {},
@@ -1031,6 +1053,7 @@ export const storage = create<StorageState>()((set, get) => {
                 mergedSessions,
                 state.machines,
                 state.daemonVersions,
+                state.restartingSessions,
             );
 
             // Update project manager with current sessions and machines
@@ -1521,6 +1544,7 @@ export const storage = create<StorageState>()((set, get) => {
                 updatedSessions,
                 state.machines,
                             state.daemonVersions,
+                            state.restartingSessions,
             );
 
             return {
@@ -1817,6 +1841,7 @@ export const storage = create<StorageState>()((set, get) => {
                 state.sessions,
                 state.machines,
                             state.daemonVersions,
+                            state.restartingSessions,
             );
 
             return {
@@ -1893,8 +1918,32 @@ export const storage = create<StorageState>()((set, get) => {
                     state.sessions,
                     state.machines,
                     daemonVersions,
+                    state.restartingSessions,
                 ),
             };
+        }),
+        markSessionRestarting: (sessionId: string) => set((state) => {
+            const now = Date.now();
+            // Anything whose grace has run out is dropped here rather than on a timer, because this
+            // is the only moment anything is written: an entry nobody would draw is one nobody
+            // needs, and a map that only grows keeps a session id per restart for the life of the
+            // process.
+            const restartingSessions: Record<string, number> = {};
+            for (const [id, askedAt] of Object.entries(state.restartingSessions)) {
+                if (restartWithinGrace(askedAt, now)) {
+                    restartingSessions[id] = askedAt;
+                }
+            }
+            restartingSessions[sessionId] = now;
+            return { ...state, restartingSessions };
+        }),
+        forgetSessionRestarting: (sessionId: string) => set((state) => {
+            if (!(sessionId in state.restartingSessions)) {
+                return state;
+            }
+            const restartingSessions = { ...state.restartingSessions };
+            delete restartingSessions[sessionId];
+            return { ...state, restartingSessions };
         }),
         applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute }[] | null) => set((state) => {
             if (sessions === null) {
@@ -2002,7 +2051,7 @@ export const storage = create<StorageState>()((set, get) => {
             saveSessionProfileIds(profileIds);
 
             // Rebuild sessionListViewData without the deleted session
-            const sessionListViewData = buildSessionListViewData(remainingSessions, state.machines, state.daemonVersions);
+            const sessionListViewData = buildSessionListViewData(remainingSessions, state.machines, state.daemonVersions, state.restartingSessions);
             
             return {
                 ...state,
@@ -2185,13 +2234,18 @@ export const storage = create<StorageState>()((set, get) => {
  * — left the rows showing whatever they were last built with. That is how a session that had just
  * been restarted kept its "restart needed" mark: the state was new, the list was old.
  *
- * Every writer is covered here instead of one at a time. The three inputs are compared by
+ * Every writer is covered here instead of one at a time. The inputs are compared by
  * identity, so a rebuild that only writes the list does not trigger another one.
+ *
+ * A restart this App has asked for is one of those inputs now: it is what makes the row stop
+ * showing the restart mark, and that has to happen when the tap happens, not when the new process
+ * gets around to reporting its build.
  */
-const builtFrom: { sessions: unknown; machines: unknown; daemonVersions: unknown } = {
+const builtFrom: { sessions: unknown; machines: unknown; daemonVersions: unknown; restartingSessions: unknown } = {
     sessions: null,
     machines: null,
     daemonVersions: null,
+    restartingSessions: null,
 };
 
 storage.subscribe((state) => {
@@ -2199,13 +2253,15 @@ storage.subscribe((state) => {
         builtFrom.sessions === state.sessions
         && builtFrom.machines === state.machines
         && builtFrom.daemonVersions === state.daemonVersions
+        && builtFrom.restartingSessions === state.restartingSessions
     ) {
         return;
     }
     builtFrom.sessions = state.sessions;
     builtFrom.machines = state.machines;
     builtFrom.daemonVersions = state.daemonVersions;
-    storage.setState({ sessionListViewData: buildSessionListViewData(state.sessions, state.machines, state.daemonVersions) });
+    builtFrom.restartingSessions = state.restartingSessions;
+    storage.setState({ sessionListViewData: buildSessionListViewData(state.sessions, state.machines, state.daemonVersions, state.restartingSessions) });
 });
 
 export function useSessions() {
@@ -2316,6 +2372,11 @@ export function useLanSightings(): Record<string, LanSighting> {
 /** What each machine last said it is running. Empty until a machine has answered on a channel. */
 export function useDaemonVersions(): Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }> {
     return storage(useShallow((state) => state.daemonVersions));
+}
+
+/** Sessions this App has asked a machine to restart, and when. Read through `sessionIsRestarting`. */
+export function useRestartingSessions(): Record<string, number> {
+    return storage(useShallow((state) => state.restartingSessions));
 }
 
 export function useDaemonSockets(): Record<string, DaemonConnectionState> {
