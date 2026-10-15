@@ -53,7 +53,7 @@ import { sendOverDaemonSocket, sendOverServerHttp, sendOverServerSocket } from '
 import type { ChannelDriver, ChannelReason } from './channels/types';
 import { FetchSlots } from './fetchSlots';
 import { DaemonConnections, type DaemonTarget } from './lan/daemonConnections';
-import { pageMovedTheLog, planDaemonRead } from './lan/windowPlan';
+import { judgeDaemonPage, pageMovedTheLog, planDaemonRead } from './lan/windowPlan';
 import type { DaemonRoute, LanSessionLogEntry, SessionChannel } from './lan/types';
 import { parseRelayEndpoint } from './lan/relay';
 import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
@@ -4406,25 +4406,29 @@ class Sync {
         // point of the channel — seeing the newest is.
         const plan = planDaemonRead(anchor);
         let read = await readPage(plan.page, knownConnection);
-        // Replacing a window throws the conversation away, so it is reserved for having nothing to
-        // throw away: no window held, or an anchor the log has pruned past (where what is held is
-        // older than anything the daemon can still serve, and no read can connect to it). A window
-        // that is merely behind is *extended* — the channel drains it in bounded pages, and the
-        // caller comes back for more while `hasNewer` holds — which is what the server path does
-        // with its own paging rather than jumping and leaving a gap.
-        let replace = plan.replace ? !hasWindow : false;
-        if (read && !replace && pageMovedTheLog(read) && read.reset) {
-            const tail = await readPage({ kind: 'tail' }, read.connection);
-            if (tail) {
-                read = tail;
-                replace = true;
-            }
+        // Whether a window is replaced, re-read from the newest end, or merely extended — and the
+        // refusal to empty a conversation on the strength of an empty page. Both invariants live in
+        // `judgeDaemonPage`, where they are stated once and tested, rather than inline here.
+        let verdict = judgeDaemonPage({
+            planned: plan,
+            hasWindow,
+            read: read ? { reset: read.reset } : null,
+        });
+        if (verdict.kind === 'replace-from-tail') {
+            read = await readPage({ kind: 'tail' }, read!.connection);
+            verdict = judgeDaemonPage({
+                planned: { replace: true },
+                hasWindow: true,
+                read: read ? { reset: read.reset } : null,
+            });
         }
+        const replace = verdict.kind === 'replace';
         if (read && replace && read.messages.length === 0 && hasWindow) {
-            // A replacement is the whole window, so an empty page would empty the conversation. An
+            // A replacement is the whole window, so an empty one would empty the conversation. An
             // empty page is not evidence that the session has no messages — it is evidence that
             // this read learned nothing — so it is treated as a failed read instead, which leaves
-            // what is held intact and lets the backoff try again.
+            // what is held intact and lets the backoff try again. Only when a window is held: with
+            // nothing to lose, an empty page is simply what the tail is.
             log.log(`📡 fetchSessionFromDaemon: empty replacement page for ${sessionId}; keeping the window`);
             this.noteRouteFailure(sessionId, read.connection.route);
             return null;

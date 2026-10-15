@@ -42,3 +42,55 @@ export function planDaemonRead(anchor: WindowAnchor | null): { page: ReadIntent;
 export function pageMovedTheLog(page: { hasNewer: boolean; reset: boolean }): boolean {
     return page.hasNewer || page.reset;
 }
+
+/** What to do with the page that came back, once it has. */
+export type PageVerdict =
+    /** The page becomes the whole window. */
+    | { kind: 'replace' }
+    /** Read the newest page first, then replace with it — the log moved past what is held. */
+    | { kind: 'replace-from-tail' }
+    /** Add it to what is held. */
+    | { kind: 'extend' }
+    /** The read did not serve this session at all: what is held stays as it is. */
+    | { kind: 'keep' };
+
+/**
+ * What to do with the page a daemon read returned.
+ *
+ * Two invariants, both of which cost a conversation when they are got wrong, and both of which were
+ * decided inline at the call site where neither could be tested:
+ *
+ * 1. **A replacement throws a window away**, so it is reserved for having nothing to throw away —
+ *    no window held, or an anchor the log has pruned past, where what is held is older than
+ *    anything the daemon can still serve and no read can connect to it. A window that is merely
+ *    behind is *extended*: the caller comes back for more while `hasNewer` holds, which is what the
+ *    server path does with its own paging rather than jumping and leaving a gap.
+ * 2. **Two windows that are not adjacent are never joined**, so a page that turns out to have moved
+ *    the log is re-read from the newest end rather than appended.
+ *
+ * What is deliberately *not* decided here is an empty page. Whether an empty replacement is a
+ * failed read or an empty session depends on whether a window is held and is answered where the
+ * failure is recorded — and a rule decided here would have applied to a reader holding nothing,
+ * where an empty page is simply what the tail is.
+ */
+export function judgeDaemonPage(args: {
+    /** What `planDaemonRead` recommended before the read went out. */
+    planned: { replace: boolean };
+    /** Whether a window is held at all — the thing a replacement would throw away. */
+    hasWindow: boolean;
+    /** What came back, or null when the read did not serve this session at all. */
+    read: { reset: boolean } | null;
+}): PageVerdict {
+    if (!args.read) {
+        return { kind: 'keep' };
+    }
+    if (args.planned.replace && !args.hasWindow) {
+        return { kind: 'replace' };
+    }
+    if (args.read.reset) {
+        // Not replaced *yet*: the page that came back is not adjacent to what is held, and the page
+        // to replace it with is the newest one rather than this one.
+        return { kind: 'replace-from-tail' };
+    }
+    return { kind: 'extend' };
+}

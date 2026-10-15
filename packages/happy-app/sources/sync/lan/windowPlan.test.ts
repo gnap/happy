@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pageMovedTheLog, planDaemonRead } from './windowPlan';
+import { judgeDaemonPage, pageMovedTheLog, planDaemonRead } from './windowPlan';
 
 describe('planDaemonRead', () => {
     it('continues from the window it already holds', () => {
@@ -27,5 +27,33 @@ describe('pageMovedTheLog', () => {
 
     it('is true when the anchor was pruned, so what is held describes a different log', () => {
         expect(pageMovedTheLog({ hasNewer: false, reset: true })).toBe(true);
+    });
+});
+
+describe('judgeDaemonPage', () => {
+    it('extends what is held when the page sits next to it', () => {
+        expect(judgeDaemonPage({ planned: { replace: false }, hasWindow: true, read: { reset: false } }))
+            .toEqual({ kind: 'extend' });
+    });
+
+    it('replaces only when there is nothing to throw away', () => {
+        // The invariant that costs a conversation: a replacement *is* the window, so a reader with
+        // one keeps it and comes back for more pages instead.
+        expect(judgeDaemonPage({ planned: { replace: true }, hasWindow: false, read: { reset: false } }))
+            .toEqual({ kind: 'replace' });
+        expect(judgeDaemonPage({ planned: { replace: true }, hasWindow: true, read: { reset: false } }))
+            .toEqual({ kind: 'extend' });
+    });
+
+    it('re-reads from the newest end when the log moved past what is held', () => {
+        expect(judgeDaemonPage({ planned: { replace: false }, hasWindow: true, read: { reset: true } }))
+            .toEqual({ kind: 'replace-from-tail' });
+    });
+
+    it('keeps the window when the read did not serve this session at all', () => {
+        expect(judgeDaemonPage({ planned: { replace: true }, hasWindow: true, read: null }))
+            .toEqual({ kind: 'keep' });
+        expect(judgeDaemonPage({ planned: { replace: false }, hasWindow: false, read: null }))
+            .toEqual({ kind: 'keep' });
     });
 });
