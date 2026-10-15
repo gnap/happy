@@ -1,13 +1,23 @@
 import * as React from 'react';
 import { Session } from '@/sync/storageTypes';
-import { useDaemonSockets, useLanSessionList } from '@/sync/storage';
+import { useDaemonSockets, useLanSessionList, useRestartingSessions } from '@/sync/storage';
+import { sessionIsRestarting } from '@/utils/sessionRestart';
 import { t } from '@/text';
 
-export type SessionState = 'disconnected' | 'thinking' | 'waiting' | 'permission_required';
+export type SessionState = 'disconnected' | 'restarting' | 'thinking' | 'waiting' | 'permission_required';
 
 export interface SessionStatus {
     state: SessionState;
     isConnected: boolean;
+    /**
+     * Whether this session should be drawn as one that is alive.
+     *
+     * Not the same question as `isConnected`, which is about a connection and is false during a
+     * restart because there is none. This one is about the *appearance*: dimming a session and
+     * greying its avatar is how a stopped session reads, and a restart in flight must not read
+     * that way — the reader has just asked for it and is waiting for it to come back.
+     */
+    isLive: boolean;
     statusText: string;
     shouldShowStatus: boolean;
     statusColor: string;
@@ -47,15 +57,40 @@ export function useSessionStatus(session: Session): SessionStatus {
     // not worth a crash in the one case it exists for.
     const isOnline = session.presence === "online" || servedNow || daemonSessions?.[session.id]?.isAlive === true;
     const hasPermissions = (session.agentState?.requests && Object.keys(session.agentState.requests).length > 0 ? true : false);
+    const restarting = useRestartingSessions();
 
     const vibingMessage = React.useMemo(() => {
         return vibingMessages[Math.floor(Math.random() * vibingMessages.length)].toLowerCase() + '…';
     }, [isOnline, hasPermissions, session.thinking]);
 
     if (!isOnline) {
+        /**
+         * A restart this App asked for is not an offline session, and the two look identical from
+         * here: the session stops reporting, and "not reporting" is what an ended session looks
+         * like too. The difference is that this App knows it asked, and while a restart could
+         * still be running, saying one is happening is the honest thing to say.
+         *
+         * Only ever consulted here, for a session that is not reporting itself. A session that
+         * answers again is drawn from what it says, whatever this App remembers asking.
+         */
+        if (sessionIsRestarting(session.id, restarting)) {
+            return {
+                state: 'restarting',
+                isConnected: false,
+                isLive: true,
+                statusText: t('status.restarting'),
+                shouldShowStatus: true,
+                // The same blue as a session that is working: a restart is something happening, and
+                // the grey that means "stopped" is the one thing it must not be mistaken for.
+                statusColor: '#007AFF',
+                statusDotColor: '#007AFF',
+                isPulsing: true
+            };
+        }
         return {
             state: 'disconnected',
             isConnected: false,
+            isLive: false,
             statusText: t('status.lastSeen', { time: formatLastSeen(session.activeAt, false) }),
             shouldShowStatus: true,
             statusColor: '#999',
@@ -68,6 +103,7 @@ export function useSessionStatus(session: Session): SessionStatus {
         return {
             state: 'permission_required',
             isConnected: true,
+            isLive: true,
             statusText: t('status.permissionRequired'),
             shouldShowStatus: true,
             statusColor: '#FF9500',
@@ -80,6 +116,7 @@ export function useSessionStatus(session: Session): SessionStatus {
         return {
             state: 'thinking',
             isConnected: true,
+            isLive: true,
             statusText: vibingMessage,
             shouldShowStatus: true,
             statusColor: '#007AFF',
@@ -91,6 +128,7 @@ export function useSessionStatus(session: Session): SessionStatus {
     return {
         state: 'waiting',
         isConnected: true,
+        isLive: true,
         statusText: t('status.online'),
         shouldShowStatus: false,
         statusColor: '#34C759',

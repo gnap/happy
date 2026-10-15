@@ -85,6 +85,7 @@ export const zhHans: TranslationStructure = {
         offline: '离线',
         lastSeen: ({ time }: { time: string }) => `最后活跃时间 ${time}`,
         permissionRequired: '需要权限',
+        restarting: '重启中…',
         activeNow: '当前活跃',
         unknown: '未知',
         creating: '创建中…',

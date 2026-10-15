@@ -83,6 +83,7 @@ export const es: TranslationStructure = {
         offline: 'desconectado',
         lastSeen: ({ time }: { time: string }) => `visto por última vez ${time}`,
         permissionRequired: 'permiso requerido',
+        restarting: 'Reiniciando…',
         activeNow: 'Activo ahora',
         unknown: 'desconocido',
         creating: 'Creando…',

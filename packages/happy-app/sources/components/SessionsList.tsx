@@ -575,7 +575,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle, 
             }}
         >
             <View style={styles.avatarContainer}>
-                <Avatar id={avatarId} size={avatarSize} monochrome={!sessionStatus.isConnected} flavor={session.metadata?.flavor} />
+                <Avatar id={avatarId} size={avatarSize} monochrome={!sessionStatus.isLive} flavor={session.metadata?.flavor} />
                 {session.draft && (
                     <View style={styles.draftIconContainer}>
                         <Ionicons
@@ -591,7 +591,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle, 
                 <View style={styles.sessionTitleRow}>
                     <Text style={[
                         styles.sessionTitle,
-                        sessionStatus.isConnected ? styles.sessionTitleConnected : styles.sessionTitleDisconnected,
+                        sessionStatus.isLive ? styles.sessionTitleConnected : styles.sessionTitleDisconnected,
                         isWorktree && { fontSize: 13 }
                     ]} numberOfLines={1}>
                         {sessionName}

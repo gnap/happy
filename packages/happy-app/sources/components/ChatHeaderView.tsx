@@ -19,7 +19,13 @@ interface ChatHeaderViewProps {
     avatarId?: string;
     backgroundColor?: string;
     tintColor?: string;
-    isConnected?: boolean;
+    /**
+     * Whether to draw the session as one that is here.
+     *
+     * Not quite "connected": a restart this App asked for has no connection yet and is not an
+     * ended session either, and the avatar going monochrome is how "ended" reads.
+     */
+    isLive?: boolean;
     flavor?: string | null;
 }
 
@@ -30,7 +36,7 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
     onBackPress,
     onAvatarPress,
     avatarId,
-    isConnected = true,
+    isLive = true,
     flavor,
 }) => {
     const { theme } = useUnistyles();
@@ -135,7 +141,7 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
                         <Avatar
                             id={avatarId}
                             size={32}
-                            monochrome={!isConnected}
+                            monochrome={!isLive}
                             flavor={flavor}
                         />
                     </Pressable>

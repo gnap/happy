@@ -7,11 +7,12 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Avatar } from '@/components/Avatar';
-import { useDaemonVersions, useSession, useIsDataReady, useSessionMessages, useMachine } from '@/sync/storage';
+import { useDaemonVersions, useRestartingSessions, useSession, useIsDataReady, useSessionMessages, useMachine } from '@/sync/storage';
 import { sync, type ChannelReason } from '@/sync/sync';
 import { useSessionChannel } from '@/hooks/useSessionChannel';
 import { CHANNEL_ICONS } from '@/sync/machinePresence';
 import { getSessionName, useSessionStatus, formatOSPlatform, formatPathRelativeToHome, getSessionAvatarId } from '@/utils/sessionUtils';
+import { sessionIsRestarting } from '@/utils/sessionRestart';
 import * as Clipboard from 'expo-clipboard';
 import { Modal } from '@/modal';
 import { sessionKill, sessionDelete, sessionRestart } from '@/sync/ops';
@@ -187,6 +188,7 @@ function SessionInfoContent({ session }: { session: Session }) {
      * place the rest of the App's picture of that machine comes from.
      */
     const daemonVersions = useDaemonVersions();
+    const restartingSessions = useRestartingSessions();
     const channel = useSessionChannel(session.id);
     const channelSubtitle = channel.pinned
         ? t('sessionInfo.channelPinned')
@@ -272,7 +274,22 @@ function SessionInfoContent({ session }: { session: Session }) {
         ?? machineVersions?.running
         ?? machine?.daemonState?.startedWithCliVersion
         ?? machine?.metadata?.happyCliVersion;
-    const sessionNeedsRestart = isSessionRestartRecommended(session.metadata?.version, daemonBuild);
+    const sessionNeedsRestart = isSessionRestartRecommended(session.metadata?.version, daemonBuild)
+        && !sessionIsRestarting(session.id, restartingSessions);
+    /**
+     * What the connection row says, and how it is tinted.
+     *
+     * Three words, because there are three facts: connected, stopped, and the one this App has no
+     * other way to express — a restart it asked for and is waiting on. Tinting it with the status
+     * colour rather than the green/grey pair keeps that row and the status line above it from
+     * disagreeing about what is happening.
+     */
+    const connectionWord = sessionStatus.state === 'restarting'
+        ? t('status.restarting')
+        : sessionStatus.isConnected ? t('status.online') : t('status.offline');
+    const connectionTint = sessionStatus.state === 'restarting'
+        ? sessionStatus.statusColor
+        : sessionStatus.isConnected ? "#34C759" : "#8E8E93";
     // What the decision was made of, once per session: an answer nobody can check is how this
     // question became a mystery in the first place.
     const loggedDecision = React.useRef<string | null>(null);
@@ -383,7 +400,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                 {/* Session Header */}
                 <View style={{ maxWidth: layout.maxWidth, alignSelf: 'center', width: '100%' }}>
                     <View style={{ alignItems: 'center', paddingVertical: 24, backgroundColor: theme.colors.surface, marginBottom: 8, borderRadius: 12, marginHorizontal: 16, marginTop: 16 }}>
-                        <Avatar id={getSessionAvatarId(session)} size={80} monochrome={!sessionStatus.isConnected} flavor={session.metadata?.flavor} />
+                        <Avatar id={getSessionAvatarId(session)} size={80} monochrome={!sessionStatus.isLive} flavor={session.metadata?.flavor} />
                         <Text style={{
                             fontSize: 20,
                             fontWeight: '600',
@@ -454,10 +471,10 @@ function SessionInfoContent({ session }: { session: Session }) {
                     )}
                     <Item
                         title={t('sessionInfo.connectionStatus')}
-                        detail={`${sessionStatus.isConnected ? t('status.online') : t('status.offline')} · ${channel.channel === 'lan' ? t('status.lan') : channel.channel === 'relay' ? t('sessionInfo.channelRelay') : t('sessionInfo.channelServer')}`}
+                        detail={`${connectionWord} · ${channel.channel === 'lan' ? t('status.lan') : channel.channel === 'relay' ? t('sessionInfo.channelRelay') : t('sessionInfo.channelServer')}`}
                         subtitle={channelSubtitle}
                         subtitleLines={0}
-                        icon={<Ionicons name={CHANNEL_ICONS[channel.channel]} size={29} color={sessionStatus.isConnected ? "#34C759" : "#8E8E93"} />}
+                        icon={<Ionicons name={CHANNEL_ICONS[channel.channel]} size={29} color={connectionTint} />}
                         onPress={handleChooseChannel}
                     />
                     <Item

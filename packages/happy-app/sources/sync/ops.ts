@@ -497,6 +497,10 @@ interface SessionRestartResponse {
  * the old behaviour for the case the channel cannot serve: no address, or one that did not answer.
  */
 export async function sessionRestart(sessionId: string, machineId: string): Promise<SessionRestartResponse> {
+    // Marked before the request goes out rather than after it comes back, because the gap this
+    // covers starts the moment the machine is told: the request itself takes time on a slow
+    // channel, and the session is already going quiet while it is in flight.
+    storage.getState().markSessionRestarting(sessionId);
     try {
         const response = await sync.restartSession(sessionId, machineId)
             ?? await apiSocket.machineRPC<SessionRestartResponse, { sessionId: string }>(
@@ -510,9 +514,14 @@ export async function sessionRestart(sessionId: string, machineId: string): Prom
             // machine is right there and the read is cheap, so ask it now: the answer is the whole
             // reason the restart was performed.
             void sync.fetchSessionFromDaemon(sessionId).catch(() => { /* reported by the read itself */ });
+        } else {
+            // Refused is not in progress. Left marked, a session nobody restarted would read as
+            // restarting for as long as the grace lasts.
+            storage.getState().forgetSessionRestarting(sessionId);
         }
         return response;
     } catch (error) {
+        storage.getState().forgetSessionRestarting(sessionId);
         return {
             success: false,
             error: error instanceof Error ? error.message : 'Unknown error'
