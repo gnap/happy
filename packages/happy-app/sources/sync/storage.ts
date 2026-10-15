@@ -344,6 +344,35 @@ function dominantMachineId(sessions: Session[]): string | undefined {
 /** The last mark logged per session, so the line appears when it changes rather than per rebuild. */
 const listMarkLogged = new Map<string, string>();
 
+/**
+ * Whether restarting this session would change its build — the one rule for every list.
+ *
+ * The baseline is the machine's own report, in this order: the build on disk (what a restart would
+ * spawn), the build the daemon is running, the fields written by the daemon, and only last the
+ * server's copy of the machine — which is the one that goes stale on its own, and the one this rule
+ * used to be built on. A copy that is missing or old makes "the versions differ" false, so sessions
+ * older than their machine read as up to date.
+ *
+ * Exported because two lists draw this mark and each had its own idea of when: one had the rule and
+ * the other had none, so the same session showed a restart in one list and nothing in the other.
+ */
+export function sessionNeedsRestart(
+    session: Session,
+    machines: Record<string, { metadata?: { happyCliVersion?: string } | null; daemonState?: { startedWithCliVersion?: string } | null }>,
+    daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }> = {},
+): boolean {
+    const machineId = session.metadata?.machineId;
+    if (!machineId) return false;
+    const machine = machines[machineId];
+    const sessionVersion = session.metadata?.version;
+    const live = daemonVersions[machineId];
+    const machineVersion = live?.onDisk
+        ?? live?.running
+        ?? machine?.daemonState?.startedWithCliVersion
+        ?? machine?.metadata?.happyCliVersion;
+    return !!(sessionVersion && machineVersion && sessionVersion !== machineVersion);
+}
+
 function buildSessionListViewData(
     sessions: Record<string, Session>,
     machines: Record<string, { metadata?: { happyCliVersion?: string } | null; daemonState?: { startedWithCliVersion?: string } | null }>,
@@ -380,19 +409,13 @@ function buildSessionListViewData(
      * as up to date, which is what made this decision look arbitrary.
      */
     const getNeedsRestart = (s: Session): boolean => {
-        const machineId = s.metadata?.machineId;
-        if (!machineId) return false;
-        const machine = machines[machineId];
-        const sessionVersion = s.metadata?.version;
-        const live = daemonVersions[machineId];
-        const machineVersion = live?.onDisk
-            ?? live?.running
-            ?? machine?.daemonState?.startedWithCliVersion
-            ?? machine?.metadata?.happyCliVersion;
-        const marked = !!(sessionVersion && machineVersion && sessionVersion !== machineVersion);
+        const marked = sessionNeedsRestart(s, machines, daemonVersions);
         // The mark's inputs, once per change: three sources feed this baseline and a log is the only
         // way to tell a rule that decided wrongly from one that was handed nothing.
-        const summary = `${s.id} session=${sessionVersion ?? '-'} onDisk=${live?.onDisk ?? '-'} running=${live?.running ?? '-'} record=${machine?.daemonState?.startedWithCliVersion ?? '-'} server=${machine?.metadata?.happyCliVersion ?? '-'} marked=${marked}`;
+        const machineId = s.metadata?.machineId;
+        const machine = machineId ? machines[machineId] : undefined;
+        const live = machineId ? daemonVersions[machineId] : undefined;
+        const summary = `${s.id} session=${s.metadata?.version ?? '-'} onDisk=${live?.onDisk ?? '-'} running=${live?.running ?? '-'} record=${machine?.daemonState?.startedWithCliVersion ?? '-'} server=${machine?.metadata?.happyCliVersion ?? '-'} marked=${marked}`;
         if (listMarkLogged.get(s.id) !== summary) {
             listMarkLogged.set(s.id, summary);
             console.log(`🔄 list restart mark: ${summary}`);

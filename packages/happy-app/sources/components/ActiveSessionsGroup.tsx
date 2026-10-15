@@ -25,6 +25,7 @@ import { useIsTablet } from '@/utils/responsive';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { HappyError } from '@/utils/errors';
 import { SessionRowStatusIndicators } from './SessionRowStatusIndicators';
+import { sessionNeedsRestart, useDaemonVersions } from '@/sync/storage';
 
 const stylesheet = StyleSheet.create((theme, runtime) => ({
     container: {
@@ -218,6 +219,8 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
     const lanSightings = useLanSightings();
     const relayDirectory = useRelayDirectory();
     const relayEndpoints = useRelayEndpoints();
+    /** The same baseline the other list uses, so the mark means one thing in both. */
+    const daemonVersions = useDaemonVersions();
 
     // Group sessions by project, then associate with machine
     const projectGroups = React.useMemo(() => {
@@ -349,6 +352,7 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
                                     <View key={`${projectPath}-${machineId}`}>
                                         {machineGroup.sessions.map((session, index) => (
                                             <CompactSessionRow
+                                                needsRestart={sessionNeedsRestart(session, machinesMap, daemonVersions)}
                                                 key={session.id}
                                                 session={session}
                                                 selected={selectedSessionId === session.id}
@@ -367,7 +371,7 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
 }
 
 // Compact session row component with status line
-const CompactSessionRow = React.memo(({ session, selected, showBorder }: { session: Session; selected?: boolean; showBorder?: boolean }) => {
+const CompactSessionRow = React.memo(({ session, selected, showBorder, needsRestart }: { session: Session; selected?: boolean; showBorder?: boolean; needsRestart?: boolean }) => {
     const styles = stylesheet;
     const sessionStatus = useSessionStatus(session);
     const sessionName = getSessionName(session);
@@ -467,7 +471,7 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
 
                         {/* No longer showing git status per item - it's in the header */}
 
-                        <SessionRowStatusIndicators session={session} />
+                        <SessionRowStatusIndicators session={session} needsRestart={needsRestart} />
                     </View>
                 </View>
             </View>
