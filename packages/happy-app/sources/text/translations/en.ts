@@ -853,6 +853,7 @@ export const en: TranslationStructure = {
         lastKnownHttpPort: 'Last Known HTTP Port',
         startedAt: 'Started At',
         cliVersion: 'CLI Version',
+        restartRequired: 'Restart required',
         daemonStateVersion: 'Daemon State Version',
         activeSessions: ({ count }: { count: number }) => `Active Sessions (${count})`,
         machineGroup: 'Machine',

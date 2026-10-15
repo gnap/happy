@@ -110,6 +110,13 @@ export type LanHistory = {
 };
 
 export type LanIdentity = {
+    /**
+     * What the machine is running, and whether the build on disk is a different one.
+     *
+     * Absent from a CLI that predates it, which is the same as unknown: an older machine is not a
+     * stale one, and the page falls back to what it knew before.
+     */
+    versions?: { running: string; onDisk: string | null; restartRequired: boolean };
     v: number;
     machineId: string;
     accountFingerprint: string;

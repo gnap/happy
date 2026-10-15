@@ -839,6 +839,7 @@ export const zhHant: TranslationStructure = {
         lastKnownHttpPort: '最後已知 HTTP 連接埠',
         startedAt: '啟動時間',
         cliVersion: 'CLI 版本',
+        restartRequired: '需要重啟',
         daemonStateVersion: '守護程序狀態版本',
         activeSessions: ({ count }: { count: number }) => `活躍工作階段 (${count})`,
         machineGroup: '裝置',

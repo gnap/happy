@@ -840,6 +840,7 @@ export const zhHans: TranslationStructure = {
         lastKnownHttpPort: '最后已知 HTTP 端口',
         startedAt: '启动时间',
         cliVersion: 'CLI 版本',
+        restartRequired: '需要重启',
         daemonStateVersion: '守护进程状态版本',
         activeSessions: ({ count }: { count: number }) => `活跃会话 (${count})`,
         machineGroup: '设备',

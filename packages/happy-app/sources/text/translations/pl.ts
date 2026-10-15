@@ -848,6 +848,7 @@ export const pl: TranslationStructure = {
         lastKnownHttpPort: 'Ostatni znany port HTTP',
         startedAt: 'Uruchomiony o',
         cliVersion: 'Wersja CLI',
+        restartRequired: 'Wymagany restart',
         daemonStateVersion: 'Wersja stanu daemon',
         activeSessions: ({ count }: { count: number }) => `Aktywne sesje (${count})`,
         machineGroup: 'Maszyna',

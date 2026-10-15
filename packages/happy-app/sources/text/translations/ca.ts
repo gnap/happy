@@ -838,6 +838,7 @@ export const ca: TranslationStructure = {
         lastKnownHttpPort: 'Últim port HTTP conegut',
         startedAt: 'Iniciat a',
         cliVersion: 'Versió del CLI',
+        restartRequired: 'Cal reiniciar',
         daemonStateVersion: 'Versió de l\'estat del dimoni',
         activeSessions: ({ count }: { count: number }) => `Sessions actives (${count})`,
         machineGroup: 'Màquina',
