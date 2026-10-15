@@ -342,7 +342,16 @@ class Sync {
         onReady: (target) => { this.onDaemonConnectionReady(target); },
         onDropped: (target) => { this.onDaemonConnectionDropped(target); },
         onHeartbeatUnsupported: (target) => { this.onDaemonHeartbeatUnsupported(target); },
-        onStateChange: (id, state) => { storage.getState().setDaemonSocketStatus(id, state); },
+        onStateChange: (id, state) => {
+            storage.getState().setDaemonSocketStatus(id, state);
+            // A connection that has just come live is the moment the App is talking to that machine
+            // anyway — the cheapest possible time to ask what it is running, and the moment its
+            // answer is most likely to have changed.
+            if (state.phase === 'live') {
+                const machineId = id.split(':')[0];
+                void this.refreshDaemonVersions([{ machineId, baseUrl: this.lanMachineConnections.get(machineId)?.baseUrl ?? '' }], true);
+            }
+        },
         // Only the LAN: over the relay the hub is the one that can see a daemon go, and it says so.
         heartbeatRoutes: ['lan'],
         log: (message) => { log.log(message); },
@@ -4283,7 +4292,7 @@ class Sync {
     }
 
     /** Asks each machine what build it is running, and records it. Never fatal. */
-    private async refreshDaemonVersions(machines: { machineId: string; baseUrl: string }[]): Promise<void> {
+    private async refreshDaemonVersions(machines: { machineId: string; baseUrl: string }[], force = false): Promise<void> {
         for (const machine of machines) {
             if (!machine.baseUrl || this.daemonVersionChecks.has(machine.machineId)) {
                 continue;
@@ -4291,7 +4300,7 @@ class Sync {
             // Asked again only when what we hold is old enough to be worth doubting: a version
             // changes when someone rebuilds, which is not something a poll interval should chase.
             const held = storage.getState().daemonVersions[machine.machineId];
-            if (held && Date.now() - held.at < 5 * 60_000) {
+            if (!force && held && Date.now() - held.at < 30_000) {
                 continue;
             }
             this.daemonVersionChecks.add(machine.machineId);
