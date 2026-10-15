@@ -59,6 +59,10 @@ export const SettingsView = React.memo(function SettingsView() {
      * So a machine's row moves when its state changes — which is information, and rare — and never
      * because something somewhere else did something.
      */
+    /** What a machine's glyphs should show, from the channels — the same source the session list uses. */
+    const badgeInputs = useMachineBadgeInputs();
+    /** How each machine is being reached, which is also what the sort below orders them by. */
+    const machinePresence = useMachinePresenceMap();
     const allMachines = React.useMemo(
         () => Object.values(machinesById).sort((a, b) => {
             // Online-first, where online means anything is reaching it — the server's own flag is
@@ -69,11 +73,8 @@ export const SettingsView = React.memo(function SettingsView() {
             const byName = machineSortName(a).localeCompare(machineSortName(b));
             return byName !== 0 ? byName : a.id.localeCompare(b.id);
         }),
-        [machinesById]
+        [machinesById, machinePresence]
     );
-    const machinePresence = useMachinePresenceMap();
-    /** What a machine's glyphs should show, from the channels — the same source the session list uses. */
-    const badgeInputs = useMachineBadgeInputs();
     const lanSightings = useLanSightings();
     const relayDirectory = useRelayDirectory();
     const relayEndpoints = useRelayEndpoints();
