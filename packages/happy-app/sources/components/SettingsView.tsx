@@ -30,6 +30,11 @@ import { getDisplayName, getAvatarUrl, getBio } from '@/sync/profile';
 import { Avatar } from '@/components/Avatar';
 import { t } from '@/text';
 
+/** What the machine list is sorted by: the name it shows, or the id when it has none. */
+function machineSortName(machine: { id: string; metadata?: { host?: string | null } | null }): string {
+    return (machine.metadata?.host || machine.id).toLowerCase();
+}
+
 export const SettingsView = React.memo(function SettingsView() {
     const { theme } = useUnistyles();
     const router = useRouter();
@@ -43,12 +48,22 @@ export const SettingsView = React.memo(function SettingsView() {
     // hide exactly the hosts worth looking at here — an offline machine is still worth listing
     // (it may be reachable on the LAN), and hiding it also hides the reason it is interesting.
     const machinesById = useMachinesMap();
+    /**
+     * Machines in an order that does not move.
+     *
+     * This used to put the online ones first and then the most recently active, which reordered the
+     * list every time a machine came or went or merely reported in — and a list that reorders under
+     * the finger is one where the wrong machine gets tapped. A machine's state belongs on its row,
+     * where it is a fact about that machine, rather than in its position, where it is a fact about
+     * everything else.
+     *
+     * Name first, because that is what someone looking for a machine is reading; the id breaks ties
+     * so two machines with the same hostname still hold their places.
+     */
     const allMachines = React.useMemo(
         () => Object.values(machinesById).sort((a, b) => {
-            const aOnline = isMachineOnline(a) ? 1 : 0;
-            const bOnline = isMachineOnline(b) ? 1 : 0;
-            if (aOnline !== bOnline) return bOnline - aOnline;
-            return b.activeAt - a.activeAt;
+            const byName = machineSortName(a).localeCompare(machineSortName(b));
+            return byName !== 0 ? byName : a.id.localeCompare(b.id);
         }),
         [machinesById]
     );
