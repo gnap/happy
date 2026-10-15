@@ -498,6 +498,13 @@ export async function sessionRestart(sessionId: string, machineId: string): Prom
             'restartSession',
             { sessionId }
         );
+        if (response.success) {
+            // The new process reports its build when it gets around to it, which is minutes later —
+            // and until it does, a session that has just been restarted still reads as stale. The
+            // machine is right there and the read is cheap, so ask it now: the answer is the whole
+            // reason the restart was performed.
+            void sync.fetchSessionFromDaemon(sessionId).catch(() => { /* reported by the read itself */ });
+        }
         return response;
     } catch (error) {
         return {
