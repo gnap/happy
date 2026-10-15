@@ -49,19 +49,20 @@ export const SettingsView = React.memo(function SettingsView() {
     // (it may be reachable on the LAN), and hiding it also hides the reason it is interesting.
     const machinesById = useMachinesMap();
     /**
-     * Machines in an order that does not move.
+     * Online first, and within that, by name.
      *
-     * This used to put the online ones first and then the most recently active, which reordered the
-     * list every time a machine came or went or merely reported in — and a list that reorders under
-     * the finger is one where the wrong machine gets tapped. A machine's state belongs on its row,
-     * where it is a fact about that machine, rather than in its position, where it is a fact about
-     * everything else.
+     * The reachable machines are the ones being looked for, so they belong at the top — but the
+     * *order inside each group* has to be one nobody has to re-read. This used to be "most recently
+     * active", which reshuffled the list every time a machine merely reported in, and a list that
+     * reorders under the finger is one where the wrong machine gets tapped.
      *
-     * Name first, because that is what someone looking for a machine is reading; the id breaks ties
-     * so two machines with the same hostname still hold their places.
+     * So a machine's row moves when its state changes — which is information, and rare — and never
+     * because something somewhere else did something.
      */
     const allMachines = React.useMemo(
         () => Object.values(machinesById).sort((a, b) => {
+            const online = (isMachineOnline(b) ? 1 : 0) - (isMachineOnline(a) ? 1 : 0);
+            if (online !== 0) return online;
             const byName = machineSortName(a).localeCompare(machineSortName(b));
             return byName !== 0 ? byName : a.id.localeCompare(b.id);
         }),
