@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { Session } from '@/sync/storageTypes';
-import { useDaemonSockets, useLanSessionList, useRestartingSessions } from '@/sync/storage';
+import { useDaemonSockets, useLanSessionList, useSessionRestartReports } from '@/sync/storage';
 import { sessionIsRestarting } from '@/utils/sessionRestart';
 import { t } from '@/text';
 
@@ -57,7 +57,7 @@ export function useSessionStatus(session: Session): SessionStatus {
     // not worth a crash in the one case it exists for.
     const isOnline = session.presence === "online" || servedNow || daemonSessions?.[session.id]?.isAlive === true;
     const hasPermissions = (session.agentState?.requests && Object.keys(session.agentState.requests).length > 0 ? true : false);
-    const restarting = useRestartingSessions();
+    const restartReports = useSessionRestartReports(session.id, session.metadata?.machineId);
 
     const vibingMessage = React.useMemo(() => {
         return vibingMessages[Math.floor(Math.random() * vibingMessages.length)].toLowerCase() + '…';
@@ -73,7 +73,7 @@ export function useSessionStatus(session: Session): SessionStatus {
          * Only ever consulted here, for a session that is not reporting itself. A session that
          * answers again is drawn from what it says, whatever this App remembers asking.
          */
-        if (sessionIsRestarting(session.id, restarting)) {
+        if (sessionIsRestarting(session.id, restartReports)) {
             return {
                 state: 'restarting',
                 isConnected: false,

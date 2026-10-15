@@ -12,7 +12,7 @@ import type { RelayDirectoryEntry } from './lan/relayDirectory';
 import type { DaemonConnectionState } from './lan/daemonConnections';
 import { resolveMachinePresence, type MachinePresence } from './machinePresence';
 import { channelLinks, type ChannelLinkState } from './channelLinks';
-import { restartWithinGrace, sessionIsRestarting } from '@/utils/sessionRestart';
+import { restartWithinGrace, sessionIsRestarting, type RestartReports } from '@/utils/sessionRestart';
 
 export { channelLinks, type ChannelFacts, type ChannelLinkState } from './channelLinks';
 import { applySettings, Settings } from "./settings";
@@ -194,7 +194,7 @@ interface StorageState {
      * no `metadata` — that is encrypted and only ever travels inside a message payload — so this
      * can confirm which sessions exist and which are alive, but it cannot build a session row.
      */
-    daemonSessionList: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; at: number }>;
+    daemonSessionList: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; at: number; restartingSince?: number }>;
     /** What each machine last said it was running, asked over a channel it answered on. */
     daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }>;
     /**
@@ -211,7 +211,7 @@ interface StorageState {
     /** Replace the daemons' view. Pass null to clear it (the server answered). */
     /** Records what a machine said it is running. Null forgets it, for a machine that moved. */
     applyDaemonVersion: (machineId: string, versions: { running: string; onDisk: string | null; restartRequired: boolean } | null) => void;
-    applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute }[] | null) => void;
+    applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute; restartingSince?: number }[] | null) => void;
     channelOverride: Record<string, SessionChannel>;
     /** Pass null to return the session to automatic. */
     setSessionChannelOverride: (sessionId: string, channel: SessionChannel | null) => void;
@@ -375,13 +375,19 @@ const listMarkLogged = new Map<string, string>();
  */
 export function sessionNeedsRestart(
     session: Session,
-    machines: Record<string, { metadata?: { happyCliVersion?: string } | null; daemonState?: { startedWithCliVersion?: string } | null }>,
+    machines: Record<string, {
+        metadata?: { happyCliVersion?: string } | null;
+        daemonState?: { startedWithCliVersion?: string; restartingSessions?: unknown } | null;
+    }>,
     daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }> = {},
     restartingSessions: Record<string, number> = {},
 ): boolean {
     const machineId = session.metadata?.machineId;
     if (!machineId) return false;
-    if (sessionIsRestarting(session.id, restartingSessions)) return false;
+    // Two of the three sources, deliberately: a daemon's own answer only exists when the server
+    // could not answer, and a server that could not answer has no versions to compare either — so
+    // there is no mark here for that source to suppress.
+    if (sessionIsRestarting(session.id, { asked: restartingSessions, machine: machines[machineId] })) return false;
     const machine = machines[machineId];
     const sessionVersion = session.metadata?.version;
     const live = daemonVersions[machineId];
@@ -1945,7 +1951,7 @@ export const storage = create<StorageState>()((set, get) => {
             delete restartingSessions[sessionId];
             return { ...state, restartingSessions };
         }),
-        applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute }[] | null) => set((state) => {
+        applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute; restartingSince?: number }[] | null) => set((state) => {
             if (sessions === null) {
                 if (Object.keys(state.daemonSessionList).length === 0) {
                     return state;
@@ -1953,7 +1959,7 @@ export const storage = create<StorageState>()((set, get) => {
                 return { ...state, daemonSessionList: {} };
             }
             const at = Date.now();
-            const next: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; at: number }> = {};
+            const next: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; at: number; restartingSince?: number }> = {};
             for (const session of sessions) {
                 next[session.happySessionId] = {
                     isAlive: session.isAlive,
@@ -1961,6 +1967,10 @@ export const storage = create<StorageState>()((set, get) => {
                     agent: session.agent,
                     via: session.via,
                     at,
+                    // A session the daemon is restarting is listed though it has no live process —
+                    // that is the whole reason the field is here, and dropping it would leave the
+                    // reader with "not alive" and nothing to explain it.
+                    ...(session.restartingSince !== undefined ? { restartingSince: session.restartingSince } : {}),
                 };
             }
             return { ...state, daemonSessionList: next };
@@ -2374,9 +2384,23 @@ export function useDaemonVersions(): Record<string, { running: string; onDisk: s
     return storage(useShallow((state) => state.daemonVersions));
 }
 
-/** Sessions this App has asked a machine to restart, and when. Read through `sessionIsRestarting`. */
+/** Sessions this App has asked a machine to restart, and when. */
 export function useRestartingSessions(): Record<string, number> {
     return storage(useShallow((state) => state.restartingSessions));
+}
+
+/**
+ * Everything this App can know about a session being restarted, from every source that can know it.
+ *
+ * A hook rather than three selectors at each call site, because the sources have to be gathered the
+ * same way everywhere for the answer to be the same everywhere — the same reason the mark itself
+ * became one exported rule. Read it with `sessionIsRestarting`.
+ */
+export function useSessionRestartReports(sessionId: string, machineId: string | undefined): RestartReports {
+    const asked = storage(useShallow((state) => state.restartingSessions));
+    const machine = storage(useShallow((state) => (machineId ? state.machines[machineId] ?? null : null)));
+    const daemon = storage(useShallow((state) => state.daemonSessionList[sessionId] ?? null));
+    return React.useMemo(() => ({ asked, machine, daemon }), [asked, machine, daemon]);
 }
 
 export function useDaemonSockets(): Record<string, DaemonConnectionState> {

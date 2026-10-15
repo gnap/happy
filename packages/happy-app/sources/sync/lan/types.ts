@@ -78,6 +78,14 @@ export type LanSessionSummary = {
     startedBy: string;
     isAlive: boolean;
     lastHeartbeat?: number;
+    /**
+     * When the daemon began restarting this session, if it is restarting it.
+     *
+     * A session being restarted has no live process for part of that, so it arrives here not alive
+     * and saying why — which is the difference between a restart and an ending, and the daemon is
+     * the only party that can draw it.
+     */
+    restartingSince?: number;
 };
 
 /**
