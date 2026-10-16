@@ -215,6 +215,16 @@ interface StorageState {
      */
     lifecycleCursors: Record<string, number>;
     /**
+     * Sessions a machine's own log says are gone, by server id or tag, and when it said so.
+     *
+     * What keeps one from coming back. A delete that a machine announced has not necessarily
+     * reached the server yet — that replay is the server channel's own progress — and until it has,
+     * every server fetch would offer the session again and the row would reappear under a reader
+     * that just watched it go. This is the window, not the record: the durable answer is the server
+     * being told, and this only has to outlive the interval between the two.
+     */
+    lifecycleDeleted: Record<string, number>;
+    /**
      * Applies what a machine's own log says, for the sessions the server has not told this App
      * about.
      *
@@ -714,6 +724,7 @@ export const storage = create<StorageState>()((set, get) => {
         relayHubConnected: false,
         daemonSockets: {},
         lifecycleCursors: {},
+        lifecycleDeleted: {},
         daemonSessionList: {},
         daemonVersions: {},
         channelOverride: {},
@@ -885,6 +896,12 @@ export const storage = create<StorageState>()((set, get) => {
 
             // Update sessions with calculated presence using centralized resolver
             sessions.forEach(session => {
+                // A machine's log is the closest thing there is to "this session is gone", and a
+                // server that has not been told yet would offer it back on every fetch. Skipped
+                // rather than deleted afterwards, so nothing downstream ever sees it return.
+                if (state.lifecycleDeleted[session.id]) {
+                    return;
+                }
                 // Use centralized resolver for consistent state management
                 const presence = resolveSessionOnlineState(session);
 
@@ -1989,13 +2006,17 @@ export const storage = create<StorageState>()((set, get) => {
                 return state.lifecycleCursors[machineId] === revision ? state : { ...state, lifecycleCursors: cursor };
             }
             const sessions = { ...state.sessions };
+            const deleted = { ...state.lifecycleDeleted };
             for (const entry of entries) {
                 const key = entry.sessionId ?? entry.tag;
                 if (entry.op === 'deleted') {
-                    // The tag's placeholder goes with it: an entry that named both is one session
-                    // under two names, and leaving one behind is a row that cannot be dismissed.
+                    // Both names are remembered, not just removed: the tag's placeholder goes with
+                    // the id — an entry that named both is one session under two names — and either
+                    // name coming back from the server is what this refuses to re-add.
                     delete sessions[key];
                     delete sessions[entry.tag];
+                    deleted[key] = entry.at;
+                    deleted[entry.tag] = entry.at;
                     continue;
                 }
                 // The server's copy is richer than anything buildable from a log entry, so it wins
@@ -2030,6 +2051,7 @@ export const storage = create<StorageState>()((set, get) => {
             return {
                 ...state,
                 sessions,
+                lifecycleDeleted: deleted,
                 lifecycleCursors: cursor,
                 // The list is built by an action, so a session that arrived without the server has
                 // to be built into it here — the same reason the restart mark rebuilds.
