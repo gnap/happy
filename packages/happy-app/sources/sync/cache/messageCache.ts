@@ -52,11 +52,12 @@ export function isCacheEnabled(session: Session | null | undefined, servedByDaem
 /**
  * How many messages one open reads back from the cache.
  *
- * A budget, not a rule about the session: the rest of the rows stay where they are, and scrolling
- * back walks them over the channel that owns the log. Sized so the read is tens of milliseconds
- * rather than seconds — it is parsing JSON on the JS thread that costs, not the query.
+ * What a screen needs, not a window to keep: the rest of the rows stay where they are, and scrolling
+ * back walks them over the channel that owns the log — the daemon's log or the server's seqs — which
+ * is where paging belongs. It is parsing JSON on the JS thread that costs here, not the query, so
+ * this number is what an open costs; sixty messages is several screens and tens of milliseconds.
  */
-const HYDRATE_MESSAGE_LIMIT = 400;
+const HYDRATE_MESSAGE_LIMIT = 60;
 
 export interface LoadedCache {
     messages: Message[];
@@ -140,12 +141,21 @@ export async function loadMessageCache(session: Session, servedByDaemon = false)
         const hydrating = truncated ? messages.slice(-HYDRATE_MESSAGE_LIMIT) : messages;
         const reducerState = deserializeReducerStateOrCreate(cacheRow.reducerStateJson);
 
-        log.log(`📦 messageCache: loaded ${hydrating.length} messages for ${session.id} (lastSeq=${cacheRow.lastSeq}, oldestSeq=${cacheRow.oldestSeq}, hasOlderMessages=${cacheRow.hasOlderMessages}, truncated=${truncated})`);
+        // Where the window this read hands back actually starts. The row's own `oldestSeq` describes
+        // the window that *wrote* it, which reaches further back than this one does — reporting that
+        // would tell the store it holds messages it does not, and the paging that follows would skip
+        // everything between.
+        const floors = hydrating.map((message) => message.seq).filter((seq): seq is number => typeof seq === 'number');
+        const oldestSeq = truncated && floors.length === hydrating.length
+            ? Math.min(...floors)
+            : cacheRow.oldestSeq;
+
+        log.log(`📦 messageCache: loaded ${hydrating.length} messages for ${session.id} (lastSeq=${cacheRow.lastSeq}, oldestSeq=${oldestSeq}, hasOlderMessages=${cacheRow.hasOlderMessages}, truncated=${truncated})`);
         return {
             messages: hydrating,
             reducerState,
             lastSeq: cacheRow.lastSeq,
-            oldestSeq: cacheRow.oldestSeq,
+            oldestSeq,
             // A window that does not reach the bottom of what is held has older messages by
             // definition, whatever the row says — the row was written by a window that did reach it.
             hasOlderMessages: cacheRow.hasOlderMessages || truncated,
