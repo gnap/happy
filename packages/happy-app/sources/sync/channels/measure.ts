@@ -56,6 +56,24 @@ const DAEMON_OPERATIONS: ReadonlySet<ChannelOperation> = new Set([
     'restart',
     'identity',
     'listSessions',
+    'lifecycle',
+]);
+
+/**
+ * What the server can be asked for.
+ *
+ * Everything except the questions that are *about a machine*: what build it is running, and what its
+ * own log says it has started. Those have no server-side answer — the daemon is the only party that
+ * knows — and a server that claims otherwise would be asked and would have to refuse, which is the
+ * "discover it by failing" this layer exists to replace.
+ */
+const SERVER_OPERATIONS: ReadonlySet<ChannelOperation> = new Set([
+    'read',
+    'send',
+    'restart',
+    'spawn',
+    'stop',
+    'exec',
 ]);
 
 /** A connection this App is holding to a machine, on any route. */
@@ -124,7 +142,7 @@ function serverDriver(state: ChannelState): ChannelDriver {
         // Everything. A machine's own channels cannot start a session — the daemon's API refuses it
         // on purpose, because starting one is the server's record to keep — and that is the whole
         // reason this axis exists.
-        supports: () => true,
+        supports: (operation) => SERVER_OPERATIONS.has(operation),
         // The server is one connection rather than a set of addresses, so it is named rather than
         // addressed — and it offers itself only while that connection is usable.
         endpoints: () => (serverCanCarry(state.socketStatus) ? [{ kind: 'server' as const }] : []),

@@ -84,6 +84,8 @@ export type ChannelOperation =
     | 'identity'
     /** Ask a machine which sessions it has. */
     | 'listSessions'
+    /** Replay a machine's own log of what it has started and archived. */
+    | 'lifecycle'
     /** Start a new session on a machine. */
     | 'spawn'
     /** Stop a session, or the daemon. */
