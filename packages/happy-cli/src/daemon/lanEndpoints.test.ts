@@ -64,6 +64,31 @@ describe('computeEndpoints', () => {
   });
 });
 
+describe('computeEndpoints with a routing table', () => {
+  it('offers only the interface the machine actually routes by', () => {
+    // The real shape from the host this was written for: a direct-attach port listed first, with an
+    // address that is private by every definition and reachable by exactly one other machine.
+    const table = interfaces({ enP7s7: [['10.99.0.1', 'IPv4']], wlP9s9: [['192.168.5.87', 'IPv4']] });
+    const set = computeEndpoints(table, LAN_PORT, new Set(['wlP9s9']));
+
+    expect(set.endpoints).toEqual([{ t: 'lan', addr: '192.168.5.87', port: LAN_PORT }]);
+  });
+
+  it('drops nothing when the routing table could not be read', () => {
+    // Fail open: one address too many costs a client a connection attempt, none costs it the LAN.
+    const table = interfaces({ enP7s7: [['10.99.0.1', 'IPv4']], wlP9s9: [['192.168.5.87', 'IPv4']] });
+    expect(computeEndpoints(table, LAN_PORT, null).endpoints).toHaveLength(2);
+    expect(computeEndpoints(table, LAN_PORT).endpoints).toHaveLength(2);
+  });
+
+  it('still applies the name deny-list before the routing table', () => {
+    const table = interfaces({ docker0: [['172.17.0.1', 'IPv4']], wlP9s9: [['192.168.5.87', 'IPv4']] });
+    // docker0 would be dropped for its name; it is not in the set of routing interfaces either.
+    expect(computeEndpoints(table, LAN_PORT, new Set(['wlP9s9', 'docker0'])).endpoints)
+      .toEqual([{ t: 'lan', addr: '192.168.5.87', port: LAN_PORT }]);
+  });
+});
+
 describe('startEndpointPublisher', () => {
   const setA = interfaces({ en0: [['192.168.1.5', 'IPv4']] });
   const setB = interfaces({ en0: [['192.168.1.99', 'IPv4']] });
@@ -72,12 +97,15 @@ describe('startEndpointPublisher', () => {
     readInterfaces: () => NodeJS.Dict<os.NetworkInterfaceInfo[]>;
     record: (e: PublishedEndpoints) => boolean;
     extraEndpoints?: () => LanEndpoint[];
+    readDefaultRouteInterfaces?: () => ReadonlySet<string> | null;
   }) {
     return startEndpointPublisher({
       lanPort: LAN_PORT,
       readInterfaces: opts.readInterfaces,
       record: opts.record,
       extraEndpoints: opts.extraEndpoints,
+      // Default: no table, so the existing cases are about the deny-list and nothing else.
+      readDefaultRouteInterfaces: opts.readDefaultRouteInterfaces ?? (() => null),
       now: () => 1_700_000_000_000,
     });
   }
@@ -146,6 +174,26 @@ describe('startEndpointPublisher', () => {
 
     expect(await p.tick()).toBe(false);
     expect(record).not.toHaveBeenCalled();
+  });
+
+  it('reads the routing table on every tick, so a machine that moves is noticed', async () => {
+    // Injected as a function rather than a value: a laptop that joins another network changes which
+    // interface its traffic leaves by, and the published set has to follow it.
+    let routing = new Set(['wlP9s9']);
+    const record = vi.fn((_e: PublishedEndpoints) => true);
+    const p = publisher({
+      readInterfaces: () => interfaces({ enP7s7: [['10.99.0.1', 'IPv4']], wlP9s9: [['192.168.5.87', 'IPv4']] }),
+      record,
+      readDefaultRouteInterfaces: () => routing,
+    });
+
+    expect(await p.tick()).toBe(true);
+    expect(record.mock.calls.at(-1)![0].endpoints).toEqual([{ t: 'lan', addr: '192.168.5.87', port: LAN_PORT }]);
+
+    routing = new Set(['enP7s7']);
+    expect(await p.tick()).toBe(true);
+    expect(record.mock.calls.at(-1)![0].endpoints).toEqual([{ t: 'lan', addr: '10.99.0.1', port: LAN_PORT }]);
+    p.stop();
   });
 
   it('appends relay endpoints after the on-link ones and republishes when one appears', async () => {

@@ -10,9 +10,10 @@
  *
  * Note the exposure is different in kind from the mDNS advertisement next to it. mDNS is
  * LAN-scoped and transient; this is carried to the server, readable by the account's client on
- * any network, and survives the daemon. That is why the filter below is a hard deny-list
- * rather than "publish whatever the OS reports" -- a VPN or VM-bridge address here would leak
- * the machine's topology into a durable, account-wide blob.
+ * any network, and survives the daemon. That is why the filter is not "publish whatever the OS
+ * reports" -- a VPN or VM-bridge address here would leak the machine's topology into a durable,
+ * account-wide blob. Two filters, in fact: a name deny-list for the interfaces that are never a
+ * LAN, and the routing table (`lanRoutes.ts`) for the ones that merely look like one.
  *
  * Deliberately no STUN/reflexive address: without hole punching a published reflexive address
  * is only reachable behind a full-cone NAT, and the keepalive would maintain a mapping that
@@ -21,6 +22,7 @@
 
 import os from 'node:os';
 import { logger } from '@/ui/logger';
+import { cachedDefaultRouteInterfaces } from './lanRoutes';
 
 export const ENDPOINT_PROTOCOL_VERSION = 1;
 export const PUBLISH_INTERVAL_MS = 20_000;
@@ -65,6 +67,13 @@ export type EndpointPublisherOptions = {
   record: (endpoints: PublishedEndpoints) => boolean;
   /** Extra endpoints appended after the on-link ones (e.g. a registered public relay). */
   extraEndpoints?: () => LanEndpoint[];
+  /**
+   * Where this machine's traffic leaves, or null when that cannot be read.
+   *
+   * Injected so the publisher can be tested without a routing table, and injected *as a function*
+   * so a machine that changes networks is noticed on a later tick.
+   */
+  readDefaultRouteInterfaces?: () => ReadonlySet<string> | null;
   /** Injected for tests, so nothing here touches a real NIC. */
   readInterfaces?: () => NodeJS.Dict<os.NetworkInterfaceInfo[]>;
   now?: () => number;
@@ -98,10 +107,18 @@ function isUniqueLocalIpv6(address: string): boolean {
  * Ranked: private IPv4 on a physical interface, then globally routable IPv6, then ULA. A
  * globally routable IPv6 address is worth more than it looks -- in networks with native IPv6
  * there is often no NAT at all, so it is directly reachable.
+ *
+ * `defaultRouteInterfaces` is where this machine's traffic actually leaves. Passing it narrows the
+ * list to those interfaces, because having a private address is not the same as being reachable
+ * from the client's network: a direct-attach link is private by every definition and reachable by
+ * exactly one other machine. The cost is stated plainly -- a second real network on an interface
+ * with no default route is not offered. Passing null (the table could not be read) keeps every
+ * interface, which is what this did before there was a table to read.
  */
 export function computeEndpoints(
   interfaces: NodeJS.Dict<os.NetworkInterfaceInfo[]>,
   lanPort: number,
+  defaultRouteInterfaces?: ReadonlySet<string> | null,
 ): EndpointSet {
   const ipv4: string[] = [];
   const ipv6Global: string[] = [];
@@ -109,6 +126,9 @@ export function computeEndpoints(
 
   for (const [name, addresses] of Object.entries(interfaces)) {
     if (!addresses || isDeniedInterface(name)) {
+      continue;
+    }
+    if (defaultRouteInterfaces && !defaultRouteInterfaces.has(name)) {
       continue;
     }
     for (const info of addresses) {
@@ -139,6 +159,7 @@ export function computeEndpoints(
 
 export function startEndpointPublisher(opts: EndpointPublisherOptions): EndpointPublisherHandle {
   const readInterfaces = opts.readInterfaces ?? (() => os.networkInterfaces());
+  const readDefaultRoutes = opts.readDefaultRouteInterfaces ?? cachedDefaultRouteInterfaces();
   const now = opts.now ?? (() => Date.now());
   const intervalMs = opts.intervalMs ?? PUBLISH_INTERVAL_MS;
   /** Serialized last published set; only a change is worth a write. */
@@ -149,7 +170,7 @@ export function startEndpointPublisher(opts: EndpointPublisherOptions): Endpoint
     if (stopped) {
       return false;
     }
-    const base = computeEndpoints(readInterfaces(), opts.lanPort);
+    const base = computeEndpoints(readInterfaces(), opts.lanPort, readDefaultRoutes());
     const set = { ...base, endpoints: [...base.endpoints, ...(opts.extraEndpoints?.() ?? [])] };
     const key = JSON.stringify(set);
     if (key === lastPublished) {
