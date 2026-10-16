@@ -187,6 +187,11 @@ export function startRelay(options: RelayOptions): RelayHandle {
             req.headers.forEach((v, k) => {
                 if (!HOP_HEADERS.has(k)) headers[k] = v;
             });
+            // The path the caller actually used, before this relay stripped the `/r/<tag>` prefix.
+            // A proof an older App signed covers that path — it cannot cover the stripped one, which
+            // it never saw — and this relay is the only party that knows it. The daemon falls back to
+            // it when the newer, path-independent proof does not verify.
+            headers['x-happy-forwarded-path'] = new URL(req.url, 'http://relay.invalid').pathname;
             const id = daemon.nextId++;
             return new Promise<Response>((resolve) => {
                 const timer = setTimeout(() => {
