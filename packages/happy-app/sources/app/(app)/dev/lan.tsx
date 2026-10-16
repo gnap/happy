@@ -7,7 +7,11 @@ import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { sync } from '@/sync/sync';
 import { useLocalSearchParams } from 'expo-router';
-import { useAllMachines, storage } from '@/sync/storage';
+import { Pressable } from 'react-native';
+import { useAllMachines, storage, useLocalSettingMutable, useMachinePresenceMap, useMachineBadgeInputs, useLanEndpoints, useLanSightings, useDaemonSockets } from '@/sync/storage';
+import { DEFAULT_CHANNEL_PRIORITY, normalizeChannelPriority } from '@/sync/lan/channelOrder';
+import { candidateInputsFor, orderedCandidates } from '@/sync/channels/candidates';
+import { candidateKey } from '@/sync/channels/health';
 import type { DaemonRoute } from '@/sync/lan/types';
 import { discoverMachines, accountFingerprintOf } from '@/sync/lan/discovery';
 import { authenticate, fetchIdentity, fetchSessions, fetchHistory } from '@/sync/lan/client';
@@ -22,6 +26,99 @@ import { decryptLanHistory } from '@/sync/lan/history';
  * fetched yet, a rejected proof and a key that will not unwrap all need different fixes. The
  * daemon must be running with HAPPY_LAN_ENABLED=1.
  */
+
+/**
+ * The order the App tries channels in — first at the top of the page, because it is the setting that
+ * decides everything below it: which channel a session is read over, which one a machine is counted
+ * as reachable on, and which glyph the badges draw.
+ */
+const ChannelPriorityGroup = React.memo(function ChannelPriorityGroup() {
+    const [stored, setStored] = useLocalSettingMutable('channelPriority');
+    const priority = normalizeChannelPriority(stored ?? DEFAULT_CHANNEL_PRIORITY);
+    const move = (index: number, by: number) => {
+        const next = [...priority];
+        const target = index + by;
+        if (target < 0 || target >= next.length) return;
+        [next[index], next[target]] = [next[target], next[index]];
+        setStored(next);
+    };
+    return (
+        <ItemGroup title="Channel priority (first wins)" footer="The order every decision above the drivers' own state is made in.">
+            {priority.map((channel, index) => (
+                <Item
+                    key={channel}
+                    title={`${index + 1}. ${channel}`}
+                    subtitle={index === 0 ? 'preferred' : channel === 'server' ? 'reaches every machine the server knows' : undefined}
+                    showChevron={false}
+                    rightElement={
+                        <View style={{ flexDirection: 'row', gap: 12 }}>
+                            <Pressable onPress={() => move(index, -1)} hitSlop={8}>
+                                <Ionicons name="chevron-up" size={20} color={index === 0 ? '#888' : '#007AFF'} />
+                            </Pressable>
+                            <Pressable onPress={() => move(index, 1)} hitSlop={8}>
+                                <Ionicons name="chevron-down" size={20} color={index === priority.length - 1 ? '#888' : '#007AFF'} />
+                            </Pressable>
+                        </View>
+                    }
+                />
+            ))}
+        </ItemGroup>
+    );
+});
+
+/**
+ * What the App believes about every machine, and why.
+ *
+ * The states are the ones the decisions are made from — presence, per-channel reach and capability,
+ * the ordered candidates with what each address has done, and the sockets actually held — because a
+ * badge that says "LAN" is the end of a chain, and the chain is what has to be visible when it is
+ * wrong.
+ */
+const ChannelStateGroup = React.memo(function ChannelStateGroup({ machines }: { machines: { id: string; metadata?: { host?: string } | null }[] }) {
+    const presence = useMachinePresenceMap();
+    const badgeInputs = useMachineBadgeInputs();
+    const endpoints = useLanEndpoints();
+    const sightings = useLanSightings();
+    const sockets = useDaemonSockets();
+    const health = storage((state) => state.candidateHealth);
+
+    return (
+        <ItemGroup title="What the App believes" footer="presence · per-channel reach (r) and capability (c) · candidates with phase · sockets held">
+            {machines.map((machine) => {
+                const id = machine.id;
+                const inputs = badgeInputs(id);
+                const candidates = orderedCandidates(id, candidateInputsFor({ ...storage.getState(), candidateHealth: health }, id, {
+                    now: Date.now(),
+                    routes: ['lan', 'relay'],
+                }));
+                const held = Object.entries(sockets).filter(([key]) => key.startsWith(`${id}:`));
+                const published = endpoints[id]?.baseUrls ?? [];
+                const seen = sightings[id] ? 'yes' : 'no';
+                return (
+                    <Item
+                        key={`state-${id}`}
+                        title={`${machine.metadata?.host ?? id.slice(0, 8)} — ${presence[id] ?? 'offline'}`}
+                        subtitle={[
+                            `lan:${inputs.reach.lan ? 'r' : '-'}${inputs.capability.lan ? 'c' : '-'}`,
+                            `relay:${inputs.reach.relay ? 'r' : '-'}${inputs.capability.relay ? 'c' : '-'}`,
+                            `server:${inputs.reach.server ? 'r' : '-'}`,
+                            `seen:${seen}`,
+                            `pub:${published.length}`,
+                            held.length > 0 ? `sock:${held.map(([k, v]) => `${k.split(':')[1]}=${v.phase}`).join(',')}` : 'sock:none',
+                        ].join(' · ')}
+                        detail={candidates.length === 0 ? 'no candidates' : candidates.map((candidate) => {
+                            const state = health[candidateKey(candidate.machineId, candidate.route, candidate.baseUrl)];
+                            const phase = state?.phase ?? 'unknown';
+                            const retry = state?.retryAt ? ` retry:${Math.max(0, Math.round((state.retryAt - Date.now()) / 1000))}s` : '';
+                            return `${candidate.route}/${candidate.source} ${candidate.baseUrl} ${phase}${retry}`;
+                        }).join('\n')}
+                        showChevron={false}
+                    />
+                );
+            })}
+        </ItemGroup>
+    );
+});
 
 type LogLine = {
     stage: string;
@@ -167,6 +264,8 @@ const LanDevScreen = React.memo(function LanDevScreen() {
 
     return (
         <ItemList>
+            <ChannelPriorityGroup />
+            <ChannelStateGroup machines={machines} />
             <ItemGroup
                 title={route === 'relay' ? 'Relay API' : 'LAN API'}
                 footer={route === 'relay'
