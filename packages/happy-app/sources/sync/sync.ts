@@ -38,7 +38,7 @@ import { AsyncLock } from '@/utils/lock';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
-import { fetchIdentity, fetchLifecycle, restartSessionAt, sessionControlAt } from './lan/client';
+import { fetchIdentity, fetchLifecycle, LanRequestError, restartSessionAt, sessionControlAt, type LanRestartVerdict } from './lan/client';
 import { accountProofHeaders } from '@/auth/accountProof';
 import { getLanCredential } from './lan/credentials';
 import { readSessionOverLan, listSessionsOverLan, toNormalizedMessages, type LanConnection, type LanSessionRead } from './lan/sessionChannel';
@@ -51,8 +51,10 @@ import { channelEnabled, enabledChannels } from '@/utils/enabledChannels';
 import { channelDrivers as buildChannelDrivers } from './channels/measure';
 import { channelAvailability } from './channels/resolve';
 import { candidateInputsFor, orderedCandidates } from './channels/candidates';
+import { carryOperation, type HealthRecorder } from './channels/execute';
+import { endpointBaseUrl, type ChannelDriver, type ChannelOperation } from './channels/types';
 import { sendOverDaemonSocket, sendOverServerHttp, sendOverServerSocket } from './channels/ops';
-import type { ChannelDriver, ChannelReason } from './channels/types';
+import type { ChannelReason } from './channels/types';
 import { FetchSlots } from './fetchSlots';
 import { DaemonConnections, type DaemonTarget } from './lan/daemonConnections';
 import { judgeDaemonPage, pageMovedTheLog, planDaemonRead } from './lan/windowPlan';
@@ -4610,43 +4612,97 @@ class Sync {
         method: 'abort' | 'permission',
         params: string,
     ): Promise<boolean> {
+        const done = await this.carrySessionAction<boolean>(sessionId, {
+            operation: 'send',
+            path: `/lan/sessions/${encodeURIComponent(sessionId)}/control`,
+            run: (baseUrl, token, proof) => sessionControlAt(baseUrl, token, sessionId, method, params, proof).then((ok) => (ok ? true : null)),
+        });
+        if (done === true) {
+            log.log(`🔄 ${method} ${sessionId}: handed to the session`);
+        }
+        return done === true;
+    }
+
+    /**
+     * An action a machine's own channels carry for a session: abort, answer a prompt, restart.
+     *
+     * One method for all of them, because they differ only in what they ask for. The rest is the
+     * same and should not be written once per action: the order the channels are tried in, the
+     * credential per address, the account's proof of *this* request over *this* path, and the rule
+     * that an address which does not answer is a reason to try the machine's next one.
+     *
+     * It used to be written per action — control and restart held the same block twice — and both
+     * took the first address on a route and never the second, so one unreachable address stood for
+     * the whole channel.
+     *
+     * Returns the value the action produced, or null when no daemon channel carried it — which is
+     * the caller's signal to ask the server.
+     */
+    private async carrySessionAction<T>(
+        sessionId: string,
+        action: {
+            operation: ChannelOperation;
+            path: string;
+            run: (baseUrl: string, token: string, proof: Record<string, string> | undefined) => Promise<T | null>;
+        },
+    ): Promise<T | null> {
         const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
         const machineKey = machineId ? this.getMachineKey(machineId) : null;
         if (!machineId || !machineKey) {
-            return false;
+            return null;
         }
-        // The same decision the session's messages are read over, so a control call goes the way the
-        // session is already being talked to.
+        // The same decision the session's messages are read over, so an action goes the way the
+        // session is already being talked to. "The server" is not this method's business — the
+        // caller is holding it.
         const preferred = this.preferredChannel(sessionId);
         if (preferred === 'server') {
-            return false;
+            return null;
         }
-        const routes = this.daemonRoutesEnabled();
-        const addresses = this.knownMachineAddresses().filter((address) => address.machineId === machineId);
-        const order: DaemonRoute[] = preferred === 'lan' ? ['lan', 'relay'] : ['relay', 'lan'];
-        for (const route of order) {
-            const address = addresses.find((candidate) => candidate.route === route);
-            if (!address || !routes[route]) {
-                continue;
-            }
-            try {
-                const { token } = await getLanCredential(address.baseUrl, machineKey);
-                // The account's proof of *this* request, built over the path as it is sent: the
-                // machine checks the same bytes, and it is not a party that can be told to trust one.
-                const proof = await accountProofHeaders({
-                    method: 'POST',
-                    path: `/lan/sessions/${encodeURIComponent(sessionId)}/control`,
-                });
-                if (await sessionControlAt(address.baseUrl, token, sessionId, method, params, proof ?? undefined)) {
-                    log.log(`🔄 ${method} ${sessionId} over ${route}: handed to the session`);
-                    return true;
+        const enabled = this.daemonRoutesEnabled();
+        const daemonDrivers = this.channelDrivers().filter(
+            (driver): driver is ChannelDriver => driver.channel !== 'server' && enabled[driver.channel as DaemonRoute] === true,
+        );
+        const order = [...daemonDrivers].sort((a, b) =>
+            (a.channel === preferred ? -1 : 0) + (b.channel === preferred ? 1 : 0));
+
+        const outcome = await carryOperation<T>({
+            drivers: order,
+            operation: action.operation,
+            machineId,
+            attempt: async (endpoint) => {
+                const baseUrl = endpointBaseUrl(endpoint);
+                if (!baseUrl) {
+                    return { kind: 'refused' };
                 }
-            } catch {
-                // The next route, and then the server: an address that does not answer is a reason to
-                // try another, not a failure to hand back.
-            }
-        }
-        return false;
+                const { token } = await getLanCredential(baseUrl, machineKey);
+                // The account's proof of *this* request, over the path as it is sent: the machine
+                // checks the same bytes, and it is not a party that can be told to trust one.
+                const proof = await accountProofHeaders({ method: 'POST', path: action.path });
+                try {
+                    const value = await action.run(baseUrl, token, proof ?? undefined);
+                    // The daemon answered. Whether it agreed is its verdict about the action, not
+                    // something to hold against the address.
+                    return value === null ? { kind: 'absent' } : { kind: 'done', value };
+                } catch (error) {
+                    // A refusal is the daemon saying no to *this device*, and every one of its
+                    // addresses would say the same — so it is an answer, not an address failure.
+                    if (error instanceof LanRequestError) {
+                        return { kind: 'refused', status: error.status };
+                    }
+                    throw error;
+                }
+            },
+            recorder: this.healthRecorder(),
+        });
+        return outcome.kind === 'done' ? outcome.value : null;
+    }
+
+    /** Where an attempt's outcome is written, so the next caller starts from what this one learned. */
+    private healthRecorder(): HealthRecorder {
+        return {
+            succeeded: (machineId, route, baseUrl) => storage.getState().candidateSucceeded(machineId, route, baseUrl),
+            failed: (machineId, route, baseUrl) => storage.getState().candidateFailed(machineId, route, baseUrl),
+        };
     }
 
     /**
@@ -4695,31 +4751,14 @@ class Sync {
         if (preferred === 'server') {
             return null;
         }
-        const routes = this.daemonRoutesEnabled();
-        const addresses = this.knownMachineAddresses().filter((address) => address.machineId === machineId);
-        // The chosen route first, then the other one: an address that has moved is worth one more
-        // try before the restart is handed to a channel the App is not otherwise using.
-        const order: DaemonRoute[] = preferred === 'lan' ? ['lan', 'relay'] : ['relay', 'lan'];
-        for (const route of order) {
-            const address = addresses.find((candidate) => candidate.route === route);
-            if (!address || !routes[route]) {
-                continue;
-            }
-            try {
-                const { token } = await getLanCredential(address.baseUrl, machineKey);
-                const proof = await accountProofHeaders({
-                    method: 'POST',
-                    path: `/lan/sessions/${encodeURIComponent(sessionId)}/restart`,
-                });
-                const verdict = await restartSessionAt(address.baseUrl, token, sessionId, proof ?? undefined);
-                if (verdict) {
-                    log.log(`🔄 restart ${sessionId} over ${route}: ${verdict.success ? 'accepted' : verdict.error ?? 'refused'}`);
-                    return verdict;
-                }
-            } catch {
-                // The next route, and then the server: an address that does not answer is a reason
-                // to try another, not a failure to hand back.
-            }
+        const verdict = await this.carrySessionAction<LanRestartVerdict>(sessionId, {
+            operation: 'restart',
+            path: `/lan/sessions/${encodeURIComponent(sessionId)}/restart`,
+            run: (baseUrl, token, proof) => restartSessionAt(baseUrl, token, sessionId, proof ?? undefined),
+        });
+        if (verdict) {
+            log.log(`🔄 restart ${sessionId}: ${verdict.success ? 'accepted' : verdict.error ?? 'refused'}`);
+            return verdict;
         }
         log.log(`🔄 restart ${sessionId}: no daemon channel answered, asking the server`);
         return null;
