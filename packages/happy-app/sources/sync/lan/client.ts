@@ -222,11 +222,14 @@ export type LanRestartVerdict = { success: boolean; newSessionId?: string; error
 export async function restartSessionAt(
     baseUrl: string,
     token: string,
-    sessionId: string
+    sessionId: string,
+    /** The account's proof of this request, when this device can make one. */
+    proof?: Record<string, string>
 ): Promise<LanRestartVerdict | null> {
     const response = await request(`${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/restart`, {
         method: 'POST',
         token,
+        headers: { 'content-type': 'application/json', ...(proof ?? {}) },
         // A restart kills a process and starts another. It is not slow, but it is not a read
         // either, and the shortest timeout in this file is for questions that are one round trip.
         timeoutMs: historyTimeoutFor(baseUrl),
@@ -250,12 +253,14 @@ export async function sessionControlAt(
     token: string,
     sessionId: string,
     method: 'abort' | 'permission',
-    params: string
+    params: string,
+    /** The account's proof of this request, when this device can make one. */
+    proof?: Record<string, string>
 ): Promise<boolean> {
     const response = await request(`${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/control`, {
         method: 'POST',
         token,
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...(proof ?? {}) },
         body: JSON.stringify({ method, params }),
         // Not a read: the daemon answers as soon as the session's socket has taken it.
         timeoutMs: REQUEST_TIMEOUT_MS,
