@@ -15,6 +15,7 @@
 import sodium from '@/encryption/libsodium.lib';
 import { decodeBase64, encodeBase64 } from '@/encryption/base64';
 import { TokenStorage } from './tokenStorage';
+import { log } from '@/log';
 
 export const ACCOUNT_PROOF_WINDOW_MS = 60_000;
 
@@ -63,6 +64,11 @@ export async function accountProofHeaders(parts: { operation: string; target: st
         const nonce = freshNonce();
         const message = accountProofMessage({ operation: parts.operation, target: parts.target, nonce, at, bodyDigest: '' });
         const signature = sodium.crypto_sign_detached(new TextEncoder().encode(message), keypair.privateKey);
+        // Which key signed it, so a `bad-signature` a machine refuses can be answered with a
+        // comparison rather than a guess: the daemon verifies against the *account* public key, and
+        // a proof made with any other key is a valid signature of the same bytes. Printed here
+        // because this is the only place the App knows both the key and the bytes it covered.
+        log.log(`🔑 account proof: signed ${parts.operation}:${parts.target} with ${encodeBase64(keypair.publicKey)}`);
         return {
             'x-happy-proof-nonce': nonce,
             'x-happy-proof-at': String(at),
