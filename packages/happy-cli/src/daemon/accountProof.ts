@@ -61,7 +61,15 @@ export const ACCOUNT_PROOF_WINDOW_MS = 60_000;
  * reaches the machine.
  */
 export function accountProofMessage(parts: {
-    /** What is being asked for: `restart`, `control:abort`, `control:permission`. */
+    /**
+     * What is being asked for: `restart`, `control`.
+     *
+     * One name per route — which is what the App signs and what this daemon checks, so the two
+     * agree. Which *method* a control carries (abort, an answer to a prompt) is not part of the
+     * proof, and neither is the body: `bodyDigest` is empty on both sides. So a proof lifted off
+     * the wire inside its window can be pointed at a different control method, or at the same one
+     * with different params, since the bytes a signature covers are the same for all of them.
+     */
     operation: string;
     /** What it is being asked of: the session id, or `-` for the machine itself. */
     target: string;
