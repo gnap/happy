@@ -530,7 +530,16 @@ export async function startDaemon(): Promise<void> {
         // The first moment this machine knows *which* session it started: the tag comes from the
         // child, and until it does there is nothing to write down that anyone could match. Written
         // before the session is announced anywhere else, so the log is ahead of every replay.
-        if (s.sessionTag && !lifecycleLog.read().some((entry) => entry.op === 'created' && entry.tag === s.sessionTag)) {
+        //
+        // Deduplicated on the tag *and* the id rather than the tag alone: a session that is adopted
+        // after a restart is written once without an id, and when the server later names it the same
+        // session has to be written again — a reader keys on the id, and an entry that never carries
+        // one leaves it hanging on a tag forever.
+        const knownLifecycle = lifecycleLog.read();
+        const alreadyWritten = knownLifecycle.some((entry) => entry.op === 'created'
+          && entry.tag === s.sessionTag
+          && entry.sessionId === s.happySessionId);
+        if (s.sessionTag && !alreadyWritten) {
           lifecycleLog.record({
             op: 'created',
             tag: s.sessionTag,
@@ -538,6 +547,7 @@ export async function startDaemon(): Promise<void> {
             directory: s.directory,
             agent: s.agent,
           });
+          announceLifecycle();
         }
         const existing = sessions[s.happySessionId];
         sessions[s.happySessionId] = {
@@ -1082,6 +1092,7 @@ export async function startDaemon(): Promise<void> {
         ?? [...pidToTrackedSession.values()].find((session) => session.happySessionId === sessionId);
       if (archived?.sessionTag) {
         lifecycleLog.record({ op: 'deleted', tag: archived.sessionTag, sessionId });
+        announceLifecycle();
       }
       let removed = stoppedSessions.delete(sessionId);
       if (removed) {
@@ -1111,6 +1122,22 @@ export async function startDaemon(): Promise<void> {
      * created at this point in the sequence". Everything outside this process replays this.
      */
     const lifecycleLog = new LifecycleLog(join(configuration.happyHomeDir, 'daemon-lifecycle.jsonl'));
+
+    /**
+     * Tells whoever is reading on a live socket that the log has moved.
+     *
+     * A hint, not the entry: the reader asks for what it missed, with its own cursor. That is what
+     * keeps this cheap and keeps the replay per-reader — and it is the alternative to a reader
+     * polling a log that changes a handful of times a day.
+     */
+    const announceLifecycle = (): void => {
+      lanServer?.broadcast('update', {
+        id: `lan-${++lanEventCounter}`,
+        seq: 0,
+        body: { t: 'lifecycle', revision: lifecycleLog.revision() },
+        createdAt: Date.now(),
+      });
+    };
 
     /**
      * Sessions this daemon is in the middle of restarting, by session id, and when it started.
