@@ -60,22 +60,22 @@ export type PageVerdict =
  * Three rules, each of which costs a conversation when it is got wrong, and each of which was
  * decided inline at the call site where it could not be tested:
  *
- * 1. **Two windows that are not adjacent are never joined.** A page cut short at its budget
- *    (`hasNewer`) says the reader is further behind than one page; a page whose anchor was pruned
- *    (`reset`) says what is held describes a log that no longer starts where it thinks. Either way
- *    the page does not touch the window, and appending it would leave the entries between the two
- *    unreachable while the store's fields still called the whole span cached.
- * 2. **A reader that is more than a page behind belongs at the newest page.** So both of those end
- *    by reading the tail and replacing the window with it. The alternative — walking forward a page
- *    per tick — is not catching up: it is falling behind at a fixed rate, and it is done by a reader
- *    that is by definition not reading, so the backlog it carries is a backlog nobody asked to see.
- *    What was missed stays reachable by paging back, and a long backlog was never going to be shown
- *    in full anyway. The server channel anchors its window the same way, at the newest hundred
- *    sequences rather than wherever the reader left off, so the two agree on what opening a session
- *    that has been away is meant to show.
+ * 1. **A page that is not adjacent to what is held is never joined to it** — unless it is a `reset`
+ *    page, which is the one page that starts at the *beginning* of the log the daemon now serves,
+ *    and therefore leaves nothing between it and what is held. A page cut short at its budget
+ *    (`hasNewer`) is the other kind: it says the reader is further behind than one page, and
+ *    appending it would leave the entries between the two unreachable while the store's fields
+ *    still called the whole span cached.
+ * 2. **A reader that is more than a page behind belongs at the newest page.** So a cut-short page
+ *    ends by reading the tail and replacing the window with it. The alternative — walking forward a
+ *    page per tick — is not catching up: it is falling behind at a fixed rate, and it is done by a
+ *    reader that is by definition not reading, so the backlog it carries is a backlog nobody asked
+ *    to see. What was missed stays reachable by paging back, and a long backlog was never going to
+ *    be shown in full anyway. The server channel anchors its window the same way, at the newest
+ *    hundred sequences rather than wherever the reader left off, so the two agree on what opening a
+ *    session that has been away is meant to show.
  * 3. **A replacement throws a window away**, so it is reserved for having nothing to throw away — no
- *    window held, or one of the two above. A window that is merely a little behind is *extended*:
- *    the page reached the end of the log, so it abuts what is held, and the two join into one span.
+ *    window held, or a page that was cut short. Everything else *extends*.
  *
  * What is deliberately *not* decided here is an empty page. Whether an empty replacement is a failed
  * read or an empty session depends on whether a window is held and is answered where the failure is
@@ -93,9 +93,18 @@ export function judgeDaemonPage(args: {
     if (!args.read) {
         return { kind: 'keep' };
     }
-    if (pageMovedTheLog(args.read)) {
-        // Not replaced with *this* page: it is not adjacent to what is held, and the page to replace
-        // with is the newest one, which is where a reader this far behind is going.
+    if (args.read.reset) {
+        // The anchor is not in the log this daemon is serving: it was pruned, or the session is
+        // being served from a log that has been restarted (the same id, a machine that started it
+        // fresh). Either way the daemon answers from the *beginning* of what it has, so the entries
+        // between that page and what is held are not missing — there are none. That makes this the
+        // one page that may be joined to a window it does not abut, and replacing instead is what
+        // empties a conversation the user was in the middle of reading.
+        return { kind: 'extend' };
+    }
+    if (args.read.hasNewer) {
+        // Cut short at its budget: the reader is more than one page behind, and where it belongs is
+        // the newest page — not at the end of a chain of pages it has to walk.
         return { kind: 'replace-from-tail' };
     }
     if (args.planned.replace && !args.hasWindow) {

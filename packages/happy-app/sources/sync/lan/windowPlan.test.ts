@@ -55,9 +55,12 @@ describe('judgeDaemonPage', () => {
             .toEqual({ kind: 'replace-from-tail' });
     });
 
-    it('re-reads from the newest end when the log moved past what is held', () => {
+    it('joins a page from a log that no longer holds the anchor', () => {
+        // A reset page starts at the *beginning* of the log the daemon serves, so nothing between
+        // it and what is held is missing. Replacing here emptied the conversation the user was
+        // reading, which is the one thing a read must never do.
         expect(judgeDaemonPage({ planned: { replace: false }, hasWindow: true, read: page({ reset: true }) }))
-            .toEqual({ kind: 'replace-from-tail' });
+            .toEqual({ kind: 'extend' });
     });
 
     it('keeps the window when the read did not serve this session at all', () => {
