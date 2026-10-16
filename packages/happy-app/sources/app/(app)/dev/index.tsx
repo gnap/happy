@@ -539,6 +539,13 @@ export default function DevScreen() {
                 footer="Reachability and use are different things: a daemon can be advertising while no session is using it — the socket only opens for a session whose machine is on this network and whose CLI declared it can serve one. So an idle socket is not a broken one."
             >
                 <Item
+                    title="Channel Priority"
+                    subtitle="Enable, disable and reorder LAN / Relay / Server"
+                    detail={channelPriority.map((c) => c === 'lan' ? 'LAN' : c === 'relay' ? 'Relay' : 'Server').join(' › ')}
+                    icon={<Ionicons name="git-branch-outline" size={28} color="#007AFF" />}
+                    onPress={() => router.push('/dev/channels')}
+                />
+                <Item
                     title="API Endpoint"
                     detail={getServerUrl()}
                     onPress={handleEditServerUrl}
@@ -558,13 +565,6 @@ export default function DevScreen() {
                     detail={lanPhase}
                     rightElement={<PhaseIndicator phase={lanSightingCount === 0 ? 'idle' : lanPhase} />}
                     showChevron={false}
-                />
-                <Item
-                    title="Channel Priority"
-                    subtitle="Enable, disable and reorder LAN / Relay / Server"
-                    detail={channelPriority.map((c) => c === 'lan' ? 'LAN' : c === 'relay' ? 'Relay' : 'Server').join(' › ')}
-                    icon={<Ionicons name="git-branch-outline" size={28} color="#007AFF" />}
-                    onPress={() => router.push('/dev/channels')}
                 />
                 <ChannelLivenessGroup />
                 <ConnectionDetailsGroup />
