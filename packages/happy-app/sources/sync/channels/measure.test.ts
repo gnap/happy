@@ -20,7 +20,8 @@ const state = (over: Partial<ChannelState> = {}): ChannelState => ({
     candidateHealth: {},
     relayEndpoints: {},
     relayDirectory: {},
-    relayHubConnected: false,
+    // The hub being up is the normal case; the case that matters is the one that sets it false.
+    relayHubConnected: true,
     ...over,
 });
 
@@ -275,8 +276,19 @@ describe('what a driver offers to send to', () => {
         expect(socketOf(derived, 'relay')).toBeNull();
         expect(endpointsOf(derived, 'relay')).toHaveLength(1); // still worth trying, not worth holding
 
-        const carried = { ...derived, relayDirectory: { 'machine-1': { at: 0, sessions: [] } } };
+        const carried = { ...derived, relayHubConnected: true, relayDirectory: { 'machine-1': { at: 0, sessions: [] } } };
         expect(socketOf(carried, 'relay')).toMatchObject({ kind: 'address', route: 'relay', baseUrl: RELAY });
+    });
+
+    it('offers nothing on the relay while the hub is down', () => {
+        // The relay is one connection and a machine is a stream inside it. Offering an address with
+        // the hub down is what had the socket layer open a per-machine connection to the same relay.
+        const carried = { relayHubConnected: false, relayDirectory: { 'machine-1': { at: 0, sessions: [] } } };
+        expect(socketOf(carried, 'relay')).toBeNull();
+        expect(endpointsOf(carried, 'relay')).toEqual([]);
+        // And a session on that machine then falls to another channel, which is the design.
+        expect(channelAvailability({ drivers: channelDrivers(state(carried), ['lan', 'server', 'relay']), machineId: 'machine-1', now: 0 }).relay)
+            .toBe(false);
     });
 
     it('offers the server itself only while its connection is usable', () => {

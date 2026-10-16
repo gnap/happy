@@ -281,13 +281,16 @@ function relayDriver(state: ChannelState): ChannelDriver {
         // relay client — every machine has one — which is why hosts that never published grew a
         // relay glyph they had not earned.
         capable: (machineId) => carrying(machineId),
-        endpoints: (machineId, now) => asEndpoints(candidatesFor(state, machineId, now, ['relay'])),
+        // Nothing at all while the hub is down: the relay is one connection, and a machine is
+        // reached as a stream inside it. Offering an address here would have the socket layer open
+        // a per-machine connection to the same relay — the shape the hub replaced.
+        endpoints: (machineId, now) => (state.relayHubConnected ? asEndpoints(candidatesFor(state, machineId, now, ['relay'])) : []),
         // A socket to the relay only when the relay is *carrying* the machine: every machine with a
         // key has a derived relay address, and holding a stream open for each of those would be a
         // connection to a machine that never dialled in.
-        socketTarget: (machineId, now) => (carrying(machineId)
-            ? asEndpoints(candidatesFor(state, machineId, now, ['relay']))[0] ?? null
-            : null),
+        socketTarget: (machineId, now) => (!state.relayHubConnected || !carrying(machineId)
+            ? null
+            : asEndpoints(candidatesFor(state, machineId, now, ['relay']))[0] ?? null),
         accepts: (operation, machineId, now) =>
             DAEMON_OPERATIONS.has(operation) && candidatesFor(state, machineId, now, ['relay']).length > 0,
         machine: (machineId, now) => {
@@ -306,7 +309,10 @@ function relayDriver(state: ChannelState): ChannelDriver {
             if (!carried && candidates.length === 0) {
                 return null;
             }
-            const answered = carried || candidates.some((candidate) => answeredAt(state, candidate));
+            // A machine the relay holds is reachable *through the hub*, so with the hub down it is
+            // not reachable at all — the same rule as the endpoints above, or the channel would say
+            // yes and then have nothing to carry it with.
+            const answered = (state.relayHubConnected && carried) || candidates.some((candidate) => answeredAt(state, candidate));
             return { reachable: answered, alive: answered };
         },
         session: (sessionId, machineId) => {
