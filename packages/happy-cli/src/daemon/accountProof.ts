@@ -61,7 +61,7 @@ export const ACCOUNT_PROOF_WINDOW_MS = 60_000;
  * reaches the machine.
  */
 export function accountProofMessage(parts: {
-    /** What is being asked for: `restart`, `control:abort`, `control:permission`. */
+    /** What is being asked for: `restart`, `control`. */
     operation: string;
     /** What it is being asked of: the session id, or `-` for the machine itself. */
     target: string;

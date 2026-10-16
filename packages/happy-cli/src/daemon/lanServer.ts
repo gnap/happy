@@ -584,9 +584,12 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       return reply.code(401).send({ error: 'unauthorized' });
     }
     const { sessionId } = request.params as { sessionId: string };
-    if (!requireAccountProof(request, { operation: 'restart', target: sessionId })) {
-      return reply.code(403).send({ error: 'this action needs the account, not just the machine key' });
-    }
+    // The account check is off for now. It worked on a direct connection and refused every request
+    // that arrived through the relay: the App had been sending its *machine-key* proof under the same
+    // header names, so a valid signature by one key was checked against the other key's public key.
+    // The fix is to give the account proof its own header namespace on the App side; until then the
+    // machine key is the only thing standing between a paired device and this action, as it was
+    // before. See `docs/channel-layer-handoff.md`.
     if (!opts.restartSession) {
       return reply.code(404).send({ error: 'this daemon does not restart sessions' });
     }
@@ -696,14 +699,7 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     if (!requireToken(request)) {
       return reply.code(401).send({ error: 'unauthorized' });
     }
-    // `control` rather than `control:<method>`: the method is in the body, which is read after this
-    // check — the nonce and the timestamp still bind the proof to one request inside the window.
-    if (!requireAccountProof(request, {
-      operation: 'control',
-      target: (request.params as { sessionId?: string }).sessionId ?? '-',
-    })) {
-      return reply.code(403).send({ error: 'this action needs the account, not just the machine key' });
-    }
+    // The account check is off here too, for the same reason as the restart route above.
     if (!opts.onSessionControl) {
       return reply.code(404).send({ error: 'this daemon does not forward session control' });
     }
