@@ -265,6 +265,12 @@ export class ApiClient {
     });
 
     // Create machine
+    //
+    // A named bound rather than `AbortSignal.timeout`: both abort kinds reach axios as the same
+    // `ERR_CANCELED`, so an abort *this call* caused cannot be told apart from one caused outside
+    // it — and the two mean different things. Naming it lets the catch below say which happened.
+    const bound = new AbortController();
+    const boundTimer = setTimeout(() => bound.abort(new Error('registration exceeded 60s')), 60_000);
     try {
       const response = await axios.post(
         `${configuration.serverUrl}/v1/machines`,
@@ -281,7 +287,7 @@ export class ApiClient {
           },
           timeout: 60000,
           // A real bound, unlike `timeout`: it also covers DNS and connection setup.
-          signal: AbortSignal.timeout(60000),
+          signal: bound.signal,
           httpsAgent: serverHttpsAgent,
         }
       );
@@ -300,8 +306,15 @@ export class ApiClient {
         daemonState: raw.daemonState ? decrypt(encryptionKey, encryptionVariant, decodeBase64(raw.daemonState)) : null,
         daemonStateVersion: raw.daemonStateVersion || 0,
       };
+      clearTimeout(boundTimer);
       return machine;
     } catch (error) {
+      // Said before anything else, because this is the one fact the error code cannot carry: an
+      // abort this call caused itself arrives as the same `ERR_CANCELED` an outside cancellation
+      // would, and "the server stopped answering" is a different problem from "the server refused".
+      if (bound.signal.aborted) {
+        logger.warn(`[API] Machine ${opts.machineId} registration hit its own 60s bound`);
+      }
       // Handle connection errors gracefully
       if (axios.isAxiosError(error) && error.code && isNetworkError(error.code)) {
         connectionState.fail({
