@@ -4613,7 +4613,7 @@ class Sync {
         sessionId: string,
         method: 'abort' | 'permission',
         params: string,
-    ): Promise<boolean> {
+    ): Promise<'done' | 'refused' | 'unavailable'> {
         const outcome = await this.carrySessionAction<boolean>(sessionId, {
             operation: 'send',
             path: `/lan/sessions/${encodeURIComponent(sessionId)}/control`,
@@ -4622,7 +4622,12 @@ class Sync {
         if (outcome.verdict === true) {
             log.log(`🔄 ${method} ${sessionId}: handed to the session`);
         }
-        return outcome.verdict === true;
+        // Three answers, because the callers act differently on them: carried, refused by a channel
+        // that answered, and no channel able to take it at all.
+        if (outcome.verdict === true) {
+            return 'done';
+        }
+        return outcome.refused ? 'refused' : 'unavailable';
     }
 
     /**
@@ -4715,6 +4720,11 @@ class Sync {
             // Whether any channel took it on: one that answered and refused did not, one that was
             // asked and went quiet did — and to a caller those mean different things.
             asked: outcome.kind === 'done' || outcome.kind === 'unreachable' || outcome.kind === 'absent',
+            // A channel *answered and said no*: about this device (a proof the machine would not
+            // accept) or about the action it will not do. Asking another road is not a retry for
+            // that — it is asking the same machine again, or substituting a different action, which
+            // is how an abort that was refused came back as something else entirely.
+            refused: outcome.kind === 'refused',
         };
     }
 

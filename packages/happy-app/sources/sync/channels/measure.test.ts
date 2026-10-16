@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { channelDrivers, type ChannelState } from './measure';
+import { channelAvailability } from './resolve';
+import { pickChannel } from '@/sync/lan/channelOrder';
 import type { ChannelOperation } from './types';
 import { channelsFor, operationSupported } from './resolve';
 import type { ChannelDriver } from './types';
@@ -292,5 +294,39 @@ describe('what a driver offers to send to', () => {
         // And starting a session is the server's, whichever channel is asked.
         expect(accepts(withAddress, 'lan', 'spawn')).toBe(false);
         expect(accepts(withAddress, 'server', 'spawn')).toBe(true);
+    });
+});
+
+describe('a machine that only published an address (the macmini case)', () => {
+    // Everything the App can say about a machine, for a machine it has never observed: no browse
+    // resolved it here, nothing has answered at its address, no socket is held. Every one of these
+    // used to say "LAN" on the strength of the address alone, which is how a machine on its own
+    // network got a wifi icon in the list.
+    const publishedOnly = {
+        lanEndpoints: { 'machine-1': { baseUrls: ['http://192.168.5.87:55673'], at: 0 } },
+    };
+    const drivers = () => channelDrivers(state(publishedOnly), ['lan', 'server', 'relay']);
+
+    it('is not reachable, not alive, and earns no glyph', () => {
+        const lan = drivers().find((driver) => driver.channel === 'lan')!;
+        expect(lan.machine('machine-1', 0)).toEqual({ reachable: false, alive: false });
+        expect(lan.capable('machine-1')).toBe(false);
+    });
+
+    it('is not the channel the App would choose, so nothing labels it LAN', () => {
+        // The two functions `resolveChannel` is made of, so this is the decision itself rather than a
+        // driver's opinion of it.
+        const available = channelAvailability({ drivers: drivers(), machineId: 'machine-1', now: 0 });
+        expect(available.lan).toBe(false);
+        expect(pickChannel(['lan', 'server', 'relay'], available)).toEqual({ channel: 'server', reachable: true });
+    });
+
+    it('is offered as something to try, which is how it can become reachable', () => {
+        // Not reachable is not the same as not worth trying: the socket opened at it is what turns
+        // an address into an observation.
+        const lan = drivers().find((driver) => driver.channel === 'lan')!;
+        expect(lan.endpoints('machine-1', 0).map((endpoint) => (endpoint.kind === 'address' ? endpoint.baseUrl : 'server')))
+            .toEqual(['http://192.168.5.87:55673']);
+        expect(lan.socketTarget('machine-1', 0)).toMatchObject({ baseUrl: 'http://192.168.5.87:55673' });
     });
 });
