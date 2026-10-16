@@ -132,39 +132,6 @@ function describePhase(state: DaemonConnectionState): string {
 }
 
 /** The relay itself: one connection, and what it is holding. */
-const RelayRow = React.memo(function RelayRow({
-    enabled,
-    connected,
-    address,
-    machines,
-    sessions,
-}: {
-    enabled: boolean;
-    connected: boolean;
-    address: string;
-    machines: number;
-    sessions: number;
-}) {
-    // Three situations that used to look identical — not switched on, not yet reached, reachable —
-    // and telling them apart is the difference between a setting and a fault.
-    const subtitle = !enabled
-        ? 'Switched off in Channel Priority'
-        : connected
-            ? `${address} · ${machines} machine${machines === 1 ? '' : 's'} · ${sessions} session${sessions === 1 ? '' : 's'}`
-            : `Connecting to ${address}…`;
-    return (
-        <Item
-            title="Relay"
-            subtitle={subtitle}
-            detail={!enabled ? 'off' : connected ? 'connected' : 'idle'}
-            rightElement={!enabled
-                ? <Ionicons name="remove-circle" size={22} color="#8E8E93" />
-                : <PhaseIndicator phase={connected ? 'live' : 'opening'} />}
-            showChevron={false}
-        />
-    );
-});
-
 /** A tag the relay holds that no key on this device matches. */
 const RelayUnknownRow = React.memo(function RelayUnknownRow({ tag }: { tag: string }) {
     return (
@@ -546,16 +513,13 @@ export default function DevScreen() {
                     onPress={() => router.push('/dev/channels')}
                 />
                 <ChannelBlock channel="lan" />
-                <ChannelBlock channel="relay">
-                <RelayRow
-                    enabled={relayEnabled}
-                    connected={relayHubConnected}
-                    address={sync.relayAddress()}
-                    machines={relayMachineCount}
-                    sessions={relaySessionCount}
-                />
-                </ChannelBlock>
+                <ChannelBlock channel="relay" />
                 <ChannelBlock channel="server">
+                    <Item
+                        title="One connection, every machine"
+                        subtitle="The server is this device's own socket — not a route per machine, which is why it has no per-machine connections"
+                        showChevron={false}
+                    />
                     <Item
                         title="API Endpoint"
                         subtitle="The server this device talks to"
