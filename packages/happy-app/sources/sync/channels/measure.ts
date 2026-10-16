@@ -218,9 +218,15 @@ function lanDriver(state: ChannelState): ChannelDriver {
         // Seen once on this network is what earns the glyph, whether or not it is up now.
         // Seen by a browse, or published by the machine itself — the second is what makes the LAN
         // usable on a network where multicast never reaches anyone.
-        capable: (machineId) => machineId in state.lanSightings || machineId in state.lanEndpoints,
-        // Capability stays "has this channel ever been had by the machine", which is what the grey
-        // glyph means; whether it is reaching it *now* is `machine().alive` above.
+        // Capability is an observation too, and for the same reason: the glyph means "this device
+        // has this channel for that machine", and a machine that merely published an address has
+        // not been observed at all — on a machine on its own network, that address is one this
+        // device cannot use. Drawing the glyph for it is exactly the wifi icon on a machine that is
+        // not on this network.
+        capable: (machineId) => machineId in state.lanSightings
+            || candidatesFor(state, machineId, Date.now(), ['lan']).some((candidate) => answeredAt(state, candidate, Date.now())),
+        // Whether it is reaching it *now* is `machine().alive` above: the glyph is drawn grey for
+        // capable-but-quiet, which is what the two together mean.
         endpoints: (machineId, now) => asEndpoints(candidatesFor(state, machineId, now, ['lan'])),
         // A socket is what turns a claimed address into a proven one, so this is the best address
         // even when nothing has answered there yet — that is the point of opening it.
