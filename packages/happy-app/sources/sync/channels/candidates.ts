@@ -70,6 +70,55 @@ export type CandidateInputs = {
  * failing because a page can cost a full timeout, while opening a socket to it is cheap and is how
  * it gets a chance to stop failing.
  */
+/**
+ * The store slices the candidate list is built from.
+ *
+ * Structural rather than the real store type so the drivers can be handed a slice in a test, and so
+ * this module does not depend on the store — the ordering and the health rules are the parts worth
+ * testing on their own, and they are pure because of this.
+ */
+export type CandidateStateSlice = {
+    lanEndpoints: Record<string, { baseUrls?: string[] } | undefined>;
+    lanSightings: Record<string, { baseUrl?: string } | undefined>;
+    daemonSockets: Record<string, { baseUrl?: string; route?: string; phase?: string } | undefined>;
+    relayEndpoints: Record<string, { baseUrl?: string; source?: string } | undefined>;
+    candidateHealth: Record<string, CandidateHealth>;
+};
+
+/** Where the addresses a machine can be reached at come from, in the store as it stands. */
+export function candidateInputsFor(
+    state: CandidateStateSlice,
+    machineId: string,
+    options: { now: number; routes: readonly DaemonRoute[]; forRead?: boolean; max?: number },
+): CandidateInputs {
+    const sockets: string[] = [];
+    for (const [key, socket] of Object.entries(state.daemonSockets)) {
+        if (key.startsWith(`${machineId}:`) && socket?.baseUrl) {
+            sockets.push(socket.baseUrl);
+        }
+    }
+    const relay: { baseUrl: string; source: CandidateSource }[] = [];
+    const relayEndpoint = state.relayEndpoints[machineId];
+    if (relayEndpoint?.baseUrl) {
+        // A route the machine published is its own claim; one this device computed from the key is a
+        // guess that its daemon runs a relay client at all. They are both worth trying, and they are
+        // not worth the same.
+        relay.push({ baseUrl: relayEndpoint.baseUrl, source: relayEndpoint.source === 'published' ? 'published' : 'derived' });
+    }
+    const sighting = state.lanSightings[machineId]?.baseUrl;
+    return {
+        published: state.lanEndpoints[machineId]?.baseUrls ?? [],
+        discovered: sighting ? [sighting] : [],
+        sockets,
+        relay,
+        health: state.candidateHealth,
+        routes: options.routes,
+        forRead: options.forRead,
+        max: options.max,
+        now: options.now,
+    };
+}
+
 export function orderedCandidates(machineId: string, inputs: CandidateInputs): Candidate[] {
     const offered: Candidate[] = [];
     const add = (route: DaemonRoute, baseUrls: readonly string[], source: CandidateSource) => {

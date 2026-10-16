@@ -50,6 +50,7 @@ import { normalizeChannelPriority, pickChannel } from './lan/channelOrder';
 import { channelEnabled, enabledChannels } from '@/utils/enabledChannels';
 import { channelDrivers as buildChannelDrivers } from './channels/measure';
 import { channelAvailability } from './channels/resolve';
+import { candidateInputsFor, orderedCandidates } from './channels/candidates';
 import { sendOverDaemonSocket, sendOverServerHttp, sendOverServerSocket } from './channels/ops';
 import type { ChannelDriver, ChannelReason } from './channels/types';
 import { FetchSlots } from './fetchSlots';
@@ -470,6 +471,11 @@ class Sync {
                 if (suspendedFor >= Sync.SUSPENDED_TRUST_MS) {
                     this.recoverFetchesAfterSuspend();
                 }
+                // A long suspension is long enough for a machine to have moved, and this device to
+                // have moved with it. Nothing that failed before it is worth believing now.
+                if (suspendedFor >= Sync.SUSPENDED_TRUST_MS) {
+                    storage.getState().rearmCandidateHealth();
+                }
                 // Probe the socket first — a live connection responds in < 200ms.
                 // If probe fails (1.5s timeout) a fresh connect is triggered.
                 // Only invalidate syncs after the probe settles so data fetches
@@ -847,6 +853,11 @@ class Sync {
             this.daemonSocketWatch = storage.subscribe((state, previous) => {
                 if (
                     state.lanSightings !== previous.lanSightings ||
+                    // A published address is where a socket can be opened for a machine no browse
+                    // ever finds, so it is as much a reason to reconcile as a sighting is — and
+                    // without it here, a machine that publishes its address gets no socket at all.
+                    state.lanEndpoints !== previous.lanEndpoints ||
+                    state.candidateHealth !== previous.candidateHealth ||
                     state.socketStatus !== previous.socketStatus ||
                     state.channelOverride !== previous.channelOverride
                 ) {
@@ -2950,6 +2961,11 @@ class Sync {
         // hiccup close and reopen the connection, and `expo-network` reports those hiccups often
         // enough for that to be the bulk of the socket churn.
         this.lanMachineConnections.clear();
+        // And what each address has done, for the same reason: an address that did not answer on the
+        // last network is not evidence about this one. This is one of the few things that re-arms a
+        // demoted address, and it is why a device that moves networks recovers without waiting out a
+        // backoff.
+        storage.getState().rearmCandidateHealth();
         if (reason !== 'regained') {
             // A device that never lost connectivity may have moved networks without a gap — but a
             // return to connectivity is the same network it left.
@@ -3532,7 +3548,9 @@ class Sync {
                     storage.getState().setLoadingOlder(sessionId, false);
                     return;
                 }
-                const read = await readSessionOverLan({
+                // Paging back stays on the route the window was read over — that is the address
+                // this session is known to answer at — and the candidate list puts it first.
+                const attempt = await readSessionOverLan({
                     sessionId,
                     machineId: link.machineId,
                     accountPublicKey: this.encryption.contentDataKey,
@@ -3540,9 +3558,12 @@ class Sync {
                     encryption: this.encryption,
                     page: { kind: 'older', before: link.older },
                     connection: link.connection,
-                    relayBaseUrl: storage.getState().relayEndpoints[link.machineId]?.baseUrl,
-                    via: link.connection.route,
+                    candidates: orderedCandidates(link.machineId, candidateInputsFor(storage.getState(), link.machineId, {
+                        now: Date.now(),
+                        routes: [link.connection.route],
+                    })),
                 });
+                const read = attempt.kind === 'read' ? attempt.read : null;
                 if (!read) {
                     storage.getState().setLoadingOlder(sessionId, false);
                     return;
@@ -4391,14 +4412,35 @@ class Sync {
         // Each channel reads on its own route and only that route: a session on the relay does not
         // browse for a machine known to be elsewhere, and one on the LAN never goes through the
         // relay. Only the server-failure fallback, which has no channel of its own, tries both.
-        const relayEndpoint = machineId ? storage.getState().relayEndpoints[machineId] : undefined;
         const channel = this.preferredChannel(sessionId);
-        const via = forceRoute ?? (channel === 'server' ? this.fallbackVia() : channel);
+        // Which routes this read may use: the one the channel chose, or every daemon route when it
+        // has fallen back from the server and has no channel of its own. The addresses come from the
+        // candidate list — the machine's own published ones included, which is what the read path
+        // could not reach before and why a machine found without mDNS was never readable on the LAN.
+        const routes: DaemonRoute[] = forceRoute
+            ? [forceRoute]
+            : channel === 'server'
+                ? (this.fallbackVia() === 'any' ? ['lan', 'relay'] : [this.fallbackVia() as DaemonRoute])
+                : [channel as DaemonRoute];
         // The session's own connection when it has one, otherwise whatever this machine was last
         // reached over — same machine, so the same address and a token that covers it.
         const knownConnection = inMemory?.connection ?? (machineId ? this.lanMachineConnections.get(machineId) : undefined);
-        const readPage = (page: Parameters<typeof readSessionOverLan>[0]['page'], connection: LanConnection | null | undefined) =>
-            readSessionOverLan({
+        const candidates = machineId
+            ? orderedCandidates(machineId, candidateInputsFor(storage.getState(), machineId, {
+                now: Date.now(),
+                routes,
+                forRead: true,
+            }))
+            : [];
+        /**
+         * One read, with what it learned about the address written down.
+         *
+         * Only "nothing answered there" counts against an address: a daemon with no log for this
+         * session, or one that refused this device, has said something about itself or the session
+         * and nothing about whether the address works.
+         */
+        const readPage = async (page: Parameters<typeof readSessionOverLan>[0]['page'], connection: LanConnection | null | undefined) => {
+            const attempt = await readSessionOverLan({
                 sessionId,
                 machineId,
                 accountPublicKey,
@@ -4406,9 +4448,15 @@ class Sync {
                 encryption: this.encryption,
                 page,
                 connection,
-                relayBaseUrl: relayEndpoint?.baseUrl,
-                via,
+                candidates,
             });
+            if (machineId && attempt.kind === 'unreachable' && attempt.baseUrl) {
+                storage.getState().candidateFailed(machineId, routes.includes('relay') && attempt.baseUrl.includes('/r/') ? 'relay' : 'lan', attempt.baseUrl);
+            } else if (machineId && attempt.kind === 'read') {
+                storage.getState().candidateSucceeded(machineId, attempt.read.connection.route, attempt.read.connection.baseUrl);
+            }
+            return attempt.kind === 'read' ? attempt.read : null;
+        };
 
         // Converge from where this App is, and only fall back to the newest page when the log has
         // moved further than one page away. Reading forward one page per tick through a backlog is
@@ -4440,23 +4488,15 @@ class Sync {
             // what is held intact and lets the backoff try again. Only when a window is held: with
             // nothing to lose, an empty page is simply what the tail is.
             log.log(`📡 fetchSessionFromDaemon: empty replacement page for ${sessionId}; keeping the window`);
-            this.noteRouteFailure(sessionId, read.connection.route);
             return null;
         }
         if (!read) {
-            // The route was tried and did not serve this session — the daemon has no log for it, or
-            // did not answer at all. Recording that is what keeps the next tick from choosing the
-            // same route and reporting the same thing, and what stops the UI from labelling the
-            // session with a channel that has never carried it.
-            if (via === 'any') {
-                this.noteRouteFailure(sessionId, 'lan');
-                this.noteRouteFailure(sessionId, 'relay');
-            } else {
-                this.noteRouteFailure(sessionId, via);
-            }
+            // Every address was tried and none served this session. What that says about each one has
+            // already been recorded per address, by the read that tried it — a route is no longer
+            // marked down as a whole, which is what used to take a working address out of the
+            // running along with a broken one.
             return null;
         }
-        this.clearRouteFailure(sessionId, read.connection.route);
         this.settleReceivedMessages(read.received);
         const window = replace
             ? { cursor: read.cursor, older: read.older, hasOlder: read.hasOlder }
@@ -4782,6 +4822,11 @@ class Sync {
             state.socketStatus,
             state.daemonSockets,
             state.lanSightings,
+            // Read by the LAN driver, and the health is what decides whether it says yes: leaving
+            // either out of the key is a cache that answers with a stale driver every time an
+            // address is proven or demoted, which is the common case this work creates.
+            state.lanEndpoints,
+            state.candidateHealth,
             state.relayEndpoints,
             state.relayDirectory,
             state.relayHubConnected,
@@ -4800,23 +4845,6 @@ class Sync {
     }
 
     private channelDriversCache: { key: unknown[]; drivers: ChannelDriver[] } | null = null;
-
-    /** A route that failed to serve this session. Ages out, since a daemon may log it later. */
-    private routeFailures = new Map<string, Partial<Record<DaemonRoute, number>>>();
-
-    private noteRouteFailure(sessionId: string, route: DaemonRoute): void {
-        const failures = this.routeFailures.get(sessionId) ?? {};
-        failures[route] = Date.now();
-        this.routeFailures.set(sessionId, failures);
-    }
-
-    private clearRouteFailure(sessionId: string, route: DaemonRoute): void {
-        const failures = this.routeFailures.get(sessionId);
-        if (failures?.[route] !== undefined) {
-            delete failures[route];
-            this.routeFailures.set(sessionId, failures);
-        }
-    }
 
     private channelReasons = new Map<string, string>();
 
@@ -4865,13 +4893,9 @@ class Sync {
         const serverDown = state.socketStatus === 'disconnected' || state.socketStatus === 'error';
         // Which channels could serve this session, from the same rule the header and the badges are
         // drawn from — they used to be worked out separately, and disagreed about the same session.
-        const lastRead = this.daemonLinks.get(sessionId);
         const available = channelAvailability({
             drivers: this.channelDrivers(),
-            sessionId,
             machineId,
-            failedAt: this.routeFailures.get(sessionId),
-            lastReadRoute: lastRead && lastRead.machineId === machineId ? lastRead.connection.route : undefined,
         });
         const { channel, reachable } = pickChannel(priority, available);
         if (!reachable) {
@@ -5170,6 +5194,15 @@ class Sync {
         if (routes.lan) {
             for (const sighting of Object.values(state.lanSightings)) {
                 add(sighting.machineId, 'lan', sighting.baseUrl);
+            }
+            // And where a machine says it is, for the network where a browse never reaches anyone.
+            // One socket per machine: the address it sits on is the best candidate it has, and a
+            // socket that comes up is what makes that address *proven* rather than merely claimed.
+            for (const machineId of Object.keys(state.lanEndpoints)) {
+                const best = orderedCandidates(machineId, candidateInputsFor(state, machineId, { now: Date.now(), routes: ['lan'] }))[0];
+                if (best) {
+                    add(machineId, 'lan', best.baseUrl);
+                }
             }
         }
 

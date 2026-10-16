@@ -9,6 +9,8 @@
  */
 
 import { normalizeChannelPriority } from '@/sync/lan/channelOrder';
+import { candidateInputsFor, orderedCandidates } from './candidates';
+import { candidateKey, channelHealthFor, type CandidateHealth } from './health';
 import type { DaemonConnectionState } from '@/sync/lan/daemonConnections';
 import type { SessionChannel } from '@/sync/lan/types';
 import type { ChannelDriver, ChannelOperation } from './types';
@@ -25,10 +27,16 @@ export type ChannelState = {
     machines: Record<string, { active?: boolean } | undefined>;
     daemonSockets: Record<string, DaemonConnectionState>;
     daemonSessionList: Record<string, { isAlive: boolean; via: string; at: number }>;
-    lanSightings: Record<string, unknown>;
+    lanSightings: Record<string, { baseUrl?: string; machineId?: string } | undefined>;
     /** Where machines published themselves on this network, for when discovery cannot find them. */
-    lanEndpoints: Record<string, unknown>;
-    relayEndpoints: Record<string, { source?: string }>;
+    lanEndpoints: Record<string, { baseUrls?: string[] } | undefined>;
+    /**
+     * What is known about each address: whether anything has answered there, and how recently it
+     * stopped. This is what makes "the machine is on the LAN" a claim with evidence behind it,
+     * instead of a claim a published blob makes by existing.
+     */
+    candidateHealth: Record<string, CandidateHealth>;
+    relayEndpoints: Record<string, { baseUrl?: string; source?: string } | undefined>;
     relayDirectory: Record<string, { at: number; sessions: { happySessionId: string; isAlive: boolean }[] }>;
     relayHubConnected: boolean;
 };
@@ -117,18 +125,29 @@ function lanDriver(state: ChannelState): ChannelDriver {
         link: () => (anySocket() ? 'connected'
             : Object.keys(state.lanSightings).length > 0 ? 'connecting'
                 : null),
-        machine: (machineId) => {
-            // A daemon advertising itself, or a socket this App is holding to it, are both the
-            // machine being up on this network — and the socket term is the one that survives a
-            // browse being missed, which is why the two callers that only read sightings disagreed
-            // with the resolver about the same machine.
-            const seen = machineId in state.lanSightings || machineId in state.lanEndpoints || heldSocket(state, machineId, 'lan');
-            return seen ? { reachable: true, alive: true } : null;
+        machine: (machineId, now) => {
+            // Every address this machine could be reached at, minus the ones that have been tried and
+            // demoted. A machine with an address nothing has tried yet is reachable — that is what
+            // makes it worth trying — and it is not *alive*, which is the badge's question and
+            // requires something to have answered.
+            //
+            // What this replaced: `machineId in lanEndpoints` as both answers. A published address
+            // said the machine was up whether or not it could be reached there, so the channel was
+            // selected, failed, and was selected again the moment the failure was forgotten.
+            const candidates = orderedCandidates(machineId, candidateInputsFor(state, machineId, { now, routes: ['lan'] }));
+            if (candidates.length === 0) {
+                return null;
+            }
+            const alive = candidates.some((candidate) =>
+                state.candidateHealth[candidateKey(candidate.machineId, candidate.route, candidate.baseUrl)]?.phase === 'live');
+            return { reachable: true, alive };
         },
         // Seen once on this network is what earns the glyph, whether or not it is up now.
         // Seen by a browse, or published by the machine itself — the second is what makes the LAN
         // usable on a network where multicast never reaches anyone.
         capable: (machineId) => machineId in state.lanSightings || machineId in state.lanEndpoints,
+        // Capability stays "has this channel ever been had by the machine", which is what the grey
+        // glyph means; whether it is reaching it *now* is `machine().alive` above.
         // A machine can serve its own sessions: read them, take a message, restart a process, say
         // what it is running. What it cannot do is start one, or act inside one — those are the
         // server's, and the daemon's API is built that way.
@@ -173,13 +192,22 @@ function relayDriver(state: ChannelState): ChannelDriver {
         // relay client — every machine has one — which is why hosts that never published grew a
         // relay glyph they had not earned.
         capable: (machineId) => carrying(machineId),
-        machine: (machineId) => {
-            // Alive: the relay is holding it, or this App has a stream to it. Reachable is wider on
-            // purpose — an address derived from the machine key is one the App can *try*, which is
-            // what choosing a channel needs, even though it is not evidence anything is there.
-            const held = carrying(machineId) || heldSocket(state, machineId, 'relay');
-            const tryable = held || machineId in state.relayEndpoints;
-            return tryable ? { reachable: true, alive: held } : null;
+        machine: (machineId, now) => {
+            // Same asymmetry as the LAN, with one extra rule: the relay holding the machine is
+            // itself evidence it is up, because the relay only holds a machine that dialled in.
+            // Every route worth trying makes it reachable — an address derived from the machine key
+            // is one the App can *try* — while being alive requires something to have answered.
+            // The relay holding the machine is reachable with no address at all: it is the relay's
+            // own answer about what it is carrying, and it is the one fact that does not need a
+            // route this App can name.
+            const carried = carrying(machineId);
+            const candidates = orderedCandidates(machineId, candidateInputsFor(state, machineId, { now, routes: ['relay'] }));
+            if (!carried && candidates.length === 0) {
+                return null;
+            }
+            const answered = candidates.some((candidate) =>
+                state.candidateHealth[candidateKey(candidate.machineId, candidate.route, candidate.baseUrl)]?.phase === 'live');
+            return { reachable: true, alive: carried || answered };
         },
         session: (sessionId, machineId) => {
             const answered = state.daemonSessionList[sessionId];

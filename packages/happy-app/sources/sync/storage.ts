@@ -16,6 +16,7 @@ import { channelLinks } from './channelLinks';
 import { enabledChannels } from '@/utils/enabledChannels';
 import { sessionIsRestarting } from '@/utils/sessionRestart';
 import { channelDrivers, type ChannelState } from './channels/measure';
+import { candidateFailed as candidateFailedAt, candidateKey, candidateSucceeded, rearmAll, type CandidateHealth } from './channels/health';
 import type { ChannelDriver, ChannelLinkState, SessionReach } from './channels/types';
 import { resolveSessionReach } from './channels/resolve';
 
@@ -159,6 +160,19 @@ interface StorageState {
      * scan, and it is exactly the one that survives when scans find nothing.
      */
     lanEndpoints: Record<string, { baseUrls: string[]; at: number }>;
+    /**
+     * What each address has done lately, keyed by machine + route + address.
+     *
+     * Deliberately not persisted: it is a record of what *this run* has observed, and a `live`
+     * carried over from a previous run is exactly the unevidenced claim this replaced.
+     */
+    candidateHealth: Record<string, CandidateHealth>;
+    /** Something answered at this address, which is the only thing that makes it usable. */
+    candidateSucceeded: (machineId: string, route: SessionChannel, baseUrl: string) => void;
+    /** Nothing answered at this address. A refusal or a 404 is not this. */
+    candidateFailed: (machineId: string, route: SessionChannel, baseUrl: string) => void;
+    /** Everything is worth retrying: the device changed network, or came back from suspension. */
+    rearmCandidateHealth: () => void;
     applyRelayEndpoint: (machineId: string, endpoint: RelayEndpoint | null) => void;
     /**
      * What the relay says it is holding, keyed by machineId.
@@ -781,6 +795,7 @@ export const storage = create<StorageState>()((set, get) => {
         lanSightings: {},
         relayEndpoints: loadRelayEndpoints(),
         lanEndpoints: {},
+        candidateHealth: {},
         relayDirectory: {},
         relayUnknownTags: [],
         relayHubConnected: false,
@@ -2008,6 +2023,21 @@ export const storage = create<StorageState>()((set, get) => {
         )),
         applyRelayEndpoint: (machineId, endpoint) => set((state) => reduceRelayEndpoint(state, machineId, endpoint) ?? state),
         applyLanEndpoint: (machineId, endpoint) => set((state) => reduceLanEndpoint(state, machineId, endpoint) ?? state),
+        candidateSucceeded: (machineId, route, baseUrl) => set((state) => {
+            const key = candidateKey(machineId, route, baseUrl);
+            const health = candidateSucceeded(state.candidateHealth[key], Date.now());
+            return { candidateHealth: { ...state.candidateHealth, [key]: health } };
+        }),
+        candidateFailed: (machineId, route, baseUrl) => set((state) => {
+            const key = candidateKey(machineId, route, baseUrl);
+            const health = candidateFailedAt(state.candidateHealth[key], Date.now());
+            return { candidateHealth: { ...state.candidateHealth, [key]: health } };
+        }),
+        rearmCandidateHealth: () => set((state) => (
+            Object.keys(state.candidateHealth).length === 0
+                ? state
+                : { candidateHealth: rearmAll(state.candidateHealth, Date.now()) }
+        )),
         applyLanSightings: (sightings: LanSighting[]) => set((state) => {
             const now = Date.now();
             const next: Record<string, LanSighting> = {};
@@ -2433,6 +2463,8 @@ const builtFrom: {
     daemonVersions: unknown;
     daemonSockets: unknown;
     lanSightings: unknown;
+    candidateHealth: unknown;
+    lanEndpoints: unknown;
     relayDirectory: unknown;
     socketStatus: unknown;
     daemonSessionList: unknown;
@@ -2442,6 +2474,8 @@ const builtFrom: {
     daemonVersions: null,
     daemonSockets: null,
     lanSightings: null,
+    candidateHealth: null,
+    lanEndpoints: null,
     relayDirectory: null,
     socketStatus: null,
     daemonSessionList: null,
@@ -2454,6 +2488,10 @@ storage.subscribe((state) => {
         && builtFrom.daemonVersions === state.daemonVersions
         && builtFrom.daemonSockets === state.daemonSockets
         && builtFrom.lanSightings === state.lanSightings
+        // The list is grouped by whether a session is reachable, and that answer now moves when an
+        // address is proven or demoted — neither of which any of the other fields would notice.
+        && builtFrom.candidateHealth === state.candidateHealth
+        && builtFrom.lanEndpoints === state.lanEndpoints
         && builtFrom.relayDirectory === state.relayDirectory
         && builtFrom.socketStatus === state.socketStatus
         && builtFrom.daemonSessionList === state.daemonSessionList
@@ -2465,6 +2503,8 @@ storage.subscribe((state) => {
     builtFrom.daemonVersions = state.daemonVersions;
     builtFrom.daemonSockets = state.daemonSockets;
     builtFrom.lanSightings = state.lanSightings;
+    builtFrom.candidateHealth = state.candidateHealth;
+    builtFrom.lanEndpoints = state.lanEndpoints;
     builtFrom.relayDirectory = state.relayDirectory;
     builtFrom.socketStatus = state.socketStatus;
     builtFrom.daemonSessionList = state.daemonSessionList;
@@ -2839,6 +2879,7 @@ const selectChannelState = (state: StorageState): ChannelState => ({
     daemonSessionList: state.daemonSessionList,
     lanSightings: state.lanSightings,
     lanEndpoints: state.lanEndpoints,
+    candidateHealth: state.candidateHealth,
     relayEndpoints: state.relayEndpoints,
     relayDirectory: state.relayDirectory,
     relayHubConnected: state.relayHubConnected,

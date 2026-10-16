@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { channelAvailability, resolveSessionReach, routeFailedRecently } from './resolve';
+import { channelAvailability, resolveSessionReach } from './resolve';
 import type { ChannelDriver } from './types';
 
 /** A driver that says the same thing about everything it is asked. */
@@ -79,52 +79,20 @@ describe('channelAvailability', () => {
     it('is what the device has measured, per channel', () => {
         expect(channelAvailability({
             drivers: [machineReachable('lan', true), machineReachable('relay', false), machineReachable('server', true)],
-            sessionId: 'sess-1',
             machineId: 'machine-1',
         })).toEqual({ lan: true, relay: false, server: true });
     });
 
-    it('counts a channel this session was read over even when the measurement has gone quiet', () => {
-        // The strongest evidence there is: a read of this very session came back over that route.
-        // It is why a working route is not dropped the moment a browse is missed.
-        expect(channelAvailability({
-            drivers: [machineReachable('lan', false), machineReachable('relay', true)],
-            sessionId: 'sess-1',
-            machineId: 'machine-1',
-            lastReadRoute: 'lan',
-        })).toEqual({ lan: true, relay: true });
-    });
-
-    it('leaves out a route that has just failed, so it is not chosen again on every tick', () => {
+    it('leaves a failed route to the address health, not to a clock of its own', () => {
+        // What used to be here: a per-session failure memory with a ninety-second TTL, which made a
+        // route eligible again with no new evidence. Whether a channel can carry traffic is now a
+        // function of what its addresses have done — a demoted address makes the driver say no, and
+        // nothing un-demotes it but the backoff or a change on the device.
         const now = 1_000_000;
         expect(channelAvailability({
-            drivers: [machineReachable('lan', true), machineReachable('relay', true)],
-            sessionId: 'sess-1',
+            drivers: [machineReachable('lan', false), machineReachable('relay', true)],
             machineId: 'machine-1',
-            failedAt: { lan: now - 1_000 },
             now,
         })).toEqual({ lan: false, relay: true });
-        // A failure also beats the read that came over it: the read was before the failure.
-        expect(channelAvailability({
-            drivers: [machineReachable('lan', true)],
-            sessionId: 'sess-1',
-            machineId: 'machine-1',
-            failedAt: { lan: now - 1_000 },
-            lastReadRoute: 'lan',
-            now,
-        })).toEqual({ lan: false });
-    });
-
-    it('brings the route back once the failure has aged out', () => {
-        const failedAt = { lan: 1_000_000 };
-        expect(routeFailedRecently(failedAt.lan, 1_000_000 + 89_999)).toBe(true);
-        expect(routeFailedRecently(failedAt.lan, 1_000_000 + 90_000)).toBe(false);
-        expect(channelAvailability({
-            drivers: [machineReachable('lan', true)],
-            sessionId: 'sess-1',
-            machineId: 'machine-1',
-            failedAt,
-            now: 1_000_000 + 90_000,
-        })).toEqual({ lan: true });
     });
 });

@@ -15,11 +15,19 @@ vi.mock('@/sync/encryption/encryption', () => ({ Encryption: class {} }));
 
 const { readSessionOverLan } = await import('./sessionChannel');
 
+/** The page one read returned, or null when it returned no page at all. */
+const readOf = async (options: Parameters<typeof readSessionOverLan>[0]) => {
+    const attempt = await readSessionOverLan(options);
+    return attempt.kind === 'read' ? attempt.read : null;
+};
+
+const RELAY = 'https://1.2.3.4/r/' + 'b'.repeat(32);
 const base = {
     sessionId: 's1', machineId: 'm1', accountPublicKey: new Uint8Array(32),
-    machineKey: new Uint8Array(32), encryption: {} as any, via: 'relay' as const,
+    machineKey: new Uint8Array(32), encryption: {} as any,
+    // These cases are about which page is asked for, so they read at one address.
+    candidates: [{ baseUrl: RELAY, route: 'relay' as const }],
 };
-const RELAY = 'https://1.2.3.4/r/' + 'b'.repeat(32);
 
 const page = (over: Partial<Record<string, unknown>> = {}) => ({
     tag: 'x', dataEncryptionKey: '', entries: [], cursor: '0:10', older: '0:0',
@@ -33,7 +41,7 @@ describe('readSessionOverLan pages', () => {
         fetchHistory.mockResolvedValue(page({ hasOlder: true }));
         decryptLanHistory.mockResolvedValue({ entries: [{ id: 'a' }], decryptedCount: 1, sessionKey: new Uint8Array(32) });
 
-        const read = await readSessionOverLan({ ...base, relayBaseUrl: RELAY, page: { kind: 'tail' } });
+        const read = await readOf({ ...base, page: { kind: 'tail' } });
 
         expect(fetchHistory.mock.calls[0][3]).toEqual({});
         expect(read?.hasOlder).toBe(true);
@@ -45,7 +53,7 @@ describe('readSessionOverLan pages', () => {
         fetchHistory.mockResolvedValue(page());
         decryptLanHistory.mockResolvedValue({ entries: [], decryptedCount: 0, sessionKey: new Uint8Array(32) });
 
-        await readSessionOverLan({ ...base, relayBaseUrl: RELAY, page: { kind: 'follow', cursor: '0:42' } });
+        await readOf({ ...base, page: { kind: 'follow', cursor: '0:42' } });
 
         expect(fetchHistory.mock.calls[0][3]).toEqual({ since: '0:42' });
     });
@@ -54,7 +62,7 @@ describe('readSessionOverLan pages', () => {
         fetchHistory.mockResolvedValue(page());
         decryptLanHistory.mockResolvedValue({ entries: [], decryptedCount: 0, sessionKey: new Uint8Array(32) });
 
-        await readSessionOverLan({ ...base, relayBaseUrl: RELAY, page: { kind: 'older', before: '0:42' } });
+        await readOf({ ...base, page: { kind: 'older', before: '0:42' } });
 
         expect(fetchHistory.mock.calls[0][3]).toEqual({ before: '0:42' });
     });
@@ -72,7 +80,7 @@ describe('readSessionOverLan pages', () => {
             sessionKey: new Uint8Array(32),
         }));
 
-        const read = await readSessionOverLan({ ...base, relayBaseUrl: RELAY, page: { kind: 'follow', cursor: '0:42' } });
+        const read = await readOf({ ...base, page: { kind: 'follow', cursor: '0:42' } });
 
         expect(fetchHistory.mock.calls[0][3]).toEqual({ since: '0:42' });
         expect(fetchHistory.mock.calls[1][3]).toEqual({ since: '1:500' });
@@ -92,7 +100,7 @@ describe('readSessionOverLan pages', () => {
             sessionKey: new Uint8Array(32),
         }));
 
-        const read = await readSessionOverLan({ ...base, relayBaseUrl: RELAY, page: { kind: 'follow', cursor: '0:0' } });
+        const read = await readOf({ ...base, page: { kind: 'follow', cursor: '0:0' } });
 
         expect(fetchHistory).toHaveBeenCalledTimes(4);
         expect(read?.hasNewer).toBe(true);

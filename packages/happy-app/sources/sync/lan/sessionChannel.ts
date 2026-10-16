@@ -208,6 +208,23 @@ export async function listSessionsOverLan(options: {
     return answers;
 }
 
+/**
+ * What one read found, with the address failures told apart from everything else.
+ *
+ * `null` used to carry all of these at once — no candidates, a daemon with no log for the session,
+ * and a machine that could not be reached — so the caller recorded a route failure for whichever it
+ * happened to be. A health record built on that would demote a working address because a session
+ * had not been written to the log yet.
+ */
+export type LanAttempt =
+    | { kind: 'read'; read: LanSessionRead }
+    /** It answered, and has no log for this session. Nothing about the address. */
+    | { kind: 'absent'; baseUrl: string }
+    /** Nothing answered there: refused to connect, or timed out. */
+    | { kind: 'unreachable'; baseUrl: string; error: unknown }
+    /** It answered and refused this device — a bad proof, or the daemon's own error. */
+    | { kind: 'refused'; baseUrl: string; status: number };
+
 export async function readSessionOverLan(options: {
     sessionId: string;
     /** The machine the session belongs to, from `session.metadata.machineId`. */
@@ -225,23 +242,23 @@ export async function readSessionOverLan(options: {
      */
     page: { kind: 'tail' } | { kind: 'follow'; cursor: string } | { kind: 'older'; before: string };
     /**
+     * Every address worth trying, best first, already filtered to those that may be tried now.
+     *
+     * The caller decides this, not a browse: an address the machine published is as real as one a
+     * browse found, and until this was a parameter the read could only use the latter — which is
+     * why a machine found without mDNS was chosen as "on the LAN" and then could not be read there.
+     * A browse still has its place, and pays for it once per scan rather than once per read.
+     */
+    candidates: readonly { baseUrl: string; route: 'lan' | 'relay' }[];
+    /**
      * Connection from the previous read. Reused while it is still valid, which is what keeps the
-     * mDNS browse and the challenge-response out of every poll — a browse alone runs for its full
-     * timeout, so paying it per tick makes the channel slower the more often it is used.
+     * challenge-response out of every poll.
      */
     connection?: LanConnection | null;
-    /** The public relay route to the same daemon, when the machine published one. */
-    relayBaseUrl?: string;
-    /**
-     * Which route to read on. `lan` only browses, `relay` only uses the relay (skipping a browse
-     * for a machine known to be elsewhere, which would burn its timeout every tick), and `any`
-     * browses first and falls back to the relay.
-     */
-    via: 'lan' | 'relay' | 'any';
-}): Promise<LanSessionRead | null> {
+}): Promise<LanAttempt> {
     const machineKey = options.machineKey;
     if (!machineKey) {
-        return null;
+        return { kind: 'absent', baseUrl: '' };
     }
 
     /**
@@ -338,18 +355,16 @@ export async function readSessionOverLan(options: {
     // half: a browse runs for its entire timeout, so paying it on every poll would make the
     // channel slower the more often it is used.
     const cached = options.connection;
-    // A cached connection is only reusable for the route it was made on: a session being read over
-    // the relay must not be handed the LAN connection another session left behind, and the other
-    // way round.
-    const cachedMatchesRoute = options.via === 'any' || cached?.route === options.via;
-    if (cached && cached.machineId === options.machineId && cachedMatchesRoute) {
+    // Reused only while the address is still one worth trying: a connection is a memory of where
+    // this machine answered, and a memory of an address that has since been demoted is not.
+    if (cached && options.candidates.some((candidate) => candidate.baseUrl === cached.baseUrl)) {
         try {
             const result = await readFrom(cached);
             if (result) {
-                return result;
+                return { kind: 'read', read: result };
             }
-            // Null is the daemon saying it has no such session — right address, wrong machine, or
-            // a log that has not been written yet. Discovery is what tells those apart.
+            // The daemon answered and has no log for this session: true of every one of its
+            // addresses, so there is nothing to gain from asking the rest.
         } catch (error) {
             // The address is a memory, and what it names may have moved, gone, or restarted with a
             // different port — so an address that does not answer is rediscovered rather than
@@ -357,38 +372,39 @@ export async function readSessionOverLan(options: {
             // cannot fix by looking around: a rejected proof or a server error belongs to the
             // caller. The token's own expiry no longer reaches here at all; `getLanCredential`
             // replaces a token before it dies and retries once after a rejection.
-            if (error instanceof LanRequestError && error.status !== 401 && error.status !== 403) {
-                throw error;
+            if (error instanceof LanRequestError) {
+                return { kind: 'refused', baseUrl: cached.baseUrl, status: error.status };
             }
+            // Nothing answered there. That is a reason to try another address, not a reason to give
+            // up on the machine — and it is the fact the caller records against this address.
         }
+        return { kind: 'absent', baseUrl: cached.baseUrl };
     }
 
-    const discovered = options.via === 'relay'
-        ? []
-        : await discoverMachines({
-            accountPublicKey: options.accountPublicKey,
-            // A session belongs to exactly one machine, so there is nothing to learn from the others.
-            // When the id is unknown, fall back to probing whatever is advertising — the daemon
-            // answers 404 for sessions it does not have, which is a cheap way to find the right one.
-            timeoutMs: 4000,
-        });
-    const candidates: { machineId: string; baseUrl: string; route: DaemonRoute }[] = (options.machineId
-        ? discovered.filter((machine) => machine.machineId === options.machineId)
-        : discovered
-    ).map((machine) => ({ machineId: machine.machineId, baseUrl: machine.baseUrl, route: 'lan' as const }));
-    if (candidates.length === 0 && options.via !== 'lan' && options.relayBaseUrl && options.machineId) {
-        candidates.push({ machineId: options.machineId, baseUrl: options.relayBaseUrl, route: 'relay' });
-    }
-
-    for (const machine of candidates) {
+    let attempt: LanAttempt = { kind: 'absent', baseUrl: options.candidates[0]?.baseUrl ?? '' };
+    for (const candidate of options.candidates) {
         // No handshake here: the read takes the credential for whatever address it is about to use,
         // and only a candidate that can actually be authenticated gets that far. Proving the key
         // before asking a question the daemon may answer with a 404 is a round trip per candidate.
-        const result = await readFrom(machine);
-        if (result) {
-            return result;
+        try {
+            const result = await readFrom({ machineId: options.machineId ?? '', route: candidate.route, baseUrl: candidate.baseUrl });
+            if (result) {
+                return { kind: 'read', read: result };
+            }
+            // The daemon answered and has no log for this session. Every candidate is an address of
+            // the same machine, so asking the rest would be asking the same daemon again.
+            return { kind: 'absent', baseUrl: candidate.baseUrl };
+        } catch (error) {
+            if (error instanceof LanRequestError) {
+                // It answered, with a status that is not a page: a rejected proof, a token from a
+                // daemon that has restarted, or the daemon's own error. Every one of those is about
+                // the *daemon*, so the next address — which reaches the same daemon — would answer
+                // the same way, and asking it would cost a round trip to be told so.
+                return { kind: 'refused', baseUrl: candidate.baseUrl, status: error.status };
+            }
+            attempt = { kind: 'unreachable', baseUrl: candidate.baseUrl, error };
         }
     }
 
-    return null;
+    return attempt;
 }

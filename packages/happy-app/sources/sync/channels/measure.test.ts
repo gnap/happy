@@ -3,6 +3,7 @@ import { channelDrivers, type ChannelState } from './measure';
 import { channelsFor, operationSupported } from './resolve';
 import type { ChannelDriver } from './types';
 import type { DaemonConnectionState } from '@/sync/lan/daemonConnections';
+import { candidateKey } from './health';
 
 /** A store slice with nothing in it, so each test states only what it is about. */
 const state = (over: Partial<ChannelState> = {}): ChannelState => ({
@@ -13,6 +14,7 @@ const state = (over: Partial<ChannelState> = {}): ChannelState => ({
     daemonSessionList: {},
     lanSightings: {},
     lanEndpoints: {},
+    candidateHealth: {},
     relayEndpoints: {},
     relayDirectory: {},
     relayHubConnected: false,
@@ -23,6 +25,8 @@ const socket = (route: 'lan' | 'relay', phase: DaemonConnectionState['phase']): 
     ({ route, phase } as DaemonConnectionState);
 
 const byChannel = (drivers: ChannelDriver[]) => drivers.map((d) => d.channel);
+const LAN = 'http://192.168.5.87:55673';
+const RELAY = 'https://relay.example.com/r/' + 'a'.repeat(32);
 
 describe('channelDrivers', () => {
     it('builds the channels that are on, in the order the priority gives', () => {
@@ -78,25 +82,52 @@ describe('the channel links the header draws', () => {
 });
 
 describe('what the drivers say about a machine', () => {
-    const machineOf = (over: Partial<ChannelState>, channel: ChannelDriver['channel'], machineId = 'machine-1') =>
+    const machineOf = (over: Partial<ChannelState>, channel: ChannelDriver['channel'], now = 0, machineId = 'machine-1') =>
         channelDrivers(state(over), ['lan', 'relay', 'server'])
             .find((driver) => driver.channel === channel)!
-            .machine(machineId, 0);
+            .machine(machineId, now);
 
     it('reaches a machine the LAN has seen, or is holding a socket to', () => {
+        // Reachable and alive are different questions now. An address nothing has tried yet is worth
+        // trying, which is what makes the channel usable at all; only something that answered makes
+        // the machine alive, which is what the badge claims.
         expect(machineOf({}, 'lan')).toBeNull();
-        expect(machineOf({ lanSightings: { 'machine-1': {} } }, 'lan')).toEqual({ reachable: true, alive: true });
+        expect(machineOf({ lanSightings: { 'machine-1': { baseUrl: LAN } } }, 'lan'))
+            .toEqual({ reachable: true, alive: false });
         expect(machineOf({ daemonSockets: { 'machine-1:lan': socket('lan', 'opening') } }, 'lan')).toBeNull();
-        expect(machineOf({ daemonSockets: { 'machine-1:lan': socket('lan', 'live') } }, 'lan')).toEqual({ reachable: true, alive: true });
+        expect(machineOf({ daemonSockets: { 'machine-1:lan': socket('lan', 'live') } }, 'lan'))
+            .toBeNull(); // a socket with no address is not an address
+
+        const proven = {
+            lanSightings: { 'machine-1': { baseUrl: LAN } },
+            candidateHealth: { [candidateKey('machine-1', 'lan', LAN)]: { phase: 'live' as const, failures: 0, since: 0 } },
+        };
+        expect(machineOf(proven, 'lan')).toEqual({ reachable: true, alive: true });
+    });
+
+    it('a demoted address stops making the channel reachable, and a proven one does not', () => {
+        // The rule that ends the sawtooth: an address that has been failing is out until its backoff
+        // expires, instead of becoming eligible again ninety seconds later with nothing new to say.
+        const down = { phase: 'down' as const, failures: 3, since: 0, retryAt: 5_000 };
+        const demoted = {
+            lanEndpoints: { 'machine-1': { baseUrls: [LAN], at: 0 } },
+            candidateHealth: { [candidateKey('machine-1', 'lan', LAN)]: down },
+        };
+        expect(machineOf(demoted, 'lan', 1_000)).toBeNull();
+        expect(machineOf(demoted, 'lan', 5_000)).toEqual({ reachable: true, alive: false });
     });
 
     it('tells a relay that is carrying the machine apart from one that merely has an address for it', () => {
         // Every machine key on this device derives a relay address whether or not that machine's
         // daemon ever dialled the hub. That address is worth *trying* — it is a route — but it is
         // not evidence that anything is there, so it routes without making the machine alive.
-        expect(machineOf({ relayEndpoints: { 'machine-1': { source: 'derived' } } }, 'relay'))
+        expect(machineOf({ relayEndpoints: { 'machine-1': { baseUrl: RELAY, source: 'derived' } } }, 'relay'))
             .toEqual({ reachable: true, alive: false });
-        expect(machineOf({ relayEndpoints: { 'machine-1': { source: 'published' } } }, 'relay'))
+        // A *published* relay route is the machine saying it runs a relay client, and the relay only
+        // holds a machine that dialled in — so unlike a published LAN address, this one is evidence.
+        // The asymmetry is deliberate: a machine knows which addresses it has, not which of them a
+        // given client can route to.
+        expect(machineOf({ relayEndpoints: { 'machine-1': { baseUrl: RELAY, source: 'published' } } }, 'relay'))
             .toEqual({ reachable: true, alive: true });
         expect(machineOf({ relayDirectory: { 'machine-1': { at: 0, sessions: [] } } }, 'relay'))
             .toEqual({ reachable: true, alive: true });
