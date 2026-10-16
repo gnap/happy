@@ -49,6 +49,15 @@ export function isCacheEnabled(session: Session | null | undefined, servedByDaem
 // Loaded cache result
 // ---------------------------------------------------------------------------
 
+/**
+ * How many messages one open reads back from the cache.
+ *
+ * A budget, not a rule about the session: the rest of the rows stay where they are, and scrolling
+ * back walks them over the channel that owns the log. Sized so the read is tens of milliseconds
+ * rather than seconds — it is parsing JSON on the JS thread that costs, not the query.
+ */
+const HYDRATE_MESSAGE_LIMIT = 400;
+
 export interface LoadedCache {
     messages: Message[];
     reducerState: ReducerState;
@@ -121,16 +130,25 @@ export async function loadMessageCache(session: Session, servedByDaemon = false)
             );
         }
 
-        const messages = await db.getSessionMessages(session.id);
+        // The newest slice, not everything on disk. Every row is a full message JSON parsed on the
+        // JS thread, so reading all of them made opening a session cost whatever its whole history
+        // cost — 660 messages measured at ten seconds on a device. The window the user opens to is
+        // the newest messages; the rest stay on disk and are reached by scrolling back, which goes
+        // through the channel's paging rather than through this read.
+        const messages = await db.getSessionMessages(session.id, HYDRATE_MESSAGE_LIMIT + 1);
+        const truncated = messages.length > HYDRATE_MESSAGE_LIMIT;
+        const hydrating = truncated ? messages.slice(-HYDRATE_MESSAGE_LIMIT) : messages;
         const reducerState = deserializeReducerStateOrCreate(cacheRow.reducerStateJson);
 
-        log.log(`📦 messageCache: loaded ${messages.length} messages for ${session.id} (lastSeq=${cacheRow.lastSeq}, oldestSeq=${cacheRow.oldestSeq}, hasOlderMessages=${cacheRow.hasOlderMessages})`);
+        log.log(`📦 messageCache: loaded ${hydrating.length} messages for ${session.id} (lastSeq=${cacheRow.lastSeq}, oldestSeq=${cacheRow.oldestSeq}, hasOlderMessages=${cacheRow.hasOlderMessages}, truncated=${truncated})`);
         return {
-            messages,
+            messages: hydrating,
             reducerState,
             lastSeq: cacheRow.lastSeq,
             oldestSeq: cacheRow.oldestSeq,
-            hasOlderMessages: cacheRow.hasOlderMessages,
+            // A window that does not reach the bottom of what is held has older messages by
+            // definition, whatever the row says — the row was written by a window that did reach it.
+            hasOlderMessages: cacheRow.hasOlderMessages || truncated,
         };
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

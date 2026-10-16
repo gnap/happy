@@ -46,7 +46,7 @@ export interface CachedSessionListRow {
 export interface ISessionCacheDB {
     initialize(): Promise<void>;
     getSessionCache(sessionId: string): Promise<CachedSessionRow | null>;
-    getSessionMessages(sessionId: string): Promise<Message[]>;
+    getSessionMessages(sessionId: string, limit?: number): Promise<Message[]>;
     saveSessionCache(row: CachedSessionRow, messages: Message[]): Promise<void>;
     clearSessionCache(sessionId: string): Promise<void>;
     clearAllCaches(): Promise<void>;
@@ -70,8 +70,9 @@ export class MemorySessionCacheDB implements ISessionCacheDB {
         return this.sessions.get(sessionId) ?? null;
     }
 
-    async getSessionMessages(sessionId: string): Promise<Message[]> {
-        return this.messages.get(sessionId) ?? [];
+    async getSessionMessages(sessionId: string, limit?: number): Promise<Message[]> {
+        const held = this.messages.get(sessionId) ?? [];
+        return limit === undefined ? held : held.slice(-limit);
     }
 
     async saveSessionCache(row: CachedSessionRow, messages: Message[]): Promise<void> {
@@ -193,7 +194,7 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
         });
     }
 
-    async getSessionMessages(sessionId: string): Promise<Message[]> {
+    async getSessionMessages(sessionId: string, limit?: number): Promise<Message[]> {
         await this.initialize();
         return new Promise((resolve, reject) => {
             const req = this.getStore().messages.get(sessionId);
@@ -203,8 +204,9 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
                     resolve([]);
                     return;
                 }
+                const held = limit === undefined ? entry.messages : entry.messages.slice(-limit);
                 const messages: Message[] = [];
-                for (const json of entry.messages) {
+                for (const json of held) {
                     try {
                         messages.push(JSON.parse(json) as Message);
                     } catch {
@@ -463,13 +465,29 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
         });
     }
 
-    async getSessionMessages(sessionId: string): Promise<Message[]> {
+    /**
+     * The newest `limit` messages, or every one the database holds when no limit is given.
+     *
+     * Opening a session used to read *all* of them: 660 messages measured at ten seconds, because
+     * every row is a full message JSON and each is parsed on the JS thread. The limit is what makes
+     * that cost a property of the window rather than of the session's history — the older rows stay
+     * on disk, where scrolling back reaches them through the channel's own paging rather than
+     * through this read.
+     */
+    async getSessionMessages(sessionId: string, limit?: number): Promise<Message[]> {
         await this.ensureReady();
         return this.enqueue(async () => {
-            const rows = await this.db.getAllAsync(
-                'SELECT message_json FROM session_messages WHERE session_id = ? ORDER BY created_at ASC',
-                [sessionId]
-            ) as Record<string, unknown>[];
+            const rows = limit === undefined
+                ? await this.db.getAllAsync(
+                    'SELECT message_json FROM session_messages WHERE session_id = ? ORDER BY created_at ASC',
+                    [sessionId]
+                ) as Record<string, unknown>[]
+                // Newest first for the LIMIT, then reversed: the same index serves both, and the
+                // rows that fall off the end are the oldest ones.
+                : (await this.db.getAllAsync(
+                    'SELECT message_json FROM session_messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ?',
+                    [sessionId, limit]
+                ) as Record<string, unknown>[]).reverse();
 
             const messages: Message[] = [];
             for (const row of rows) {
@@ -681,8 +699,8 @@ class LazySessionCacheDB implements ISessionCacheDB {
         return (await this.ensureDelegate()).getSessionCache(sessionId);
     }
 
-    async getSessionMessages(sessionId: string): Promise<Message[]> {
-        return (await this.ensureDelegate()).getSessionMessages(sessionId);
+    async getSessionMessages(sessionId: string, limit?: number): Promise<Message[]> {
+        return (await this.ensureDelegate()).getSessionMessages(sessionId, limit);
     }
 
     async saveSessionCache(row: CachedSessionRow, messages: Message[]): Promise<void> {
