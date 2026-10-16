@@ -323,19 +323,26 @@ describe('load → save → load round-trip', () => {
         resetSessionCacheDB();
     });
 
-    it('preserves ReducerState Maps across save/load', async () => {
+    it('preserves the ReducerState Maps of the messages it saves', async () => {
         const session = makeSession('cursor');
         const reducerState = createReducer();
-        reducerState.toolIdToMessageId.set('toolA', 'msgA');
+        // `m1` is one of the two messages saved, so its entries survive; `msgA` is not, and the
+        // entry goes with it — a state entry for a message the window does not hold describes
+        // nothing the load can use, and it is what made the stored state as long as the session.
+        reducerState.toolIdToMessageId.set('toolA', 'm1');
+        reducerState.toolIdToMessageId.set('toolB', 'msgA');
         reducerState.lastThinkingMessageId = 'thinkX';
+        reducerState.tracerState.processedIds.add('m1');
         reducerState.tracerState.processedIds.add('processed1');
 
         await saveMessageCache(session, makeMessages(2), reducerState, 99);
         const loaded = await loadMessageCache(session);
 
-        expect(loaded?.reducerState.toolIdToMessageId.get('toolA')).toBe('msgA');
+        expect(loaded?.reducerState.toolIdToMessageId.get('toolA')).toBe('m1');
+        expect(loaded?.reducerState.toolIdToMessageId.has('toolB')).toBe(false);
         expect(loaded?.reducerState.lastThinkingMessageId).toBe('thinkX');
-        expect(loaded?.reducerState.tracerState.processedIds.has('processed1')).toBe(true);
+        expect(loaded?.reducerState.tracerState.processedIds.has('m1')).toBe(true);
+        expect(loaded?.reducerState.tracerState.processedIds.has('processed1')).toBe(false);
         expect(loaded?.lastSeq).toBe(99);
         expect(loaded?.messages).toHaveLength(2);
     });
@@ -363,7 +370,9 @@ describe('load → save → load round-trip', () => {
         });
         reducerState.toolIdToMessageId.set('r1', 'm1');
 
-        await saveMessageCache(session, [], reducerState, 10);
+        // The window it is saved with, because that is what the state is kept against: `m1` is in
+        // it, so its running tool survives the round trip.
+        await saveMessageCache(session, makeMessages(2), reducerState, 10);
         const loaded = await loadMessageCache(session);
 
         const tool = loaded?.reducerState.messages.get('m1')?.tool;

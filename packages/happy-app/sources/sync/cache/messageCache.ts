@@ -15,6 +15,7 @@
 import { getSessionCacheDB } from './sessionCacheDB';
 import {
     serializeReducerStateToJson,
+    trimReducerState,
     deserializeReducerStateOrCreate,
     SERIALIZER_SCHEMA_VERSION,
 } from './reducerStateSerializer';
@@ -249,7 +250,11 @@ export async function saveMessageCache(
     try {
         const started = Date.now();
         const db = getSessionCacheDB();
-        const reducerStateJson = serializeReducerStateToJson(reducerState);
+        // Trimmed to the window a load hands back, so what is written is what will be read: see
+        // `trimReducerState`. The window's own state is untouched — this is the copy that goes to
+        // disk.
+        const newest = [...messages].sort((a, b) => b.createdAt - a.createdAt).slice(0, HYDRATE_MESSAGE_LIMIT);
+        const reducerStateJson = serializeReducerStateToJson(trimReducerState(reducerState, new Set(newest.map((message) => message.id))));
         const stateMs = Date.now() - started;
         const row = {
             sessionId: session.id,
