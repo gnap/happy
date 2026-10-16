@@ -99,10 +99,14 @@ export const ChannelBlock = React.memo(function ChannelBlock({ channel, children
                         {rows.map((row) => row.kind === 'name'
                             ? <Text key={row.key} style={{ fontSize: 12, fontWeight: '600', color: theme.colors.text, marginTop: 8 }}>{row.text}</Text>
                             : (
-                                <View key={row.key} style={{ flexDirection: 'row', paddingLeft: 12 }}>
-                                    <Text style={{ fontSize: 11, color: theme.colors.textSecondary, width: 74 }} numberOfLines={1}>{row.text.split('  ')[0]}</Text>
-                                    <Text style={{ fontSize: 11, color: theme.colors.text, width: 66 }} numberOfLines={1}>{row.text.split('  ')[1] ?? ''}</Text>
-                                    <Text style={{ fontSize: 11, color: theme.colors.textSecondary, flexShrink: 1 }} numberOfLines={1}>{row.text.split('  ').slice(2).join('  ')}</Text>
+                                <View key={row.key} style={{ paddingLeft: 12 }}>
+                                    {/* The address is what a person reads here, so it gets a line of its
+                                        own and is never truncated — squeezing it into a fixed column is
+                                        what turned it into `http://19…`. */}
+                                    <Text style={{ fontSize: 11, color: theme.colors.text }}>
+                                        {`${row.text.split('  ')[0]}  ${row.text.split('  ')[1] ?? ''}`}
+                                    </Text>
+                                    <Text style={{ fontSize: 10, color: theme.colors.textSecondary }}>{row.text.split('  ').slice(2).join('  ')}</Text>
                                 </View>
                             ))}
                     </View>
