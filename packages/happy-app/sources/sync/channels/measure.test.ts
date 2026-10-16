@@ -83,6 +83,10 @@ describe('the channel links the header draws', () => {
 });
 
 describe('what the drivers say about a machine', () => {
+    const capableOf = (over: Partial<ChannelState>, channel: ChannelDriver['channel'], machineId = 'machine-1') =>
+        channelDrivers(state(over), ['lan', 'relay', 'server'])
+            .find((driver) => driver.channel === channel)!
+            .capable(machineId);
     const machineOf = (over: Partial<ChannelState>, channel: ChannelDriver['channel'], now = 0, machineId = 'machine-1') =>
         channelDrivers(state(over), ['lan', 'relay', 'server'])
             .find((driver) => driver.channel === channel)!
@@ -105,6 +109,21 @@ describe('what the drivers say about a machine', () => {
             candidateHealth: { [candidateKey('machine-1', 'lan', LAN)]: { phase: 'live' as const, failures: 0, since: 0 } },
         };
         expect(machineOf(proven, 'lan')).toEqual({ reachable: true, alive: true });
+    });
+
+    it('does not earn the channel glyph from an address the machine published', () => {
+        // The glyph is what the list draws beside a machine, so this is the wifi icon on a machine
+        // that is not on this network: publishing an address is a claim, and a claim is not having
+        // observed the channel.
+        const claimed = { lanEndpoints: { 'machine-1': { baseUrls: [LAN], at: 0 } } };
+        expect(capableOf(claimed, 'lan')).toBe(false);
+        // Seen by a browse, or answered at: then it is this device's channel for that machine.
+        expect(capableOf({ lanSightings: { 'machine-1': { baseUrl: LAN } } }, 'lan')).toBe(true);
+        expect(capableOf({ ...claimed, daemonSockets: { 'machine-1:lan': { ...socket('lan', 'live'), baseUrl: LAN } } }, 'lan'))
+            .toBe(true);
+        // And a relay route derived from the key earns nothing either: every machine has one.
+        expect(capableOf({ relayEndpoints: { 'machine-1': { baseUrl: RELAY, source: 'derived' } } }, 'relay')).toBe(false);
+        expect(capableOf({ relayEndpoints: { 'machine-1': { baseUrl: RELAY, source: 'published' } } }, 'relay')).toBe(true);
     });
 
     it('does not call a machine reachable here on the strength of an address it published', () => {
