@@ -2,7 +2,19 @@ import type { MarkdownSpan } from "./parseMarkdown";
 
 // Pattern: $$...$$ (1-2), $...$ (3-4), **bold** (5-6), *italic* (7-8), [link](url) (9-11), `code` (12-13)
 // Inline math $...$ accepts 1+ non-$ chars (single-char like $x$ now works)
-const pattern = /(\$\$([^$]+)\$\$)|(\$([^$\s]?[^$]*?[^$\s]?)\$)|(\*\*(.*?)(?:\*\*|$))|(\*(.*?)(?:\*|$))|(\[([^\]]+)\](?:\(([^)]+)\))?)|(`(.*?)(?:`|$))/g;
+/**
+ * Markdown spans, one pattern, tried left to right.
+ *
+ * The asterisks are where this used to go wrong. `*italic*` accepted *any* star as its closer and
+ * could end at the end of the line, so a list marker — `* an item with **bold** in it` — opened an
+ * italic that swallowed one of the bold's two stars, and the bold came out as plain text. Bold's
+ * closer was optional in the same way, so an unclosed `**` made the rest of the line bold.
+ *
+ * Both now require their own delimiters and nothing else's: `**` closes bold, a star that is not the
+ * first of a pair closes italic (`(?!\*)`), and neither may contain a star. Text with an unmatched
+ * delimiter stays plain, which is what it is.
+ */
+const pattern = /(\$\$([^$]+)\$\$)|(\$([^$\s]?[^$]*?[^$\s]?)\$)|(\*\*([^*]+)\*\*)|(\*(?!\*)([^*]+)\*(?!\*))|(\[([^\]]+)\](?:\(([^)]+)\))?)|(`(.*?)(?:`|$))/g;
 
 export function parseMarkdownSpans(markdown: string, header: boolean) {
     const spans: MarkdownSpan[] = [];
