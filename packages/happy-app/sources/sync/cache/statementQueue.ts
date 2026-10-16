@@ -33,10 +33,21 @@ export class StatementQueue {
                 work: work as () => Promise<unknown>,
                 resolve: resolve as (value: unknown) => void,
                 reject,
+                queuedAt: Date.now(),
+                depth: this.waiting + 1,
             });
             void this.pump();
         });
     }
+
+    /**
+     * Called after every statement with how long it waited and how long it took.
+     *
+     * The two are the whole diagnosis of a slow read: waiting is this queue's business — who is
+     * ahead of whom — and taking is the connection's, which is where a statement left un-finalised
+     * by an earlier failure shows up as seconds rather than milliseconds.
+     */
+    onStatement: ((statement: { waited: number; ran: number; depth: number }) => void) | null = null;
 
     /** How many jobs are waiting, for the tests and for the log line the metrics use. */
     get waiting(): number {
@@ -54,12 +65,16 @@ export class StatementQueue {
                 if (!next) {
                     return;
                 }
+                const waited = Date.now() - next.queuedAt;
+                const ranAt = Date.now();
                 try {
                     next.resolve(await next.work());
                 } catch (error) {
                     // A failed statement is the caller's business, not the queue's: the next job
                     // runs either way, which is what keeps one bad save from stalling the cache.
                     next.reject(error);
+                } finally {
+                    this.onStatement?.({ waited, ran: Date.now() - ranAt, depth: next.depth });
                 }
             }
         } finally {
@@ -72,4 +87,7 @@ type Job = {
     work: () => Promise<unknown>;
     resolve: (value: unknown) => void;
     reject: (error: unknown) => void;
+    /** When it was handed to the queue, and how many were waiting at that moment. */
+    queuedAt: number;
+    depth: number;
 };

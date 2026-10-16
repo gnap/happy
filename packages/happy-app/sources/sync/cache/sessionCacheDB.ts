@@ -374,6 +374,7 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
         const t0 = Date.now();
         // Static import so expo-sqlite loads with app bundle (avoids cold-start hang on first session open)
         this.db = await SQLite.openDatabaseAsync(DB_NAME);
+        this.watchStatements();
         log.log(`📦 sessionCacheDB: openDatabaseAsync took ${Date.now() - t0}ms`);
 
         const t2 = Date.now();
@@ -439,6 +440,22 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
      */
     /** Every statement on the one connection, with the ones a person is waiting for first. */
     private statements = new StatementQueue();
+
+    /**
+     * Statement timings, but only the ones worth seeing.
+     *
+     * A slow read is either waiting for the connection or slow *on* it, and those are different
+     * bugs: the first is who is ahead in this queue, the second is the connection itself — a
+     * statement an earlier failure left un-finalised holds it, and every statement behind that one
+     * pays seconds. Nothing under a fifth of a second is reported, so a healthy cache says nothing.
+     */
+    private watchStatements = () => {
+        this.statements.onStatement = ({ waited, ran, depth }) => {
+            if (waited > 200 || ran > 200) {
+                log.log(`📦 sessionCacheDB: statement waited=${waited}ms ran=${ran}ms queued behind ${depth - 1}`);
+            }
+        };
+    };
 
     private enqueue<T>(work: () => Promise<T>, urgent = false): Promise<T> {
         return this.statements.run(work, urgent);
