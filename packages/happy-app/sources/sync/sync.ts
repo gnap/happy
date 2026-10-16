@@ -52,6 +52,7 @@ import { channelDrivers as buildChannelDrivers } from './channels/measure';
 import { channelAvailability } from './channels/resolve';
 import { candidateInputsFor, orderedCandidates } from './channels/candidates';
 import { carryOperation, type HealthRecorder } from './channels/execute';
+import { readRoutes } from './channels/readRoute';
 import { endpointBaseUrl, type ChannelDriver, type ChannelOperation } from './channels/types';
 import { sendOverDaemonSocket, sendOverServerHttp, sendOverServerSocket } from './channels/ops';
 import type { ChannelReason } from './channels/types';
@@ -4806,20 +4807,17 @@ class Sync {
      * so this was the one place a priority change did not reach.
      */
     private readRoutes(sessionId: string, machineId: string | undefined, forceRoute?: DaemonRoute): DaemonRoute[] {
-        if (forceRoute) {
-            return [forceRoute];
-        }
-        const channel = this.preferredChannel(sessionId);
-        if (channel !== 'server') {
-            return [channel as DaemonRoute];
-        }
-        if (!machineId) {
-            return [];
-        }
-        return this.channelDrivers()
-            .filter((driver): driver is ChannelDriver => driver.channel !== 'server'
-                && driver.accepts('read', machineId, Date.now()))
-            .map((driver) => driver.channel as DaemonRoute);
+        const drivers = this.channelDrivers().filter((driver) => driver.channel !== 'server');
+        const now = Date.now();
+        const pinned = storage.getState().channelOverride[sessionId];
+        return readRoutes({
+            forced: forceRoute,
+            pinned: pinned && pinned !== 'server' ? (pinned as DaemonRoute) : pinned === 'server' ? 'server' : undefined,
+            chosen: this.preferredChannel(sessionId),
+            accepts: (route) => !machineId
+                ? false
+                : drivers.some((driver) => driver.channel === route && driver.accepts('read', machineId, now)),
+        });
     }
 
     /** Where an attempt's outcome is written, so the next caller starts from what this one learned. */
