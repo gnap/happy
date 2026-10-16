@@ -28,7 +28,7 @@ import { decryptLanHistory } from '@/sync/lan/history';
  */
 
 /** 各通道活性: what each channel is doing as a channel, before any machine is looked at. */
-export const ChannelLivenessGroup = React.memo(function ChannelLivenessGroup() {
+export const ChannelLivenessGroup = React.memo(function ChannelLivenessGroup({ serverUrl, onEditServerUrl }: { serverUrl?: string; onEditServerUrl?: () => void }) {
     const { theme } = useUnistyles();
     const machines = useAllMachines();
     const links = useChannelLinks();
@@ -49,7 +49,10 @@ export const ChannelLivenessGroup = React.memo(function ChannelLivenessGroup() {
                     <Item
                         key={`live-${link.channel}`}
                         title={link.channel.toUpperCase()}
-                        subtitle={link.state ?? 'absent'}
+                        // The server's endpoint is a detail *of the server channel*, not a row of its
+                        // own above everything: there is one server, and this is where it is.
+                        subtitle={link.channel === 'server' && serverUrl ? serverUrl : (link.state ?? 'absent')}
+                        onPress={link.channel === 'server' ? onEditServerUrl : undefined}
                         icon={<Ionicons name={link.channel === 'lan' ? 'wifi-outline' : link.channel === 'relay' ? 'swap-horizontal' : 'globe-outline'} size={24} color={link.state === 'connected' ? '#34C759' : '#8E8E93'} />}
                         showChevron={false}
                         rightElement={

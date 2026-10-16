@@ -545,12 +545,7 @@ export default function DevScreen() {
                     icon={<Ionicons name="git-branch-outline" size={28} color="#007AFF" />}
                     onPress={() => router.push('/dev/channels')}
                 />
-                <Item
-                    title="API Endpoint"
-                    detail={getServerUrl()}
-                    onPress={handleEditServerUrl}
-                />
-                <ChannelLivenessGroup />
+                <ChannelLivenessGroup serverUrl={getServerUrl()} onEditServerUrl={handleEditServerUrl} />
                 <ConnectionDetailsGroup />
                 <RelayRow
                     enabled={relayEnabled}
