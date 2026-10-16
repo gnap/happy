@@ -24,6 +24,15 @@ export type RelayClientOptions = {
    * itself; publishing it is what saves every App a per-machine round trip and a per-machine socket.
    */
   getSessions?: () => unknown[];
+  /**
+   * Where this machine says it can be reached, from its own log.
+   *
+   * The relay's directory carries it for the same reason it carries the session list — a client
+   * should not have to ask each machine — and for one more: an App whose server is unreachable has
+   * no other way to learn a LAN address, which is exactly the client that wants one. The relay
+   * stores the blob without reading it, so nothing here needs the relay to know the shape.
+   */
+  getReachable?: () => { endpoints: unknown[]; at: number; rev: number } | null;
   minBackoffMs?: number;
   maxBackoffMs?: number;
 };
@@ -31,6 +40,13 @@ export type RelayClientOptions = {
 export type RelayClientHandle = {
   identity: RelayIdentity;
   isConnected: () => boolean;
+  /**
+   * Publishes the directory now instead of at the next tick.
+   *
+   * Called when the machine's log moves — a session starting, an address changing — so the relay's
+   * answer is as fresh as the machine's own state is, without a client polling for it.
+   */
+  publishDirectory: () => void;
   stop: () => void;
 };
 
@@ -44,7 +60,7 @@ const RELAY_MAX_FRAME_BYTES = 8 * 1024 * 1024;
  * the LAN API, comparing it costs one stringify, and a session appearing is not urgent enough to
  * justify threading a notification through every path that starts or ends one.
  */
-const SESSIONS_PUBLISH_INTERVAL_MS = 5_000;
+const DIRECTORY_PUBLISH_INTERVAL_MS = 5_000;
 const STRIP_REQUEST_HEADERS = new Set(['host', 'connection', 'content-length', 'accept-encoding']);
 const STRIP_RESPONSE_HEADERS = new Set(['content-length', 'content-encoding', 'transfer-encoding', 'connection']);
 
@@ -60,7 +76,9 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   /** The summary last published, so an unchanged one is not re-sent every tick. */
   let publishedSessions: string | null = null;
-  let sessionsTimer: ReturnType<typeof setInterval> | null = null;
+  /** The address set last published, deduped the same way. */
+  let publishedReachable: string | null = null;
+  let directoryTimer: ReturnType<typeof setInterval> | null = null;
   /**
    * How to write to the *registered* connection, or null while there is none.
    *
@@ -85,6 +103,36 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     if (encoded === publishedSessions) return;
     publishedSessions = encoded;
     try { send({ t: 'sessions', sessions }); } catch { /* the close handler reconnects */ }
+  };
+
+  /**
+   * Sends where this machine can be reached, if it is different from the last one.
+   *
+   * Read from the machine's log rather than from the publisher directly: the log is what a LAN
+   * reader replays, so the relay's answer and the LAN answer come from the same entry, and a
+   * machine that has recorded an address has it on every channel or on none.
+   */
+  const publishReachable = () => {
+    const send = publishFrame;
+    if (!send || stopped) return;
+    let reachable: { endpoints: unknown[]; at: number; rev: number } | null;
+    try {
+      reachable = options.getReachable?.() ?? null;
+    } catch (error) {
+      logger.debug(`[relay] could not read the endpoints: ${String(error)}`);
+      return;
+    }
+    if (!reachable) return;
+    const encoded = JSON.stringify(reachable);
+    if (encoded === publishedReachable) return;
+    publishedReachable = encoded;
+    try { send({ t: 'reachable', ...reachable }); } catch { /* the close handler reconnects */ }
+  };
+
+  /** Everything the relay's directory is built from. */
+  const publishDirectory = () => {
+    publishSessions();
+    publishReachable();
   };
 
   const setConnected = (value: boolean) => {
@@ -121,10 +169,11 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
         // change an App wants to hear about.
         publishFrame = send;
         publishedSessions = null;
-        publishSessions();
-        if (sessionsTimer === null) {
-          sessionsTimer = setInterval(publishSessions, SESSIONS_PUBLISH_INTERVAL_MS);
-          (sessionsTimer as any).unref?.();
+        publishedReachable = null;
+        publishDirectory();
+        if (directoryTimer === null) {
+          directoryTimer = setInterval(publishDirectory, DIRECTORY_PUBLISH_INTERVAL_MS);
+          (directoryTimer as any).unref?.();
         }
       } else if (msg.t === 'http') {
         // The query is part of the picture for a history read: `since` is what says whether the
@@ -202,10 +251,11 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
   return {
     identity,
     isConnected: () => connected,
+    publishDirectory,
     stop: () => {
       stopped = true;
       if (retryTimer) clearTimeout(retryTimer);
-      if (sessionsTimer) { clearInterval(sessionsTimer); sessionsTimer = null; }
+      if (directoryTimer) { clearInterval(directoryTimer); directoryTimer = null; }
       try { socket?.close(); } catch { /* gone */ }
       setConnected(false);
     },

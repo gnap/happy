@@ -6,10 +6,43 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import nacl from 'tweetnacl';
 import { startLanServer, lanProofFor, LAN_PROTOCOL_VERSION, type LanHistory, type LanServerHandle, type LanSessionSummary } from './lanServer';
+import { accountProofMessage } from './accountProof';
 
 const SECRET = new Uint8Array(32).fill(3);
 const WRONG_SECRET = new Uint8Array(32).fill(4);
+
+/**
+ * The account, whose key authorises the actions that change something.
+ *
+ * The machine key is a *transport* credential — every paired device holds it — so a restart is
+ * signed by the account instead. A test about what those routes do therefore has to sign like a real
+ * caller, which is what `signed` is for; a test about what they refuse can simply not sign.
+ */
+const ACCOUNT = nacl.sign.keyPair();
+const utf8 = (text: string) => new TextEncoder().encode(text);
+/** Nonces already spent, so a proof that arrives twice is refused the second time. */
+let proofNonces = new Set<string>();
+let proofCounter = 0;
+
+/** A request carrying the account's proof over `method path`, which is what the signature covers. */
+function signed(path: string, init: { token?: string; body?: unknown } = {}) {
+    const nonce = `nonce-${++proofCounter}`;
+    const at = Date.now();
+    const message = accountProofMessage({ method: 'POST', path, nonce, at, bodyDigest: '' });
+    return {
+        method: 'POST',
+        ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+        headers: {
+            ...(init.token ? { authorization: `Bearer ${init.token}` } : {}),
+            ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
+            'x-happy-proof-nonce': nonce,
+            'x-happy-proof-at': String(at),
+            'x-happy-proof-signature': Buffer.from(nacl.sign.detached(utf8(message), ACCOUNT.secretKey)).toString('base64'),
+        },
+    };
+}
 
 const SESSIONS: LanSessionSummary[] = [
     { happySessionId: 'sess-1', directory: '/work/repo', agent: 'claude', startedBy: 'daemon', isAlive: true },
@@ -77,6 +110,13 @@ async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
             return true;
         },
         getSnapshot: () => snapshot,
+        // A daemon that cannot check a proof refuses the routes that need one rather than accepting
+        // them on the machine key alone, so the check is part of the surface these tests exercise.
+        accountProof: {
+            verify: (message, signature) => nacl.sign.detached.verify(utf8(message), Buffer.from(signature, 'base64'), ACCOUNT.publicKey),
+            nonceSeen: (nonce) => proofNonces.has(nonce),
+            rememberNonce: (nonce) => { proofNonces.add(nonce); },
+        },
         host: '127.0.0.1',
         port: 0,
         limits,
@@ -117,6 +157,7 @@ afterEach(async () => {
     liveSessions = new Set(['sess-1']);
     lifecycleEntries = [];
     restartHandler = undefined;
+    proofNonces = new Set();
 });
 
 describe('lanServer read-only API', () => {
@@ -287,7 +328,7 @@ describe('lanServer read-only API', () => {
             await start();
             const token = await getToken();
 
-            const res = await fetch(url('/lan/sessions/sess-1/restart'), { method: 'POST', ...authorized(token) });
+            const res = await fetch(url('/lan/sessions/sess-1/restart'), signed('/lan/sessions/sess-1/restart', { token }));
 
             expect(res.status).toBe(200);
             expect(await res.json()).toEqual({ v: 1, success: true, newSessionId: 'sess-1-restarted' });
@@ -302,7 +343,7 @@ describe('lanServer read-only API', () => {
             await start();
             const token = await getToken();
 
-            const res = await fetch(url('/lan/sessions/sess-1/restart'), { method: 'POST', ...authorized(token) });
+            const res = await fetch(url('/lan/sessions/sess-1/restart'), signed('/lan/sessions/sess-1/restart', { token }));
 
             expect(res.status).toBe(200);
             expect(await res.json()).toEqual({
@@ -332,9 +373,31 @@ describe('lanServer read-only API', () => {
             await start();
             const token = await getToken();
 
-            const res = await fetch(url('/lan/sessions/sess-1/restart'), { method: 'POST', ...authorized(token) });
+            const res = await fetch(url('/lan/sessions/sess-1/restart'), signed('/lan/sessions/sess-1/restart', { token }));
 
             expect(res.status).toBe(404);
+        });
+
+        it('refuses a restart the machine key alone can ask for, which is the whole distinction', async () => {
+            // Holding the machine key means "can connect", not "may start a process": every paired
+            // device has it, and a key holder can derive the relay tag and arrive that way too — so
+            // this cannot be a per-channel rule and it is checked on the route.
+            restartHandler = async (sessionId) => {
+                restarted.push(sessionId);
+                return { success: true };
+            };
+            await start();
+            const token = await getToken();
+
+            const unsigned = await fetch(url('/lan/sessions/sess-1/restart'), { method: 'POST', ...authorized(token) });
+            expect(unsigned.status).toBe(403);
+            expect(restarted).toEqual([]);
+
+            // And a signature that has already been used is not a second authorisation.
+            const first = signed('/lan/sessions/sess-1/restart', { token });
+            expect((await fetch(url('/lan/sessions/sess-1/restart'), first)).status).toBe(200);
+            expect((await fetch(url('/lan/sessions/sess-1/restart'), first)).status).toBe(403);
+            expect(restarted).toEqual(['sess-1']);
         });
     });
 
@@ -486,11 +549,8 @@ describe('lanServer read-only API', () => {
 });
 
 describe('control calls inside a running session', () => {
-    const control = (token: string, sessionId: string, body: unknown) => fetch(url(`/lan/sessions/${sessionId}/control`), {
-        method: 'POST',
-        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-    });
+    const control = (token: string, sessionId: string, body: unknown) =>
+        fetch(url(`/lan/sessions/${sessionId}/control`), signed(`/lan/sessions/${sessionId}/control`, { token, body }));
 
     it('forwards an abort or a permission answer to the session, ciphertext and all', async () => {
         await start();

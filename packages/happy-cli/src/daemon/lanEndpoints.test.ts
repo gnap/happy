@@ -1,8 +1,9 @@
 /**
- * The endpoints published here land in a server-stored blob that outlives the daemon and is
- * readable account-wide, so the filter matters: a VPN or bridge address would leak topology
- * into something durable, and every wrong address costs a connection attempt on the client.
- * Tests inject a synthetic interface table rather than reading a real NIC.
+ * What is computed here is a fact about this machine, and it is recorded locally — so the filter
+ * matters for a different reason than it used to: the set is carried to the server and to the
+ * relay, readable account-wide, and a VPN or bridge address would leak topology into something
+ * durable. Every wrong address also costs a connection attempt on the client. Tests inject a
+ * synthetic interface table rather than reading a real NIC.
  */
 
 import { describe, expect, it, vi } from 'vitest';
@@ -69,98 +70,95 @@ describe('startEndpointPublisher', () => {
 
   function publisher(opts: {
     readInterfaces: () => NodeJS.Dict<os.NetworkInterfaceInfo[]>;
-    publish: (e: PublishedEndpoints) => Promise<boolean>;
-    isConnected?: () => boolean;
+    record: (e: PublishedEndpoints) => boolean;
     extraEndpoints?: () => LanEndpoint[];
   }) {
     return startEndpointPublisher({
       lanPort: LAN_PORT,
       readInterfaces: opts.readInterfaces,
-      publish: opts.publish,
-      isConnected: opts.isConnected ?? (() => true),
+      record: opts.record,
       extraEndpoints: opts.extraEndpoints,
       now: () => 1_700_000_000_000,
     });
   }
 
   it('publishes on the first tick and then stays quiet while the address set is unchanged', async () => {
-    const publish = vi.fn(async (_e: PublishedEndpoints) => true);
-    const p = publisher({ readInterfaces: () => setA, publish });
+    const record = vi.fn((_e: PublishedEndpoints) => true);
+    const p = publisher({ readInterfaces: () => setA, record });
 
     expect(await p.tick()).toBe(true);
     expect(await p.tick()).toBe(false);
     expect(await p.tick()).toBe(false);
 
     // Quiet means quiet: one call, not one per tick.
-    expect(publish).toHaveBeenCalledTimes(1);
-    expect(publish.mock.calls.map((c) => c[0].endpoints)).toEqual([[{ t: 'lan', addr: '192.168.1.5', port: LAN_PORT }]]);
+    expect(record).toHaveBeenCalledTimes(1);
+    expect(record.mock.calls.map((c) => c[0].endpoints)).toEqual([[{ t: 'lan', addr: '192.168.1.5', port: LAN_PORT }]]);
     p.stop();
   });
 
   it('re-publishes when the address set changes', async () => {
     let current = setA;
-    const publish = vi.fn(async (_e: PublishedEndpoints) => true);
-    const p = publisher({ readInterfaces: () => current, publish });
+    const record = vi.fn((_e: PublishedEndpoints) => true);
+    const p = publisher({ readInterfaces: () => current, record });
 
     await p.tick();
     current = setB;
     expect(await p.tick()).toBe(true);
 
-    expect(publish).toHaveBeenCalledTimes(2);
-    expect(publish.mock.calls.map((c) => c[0].endpoints)[1]).toEqual([{ t: 'lan', addr: '192.168.1.99', port: LAN_PORT }]);
+    expect(record).toHaveBeenCalledTimes(2);
+    expect(record.mock.calls.map((c) => c[0].endpoints)[1]).toEqual([{ t: 'lan', addr: '192.168.1.99', port: LAN_PORT }]);
     p.stop();
   });
 
-  it('does not write while disconnected, and retries once connected', async () => {
-    let connected = false;
-    const publish = vi.fn(async (_e: PublishedEndpoints) => true);
-    const p = publisher({ readInterfaces: () => setA, publish, isConnected: () => connected });
+  it('records whether or not there is a server to hear about it', async () => {
+    // There used to be a connectivity gate here — nothing written unless the server socket was up —
+    // and its effect was that the address existed only while the server was reachable, which is the
+    // one case where a client has another way to learn it. Recording is local now, so there is
+    // nothing to gate on.
+    const record = vi.fn((_e: PublishedEndpoints) => true);
+    const p = publisher({ readInterfaces: () => setA, record });
 
-    expect(await p.tick()).toBe(false);
-    expect(publish).not.toHaveBeenCalled();
-
-    connected = true;
     expect(await p.tick()).toBe(true);
-    expect(publish).toHaveBeenCalledTimes(1);
+    expect(record).toHaveBeenCalledTimes(1);
     p.stop();
   });
 
-  it('retries a failed write on the next tick instead of assuming it landed', async () => {
-    // An OCC conflict resolves to false inside tryUpdateDaemonState; the publisher must not
-    // treat that as delivered, or the endpoint would never be published.
-    const publish = vi.fn(async (_e: PublishedEndpoints) => false);
-    const p = publisher({ readInterfaces: () => setA, publish });
+  it('retries a write that did not land on the next tick instead of assuming it did', async () => {
+    // A log that could not be appended to (a full disk, a permission it lost) must not be recorded
+    // as done, or the address would never be written down.
+    const record = vi.fn((_e: PublishedEndpoints) => false);
+    const p = publisher({ readInterfaces: () => setA, record });
 
     expect(await p.tick()).toBe(false);
     expect(await p.tick()).toBe(false);
-    expect(publish).toHaveBeenCalledTimes(2);
+    expect(record).toHaveBeenCalledTimes(2);
 
-    publish.mockResolvedValue(true);
+    record.mockReturnValue(true);
     expect(await p.tick()).toBe(true);
     expect(await p.tick()).toBe(false); // now recorded, so quiet again
     p.stop();
   });
 
   it('stops ticking after stop()', async () => {
-    const publish = vi.fn(async (_e: PublishedEndpoints) => true);
-    const p = publisher({ readInterfaces: () => setA, publish });
+    const record = vi.fn((_e: PublishedEndpoints) => true);
+    const p = publisher({ readInterfaces: () => setA, record });
     p.stop();
 
     expect(await p.tick()).toBe(false);
-    expect(publish).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
   });
 
   it('appends relay endpoints after the on-link ones and republishes when one appears', async () => {
-    const publish = vi.fn(async (_e: PublishedEndpoints) => true);
+    const record = vi.fn((_e: PublishedEndpoints) => true);
     let extra: LanEndpoint[] = [];
-    const p = publisher({ readInterfaces: () => setA, publish, extraEndpoints: () => extra });
+    const p = publisher({ readInterfaces: () => setA, record, extraEndpoints: () => extra });
 
     expect(await p.tick()).toBe(true);
     expect(await p.tick()).toBe(false);
 
     extra = [{ t: 'relay', addr: '1.2.3.4', port: 443, tag: 'a'.repeat(32) }];
     expect(await p.tick()).toBe(true);
-    const last = publish.mock.calls.at(-1)![0];
+    const last = record.mock.calls.at(-1)![0];
     expect(last.endpoints.at(-1)).toEqual(extra[0]);
     expect(last.endpoints[0].t).toBe('lan');
     p.stop();

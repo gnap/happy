@@ -30,7 +30,7 @@ import { delay } from '@/utils/time';
 import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSessionSummary } from './lanServer';
 import { RESTARTING_TTL_MS, expiredRestarting } from './restartTracker';
 import { LifecycleLog } from './lifecycleLog';
-import { replayDeletions } from './lifecycleServerReplay';
+import { replayToServer } from './lifecycleServerReplay';
 import { ACCOUNT_PROOF_WINDOW_MS } from './accountProof';
 import nacl from 'tweetnacl';
 import type { UpdateSessionBody } from '@slopus/happy-wire';
@@ -41,7 +41,7 @@ import { readSessionKey } from '@/api/sessionKeyPersistence';
 import { readSessionLogPage } from '@/api/sessionLog';
 import { decodeBase64, encodeBase64, libsodiumEncryptForPublicKey } from '@/api/encryption';
 import { startLanDiscovery, type LanDiscoveryHandle } from './lanDiscovery';
-import { startEndpointPublisher, type EndpointPublisherHandle, type LanEndpoint } from './lanEndpoints';
+import { ENDPOINT_PROTOCOL_VERSION, startEndpointPublisher, type EndpointPublisherHandle, type LanEndpoint } from './lanEndpoints';
 import { startRelayClient, type RelayClientHandle } from './relay/relayClient';
 
 /** Time to wait for a spawned session to report via /session-started webhook before failing the spawn (Cursor cold start can exceed 30s). */
@@ -1167,7 +1167,25 @@ export async function startDaemon(): Promise<void> {
       replayingLifecycle = true;
       try {
         const from = readServerCursor();
-        const to = await replayDeletions(lifecycleLog.read(), from, {
+        const to = await replayToServer(lifecycleLog.read(), from, {
+          // Where this machine says it can be reached. The server stores the blob without decoding
+          // it, and a client reads it while it is here — a projection of the log entry, not the
+          // record, which is why a write that does not land simply leaves the cursor where it is.
+          publishReachable: async (endpoints, at) => {
+            if (!apiMachineRef) {
+              return false;
+            }
+            try {
+              return await apiMachineRef.tryUpdateDaemonState((state) => ({
+                ...state,
+                status: state?.status ?? 'running',
+                p2p: { v: ENDPOINT_PROTOCOL_VERSION, endpoints, at },
+              }));
+            } catch (error) {
+              logger.debug('[DAEMON RUN] Lifecycle replay: reachable projection failed', { error: String(error) });
+              return false;
+            }
+          },
           remove: async (sessionId) => {
             try {
               const response = await fetch(`${configuration.serverUrl}/v1/sessions/${encodeURIComponent(sessionId)}`, {
@@ -1205,6 +1223,9 @@ export async function startDaemon(): Promise<void> {
     const announceLifecycle = (): void => {
       // The readers on a socket, and the server — which is one of them, just slower.
       void replayLifecycleToServer();
+      // The relay is a reader too, but not one that asks: it answers for this machine, so it is
+      // told. Its own tick would catch up within seconds; this is what makes it immediate.
+      relayClient?.publishDirectory();
       lanServer?.broadcast('update', {
         id: `lan-${++lanEventCounter}`,
         seq: 0,
@@ -1231,8 +1252,13 @@ export async function startDaemon(): Promise<void> {
      * The LAN/relay fan-out. Declared here, above the restart path that pushes through it: a
      * `let` read before its declaration throws, and a restart can be asked for from the moment the
      * control server is up, which is earlier than the LAN listener is.
+     *
+     * The relay client is here for the same reason and one more: the log moving is what makes both
+     * the LAN hint and the relay's directory refresh, and a log entry can be written by a session
+     * registering with this daemon before the LAN half has finished starting.
      */
     let lanServer: LanServerHandle | null = null;
+    let relayClient: RelayClientHandle | null = null;
     /** Only has to make the envelope's `id` unique; the App does not key on it. */
     let lanEventCounter = 0;
 
@@ -1518,7 +1544,6 @@ export async function startDaemon(): Promise<void> {
     }>();
     let lanDiscovery: LanDiscoveryHandle | null = null;
     let endpointPublisher: EndpointPublisherHandle | null = null;
-    let relayClient: RelayClientHandle | null = null;
     let relayEndpoint: LanEndpoint | null = null;
     // The endpoint publisher needs the machine socket, but that client is created later in
     // startup (it depends on a network round trip). Referencing `apiMachine` directly here
@@ -1751,6 +1776,12 @@ export async function startDaemon(): Promise<void> {
               // What the relay's directory says about this machine, so an App can list this
               // machine's sessions without asking it, or holding a connection to it.
               getSessions: sessionSummaries,
+              // And where it can be reached on the LAN, which is the half an App needs when the
+              // server is the thing that is missing.
+              getReachable: () => {
+                const entry = lifecycleLog.latestReachable();
+                return entry ? { endpoints: entry.endpoints, at: entry.at, rev: entry.rev } : null;
+              },
               // Republish as soon as the relay is (un)available rather than at the next slow tick.
               onStatus: () => { void endpointPublisher?.tick(); },
             });
@@ -1771,15 +1802,21 @@ export async function startDaemon(): Promise<void> {
           // re-publishes and a settled one stays quiet.
           endpointPublisher = startEndpointPublisher({
             lanPort: started.port,
-            isConnected: () => apiMachineRef?.isSocketConnected() ?? false,
             extraEndpoints: () => (relayEndpoint ? [relayEndpoint] : []),
-            publish: async (endpoints) => apiMachineRef
-              ? apiMachineRef.tryUpdateDaemonState((state) => ({
-                  ...state,
-                  status: state?.status ?? 'running',
-                  p2p: endpoints,
-                }))
-              : false,
+            // Recorded in this machine's log rather than written to the server: the address is a
+            // fact about this machine, and every channel replays the log at its own pace — a LAN
+            // client directly, the server and the relay each through a cursor of their own.
+            record: (endpoints) => {
+              try {
+                lifecycleLog.recordReachable(endpoints.endpoints, endpoints.at);
+              } catch (error) {
+                logger.debug('[DAEMON RUN] could not record the endpoints', { error: String(error) });
+                return false;
+              }
+              logger.debug(`[DAEMON RUN] reachable recorded: ${endpoints.endpoints.map((e) => `${e.t}:${e.addr}:${e.port}`).join(' ')}`);
+              announceLifecycle();
+              return true;
+            },
           });
           void endpointPublisher.tick();
         } catch (error) {

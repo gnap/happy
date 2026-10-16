@@ -1,14 +1,15 @@
 /**
- * Publishes where this machine can be reached on the LAN, so a client can cache it and still
- * connect after the Happy server goes down.
+ * Works out where this machine can be reached on the LAN, and hands it to whoever records it.
  *
- * The blob lands in the machine's `daemonState`, which the server stores as an opaque string
- * and never decodes -- so this needs no server change. It is a *pre-fetch*, not a live lookup:
- * `daemonState` lives on the server, so a client can only read it while the server is up.
- * Caching it while healthy is the entire point.
+ * What is computed here is a fact about this machine, and it is recorded as one — an entry in the
+ * machine's own log, which is local, so computing it never depends on a channel being up. Each
+ * channel then replays it: a client reads it directly over the LAN, and the server and the relay
+ * each get it written to them at their own pace. It used to be published straight to the server
+ * while the server socket was up, which made the address exist only in the case where a client has
+ * no other way to learn it.
  *
  * Note the exposure is different in kind from the mDNS advertisement next to it. mDNS is
- * LAN-scoped and transient; this is stored on the server, readable by the account's client on
+ * LAN-scoped and transient; this is carried to the server, readable by the account's client on
  * any network, and survives the daemon. That is why the filter below is a hard deny-list
  * rather than "publish whatever the OS reports" -- a VPN or VM-bridge address here would leak
  * the machine's topology into a durable, account-wide blob.
@@ -54,9 +55,14 @@ export type PublishedEndpoints = EndpointSet & { at: number };
 export type EndpointPublisherOptions = {
   /** The port the LAN API is listening on. */
   lanPort: number;
-  /** Stored on the server; returns whether the write landed. */
-  publish: (endpoints: PublishedEndpoints) => Promise<boolean>;
-  isConnected: () => boolean;
+  /**
+   * Writes the set down as a fact of this machine, and says whether it landed.
+   *
+   * Local by contract — an append to this machine's own log — so this is never the reason an address
+   * goes unpublished. Whether any given channel has heard about it is that channel's progress, not
+   * this function's.
+   */
+  record: (endpoints: PublishedEndpoints) => boolean;
   /** Extra endpoints appended after the on-link ones (e.g. a registered public relay). */
   extraEndpoints?: () => LanEndpoint[];
   /** Injected for tests, so nothing here touches a real NIC. */
@@ -149,12 +155,12 @@ export function startEndpointPublisher(opts: EndpointPublisherOptions): Endpoint
     if (key === lastPublished) {
       return false;
     }
-    // Don't queue a write while offline: an unreachable server is the case where a pending
-    // write would sit unresolved. The next tick retries.
-    if (!opts.isConnected()) {
-      return false;
-    }
-    const landed = await opts.publish({ ...set, at: now() });
+    // No connectivity gate on purpose. There used to be one — nothing was written unless the server
+    // socket was up — and it meant the machine's LAN address was published only while the server was
+    // reachable, which is the one case where a client does not need to be told it. The write is now a
+    // local append, so it cannot fail for the network being down, and each channel picks it up from
+    // where it left off.
+    const landed = opts.record({ ...set, at: now() });
     // Only remember it once it landed, so a failed write is retried rather than assumed done.
     if (landed) {
       lastPublished = key;
