@@ -106,10 +106,14 @@ function asEndpoints(candidates: readonly Candidate[]): ChannelEndpoint[] {
  * neither — it is the machine saying where it is, which on a machine that is on its own network is
  * an address this device cannot use at all.
  */
-const answeredAt = (state: ChannelState, candidate: Candidate, now: number): boolean =>
-    state.candidateHealth[candidateKey(candidate.machineId, candidate.route, candidate.baseUrl)]?.phase === 'live'
-    || state.daemonSockets[`${candidate.machineId}:${candidate.route}`]?.phase === 'live'
-        && state.daemonSockets[`${candidate.machineId}:${candidate.route}`]?.baseUrl === candidate.baseUrl;
+const answeredAt = (state: ChannelState, candidate: Candidate): boolean =>
+    // A socket that is up *now*, at that address. This is the only evidence that stays true as the
+    // network changes: a socket is continuously verified by its heartbeat, so it cannot go quietly
+    // stale, while "something answered there once" has no expiry at all — an address that answered
+    // an hour ago, on a network this device has since left, would keep a machine looking reachable
+    // here forever, which is exactly what it looked like.
+    state.daemonSockets[`${candidate.machineId}:${candidate.route}`]?.phase === 'live'
+    && state.daemonSockets[`${candidate.machineId}:${candidate.route}`]?.baseUrl === candidate.baseUrl;
 
 const heldSocket = (state: ChannelState, machineId: string, route: SessionChannel): boolean =>
     Object.entries(state.daemonSockets).some(
@@ -212,7 +216,7 @@ function lanDriver(state: ChannelState): ChannelDriver {
             // for exactly this distinction, and reporting a claim as reachability made them pointless.
             // A sighting is an observation too, and the strongest kind: mDNS reaches this device's
             // own segment only, so a machine advertising here is on this network.
-            const answered = machineId in state.lanSightings || candidates.some((candidate) => answeredAt(state, candidate, now));
+            const answered = machineId in state.lanSightings || candidates.some((candidate) => answeredAt(state, candidate));
             return { reachable: answered, alive: answered };
         },
         // Seen once on this network is what earns the glyph, whether or not it is up now.
@@ -224,7 +228,7 @@ function lanDriver(state: ChannelState): ChannelDriver {
         // device cannot use. Drawing the glyph for it is exactly the wifi icon on a machine that is
         // not on this network.
         capable: (machineId) => machineId in state.lanSightings
-            || candidatesFor(state, machineId, Date.now(), ['lan']).some((candidate) => answeredAt(state, candidate, Date.now())),
+            || candidatesFor(state, machineId, Date.now(), ['lan']).some((candidate) => answeredAt(state, candidate)),
         // Whether it is reaching it *now* is `machine().alive` above: the glyph is drawn grey for
         // capable-but-quiet, which is what the two together mean.
         endpoints: (machineId, now) => asEndpoints(candidatesFor(state, machineId, now, ['lan'])),
@@ -302,7 +306,7 @@ function relayDriver(state: ChannelState): ChannelDriver {
             if (!carried && candidates.length === 0) {
                 return null;
             }
-            const answered = carried || candidates.some((candidate) => answeredAt(state, candidate, now));
+            const answered = carried || candidates.some((candidate) => answeredAt(state, candidate));
             return { reachable: answered, alive: answered };
         },
         session: (sessionId, machineId) => {

@@ -335,11 +335,7 @@ export const SettingsView = React.memo(function SettingsView() {
                                     <Ionicons
                                         name="desktop-outline"
                                         size={29}
-                                        // The channel's own colour, so a machine reached through the
-                                        // relay cannot look like one sitting on this network.
-                                        color={presence === 'server'
-                                            ? theme.colors.status.disconnected
-                                            : MACHINE_PRESENCE_COLORS[presence]}
+                                        color={isOnline ? theme.colors.status.connected : theme.colors.status.disconnected}
                                     />
                                 }
                                 rightElement={
