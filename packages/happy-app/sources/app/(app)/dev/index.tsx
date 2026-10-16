@@ -550,22 +550,6 @@ export default function DevScreen() {
                     detail={getServerUrl()}
                     onPress={handleEditServerUrl}
                 />
-                <Item
-                    title="Server Socket"
-                    subtitle={getSocketStatusSubtitle()}
-                    detail={socketStatus.status}
-                    rightElement={<SocketStatusIndicator />}
-                    showChevron={false}
-                />
-                <Item
-                    title="LAN"
-                    subtitle={lanSightingCount === 0
-                        ? 'No daemon advertising on this network'
-                        : `${lanSightingCount} advertising · ${lanConnectedCount} connected`}
-                    detail={lanPhase}
-                    rightElement={<PhaseIndicator phase={lanSightingCount === 0 ? 'idle' : lanPhase} />}
-                    showChevron={false}
-                />
                 <ChannelLivenessGroup />
                 <ConnectionDetailsGroup />
                 <Item
