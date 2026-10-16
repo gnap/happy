@@ -147,6 +147,16 @@ interface StorageState {
      * still known when the server is down at the next cold start.
      */
     relayEndpoints: Record<string, RelayEndpoint>;
+    /**
+     * Where each machine said it can be reached on the local network, from the metadata it publishes.
+     *
+     * A second source of LAN addresses beside the mDNS sightings, and not a replacement: discovery
+     * needs multicast, which a VLAN or an isolating access point takes away, while this arrives over
+     * whatever channel that machine's metadata does. Kept apart from the sightings because a browse
+     * owns that set and replaces it — an address a machine published would be swept away by the next
+     * scan, and it is exactly the one that survives when scans find nothing.
+     */
+    lanEndpoints: Record<string, { baseUrl: string; at: number }>;
     applyRelayEndpoint: (machineId: string, endpoint: RelayEndpoint | null) => void;
     /**
      * What the relay says it is holding, keyed by machineId.
@@ -272,6 +282,8 @@ interface StorageState {
     applyMachines: (machines: Machine[], replace?: boolean) => void;
     /** Replace the LAN sighting set with the result of one scan. */
     applyLanSightings: (sightings: LanSighting[]) => void;
+    /** Records where a machine publishes itself on the LAN, or forgets it when it stops saying. */
+    applyLanEndpoint: (machineId: string, endpoint: { baseUrl: string; at: number } | null) => void;
     /** Record the live LAN socket, or null once it is gone. */
     setDaemonSocketStatus: (id: string, status: DaemonConnectionState) => void;
     applyLoaded: () => void;
@@ -719,6 +731,7 @@ export const storage = create<StorageState>()((set, get) => {
         machines: {},
         lanSightings: {},
         relayEndpoints: loadRelayEndpoints(),
+        lanEndpoints: {},
         relayDirectory: {},
         relayUnknownTags: [],
         relayHubConnected: false,
@@ -1959,6 +1972,18 @@ export const storage = create<StorageState>()((set, get) => {
             saveRelayEndpoints(next);
             return { ...state, relayEndpoints: next };
         }),
+        applyLanEndpoint: (machineId: string, endpoint: { baseUrl: string; at: number } | null) => set((state) => {
+            const held = state.lanEndpoints[machineId];
+            if (endpoint === null) {
+                if (held === undefined) return state;
+                const { [machineId]: _gone, ...rest } = state.lanEndpoints;
+                return { ...state, lanEndpoints: rest };
+            }
+            // Same address, same answer: a machine republishes on a slow tick and this is called for
+            // each of them, so an unchanged endpoint must not churn the store.
+            if (held?.baseUrl === endpoint.baseUrl) return state;
+            return { ...state, lanEndpoints: { ...state.lanEndpoints, [machineId]: endpoint } };
+        }),
         applyLanSightings: (sightings: LanSighting[]) => set((state) => {
             const now = Date.now();
             const next: Record<string, LanSighting> = {};
@@ -2516,6 +2541,11 @@ export function useMachines(): Record<string, Machine> {
  * for still resolves to `lan` instead of disappearing.
  */
 /** Machines the LAN scanner can currently see, by machineId. */
+/** Where machines publish themselves on this network; a second source beside the mDNS sightings. */
+export function useLanEndpoints(): Record<string, { baseUrl: string; at: number }> {
+    return storage(useShallow((state) => state.lanEndpoints));
+}
+
 export function useLanSightings(): Record<string, LanSighting> {
     return storage(useShallow((state) => state.lanSightings));
 }
@@ -2775,6 +2805,7 @@ const selectChannelState = (state: StorageState): ChannelState => ({
     daemonSockets: state.daemonSockets,
     daemonSessionList: state.daemonSessionList,
     lanSightings: state.lanSightings,
+    lanEndpoints: state.lanEndpoints,
     relayEndpoints: state.relayEndpoints,
     relayDirectory: state.relayDirectory,
     relayHubConnected: state.relayHubConnected,

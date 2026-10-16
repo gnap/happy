@@ -26,6 +26,8 @@ export type ChannelState = {
     daemonSockets: Record<string, DaemonConnectionState>;
     daemonSessionList: Record<string, { isAlive: boolean; via: string; at: number }>;
     lanSightings: Record<string, unknown>;
+    /** Where machines published themselves on this network, for when discovery cannot find them. */
+    lanEndpoints: Record<string, unknown>;
     relayEndpoints: Record<string, { source?: string }>;
     relayDirectory: Record<string, { at: number; sessions: { happySessionId: string; isAlive: boolean }[] }>;
     relayHubConnected: boolean;
@@ -120,11 +122,13 @@ function lanDriver(state: ChannelState): ChannelDriver {
             // machine being up on this network — and the socket term is the one that survives a
             // browse being missed, which is why the two callers that only read sightings disagreed
             // with the resolver about the same machine.
-            const seen = machineId in state.lanSightings || heldSocket(state, machineId, 'lan');
+            const seen = machineId in state.lanSightings || machineId in state.lanEndpoints || heldSocket(state, machineId, 'lan');
             return seen ? { reachable: true, alive: true } : null;
         },
         // Seen once on this network is what earns the glyph, whether or not it is up now.
-        capable: (machineId) => machineId in state.lanSightings,
+        // Seen by a browse, or published by the machine itself — the second is what makes the LAN
+        // usable on a network where multicast never reaches anyone.
+        capable: (machineId) => machineId in state.lanSightings || machineId in state.lanEndpoints,
         // A machine can serve its own sessions: read them, take a message, restart a process, say
         // what it is running. What it cannot do is start one, or act inside one — those are the
         // server's, and the daemon's API is built that way.
