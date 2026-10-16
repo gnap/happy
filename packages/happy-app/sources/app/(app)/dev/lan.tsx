@@ -68,7 +68,12 @@ export const ChannelBlock = React.memo(function ChannelBlock({ channel, children
         const byAddress = new Map<string, { socket?: string; candidate?: string }>();
         for (const [, socket] of held) {
             if (socket.baseUrl) {
-                byAddress.set(socket.baseUrl, { ...byAddress.get(socket.baseUrl), socket: socket.phase });
+                // `opening` is one attempt in flight; `retrying` is the backoff between them, and the
+                // countdown is what says whether it is getting anywhere. Without them the panel showed
+                // a state and not whether it was stuck in it.
+                const retry = socket.retryAt ? ` retry ${Math.max(0, Math.round((socket.retryAt - Date.now()) / 1000))}s` : '';
+                const attempt = socket.attempt && socket.attempt > 1 ? ` try ${socket.attempt}` : '';
+                byAddress.set(socket.baseUrl, { ...byAddress.get(socket.baseUrl), socket: `${socket.phase}${attempt}${retry}` });
             }
         }
         for (const candidate of candidates) {
