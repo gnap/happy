@@ -615,7 +615,9 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
    */
   const requireAccountProof = (request: { headers: Record<string, unknown>; method?: string; url?: string }): boolean => {
     if (!opts.accountProof) {
-      logger.debug(`[lan] refused ${request.url ?? '-'}: no account-proof check configured`);
+      // A warning, not a debug line: this daemon cannot authorise the action at all, and nothing
+      // else about the request will say so — the caller sees a refusal it cannot explain.
+      logger.warn(`[lan] refused ${request.url ?? '-'}: no account-proof check configured`);
       return false;
     }
     const header = (name: string): string | null => {
@@ -639,7 +641,9 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       verify: opts.accountProof.verify,
     });
     if (!verdict.ok) {
-      logger.debug(`[lan] refused ${request.url ?? '-'}: account proof ${verdict.reason}`);
+      // A warning for the same reason, and one more: the reason (missing, stale, replayed, bad
+      // signature) is the whole diagnosis of a refusal a client can only see as a refusal.
+      logger.warn(`[lan] refused ${request.url ?? '-'}: account proof ${verdict.reason} from=${clientAddress(request)}`);
       return false;
     }
     opts.accountProof.rememberNonce(nonce!);
