@@ -262,3 +262,44 @@ export async function sessionControlAt(
     });
     return response.ok;
 }
+
+/** One fact from a machine's own log of the sessions it has started and archived. */
+export type LifecycleEntry = {
+    /** Position in that machine's log. The cursor a reader sends back is the last one it applied. */
+    rev: number;
+    at: number;
+    op: 'created' | 'deleted';
+    /** The CLI's own name for the session, which exists before the server has issued an id. */
+    tag: string;
+    /** The server's id, once that machine knows it. */
+    sessionId?: string;
+    directory?: string;
+    agent?: string;
+};
+
+/**
+ * What a machine has started and archived, from a reader's cursor.
+ *
+ * A different question from `/lan/sessions`, and asked separately on purpose: that is a *snapshot*
+ * of what exists now, this is an ordered list of facts. A reader that wants to know what changed
+ * asks here, and one that wants to know what there is asks there — and neither may be used to
+ * answer the other's question.
+ *
+ * `revision` comes back with every answer so a reader can hold it as its next cursor, which is what
+ * makes replaying again an empty operation rather than a second application of the same facts.
+ */
+export async function fetchLifecycle(
+    baseUrl: string,
+    token: string,
+    since: number
+): Promise<{ revision: number; entries: LifecycleEntry[] }> {
+    const response = await request(`${baseUrl}/lan/lifecycle?since=${since}`, { token });
+    if (!response.ok) {
+        throw new LanRequestError('lifecycle request failed', response.status);
+    }
+    const body = (await response.json()) as { revision?: unknown; entries?: unknown };
+    return {
+        revision: typeof body.revision === 'number' ? body.revision : since,
+        entries: Array.isArray(body.entries) ? body.entries as LifecycleEntry[] : [],
+    };
+}
