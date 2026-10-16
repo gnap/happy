@@ -859,7 +859,6 @@ class Sync {
                     // ever finds, so it is as much a reason to reconcile as a sighting is — and
                     // without it here, a machine that publishes its address gets no socket at all.
                     state.lanEndpoints !== previous.lanEndpoints ||
-                    state.candidateHealth !== previous.candidateHealth ||
                     state.socketStatus !== previous.socketStatus ||
                     state.channelOverride !== previous.channelOverride
                 ) {
@@ -4662,8 +4661,10 @@ class Sync {
         const daemonDrivers = this.channelDrivers().filter(
             (driver): driver is ChannelDriver => driver.channel !== 'server' && enabled[driver.channel as DaemonRoute] === true,
         );
-        const order = [...daemonDrivers].sort((a, b) =>
-            (a.channel === preferred ? -1 : 0) + (b.channel === preferred ? 1 : 0));
+        // A real comparison: the preferred channel first, the rest in the order the device lists
+        // them. `sort` needs an answer that does not depend on which side it is asked about.
+        const rank = (channel: SessionChannel): number => (channel === preferred ? 0 : 1);
+        const order = [...daemonDrivers].sort((a, b) => rank(a.channel) - rank(b.channel));
 
         const outcome = await carryOperation<T>({
             drivers: order,

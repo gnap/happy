@@ -769,10 +769,16 @@ function reduceRelayEndpoint(
  * arrived on is not allowed to change what the App believes.
  */
 function withPublishedEndpoints(state: EndpointSlices, machineId: string, blob: unknown): EndpointSlices {
-    let next: EndpointSlices = state;
-    next = { ...next, ...(reduceLanEndpoint(next, machineId, parseLanEndpoints(machineId, blob)) ?? {}) };
-    next = { ...next, ...(reduceRelayEndpoint(next, machineId, parseRelayEndpoint(machineId, blob)) ?? {}) };
-    return next;
+    // Both reducers read only their own slice, so they are computed against the same state and
+    // merged once — and each answers null when the claim says nothing new.
+    const lan = reduceLanEndpoint(state, machineId, parseLanEndpoints(machineId, blob));
+    const relay = reduceRelayEndpoint(state, machineId, parseRelayEndpoint(machineId, blob));
+    // Nothing to change: the *identity* matters as much as the values, because a caller that gets a
+    // new object back will treat the whole slice as having moved.
+    if (lan === null && relay === null) {
+        return state;
+    }
+    return { ...state, ...(lan ?? {}), ...(relay ?? {}) };
 }
 
 export const storage = create<StorageState>()((set, get) => {
@@ -2025,12 +2031,25 @@ export const storage = create<StorageState>()((set, get) => {
         applyLanEndpoint: (machineId, endpoint) => set((state) => reduceLanEndpoint(state, machineId, endpoint) ?? state),
         candidateSucceeded: (machineId, route, baseUrl) => set((state) => {
             const key = candidateKey(machineId, route, baseUrl);
-            const health = candidateSucceeded(state.candidateHealth[key], Date.now());
-            return { candidateHealth: { ...state.candidateHealth, [key]: health } };
+            const held = state.candidateHealth[key];
+            // Every read writes its outcome, and a read at an address that was already proven says
+            // nothing new. Without this, every poll is a store update, and every store update that
+            // touches what the list depends on is a full rebuild of it.
+            if (held?.phase === 'live' && held.failures === 0) {
+                return state;
+            }
+            return { candidateHealth: { ...state.candidateHealth, [key]: candidateSucceeded(held, Date.now()) } };
         }),
         candidateFailed: (machineId, route, baseUrl) => set((state) => {
             const key = candidateKey(machineId, route, baseUrl);
-            const health = candidateFailedAt(state.candidateHealth[key], Date.now());
+            const held = state.candidateHealth[key];
+            const health = candidateFailedAt(held, Date.now());
+            // The dwell swallows a failure inside it, and a swallowed failure must not be a write
+            // either: the same reasoning as above, one layer down.
+            if (held && health.phase === held.phase && health.failures === held.failures
+                && health.since === held.since && health.retryAt === held.retryAt) {
+                return state;
+            }
             return { candidateHealth: { ...state.candidateHealth, [key]: health } };
         }),
         rearmCandidateHealth: () => set((state) => (
@@ -2463,8 +2482,6 @@ const builtFrom: {
     daemonVersions: unknown;
     daemonSockets: unknown;
     lanSightings: unknown;
-    candidateHealth: unknown;
-    lanEndpoints: unknown;
     relayDirectory: unknown;
     socketStatus: unknown;
     daemonSessionList: unknown;
@@ -2474,8 +2491,6 @@ const builtFrom: {
     daemonVersions: null,
     daemonSockets: null,
     lanSightings: null,
-    candidateHealth: null,
-    lanEndpoints: null,
     relayDirectory: null,
     socketStatus: null,
     daemonSessionList: null,
@@ -2488,10 +2503,6 @@ storage.subscribe((state) => {
         && builtFrom.daemonVersions === state.daemonVersions
         && builtFrom.daemonSockets === state.daemonSockets
         && builtFrom.lanSightings === state.lanSightings
-        // The list is grouped by whether a session is reachable, and that answer now moves when an
-        // address is proven or demoted — neither of which any of the other fields would notice.
-        && builtFrom.candidateHealth === state.candidateHealth
-        && builtFrom.lanEndpoints === state.lanEndpoints
         && builtFrom.relayDirectory === state.relayDirectory
         && builtFrom.socketStatus === state.socketStatus
         && builtFrom.daemonSessionList === state.daemonSessionList
@@ -2503,8 +2514,6 @@ storage.subscribe((state) => {
     builtFrom.daemonVersions = state.daemonVersions;
     builtFrom.daemonSockets = state.daemonSockets;
     builtFrom.lanSightings = state.lanSightings;
-    builtFrom.candidateHealth = state.candidateHealth;
-    builtFrom.lanEndpoints = state.lanEndpoints;
     builtFrom.relayDirectory = state.relayDirectory;
     builtFrom.socketStatus = state.socketStatus;
     builtFrom.daemonSessionList = state.daemonSessionList;
