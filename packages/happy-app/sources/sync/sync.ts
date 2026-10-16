@@ -4438,15 +4438,20 @@ class Sync {
         let verdict = judgeDaemonPage({
             planned: plan,
             hasWindow,
-            read: read ? { reset: read.reset } : null,
+            read: read ? { hasNewer: read.hasNewer, reset: read.reset } : null,
         });
         if (verdict.kind === 'replace-from-tail') {
-            read = await readPage({ kind: 'tail' }, read!.connection);
-            verdict = judgeDaemonPage({
-                planned: { replace: true },
-                hasWindow: true,
-                read: read ? { reset: read.reset } : null,
-            });
+            // The page just read is not adjacent to what is held, so the window is not joined to it:
+            // it is re-read from the newest end and *that* page is the window. A tail read that does
+            // not come back leaves the window alone — there is nothing to replace it with, and what
+            // is held is still what the user was looking at.
+            const tail = await readPage({ kind: 'tail' }, read!.connection);
+            if (!tail) {
+                log.log(`📡 fetchSessionFromDaemon: no newest page for ${sessionId}; keeping the window`);
+                return null;
+            }
+            read = tail;
+            verdict = { kind: 'replace' };
         }
         const replace = verdict.kind === 'replace';
         if (read && replace && read.messages.length === 0 && hasWindow) {
@@ -4511,17 +4516,10 @@ class Sync {
                 storage.getState().setNewestSeq(sessionId, newestSeq);
             }
         }
-        // Still behind after a bounded drain: come back for the rest, throttled the same way the
-        // server path throttles its "still behind session.seq" re-invalidate. The window keeps what
-        // it already has, so catching up adds to the conversation instead of interrupting it.
-        if (read.hasNewer && !replace) {
-            const lastBehindAt = this.sessionLastFetchTime.get(sessionId) ?? 0;
-            if (Date.now() - lastBehindAt >= 2_000) {
-                this.sessionLastFetchTime.set(sessionId, Date.now());
-                log.log(`📡 fetchSessionFromDaemon: still behind for ${sessionId}; reading on`);
-                this.getMessagesSync(sessionId).invalidate();
-            }
-        }
+        // No "still behind" retry here, and none is needed: a page that came back cut short was
+        // answered above by reading the newest one, and that page is the end of the log by
+        // construction. Coming back for more is what walking a backlog means, and walking it is
+        // what left a session opened after a day idle showing the start of the day.
 
         // The session key has to be registered on both paths: the live socket decrypts each pushed
         // entry with it, and a replaced window has had no `ingestChannelRead` to do it.

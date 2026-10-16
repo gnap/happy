@@ -31,22 +31,32 @@ describe('pageMovedTheLog', () => {
 });
 
 describe('judgeDaemonPage', () => {
-    it('extends what is held when the page sits next to it', () => {
-        expect(judgeDaemonPage({ planned: { replace: false }, hasWindow: true, read: { reset: false } }))
+    const page = (over: { hasNewer?: boolean; reset?: boolean } = {}) => ({ hasNewer: false, reset: false, ...over });
+
+    it('extends what is held when the page reached the end of the log', () => {
+        expect(judgeDaemonPage({ planned: { replace: false }, hasWindow: true, read: page() }))
             .toEqual({ kind: 'extend' });
     });
 
     it('replaces only when there is nothing to throw away', () => {
         // The invariant that costs a conversation: a replacement *is* the window, so a reader with
-        // one keeps it and comes back for more pages instead.
-        expect(judgeDaemonPage({ planned: { replace: true }, hasWindow: false, read: { reset: false } }))
+        // one keeps it — unless one of the two cases below says the page cannot join to it.
+        expect(judgeDaemonPage({ planned: { replace: true }, hasWindow: false, read: page() }))
             .toEqual({ kind: 'replace' });
-        expect(judgeDaemonPage({ planned: { replace: true }, hasWindow: true, read: { reset: false } }))
+        expect(judgeDaemonPage({ planned: { replace: true }, hasWindow: true, read: page() }))
             .toEqual({ kind: 'extend' });
     });
 
+    it('reads the newest page when the reader is further behind than one page', () => {
+        // The page was cut short at its budget, which says the log is more than a page further on
+        // than the anchor. Walking it is falling behind at a fixed rate, on a reader that is not
+        // reading — so the window goes to the newest page instead, and the rest is paged back.
+        expect(judgeDaemonPage({ planned: { replace: false }, hasWindow: true, read: page({ hasNewer: true }) }))
+            .toEqual({ kind: 'replace-from-tail' });
+    });
+
     it('re-reads from the newest end when the log moved past what is held', () => {
-        expect(judgeDaemonPage({ planned: { replace: false }, hasWindow: true, read: { reset: true } }))
+        expect(judgeDaemonPage({ planned: { replace: false }, hasWindow: true, read: page({ reset: true }) }))
             .toEqual({ kind: 'replace-from-tail' });
     });
 
