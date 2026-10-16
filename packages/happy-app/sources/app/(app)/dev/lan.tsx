@@ -63,14 +63,32 @@ export const ChannelBlock = React.memo(function ChannelBlock({ channel, children
         if (held.length === 0 && candidates.length === 0) {
             return [];
         }
+        // One line per address, not one per fact about it: the socket this App holds and the
+        // candidate that names it are the same address, and printing both says nothing twice.
+        const byAddress = new Map<string, { socket?: string; candidate?: string }>();
+        for (const [, socket] of held) {
+            if (socket.baseUrl) {
+                byAddress.set(socket.baseUrl, { ...byAddress.get(socket.baseUrl), socket: socket.phase });
+            }
+        }
+        for (const candidate of candidates) {
+            const state = health[candidateKey(candidate.machineId, candidate.route, candidate.baseUrl)];
+            const retry = state?.retryAt ? ` retry ${Math.max(0, Math.round((state.retryAt - Date.now()) / 1000))}s` : '';
+            const seen = byAddress.get(candidate.baseUrl) ?? {};
+            // The socket's own phase is the truth when there is one; the candidate adds where the
+            // address came from and what it has done.
+            byAddress.set(candidate.baseUrl, { ...seen, candidate: `${candidate.source} ${seen.socket ? '' : `${state?.phase ?? 'unknown'}${retry}`}`.trim() });
+        }
+        if (byAddress.size === 0) {
+            return [];
+        }
         return [
-            { kind: 'name' as const, key: `n-${id}`, text: machine.metadata?.host ?? id.slice(0, 8) },
-            ...held.map(([key, socket]) => ({ kind: 'fact' as const, key: `s-${key}`, text: `socket ${socket.phase}  ${socket.baseUrl ?? ''}` })),
-            ...candidates.map((candidate) => {
-                const state = health[candidateKey(candidate.machineId, candidate.route, candidate.baseUrl)];
-                const retry = state?.retryAt ? `retry ${Math.max(0, Math.round((state.retryAt - Date.now()) / 1000))}s` : '';
-                return { kind: 'fact' as const, key: `c-${candidate.baseUrl}`, text: `${candidate.source} ${state?.phase ?? 'unknown'} ${retry}  ${candidate.baseUrl}` };
-            }),
+            { kind: 'name' as const, key: `n-${id}`, text: `${machine.metadata?.host ?? id.slice(0, 8)}${byAddress.size > 1 ? `  ·  ${byAddress.size} addresses` : ''}` },
+            ...[...byAddress.entries()].map(([baseUrl, facts]) => ({
+                kind: 'fact' as const,
+                key: `f-${id}-${baseUrl}`,
+                text: `${[facts.socket ? `socket ${facts.socket}` : '', facts.candidate ?? ''].filter(Boolean).join(' · ')}  ${baseUrl}`,
+            })),
         ];
     });
 
