@@ -15,6 +15,18 @@ import { StatementQueue } from './statementQueue';
 import { log } from '@/log';
 import * as SQLite from 'expo-sqlite';
 
+/**
+ * Whatever the engine says when another connection holds the lock.
+ *
+ * expo-sqlite reports it as `SQLiteErrorException: Error code 5: database is locked` wrapped in a
+ * `FunctionCallException` from whichever statement could not finish, so the code and the text are
+ * both matched rather than one assumed.
+ */
+function isLocked(error: unknown): boolean {
+    const message = String(error);
+    return message.includes('database is locked') || message.includes('Error code 5');
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -380,6 +392,10 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
         const t2 = Date.now();
         await this.db.execAsync(`
             PRAGMA journal_mode = WAL;
+            -- Wait for a lock rather than failing on it. The failure this replaces is
+            -- "finalizeAsync has failed: database is locked", which lost saves outright; five
+            -- seconds is longer than any statement here takes and shorter than a user's patience.
+            PRAGMA busy_timeout = 5000;
 
             CREATE TABLE IF NOT EXISTS session_cache (
                 session_id          TEXT PRIMARY KEY,
@@ -458,7 +474,52 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
     };
 
     private enqueue<T>(work: () => Promise<T>, urgent = false): Promise<T> {
-        return this.statements.run(work, urgent);
+        return this.statements.run(async () => {
+            try {
+                return await work();
+            } catch (error) {
+                if (!isLocked(error)) {
+                    throw error;
+                }
+                // A locked connection is not a failed statement, it is a connection somebody else
+                // still holds: a previous JS context that a reload left running, or a transaction of
+                // ours an earlier failure never finalised. Everything behind it pays — measured on a
+                // device, one read waited 0ms and then took thirty seconds — and no amount of
+                // retrying on the same connection helps. So the connection is replaced, and the
+                // statement is tried once on the new one: every statement here is idempotent
+                // (`INSERT OR REPLACE`, deletes by key), so a second run cannot double-apply it.
+                log.log(`📦 sessionCacheDB: the connection is locked (${String(error).slice(0, 80)}); replacing it and retrying`);
+                await this.replaceConnection();
+                await this.ensureReady();
+                return await work();
+            }
+        }, urgent);
+    }
+
+    /**
+     * Throws the connection away, and the state that says it is ready.
+     *
+     * `closeAsync` is bounded: a connection wedged by an un-finalised statement is exactly the case
+     * where closing it can hang, and a reset that never returns would be a worse failure than the
+     * lock it is fixing.
+     */
+    private async replaceConnection(): Promise<void> {
+        const previous = this.db;
+        this.db = null;
+        this.initialized = false;
+        this.initPromise = null;
+        if (!previous) {
+            return;
+        }
+        try {
+            await Promise.race([
+                previous.closeAsync(),
+                new Promise((resolve) => setTimeout(resolve, 2_000)),
+            ]);
+        } catch {
+            // Already gone, or never closable: the reference is dropped either way, which is what
+            // matters — the next statement opens a connection of its own.
+        }
     }
 
     async getSessionCache(sessionId: string): Promise<CachedSessionRow | null> {
