@@ -5265,32 +5265,32 @@ class Sync {
             }
         };
 
-        if (routes.lan) {
-            for (const sighting of Object.values(state.lanSightings)) {
-                add(sighting.machineId, 'lan', sighting.baseUrl);
+        // What each channel wants a socket at, asked of the channels. This was four sources assembled
+        // here — sightings, the best published address, the relay's directory, and the sessions being
+        // read — each with its own idea of which address wins, and the loop order decided the answer:
+        // a published address overwrote a mDNS sighting for the same machine simply by being added
+        // second.
+        //
+        // Now the ranking is the one the channels already use for a read, so a socket sits where a
+        // read would go. The relay is the case that needed its own guard: every machine with a key
+        // has a derived relay address, and holding a stream open for each of those would be a
+        // connection to a machine that never dialled in.
+        const now = Date.now();
+        for (const driver of this.channelDrivers()) {
+            if (driver.channel === 'server' || routes[driver.channel as DaemonRoute] !== true) {
+                continue;
             }
-            // And where a machine says it is, for the network where a browse never reaches anyone.
-            // One socket per machine: the address it sits on is the best candidate it has, and a
-            // socket that comes up is what makes that address *proven* rather than merely claimed.
-            for (const machineId of Object.keys(state.lanEndpoints)) {
-                const best = orderedCandidates(machineId, candidateInputsFor(state, machineId, { now: Date.now(), routes: ['lan'] }))[0];
-                if (best) {
-                    add(machineId, 'lan', best.baseUrl);
-                }
-            }
-        }
-
-        if (routes.relay) {
-            // The relay's own answer, not a sighting: these are the machines it is holding right
-            // now, which is exactly the set worth holding a connection to.
-            for (const machineId of this.relayMachines.keys()) {
-                const baseUrl = state.relayEndpoints[machineId]?.baseUrl;
+            for (const machineId of this.knownMachineIds()) {
+                const target = driver.socketTarget(machineId, now);
+                const baseUrl = target ? endpointBaseUrl(target) : null;
                 if (baseUrl) {
-                    add(machineId, 'relay', baseUrl);
+                    add(machineId, driver.channel as DaemonRoute, baseUrl);
                 }
             }
         }
 
+        // And the sessions being read, whatever else claims their machines: the address a read came
+        // back over is proof enough that it answers, and it is the connection a send would use.
         for (const link of this.daemonLinks.values()) {
             add(link.machineId, link.connection.route, link.connection.baseUrl);
         }

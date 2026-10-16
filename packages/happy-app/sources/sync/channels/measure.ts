@@ -252,7 +252,12 @@ function relayDriver(state: ChannelState): ChannelDriver {
         // relay glyph they had not earned.
         capable: (machineId) => carrying(machineId),
         endpoints: (machineId, now) => asEndpoints(candidatesFor(state, machineId, now, ['relay'])),
-        socketTarget: (machineId, now) => asEndpoints(candidatesFor(state, machineId, now, ['relay']))[0] ?? null,
+        // A socket to the relay only when the relay is *carrying* the machine: every machine with a
+        // key has a derived relay address, and holding a stream open for each of those would be a
+        // connection to a machine that never dialled in.
+        socketTarget: (machineId, now) => (carrying(machineId)
+            ? asEndpoints(candidatesFor(state, machineId, now, ['relay']))[0] ?? null
+            : null),
         accepts: (operation, machineId, now) =>
             DAEMON_OPERATIONS.has(operation) && candidatesFor(state, machineId, now, ['relay']).length > 0,
         machine: (machineId, now) => {

@@ -230,6 +230,17 @@ describe('what a driver offers to send to', () => {
         expect(socketOf({}, 'server')).toBeNull();
     });
 
+    it('holds a relay socket only for a machine the relay is carrying', () => {
+        // Every machine with a key has a derived relay address, and holding a stream open for each of
+        // those would be a connection to a machine that never dialled in.
+        const derived = { relayEndpoints: { 'machine-1': { baseUrl: RELAY, source: 'derived' } } };
+        expect(socketOf(derived, 'relay')).toBeNull();
+        expect(endpointsOf(derived, 'relay')).toHaveLength(1); // still worth trying, not worth holding
+
+        const carried = { ...derived, relayDirectory: { 'machine-1': { at: 0, sessions: [] } } };
+        expect(socketOf(carried, 'relay')).toMatchObject({ kind: 'address', route: 'relay', baseUrl: RELAY });
+    });
+
     it('offers the server itself only while its connection is usable', () => {
         expect(endpointsOf({ socketStatus: 'connected' }, 'server')).toEqual([{ kind: 'server' }]);
         expect(endpointsOf({ socketStatus: 'disconnected' }, 'server')).toEqual([]);
