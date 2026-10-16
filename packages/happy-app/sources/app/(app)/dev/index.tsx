@@ -516,11 +516,6 @@ export default function DevScreen() {
                 <ChannelBlock channel="relay" />
                 <ChannelBlock channel="server">
                     <Item
-                        title="One connection, every machine"
-                        subtitle="The server is this device's own socket — not a route per machine, which is why it has no per-machine connections"
-                        showChevron={false}
-                    />
-                    <Item
                         title="API Endpoint"
                         subtitle="The server this device talks to"
                         detail={getServerUrl()}

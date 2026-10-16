@@ -98,7 +98,9 @@ export const ChannelBlock = React.memo(function ChannelBlock({ channel, children
     });
 
     return (
-        <ItemGroup>
+        <ItemGroup footer={channel === 'server'
+            ? 'One connection for every machine: the server is this device\'s own socket, not a route per machine, which is why there are no per-machine connections here.'
+            : undefined}>
             {/* The row is the whole channel until it is opened: the link, and how many machines it is
                 reaching. Everything else is one tap away, because a page of open details is what made
                 this unreadable. */}
@@ -112,9 +114,7 @@ export const ChannelBlock = React.memo(function ChannelBlock({ channel, children
             {open && <>
             <Item title="Capable of carrying it" detail={`${capable} of ${ids.length} machines`} showChevron={false} />
             <Item title={channel === 'lan' ? 'Advertising here' : channel === 'relay' ? 'Machines the relay holds' : 'Machines the server knows'} detail={extra} showChevron={false} />
-            {rows.length === 0
-                ? <Item title="No connections" showChevron={false} />
-                : (
+            {rows.length > 0 && (
                     // Compact on purpose: a machine and what it has are a few short lines, indented
                     // under its name, rather than one full-height row per fact — which is what made
                     // the expanded block a wall of the same address repeated.
