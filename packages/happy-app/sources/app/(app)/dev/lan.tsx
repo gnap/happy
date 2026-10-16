@@ -32,7 +32,7 @@ import { decryptLanHistory } from '@/sync/lan/history';
  * decides everything below it: which channel a session is read over, which one a machine is counted
  * as reachable on, and which glyph the badges draw.
  */
-const ChannelPriorityGroup = React.memo(function ChannelPriorityGroup() {
+export const ChannelPriorityGroup = React.memo(function ChannelPriorityGroup() {
     const [stored, setStored] = useLocalSettingMutable('channelPriority');
     const priority = normalizeChannelPriority(stored ?? DEFAULT_CHANNEL_PRIORITY);
     const move = (index: number, by: number) => {
@@ -74,7 +74,8 @@ const ChannelPriorityGroup = React.memo(function ChannelPriorityGroup() {
  * badge that says "LAN" is the end of a chain, and the chain is what has to be visible when it is
  * wrong.
  */
-const ChannelStateGroup = React.memo(function ChannelStateGroup({ machines }: { machines: { id: string; metadata?: { host?: string } | null }[] }) {
+export const ChannelStateGroup = React.memo(function ChannelStateGroup() {
+    const machines = useAllMachines();
     const presence = useMachinePresenceMap();
     const badgeInputs = useMachineBadgeInputs();
     const endpoints = useLanEndpoints();
@@ -265,7 +266,7 @@ const LanDevScreen = React.memo(function LanDevScreen() {
     return (
         <ItemList>
             <ChannelPriorityGroup />
-            <ChannelStateGroup machines={machines} />
+            <ChannelStateGroup />
             <ItemGroup
                 title={route === 'relay' ? 'Relay API' : 'LAN API'}
                 footer={route === 'relay'

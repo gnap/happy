@@ -4,6 +4,7 @@ import { ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
+import { ChannelPriorityGroup, ChannelStateGroup } from './lan';
 import { ItemList } from '@/components/ItemList';
 import { useRouter } from 'expo-router';
 import Constants from 'expo-constants';
@@ -558,6 +559,8 @@ export default function DevScreen() {
                     rightElement={<PhaseIndicator phase={lanSightingCount === 0 ? 'idle' : lanPhase} />}
                     showChevron={false}
                 />
+                <ChannelPriorityGroup />
+                <ChannelStateGroup />
                 <Item
                     title="LAN Round Trip"
                     subtitle="Discover a local daemon, authenticate, read and decrypt history"
