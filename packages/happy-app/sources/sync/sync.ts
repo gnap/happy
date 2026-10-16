@@ -4422,19 +4422,7 @@ class Sync {
             : persisted && persisted.machineId === machineId
                 ? { cursor: persisted.cursor, older: persisted.floor, hasOlder: persisted.hasOlder }
                 : null;
-        // Each channel reads on its own route and only that route: a session on the relay does not
-        // browse for a machine known to be elsewhere, and one on the LAN never goes through the
-        // relay. Only the server-failure fallback, which has no channel of its own, tries both.
-        const channel = this.preferredChannel(sessionId);
-        // Which routes this read may use: the one the channel chose, or every daemon route when it
-        // has fallen back from the server and has no channel of its own. The addresses come from the
-        // candidate list — the machine's own published ones included, which is what the read path
-        // could not reach before and why a machine found without mDNS was never readable on the LAN.
-        const routes: DaemonRoute[] = forceRoute
-            ? [forceRoute]
-            : channel === 'server'
-                ? (this.fallbackVia() === 'any' ? ['lan', 'relay'] : [this.fallbackVia() as DaemonRoute])
-                : [channel as DaemonRoute];
+        const routes = this.readRoutes(sessionId, machineId, forceRoute);
         // The session's own connection when it has one, otherwise whatever this machine was last
         // reached over — same machine, so the same address and a token that covers it.
         const knownConnection = inMemory?.connection ?? (machineId ? this.lanMachineConnections.get(machineId) : undefined);
@@ -4796,6 +4784,34 @@ class Sync {
             // road is not a retry for that.
             refused: outcome.kind === 'refused',
         };
+    }
+
+    /**
+     * Which routes one read may use, asked of the channels rather than worked out here.
+     *
+     * `forceRoute` is the caller saying so outright. Otherwise a session on a channel reads on that
+     * channel and only that one — a session on the relay does not browse for a machine known to be
+     * elsewhere — and a session the server is carrying has no channel of its own, so every daemon
+     * channel that would accept a read is offered, in the device's priority order.
+     *
+     * That order is the point of asking: the list used to be the literal `['lan', 'relay']` here,
+     * so this was the one place a priority change did not reach.
+     */
+    private readRoutes(sessionId: string, machineId: string | undefined, forceRoute?: DaemonRoute): DaemonRoute[] {
+        if (forceRoute) {
+            return [forceRoute];
+        }
+        const channel = this.preferredChannel(sessionId);
+        if (channel !== 'server') {
+            return [channel as DaemonRoute];
+        }
+        if (!machineId) {
+            return [];
+        }
+        return this.channelDrivers()
+            .filter((driver): driver is ChannelDriver => driver.channel !== 'server'
+                && driver.accepts('read', machineId, Date.now()))
+            .map((driver) => driver.channel as DaemonRoute);
     }
 
     /** Where an attempt's outcome is written, so the next caller starts from what this one learned. */
