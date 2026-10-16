@@ -661,8 +661,11 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     });
     if (!verdict.ok) {
       // A warning for the same reason, and one more: the reason (missing, stale, replayed, bad
-      // signature) is the whole diagnosis of a refusal a client can only see as a refusal.
-      logger.warn(`[lan] refused ${request.url ?? '-'}: account proof ${verdict.reason} from=${clientAddress(request)}`);
+      // signature) is the whole diagnosis of a refusal a client can only see as a refusal. The two
+      // paths are logged together because a v1 proof covers the path the *client* wrote, which is
+      // not the one this daemon sees when the request came through the relay — and when the fallback
+      // fails, those two strings are the whole answer.
+      logger.warn(`[lan] refused ${request.url ?? '-'}: account proof ${verdict.reason} from=${clientAddress(request)} path=${path} forwarded=${forwarded ?? '-'} action=${action.operation}:${action.target}`);
       return false;
     }
     opts.accountProof.rememberNonce(nonce!);
