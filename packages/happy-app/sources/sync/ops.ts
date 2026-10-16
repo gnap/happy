@@ -537,22 +537,22 @@ interface SessionRestartResponse {
 }
 
 /**
- * Restart a session via daemon RPC, reconnecting to the same server session
- * with the newer CLI version.  Returns the new session ID on success.
+ * Restart a session, reconnecting to the same server session with the newer CLI version.
  *
- * The machine's own channel is asked first when this App has one. Restarting exists to pick up a
- * build that is on disk, so the machine is the party that has to be told — and its own channel is
- * the one that is up then, while the server's is not necessarily. Falling back to the server keeps
- * the old behaviour for the case the channel cannot serve: no address, or one that did not answer.
+ * Which channel carries it is the engine's answer, not this function's. The machine's own channel is
+ * preferred — restarting exists to pick up a build that is on disk, so the machine is the party that
+ * has to be told, and its channel is the one that is up then — and the server is *a channel* that
+ * carries the same action by asking the daemon on this App's behalf. There is no chain of
+ * substitutions here: a channel that cannot carry it, or that failed, is where the next one starts.
  */
 export async function sessionRestart(sessionId: string, machineId: string): Promise<SessionRestartResponse> {
     try {
-        const response = await sync.restartSession(sessionId, machineId)
-            ?? await apiSocket.machineRPC<SessionRestartResponse, { sessionId: string }>(
-                machineId,
-                'restartSession',
-                { sessionId }
-            );
+        const response = await sync.restartSession(sessionId, machineId);
+        if (!response) {
+            // Nothing carried it. Saying that is more use than a substitute attempt: the reasons are
+            // per channel, and the caller has nowhere useful to look for them.
+            return { success: false, error: 'No channel could restart this session' };
+        }
         if (response.success) {
             // The new process reports its build when it gets around to it, which is minutes later —
             // and until it does, a session that has just been restarted still reads as stale. The
