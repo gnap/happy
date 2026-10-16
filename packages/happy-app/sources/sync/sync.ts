@@ -54,7 +54,7 @@ import { candidateInputsFor, orderedCandidates } from './channels/candidates';
 import { carryOperation, type HealthRecorder } from './channels/execute';
 import { readRoutes } from './channels/readRoute';
 import { endpointBaseUrl, type ChannelDriver, type ChannelOperation } from './channels/types';
-import { sendOverDaemonSocket, sendOverServerHttp, sendOverServerSocket } from './channels/ops';
+import { sendBatch, type SendResult } from './channels/ops';
 import type { ChannelReason } from './channels/types';
 import { FetchSlots } from './fetchSlots';
 import { DaemonConnections, type DaemonTarget } from './lan/daemonConnections';
@@ -2820,80 +2820,55 @@ class Sync {
         }
         const batch = pending.slice();
 
-        // A session on the LAN channel writes back over the LAN, the same way the server path
-        // prefers its own socket. Both channels are chosen the same way and neither is written to
-        // twice — keeping them in agreement is the CLI's job, since the message it receives is
-        // synced onward by its ordinary outgoing path.
-        const daemon = this.daemonSendTarget(sessionId);
-        if (daemon) {
-            const outcome = sendOverDaemonSocket({
-                socket: daemon.handle,
-                sessionId,
-                batch,
-                // Deliberately not marked acked here, unlike the server socket path. There the
-                // server echoes the message back, so a fast-ack is a claim the server will honour;
-                // here nothing confirms the write but the session itself, and treating the write as
-                // the delivery is exactly what hides a dropped message. Each entry waits for that
-                // verdict, and fails if it never arrives.
-                awaitVerdict: (localId) => this.awaitLanDelivery(localId),
-            });
-            if (outcome.kind === 'unconfirmed') {
-                for (const msg of batch) {
-                    outcome.awaitVerdict(msg.localId);
-                }
-                return;
-            }
-            if (outcome.kind === 'failed') {
-                throw outcome.error;
-            }
-        }
-
-        // Prefer WebSocket send — same path as CLI. No HTTP round-trip, no
-        // Tauri HTTP plugin issues. Server echoes back via new-message WS
-        // event, which handleUpdate already fast-acks.
-        const overSocket = sendOverServerSocket({ transport: apiSocket, sessionId, batch });
-        if (overSocket.kind === 'acked') {
-            pending.splice(0, batch.length);
-            for (const msg of batch) {
-                storage.getState().markOutboxMessageAcked(msg.localId);
-            }
-            // WS send has no seq ack — pull receive cursor forward via HTTP.
-            this.getMessagesSync(sessionId).invalidate();
-            return;
-        }
-        // Anything else — never connected, or the write threw mid-batch — falls through to the HTTP
-        // route below, which is idempotent on `localId`. A genuinely unusable server is reported by
-        // that attempt failing, not by this one declining to try.
-
+        // The walk itself lives in `channels/ops.ts`, where its order and what each rung's answer
+        // means are pinned down by tests rather than by reading this method. What stays here is the
+        // queue: what leaving it means, and what each outcome settles.
         const controller = new AbortController();
         this.sendAbortControllers.set(sessionId, controller);
+        let result: SendResult;
         try {
-            const outcome = await sendOverServerHttp({
-                transport: apiSocket,
+            result = await sendBatch({
+                daemon: this.daemonSendTarget(sessionId)?.handle ?? null,
+                server: apiSocket,
                 sessionId,
                 batch,
                 signal: controller.signal,
             });
-            // The one path that says where the session now stands: the server answered with the seqs
-            // it assigned, so the receive cursor moves with it rather than being pulled.
-            if (outcome.kind === 'failed') {
-                this.maybeStartBackgroundSendWatchdog();
-                throw outcome.error;
-            }
-            pending.splice(0, batch.length);
-            // Server confirmed – mark as acked (green check). The echo
-            // (fast-ack or text-matched session-protocol echo) will remove it.
-            for (const msg of batch) {
-                storage.getState().markOutboxMessageAcked(msg.localId);
-            }
-            if (outcome.kind === 'acked' && outcome.advanceTo !== undefined) {
-                const currentLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
-                if (outcome.advanceTo > currentLastSeq) {
-                    this.sessionLastSeq.set(sessionId, outcome.advanceTo);
-                }
-            }
         } finally {
             this.sendAbortControllers.delete(sessionId);
+        }
+
+        if (result.kind === 'unconfirmed') {
+            // A write over the machine's own channel is not a delivery. There the server echoes the
+            // message back so a fast-ack is a claim it will honour; here nothing confirms the write
+            // but the session itself, and treating the write as the delivery is exactly what hides
+            // a dropped message. Each entry waits for that verdict, and fails if it never arrives.
+            for (const msg of batch) {
+                this.awaitLanDelivery(msg.localId);
+            }
+            return;
+        }
+        if (result.kind === 'failed') {
+            this.maybeStartBackgroundSendWatchdog();
+            throw result.error;
+        }
+
+        pending.splice(0, batch.length);
+        // Server confirmed – mark as acked (green check). The echo (fast-ack or text-matched
+        // session-protocol echo) will remove it.
+        for (const msg of batch) {
+            storage.getState().markOutboxMessageAcked(msg.localId);
+        }
+        if (result.over === 'socket') {
+            // WS send has no seq ack — pull receive cursor forward via HTTP.
+            this.getMessagesSync(sessionId).invalidate();
+        } else if (result.advanceTo !== undefined) {
+            // The one path that says where the session now stands: the server answered with the seqs
+            // it assigned, so the receive cursor moves with it rather than being pulled.
+            const currentLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
+            if (result.advanceTo > currentLastSeq) {
+                this.sessionLastSeq.set(sessionId, result.advanceTo);
+            }
         }
 
         if (pending.length === 0) {

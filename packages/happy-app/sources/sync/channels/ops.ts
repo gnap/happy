@@ -20,8 +20,6 @@
  * sync owns.
  */
 
-import type { SessionChannel } from '@/sync/lan/types';
-
 /** One message on its way out, already encrypted. */
 export type OutgoingMessage = { localId: string; content: string };
 
@@ -151,5 +149,76 @@ export async function sendOverServerHttp(args: {
     }
 }
 
-/** The channels that can hand a message to a session, in the caller's order of preference. */
-export const SEND_CHANNELS: readonly SessionChannel[] = ['lan', 'relay', 'server'];
+/**
+ * What the batch's walk came to, in the caller's terms.
+ *
+ * `over` matters because the two acknowledged transports say different things: the socket's echo is
+ * an acknowledgement and nothing about where the session stands; the HTTP route's seqs are both.
+ */
+export type SendResult =
+    /** Taken, nothing confirms it. The caller waits on the session's own verdict. */
+    | { kind: 'unconfirmed' }
+    | { kind: 'acked'; over: 'socket' | 'http'; advanceTo?: number }
+    | { kind: 'failed'; error: unknown };
+
+/**
+ * Walks the batch down the transports this App prefers, in order.
+ *
+ * The one part of sending that is a decision rather than bookkeeping — and the part a message is
+ * lost to when a rung is misread. An unavailable rung is not a failure (fall through); a daemon
+ * write is not a delivery (the caller waits on the session's verdict); the HTTP route is idempotent
+ * on `localId`, so a half-written socket batch is safe to repeat there. Kept pure and here, so the
+ * order and what each answer means can be pinned down without a device.
+ */
+export async function sendBatch(args: {
+    /** The machine's own socket, when one is carrying this session. */
+    daemon?: DaemonSendSocket | null;
+    server: ServerSendTransport;
+    sessionId: string;
+    batch: readonly OutgoingMessage[];
+    signal?: AbortSignal;
+}): Promise<SendResult> {
+    if (args.daemon) {
+        const overDaemon = sendOverDaemonSocket({
+            socket: args.daemon,
+            sessionId: args.sessionId,
+            batch: args.batch,
+            // Unused by this walk: the caller registers the wait itself, because how long to wait
+            // and what a missing verdict means are its business, not this walk's.
+            awaitVerdict: () => {},
+        });
+        if (overDaemon.kind === 'unconfirmed') {
+            return { kind: 'unconfirmed' };
+        }
+        if (overDaemon.kind === 'failed') {
+            return { kind: 'failed', error: overDaemon.error };
+        }
+        // Unavailable: this socket is not carrying the session. Fall through rather than give up.
+    }
+
+    const overSocket = sendOverServerSocket({
+        transport: args.server,
+        sessionId: args.sessionId,
+        batch: args.batch,
+    });
+    if (overSocket.kind === 'acked') {
+        return { kind: 'acked', over: 'socket' };
+    }
+
+    // Never connected, or the write threw part-way. The route below is idempotent on `localId`, so
+    // repeating a partial batch there is safe — a genuinely unusable server is reported by that
+    // attempt failing, not by this one declining to try.
+    const overHttp = await sendOverServerHttp({
+        transport: args.server,
+        sessionId: args.sessionId,
+        batch: args.batch,
+        signal: args.signal,
+    });
+    if (overHttp.kind !== 'acked') {
+        return {
+            kind: 'failed',
+            error: overHttp.kind === 'failed' ? overHttp.error : new Error('send: the HTTP route did not acknowledge'),
+        };
+    }
+    return { kind: 'acked', over: 'http', advanceTo: overHttp.advanceTo };
+}
