@@ -640,22 +640,27 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     const forwarded = typeof request.headers['x-happy-forwarded-path'] === 'string'
       ? String(request.headers['x-happy-forwarded-path']).split('?')[0]
       : null;
+    // Built as values rather than inline, so a refusal can print exactly what was checked against
+    // what was received: an Ed25519 signature says nothing about the key that made it, so the
+    // message bytes are the only thing a `bad-signature` can be diagnosed from.
+    const messageV2 = accountProofMessage({
+      operation: action.operation,
+      target: action.target,
+      nonce: nonce ?? '',
+      at: Number.isFinite(at) ? at : 0,
+      bodyDigest: '',
+    });
+    const messageV1 = accountProofMessageV1({
+      method: request.method ?? 'POST',
+      path: forwarded ?? path,
+      nonce: nonce ?? '',
+      at: Number.isFinite(at) ? at : 0,
+      bodyDigest: '',
+    });
     const verdict = verifyAccountProof({
       proof: nonce !== null && Number.isFinite(at) && signature !== null ? { nonce, at, signature } : null,
-      message: accountProofMessage({
-        operation: action.operation,
-        target: action.target,
-        nonce: nonce ?? '',
-        at: Number.isFinite(at) ? at : 0,
-        bodyDigest: '',
-      }),
-      legacyMessage: accountProofMessageV1({
-        method: request.method ?? 'POST',
-        path: forwarded ?? path,
-        nonce: nonce ?? '',
-        at: Number.isFinite(at) ? at : 0,
-        bodyDigest: '',
-      }),
+      message: messageV2,
+      legacyMessage: messageV1,
       nonceSeen: opts.accountProof.nonceSeen,
       verify: opts.accountProof.verify,
     });
@@ -665,7 +670,18 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       // paths are logged together because a v1 proof covers the path the *client* wrote, which is
       // not the one this daemon sees when the request came through the relay — and when the fallback
       // fails, those two strings are the whole answer.
-      logger.warn(`[lan] refused ${request.url ?? '-'}: account proof ${verdict.reason} from=${clientAddress(request)} path=${path} forwarded=${forwarded ?? '-'} action=${action.operation}:${action.target}`);
+      logger.warn([
+        `[lan] refused ${request.url ?? '-'}: account proof ${verdict.reason}`,
+        `from=${clientAddress(request)}`,
+        `path=${path}`,
+        `forwarded=${forwarded ?? '-'}`,
+        `action=${action.operation}:${action.target}`,
+        `nonce=${nonce ?? '-'}`,
+        `at=${Number.isFinite(at) ? at : 0}`,
+        `sig=${signature ? `${signature.slice(0, 12)}…(${signature.length})` : '-'}`,
+        `v2=${JSON.stringify(messageV2)}`,
+        `v1=${JSON.stringify(messageV1)}`,
+      ].join(' '));
       return false;
     }
     opts.accountProof.rememberNonce(nonce!);
