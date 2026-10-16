@@ -4969,6 +4969,7 @@ class Sync {
                     machineId,
                     tag: machine.tag,
                     sessions: Array.isArray(machine.sessions) ? (machine.sessions as RelayDirectoryEntry['sessions']) : [],
+                    ...(machine.reachable ? { reachable: machine.reachable } : {}),
                     at,
                 });
             } else {
@@ -4977,6 +4978,17 @@ class Sync {
         }
         for (const entry of entries) {
             this.relayMachines.set(entry.machineId, { tag: entry.tag, sessions: entry.sessions });
+        }
+        // Where each machine says it can be reached, merged exactly as the server's copy of the same
+        // claim is. This is the relay doing the job the server would otherwise do, and it matters
+        // most when the server is the thing that is gone: without it, a machine on this very network
+        // has no address the App can try.
+        for (const entry of entries) {
+            if (entry.reachable) {
+                const blob = { p2p: entry.reachable };
+                storage.getState().applyLanEndpoint(entry.machineId, parseLanEndpoint(entry.machineId, blob));
+                storage.getState().applyRelayEndpoint(entry.machineId, parseRelayEndpoint(entry.machineId, blob));
+            }
         }
         // Worth a line of its own: a machine the relay is holding but this App cannot name has no
         // relay icon and no relay route, and it looks exactly like a machine that is not on the

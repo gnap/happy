@@ -42,6 +42,57 @@ export function parseRelayEndpoint(machineId: string, daemonState: unknown): Rel
 export type PublishedLanEndpoint = { machineId: string; baseUrl: string; at: number };
 
 /**
+ * What a machine's latest claim does to the address being held.
+ *
+ * Three outcomes rather than two, because "the machine published nothing about itself" and "the
+ * machine published that it has no address" are different facts, and only one of them is a reason to
+ * forget what was cached: a blob that parses to nothing is a machine whose metadata is older than
+ * this field, while a route the App derived for itself is dropped on purpose.
+ */
+export type EndpointChange<T> =
+    | { kind: 'none' }
+    | { kind: 'clear' }
+    | { kind: 'set'; endpoint: T };
+
+/**
+ * One rule for the LAN address, wherever the claim came from.
+ *
+ * The server's copy of a machine's metadata and the machine's own log both end up here, and they
+ * have to agree: the same claim arriving on two channels must not produce two different addresses,
+ * and a machine that republishes the address it already has must not churn the store.
+ */
+export function advanceLanEndpoint(
+    held: { baseUrl: string; at: number } | undefined,
+    next: { baseUrl: string; at: number } | null,
+): EndpointChange<{ baseUrl: string; at: number }> {
+    if (next === null) {
+        return held === undefined ? { kind: 'none' } : { kind: 'clear' };
+    }
+    return held?.baseUrl === next.baseUrl ? { kind: 'none' } : { kind: 'set', endpoint: next };
+}
+
+/**
+ * The same rule for a relay route.
+ *
+ * A route is never cleared: the machine going quiet and the machine having none look identical from
+ * here, and the cache is for exactly the first of those. `derived` and `published` are both routes,
+ * and the published one wins — it is the machine's own claim about itself rather than something this
+ * device computed.
+ */
+export function advanceRelayEndpoint(
+    held: RelayEndpoint | undefined,
+    next: RelayEndpoint | null,
+): EndpointChange<RelayEndpoint> {
+    if (next === null) {
+        return { kind: 'none' };
+    }
+    if (held?.baseUrl === next.baseUrl && held.source === next.source) {
+        return { kind: 'none' };
+    }
+    return { kind: 'set', endpoint: next };
+}
+
+/**
  * Reads the LAN half of what a machine publishes about itself.
  *
  * The relay half has been read from the same blob for a while (`parseRelayEndpoint`); this is the

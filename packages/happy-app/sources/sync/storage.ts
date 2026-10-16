@@ -8,6 +8,8 @@ import { Message } from "./typesMessage";
 import { NormalizedMessage } from "./typesRaw";
 import type { DaemonRoute, LanSighting, RelayEndpoint, SessionChannel } from './lan/types';
 import type { RelayDirectoryEntry } from './lan/relayDirectory';
+import { advanceLanEndpoint, advanceRelayEndpoint, parseLanEndpoint, parseRelayEndpoint } from './lan/relay';
+import type { LifecycleEntry } from './lan/client';
 import type { DaemonConnectionState } from './lan/daemonConnections';
 import { machineBadgeInputs, resolveMachinePresence, type MachineCapability, type MachinePresence, type MachineReach } from './machinePresence';
 import { channelLinks } from './channelLinks';
@@ -243,16 +245,12 @@ interface StorageState {
      * Keyed by the server's id when the entry carries one and by the tag when it does not — a
      * session has a tag from the moment it is spawned and an id only once the server has answered —
      * so an entry that brings the id replaces the row that was standing in on the tag.
+     *
+     * The same walk carries where the machine says it can be reached, because that is a fact from
+     * the same log: one cursor covers both, and a reader that applied an entry never has to be told
+     * it again.
      */
-    applyLifecycle: (machineId: string, revision: number, entries: {
-        rev: number;
-        at: number;
-        op: 'created' | 'deleted';
-        tag: string;
-        sessionId?: string;
-        directory?: string;
-        agent?: string;
-    }[]) => void;
+    applyLifecycle: (machineId: string, revision: number, entries: LifecycleEntry[]) => void;
     /** What each machine last said it was running, asked over a channel it answered on. */
     daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }>;
     /** Replace the daemons' view. Pass null to clear it (the server answered). */
@@ -710,6 +708,57 @@ function buildSessionListViewData(
     }
 
     return listData;
+}
+
+/**
+ * The two slices a machine's published addresses live in.
+ *
+ * Narrower than the whole store on purpose: these reducers are used both by the actions that take a
+ * single parsed endpoint and by the log replay, which applies a blob of them as it walks a machine's
+ * entries — and it must be the *same* rule in both, or the same claim would mean two things
+ * depending on which channel carried it.
+ */
+type EndpointSlices = Pick<StorageState, 'lanEndpoints' | 'relayEndpoints'>;
+
+/** The change to make, or null when the endpoint says nothing new. */
+function reduceLanEndpoint(
+    state: EndpointSlices,
+    machineId: string,
+    endpoint: { baseUrl: string; at: number } | null,
+): Partial<EndpointSlices> | null {
+    const change = advanceLanEndpoint(state.lanEndpoints[machineId], endpoint);
+    if (change.kind === 'none') return null;
+    if (change.kind === 'clear') {
+        const { [machineId]: _gone, ...rest } = state.lanEndpoints;
+        return { lanEndpoints: rest };
+    }
+    return { lanEndpoints: { ...state.lanEndpoints, [machineId]: change.endpoint } };
+}
+
+function reduceRelayEndpoint(
+    state: EndpointSlices,
+    machineId: string,
+    endpoint: RelayEndpoint | null,
+): Partial<EndpointSlices> | null {
+    const change = advanceRelayEndpoint(state.relayEndpoints[machineId], endpoint);
+    if (change.kind !== 'set') return null;
+    const next = { ...state.relayEndpoints, [machineId]: change.endpoint };
+    saveRelayEndpoints(next);
+    return { relayEndpoints: next };
+}
+
+/**
+ * Folds what a machine published about where it can be reached into the slices that hold addresses.
+ *
+ * One entry point for all three carriers — the server's copy of the blob, the machine's own log, and
+ * the relay's directory — because they are the same claim about the same machine. Which channel it
+ * arrived on is not allowed to change what the App believes.
+ */
+function withPublishedEndpoints(state: EndpointSlices, machineId: string, blob: unknown): EndpointSlices {
+    let next: EndpointSlices = state;
+    next = { ...next, ...(reduceLanEndpoint(next, machineId, parseLanEndpoint(machineId, blob)) ?? {}) };
+    next = { ...next, ...(reduceRelayEndpoint(next, machineId, parseRelayEndpoint(machineId, blob)) ?? {}) };
+    return next;
 }
 
 export const storage = create<StorageState>()((set, get) => {
@@ -1957,33 +2006,8 @@ export const storage = create<StorageState>()((set, get) => {
         setRelayHubConnected: (connected) => set((state) => (
             state.relayHubConnected === connected ? state : { ...state, relayHubConnected: connected }
         )),
-        applyRelayEndpoint: (machineId: string, endpoint: RelayEndpoint | null) => set((state) => {
-            const current = state.relayEndpoints[machineId];
-            if (endpoint === null) {
-                // A machine that stopped publishing a relay keeps its cached route: the publisher
-                // also goes quiet whenever the daemon is merely offline, and the cache is for
-                // exactly that moment.
-                return state;
-            }
-            if (current?.baseUrl === endpoint.baseUrl) {
-                return state;
-            }
-            const next = { ...state.relayEndpoints, [machineId]: endpoint };
-            saveRelayEndpoints(next);
-            return { ...state, relayEndpoints: next };
-        }),
-        applyLanEndpoint: (machineId: string, endpoint: { baseUrl: string; at: number } | null) => set((state) => {
-            const held = state.lanEndpoints[machineId];
-            if (endpoint === null) {
-                if (held === undefined) return state;
-                const { [machineId]: _gone, ...rest } = state.lanEndpoints;
-                return { ...state, lanEndpoints: rest };
-            }
-            // Same address, same answer: a machine republishes on a slow tick and this is called for
-            // each of them, so an unchanged endpoint must not churn the store.
-            if (held?.baseUrl === endpoint.baseUrl) return state;
-            return { ...state, lanEndpoints: { ...state.lanEndpoints, [machineId]: endpoint } };
-        }),
+        applyRelayEndpoint: (machineId, endpoint) => set((state) => reduceRelayEndpoint(state, machineId, endpoint) ?? state),
+        applyLanEndpoint: (machineId, endpoint) => set((state) => reduceLanEndpoint(state, machineId, endpoint) ?? state),
         applyLanSightings: (sightings: LanSighting[]) => set((state) => {
             const now = Date.now();
             const next: Record<string, LanSighting> = {};
@@ -2032,7 +2056,15 @@ export const storage = create<StorageState>()((set, get) => {
             }
             const sessions = { ...state.sessions };
             const deleted = { ...state.lifecycleDeleted };
+            // Addresses travel in this log too, so they are applied by the same walk, at the same
+            // point in the sequence, under the same cursor: a machine that moves is one entry, and a
+            // reader that applied it does not need to be told again.
+            let endpoints: EndpointSlices = state;
             for (const entry of entries) {
+                if (entry.op === 'reachable') {
+                    endpoints = withPublishedEndpoints(endpoints, machineId, { p2p: { endpoints: entry.endpoints, at: entry.at } });
+                    continue;
+                }
                 const key = entry.sessionId ?? entry.tag;
                 if (entry.op === 'deleted') {
                     // Both names are remembered, not just removed: the tag's placeholder goes with
@@ -2075,6 +2107,7 @@ export const storage = create<StorageState>()((set, get) => {
             }
             return {
                 ...state,
+                ...endpoints,
                 sessions,
                 lifecycleDeleted: deleted,
                 lifecycleCursors: cursor,

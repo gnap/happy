@@ -28,6 +28,16 @@ export type HubMachine = {
     tag: string;
     /** The daemon's own session summary — the same shape `GET /lan/sessions` returns. */
     sessions: unknown[];
+    /**
+     * Where the machine says it can be reached, as it published it.
+     *
+     * Carried for the case the relay exists for: an App whose server is unreachable cannot read the
+     * server's copy of a machine's metadata, so without this it would have no LAN address for a
+     * machine that is sitting on the same network. Untyped on purpose — the relay stores the
+     * daemon's blob and does not read it, and neither does this: it is handed to the same parser
+     * the server's copy goes through.
+     */
+    reachable?: unknown;
 };
 
 /** The bit of a WebSocket a relay stream has to look like, so `openLanSocket` can use either. */

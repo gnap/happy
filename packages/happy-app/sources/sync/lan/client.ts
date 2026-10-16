@@ -268,19 +268,33 @@ export async function sessionControlAt(
     return response.ok;
 }
 
-/** One fact from a machine's own log of the sessions it has started and archived. */
-export type LifecycleEntry = {
-    /** Position in that machine's log. The cursor a reader sends back is the last one it applied. */
-    rev: number;
-    at: number;
-    op: 'created' | 'deleted';
-    /** The CLI's own name for the session, which exists before the server has issued an id. */
-    tag: string;
-    /** The server's id, once that machine knows it. */
-    sessionId?: string;
-    directory?: string;
-    agent?: string;
-};
+/** One fact from a machine's own log of what it knows about itself. */
+export type LifecycleEntry =
+    | {
+        /** Position in that machine's log. The cursor a reader sends back is the last one it applied. */
+        rev: number;
+        at: number;
+        op: 'created' | 'deleted';
+        /** The CLI's own name for the session, which exists before the server has issued an id. */
+        tag: string;
+        /** The server's id, once that machine knows it. */
+        sessionId?: string;
+        directory?: string;
+        agent?: string;
+    }
+    | {
+        rev: number;
+        at: number;
+        op: 'reachable';
+        /**
+         * Where that machine could be reached, in the shape it publishes.
+         *
+         * The same statement the server's copy of the blob carries, arriving over whichever channel
+         * is up — which is the point: a machine's LAN address has to be learnable when the server,
+         * the usual carrier of it, is the thing that is missing.
+         */
+        endpoints: unknown[];
+    };
 
 /**
  * What a machine has started and archived, from a reader's cursor.
