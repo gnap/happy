@@ -124,6 +124,7 @@ export type LanHistory = {
 };
 
 import type { VersionState } from './versionState';
+import { accountProofMessage, verifyAccountProof } from './accountProof';
 
 export type LanServerOptions = {
   /** The machine key: a 32-byte symmetric secret shared with the App via the machine record. */
@@ -181,6 +182,24 @@ export type LanServerOptions = {
    * caller has to be told: it is the difference between "the session acted" and "nobody was asked".
    */
   onSessionControl?: (request: { sessionId: string; method: string; params: string }) => boolean;
+  /**
+   * Checking that a side-effecting request was made by the account, not merely by a device holding
+   * the machine key.
+   *
+   * The machine key is a transport credential every paired device holds, so without this "can
+   * reach the daemon" and "may act on it" would be the same thing — and a key holder can derive the
+   * relay tag, so per-channel rules would not help. One check on the route, both channels through
+   * it. The material is already here: the account's public key is what the account fingerprint is
+   * derived from.
+   */
+  accountProof?: {
+    /** Verifies a detached signature over `accountProofMessage(...)`. */
+    verify: (message: string, signature: string) => boolean;
+    /** One-shot nonces: a signature that arrives twice is refused the second time. */
+    nonceSeen: (nonce: string) => boolean;
+    /** Called once a proof has been accepted, so the nonce cannot be used again. */
+    rememberNonce: (nonce: string) => void;
+  };
   /**
    * This machine's lifecycle log: which sessions it has started and archived, in order.
    *
@@ -564,6 +583,9 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     if (!requireToken(request)) {
       return reply.code(401).send({ error: 'unauthorized' });
     }
+    if (!requireAccountProof(request)) {
+      return reply.code(403).send({ error: 'this action needs the account, not just the machine key' });
+    }
     if (!opts.restartSession) {
       return reply.code(404).send({ error: 'this daemon does not restart sessions' });
     }
@@ -584,9 +606,52 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
    * that is already running, which is the same boundary a restart sits on.
    */
   const SESSION_CONTROL_METHODS = new Set(['abort', 'permission']);
+  /**
+   * Whether this request carries the account's proof, and consumes its nonce when it does.
+   *
+   * Refused rather than allowed when the daemon has no way to check: a machine that cannot verify
+   * cannot tell an account from a device holding the machine key, and guessing "allowed" would make
+   * this decoration.
+   */
+  const requireAccountProof = (request: { headers: Record<string, unknown>; method?: string; url?: string }): boolean => {
+    if (!opts.accountProof) {
+      logger.debug(`[lan] refused ${request.url ?? '-'}: no account-proof check configured`);
+      return false;
+    }
+    const header = (name: string): string | null => {
+      const value = request.headers[name];
+      return typeof value === 'string' && value.length > 0 ? value : null;
+    };
+    const nonce = header('x-happy-proof-nonce');
+    const at = Number.parseInt(header('x-happy-proof-at') ?? '', 10);
+    const signature = header('x-happy-proof-signature');
+    const path = (request.url ?? '').split('?')[0];
+    const verdict = verifyAccountProof({
+      proof: nonce !== null && Number.isFinite(at) && signature !== null ? { nonce, at, signature } : null,
+      message: accountProofMessage({
+        method: request.method ?? 'POST',
+        path,
+        nonce: nonce ?? '',
+        at: Number.isFinite(at) ? at : 0,
+        bodyDigest: '',
+      }),
+      nonceSeen: opts.accountProof.nonceSeen,
+      verify: opts.accountProof.verify,
+    });
+    if (!verdict.ok) {
+      logger.debug(`[lan] refused ${request.url ?? '-'}: account proof ${verdict.reason}`);
+      return false;
+    }
+    opts.accountProof.rememberNonce(nonce!);
+    return true;
+  };
+
   app.post('/lan/sessions/:sessionId/control', async (request, reply) => {
     if (!requireToken(request)) {
       return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (!requireAccountProof(request)) {
+      return reply.code(403).send({ error: 'this action needs the account, not just the machine key' });
     }
     if (!opts.onSessionControl) {
       return reply.code(404).send({ error: 'this daemon does not forward session control' });

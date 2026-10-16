@@ -31,13 +31,15 @@ import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSes
 import { RESTARTING_TTL_MS, expiredRestarting } from './restartTracker';
 import { LifecycleLog } from './lifecycleLog';
 import { replayDeletions } from './lifecycleServerReplay';
+import { ACCOUNT_PROOF_WINDOW_MS } from './accountProof';
+import nacl from 'tweetnacl';
 import type { UpdateSessionBody } from '@slopus/happy-wire';
 import { versionStateOf } from './versionState';
 import { BUILD_VERSION } from '../version';
 import type { ApiMachineClient } from '@/api/apiMachine';
 import { readSessionKey } from '@/api/sessionKeyPersistence';
 import { readSessionLogPage } from '@/api/sessionLog';
-import { encodeBase64, libsodiumEncryptForPublicKey } from '@/api/encryption';
+import { decodeBase64, encodeBase64, libsodiumEncryptForPublicKey } from '@/api/encryption';
 import { startLanDiscovery, type LanDiscoveryHandle } from './lanDiscovery';
 import { startEndpointPublisher, type EndpointPublisherHandle, type LanEndpoint } from './lanEndpoints';
 import { startRelayClient, type RelayClientHandle } from './relay/relayClient';
@@ -1197,6 +1199,9 @@ export async function startDaemon(): Promise<void> {
       }
     };
 
+/** Nonces already spent, so a lifted signature cannot be used a second time. */
+    const accountProofNonces = new Map<string, number>();
+
     const announceLifecycle = (): void => {
       // The readers on a socket, and the server — which is one of them, just slower.
       void replayLifecycleToServer();
@@ -1635,6 +1640,34 @@ export async function startDaemon(): Promise<void> {
             // so a permission answered over the LAN is answered exactly as one answered over the
             // server. Refused when no live session has that id — the one thing the caller needs told
             // apart, since it cannot otherwise know whether anybody was asked.
+            // Authorising the side-effecting routes by the *account* rather than by the machine key
+            // every paired device holds. The material is already here: the account's public key is
+            // what the mDNS account fingerprint is derived from.
+            accountProof: {
+              verify: (message, signature) => {
+                try {
+                  return nacl.sign.detached.verify(
+                    new TextEncoder().encode(message),
+                    decodeBase64(signature),
+                    accountPublicKey,
+                  );
+                } catch {
+                  // A malformed signature is a refusal, not a crash on a route anyone can reach.
+                  return false;
+                }
+              },
+              nonceSeen: (nonce) => accountProofNonces.has(nonce),
+              rememberNonce: (nonce) => {
+                accountProofNonces.set(nonce, Date.now());
+                // Pruned here rather than on a timer: a nonce only has to outlive the window its
+                // signature was good for, and this is the only moment the set grows.
+                for (const [seen, at] of accountProofNonces) {
+                  if (Date.now() - at > ACCOUNT_PROOF_WINDOW_MS) {
+                    accountProofNonces.delete(seen);
+                  }
+                }
+              },
+            },
             lifecycle: {
               revision: () => lifecycleLog.revision(),
               entriesSince: (since: number) => lifecycleLog.entriesSince(since),
