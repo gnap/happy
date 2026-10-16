@@ -104,6 +104,7 @@ export async function loadMessageCache(session: Session, servedByDaemon = false)
 
     try {
         const db = getSessionCacheDB();
+        const tStart = Date.now();
         // Don't block fetchMessages if DB is still initializing (e.g. preload not done). Skip cache after timeout.
         const CACHE_LOAD_TIMEOUT_MS = 3000;
         const cacheRow = await Promise.race([
@@ -112,6 +113,7 @@ export async function loadMessageCache(session: Session, servedByDaemon = false)
                 setTimeout(() => reject(new Error('cache load timeout')), CACHE_LOAD_TIMEOUT_MS)
             ),
         ]);
+        const tRow = Date.now();
         if (!cacheRow) {
             log.log(`📦 messageCache: no cache row for ${session.id}`);
             return null;
@@ -137,9 +139,19 @@ export async function loadMessageCache(session: Session, servedByDaemon = false)
         // the newest messages; the rest stay on disk and are reached by scrolling back, which goes
         // through the channel's paging rather than through this read.
         const messages = await db.getSessionMessages(session.id, HYDRATE_MESSAGE_LIMIT + 1);
+        const tMessages = Date.now();
         const truncated = messages.length > HYDRATE_MESSAGE_LIMIT;
         const hydrating = truncated ? messages.slice(-HYDRATE_MESSAGE_LIMIT) : messages;
+        const tDeserialize = Date.now();
         const reducerState = deserializeReducerStateOrCreate(cacheRow.reducerStateJson);
+        // Where the milliseconds of an open actually go. The row read, the message rows and the
+        // reducer state are three different sizes — one row, sixty rows, one blob whose size is the
+        // session's history — and the totals so far say the messages are not the expensive part.
+        log.log(
+            `📦 messageCache: kind=${truncated ? 'truncated' : 'whole'} ` +
+            `row=${tRow - tStart}ms messages=${tMessages - tRow}ms(${hydrating.length}) ` +
+            `reducerState=${Date.now() - tDeserialize}ms(${cacheRow.reducerStateJson.length}b)`
+        );
 
         // Where the window this read hands back actually starts. The row's own `oldestSeq` describes
         // the window that *wrote* it, which reaches further back than this one does — reporting that
