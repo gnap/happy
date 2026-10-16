@@ -197,6 +197,24 @@ describe('relay', () => {
         expect(hub.reply('close', 7)[0]).toMatchObject({ code: 4502 });
     });
 
+    it('carries where a machine says it can be reached, without reading it', async () => {
+        // The relay stores this blob the way it stores the session summary — it is the machine's own
+        // claim about itself, and the shape is the daemon's business. What it buys is the case the
+        // relay exists for: the App's server is unreachable, so the LAN address cannot come from
+        // there, and the relay is the only party still holding it.
+        relay = startRelay({ port: 0 });
+        const d = await connectDaemon(relay.port);
+        await until(() => d.frames.some((f) => f.t === 'ok'));
+        const reachable = { endpoints: [{ t: 'lan', addr: '192.168.1.5', port: 55673 }], at: 1700, rev: 4 };
+        d.ws.send(JSON.stringify({ t: 'reachable', ...reachable }));
+
+        const hub = await connectHub(relay.port);
+        hub.send({ t: 'machines' });
+        await until(() => hub.reply('machines').some((f) => f.machines.some((m: any) => m.reachable)));
+        const answer = hub.reply('machines').find((f) => f.machines.some((m: any) => m.reachable));
+        expect(answer.machines.find((m: any) => m.tag === d.tag).reachable).toEqual(reachable);
+    });
+
     it('answers for every machine and the sessions they published', async () => {
         relay = startRelay({ port: 0 });
         const d = await connectDaemon(relay.port);
@@ -208,7 +226,9 @@ describe('relay', () => {
         hub.send({ t: 'machines' });
         await until(() => hub.reply('machines').some((f) => f.machines.length === 1));
         const answer = hub.reply('machines').find((f) => f.machines.length === 1);
-        expect(answer.machines[0]).toEqual({ tag: d.tag, sessions });
+        // `reachable` rides along in the same entry: the address a machine publishes for itself,
+        // which is what an App with no server left needs in order to reach it directly.
+        expect(answer.machines[0]).toEqual({ tag: d.tag, sessions, reachable: null });
 
         // A machine dialling in is pushed to the client: it is the event the App waits for, and
         // asking for it on a timer is the probing this connection replaces.

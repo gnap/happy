@@ -14,8 +14,13 @@
  *
  * The relay still stores nothing durable and never holds a credential: the LAN protocol's own HMAC
  * challenge-response decides access, session content is ciphertext end to end, and what it caches is
- * only what the daemons themselves publish as a directory (session ids and their summary lines —
- * the same thing `GET /lan/sessions` already returns through this relay).
+ * only what the daemons themselves publish as a directory (session ids, their summary lines, and the
+ * addresses each machine says it can be reached at — the same things the daemon's own LAN API
+ * already returns through this relay).
+ *
+ * The addresses belong here because the relay is the one party still holding them when the server is
+ * gone, which is the situation the relay exists for: an App that cannot read the server's copy of a
+ * machine's metadata can still learn where that machine is on the LAN and go straight to it.
  */
 import nacl from 'tweetnacl';
 import { createHash, randomBytes } from 'node:crypto';
@@ -59,6 +64,15 @@ type Daemon = {
     clients: Map<number, any>;
     /** Streams opened through `/hub`, keyed the same way, each remembering which client wants it. */
     hub: Map<number, { client: any; clientId: number }>;
+    /**
+     * Where this daemon last said it can be reached, for the directory.
+     *
+     * Stored as it arrived and never decoded, like the session summary beside it: the relay is a
+     * pipe, and the shape of an address is the daemon's business. What it buys is the case the
+     * relay exists for — an App whose server is unreachable can still learn where the machine is
+     * on the LAN, and connect to it directly.
+     */
+    reachable: unknown | null;
     /** The session summary this daemon last published, for the directory. */
     sessions: unknown[];
     nextId: number;
@@ -256,7 +270,7 @@ export function startRelay(options: RelayOptions): RelayHandle {
                     // The signature proves key ownership, so a newer connection from the same key
                     // legitimately replaces a stale one (daemon restart / NAT rebinding).
                     const previous = daemons.get(tag);
-                    const daemon: Daemon = { tag, ws, pending: new Map(), clients: new Map(), hub: new Map(), sessions: [], nextId: 1 };
+                    const daemon: Daemon = { tag, ws, pending: new Map(), clients: new Map(), hub: new Map(), sessions: [], reachable: null, nextId: 1 };
                     daemons.set(tag, daemon);
                     data.tag = tag;
                     if (previous && previous.ws !== ws) {
@@ -317,6 +331,12 @@ export function startRelay(options: RelayOptions): RelayHandle {
                     // wire — and it is what lets an App list sessions without asking each machine.
                     daemon.sessions = Array.isArray(msg.sessions) ? msg.sessions : [];
                     broadcastDirectory();
+                } else if (msg.t === 'reachable') {
+                    // Same deal as the session list: the machine's own claim about itself, carried so
+                    // a client can reach it without asking it. Sent on registration and whenever the
+                    // machine's log records a new address.
+                    daemon.reachable = msg.endpoints ? { endpoints: msg.endpoints, at: msg.at, rev: msg.rev } : null;
+                    broadcastDirectory();
                 }
             },
             close(ws) {
@@ -353,9 +373,12 @@ export function startRelay(options: RelayOptions): RelayHandle {
         },
     });
 
-    /** What a client can reach: every daemon that is dialled in, with the sessions it published. */
-    function directory(): { tag: string; sessions: unknown[] }[] {
-        return [...daemons.values()].map((daemon) => ({ tag: daemon.tag, sessions: daemon.sessions }));
+    /**
+     * What a client can reach: every daemon that is dialled in, with what it published — its
+     * sessions, and where it says it can be reached.
+     */
+    function directory(): { tag: string; sessions: unknown[]; reachable: unknown | null }[] {
+        return [...daemons.values()].map((daemon) => ({ tag: daemon.tag, sessions: daemon.sessions, reachable: daemon.reachable }));
     }
 
     /**
