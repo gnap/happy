@@ -4606,6 +4606,7 @@ class Sync {
         const outcome = await this.carrySessionAction<boolean>(sessionId, {
             operation: 'send',
             path: `/lan/sessions/${encodeURIComponent(sessionId)}/control`,
+            proof: { operation: 'control', target: sessionId },
             run: (baseUrl, token, proof) => sessionControlAt(baseUrl, token, sessionId, method, params, proof).then((ok) => (ok ? true : null)),
         });
         if (outcome.verdict === true) {
@@ -4639,6 +4640,8 @@ class Sync {
         action: {
             operation: ChannelOperation;
             path: string;
+            /** The account's proof names this, not the path: a path changes with the route. */
+            proof?: { operation: string; target: string };
             run: (baseUrl: string, token: string, proof: Record<string, string> | undefined) => Promise<T | null>;
             /**
              * How the *server* channel carries this action, when the server is the channel that
@@ -4691,7 +4694,7 @@ class Sync {
                     return { kind: 'refused' };
                 }
                 const { token } = await getLanCredential(endpoint.baseUrl, machineKey);
-                const proof = await accountProofHeaders({ method: 'POST', path: action.path });
+                const proof = action.proof ? await accountProofHeaders(action.proof) : null;
                 try {
                     const value = await action.run(endpoint.baseUrl, token, proof ?? undefined);
                     return value === null ? { kind: 'absent' } : { kind: 'done', value };
@@ -4726,13 +4729,14 @@ class Sync {
      * answer rather than an address failure. A thrown anything-else is silence, which is exactly what
      * the address health is for.
      *
-     * `proofPath` is for the actions the account has to authorise (restart, control): the proof is
-     * built over the path as it will be sent, because the machine checks the bytes it receives.
+     * `proofAction` is for the actions the account has to authorise (restart, control): the proof
+     * names the action and its target, which is what the machine checks and what does not change with
+     * the route the request takes.
      */
     private async carryAtDaemon<T>(args: {
         machineId: string;
         operation: ChannelOperation;
-        proofPath?: string;
+        proofAction?: { operation: string; target: string };
         /** Only these channels, in this order — the caller's policy, e.g. where the session is read. */
         drivers?: readonly ChannelDriver[];
         run: (baseUrl: string, token: string, proof: Record<string, string> | undefined) => Promise<T | null>;
@@ -4752,7 +4756,7 @@ class Sync {
                     return { kind: 'refused' };
                 }
                 const { token } = await getLanCredential(baseUrl, machineKey);
-                const proof = args.proofPath ? await accountProofHeaders({ method: 'POST', path: args.proofPath }) : null;
+                const proof = args.proofAction ? await accountProofHeaders(args.proofAction) : null;
                 try {
                     const value = await args.run(baseUrl, token, proof ?? undefined);
                     // It answered. Whether the answer is what was wanted is its verdict about the
@@ -4884,6 +4888,7 @@ class Sync {
         const outcome = await this.carrySessionAction<LanRestartVerdict>(sessionId, {
             operation: 'restart',
             path: `/lan/sessions/${encodeURIComponent(sessionId)}/restart`,
+            proof: { operation: 'restart', target: sessionId },
             run: (baseUrl, token, proof) => restartSessionAt(baseUrl, token, sessionId, proof ?? undefined),
             // The server carries the same action by asking the daemon on this App's behalf. It is a
             // channel like the others: tried when its turn comes, and skipped when it cannot.
