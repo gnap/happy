@@ -29,6 +29,7 @@ import { fetchSessionProfileMeta, PROFILE_META_DEADLINE_MS } from './fetchSessio
 import { delay } from '@/utils/time';
 import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSessionSummary } from './lanServer';
 import { RESTARTING_TTL_MS, expiredRestarting } from './restartTracker';
+import { LifecycleLog } from './lifecycleLog';
 import type { UpdateSessionBody } from '@slopus/happy-wire';
 import { versionStateOf } from './versionState';
 import { BUILD_VERSION } from '../version';
@@ -526,6 +527,18 @@ export async function startDaemon(): Promise<void> {
       }
       const s = pidToTrackedSession.get(pid);
       if (s?.happySessionId) {
+        // The first moment this machine knows *which* session it started: the tag comes from the
+        // child, and until it does there is nothing to write down that anyone could match. Written
+        // before the session is announced anywhere else, so the log is ahead of every replay.
+        if (s.sessionTag && !lifecycleLog.read().some((entry) => entry.op === 'created' && entry.tag === s.sessionTag)) {
+          lifecycleLog.record({
+            op: 'created',
+            tag: s.sessionTag,
+            sessionId: s.happySessionId,
+            directory: s.directory,
+            agent: s.agent,
+          });
+        }
         const existing = sessions[s.happySessionId];
         sessions[s.happySessionId] = {
           sessionId: s.happySessionId,
@@ -1063,6 +1076,13 @@ export async function startDaemon(): Promise<void> {
 
     /** Remove a stopped session from the visible list (explicit user action). */
     const archiveSession = (sessionId: string): boolean => {
+      // Written first: an archived session is a fact every reader has to be able to replay, and the
+      // tracking below is what stops being able to tell them.
+      const archived = stoppedSessions.get(sessionId)
+        ?? [...pidToTrackedSession.values()].find((session) => session.happySessionId === sessionId);
+      if (archived?.sessionTag) {
+        lifecycleLog.record({ op: 'deleted', tag: archived.sessionTag, sessionId });
+      }
       let removed = stoppedSessions.delete(sessionId);
       if (removed) {
         logger.debug(`[DAEMON RUN] Archived session ${sessionId}`);
@@ -1082,6 +1102,15 @@ export async function startDaemon(): Promise<void> {
       }
       return removed;
     };
+
+    /**
+     * What this machine has started and archived, in order, on disk.
+     *
+     * Written when the fact happens rather than derived from the tracking maps, because those are
+     * snapshots: they say what exists *now*, which is a different kind of statement from "this was
+     * created at this point in the sequence". Everything outside this process replays this.
+     */
+    const lifecycleLog = new LifecycleLog(join(configuration.happyHomeDir, 'daemon-lifecycle.jsonl'));
 
     /**
      * Sessions this daemon is in the middle of restarting, by session id, and when it started.
@@ -1510,6 +1539,10 @@ export async function startDaemon(): Promise<void> {
             // so a permission answered over the LAN is answered exactly as one answered over the
             // server. Refused when no live session has that id — the one thing the caller needs told
             // apart, since it cannot otherwise know whether anybody was asked.
+            lifecycle: {
+              revision: () => lifecycleLog.revision(),
+              entriesSince: (since: number) => lifecycleLog.entriesSince(since),
+            },
             onSessionControl: ({ sessionId, method, params }) => {
               if (activeSessionsBySessionId(sessionId).length === 0) {
                 return false;

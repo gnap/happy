@@ -39,6 +39,8 @@ let restarted: string[] = [];
 let controlled: { sessionId: string; method: string; params: string }[] = [];
 /** Whether the wired daemon claims a live session for the id it is handed. */
 let liveSessions: Set<string> = new Set(['sess-1']);
+/** The daemon's lifecycle log, as the route reads it. */
+let lifecycleEntries: { rev: number; op: string; tag: string }[] = [];
 /** Left unset by default, which is how a daemon that predates the route behaves. */
 let restartHandler: ((sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>) | undefined;
 
@@ -63,6 +65,10 @@ async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
         // Only when a test asked for it: a daemon without the handler is a daemon from before the
         // route existed, and the 404 it answers is what sends a caller to the server instead.
         ...(restartHandler ? { restartSession: restartHandler } : {}),
+        lifecycle: {
+            revision: () => lifecycleEntries.length,
+            entriesSince: (since: number) => lifecycleEntries.filter((entry) => entry.rev > since),
+        },
         onSessionControl: ({ sessionId, method, params }) => {
             if (!liveSessions.has(sessionId)) {
                 return false;
@@ -109,6 +115,7 @@ afterEach(async () => {
     restarted = [];
     controlled = [];
     liveSessions = new Set(['sess-1']);
+    lifecycleEntries = [];
     restartHandler = undefined;
 });
 
@@ -529,5 +536,47 @@ describe('control calls inside a running session', () => {
         expect((await fetch(url('/lan/sessions/sess-1/control'), { method: 'POST' })).status).toBe(401);
         expect((await control(token, 'sess-1', { method: 'abort' })).status).toBe(400);
         expect(controlled).toEqual([]);
+    });
+});
+
+describe('the lifecycle log over the LAN', () => {
+    const lifecycle = (token: string, query = '') => fetch(url(`/lan/lifecycle${query}`), { headers: { authorization: `Bearer ${token}` } });
+
+    it('hands a reader everything after its own cursor, and where the log now stands', async () => {
+        // How far the log has been replayed is the *reader's* business, which is what lets one
+        // channel be at the newest entry while another is still catching up.
+        lifecycleEntries = [
+            { rev: 1, op: 'created', tag: 'a' },
+            { rev: 2, op: 'created', tag: 'b' },
+            { rev: 3, op: 'deleted', tag: 'a' },
+        ];
+        await start();
+        const token = await getToken();
+
+        const fresh = await (await lifecycle(token)).json() as { revision: number; entries: unknown[] };
+        expect(fresh.revision).toBe(3);
+        expect(fresh.entries).toHaveLength(3);
+
+        const caughtUp = await (await lifecycle(token, '?since=2')).json() as { entries: { tag: string }[] };
+        expect(caughtUp.entries.map((entry) => entry.tag)).toEqual(['a']);
+        // A cursor at the end is a reader with nothing to do, not an error.
+        expect(((await (await lifecycle(token, '?since=3')).json()) as { entries: unknown[] }).entries).toEqual([]);
+    });
+
+    it('is a route of its own, not a field on the session list', async () => {
+        // The summary is a snapshot of what exists; this is an ordered list of facts. A reader that
+        // wants to know what changed asks here.
+        lifecycleEntries = [{ rev: 1, op: 'created', tag: 'a' }];
+        await start();
+        const token = await getToken();
+
+        const summary = await (await fetch(url('/lan/sessions'), authorized(token))).json() as Record<string, unknown>;
+        expect(summary).not.toHaveProperty('entries');
+        expect(summary).not.toHaveProperty('revision');
+    });
+
+    it('is not reachable without a token', async () => {
+        await start();
+        expect((await fetch(url('/lan/lifecycle'))).status).toBe(401);
     });
 });

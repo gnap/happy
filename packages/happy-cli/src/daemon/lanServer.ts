@@ -182,6 +182,19 @@ export type LanServerOptions = {
    */
   onSessionControl?: (request: { sessionId: string; method: string; params: string }) => boolean;
   /**
+   * This machine's lifecycle log: which sessions it has started and archived, in order.
+   *
+   * A reader replays it at its own pace — that is what the cursor is for — so the App can be told
+   * about a session this machine has, while the server catching up remains a separate progress.
+   * Read on demand rather than pushed: the log is small, sessions change rarely, and a reader that
+   * has been away asks for everything it missed in one request.
+   */
+  lifecycle?: {
+    /** Where a reader stands after applying everything. */
+    revision: () => number;
+    entriesSince: (since: number) => unknown[];
+  };
+  /**
    * Update envelopes to send to a socket reader as soon as it connects, before any live frame.
    * A reader that joins after a session changed its state would otherwise never see that change:
    * the live mirror only carries what happens while it is listening.
@@ -478,6 +491,29 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       // Which build this machine is running, and whether the one on disk is a different one.
       versions: opts.versionState?.(),
     });
+  });
+
+  /**
+   * The lifecycle log, from a reader's cursor.
+   *
+   * A route of its own rather than a field on `/lan/sessions`, because the two are different kinds
+   * of thing and neither may pretend to be the other: the summary is a *snapshot* — what exists now
+   * — and this is an ordered list of facts. A reader that wants to know what changed asks here; one
+   * that wants to know what there is asks there.
+   */
+  app.get('/lan/lifecycle', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (!opts.lifecycle) {
+      return reply.code(404).send({ error: 'this daemon keeps no lifecycle log' });
+    }
+    const { since } = request.query as { since?: string };
+    const cursor = Number.parseInt(since ?? '0', 10);
+    const from = Number.isFinite(cursor) && cursor > 0 ? cursor : 0;
+    const entries = opts.lifecycle.entriesSince(from);
+    logger.debug(`[lan] lifecycle since=${from} entries=${entries.length} revision=${opts.lifecycle.revision()} from=${clientAddress(request)}`);
+    return reply.send({ v: LAN_PROTOCOL_VERSION, revision: opts.lifecycle.revision(), entries });
   });
 
   app.get('/lan/sessions', async (request, reply) => {
