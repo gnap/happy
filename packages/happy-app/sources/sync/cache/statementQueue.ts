@@ -19,6 +19,8 @@ export class StatementQueue {
     private readonly urgent: Job[] = [];
     /** True while a job is in flight — the invariant this exists to keep. */
     private running = false;
+    /** When the job now in flight started, or null when the connection is free. */
+    private runningSince: number | null = null;
 
     /**
      * Runs `work` when the connection is free.
@@ -49,6 +51,19 @@ export class StatementQueue {
      */
     onStatement: ((statement: { waited: number; ran: number; depth: number }) => void) | null = null;
 
+    /**
+     * How long the job in flight has been running, or 0 when the connection is free.
+     *
+     * A job whose promise never resolves holds the connection for good, and everyone behind it
+     * waits for nothing: measured on a device, statements waiting 51, 56 and 65 seconds with 4-5
+     * queued behind them. That is what a JS context being replaced leaves behind — the work was
+     * handed to a native connection whose caller is gone — so the caller asks this and starts over
+     * with a queue and a connection of its own.
+     */
+    get stuckFor(): number {
+        return this.runningSince === null ? 0 : Date.now() - this.runningSince;
+    }
+
     /** How many jobs are waiting, for the tests and for the log line the metrics use. */
     get waiting(): number {
         return this.urgent.length + this.background.length;
@@ -67,6 +82,7 @@ export class StatementQueue {
                 }
                 const waited = Date.now() - next.queuedAt;
                 const ranAt = Date.now();
+                this.runningSince = ranAt;
                 try {
                     next.resolve(await next.work());
                 } catch (error) {
@@ -74,6 +90,7 @@ export class StatementQueue {
                     // runs either way, which is what keeps one bad save from stalling the cache.
                     next.reject(error);
                 } finally {
+                    this.runningSince = null;
                     this.onStatement?.({ waited, ran: Date.now() - ranAt, depth: next.depth });
                 }
             }

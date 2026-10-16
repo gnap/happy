@@ -473,7 +473,25 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
         };
     };
 
+    /**
+     * Past every statement this file issues with room to spare: a save of a whole window measured
+     * 1.1 s, and a read of one row is milliseconds.
+     */
+    private static readonly STUCK_STATEMENT_MS = 10_000;
+
     private enqueue<T>(work: () => Promise<T>, urgent = false): Promise<T> {
+        // A job that never finishes must not take the cache with it. The queue and the connection
+        // are module state, and a reload hands them to a context whose promises will never settle —
+        // so the head of the queue can be a statement nobody is waiting for any more, with every
+        // new statement behind it. Past the ceiling, both are abandoned: the new statement gets a
+        // queue and a connection of its own, and the old ones are left to whatever native state
+        // they hold.
+        if (this.statements.stuckFor > ExpoSQLiteSessionCacheDB.STUCK_STATEMENT_MS) {
+            log.log(`📦 sessionCacheDB: a statement has been running ${this.statements.stuckFor}ms; abandoning the queue and its connection`);
+            this.statements = new StatementQueue();
+            this.watchStatements();
+            void this.replaceConnection();
+        }
         return this.statements.run(async () => {
             try {
                 return await work();
