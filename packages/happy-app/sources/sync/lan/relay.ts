@@ -38,8 +38,14 @@ export function parseRelayEndpoint(machineId: string, daemonState: unknown): Rel
     return null;
 }
 
-/** Where a machine said it can be reached on the local network, from the metadata it publishes. */
-export type PublishedLanEndpoint = { machineId: string; baseUrl: string; at: number };
+/**
+ * Where a machine said it can be reached on the local network, from the metadata it publishes.
+ *
+ * A list, in the order the machine ranked it. The machine is the one that knows which of its
+ * interfaces it is reachable on, so its order is kept rather than re-derived here — and when one
+ * address does not answer, the next one is a real alternative rather than nothing.
+ */
+export type PublishedLanAddresses = { machineId: string; baseUrls: string[]; at: number };
 
 /**
  * What a machine's latest claim does to the address being held.
@@ -62,13 +68,22 @@ export type EndpointChange<T> =
  * and a machine that republishes the address it already has must not churn the store.
  */
 export function advanceLanEndpoint(
-    held: { baseUrl: string; at: number } | undefined,
-    next: { baseUrl: string; at: number } | null,
-): EndpointChange<{ baseUrl: string; at: number }> {
+    held: { baseUrls: string[]; at: number } | undefined,
+    next: { baseUrls: string[]; at: number } | null,
+): EndpointChange<{ baseUrls: string[]; at: number }> {
     if (next === null) {
+        // A blob that names no address is a machine that has stopped claiming one — a rebuild that
+        // took the field away, or an interface check that now excludes everything it used to offer.
+        // The cached list goes, because nothing is claiming it any more.
         return held === undefined ? { kind: 'none' } : { kind: 'clear' };
     }
-    return held?.baseUrl === next.baseUrl ? { kind: 'none' } : { kind: 'set', endpoint: next };
+    // The whole ordered list is the claim, so a republish of the same set says nothing new even
+    // though it arrives with a later `at`.
+    return sameBaseUrls(held?.baseUrls, next.baseUrls) ? { kind: 'none' } : { kind: 'set', endpoint: next };
+}
+
+function sameBaseUrls(a: readonly string[] | undefined, b: readonly string[]): boolean {
+    return a !== undefined && a.length === b.length && a.every((url, index) => url === b[index]);
 }
 
 /**
@@ -104,11 +119,12 @@ export function advanceRelayEndpoint(
  * sighting, because a machine's address changes without telling anyone. What it buys is that the
  * LAN channel can be used on networks where it could otherwise never be found.
  */
-export function parseLanEndpoint(machineId: string, daemonState: unknown): PublishedLanEndpoint | null {
+export function parseLanEndpoints(machineId: string, daemonState: unknown): PublishedLanAddresses | null {
     const p2p = (daemonState as { p2p?: Partial<PublishedLanEndpoints> } | null)?.p2p;
     if (!p2p || !Array.isArray(p2p.endpoints)) {
         return null;
     }
+    const baseUrls: string[] = [];
     for (const endpoint of p2p.endpoints) {
         if (endpoint?.t !== 'lan' && endpoint?.t !== 'ipv6') {
             continue;
@@ -117,7 +133,17 @@ export function parseLanEndpoint(machineId: string, daemonState: unknown): Publi
             continue;
         }
         const port = typeof endpoint.port === 'number' && endpoint.port > 0 ? endpoint.port : LAN_DEFAULT_PORT;
-        return { machineId, baseUrl: `http://${endpoint.addr}:${port}`, at: typeof p2p.at === 'number' ? p2p.at : Date.now() };
+        // An IPv6 address has to be bracketed in a URL, or the port reads as part of the address and
+        // the result is not a URL at all. The v6 half of the published list never worked without it.
+        const host = endpoint.addr.includes(':') ? `[${endpoint.addr}]` : endpoint.addr;
+        const baseUrl = `http://${host}:${port}`;
+        if (!baseUrls.includes(baseUrl)) {
+            baseUrls.push(baseUrl);
+        }
     }
-    return null;
+    if (baseUrls.length === 0) {
+        return null;
+    }
+    return { machineId, baseUrls, at: typeof p2p.at === 'number' ? p2p.at : Date.now() };
 }
+

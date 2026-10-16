@@ -8,7 +8,7 @@ import { Message } from "./typesMessage";
 import { NormalizedMessage } from "./typesRaw";
 import type { DaemonRoute, LanSighting, RelayEndpoint, SessionChannel } from './lan/types';
 import type { RelayDirectoryEntry } from './lan/relayDirectory';
-import { advanceLanEndpoint, advanceRelayEndpoint, parseLanEndpoint, parseRelayEndpoint } from './lan/relay';
+import { advanceLanEndpoint, advanceRelayEndpoint, parseLanEndpoints, parseRelayEndpoint } from './lan/relay';
 import type { LifecycleEntry } from './lan/client';
 import type { DaemonConnectionState } from './lan/daemonConnections';
 import { machineBadgeInputs, resolveMachinePresence, type MachineCapability, type MachinePresence, type MachineReach } from './machinePresence';
@@ -158,7 +158,7 @@ interface StorageState {
      * owns that set and replaces it — an address a machine published would be swept away by the next
      * scan, and it is exactly the one that survives when scans find nothing.
      */
-    lanEndpoints: Record<string, { baseUrl: string; at: number }>;
+    lanEndpoints: Record<string, { baseUrls: string[]; at: number }>;
     applyRelayEndpoint: (machineId: string, endpoint: RelayEndpoint | null) => void;
     /**
      * What the relay says it is holding, keyed by machineId.
@@ -281,7 +281,7 @@ interface StorageState {
     /** Replace the LAN sighting set with the result of one scan. */
     applyLanSightings: (sightings: LanSighting[]) => void;
     /** Records where a machine publishes itself on the LAN, or forgets it when it stops saying. */
-    applyLanEndpoint: (machineId: string, endpoint: { baseUrl: string; at: number } | null) => void;
+    applyLanEndpoint: (machineId: string, endpoint: { baseUrls: string[]; at: number } | null) => void;
     /** Record the live LAN socket, or null once it is gone. */
     setDaemonSocketStatus: (id: string, status: DaemonConnectionState) => void;
     applyLoaded: () => void;
@@ -724,7 +724,7 @@ type EndpointSlices = Pick<StorageState, 'lanEndpoints' | 'relayEndpoints'>;
 function reduceLanEndpoint(
     state: EndpointSlices,
     machineId: string,
-    endpoint: { baseUrl: string; at: number } | null,
+    endpoint: { baseUrls: string[]; at: number } | null,
 ): Partial<EndpointSlices> | null {
     const change = advanceLanEndpoint(state.lanEndpoints[machineId], endpoint);
     if (change.kind === 'none') return null;
@@ -756,7 +756,7 @@ function reduceRelayEndpoint(
  */
 function withPublishedEndpoints(state: EndpointSlices, machineId: string, blob: unknown): EndpointSlices {
     let next: EndpointSlices = state;
-    next = { ...next, ...(reduceLanEndpoint(next, machineId, parseLanEndpoint(machineId, blob)) ?? {}) };
+    next = { ...next, ...(reduceLanEndpoint(next, machineId, parseLanEndpoints(machineId, blob)) ?? {}) };
     next = { ...next, ...(reduceRelayEndpoint(next, machineId, parseRelayEndpoint(machineId, blob)) ?? {}) };
     return next;
 }
@@ -2575,7 +2575,7 @@ export function useMachines(): Record<string, Machine> {
  */
 /** Machines the LAN scanner can currently see, by machineId. */
 /** Where machines publish themselves on this network; a second source beside the mDNS sightings. */
-export function useLanEndpoints(): Record<string, { baseUrl: string; at: number }> {
+export function useLanEndpoints(): Record<string, { baseUrls: string[]; at: number }> {
     return storage(useShallow((state) => state.lanEndpoints));
 }
 
