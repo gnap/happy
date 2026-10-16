@@ -4,7 +4,7 @@ import { ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
-import { ChannelPriorityGroup, ChannelStateGroup } from './lan';
+import { ChannelStateGroup } from './lan';
 import { ItemList } from '@/components/ItemList';
 import { useRouter } from 'expo-router';
 import Constants from 'expo-constants';
@@ -559,7 +559,13 @@ export default function DevScreen() {
                     rightElement={<PhaseIndicator phase={lanSightingCount === 0 ? 'idle' : lanPhase} />}
                     showChevron={false}
                 />
-                <ChannelPriorityGroup />
+                <Item
+                    title="Channel Priority"
+                    subtitle="Enable, disable and reorder LAN / Relay / Server"
+                    detail={channelPriority.map((c) => c === 'lan' ? 'LAN' : c === 'relay' ? 'Relay' : 'Server').join(' › ')}
+                    icon={<Ionicons name="git-branch-outline" size={28} color="#007AFF" />}
+                    onPress={() => router.push('/dev/channels')}
+                />
                 <ChannelStateGroup />
                 <Item
                     title="LAN Round Trip"
