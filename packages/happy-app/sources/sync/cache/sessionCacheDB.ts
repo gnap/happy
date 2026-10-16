@@ -488,15 +488,14 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
 
     async saveSessionCache(row: CachedSessionRow, messages: Message[]): Promise<void> {
         await this.ensureReady();
-        const { next, inserts, removed, rewrite } = diffMessages(this.written.get(row.sessionId), messages);
-        // Nothing to add, nothing to drop, and the window is where it was: the row on disk already
-        // says all of this. The reducer state needs no comparison of its own — it is only ever
-        // mutated by reducing messages, and any message that changed is one of the inserts.
+        const { next, inserts, rewrite } = diffMessages(this.written.get(row.sessionId), messages);
+        // Nothing to add, and the window is where it was: the row on disk already says all of this.
+        // The reducer state needs no comparison of its own — it is only ever mutated by reducing
+        // messages, and any message that changed is one of the inserts.
         const watermark = this.writtenWatermark.get(row.sessionId);
         if (
             !rewrite &&
             inserts.length === 0 &&
-            removed.length === 0 &&
             watermark !== undefined &&
             watermark.lastSeq === row.lastSeq &&
             watermark.oldestSeq === row.oldestSeq &&
@@ -519,18 +518,18 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
                     [row.sessionId, row.lastSeq, row.oldestSeq, row.hasOlderMessages ? 1 : 0, row.schemaVersion, row.cachedAt, row.reducerStateJson]
                 );
 
-                // A rewrite is the one case INSERT OR REPLACE cannot express on its own: the rows
-                // for messages that are gone have to be dropped, and nothing left names them.
-                if (rewrite) {
-                    await this.db.runAsync('DELETE FROM session_messages WHERE session_id = ?', [row.sessionId]);
-                } else if (removed.length > 0) {
-                    const marks = removed.map(() => '?').join(',');
-                    await this.db.runAsync(
-                        `DELETE FROM session_messages WHERE session_id = ? AND message_id IN (${marks})`,
-                        [row.sessionId, ...removed]
-                    );
-                }
-
+                // Nothing is ever deleted here, and that is the point.
+                //
+                // This used to drop the rows for messages that had left the window — and a rewrite
+                // dropped every row for the session outright. But a window shrinks as a matter of
+                // course on this channel: a read that is more than a page behind replaces it with
+                // the newest page, and the whole point of the cache is to be the copy the App can
+                // still show when that page is a small one. Deleting the rows made the shrink
+                // permanent and irreversible, which is what "today's messages are gone" was: the
+                // window was replaced by a page of a few dozen messages, and the save that followed
+                // deleted the hundreds of rows behind it. Rows now accumulate; a window is a view of
+                // what is held, not a licence to discard it.
+                //
                 // One statement per chunk rather than one per message: each round trip crosses into
                 // native, and a burst of messages is the normal case, not the exception. 100 rows x
                 // 4 columns stays well under SQLite's bound-parameter limit.
