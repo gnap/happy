@@ -93,9 +93,13 @@ export function candidateInputsFor(
 ): CandidateInputs {
     const sockets: string[] = [];
     for (const [key, socket] of Object.entries(state.daemonSockets)) {
-        if (key.startsWith(`${machineId}:`) && socket?.baseUrl) {
-            sockets.push(socket.baseUrl);
+        // Only this route's own socket. Taking every socket for the machine put the *relay's* url in
+        // the LAN candidates — where it is live, because the relay socket is up — and a machine on
+        // another network then read as reachable on this one.
+        if (key !== `${machineId}:lan` || !socket?.baseUrl) {
+            continue;
         }
+        sockets.push(socket.baseUrl);
     }
     const relay: { baseUrl: string; source: CandidateSource }[] = [];
     const relayEndpoint = state.relayEndpoints[machineId];

@@ -19,6 +19,7 @@ import { Modal } from '@/modal';
 import { useMultiClick } from '@/hooks/useMultiClick';
 import { useAllMachines, useMachinesMap, useMachinePresenceMap, useLanSightings, useRelayDirectory, useRelayEndpoints, useMachineBadgeInputs } from '@/sync/storage';
 import { MachinePresenceBadge } from '@/components/MachinePresenceBadge';
+import { MACHINE_PRESENCE_COLORS } from '@/sync/machinePresence';
 import { machineIsReachable } from '@/utils/machineUtils';
 import { useUnistyles } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
@@ -298,14 +299,16 @@ export const SettingsView = React.memo(function SettingsView() {
             {allMachines.length > 0 && (
                 <ItemGroup title={t('settings.machines')}>
                     {[...allMachines].map((machine) => {
-                        // Green means *this device* can talk to it: its own channel, on the LAN or
-                        // through the relay. The server channel is how the App hears *about* a
-                        // machine, and a machine the server is carrying while nothing here can reach
-                        // it is exactly the case that must not read as online — it is on someone
-                        // else's network, or behind a NAT, and a green dot there is a promise the
-                        // App cannot keep.
+                        // Which channel this device would actually use, named. One word cannot say
+                        // "on our network" and "reachable some other way" at once, and the whole
+                        // question here is whether a machine is on *this* network — so the row says
+                        // which channel it is on, and the colour is that channel's own.
                         const presence = machinePresence[machine.id] ?? 'offline';
-                        const isOnline = presence === 'lan' || presence === 'relay';
+                        const isOnline = presence !== 'offline' && presence !== 'server';
+                        const statusLabel = presence === 'lan' ? t('status.lan')
+                            : presence === 'relay' ? t('sessionInfo.channelRelay')
+                                : presence === 'server' ? t('sessionInfo.channelServer')
+                                    : t('status.offline');
                         const host = machine.metadata?.host || 'Unknown';
                         const displayName = machine.metadata?.displayName;
                         const platform = machine.metadata?.platform || '';
@@ -321,7 +324,7 @@ export const SettingsView = React.memo(function SettingsView() {
                         if (platform) {
                             subtitle = subtitle ? `${subtitle} • ${platform}` : platform;
                         }
-                        subtitle = subtitle ? `${subtitle} • ${isOnline ? t('status.online') : t('status.offline')}` : (isOnline ? t('status.online') : t('status.offline'));
+                        subtitle = subtitle ? `${subtitle} • ${statusLabel}` : statusLabel;
 
                         return (
                             <Item

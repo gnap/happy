@@ -4,6 +4,7 @@ import { ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
+import { ChannelBlock } from './lan';
 import { ItemList } from '@/components/ItemList';
 import { useRouter } from 'expo-router';
 import Constants from 'expo-constants';
@@ -131,39 +132,6 @@ function describePhase(state: DaemonConnectionState): string {
 }
 
 /** The relay itself: one connection, and what it is holding. */
-const RelayRow = React.memo(function RelayRow({
-    enabled,
-    connected,
-    address,
-    machines,
-    sessions,
-}: {
-    enabled: boolean;
-    connected: boolean;
-    address: string;
-    machines: number;
-    sessions: number;
-}) {
-    // Three situations that used to look identical — not switched on, not yet reached, reachable —
-    // and telling them apart is the difference between a setting and a fault.
-    const subtitle = !enabled
-        ? 'Switched off in Channel Priority'
-        : connected
-            ? `${address} · ${machines} machine${machines === 1 ? '' : 's'} · ${sessions} session${sessions === 1 ? '' : 's'}`
-            : `Connecting to ${address}…`;
-    return (
-        <Item
-            title="Relay"
-            subtitle={subtitle}
-            detail={!enabled ? 'off' : connected ? 'connected' : 'idle'}
-            rightElement={!enabled
-                ? <Ionicons name="remove-circle" size={22} color="#8E8E93" />
-                : <PhaseIndicator phase={connected ? 'live' : 'opening'} />}
-            showChevron={false}
-        />
-    );
-});
-
 /** A tag the relay holds that no key on this device matches. */
 const RelayUnknownRow = React.memo(function RelayUnknownRow({ tag }: { tag: string }) {
     return (
@@ -181,6 +149,8 @@ export default function DevScreen() {
     const router = useRouter();
     const [debugMode, setDebugMode] = useLocalSettingMutable('debugMode');
     const [verboseLogging, setVerboseLogging] = React.useState(false);
+    // The one LAN socket this device is holding, for the transport line under the LAN block.
+    const lanSocket = Object.entries(useDaemonSockets()).find(([key, socket]) => key.endsWith(':lan') && socket.phase === 'live')?.[1];
     const socketStatus = useSocketStatus();
     const daemonSockets = useDaemonSockets();
     const lanSightingCount = Object.keys(useLanSightings()).length;
@@ -538,55 +508,51 @@ export default function DevScreen() {
                 footer="Reachability and use are different things: a daemon can be advertising while no session is using it — the socket only opens for a session whose machine is on this network and whose CLI declared it can serve one. So an idle socket is not a broken one."
             >
                 <Item
-                    title="API Endpoint"
-                    detail={getServerUrl()}
-                    onPress={handleEditServerUrl}
-                />
-                <Item
-                    title="Server Socket"
-                    subtitle={getSocketStatusSubtitle()}
-                    detail={socketStatus.status}
-                    rightElement={<SocketStatusIndicator />}
-                    showChevron={false}
-                />
-                <Item
-                    title="LAN"
-                    subtitle={lanSightingCount === 0
-                        ? 'No daemon advertising on this network'
-                        : `${lanSightingCount} advertising · ${lanConnectedCount} connected`}
-                    detail={lanPhase}
-                    rightElement={<PhaseIndicator phase={lanSightingCount === 0 ? 'idle' : lanPhase} />}
-                    showChevron={false}
-                />
-                <Item
-                    title="LAN Round Trip"
-                    subtitle="Discover a local daemon, authenticate, read and decrypt history"
-                    icon={<Ionicons name="wifi-outline" size={28} color="#007AFF" />}
-                    onPress={() => router.push('/dev/lan')}
-                />
-                <Item
                     title="Channel Priority"
-                    subtitle="Enable, disable and reorder LAN / Relay / Server"
+                    subtitle="The order every decision is made in — a channel is on when it is in the list"
                     detail={channelPriority.map((c) => c === 'lan' ? 'LAN' : c === 'relay' ? 'Relay' : 'Server').join(' › ')}
                     icon={<Ionicons name="git-branch-outline" size={28} color="#007AFF" />}
                     onPress={() => router.push('/dev/channels')}
                 />
-                <RelayRow
-                    enabled={relayEnabled}
-                    connected={relayHubConnected}
-                    address={sync.relayAddress()}
-                    machines={relayMachineCount}
-                    sessions={relaySessionCount}
+                <ChannelBlock
+                    channel="lan"
+                    liveness={
+                        <Item
+                            title="LAN Socket"
+                            subtitle={lanSocket
+                                ? `${lanSocket.baseUrl} · up ${formatTimeAgo(lanSocket.connectedAt)}`
+                                : 'No daemon on this network is serving an open channel'}
+                            detail={lanSocket ? 'live' : 'off'}
+                            rightElement={lanSocket
+                                ? <Ionicons name="checkmark-circle" size={22} color="#34C759" />
+                                : <Ionicons name="close-circle" size={22} color="#8E8E93" />}
+                            showChevron={false}
+                        />
+                    }
                 />
+                <ChannelBlock channel="relay" />
+                <ChannelBlock
+                    channel="server"
+                    liveness={
+                        <Item
+                            title="Server Socket"
+                            subtitle={getSocketStatusSubtitle()}
+                            detail={socketStatus.status}
+                            rightElement={<SocketStatusIndicator />}
+                            showChevron={false}
+                        />
+                    }
+                >
+                    <Item
+                        title="API Endpoint"
+                        subtitle="The server this device talks to"
+                        detail={getServerUrl()}
+                        onPress={handleEditServerUrl}
+                    />
+                </ChannelBlock>
                 {relayUnknownTags.map((tag) => (
                     <RelayUnknownRow key={tag} tag={tag} />
                 ))}
-                <Item
-                    title="Relay Round Trip"
-                    subtitle="Through the public relay: authenticate, list sessions, read and decrypt history"
-                    icon={<Ionicons name="swap-horizontal" size={28} color="#AF52DE" />}
-                    onPress={() => router.push('/dev/lan?route=relay')}
-                />
             </ItemGroup>
         </ItemList>
     );
