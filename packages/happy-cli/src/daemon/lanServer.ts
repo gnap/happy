@@ -652,7 +652,11 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     });
     const messageV1 = accountProofMessageV1({
       method: request.method ?? 'POST',
-      path: forwarded ?? path,
+      // `path`, not `forwarded`: the App signs the path it asks for — `/lan/sessions/<id>/control` —
+      // which is exactly what this daemon sees, because the relay stripped its `/r/<tag>` prefix
+      // before forwarding. Using the caller's prefixed path here was backwards and made every
+      // relayed proof fail while the LAN ones passed.
+      path,
       nonce: nonce ?? '',
       at: Number.isFinite(at) ? at : 0,
       bodyDigest: '',
