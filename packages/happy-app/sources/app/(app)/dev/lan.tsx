@@ -29,6 +29,7 @@ import { decryptLanHistory } from '@/sync/lan/history';
 
 /** 各通道活性: what each channel is doing as a channel, before any machine is looked at. */
 export const ChannelLivenessGroup = React.memo(function ChannelLivenessGroup() {
+    const { theme } = useUnistyles();
     const machines = useAllMachines();
     const links = useChannelLinks();
     const badgeInputs = useMachineBadgeInputs();
@@ -48,8 +49,15 @@ export const ChannelLivenessGroup = React.memo(function ChannelLivenessGroup() {
                     <Item
                         key={`live-${link.channel}`}
                         title={link.channel.toUpperCase()}
-                        subtitle={`link: ${link.state ?? 'absent'} · reaching ${reaching}/${ids.length} · capable ${capable} · ${extra}`}
+                        subtitle={link.state ?? 'absent'}
+                        icon={<Ionicons name={link.channel === 'lan' ? 'wifi-outline' : link.channel === 'relay' ? 'swap-horizontal' : 'globe-outline'} size={24} color={link.state === 'connected' ? '#34C759' : '#8E8E93'} />}
                         showChevron={false}
+                        rightElement={
+                            <View style={{ alignItems: 'flex-end' }}>
+                                <Text style={{ fontSize: 13, color: theme.colors.text }}>{`${reaching}/${ids.length} reaching`}</Text>
+                                <Text style={{ fontSize: 11, color: theme.colors.textSecondary ?? theme.colors.text }}>{`${capable} capable · ${extra}`}</Text>
+                            </View>
+                        }
                     />
                 );
             })}
@@ -77,8 +85,8 @@ export const ConnectionDetailsGroup = React.memo(function ConnectionDetailsGroup
             ...held.map(([key, socket]) => ({ kind: 'row' as const, key: `s-${key}`, text: `socket ${key.slice(id.length + 1)}  ${socket.phase}  ${socket.baseUrl ?? ''}` })),
             ...candidates.map((candidate) => {
                 const state = health[candidateKey(candidate.machineId, candidate.route, candidate.baseUrl)];
-                const retry = state?.retryAt ? `  retry ${Math.max(0, Math.round((state.retryAt - Date.now()) / 1000))}s` : '';
-                return { kind: 'row' as const, key: `c-${candidate.route}-${candidate.baseUrl}`, text: `cand ${candidate.route}/${candidate.source}  ${state?.phase ?? 'unknown'}${retry}  ${candidate.baseUrl}` };
+                const retry = state?.retryAt ? `retry ${Math.max(0, Math.round((state.retryAt - Date.now()) / 1000))}s` : '';
+                return { kind: 'row' as const, key: `c-${candidate.route}-${candidate.baseUrl}`, text: `${candidate.route}/${candidate.source}  ${state?.phase ?? 'unknown'} ${retry}  ${candidate.baseUrl}` };
             }),
         ];
     });
@@ -90,9 +98,13 @@ export const ConnectionDetailsGroup = React.memo(function ConnectionDetailsGroup
                 : rows.map((row) => row.kind === 'header'
                     ? <Item key={row.key} title={row.text} showChevron={false} />
                     : (
-                        <View key={row.key} style={{ paddingHorizontal: 16, paddingVertical: 4 }}>
-                            <Text style={{ fontSize: 11, color: theme.colors.text }} numberOfLines={1}>{row.text}</Text>
-                        </View>
+                        <Item
+                            key={row.key}
+                            title={row.text.split('  ')[0]}
+                            subtitle={row.text.split('  ')[1]}
+                            detail={row.text.split('  ').slice(2).join(' ')}
+                            showChevron={false}
+                        />
                     ))}
         </ItemGroup>
     );

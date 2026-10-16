@@ -552,12 +552,6 @@ export default function DevScreen() {
                 />
                 <ChannelLivenessGroup />
                 <ConnectionDetailsGroup />
-                <Item
-                    title="LAN Round Trip"
-                    subtitle="Discover a local daemon, authenticate, read and decrypt history"
-                    icon={<Ionicons name="wifi-outline" size={28} color="#007AFF" />}
-                    onPress={() => router.push('/dev/lan')}
-                />
                 <RelayRow
                     enabled={relayEnabled}
                     connected={relayHubConnected}
@@ -568,12 +562,6 @@ export default function DevScreen() {
                 {relayUnknownTags.map((tag) => (
                     <RelayUnknownRow key={tag} tag={tag} />
                 ))}
-                <Item
-                    title="Relay Round Trip"
-                    subtitle="Through the public relay: authenticate, list sessions, read and decrypt history"
-                    icon={<Ionicons name="swap-horizontal" size={28} color="#AF52DE" />}
-                    onPress={() => router.push('/dev/lan?route=relay')}
-                />
             </ItemGroup>
         </ItemList>
     );
