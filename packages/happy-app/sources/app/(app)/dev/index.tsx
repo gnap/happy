@@ -538,6 +538,13 @@ export default function DevScreen() {
                 title="Network"
                 footer="Reachability and use are different things: a daemon can be advertising while no session is using it — the socket only opens for a session whose machine is on this network and whose CLI declared it can serve one. So an idle socket is not a broken one."
             >
+                <Item
+                    title="Channel Priority"
+                    subtitle="The order every decision is made in — a channel is on when it is in the list"
+                    detail={channelPriority.map((c) => c === 'lan' ? 'LAN' : c === 'relay' ? 'Relay' : 'Server').join(' › ')}
+                    icon={<Ionicons name="git-branch-outline" size={28} color="#007AFF" />}
+                    onPress={() => router.push('/dev/channels')}
+                />
                 <ChannelBlock channel="lan" />
                 <ChannelBlock channel="relay">
                 <RelayRow
