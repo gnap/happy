@@ -84,8 +84,16 @@ const SERVER_OPERATIONS: ReadonlySet<ChannelOperation> = new Set([
  * channel decides here, and everything else — health, source ranking, demotions — is the same for
  * all of them because it is about addresses, not about channels.
  */
-function candidatesFor(state: ChannelState, machineId: string, now: number, routes: DaemonRoute[]): Candidate[] {
-    return orderedCandidates(machineId, candidateInputsFor(state, machineId, { now, routes }));
+function candidatesFor(
+    state: ChannelState,
+    machineId: string,
+    now: number,
+    routes: DaemonRoute[],
+    options?: { forRead?: boolean },
+): Candidate[] {
+    // A read skips an address that has been failing: a page can cost a full timeout, so the read
+    // cannot walk the list the way opening a socket can.
+    return orderedCandidates(machineId, candidateInputsFor(state, machineId, { now, routes, forRead: options?.forRead }));
 }
 
 /** The same list, in the shape anything outside the channel layer sends to. */
@@ -231,7 +239,7 @@ function lanDriver(state: ChannelState): ChannelDriver {
             || candidatesFor(state, machineId, Date.now(), ['lan']).some((candidate) => answeredAt(state, candidate)),
         // Whether it is reaching it *now* is `machine().alive` above: the glyph is drawn grey for
         // capable-but-quiet, which is what the two together mean.
-        endpoints: (machineId, now) => asEndpoints(candidatesFor(state, machineId, now, ['lan'])),
+        endpoints: (machineId, now, options) => asEndpoints(candidatesFor(state, machineId, now, ['lan'], options)),
         // A socket is what turns a claimed address into a proven one, so this is the best address
         // even when nothing has answered there yet — that is the point of opening it.
         socketTarget: (machineId, now) => asEndpoints(candidatesFor(state, machineId, now, ['lan']))[0] ?? null,
@@ -284,7 +292,7 @@ function relayDriver(state: ChannelState): ChannelDriver {
         // Nothing at all while the hub is down: the relay is one connection, and a machine is
         // reached as a stream inside it. Offering an address here would have the socket layer open
         // a per-machine connection to the same relay — the shape the hub replaced.
-        endpoints: (machineId, now) => (state.relayHubConnected ? asEndpoints(candidatesFor(state, machineId, now, ['relay'])) : []),
+        endpoints: (machineId, now, options) => (state.relayHubConnected ? asEndpoints(candidatesFor(state, machineId, now, ['relay'], options)) : []),
         // A socket to the relay only when the relay is *carrying* the machine: every machine with a
         // key has a derived relay address, and holding a stream open for each of those would be a
         // connection to a machine that never dialled in.

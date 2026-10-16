@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+    sendBatch,
     sendOverDaemonSocket,
     sendOverServerHttp,
     sendOverServerSocket,
@@ -138,5 +139,90 @@ describe('sendOverServerHttp', () => {
             batch,
         });
         expect(outcome).toEqual({ kind: 'failed', error: new Error('offline') });
+    });
+});
+
+describe('sendBatch', () => {
+    const transport = (over: Partial<ServerSendTransport> = {}): ServerSendTransport => ({
+        isConnected: true,
+        send: () => undefined,
+        request: async () => ({ ok: true, status: 200, json: async () => ({}) }),
+        ...over,
+    });
+
+    it('stops at the machine when the machine takes it, and never asks the server', async () => {
+        // The order is the decision: a session the machine is carrying is written to there, and the
+        // server must not also be handed the message — the two would both deliver it.
+        const send = vi.fn();
+        const result = await sendBatch({
+            daemon: { send: () => true },
+            server: transport({ send }),
+            sessionId: 'sess-1',
+            batch,
+        });
+        expect(result).toEqual({ kind: 'unconfirmed' });
+        expect(send).not.toHaveBeenCalled();
+    });
+
+    it('falls through to the server when the machine is not carrying the session', async () => {
+        // "Unavailable" is not a failure: a socket refusing the batch means somewhere else to go,
+        // and the entries stay queued either way.
+        const result = await sendBatch({
+            daemon: { send: () => false },
+            server: transport(),
+            sessionId: 'sess-1',
+            batch,
+        });
+        expect(result).toEqual({ kind: 'acked', over: 'socket' });
+    });
+
+    it('takes the server socket echo as the answer, with no cursor to move', async () => {
+        const result = await sendBatch({ server: transport(), sessionId: 'sess-1', batch });
+        expect(result).toEqual({ kind: 'acked', over: 'socket' });
+    });
+
+    it('walks on to HTTP when the socket cannot take the batch', async () => {
+        // The route below is idempotent on `localId`, so a batch the socket may have half-written
+        // is safe to repeat there.
+        const requested: string[] = [];
+        const result = await sendBatch({
+            server: transport({
+                isConnected: false,
+                request: async (path) => {
+                    requested.push(path);
+                    return { ok: true, status: 200, json: async () => ({ messages: [{ seq: 7 }] }) };
+                },
+            }),
+            sessionId: 'sess-1',
+            batch,
+        });
+        expect(requested).toHaveLength(1);
+        expect(result).toEqual({ kind: 'acked', over: 'http', advanceTo: 7 });
+    });
+
+    it('carries the server cursor back, because HTTP is the only rung that knows it', async () => {
+        const result = await sendBatch({
+            server: transport({
+                isConnected: false,
+                request: async () => ({ ok: true, status: 200, json: async () => ({ messages: [{ seq: 3 }, { seq: 11 }] }) }),
+            }),
+            sessionId: 'sess-1',
+            batch,
+        });
+        expect(result).toEqual({ kind: 'acked', over: 'http', advanceTo: 11 });
+    });
+
+    it('reports the walk as failed when the last rung fails', async () => {
+        // Nothing below HTTP to fall back to, so this is the walk's own failure and the caller
+        // reports it rather than inventing another transport.
+        const result = await sendBatch({
+            server: transport({
+                isConnected: false,
+                request: async () => { throw new Error('offline'); },
+            }),
+            sessionId: 'sess-1',
+            batch,
+        });
+        expect(result).toEqual({ kind: 'failed', error: new Error('offline') });
     });
 });

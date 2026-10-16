@@ -52,8 +52,9 @@ import { channelDrivers as buildChannelDrivers } from './channels/measure';
 import { channelAvailability } from './channels/resolve';
 import { candidateInputsFor, orderedCandidates } from './channels/candidates';
 import { carryOperation, type HealthRecorder } from './channels/execute';
+import { readRoutes } from './channels/readRoute';
 import { endpointBaseUrl, type ChannelDriver, type ChannelOperation } from './channels/types';
-import { sendOverDaemonSocket, sendOverServerHttp, sendOverServerSocket } from './channels/ops';
+import { sendBatch, type SendResult } from './channels/ops';
 import type { ChannelReason } from './channels/types';
 import { FetchSlots } from './fetchSlots';
 import { DaemonConnections, type DaemonTarget } from './lan/daemonConnections';
@@ -2819,80 +2820,55 @@ class Sync {
         }
         const batch = pending.slice();
 
-        // A session on the LAN channel writes back over the LAN, the same way the server path
-        // prefers its own socket. Both channels are chosen the same way and neither is written to
-        // twice — keeping them in agreement is the CLI's job, since the message it receives is
-        // synced onward by its ordinary outgoing path.
-        const daemon = this.daemonSendTarget(sessionId);
-        if (daemon) {
-            const outcome = sendOverDaemonSocket({
-                socket: daemon.handle,
-                sessionId,
-                batch,
-                // Deliberately not marked acked here, unlike the server socket path. There the
-                // server echoes the message back, so a fast-ack is a claim the server will honour;
-                // here nothing confirms the write but the session itself, and treating the write as
-                // the delivery is exactly what hides a dropped message. Each entry waits for that
-                // verdict, and fails if it never arrives.
-                awaitVerdict: (localId) => this.awaitLanDelivery(localId),
-            });
-            if (outcome.kind === 'unconfirmed') {
-                for (const msg of batch) {
-                    outcome.awaitVerdict(msg.localId);
-                }
-                return;
-            }
-            if (outcome.kind === 'failed') {
-                throw outcome.error;
-            }
-        }
-
-        // Prefer WebSocket send — same path as CLI. No HTTP round-trip, no
-        // Tauri HTTP plugin issues. Server echoes back via new-message WS
-        // event, which handleUpdate already fast-acks.
-        const overSocket = sendOverServerSocket({ transport: apiSocket, sessionId, batch });
-        if (overSocket.kind === 'acked') {
-            pending.splice(0, batch.length);
-            for (const msg of batch) {
-                storage.getState().markOutboxMessageAcked(msg.localId);
-            }
-            // WS send has no seq ack — pull receive cursor forward via HTTP.
-            this.getMessagesSync(sessionId).invalidate();
-            return;
-        }
-        // Anything else — never connected, or the write threw mid-batch — falls through to the HTTP
-        // route below, which is idempotent on `localId`. A genuinely unusable server is reported by
-        // that attempt failing, not by this one declining to try.
-
+        // The walk itself lives in `channels/ops.ts`, where its order and what each rung's answer
+        // means are pinned down by tests rather than by reading this method. What stays here is the
+        // queue: what leaving it means, and what each outcome settles.
         const controller = new AbortController();
         this.sendAbortControllers.set(sessionId, controller);
+        let result: SendResult;
         try {
-            const outcome = await sendOverServerHttp({
-                transport: apiSocket,
+            result = await sendBatch({
+                daemon: this.daemonSendTarget(sessionId)?.handle ?? null,
+                server: apiSocket,
                 sessionId,
                 batch,
                 signal: controller.signal,
             });
-            // The one path that says where the session now stands: the server answered with the seqs
-            // it assigned, so the receive cursor moves with it rather than being pulled.
-            if (outcome.kind === 'failed') {
-                this.maybeStartBackgroundSendWatchdog();
-                throw outcome.error;
-            }
-            pending.splice(0, batch.length);
-            // Server confirmed – mark as acked (green check). The echo
-            // (fast-ack or text-matched session-protocol echo) will remove it.
-            for (const msg of batch) {
-                storage.getState().markOutboxMessageAcked(msg.localId);
-            }
-            if (outcome.kind === 'acked' && outcome.advanceTo !== undefined) {
-                const currentLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
-                if (outcome.advanceTo > currentLastSeq) {
-                    this.sessionLastSeq.set(sessionId, outcome.advanceTo);
-                }
-            }
         } finally {
             this.sendAbortControllers.delete(sessionId);
+        }
+
+        if (result.kind === 'unconfirmed') {
+            // A write over the machine's own channel is not a delivery. There the server echoes the
+            // message back so a fast-ack is a claim it will honour; here nothing confirms the write
+            // but the session itself, and treating the write as the delivery is exactly what hides
+            // a dropped message. Each entry waits for that verdict, and fails if it never arrives.
+            for (const msg of batch) {
+                this.awaitLanDelivery(msg.localId);
+            }
+            return;
+        }
+        if (result.kind === 'failed') {
+            this.maybeStartBackgroundSendWatchdog();
+            throw result.error;
+        }
+
+        pending.splice(0, batch.length);
+        // Server confirmed – mark as acked (green check). The echo (fast-ack or text-matched
+        // session-protocol echo) will remove it.
+        for (const msg of batch) {
+            storage.getState().markOutboxMessageAcked(msg.localId);
+        }
+        if (result.over === 'socket') {
+            // WS send has no seq ack — pull receive cursor forward via HTTP.
+            this.getMessagesSync(sessionId).invalidate();
+        } else if (result.advanceTo !== undefined) {
+            // The one path that says where the session now stands: the server answered with the seqs
+            // it assigned, so the receive cursor moves with it rather than being pulled.
+            const currentLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
+            if (result.advanceTo > currentLastSeq) {
+                this.sessionLastSeq.set(sessionId, result.advanceTo);
+            }
         }
 
         if (pending.length === 0) {
@@ -3559,12 +3535,18 @@ class Sync {
                     encryption: this.encryption,
                     page: { kind: 'older', before: link.older },
                     connection: link.connection,
-                    candidates: orderedCandidates(link.machineId, candidateInputsFor(storage.getState(), link.machineId, {
-                        now: Date.now(),
-                        routes: [link.connection.route],
-                    })),
+                    candidates: this.readCandidates(link.machineId, [link.connection.route]),
                 });
                 const read = attempt.kind === 'read' ? attempt.read : null;
+                // The same accounting the forward read does. Paging back is how a machine gets read
+                // again after a quiet spell, and it used to be the one path that learned nothing
+                // from what it found — so an address that failed here was not held against it, and
+                // one that answered was not credited.
+                if (attempt.kind === 'unreachable' && attempt.baseUrl) {
+                    storage.getState().candidateFailed(link.machineId, link.connection.route, attempt.baseUrl);
+                } else if (attempt.kind === 'read') {
+                    storage.getState().candidateSucceeded(link.machineId, attempt.read.connection.route, attempt.read.connection.baseUrl);
+                }
                 if (!read) {
                     storage.getState().setLoadingOlder(sessionId, false);
                     return;
@@ -4413,29 +4395,11 @@ class Sync {
             : persisted && persisted.machineId === machineId
                 ? { cursor: persisted.cursor, older: persisted.floor, hasOlder: persisted.hasOlder }
                 : null;
-        // Each channel reads on its own route and only that route: a session on the relay does not
-        // browse for a machine known to be elsewhere, and one on the LAN never goes through the
-        // relay. Only the server-failure fallback, which has no channel of its own, tries both.
-        const channel = this.preferredChannel(sessionId);
-        // Which routes this read may use: the one the channel chose, or every daemon route when it
-        // has fallen back from the server and has no channel of its own. The addresses come from the
-        // candidate list — the machine's own published ones included, which is what the read path
-        // could not reach before and why a machine found without mDNS was never readable on the LAN.
-        const routes: DaemonRoute[] = forceRoute
-            ? [forceRoute]
-            : channel === 'server'
-                ? (this.fallbackVia() === 'any' ? ['lan', 'relay'] : [this.fallbackVia() as DaemonRoute])
-                : [channel as DaemonRoute];
+        const routes = this.readRoutes(sessionId, machineId, forceRoute);
         // The session's own connection when it has one, otherwise whatever this machine was last
         // reached over — same machine, so the same address and a token that covers it.
         const knownConnection = inMemory?.connection ?? (machineId ? this.lanMachineConnections.get(machineId) : undefined);
-        const candidates = machineId
-            ? orderedCandidates(machineId, candidateInputsFor(storage.getState(), machineId, {
-                now: Date.now(),
-                routes,
-                forRead: true,
-            }))
-            : [];
+        const candidates = this.readCandidates(machineId, routes);
         /**
          * One read, with what it learned about the address written down.
          *
@@ -4787,6 +4751,48 @@ class Sync {
             // road is not a retry for that.
             refused: outcome.kind === 'refused',
         };
+    }
+
+    /**
+     * The addresses one read may try, asked of the channels themselves.
+     *
+     * The channels answer where they would send — ordered, health-filtered, and skipping an address a
+     * read cannot afford to wait on — so the read path holds no address logic of its own any more.
+     */
+    private readCandidates(machineId: string | undefined, routes: readonly DaemonRoute[]): { baseUrl: string; route: 'lan' | 'relay' }[] {
+        if (!machineId) {
+            return [];
+        }
+        const now = Date.now();
+        return this.channelDrivers()
+            .filter((driver) => driver.channel !== 'server' && routes.includes(driver.channel as DaemonRoute))
+            .flatMap((driver) => driver.endpoints(machineId, now, { forRead: true }))
+            .flatMap((endpoint) => (endpoint.kind === 'address' ? [{ baseUrl: endpoint.baseUrl, route: endpoint.route }] : []));
+    }
+
+    /**
+     * Which routes one read may use, asked of the channels rather than worked out here.
+     *
+     * `forceRoute` is the caller saying so outright. Otherwise a session on a channel reads on that
+     * channel and only that one — a session on the relay does not browse for a machine known to be
+     * elsewhere — and a session the server is carrying has no channel of its own, so every daemon
+     * channel that would accept a read is offered, in the device's priority order.
+     *
+     * That order is the point of asking: the list used to be the literal `['lan', 'relay']` here,
+     * so this was the one place a priority change did not reach.
+     */
+    private readRoutes(sessionId: string, machineId: string | undefined, forceRoute?: DaemonRoute): DaemonRoute[] {
+        const drivers = this.channelDrivers().filter((driver) => driver.channel !== 'server');
+        const now = Date.now();
+        const pinned = storage.getState().channelOverride[sessionId];
+        return readRoutes({
+            forced: forceRoute,
+            pinned: pinned && pinned !== 'server' ? (pinned as DaemonRoute) : pinned === 'server' ? 'server' : undefined,
+            chosen: this.preferredChannel(sessionId),
+            accepts: (route) => !machineId
+                ? false
+                : drivers.some((driver) => driver.channel === route && driver.accepts('read', machineId, now)),
+        });
     }
 
     /** Where an attempt's outcome is written, so the next caller starts from what this one learned. */

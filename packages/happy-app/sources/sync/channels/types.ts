@@ -148,7 +148,7 @@ export type ChannelDriver = {
      * that is the machine's published ones, a browse's sightings and any address this App holds a
      * connection to, with the proven ones first and the demoted ones left out.
      */
-    endpoints(machineId: string, now: number): ChannelEndpoint[];
+    endpoints(machineId: string, now: number, options?: { forRead?: boolean }): ChannelEndpoint[];
     /**
      * The endpoint a socket should be held at for this machine, or null when this channel has
      * nothing to hold one to.
