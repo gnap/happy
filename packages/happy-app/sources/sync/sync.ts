@@ -3559,10 +3559,7 @@ class Sync {
                     encryption: this.encryption,
                     page: { kind: 'older', before: link.older },
                     connection: link.connection,
-                    candidates: orderedCandidates(link.machineId, candidateInputsFor(storage.getState(), link.machineId, {
-                        now: Date.now(),
-                        routes: [link.connection.route],
-                    })),
+                    candidates: this.readCandidates(link.machineId, [link.connection.route]),
                 });
                 const read = attempt.kind === 'read' ? attempt.read : null;
                 // The same accounting the forward read does. Paging back is how a machine gets read
@@ -4426,13 +4423,7 @@ class Sync {
         // The session's own connection when it has one, otherwise whatever this machine was last
         // reached over — same machine, so the same address and a token that covers it.
         const knownConnection = inMemory?.connection ?? (machineId ? this.lanMachineConnections.get(machineId) : undefined);
-        const candidates = machineId
-            ? orderedCandidates(machineId, candidateInputsFor(storage.getState(), machineId, {
-                now: Date.now(),
-                routes,
-                forRead: true,
-            }))
-            : [];
+        const candidates = this.readCandidates(machineId, routes);
         /**
          * One read, with what it learned about the address written down.
          *
@@ -4784,6 +4775,23 @@ class Sync {
             // road is not a retry for that.
             refused: outcome.kind === 'refused',
         };
+    }
+
+    /**
+     * The addresses one read may try, asked of the channels themselves.
+     *
+     * The channels answer where they would send — ordered, health-filtered, and skipping an address a
+     * read cannot afford to wait on — so the read path holds no address logic of its own any more.
+     */
+    private readCandidates(machineId: string | undefined, routes: readonly DaemonRoute[]): { baseUrl: string; route: 'lan' | 'relay' }[] {
+        if (!machineId) {
+            return [];
+        }
+        const now = Date.now();
+        return this.channelDrivers()
+            .filter((driver) => driver.channel !== 'server' && routes.includes(driver.channel as DaemonRoute))
+            .flatMap((driver) => driver.endpoints(machineId, now, { forRead: true }))
+            .flatMap((endpoint) => (endpoint.kind === 'address' ? [{ baseUrl: endpoint.baseUrl, route: endpoint.route }] : []));
     }
 
     /**
