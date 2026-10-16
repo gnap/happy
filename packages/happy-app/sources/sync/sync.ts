@@ -3565,6 +3565,15 @@ class Sync {
                     })),
                 });
                 const read = attempt.kind === 'read' ? attempt.read : null;
+                // The same accounting the forward read does. Paging back is how a machine gets read
+                // again after a quiet spell, and it used to be the one path that learned nothing
+                // from what it found — so an address that failed here was not held against it, and
+                // one that answered was not credited.
+                if (attempt.kind === 'unreachable' && attempt.baseUrl) {
+                    storage.getState().candidateFailed(link.machineId, link.connection.route, attempt.baseUrl);
+                } else if (attempt.kind === 'read') {
+                    storage.getState().candidateSucceeded(link.machineId, attempt.read.connection.route, attempt.read.connection.baseUrl);
+                }
                 if (!read) {
                     storage.getState().setLoadingOlder(sessionId, false);
                     return;
