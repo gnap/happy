@@ -298,7 +298,14 @@ export const SettingsView = React.memo(function SettingsView() {
             {allMachines.length > 0 && (
                 <ItemGroup title={t('settings.machines')}>
                     {[...allMachines].map((machine) => {
-                        const isOnline = machineIsReachable(machinePresence[machine.id] ?? 'offline');
+                        // Green means *this device* can talk to it: its own channel, on the LAN or
+                        // through the relay. The server channel is how the App hears *about* a
+                        // machine, and a machine the server is carrying while nothing here can reach
+                        // it is exactly the case that must not read as online — it is on someone
+                        // else's network, or behind a NAT, and a green dot there is a promise the
+                        // App cannot keep.
+                        const presence = machinePresence[machine.id] ?? 'offline';
+                        const isOnline = presence === 'lan' || presence === 'relay';
                         const host = machine.metadata?.host || 'Unknown';
                         const displayName = machine.metadata?.displayName;
                         const platform = machine.metadata?.platform || '';
