@@ -335,11 +335,17 @@ export async function machineUpdateMetadata(
  * Abort the current session operation
  */
 /**
- * Hands a control call to the machine's own channel first, and to the server when it has none.
+ * Hands a control call to the machine's own channel, and to the server only when it has none.
  *
  * The parameters are encrypted once, here, and then travel either way: the daemon cannot read them
  * and does not need to — it forwards them to the session, whose key opens them. So the two routes
- * are the same request down two paths, and the App does not care which one carried it.
+ * are the same request down two paths.
+ *
+ * The distinction that matters is why the machine's channel did not carry it. "It has none" — no
+ * address, no key — is what the server route is for. "It answered and refused" is not: that is the
+ * machine saying no to this device, and asking the server is asking the same machine by another
+ * road, or substituting a different action. Which is how an abort that the machine refused came
+ * back as a killed process.
  */
 async function sessionControl<T>(
     sessionId: string,
@@ -349,8 +355,14 @@ async function sessionControl<T>(
     const sessionEncryption = sync.encryption?.getSessionEncryption(sessionId);
     if (sessionEncryption) {
         const encrypted = await sessionEncryption.encryptRaw(params);
-        if (await sync.sessionControl(sessionId, method, encrypted)) {
+        const outcome = await sync.sessionControl(sessionId, method, encrypted);
+        if (outcome === 'done') {
             return undefined as T;
+        }
+        if (outcome === 'refused') {
+            // The machine answered. Nothing else carries this now: the caller is told, rather than
+            // handed whatever the next route happens to do.
+            throw new Error('The machine refused this action. It needs the account to authorise it.');
         }
     }
     return apiSocket.sessionRPC<T, unknown>(sessionId, method, params);
