@@ -124,7 +124,7 @@ export type LanHistory = {
 };
 
 import type { VersionState } from './versionState';
-import { accountProofMessage, verifyAccountProof } from './accountProof';
+import { accountProofMessage, accountProofMessageV1, verifyAccountProof } from './accountProof';
 
 export type LanServerOptions = {
   /** The machine key: a 32-byte symmetric secret shared with the App via the machine record. */
@@ -583,13 +583,13 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     if (!requireToken(request)) {
       return reply.code(401).send({ error: 'unauthorized' });
     }
-    if (!requireAccountProof(request)) {
+    const { sessionId } = request.params as { sessionId: string };
+    if (!requireAccountProof(request, { operation: 'restart', target: sessionId })) {
       return reply.code(403).send({ error: 'this action needs the account, not just the machine key' });
     }
     if (!opts.restartSession) {
       return reply.code(404).send({ error: 'this daemon does not restart sessions' });
     }
-    const { sessionId } = request.params as { sessionId: string };
     logger.debug(`[lan] restart ${sessionId} from=${clientAddress(request)}`);
     const result = await opts.restartSession(sessionId);
     logger.debug(`[lan] restart ${sessionId} success=${result.success}${result.error ? ` error=${result.error}` : ''}`);
@@ -613,7 +613,11 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
    * cannot tell an account from a device holding the machine key, and guessing "allowed" would make
    * this decoration.
    */
-  const requireAccountProof = (request: { headers: Record<string, unknown>; method?: string; url?: string }): boolean => {
+  const requireAccountProof = (
+    request: { headers: Record<string, unknown>; method?: string; url?: string },
+    /** What the proof is about: the action, and what it is being asked of. */
+    action: { operation: string; target: string },
+  ): boolean => {
     if (!opts.accountProof) {
       // A warning, not a debug line: this daemon cannot authorise the action at all, and nothing
       // else about the request will say so — the caller sees a refusal it cannot explain.
@@ -628,11 +632,26 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     const at = Number.parseInt(header('x-happy-proof-at') ?? '', 10);
     const signature = header('x-happy-proof-signature');
     const path = (request.url ?? '').split('?')[0];
+    // What the client signed, when it arrived through the relay: the relay is the only party that
+    // knows the path as the caller wrote it, since it is the one that strips the `/r/<tag>` prefix
+    // before the request gets here. An older App signs that path (v1), so it is the only string its
+    // proof can be checked against — and without this, every signed request through the relay failed
+    // while the same request over the LAN worked.
+    const forwarded = typeof request.headers['x-happy-forwarded-path'] === 'string'
+      ? String(request.headers['x-happy-forwarded-path']).split('?')[0]
+      : null;
     const verdict = verifyAccountProof({
       proof: nonce !== null && Number.isFinite(at) && signature !== null ? { nonce, at, signature } : null,
       message: accountProofMessage({
+        operation: action.operation,
+        target: action.target,
+        nonce: nonce ?? '',
+        at: Number.isFinite(at) ? at : 0,
+        bodyDigest: '',
+      }),
+      legacyMessage: accountProofMessageV1({
         method: request.method ?? 'POST',
-        path,
+        path: forwarded ?? path,
         nonce: nonce ?? '',
         at: Number.isFinite(at) ? at : 0,
         bodyDigest: '',
@@ -654,7 +673,12 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     if (!requireToken(request)) {
       return reply.code(401).send({ error: 'unauthorized' });
     }
-    if (!requireAccountProof(request)) {
+    // `control` rather than `control:<method>`: the method is in the body, which is read after this
+    // check — the nonce and the timestamp still bind the proof to one request inside the window.
+    if (!requireAccountProof(request, {
+      operation: 'control',
+      target: (request.params as { sessionId?: string }).sessionId ?? '-',
+    })) {
       return reply.code(403).send({ error: 'this action needs the account, not just the machine key' });
     }
     if (!opts.onSessionControl) {

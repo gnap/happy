@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ACCOUNT_PROOF_WINDOW_MS, accountProofMessage, verifyAccountProof } from './accountProof';
+import { ACCOUNT_PROOF_WINDOW_MS, accountProofMessage, accountProofMessageV1, verifyAccountProof } from './accountProof';
 
 const NOW = 1_800_000_000_000;
 const message = accountProofMessage({
-    method: 'POST',
-    path: '/lan/sessions/sess-1/control',
+    operation: 'control:abort',
+    target: 'sess-1',
     nonce: 'n-1',
     at: NOW,
     bodyDigest: 'abc',
@@ -22,25 +22,41 @@ const check = (over: Partial<Parameters<typeof verifyAccountProof>[0]> = {}) => 
 describe('accountProofMessage', () => {
     it('is positional and canonical, so two implementations build the same bytes', () => {
         // A JSON blob would depend on key order, which two languages do not agree on by accident.
-        expect(message).toBe('happy-lan-account-proof-v1\nPOST\n/lan/sessions/sess-1/control\nn-1\n' + String(NOW) + '\nabc');
+        expect(message).toBe('happy-lan-account-proof-v2\ncontrol:abort\nsess-1\nn-1\n' + String(NOW) + '\nabc');
     });
 
-    it('binds the request: a different action produces different bytes', () => {
-        const other = accountProofMessage({
-            method: 'POST', path: '/lan/sessions/sess-1/control', nonce: 'n-1', at: NOW, bodyDigest: 'different',
-        });
-        expect(other).not.toBe(message);
+    it('binds the action and its target: either one changing produces different bytes', () => {
+        expect(accountProofMessage({ operation: 'restart', target: 'sess-1', nonce: 'n-1', at: NOW, bodyDigest: 'abc' }))
+            .not.toBe(message);
+        expect(accountProofMessage({ operation: 'control:abort', target: 'sess-2', nonce: 'n-1', at: NOW, bodyDigest: 'abc' }))
+            .not.toBe(message);
     });
 
-    it('does not depend on how the method was capitalised by the caller', () => {
-        expect(accountProofMessage({ ...{ method: 'post', path: '/x', nonce: 'n', at: 1, bodyDigest: 'd' } }))
-            .toBe(accountProofMessage({ method: 'POST', path: '/x', nonce: 'n', at: 1, bodyDigest: 'd' }));
+    it('is the same bytes however the request travels', () => {
+        // The bug this version exists for: v1 signed the path, so a request arriving through the relay
+        // — where the path grows an `/r/<tag>` prefix — signed different bytes on each side and every
+        // such proof failed. What a proof is about does not depend on the route to the machine.
+        const direct = accountProofMessage({ operation: 'restart', target: 'sess-1', nonce: 'n-1', at: NOW, bodyDigest: 'abc' });
+        const throughRelay = accountProofMessage({ operation: 'restart', target: 'sess-1', nonce: 'n-1', at: NOW, bodyDigest: 'abc' });
+        expect(direct).toBe(throughRelay);
+        // And the old one, for contrast: the same call over two paths was two different messages.
+        const v1 = (path: string) => accountProofMessageV1({ method: 'POST', path, nonce: 'n-1', at: NOW, bodyDigest: 'abc' });
+        expect(v1('/lan/sessions/sess-1/restart')).not.toBe(v1('/r/tag/lan/sessions/sess-1/restart'));
     });
 });
 
 describe('verifyAccountProof', () => {
     it('accepts a fresh, unseen, correctly signed proof', () => {
         expect(check()).toEqual({ ok: true });
+    });
+
+    it('accepts a v1 proof from an App that has not updated', () => {
+        // The compatibility path: an older App signs the path it saw, which is checkable on a direct
+        // connection and never was through the relay.
+        const v1 = accountProofMessageV1({ method: 'POST', path: '/lan/sessions/sess-1/control', nonce: 'n-1', at: NOW, bodyDigest: 'abc' });
+        const verify = vi.fn((candidate: string) => candidate === v1);
+        expect(check({ verify, legacyMessage: v1 })).toEqual({ ok: true });
+        expect(check({ verify, legacyMessage: 'something-else' })).toEqual({ ok: false, reason: 'bad-signature' });
     });
 
     it('refuses a request with no proof at all', () => {

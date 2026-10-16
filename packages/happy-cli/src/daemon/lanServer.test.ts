@@ -26,11 +26,19 @@ const utf8 = (text: string) => new TextEncoder().encode(text);
 let proofNonces = new Set<string>();
 let proofCounter = 0;
 
-/** A request carrying the account's proof over `method path`, which is what the signature covers. */
+/**
+ * A request carrying the account's proof of the *action*, which is what the signature covers.
+ *
+ * The path is not signed any more: it changes with the route a request takes, so the proof names the
+ * action and its target instead. The helper still takes the path, because that is how the tests say
+ * which action they mean.
+ */
 function signed(path: string, init: { token?: string; body?: unknown } = {}) {
     const nonce = `nonce-${++proofCounter}`;
     const at = Date.now();
-    const message = accountProofMessage({ method: 'POST', path, nonce, at, bodyDigest: '' });
+    const operation = path.endsWith('/restart') ? 'restart' : 'control';
+    const target = path.split('/sessions/')[1]?.split('/')[0] ?? '-';
+    const message = accountProofMessage({ operation, target, nonce, at, bodyDigest: '' });
     return {
         method: 'POST',
         ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),

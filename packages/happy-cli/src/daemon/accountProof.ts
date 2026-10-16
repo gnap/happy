@@ -47,12 +47,44 @@ export const ACCOUNT_PROOF_WINDOW_MS = 60_000;
  * and JSON key order is not something two implementations agree on by accident. The body is
  * included by digest so a signature cannot be moved to a different payload.
  */
+/**
+ * The bytes the proof covers, as of v2 — and what changed, and why.
+ *
+ * v1 covered the request's **path**, which was a mistake: a path is not an identity. It changes as a
+ * request travels (through the relay it grows an `/r/<tag>` prefix, and a reverse proxy may rewrite
+ * it again), so two parties looking at the same request disagreed about the string and the signature
+ * failed — which is exactly what happened to every signed request that arrived through the relay,
+ * while direct LAN requests kept working because both sides saw the same path.
+ *
+ * v2 covers what the proof is actually about: the **action** and its **target**. Both are properties
+ * of the request rather than of the route it took, so the same call signs the same bytes however it
+ * reaches the machine.
+ */
 export function accountProofMessage(parts: {
+    /** What is being asked for: `restart`, `control:abort`, `control:permission`. */
+    operation: string;
+    /** What it is being asked of: the session id, or `-` for the machine itself. */
+    target: string;
+    nonce: string;
+    at: number;
+    /** A digest of the request body — see `digestOf`. */
+    bodyDigest: string;
+}): string {
+    return ['happy-lan-account-proof-v2', parts.operation, parts.target, parts.nonce, String(parts.at), parts.bodyDigest].join('\n');
+}
+
+/**
+ * The v1 message, kept so a proof signed by an App that has not updated still verifies.
+ *
+ * Only ever checkable on a direct connection: the path is what the caller saw, and a caller arriving
+ * through the relay saw a different one. That is the bug v2 fixes, and it is why this is a
+ * compatibility path rather than a supported one.
+ */
+export function accountProofMessageV1(parts: {
     method: string;
     path: string;
     nonce: string;
     at: number;
-    /** A digest of the request body — see `digestOf`. */
     bodyDigest: string;
 }): string {
     return ['happy-lan-account-proof-v1', parts.method.toUpperCase(), parts.path, parts.nonce, String(parts.at), parts.bodyDigest].join('\n');
@@ -61,7 +93,13 @@ export function accountProofMessage(parts: {
 /** Whether a proof authorises this request, now. */
 export function verifyAccountProof(args: {
     proof: AccountProof | null | undefined;
+    /** The v2 message: what the proof is about. */
     message: string;
+    /**
+     * The v1 message to fall back to, for a proof signed by an App that has not updated. Left out
+     * where a route has no meaningful path (and where v1 could not have been used anyway).
+     */
+    legacyMessage?: string;
     /** Whether this nonce has already been used. One-shot, so a replay is refused. */
     nonceSeen: (nonce: string) => boolean;
     /** Checks the signature over the message with the account's public key. */
@@ -84,7 +122,12 @@ export function verifyAccountProof(args: {
     if (args.nonceSeen(proof.nonce)) {
         return { ok: false, reason: 'replayed' };
     }
-    if (!args.verify(args.message, proof.signature)) {
+    // v2 first, then v1: an App that has updated signs the action and its target, one that has not
+    // signs the path it saw. The nonce is spent only by a proof that verified, so a failed v2 does
+    // not stop the v1 that follows.
+    const verified = args.verify(args.message, proof.signature)
+        || (args.legacyMessage !== undefined && args.verify(args.legacyMessage, proof.signature));
+    if (!verified) {
         return { ok: false, reason: 'bad-signature' };
     }
     return { ok: true };
