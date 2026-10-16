@@ -3240,9 +3240,23 @@ class Sync {
 
                 // A channel is chosen per session, and everything after this point is the same
                 // whichever one it was: the read's bytes go through `ingestChannelRead`.
+                //
+                // The daemon's channel is read on the daemon — but only while the daemon can serve
+                // the session. A machine that is not running it answers nothing for it: the session
+                // belongs to a process that lives elsewhere, or died, or has no log on that machine
+                // at all. Polling there forever leaves the conversation at whatever the cache holds,
+                // which is what a session that "will not load" is — and the server is the other
+                // channel that session may be on, so a tick the daemon could not serve falls through
+                // to it rather than returning with nothing.
+                //
+                // A pin is the one exception: it exists to make the daemon path testable, so it must
+                // mean the daemon and nothing else.
                 if (this.preferredChannel(sessionId) !== 'server') {
-                    await this.fetchMessagesViaDaemon(sessionId);
-                    return;
+                    const served = await this.fetchMessagesViaDaemon(sessionId);
+                    if (served || this.describeChannel(sessionId).reason === 'pinned') {
+                        return;
+                    }
+                    log.log(`📡 fetchMessages: daemon could not serve ${sessionId}; asking the server`);
                 }
 
                 const encryption = this.encryption.getSessionEncryption(sessionId);
@@ -5782,7 +5796,12 @@ class Sync {
      * way to reach the LAN is to break the server, so a broken channel stays invisible until the
      * day it is needed.
      */
-    private fetchMessagesViaDaemon = async (sessionId: string): Promise<void> => {
+    /**
+     * Returns whether the daemon served this session — a page came back. False is the caller's
+     * signal that the daemon has nothing for it, which is a different thing from "the conversation
+     * is empty" and is answered by asking the server.
+     */
+    private fetchMessagesViaDaemon = async (sessionId: string): Promise<boolean> => {
         // Only while this session has nothing to show: the flag is what the view reads to tell
         // "nothing yet, still loading" from "this session has nothing", and setting it on every tick
         // made the indicator at the bottom of the list flicker on a two-second poll — a loader that
@@ -5810,9 +5829,10 @@ class Sync {
             && this.connections.current(read.machineId, read.connection.route)?.baseUrl === read.connection.baseUrl
         ) {
             this.stopDaemonPolling(sessionId);
-            return;
+            return true;
         }
         this.startDaemonPolling(sessionId);
+        return read !== null;
     };
 
     /**
