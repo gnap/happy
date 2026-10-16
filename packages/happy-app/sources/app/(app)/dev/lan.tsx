@@ -8,7 +8,8 @@ import { ItemList } from '@/components/ItemList';
 import { sync } from '@/sync/sync';
 import { useLocalSearchParams } from 'expo-router';
 import { Pressable } from 'react-native';
-import { useAllMachines, storage, useMachinePresenceMap, useMachineBadgeInputs, useLanSightings, useDaemonSockets, useChannelLinks, useRelayDirectory } from '@/sync/storage';
+import { useAllMachines, storage, useMachineBadgeInputs, useLanSightings, useDaemonSockets, useChannelLinks, useRelayDirectory } from '@/sync/storage';
+import type { SessionChannel } from '@/sync/lan/types';
 import { DEFAULT_CHANNEL_PRIORITY, normalizeChannelPriority } from '@/sync/lan/channelOrder';
 import { candidateInputsFor, orderedCandidates } from '@/sync/channels/candidates';
 import { candidateKey } from '@/sync/channels/health';
@@ -27,85 +28,81 @@ import { decryptLanHistory } from '@/sync/lan/history';
  * daemon must be running with HAPPY_LAN_ENABLED=1.
  */
 
-/** 各通道活性: what each channel is doing as a channel, before any machine is looked at. */
-export const ChannelLivenessGroup = React.memo(function ChannelLivenessGroup() {
+/**
+ * One channel: what it is doing, what it is connected to, and — at the bottom — what it is set to.
+ *
+ * The three belong together because they are the same subject: a channel's settings decide its
+ * connections and its connections are its liveness. Splitting them into page-wide sections made the
+ * reader hold a machine in their head while scrolling to another part of the page to find its
+ * address.
+ */
+export const ChannelBlock = React.memo(function ChannelBlock({ channel, children }: { channel: SessionChannel; children?: React.ReactNode }) {
     const { theme } = useUnistyles();
     const machines = useAllMachines();
     const links = useChannelLinks();
     const badgeInputs = useMachineBadgeInputs();
+    const sockets = useDaemonSockets();
+    const health = storage((state) => state.candidateHealth);
     const sightings = useLanSightings();
     const directory = useRelayDirectory();
 
-    return (
-        <ItemGroup title="Channel liveness" footer="What each channel is doing on this device, independent of any one machine.">
-            {links.map((link) => {
-                const ids = machines.map((machine) => machine.id);
-                const reaching = ids.filter((id) => badgeInputs(id).reach[link.channel]).length;
-                const capable = link.channel === 'server' ? ids.length : ids.filter((id) => badgeInputs(id).capability[link.channel as 'lan' | 'relay']).length;
-                const extra = link.channel === 'lan' ? `${Object.keys(sightings).length} advertising`
-                    : link.channel === 'relay' ? `${Object.keys(directory).length} held`
-                        : `${ids.length} known`;
-                return (
-                    <Item
-                        key={`live-${link.channel}`}
-                        title={link.channel.toUpperCase()}
-                        subtitle={link.state ?? 'absent'}
-                        icon={<Ionicons name={link.channel === 'lan' ? 'wifi-outline' : link.channel === 'relay' ? 'swap-horizontal' : 'globe-outline'} size={24} color={link.state === 'connected' ? '#34C759' : '#8E8E93'} />}
-                        showChevron={false}
-                        rightElement={
-                            <View style={{ alignItems: 'flex-end' }}>
-                                <Text style={{ fontSize: 13, color: theme.colors.text }}>{`${reaching}/${ids.length} reaching`}</Text>
-                                <Text style={{ fontSize: 11, color: theme.colors.textSecondary ?? theme.colors.text }}>{`${capable} capable · ${extra}`}</Text>
-                            </View>
-                        }
-                    />
-                );
-            })}
-        </ItemGroup>
-    );
-});
-
-/** 连接详情: the machines this device can actually reach, and over what. */
-export const ConnectionDetailsGroup = React.memo(function ConnectionDetailsGroup() {
-    const { theme } = useUnistyles();
-    const machines = useAllMachines();
-    const presence = useMachinePresenceMap();
-    const sockets = useDaemonSockets();
-    const health = storage((state) => state.candidateHealth);
+    const [open, setOpen] = React.useState(false);
+    const link = links.find((entry) => entry.channel === channel);
+    const ids = machines.map((machine) => machine.id);
+    const reaching = ids.filter((id) => badgeInputs(id).reach[channel]).length;
+    const capable = channel === 'server' ? ids.length : ids.filter((id) => badgeInputs(id).capability[channel as 'lan' | 'relay']).length;
+    const extra = channel === 'lan' ? `${Object.keys(sightings).length} advertising`
+        : channel === 'relay' ? `${Object.keys(directory).length} held`
+            : `${ids.length} known`;
 
     const rows = machines.flatMap((machine) => {
         const id = machine.id;
-        const candidates = orderedCandidates(id, candidateInputsFor(storage.getState(), id, { now: Date.now(), routes: ['lan', 'relay'] }));
-        const held = Object.entries(sockets).filter(([key]) => key.startsWith(`${id}:`));
-        if (candidates.length === 0 && held.length === 0) {
+        const held = Object.entries(sockets).filter(([key]) => key === `${id}:${channel}`);
+        const candidates = orderedCandidates(id, candidateInputsFor(storage.getState(), id, { now: Date.now(), routes: [channel as 'lan' | 'relay'] }))
+            .filter((candidate) => candidate.route === channel);
+        if (held.length === 0 && candidates.length === 0) {
             return [];
         }
         return [
-            { kind: 'header' as const, key: `h-${id}`, text: `${machine.metadata?.host ?? id.slice(0, 8)} — ${presence[id] ?? 'offline'}` },
-            ...held.map(([key, socket]) => ({ kind: 'row' as const, key: `s-${key}`, text: `socket ${key.slice(id.length + 1)}  ${socket.phase}  ${socket.baseUrl ?? ''}` })),
+            { kind: 'name' as const, key: `n-${id}`, text: machine.metadata?.host ?? id.slice(0, 8) },
+            ...held.map(([key, socket]) => ({ kind: 'fact' as const, key: `s-${key}`, text: `socket ${socket.phase}  ${socket.baseUrl ?? ''}` })),
             ...candidates.map((candidate) => {
                 const state = health[candidateKey(candidate.machineId, candidate.route, candidate.baseUrl)];
                 const retry = state?.retryAt ? `retry ${Math.max(0, Math.round((state.retryAt - Date.now()) / 1000))}s` : '';
-                return { kind: 'row' as const, key: `c-${candidate.route}-${candidate.baseUrl}`, text: `${candidate.route}/${candidate.source}  ${state?.phase ?? 'unknown'} ${retry}  ${candidate.baseUrl}` };
+                return { kind: 'fact' as const, key: `c-${candidate.baseUrl}`, text: `${candidate.source} ${state?.phase ?? 'unknown'} ${retry}  ${candidate.baseUrl}` };
             }),
         ];
     });
 
     return (
-        <ItemGroup title="Connection details" footer="Held sockets and the ordered candidates, with what each address has done.">
+        <ItemGroup>
+            {/* The row is the whole channel until it is opened: the link, and how many machines it is
+                reaching. Everything else is one tap away, because a page of open details is what made
+                this unreadable. */}
+            <Item
+                title={channel.toUpperCase()}
+                subtitle={link?.state ?? 'absent'}
+                icon={<Ionicons name={channel === 'lan' ? 'wifi-outline' : channel === 'relay' ? 'swap-horizontal' : 'globe-outline'} size={24} color={link?.state === 'connected' ? '#34C759' : '#8E8E93'} />}
+                onPress={() => setOpen((was) => !was)}
+                rightElement={<Text style={{ fontSize: 13, color: theme.colors.text }}>{`${reaching}/${ids.length} reaching`}</Text>}
+            />
+            {open && <>
+            <Item title="Capable of carrying it" detail={`${capable} of ${ids.length} machines`} showChevron={false} />
+            <Item title={channel === 'lan' ? 'Advertising here' : channel === 'relay' ? 'Machines the relay holds' : 'Machines the server knows'} detail={extra} showChevron={false} />
             {rows.length === 0
-                ? [<Item key="none" title="nothing reachable" showChevron={false} />]
-                : rows.map((row) => row.kind === 'header'
+                ? <Item title="No connections" showChevron={false} />
+                : rows.map((row) => row.kind === 'name'
                     ? <Item key={row.key} title={row.text} showChevron={false} />
                     : (
                         <Item
                             key={row.key}
                             title={row.text.split('  ')[0]}
-                            subtitle={row.text.split('  ')[1]}
-                            detail={row.text.split('  ').slice(2).join(' ')}
+                            detail={row.text.split('  ').slice(1).join('  ')}
                             showChevron={false}
                         />
                     ))}
+            {children}
+            </>}
         </ItemGroup>
     );
 });
