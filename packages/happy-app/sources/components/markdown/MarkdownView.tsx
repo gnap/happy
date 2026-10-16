@@ -431,14 +431,18 @@ const style = StyleSheet.create((theme) => ({
         fontWeight: '400',
     },
 
+    // The family carries the weight here, not `fontWeight`: the app's fonts are registered per face
+    // (regular / italic / semiBold) and have no bold face at all, so a `fontWeight` is silently
+    // ignored on iOS and the text renders regular — which is why bold showed on the desktop, where
+    // the webview synthesises it, and not on iOS.
     italic: {
-        fontStyle: 'italic',
+        ...Typography.default('italic'),
     },
     bold: {
-        fontWeight: 'bold',
+        ...Typography.default('semiBold'),
     },
     semibold: {
-        fontWeight: '600',
+        ...Typography.default('semiBold'),
     },
     code: {
         ...Typography.mono(),
