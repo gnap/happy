@@ -54,7 +54,7 @@ import { candidateInputsFor, orderedCandidates } from './channels/candidates';
 import { carryOperation, type HealthRecorder } from './channels/execute';
 import { readRoutes } from './channels/readRoute';
 import { endpointBaseUrl, type ChannelDriver, type ChannelOperation } from './channels/types';
-import { sendOverDaemonSocket, sendOverServerHttp, sendOverServerSocket } from './channels/ops';
+import { sendBatch, type SendResult } from './channels/ops';
 import type { ChannelReason } from './channels/types';
 import { FetchSlots } from './fetchSlots';
 import { DaemonConnections, type DaemonTarget } from './lan/daemonConnections';
@@ -2820,80 +2820,55 @@ class Sync {
         }
         const batch = pending.slice();
 
-        // A session on the LAN channel writes back over the LAN, the same way the server path
-        // prefers its own socket. Both channels are chosen the same way and neither is written to
-        // twice — keeping them in agreement is the CLI's job, since the message it receives is
-        // synced onward by its ordinary outgoing path.
-        const daemon = this.daemonSendTarget(sessionId);
-        if (daemon) {
-            const outcome = sendOverDaemonSocket({
-                socket: daemon.handle,
-                sessionId,
-                batch,
-                // Deliberately not marked acked here, unlike the server socket path. There the
-                // server echoes the message back, so a fast-ack is a claim the server will honour;
-                // here nothing confirms the write but the session itself, and treating the write as
-                // the delivery is exactly what hides a dropped message. Each entry waits for that
-                // verdict, and fails if it never arrives.
-                awaitVerdict: (localId) => this.awaitLanDelivery(localId),
-            });
-            if (outcome.kind === 'unconfirmed') {
-                for (const msg of batch) {
-                    outcome.awaitVerdict(msg.localId);
-                }
-                return;
-            }
-            if (outcome.kind === 'failed') {
-                throw outcome.error;
-            }
-        }
-
-        // Prefer WebSocket send — same path as CLI. No HTTP round-trip, no
-        // Tauri HTTP plugin issues. Server echoes back via new-message WS
-        // event, which handleUpdate already fast-acks.
-        const overSocket = sendOverServerSocket({ transport: apiSocket, sessionId, batch });
-        if (overSocket.kind === 'acked') {
-            pending.splice(0, batch.length);
-            for (const msg of batch) {
-                storage.getState().markOutboxMessageAcked(msg.localId);
-            }
-            // WS send has no seq ack — pull receive cursor forward via HTTP.
-            this.getMessagesSync(sessionId).invalidate();
-            return;
-        }
-        // Anything else — never connected, or the write threw mid-batch — falls through to the HTTP
-        // route below, which is idempotent on `localId`. A genuinely unusable server is reported by
-        // that attempt failing, not by this one declining to try.
-
+        // The walk itself lives in `channels/ops.ts`, where its order and what each rung's answer
+        // means are pinned down by tests rather than by reading this method. What stays here is the
+        // queue: what leaving it means, and what each outcome settles.
         const controller = new AbortController();
         this.sendAbortControllers.set(sessionId, controller);
+        let result: SendResult;
         try {
-            const outcome = await sendOverServerHttp({
-                transport: apiSocket,
+            result = await sendBatch({
+                daemon: this.daemonSendTarget(sessionId)?.handle ?? null,
+                server: apiSocket,
                 sessionId,
                 batch,
                 signal: controller.signal,
             });
-            // The one path that says where the session now stands: the server answered with the seqs
-            // it assigned, so the receive cursor moves with it rather than being pulled.
-            if (outcome.kind === 'failed') {
-                this.maybeStartBackgroundSendWatchdog();
-                throw outcome.error;
-            }
-            pending.splice(0, batch.length);
-            // Server confirmed – mark as acked (green check). The echo
-            // (fast-ack or text-matched session-protocol echo) will remove it.
-            for (const msg of batch) {
-                storage.getState().markOutboxMessageAcked(msg.localId);
-            }
-            if (outcome.kind === 'acked' && outcome.advanceTo !== undefined) {
-                const currentLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
-                if (outcome.advanceTo > currentLastSeq) {
-                    this.sessionLastSeq.set(sessionId, outcome.advanceTo);
-                }
-            }
         } finally {
             this.sendAbortControllers.delete(sessionId);
+        }
+
+        if (result.kind === 'unconfirmed') {
+            // A write over the machine's own channel is not a delivery. There the server echoes the
+            // message back so a fast-ack is a claim it will honour; here nothing confirms the write
+            // but the session itself, and treating the write as the delivery is exactly what hides
+            // a dropped message. Each entry waits for that verdict, and fails if it never arrives.
+            for (const msg of batch) {
+                this.awaitLanDelivery(msg.localId);
+            }
+            return;
+        }
+        if (result.kind === 'failed') {
+            this.maybeStartBackgroundSendWatchdog();
+            throw result.error;
+        }
+
+        pending.splice(0, batch.length);
+        // Server confirmed – mark as acked (green check). The echo (fast-ack or text-matched
+        // session-protocol echo) will remove it.
+        for (const msg of batch) {
+            storage.getState().markOutboxMessageAcked(msg.localId);
+        }
+        if (result.over === 'socket') {
+            // WS send has no seq ack — pull receive cursor forward via HTTP.
+            this.getMessagesSync(sessionId).invalidate();
+        } else if (result.advanceTo !== undefined) {
+            // The one path that says where the session now stands: the server answered with the seqs
+            // it assigned, so the receive cursor moves with it rather than being pulled.
+            const currentLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
+            if (result.advanceTo > currentLastSeq) {
+                this.sessionLastSeq.set(sessionId, result.advanceTo);
+            }
         }
 
         if (pending.length === 0) {
@@ -2908,6 +2883,21 @@ class Sync {
         }
     }
 
+    /**
+     * How long a waiter for a fetch slot waits before looking again.
+     *
+     * The pool reclaims an expired lease on its own, but only when someone asks it for a slot — and
+     * the queue of waiters was pumped *only* by a release. So a holder that never released (a fetch
+     * suspended mid-request on iOS, or one waiting on a wedged SQLite call, whose `finally` never
+     * ran) left every waiter behind it parked for the life of the process, even though its own slot
+     * had long since been reclaimed: opening a session printed "acquiring lock" and then nothing.
+     * A waiter that looks again on its own is what makes the lease worth having.
+     */
+    private static readonly FETCH_SLOT_RETRY_MS = 2_000;
+
+    /** The one timer that keeps looking while waiters exist, so waiting is not tied to a release. */
+    private fetchSlotTimer: ReturnType<typeof setTimeout> | null = null;
+
     private acquireMessageFetchSlot = (): Promise<number> => {
         const token = this.messageFetchSlots.tryAcquire(Date.now());
         if (token !== null) {
@@ -2915,6 +2905,7 @@ class Sync {
         }
         return new Promise<number>((resolve) => {
             this.messageFetchQueue.push(resolve);
+            this.armMessageFetchPump();
         });
     };
 
@@ -2926,6 +2917,19 @@ class Sync {
             return;
         }
         this.pumpMessageFetchQueue();
+    };
+
+    /** Keeps one timer alive for as long as anyone is waiting, and no longer. */
+    private armMessageFetchPump = (): void => {
+        if (this.fetchSlotTimer !== null || this.messageFetchQueue.length === 0) {
+            return;
+        }
+        this.fetchSlotTimer = setTimeout(() => {
+            this.fetchSlotTimer = null;
+            this.pumpMessageFetchQueue();
+            this.armMessageFetchPump();
+        }, Sync.FETCH_SLOT_RETRY_MS);
+        (this.fetchSlotTimer as unknown as { unref?: () => void }).unref?.();
     };
 
     private pumpMessageFetchQueue = (): void => {
@@ -3236,9 +3240,23 @@ class Sync {
 
                 // A channel is chosen per session, and everything after this point is the same
                 // whichever one it was: the read's bytes go through `ingestChannelRead`.
+                //
+                // The daemon's channel is read on the daemon — but only while the daemon can serve
+                // the session. A machine that is not running it answers nothing for it: the session
+                // belongs to a process that lives elsewhere, or died, or has no log on that machine
+                // at all. Polling there forever leaves the conversation at whatever the cache holds,
+                // which is what a session that "will not load" is — and the server is the other
+                // channel that session may be on, so a tick the daemon could not serve falls through
+                // to it rather than returning with nothing.
+                //
+                // A pin is the one exception: it exists to make the daemon path testable, so it must
+                // mean the daemon and nothing else.
                 if (this.preferredChannel(sessionId) !== 'server') {
-                    await this.fetchMessagesViaDaemon(sessionId);
-                    return;
+                    const served = await this.fetchMessagesViaDaemon(sessionId);
+                    if (served || this.describeChannel(sessionId).reason === 'pinned') {
+                        return;
+                    }
+                    log.log(`📡 fetchMessages: daemon could not serve ${sessionId}; asking the server`);
                 }
 
                 const encryption = this.encryption.getSessionEncryption(sessionId);
@@ -4463,15 +4481,20 @@ class Sync {
         let verdict = judgeDaemonPage({
             planned: plan,
             hasWindow,
-            read: read ? { reset: read.reset } : null,
+            read: read ? { hasNewer: read.hasNewer, reset: read.reset } : null,
         });
         if (verdict.kind === 'replace-from-tail') {
-            read = await readPage({ kind: 'tail' }, read!.connection);
-            verdict = judgeDaemonPage({
-                planned: { replace: true },
-                hasWindow: true,
-                read: read ? { reset: read.reset } : null,
-            });
+            // The page just read is not adjacent to what is held, so the window is not joined to it:
+            // it is re-read from the newest end and *that* page is the window. A tail read that does
+            // not come back leaves the window alone — there is nothing to replace it with, and what
+            // is held is still what the user was looking at.
+            const tail = await readPage({ kind: 'tail' }, read!.connection);
+            if (!tail) {
+                log.log(`📡 fetchSessionFromDaemon: no newest page for ${sessionId}; keeping the window`);
+                return null;
+            }
+            read = tail;
+            verdict = { kind: 'replace' };
         }
         const replace = verdict.kind === 'replace';
         if (read && replace && read.messages.length === 0 && hasWindow) {
@@ -4536,17 +4559,10 @@ class Sync {
                 storage.getState().setNewestSeq(sessionId, newestSeq);
             }
         }
-        // Still behind after a bounded drain: come back for the rest, throttled the same way the
-        // server path throttles its "still behind session.seq" re-invalidate. The window keeps what
-        // it already has, so catching up adds to the conversation instead of interrupting it.
-        if (read.hasNewer && !replace) {
-            const lastBehindAt = this.sessionLastFetchTime.get(sessionId) ?? 0;
-            if (Date.now() - lastBehindAt >= 2_000) {
-                this.sessionLastFetchTime.set(sessionId, Date.now());
-                log.log(`📡 fetchSessionFromDaemon: still behind for ${sessionId}; reading on`);
-                this.getMessagesSync(sessionId).invalidate();
-            }
-        }
+        // No "still behind" retry here, and none is needed: a page that came back cut short was
+        // answered above by reading the newest one, and that page is the end of the log by
+        // construction. Coming back for more is what walking a backlog means, and walking it is
+        // what left a session opened after a day idle showing the start of the day.
 
         // The session key has to be registered on both paths: the live socket decrypts each pushed
         // entry with it, and a replaced window has had no `ingestChannelRead` to do it.
@@ -5785,7 +5801,12 @@ class Sync {
      * way to reach the LAN is to break the server, so a broken channel stays invisible until the
      * day it is needed.
      */
-    private fetchMessagesViaDaemon = async (sessionId: string): Promise<void> => {
+    /**
+     * Returns whether the daemon served this session — a page came back. False is the caller's
+     * signal that the daemon has nothing for it, which is a different thing from "the conversation
+     * is empty" and is answered by asking the server.
+     */
+    private fetchMessagesViaDaemon = async (sessionId: string): Promise<boolean> => {
         // Only while this session has nothing to show: the flag is what the view reads to tell
         // "nothing yet, still loading" from "this session has nothing", and setting it on every tick
         // made the indicator at the bottom of the list flicker on a two-second poll — a loader that
@@ -5813,9 +5834,10 @@ class Sync {
             && this.connections.current(read.machineId, read.connection.route)?.baseUrl === read.connection.baseUrl
         ) {
             this.stopDaemonPolling(sessionId);
-            return;
+            return true;
         }
         this.startDaemonPolling(sessionId);
+        return read !== null;
     };
 
     /**
