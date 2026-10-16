@@ -4362,7 +4362,7 @@ class Sync {
             }
             this.daemonVersionChecks.add(machineId);
             try {
-                const versions = await this.carryAtDaemon<{ running: string; onDisk: string | null; restartRequired: boolean }>({
+                const carried = await this.carryAtDaemon<{ running: string; onDisk: string | null; restartRequired: boolean }>({
                     machineId,
                     operation: 'identity',
                     run: async (baseUrl, token) => {
@@ -4370,7 +4370,8 @@ class Sync {
                         return identity.versions ?? null;
                     },
                 });
-                if (versions) {
+                if (carried.verdict) {
+                    const versions = carried.verdict;
                     storage.getState().applyDaemonVersion(machineId, versions);
                     log.log(`📡 daemon ${machineId.slice(0, 8)} is running ${versions.running}${versions.restartRequired ? ' (restart required)' : ''}`);
                 }
@@ -4613,15 +4614,15 @@ class Sync {
         method: 'abort' | 'permission',
         params: string,
     ): Promise<boolean> {
-        const done = await this.carrySessionAction<boolean>(sessionId, {
+        const outcome = await this.carrySessionAction<boolean>(sessionId, {
             operation: 'send',
             path: `/lan/sessions/${encodeURIComponent(sessionId)}/control`,
             run: (baseUrl, token, proof) => sessionControlAt(baseUrl, token, sessionId, method, params, proof).then((ok) => (ok ? true : null)),
         });
-        if (done === true) {
+        if (outcome.verdict === true) {
             log.log(`🔄 ${method} ${sessionId}: handed to the session`);
         }
-        return done === true;
+        return outcome.verdict === true;
     }
 
     /**
@@ -4651,10 +4652,10 @@ class Sync {
              */
             onServer?: () => Promise<T | null>;
         },
-    ): Promise<T | null> {
+    ): Promise<{ verdict: T | null; asked: boolean }> {
         const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
         if (!machineId) {
-            return null;
+            return { verdict: null, asked: false };
         }
         // The same decision the session's messages are read over, so an action goes the way the
         // session is already being talked to — and the server is one of the channels here, not a
@@ -4686,10 +4687,10 @@ class Sync {
                         const value = await action.onServer();
                         return value === null ? { kind: 'absent' } : { kind: 'done', value };
                     } catch (error) {
-                        // The server channel's own transport failing is that channel's answer, not
-                        // something to hold against a machine address: the RPC is encrypted for the
-                        // machine, so an App without that key cannot use this channel at all.
-                        return { kind: 'refused' };
+                        // Not `refused`: the RPC may well have reached the daemon and started the
+                        // work, and the answer is what did not come back. Calling that a refusal is
+                        // how a restart that *did* happen gets reported as one no channel would do.
+                        return { kind: 'unreachable', error };
                     }
                 }
                 if (!machineKey) {
@@ -4709,7 +4710,12 @@ class Sync {
             },
             recorder: this.healthRecorder(),
         });
-        return outcome.kind === 'done' ? outcome.value : null;
+        return {
+            verdict: outcome.kind === 'done' ? outcome.value : null,
+            // Whether any channel took it on: one that answered and refused did not, one that was
+            // asked and went quiet did — and to a caller those mean different things.
+            asked: outcome.kind === 'done' || outcome.kind === 'unreachable' || outcome.kind === 'absent',
+        };
     }
 
     /**
@@ -4731,10 +4737,10 @@ class Sync {
         /** Only these channels, in this order — the caller's policy, e.g. where the session is read. */
         drivers?: readonly ChannelDriver[];
         run: (baseUrl: string, token: string, proof: Record<string, string> | undefined) => Promise<T | null>;
-    }): Promise<T | null> {
+    }): Promise<{ verdict: T | null; asked: boolean }> {
         const machineKey = this.getMachineKey(args.machineId);
         if (!machineKey) {
-            return null;
+            return { verdict: null, asked: false };
         }
         const drivers = args.drivers ?? this.channelDrivers();
         const outcome = await carryOperation<T>({
@@ -4762,7 +4768,12 @@ class Sync {
             },
             recorder: this.healthRecorder(),
         });
-        return outcome.kind === 'done' ? outcome.value : null;
+        return {
+            verdict: outcome.kind === 'done' ? outcome.value : null,
+            // Whether any channel took it on. A channel that answered and refused did not; one that
+            // was asked and went quiet did, and the two mean different things to a caller.
+            asked: outcome.kind === 'done' || outcome.kind === 'unreachable' || outcome.kind === 'absent',
+        };
     }
 
     /** Where an attempt's outcome is written, so the next caller starts from what this one learned. */
@@ -4794,11 +4805,12 @@ class Sync {
         for (const machineId of this.knownMachineIds()) {
             try {
                 const since = storage.getState().lifecycleCursors[machineId] ?? 0;
-                const answer = await this.carryAtDaemon<{ revision: number; entries: LifecycleEntry[] }>({
+                const carried = await this.carryAtDaemon<{ revision: number; entries: LifecycleEntry[] }>({
                     machineId,
                     operation: 'lifecycle',
                     run: (baseUrl, token) => fetchLifecycle(baseUrl, token, since),
                 });
+                const answer = carried.verdict;
                 if (!answer) {
                     continue;
                 }
@@ -4825,7 +4837,7 @@ class Sync {
         if (preferred === 'server') {
             return null;
         }
-        const verdict = await this.carrySessionAction<LanRestartVerdict>(sessionId, {
+        const outcome = await this.carrySessionAction<LanRestartVerdict>(sessionId, {
             operation: 'restart',
             path: `/lan/sessions/${encodeURIComponent(sessionId)}/restart`,
             run: (baseUrl, token, proof) => restartSessionAt(baseUrl, token, sessionId, proof ?? undefined),
@@ -4835,11 +4847,18 @@ class Sync {
                 machineId, 'restartSession', { sessionId },
             ),
         });
-        if (verdict) {
-            log.log(`🔄 restart ${sessionId}: ${verdict.success ? 'accepted' : verdict.error ?? 'refused'}`);
-            return verdict;
+        if (outcome.verdict) {
+            log.log(`🔄 restart ${sessionId}: ${outcome.verdict.success ? 'accepted' : outcome.verdict.error ?? 'refused'}`);
+            return outcome.verdict;
         }
-        log.log(`🔄 restart ${sessionId}: no daemon channel answered, asking the server`);
+        if (outcome.asked) {
+            // Somebody was asked and did not answer. The restart may well be under way — a machine
+            // restarting a session takes longer than a request waits — so this is not a failure and
+            // must not be reported as one.
+            log.log(`🔄 restart ${sessionId}: asked, and the verdict did not come back`);
+            return { success: true };
+        }
+        log.log(`🔄 restart ${sessionId}: no channel could carry it`);
         return null;
     }
 
