@@ -36,7 +36,7 @@ import { decryptLanHistory } from '@/sync/lan/history';
  * reader hold a machine in their head while scrolling to another part of the page to find its
  * address.
  */
-export const ChannelBlock = React.memo(function ChannelBlock({ channel, children }: { channel: SessionChannel; children?: React.ReactNode }) {
+export const ChannelBlock = React.memo(function ChannelBlock({ channel, liveness, children }: { channel: SessionChannel; liveness?: React.ReactNode; children?: React.ReactNode }) {
     const { theme } = useUnistyles();
     const machines = useAllMachines();
     const links = useChannelLinks();
@@ -73,7 +73,11 @@ export const ChannelBlock = React.memo(function ChannelBlock({ channel, children
                 // a state and not whether it was stuck in it.
                 const retry = socket.retryAt ? ` retry ${Math.max(0, Math.round((socket.retryAt - Date.now()) / 1000))}s` : '';
                 const attempt = socket.attempt && socket.attempt > 1 ? ` try ${socket.attempt}` : '';
-                byAddress.set(socket.baseUrl, { ...byAddress.get(socket.baseUrl), socket: `${socket.phase}${attempt}${retry}` });
+                // What the App holds over the relay is a *stream* in the hub's one connection; over
+                // the LAN it is a socket to that machine. Naming both "socket" is what made the relay
+                // block read like one connection per machine.
+                const noun = channel === 'relay' ? 'stream' : 'socket';
+                byAddress.set(socket.baseUrl, { ...byAddress.get(socket.baseUrl), socket: `${noun} ${socket.phase}${attempt}${retry}` });
             }
         }
         for (const candidate of candidates) {
@@ -112,6 +116,7 @@ export const ChannelBlock = React.memo(function ChannelBlock({ channel, children
                 rightElement={<Text style={{ fontSize: 13, color: theme.colors.text }}>{`${reaching}/${ids.length} reaching`}</Text>}
             />
             {open && <>
+            {liveness}
             <Item title="Capable of carrying it" detail={`${capable} of ${ids.length} machines`} showChevron={false} />
             <Item title={channel === 'lan' ? 'Advertising here' : channel === 'relay' ? 'Machines the relay holds' : 'Machines the server knows'} detail={extra} showChevron={false} />
             {rows.length > 0 && (

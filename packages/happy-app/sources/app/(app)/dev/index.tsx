@@ -149,6 +149,8 @@ export default function DevScreen() {
     const router = useRouter();
     const [debugMode, setDebugMode] = useLocalSettingMutable('debugMode');
     const [verboseLogging, setVerboseLogging] = React.useState(false);
+    // The one LAN socket this device is holding, for the transport line under the LAN block.
+    const lanSocket = Object.entries(useDaemonSockets()).find(([key, socket]) => key.endsWith(':lan') && socket.phase === 'live')?.[1];
     const socketStatus = useSocketStatus();
     const daemonSockets = useDaemonSockets();
     const lanSightingCount = Object.keys(useLanSightings()).length;
@@ -512,9 +514,35 @@ export default function DevScreen() {
                     icon={<Ionicons name="git-branch-outline" size={28} color="#007AFF" />}
                     onPress={() => router.push('/dev/channels')}
                 />
-                <ChannelBlock channel="lan" />
+                <ChannelBlock
+                    channel="lan"
+                    liveness={
+                        <Item
+                            title="LAN Socket"
+                            subtitle={lanSocket
+                                ? `${lanSocket.baseUrl} · up ${formatTimeAgo(lanSocket.connectedAt)}`
+                                : 'No daemon on this network is serving an open channel'}
+                            detail={lanSocket ? 'live' : 'off'}
+                            rightElement={lanSocket
+                                ? <Ionicons name="checkmark-circle" size={22} color="#34C759" />
+                                : <Ionicons name="close-circle" size={22} color="#8E8E93" />}
+                            showChevron={false}
+                        />
+                    }
+                />
                 <ChannelBlock channel="relay" />
-                <ChannelBlock channel="server">
+                <ChannelBlock
+                    channel="server"
+                    liveness={
+                        <Item
+                            title="Server Socket"
+                            subtitle={getSocketStatusSubtitle()}
+                            detail={socketStatus.status}
+                            rightElement={<SocketStatusIndicator />}
+                            showChevron={false}
+                        />
+                    }
+                >
                     <Item
                         title="API Endpoint"
                         subtitle="The server this device talks to"
