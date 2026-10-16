@@ -129,6 +129,36 @@ export function serializeReducerState(state: ReducerState): PersistedReducerStat
     };
 }
 
+/**
+ * The state that belongs to the messages a load would actually hand back.
+ *
+ * What is persisted is read on every open, as one string across the bridge — and it grew with the
+ * session rather than with the window: three megabytes for a session whose window is sixty messages,
+ * measured at 1.8s of the 1.9s an open cost. The entries for messages outside that window cannot be
+ * used by anything that reads this back, because they describe messages that will not be there.
+ *
+ * So it is trimmed by message id, which is what these maps are keyed or valued on. The maps whose
+ * keys mean something else (`permissions`, `sidechains`, `taskTools`) are small and are kept whole.
+ */
+export function trimReducerState(state: ReducerState, keepIds: Set<string>): ReducerState {
+    const byValue = <K>(entries: Iterable<[K, string]>) => new Map([...entries].filter(([, messageId]) => keepIds.has(messageId)));
+    const byKey = <V>(entries: Iterable<[string, V]>) => new Map([...entries].filter(([id]) => keepIds.has(id)));
+    return {
+        ...state,
+        messages: byKey(state.messages),
+        messageIds: byKey(state.messageIds),
+        localIds: byKey(state.localIds),
+        toolIdToMessageId: byValue(state.toolIdToMessageId),
+        sidechainToolIdToMessageId: byValue(state.sidechainToolIdToMessageId),
+        tracerState: {
+            ...state.tracerState,
+            toolCallToMessageId: byValue(state.tracerState.toolCallToMessageId),
+            orphanMessages: byKey(state.tracerState.orphanMessages),
+            processedIds: new Set([...state.tracerState.processedIds].filter((id) => keepIds.has(id))),
+        },
+    };
+}
+
 export function serializeReducerStateToJson(state: ReducerState): string {
     return JSON.stringify(serializeReducerState(state));
 }

@@ -67,13 +67,11 @@ describe('readSessionOverLan pages', () => {
         expect(fetchHistory.mock.calls[0][3]).toEqual({ before: '0:42' });
     });
 
-    // The window is the conversation the user is looking at, so catching up adds to it. What is
-    // not acceptable is either jumping (which throws the window away) or one unbounded call (which
-    // the UI waits on): both ends are bounded, and the caller is told when there is more.
-    it('extends the window in bounded pages when a follow page comes back cut short', async () => {
-        fetchHistory
-            .mockResolvedValueOnce(page({ hasNewer: true, cursor: '1:500', entries: [{ id: 'a' }] }))
-            .mockResolvedValueOnce(page({ hasNewer: false, cursor: '1:900', entries: [{ id: 'b' }] }));
+    // One read is one page. A cut-short page is not a job left half-done — it answers a question the
+    // caller asked ("is this reader further behind than a page?") — and walking the pages it implies
+    // is what made opening a session idle for a day take as long as the day was busy.
+    it('hands a cut-short follow page back as it is, without walking to the end', async () => {
+        fetchHistory.mockResolvedValue(page({ hasNewer: true, cursor: '1:500', entries: [{ id: 'a' }] }));
         decryptLanHistory.mockImplementation(async (_e: unknown, h: any) => ({
             entries: h.entries,
             decryptedCount: h.entries.length,
@@ -82,27 +80,9 @@ describe('readSessionOverLan pages', () => {
 
         const read = await readOf({ ...base, page: { kind: 'follow', cursor: '0:42' } });
 
+        expect(fetchHistory).toHaveBeenCalledTimes(1);
         expect(fetchHistory.mock.calls[0][3]).toEqual({ since: '0:42' });
-        expect(fetchHistory.mock.calls[1][3]).toEqual({ since: '1:500' });
-        expect(read?.total).toBe(2);
-        expect(read?.cursor).toBe('1:900');
-        expect(read?.hasNewer).toBe(false);
-    });
-
-    it('stops at the page cap and reports that it is still behind', async () => {
-        // Four pages per call, then the caller comes back: a backlog is drained over several ticks
-        // rather than in one call nothing can interrupt.
-        let cursor = 0;
-        fetchHistory.mockImplementation(async () => page({ hasNewer: true, cursor: `1:${++cursor}`, entries: [{ id: `x${cursor}` }] }));
-        decryptLanHistory.mockImplementation(async (_e: unknown, h: any) => ({
-            entries: h.entries,
-            decryptedCount: h.entries.length,
-            sessionKey: new Uint8Array(32),
-        }));
-
-        const read = await readOf({ ...base, page: { kind: 'follow', cursor: '0:0' } });
-
-        expect(fetchHistory).toHaveBeenCalledTimes(4);
+        expect(read?.cursor).toBe('1:500');
         expect(read?.hasNewer).toBe(true);
     });
 });

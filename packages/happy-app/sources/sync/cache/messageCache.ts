@@ -15,6 +15,7 @@
 import { getSessionCacheDB } from './sessionCacheDB';
 import {
     serializeReducerStateToJson,
+    trimReducerState,
     deserializeReducerStateOrCreate,
     SERIALIZER_SCHEMA_VERSION,
 } from './reducerStateSerializer';
@@ -48,6 +49,16 @@ export function isCacheEnabled(session: Session | null | undefined, servedByDaem
 // ---------------------------------------------------------------------------
 // Loaded cache result
 // ---------------------------------------------------------------------------
+
+/**
+ * How many messages one open reads back from the cache.
+ *
+ * What a screen needs, not a window to keep: the rest of the rows stay where they are, and scrolling
+ * back walks them over the channel that owns the log — the daemon's log or the server's seqs — which
+ * is where paging belongs. It is parsing JSON on the JS thread that costs here, not the query, so
+ * this number is what an open costs; sixty messages is several screens and tens of milliseconds.
+ */
+const HYDRATE_MESSAGE_LIMIT = 60;
 
 export interface LoadedCache {
     messages: Message[];
@@ -94,6 +105,7 @@ export async function loadMessageCache(session: Session, servedByDaemon = false)
 
     try {
         const db = getSessionCacheDB();
+        const tStart = Date.now();
         // Don't block fetchMessages if DB is still initializing (e.g. preload not done). Skip cache after timeout.
         const CACHE_LOAD_TIMEOUT_MS = 3000;
         const cacheRow = await Promise.race([
@@ -102,6 +114,7 @@ export async function loadMessageCache(session: Session, servedByDaemon = false)
                 setTimeout(() => reject(new Error('cache load timeout')), CACHE_LOAD_TIMEOUT_MS)
             ),
         ]);
+        const tRow = Date.now();
         if (!cacheRow) {
             log.log(`📦 messageCache: no cache row for ${session.id}`);
             return null;
@@ -121,16 +134,44 @@ export async function loadMessageCache(session: Session, servedByDaemon = false)
             );
         }
 
-        const messages = await db.getSessionMessages(session.id);
+        // The newest slice, not everything on disk. Every row is a full message JSON parsed on the
+        // JS thread, so reading all of them made opening a session cost whatever its whole history
+        // cost — 660 messages measured at ten seconds on a device. The window the user opens to is
+        // the newest messages; the rest stay on disk and are reached by scrolling back, which goes
+        // through the channel's paging rather than through this read.
+        const messages = await db.getSessionMessages(session.id, HYDRATE_MESSAGE_LIMIT + 1);
+        const tMessages = Date.now();
+        const truncated = messages.length > HYDRATE_MESSAGE_LIMIT;
+        const hydrating = truncated ? messages.slice(-HYDRATE_MESSAGE_LIMIT) : messages;
+        const tDeserialize = Date.now();
         const reducerState = deserializeReducerStateOrCreate(cacheRow.reducerStateJson);
+        // Where the milliseconds of an open actually go. The row read, the message rows and the
+        // reducer state are three different sizes — one row, sixty rows, one blob whose size is the
+        // session's history — and the totals so far say the messages are not the expensive part.
+        log.log(
+            `📦 messageCache: kind=${truncated ? 'truncated' : 'whole'} ` +
+            `row=${tRow - tStart}ms messages=${tMessages - tRow}ms(${hydrating.length}) ` +
+            `reducerState=${Date.now() - tDeserialize}ms(${cacheRow.reducerStateJson.length}b)`
+        );
 
-        log.log(`📦 messageCache: loaded ${messages.length} messages for ${session.id} (lastSeq=${cacheRow.lastSeq}, oldestSeq=${cacheRow.oldestSeq}, hasOlderMessages=${cacheRow.hasOlderMessages})`);
+        // Where the window this read hands back actually starts. The row's own `oldestSeq` describes
+        // the window that *wrote* it, which reaches further back than this one does — reporting that
+        // would tell the store it holds messages it does not, and the paging that follows would skip
+        // everything between.
+        const floors = hydrating.map((message) => message.seq).filter((seq): seq is number => typeof seq === 'number');
+        const oldestSeq = truncated && floors.length === hydrating.length
+            ? Math.min(...floors)
+            : cacheRow.oldestSeq;
+
+        log.log(`📦 messageCache: loaded ${hydrating.length} messages for ${session.id} (lastSeq=${cacheRow.lastSeq}, oldestSeq=${oldestSeq}, hasOlderMessages=${cacheRow.hasOlderMessages}, truncated=${truncated})`);
         return {
-            messages,
+            messages: hydrating,
             reducerState,
             lastSeq: cacheRow.lastSeq,
-            oldestSeq: cacheRow.oldestSeq,
-            hasOlderMessages: cacheRow.hasOlderMessages,
+            oldestSeq,
+            // A window that does not reach the bottom of what is held has older messages by
+            // definition, whatever the row says — the row was written by a window that did reach it.
+            hasOlderMessages: cacheRow.hasOlderMessages || truncated,
         };
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -209,7 +250,11 @@ export async function saveMessageCache(
     try {
         const started = Date.now();
         const db = getSessionCacheDB();
-        const reducerStateJson = serializeReducerStateToJson(reducerState);
+        // Trimmed to the window a load hands back, so what is written is what will be read: see
+        // `trimReducerState`. The window's own state is untouched — this is the copy that goes to
+        // disk.
+        const newest = [...messages].sort((a, b) => b.createdAt - a.createdAt).slice(0, HYDRATE_MESSAGE_LIMIT);
+        const reducerStateJson = serializeReducerStateToJson(trimReducerState(reducerState, new Set(newest.map((message) => message.id))));
         const stateMs = Date.now() - started;
         const row = {
             sessionId: session.id,

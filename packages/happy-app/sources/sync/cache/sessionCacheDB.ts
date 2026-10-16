@@ -11,8 +11,51 @@
  */
 
 import type { Message } from '../typesMessage';
+import { StatementQueue } from './statementQueue';
 import { log } from '@/log';
 import * as SQLite from 'expo-sqlite';
+
+/**
+ * Whatever the engine says when another connection holds the lock.
+ *
+ * expo-sqlite reports it as `SQLiteErrorException: Error code 5: database is locked` wrapped in a
+ * `FunctionCallException` from whichever statement could not finish, so the code and the text are
+ * both matched rather than one assumed.
+ */
+/**
+ * The connection the *previous* evaluation of this module left open, if there was one.
+ *
+ * A reload re-evaluates this module but not the native side: the connection the last
+ * evaluation opened stays open, and the object that could close it is about to be garbage. So the
+ * handle is parked here — on `globalThis`, which every evaluation of the module shares — and the
+ * next one closes it before opening its own. Without this the old connection holds the database
+ * while the new one works: statements wait, saves fail locked, and the whole cache crawls until
+ * the ten-second detector gives up on it. Measured: statements waiting 51-65 seconds.
+ *
+ * In production this runs exactly never, because the module is evaluated once — which is also why
+ * nothing else would have caught it.
+ */
+const inheritedSlot = globalThis as unknown as { __happyRetiredCacheConnection?: unknown };
+const inherited = inheritedSlot.__happyRetiredCacheConnection;
+inheritedSlot.__happyRetiredCacheConnection = null;
+if (inherited) {
+    try {
+        // Bounded, and never awaited: a connection wedged by a statement whose caller is gone is
+        // the case where closing can hang, and the module still has to finish loading.
+        void Promise.race([
+            (inherited as { closeAsync: () => Promise<void> }).closeAsync(),
+            new Promise((resolve) => setTimeout(resolve, 2_000)),
+        ]).catch(() => undefined);
+        log.log('📦 sessionCacheDB: closed the connection a previous load of this module left open');
+    } catch {
+        // Not closable from here; the new connection is opened regardless.
+    }
+}
+
+function isLocked(error: unknown): boolean {
+    const message = String(error);
+    return message.includes('database is locked') || message.includes('Error code 5');
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -46,7 +89,7 @@ export interface CachedSessionListRow {
 export interface ISessionCacheDB {
     initialize(): Promise<void>;
     getSessionCache(sessionId: string): Promise<CachedSessionRow | null>;
-    getSessionMessages(sessionId: string): Promise<Message[]>;
+    getSessionMessages(sessionId: string, limit?: number): Promise<Message[]>;
     saveSessionCache(row: CachedSessionRow, messages: Message[]): Promise<void>;
     clearSessionCache(sessionId: string): Promise<void>;
     clearAllCaches(): Promise<void>;
@@ -70,8 +113,9 @@ export class MemorySessionCacheDB implements ISessionCacheDB {
         return this.sessions.get(sessionId) ?? null;
     }
 
-    async getSessionMessages(sessionId: string): Promise<Message[]> {
-        return this.messages.get(sessionId) ?? [];
+    async getSessionMessages(sessionId: string, limit?: number): Promise<Message[]> {
+        const held = this.messages.get(sessionId) ?? [];
+        return limit === undefined ? held : held.slice(-limit);
     }
 
     async saveSessionCache(row: CachedSessionRow, messages: Message[]): Promise<void> {
@@ -193,7 +237,7 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
         });
     }
 
-    async getSessionMessages(sessionId: string): Promise<Message[]> {
+    async getSessionMessages(sessionId: string, limit?: number): Promise<Message[]> {
         await this.initialize();
         return new Promise((resolve, reject) => {
             const req = this.getStore().messages.get(sessionId);
@@ -203,8 +247,9 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
                     resolve([]);
                     return;
                 }
+                const held = limit === undefined ? entry.messages : entry.messages.slice(-limit);
                 const messages: Message[] = [];
-                for (const json of entry.messages) {
+                for (const json of held) {
                     try {
                         messages.push(JSON.parse(json) as Message);
                     } catch {
@@ -371,11 +416,18 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
         const t0 = Date.now();
         // Static import so expo-sqlite loads with app bundle (avoids cold-start hang on first session open)
         this.db = await SQLite.openDatabaseAsync(DB_NAME);
+        // Parked for whichever evaluation of this module comes after this one: see the slot above.
+        inheritedSlot.__happyRetiredCacheConnection = this.db;
+        this.watchStatements();
         log.log(`📦 sessionCacheDB: openDatabaseAsync took ${Date.now() - t0}ms`);
 
         const t2 = Date.now();
         await this.db.execAsync(`
             PRAGMA journal_mode = WAL;
+            -- Wait for a lock rather than failing on it. The failure this replaces is
+            -- "finalizeAsync has failed: database is locked", which lost saves outright; five
+            -- seconds is longer than any statement here takes and shorter than a user's patience.
+            PRAGMA busy_timeout = 5000;
 
             CREATE TABLE IF NOT EXISTS session_cache (
                 session_id          TEXT PRIMARY KEY,
@@ -423,78 +475,186 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
     }
 
     /**
-     * expo-sqlite hands out a single connection and `withTransactionAsync` is not re-entrant, so
-     * two sessions saving at once nested their BEGINs and failed with "cannot start a transaction
-     * within a transaction" — then "cannot rollback - no transaction is active" when the loser
-     * rolled back. The cache never persisted while still paying the full cost of the write.
-     * Every statement now goes through one queue.
+     * expo-sqlite hands out a single connection, and one connection cannot have two statements in
+     * flight. Overlapping them fails however the engine notices first, and both ways were seen
+     * here: two saves nested their BEGINs ("cannot start a transaction within a transaction"), and
+     * a read running alongside a write came back "database is locked" and then failed to finalise
+     * its statement — which left the cache saving *nothing at all*, the state a session reverts to
+     * its older messages from after the app has been in the background.
+     *
+     * So every statement goes through one queue, reads included. The reads were left out of this
+     * the first time because the symptom then was a write failing; the connection does not care
+     * which half of a pair is the read.
      */
-    private writeQueue: Promise<unknown> = Promise.resolve();
+    /** Every statement on the one connection, with the ones a person is waiting for first. */
+    private statements = new StatementQueue();
 
-    private enqueueWrite<T>(work: () => Promise<T>): Promise<T> {
-        const run = this.writeQueue.then(work, work);
-        this.writeQueue = run.catch(() => {});
-        return run;
+    /**
+     * Statement timings, but only the ones worth seeing.
+     *
+     * A slow read is either waiting for the connection or slow *on* it, and those are different
+     * bugs: the first is who is ahead in this queue, the second is the connection itself — a
+     * statement an earlier failure left un-finalised holds it, and every statement behind that one
+     * pays seconds. Nothing under a fifth of a second is reported, so a healthy cache says nothing.
+     */
+    private watchStatements = () => {
+        this.statements.onStatement = ({ waited, ran, depth }) => {
+            if (waited > 200 || ran > 200) {
+                log.log(`📦 sessionCacheDB: statement waited=${waited}ms ran=${ran}ms queued behind ${depth - 1}`);
+            }
+        };
+    };
+
+    /**
+     * Past every statement this file issues with room to spare: a save of a whole window measured
+     * 1.1 s, and a read of one row is milliseconds.
+     */
+    private static readonly STUCK_STATEMENT_MS = 10_000;
+
+    private enqueue<T>(work: () => Promise<T>, urgent = false): Promise<T> {
+        // A job that never finishes must not take the cache with it. The queue and the connection
+        // are module state, and a reload hands them to a context whose promises will never settle —
+        // so the head of the queue can be a statement nobody is waiting for any more, with every
+        // new statement behind it. Past the ceiling, both are abandoned: the new statement gets a
+        // queue and a connection of its own, and the old ones are left to whatever native state
+        // they hold.
+        if (this.statements.stuckFor > ExpoSQLiteSessionCacheDB.STUCK_STATEMENT_MS) {
+            log.log(`📦 sessionCacheDB: a statement has been running ${this.statements.stuckFor}ms; abandoning the queue and its connection`);
+            this.statements = new StatementQueue();
+            this.watchStatements();
+            void this.replaceConnection();
+        }
+        return this.statements.run(async () => {
+            try {
+                return await work();
+            } catch (error) {
+                if (!isLocked(error)) {
+                    throw error;
+                }
+                // A locked connection is not a failed statement, it is a connection somebody else
+                // still holds: a previous JS context that a reload left running, or a transaction of
+                // ours an earlier failure never finalised. Everything behind it pays — measured on a
+                // device, one read waited 0ms and then took thirty seconds — and no amount of
+                // retrying on the same connection helps. So the connection is replaced, and the
+                // statement is tried once on the new one: every statement here is idempotent
+                // (`INSERT OR REPLACE`, deletes by key), so a second run cannot double-apply it.
+                log.log(`📦 sessionCacheDB: the connection is locked (${String(error).slice(0, 80)}); replacing it and retrying`);
+                await this.replaceConnection();
+                await this.ensureReady();
+                return await work();
+            }
+        }, urgent);
     }
 
     /**
-     * sessionId -> the exact message objects last written. A save diffs against this by identity
-     * (the store rebuilds its array per batch but reuses unchanged objects) so it can write only
-     * what changed. Rewriting 2000+ messages took ~1.5s and ran every few seconds; a streaming
-     * session only ever changes the last handful.
+     * Throws the connection away, and the state that says it is ready.
+     *
+     * `closeAsync` is bounded: a connection wedged by an un-finalised statement is exactly the case
+     * where closing it can hang, and a reset that never returns would be a worse failure than the
+     * lock it is fixing.
      */
+    private async replaceConnection(): Promise<void> {
+        const previous = this.db;
+        // `this.db` is never left null: a statement already in flight reads it again after every
+        // await, and the reset must not turn "the connection is being replaced" into
+        // `Cannot read property 'withTransactionAsync' of null` for the work it is replacing. The
+        // new connection is opened first, and the old one is closed behind it.
+        this.initialized = false;
+        this.initPromise = null;
+        if (!previous) {
+            return;
+        }
+        try {
+            await this.ensureReady();
+            if (this.db === previous) {
+                return;
+            }
+        } catch {
+            // Opening a replacement failed outright; the caller's retry will report why.
+            return;
+        }
+        try {
+            await Promise.race([
+                previous.closeAsync(),
+                new Promise((resolve) => setTimeout(resolve, 2_000)),
+            ]);
+        } catch {
+            // Already gone, or never closable: the reference is dropped either way, which is what
+            // matters — the next statement opens a connection of its own.
+        }
+    }
 
     async getSessionCache(sessionId: string): Promise<CachedSessionRow | null> {
         await this.ensureReady();
-        const row = await this.db.getFirstAsync(
-            'SELECT session_id, last_seq, oldest_seq, has_older_messages, schema_version, cached_at, reducer_state FROM session_cache WHERE session_id = ?',
-            [sessionId]
-        ) as Record<string, unknown> | null;
+        return this.enqueue(async () => {
+            const row = await this.db.getFirstAsync(
+                'SELECT session_id, last_seq, oldest_seq, has_older_messages, schema_version, cached_at, reducer_state FROM session_cache WHERE session_id = ?',
+                [sessionId]
+            ) as Record<string, unknown> | null;
 
-        if (!row) return null;
-        return {
-            sessionId: row['session_id'] as string,
-            lastSeq: row['last_seq'] as number,
-            oldestSeq: (row['oldest_seq'] as number) ?? 0,
-            hasOlderMessages: !!row['has_older_messages'],
-            schemaVersion: row['schema_version'] as number,
-            cachedAt: row['cached_at'] as number,
-            reducerStateJson: row['reducer_state'] as string,
-        };
+            if (!row) return null;
+            return {
+                sessionId: row['session_id'] as string,
+                lastSeq: row['last_seq'] as number,
+                oldestSeq: (row['oldest_seq'] as number) ?? 0,
+                hasOlderMessages: !!row['has_older_messages'],
+                schemaVersion: row['schema_version'] as number,
+                cachedAt: row['cached_at'] as number,
+                reducerStateJson: row['reducer_state'] as string,
+            };
+        }, true);
     }
 
-    async getSessionMessages(sessionId: string): Promise<Message[]> {
+    /**
+     * The newest `limit` messages, or every one the database holds when no limit is given.
+     *
+     * Opening a session used to read *all* of them: 660 messages measured at ten seconds, because
+     * every row is a full message JSON and each is parsed on the JS thread. The limit is what makes
+     * that cost a property of the window rather than of the session's history — the older rows stay
+     * on disk, where scrolling back reaches them through the channel's own paging rather than
+     * through this read.
+     */
+    async getSessionMessages(sessionId: string, limit?: number): Promise<Message[]> {
         await this.ensureReady();
-        const rows = await this.db.getAllAsync(
-            'SELECT message_json FROM session_messages WHERE session_id = ? ORDER BY created_at ASC',
-            [sessionId]
-        ) as Record<string, unknown>[];
+        // Urgent for the same reason the row above is: this is the read a tap is waiting on.
+        return this.enqueue(async () => {
+            const rows = limit === undefined
+                ? await this.db.getAllAsync(
+                    'SELECT message_json FROM session_messages WHERE session_id = ? ORDER BY created_at ASC',
+                    [sessionId]
+                ) as Record<string, unknown>[]
+                // Newest first for the LIMIT, then reversed: the same index serves both, and the
+                // rows that fall off the end are the oldest ones.
+                : (await this.db.getAllAsync(
+                    'SELECT message_json FROM session_messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ?',
+                    [sessionId, limit]
+                ) as Record<string, unknown>[]).reverse();
 
-        const messages: Message[] = [];
-        for (const row of rows) {
-            try {
-                messages.push(JSON.parse(row['message_json'] as string) as Message);
-            } catch {
-                // Skip malformed rows
+            const messages: Message[] = [];
+            for (const row of rows) {
+                try {
+                    messages.push(JSON.parse(row['message_json'] as string) as Message);
+                } catch {
+                    // Skip malformed rows
+                }
             }
-        }
-        // Reading is how the database learns what it holds: it has just seen every row, so the next
-        // save can be a delta rather than a rewrite.
-        this.written.set(sessionId, new Map(messages.map((message) => [message.id, message])));
-        return messages;
+            // Reading is how the database learns what it holds: it has just seen every row, so the
+            // next save can be a delta rather than a rewrite.
+            this.written.set(sessionId, new Map(messages.map((message) => [message.id, message])));
+            return messages;
+        }, true);
     }
 
     async saveSessionCache(row: CachedSessionRow, messages: Message[]): Promise<void> {
         await this.ensureReady();
-        const { next, inserts, removed, rewrite } = diffMessages(this.written.get(row.sessionId), messages);
-        // Nothing to add, nothing to drop, and the window is where it was: the row on disk already
-        // says all of this. The reducer state needs no comparison of its own — it is only ever
-        // mutated by reducing messages, and any message that changed is one of the inserts.
+        const { next, inserts, rewrite } = diffMessages(this.written.get(row.sessionId), messages);
+        // Nothing to add, and the window is where it was: the row on disk already says all of this.
+        // The reducer state needs no comparison of its own — it is only ever mutated by reducing
+        // messages, and any message that changed is one of the inserts.
         const watermark = this.writtenWatermark.get(row.sessionId);
         if (
             !rewrite &&
             inserts.length === 0 &&
-            removed.length === 0 &&
             watermark !== undefined &&
             watermark.lastSeq === row.lastSeq &&
             watermark.oldestSeq === row.oldestSeq &&
@@ -508,7 +668,7 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
         const encoded = inserts.map((message) => JSON.stringify(message));
         const started = Date.now();
 
-        await this.enqueueWrite(async () => {
+        await this.enqueue(async () => {
             await this.db.withTransactionAsync(async () => {
                 await this.db.runAsync(
                     `INSERT OR REPLACE INTO session_cache
@@ -517,18 +677,18 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
                     [row.sessionId, row.lastSeq, row.oldestSeq, row.hasOlderMessages ? 1 : 0, row.schemaVersion, row.cachedAt, row.reducerStateJson]
                 );
 
-                // A rewrite is the one case INSERT OR REPLACE cannot express on its own: the rows
-                // for messages that are gone have to be dropped, and nothing left names them.
-                if (rewrite) {
-                    await this.db.runAsync('DELETE FROM session_messages WHERE session_id = ?', [row.sessionId]);
-                } else if (removed.length > 0) {
-                    const marks = removed.map(() => '?').join(',');
-                    await this.db.runAsync(
-                        `DELETE FROM session_messages WHERE session_id = ? AND message_id IN (${marks})`,
-                        [row.sessionId, ...removed]
-                    );
-                }
-
+                // Nothing is ever deleted here, and that is the point.
+                //
+                // This used to drop the rows for messages that had left the window — and a rewrite
+                // dropped every row for the session outright. But a window shrinks as a matter of
+                // course on this channel: a read that is more than a page behind replaces it with
+                // the newest page, and the whole point of the cache is to be the copy the App can
+                // still show when that page is a small one. Deleting the rows made the shrink
+                // permanent and irreversible, which is what "today's messages are gone" was: the
+                // window was replaced by a page of a few dozen messages, and the save that followed
+                // deleted the hundreds of rows behind it. Rows now accumulate; a window is a view of
+                // what is held, not a licence to discard it.
+                //
                 // One statement per chunk rather than one per message: each round trip crosses into
                 // native, and a burst of messages is the normal case, not the exception. 100 rows x
                 // 4 columns stays well under SQLite's bound-parameter limit.
@@ -553,7 +713,7 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
             if (ms > 50) {
                 log.log(`📦 sessionCacheDB: wrote ${inserts.length}/${messages.length} messages for ${row.sessionId} in ${ms}ms${rewrite ? ' (rewrite)' : ''}`);
             }
-        });
+        }, true);
 
         this.writtenWatermark.set(row.sessionId, {
             lastSeq: row.lastSeq,
@@ -564,7 +724,7 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
 
     async clearSessionCache(sessionId: string): Promise<void> {
         await this.ensureReady();
-        await this.enqueueWrite(async () => {
+        await this.enqueue(async () => {
             await this.db.withTransactionAsync(async () => {
                 await this.db.runAsync('DELETE FROM session_cache WHERE session_id = ?', [sessionId]);
                 await this.db.runAsync('DELETE FROM session_messages WHERE session_id = ?', [sessionId]);
@@ -576,34 +736,36 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
 
     async getSessionsListCache(): Promise<CachedSessionListRow | null> {
         await this.ensureReady();
-        // Try with encryption_keys_json first. If the column doesn't exist yet
-        // (pre-migration), fall back to the old schema.
-        try {
-            const row = await this.db.getFirstAsync(
-                'SELECT sessions_json, cached_at, encryption_keys_json FROM sessions_list_cache WHERE id = 1'
-            ) as Record<string, unknown> | null;
-            if (!row) return null;
-            return {
-                sessionsJson: row['sessions_json'] as string,
-                cachedAt: row['cached_at'] as number,
-                encryptionKeysJson: row['encryption_keys_json'] as string | undefined,
-            };
-        } catch {
-            // Column encryption_keys_json doesn't exist yet — fall back.
-            const row = await this.db.getFirstAsync(
-                'SELECT sessions_json, cached_at FROM sessions_list_cache WHERE id = 1'
-            ) as Record<string, unknown> | null;
-            if (!row) return null;
-            return {
-                sessionsJson: row['sessions_json'] as string,
-                cachedAt: row['cached_at'] as number,
-            };
-        }
+        return this.enqueue(async () => {
+            // Try with encryption_keys_json first. If the column doesn't exist yet
+            // (pre-migration), fall back to the old schema.
+            try {
+                const row = await this.db.getFirstAsync(
+                    'SELECT sessions_json, cached_at, encryption_keys_json FROM sessions_list_cache WHERE id = 1'
+                ) as Record<string, unknown> | null;
+                if (!row) return null;
+                return {
+                    sessionsJson: row['sessions_json'] as string,
+                    cachedAt: row['cached_at'] as number,
+                    encryptionKeysJson: row['encryption_keys_json'] as string | undefined,
+                };
+            } catch {
+                // Column encryption_keys_json doesn't exist yet — fall back.
+                const row = await this.db.getFirstAsync(
+                    'SELECT sessions_json, cached_at FROM sessions_list_cache WHERE id = 1'
+                ) as Record<string, unknown> | null;
+                if (!row) return null;
+                return {
+                    sessionsJson: row['sessions_json'] as string,
+                    cachedAt: row['cached_at'] as number,
+                };
+            }
+        });
     }
 
     async saveSessionsListCache(row: CachedSessionListRow): Promise<void> {
         await this.ensureReady();
-        await this.enqueueWrite(async () => {
+        await this.enqueue(async () => {
             try {
                 await this.db.runAsync(
                     'INSERT OR REPLACE INTO sessions_list_cache (id, sessions_json, cached_at, encryption_keys_json) VALUES (1, ?, ?, ?)',
@@ -621,14 +783,14 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
 
     async clearSessionsListCache(): Promise<void> {
         await this.ensureReady();
-        await this.enqueueWrite(async () => {
+        await this.enqueue(async () => {
             await this.db.runAsync('DELETE FROM sessions_list_cache WHERE id = 1');
         });
     }
 
     async clearAllCaches(): Promise<void> {
         await this.ensureReady();
-        await this.enqueueWrite(async () => {
+        await this.enqueue(async () => {
             await this.db.withTransactionAsync(async () => {
                 await this.db.runAsync('DELETE FROM session_cache');
                 await this.db.runAsync('DELETE FROM session_messages');
@@ -678,8 +840,8 @@ class LazySessionCacheDB implements ISessionCacheDB {
         return (await this.ensureDelegate()).getSessionCache(sessionId);
     }
 
-    async getSessionMessages(sessionId: string): Promise<Message[]> {
-        return (await this.ensureDelegate()).getSessionMessages(sessionId);
+    async getSessionMessages(sessionId: string, limit?: number): Promise<Message[]> {
+        return (await this.ensureDelegate()).getSessionMessages(sessionId, limit);
     }
 
     async saveSessionCache(row: CachedSessionRow, messages: Message[]): Promise<void> {

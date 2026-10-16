@@ -2883,6 +2883,21 @@ class Sync {
         }
     }
 
+    /**
+     * How long a waiter for a fetch slot waits before looking again.
+     *
+     * The pool reclaims an expired lease on its own, but only when someone asks it for a slot — and
+     * the queue of waiters was pumped *only* by a release. So a holder that never released (a fetch
+     * suspended mid-request on iOS, or one waiting on a wedged SQLite call, whose `finally` never
+     * ran) left every waiter behind it parked for the life of the process, even though its own slot
+     * had long since been reclaimed: opening a session printed "acquiring lock" and then nothing.
+     * A waiter that looks again on its own is what makes the lease worth having.
+     */
+    private static readonly FETCH_SLOT_RETRY_MS = 2_000;
+
+    /** The one timer that keeps looking while waiters exist, so waiting is not tied to a release. */
+    private fetchSlotTimer: ReturnType<typeof setTimeout> | null = null;
+
     private acquireMessageFetchSlot = (): Promise<number> => {
         const token = this.messageFetchSlots.tryAcquire(Date.now());
         if (token !== null) {
@@ -2890,6 +2905,7 @@ class Sync {
         }
         return new Promise<number>((resolve) => {
             this.messageFetchQueue.push(resolve);
+            this.armMessageFetchPump();
         });
     };
 
@@ -2901,6 +2917,19 @@ class Sync {
             return;
         }
         this.pumpMessageFetchQueue();
+    };
+
+    /** Keeps one timer alive for as long as anyone is waiting, and no longer. */
+    private armMessageFetchPump = (): void => {
+        if (this.fetchSlotTimer !== null || this.messageFetchQueue.length === 0) {
+            return;
+        }
+        this.fetchSlotTimer = setTimeout(() => {
+            this.fetchSlotTimer = null;
+            this.pumpMessageFetchQueue();
+            this.armMessageFetchPump();
+        }, Sync.FETCH_SLOT_RETRY_MS);
+        (this.fetchSlotTimer as unknown as { unref?: () => void }).unref?.();
     };
 
     private pumpMessageFetchQueue = (): void => {
@@ -3211,9 +3240,23 @@ class Sync {
 
                 // A channel is chosen per session, and everything after this point is the same
                 // whichever one it was: the read's bytes go through `ingestChannelRead`.
+                //
+                // The daemon's channel is read on the daemon — but only while the daemon can serve
+                // the session. A machine that is not running it answers nothing for it: the session
+                // belongs to a process that lives elsewhere, or died, or has no log on that machine
+                // at all. Polling there forever leaves the conversation at whatever the cache holds,
+                // which is what a session that "will not load" is — and the server is the other
+                // channel that session may be on, so a tick the daemon could not serve falls through
+                // to it rather than returning with nothing.
+                //
+                // A pin is the one exception: it exists to make the daemon path testable, so it must
+                // mean the daemon and nothing else.
                 if (this.preferredChannel(sessionId) !== 'server') {
-                    await this.fetchMessagesViaDaemon(sessionId);
-                    return;
+                    const served = await this.fetchMessagesViaDaemon(sessionId);
+                    if (served || this.describeChannel(sessionId).reason === 'pinned') {
+                        return;
+                    }
+                    log.log(`📡 fetchMessages: daemon could not serve ${sessionId}; asking the server`);
                 }
 
                 const encryption = this.encryption.getSessionEncryption(sessionId);
@@ -4438,15 +4481,20 @@ class Sync {
         let verdict = judgeDaemonPage({
             planned: plan,
             hasWindow,
-            read: read ? { reset: read.reset } : null,
+            read: read ? { hasNewer: read.hasNewer, reset: read.reset } : null,
         });
         if (verdict.kind === 'replace-from-tail') {
-            read = await readPage({ kind: 'tail' }, read!.connection);
-            verdict = judgeDaemonPage({
-                planned: { replace: true },
-                hasWindow: true,
-                read: read ? { reset: read.reset } : null,
-            });
+            // The page just read is not adjacent to what is held, so the window is not joined to it:
+            // it is re-read from the newest end and *that* page is the window. A tail read that does
+            // not come back leaves the window alone — there is nothing to replace it with, and what
+            // is held is still what the user was looking at.
+            const tail = await readPage({ kind: 'tail' }, read!.connection);
+            if (!tail) {
+                log.log(`📡 fetchSessionFromDaemon: no newest page for ${sessionId}; keeping the window`);
+                return null;
+            }
+            read = tail;
+            verdict = { kind: 'replace' };
         }
         const replace = verdict.kind === 'replace';
         if (read && replace && read.messages.length === 0 && hasWindow) {
@@ -4511,17 +4559,10 @@ class Sync {
                 storage.getState().setNewestSeq(sessionId, newestSeq);
             }
         }
-        // Still behind after a bounded drain: come back for the rest, throttled the same way the
-        // server path throttles its "still behind session.seq" re-invalidate. The window keeps what
-        // it already has, so catching up adds to the conversation instead of interrupting it.
-        if (read.hasNewer && !replace) {
-            const lastBehindAt = this.sessionLastFetchTime.get(sessionId) ?? 0;
-            if (Date.now() - lastBehindAt >= 2_000) {
-                this.sessionLastFetchTime.set(sessionId, Date.now());
-                log.log(`📡 fetchSessionFromDaemon: still behind for ${sessionId}; reading on`);
-                this.getMessagesSync(sessionId).invalidate();
-            }
-        }
+        // No "still behind" retry here, and none is needed: a page that came back cut short was
+        // answered above by reading the newest one, and that page is the end of the log by
+        // construction. Coming back for more is what walking a backlog means, and walking it is
+        // what left a session opened after a day idle showing the start of the day.
 
         // The session key has to be registered on both paths: the live socket decrypts each pushed
         // entry with it, and a replaced window has had no `ingestChannelRead` to do it.
@@ -4581,6 +4622,7 @@ class Sync {
         const outcome = await this.carrySessionAction<boolean>(sessionId, {
             operation: 'send',
             path: `/lan/sessions/${encodeURIComponent(sessionId)}/control`,
+            proof: { operation: 'control', target: sessionId },
             run: (baseUrl, token, proof) => sessionControlAt(baseUrl, token, sessionId, method, params, proof).then((ok) => (ok ? true : null)),
         });
         if (outcome.verdict === true) {
@@ -4614,6 +4656,8 @@ class Sync {
         action: {
             operation: ChannelOperation;
             path: string;
+            /** The account's proof names this, not the path: a path changes with the route. */
+            proof?: { operation: string; target: string };
             run: (baseUrl: string, token: string, proof: Record<string, string> | undefined) => Promise<T | null>;
             /**
              * How the *server* channel carries this action, when the server is the channel that
@@ -4666,7 +4710,7 @@ class Sync {
                     return { kind: 'refused' };
                 }
                 const { token } = await getLanCredential(endpoint.baseUrl, machineKey);
-                const proof = await accountProofHeaders({ method: 'POST', path: action.path });
+                const proof = action.proof ? await accountProofHeaders(action.proof) : null;
                 try {
                     const value = await action.run(endpoint.baseUrl, token, proof ?? undefined);
                     return value === null ? { kind: 'absent' } : { kind: 'done', value };
@@ -4701,13 +4745,14 @@ class Sync {
      * answer rather than an address failure. A thrown anything-else is silence, which is exactly what
      * the address health is for.
      *
-     * `proofPath` is for the actions the account has to authorise (restart, control): the proof is
-     * built over the path as it will be sent, because the machine checks the bytes it receives.
+     * `proofAction` is for the actions the account has to authorise (restart, control): the proof
+     * names the action and its target, which is what the machine checks and what does not change with
+     * the route the request takes.
      */
     private async carryAtDaemon<T>(args: {
         machineId: string;
         operation: ChannelOperation;
-        proofPath?: string;
+        proofAction?: { operation: string; target: string };
         /** Only these channels, in this order — the caller's policy, e.g. where the session is read. */
         drivers?: readonly ChannelDriver[];
         run: (baseUrl: string, token: string, proof: Record<string, string> | undefined) => Promise<T | null>;
@@ -4727,7 +4772,7 @@ class Sync {
                     return { kind: 'refused' };
                 }
                 const { token } = await getLanCredential(baseUrl, machineKey);
-                const proof = args.proofPath ? await accountProofHeaders({ method: 'POST', path: args.proofPath }) : null;
+                const proof = args.proofAction ? await accountProofHeaders(args.proofAction) : null;
                 try {
                     const value = await args.run(baseUrl, token, proof ?? undefined);
                     // It answered. Whether the answer is what was wanted is its verdict about the
@@ -4859,6 +4904,7 @@ class Sync {
         const outcome = await this.carrySessionAction<LanRestartVerdict>(sessionId, {
             operation: 'restart',
             path: `/lan/sessions/${encodeURIComponent(sessionId)}/restart`,
+            proof: { operation: 'restart', target: sessionId },
             run: (baseUrl, token, proof) => restartSessionAt(baseUrl, token, sessionId, proof ?? undefined),
             // The server carries the same action by asking the daemon on this App's behalf. It is a
             // channel like the others: tried when its turn comes, and skipped when it cannot.
@@ -5755,7 +5801,12 @@ class Sync {
      * way to reach the LAN is to break the server, so a broken channel stays invisible until the
      * day it is needed.
      */
-    private fetchMessagesViaDaemon = async (sessionId: string): Promise<void> => {
+    /**
+     * Returns whether the daemon served this session — a page came back. False is the caller's
+     * signal that the daemon has nothing for it, which is a different thing from "the conversation
+     * is empty" and is answered by asking the server.
+     */
+    private fetchMessagesViaDaemon = async (sessionId: string): Promise<boolean> => {
         // Only while this session has nothing to show: the flag is what the view reads to tell
         // "nothing yet, still loading" from "this session has nothing", and setting it on every tick
         // made the indicator at the bottom of the list flicker on a two-second poll — a loader that
@@ -5783,9 +5834,10 @@ class Sync {
             && this.connections.current(read.machineId, read.connection.route)?.baseUrl === read.connection.baseUrl
         ) {
             this.stopDaemonPolling(sessionId);
-            return;
+            return true;
         }
         this.startDaemonPolling(sessionId);
+        return read !== null;
     };
 
     /**

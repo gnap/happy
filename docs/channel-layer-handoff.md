@@ -63,3 +63,19 @@ operation. Callers say *what* they want, not *where*.
   claiming anything; a bundle grep only proves the code shipped.
 - `yarn typecheck` has a baseline of ~20 pre-existing errors outside these files; the test suite has five
   pre-existing failures (apiGithub, typesRaw, reducer ×2, reducerTracer) — both worth checking against.
+
+## Open: the account proof reads the same headers the machine-key proof uses
+
+Found on a phone through the relay: `/control` (abort, permission answers) refused with
+`account proof bad-signature`, while reads and sends — which have no account check — worked. The
+daemon's new verification reads `x-happy-proof-{nonce,at,signature}`, and the App has been sending a
+**machine-key** signature under exactly those names as its proof of possession. So a valid signature by
+one key was checked against the other key's public key, and every such request failed.
+
+The fix is to give the account proof its own header namespace (`x-happy-account-proof-*`), leaving the
+machine-key proof where it is. Verify with both keys minted locally: the machine-key one must be refused
+as needing the account, the account one must pass. Everything else in the diagnostic is already right —
+the daemon builds the correct v1 (unprefixed) and v2 messages, which the refusal line prints.
+
+Deployed at the time of writing: relay (with `x-happy-forwarded-path`, now used only for logging) and
+the daemon on clawbox-05. Daemons elsewhere, and the App once it signs v2, still to follow.
