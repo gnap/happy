@@ -50,23 +50,6 @@ export function resolveSessionReach(
 }
 
 /**
- * How long a route that failed to serve this session is left out of the running.
- *
- * Long enough that a route is not re-tried every tick, short enough that it recovers on its own —
- * a daemon may log the session later, and nothing else would ever bring the route back.
- */
-export const ROUTE_FAILURE_TTL_MS = 90_000;
-
-/** Whether a route's failure for this session is recent enough to keep it out of the running. */
-export function routeFailedRecently(
-    failedAt: number | undefined,
-    now: number,
-    ttlMs: number = ROUTE_FAILURE_TTL_MS,
-): boolean {
-    return failedAt !== undefined && now - failedAt < ttlMs;
-}
-
-/**
  * Which channels could serve this session right now.
  *
  * The one place this is decided, so that what the App draws and what it does cannot disagree about
@@ -77,31 +60,17 @@ export function routeFailedRecently(
  * session declares that when it registers, which says what its daemon can do in principle, not
  * that this device can reach it. So a channel is available when this device has seen the machine
  * on it, or is holding a connection to it, or has read this very session over it. The last of those
- * is the strongest — it is the reason a working route is not dropped when a browse is missed — and
- * it is why this takes a session rather than only a machine.
- *
- * A route that has just failed to serve this session is out until that failure ages out, which is
- * what stops a broken channel being chosen again on every tick.
+ * is the strongest — it is the reason a working route is not dropped when a browse is missed.
  */
 export function channelAvailability(args: {
     drivers: readonly ChannelDriver[];
-    sessionId: string;
     machineId: string;
-    /** When each route last failed for this session, from the caller's own memory. */
-    failedAt?: Record<string, number | undefined>;
-    /** The channel this session was last read over, if it has been. */
-    lastReadRoute?: SessionChannel;
     now?: number;
 }): Partial<Record<SessionChannel, boolean>> {
     const now = args.now ?? Date.now();
     const available: Partial<Record<SessionChannel, boolean>> = {};
     for (const driver of args.drivers) {
-        if (routeFailedRecently(args.failedAt?.[driver.channel], now)) {
-            available[driver.channel] = false;
-            continue;
-        }
-        const measured = driver.machine(args.machineId, now)?.reachable === true;
-        available[driver.channel] = measured || args.lastReadRoute === driver.channel;
+        available[driver.channel] = driver.machine(args.machineId, now)?.reachable === true;
     }
     return available;
 }

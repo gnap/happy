@@ -9,9 +9,12 @@
  */
 
 import { normalizeChannelPriority } from '@/sync/lan/channelOrder';
+import { candidateInputsFor, orderedCandidates, type Candidate } from './candidates';
+import { candidateKey, type CandidateHealth } from './health';
 import type { DaemonConnectionState } from '@/sync/lan/daemonConnections';
+import type { DaemonRoute } from '@/sync/lan/types';
 import type { SessionChannel } from '@/sync/lan/types';
-import type { ChannelDriver, ChannelOperation } from './types';
+import type { ChannelDriver, ChannelOperation , ChannelEndpoint } from './types';
 
 /**
  * The slice of the store the drivers read.
@@ -25,10 +28,16 @@ export type ChannelState = {
     machines: Record<string, { active?: boolean } | undefined>;
     daemonSockets: Record<string, DaemonConnectionState>;
     daemonSessionList: Record<string, { isAlive: boolean; via: string; at: number }>;
-    lanSightings: Record<string, unknown>;
+    lanSightings: Record<string, { baseUrl?: string; machineId?: string } | undefined>;
     /** Where machines published themselves on this network, for when discovery cannot find them. */
-    lanEndpoints: Record<string, unknown>;
-    relayEndpoints: Record<string, { source?: string }>;
+    lanEndpoints: Record<string, { baseUrls?: string[]; at?: number } | undefined>;
+    /**
+     * What is known about each address: whether anything has answered there, and how recently it
+     * stopped. This is what makes "the machine is on the LAN" a claim with evidence behind it,
+     * instead of a claim a published blob makes by existing.
+     */
+    candidateHealth: Record<string, CandidateHealth>;
+    relayEndpoints: Record<string, { baseUrl?: string; source?: string } | undefined>;
     relayDirectory: Record<string, { at: number; sessions: { happySessionId: string; isAlive: boolean }[] }>;
     relayHubConnected: boolean;
 };
@@ -47,9 +56,48 @@ const DAEMON_OPERATIONS: ReadonlySet<ChannelOperation> = new Set([
     'restart',
     'identity',
     'listSessions',
+    'lifecycle',
+]);
+
+/**
+ * What the server can be asked for.
+ *
+ * Everything except the questions that are *about a machine*: what build it is running, and what its
+ * own log says it has started. Those have no server-side answer — the daemon is the only party that
+ * knows — and a server that claims otherwise would be asked and would have to refuse, which is the
+ * "discover it by failing" this layer exists to replace.
+ */
+const SERVER_OPERATIONS: ReadonlySet<ChannelOperation> = new Set([
+    'read',
+    'send',
+    'restart',
+    'spawn',
+    'stop',
+    'exec',
 ]);
 
 /** A connection this App is holding to a machine, on any route. */
+/**
+ * The endpoints a channel would use for a machine, best first.
+ *
+ * One wrapper around the ordering so the three drivers cannot drift: `routes` is the only thing a
+ * channel decides here, and everything else — health, source ranking, demotions — is the same for
+ * all of them because it is about addresses, not about channels.
+ */
+function candidatesFor(state: ChannelState, machineId: string, now: number, routes: DaemonRoute[]): Candidate[] {
+    return orderedCandidates(machineId, candidateInputsFor(state, machineId, { now, routes }));
+}
+
+/** The same list, in the shape anything outside the channel layer sends to. */
+function asEndpoints(candidates: readonly Candidate[]): ChannelEndpoint[] {
+    return candidates.map((candidate) => ({
+        kind: 'address' as const,
+        route: candidate.route,
+        baseUrl: candidate.baseUrl,
+        source: candidate.source,
+    }));
+}
+
 const heldSocket = (state: ChannelState, machineId: string, route: SessionChannel): boolean =>
     Object.entries(state.daemonSockets).some(
         ([key, socket]) => key.startsWith(`${machineId}:`) && socket.route === route && socket.phase === 'live'
@@ -67,6 +115,10 @@ const heldSocket = (state: ChannelState, machineId: string, route: SessionChanne
  * "connected", "trying", or plainly not there. It is never absent, because unlike the LAN there is
  * nothing conditional about it existing.
  */
+/** Whether the server's own connection is usable at all — the same measurement `machine()` makes. */
+const serverCanCarry = (socketStatus: ChannelState['socketStatus']): boolean =>
+    socketStatus !== 'disconnected' && socketStatus !== 'error';
+
 function serverDriver(state: ChannelState): ChannelDriver {
     return {
         channel: 'server',
@@ -90,7 +142,16 @@ function serverDriver(state: ChannelState): ChannelDriver {
         // Everything. A machine's own channels cannot start a session — the daemon's API refuses it
         // on purpose, because starting one is the server's record to keep — and that is the whole
         // reason this axis exists.
-        supports: () => true,
+        supports: (operation) => SERVER_OPERATIONS.has(operation),
+        // The server is one connection rather than a set of addresses, so it is named rather than
+        // addressed — and it offers itself only while that connection is usable.
+        endpoints: () => (serverCanCarry(state.socketStatus) ? [{ kind: 'server' as const }] : []),
+        // No socket to hold: this *is* the socket.
+        socketTarget: () => null,
+        // No operation filter: starting a session is exactly what the server is for, and `supports`
+        // above already says this channel can carry anything. What is left is whether its connection
+        // is usable at all.
+        accepts: () => serverCanCarry(state.socketStatus),
         session: (sessionId) => {
             const session = state.sessions[sessionId];
             if (!session) {
@@ -117,18 +178,35 @@ function lanDriver(state: ChannelState): ChannelDriver {
         link: () => (anySocket() ? 'connected'
             : Object.keys(state.lanSightings).length > 0 ? 'connecting'
                 : null),
-        machine: (machineId) => {
-            // A daemon advertising itself, or a socket this App is holding to it, are both the
-            // machine being up on this network — and the socket term is the one that survives a
-            // browse being missed, which is why the two callers that only read sightings disagreed
-            // with the resolver about the same machine.
-            const seen = machineId in state.lanSightings || machineId in state.lanEndpoints || heldSocket(state, machineId, 'lan');
-            return seen ? { reachable: true, alive: true } : null;
+        machine: (machineId, now) => {
+            // Every address this machine could be reached at, minus the ones that have been tried and
+            // demoted. A machine with an address nothing has tried yet is reachable — that is what
+            // makes it worth trying — and it is not *alive*, which is the badge's question and
+            // requires something to have answered.
+            //
+            // What this replaced: `machineId in lanEndpoints` as both answers. A published address
+            // said the machine was up whether or not it could be reached there, so the channel was
+            // selected, failed, and was selected again the moment the failure was forgotten.
+            const candidates = orderedCandidates(machineId, candidateInputsFor(state, machineId, { now, routes: ['lan'] }));
+            if (candidates.length === 0) {
+                return null;
+            }
+            const alive = candidates.some((candidate) =>
+                state.candidateHealth[candidateKey(candidate.machineId, candidate.route, candidate.baseUrl)]?.phase === 'live');
+            return { reachable: true, alive };
         },
         // Seen once on this network is what earns the glyph, whether or not it is up now.
         // Seen by a browse, or published by the machine itself — the second is what makes the LAN
         // usable on a network where multicast never reaches anyone.
         capable: (machineId) => machineId in state.lanSightings || machineId in state.lanEndpoints,
+        // Capability stays "has this channel ever been had by the machine", which is what the grey
+        // glyph means; whether it is reaching it *now* is `machine().alive` above.
+        endpoints: (machineId, now) => asEndpoints(candidatesFor(state, machineId, now, ['lan'])),
+        // A socket is what turns a claimed address into a proven one, so this is the best address
+        // even when nothing has answered there yet — that is the point of opening it.
+        socketTarget: (machineId, now) => asEndpoints(candidatesFor(state, machineId, now, ['lan']))[0] ?? null,
+        accepts: (operation, machineId, now) =>
+            DAEMON_OPERATIONS.has(operation) && candidatesFor(state, machineId, now, ['lan']).length > 0,
         // A machine can serve its own sessions: read them, take a message, restart a process, say
         // what it is running. What it cannot do is start one, or act inside one — those are the
         // server's, and the daemon's API is built that way.
@@ -173,13 +251,31 @@ function relayDriver(state: ChannelState): ChannelDriver {
         // relay client — every machine has one — which is why hosts that never published grew a
         // relay glyph they had not earned.
         capable: (machineId) => carrying(machineId),
-        machine: (machineId) => {
-            // Alive: the relay is holding it, or this App has a stream to it. Reachable is wider on
-            // purpose — an address derived from the machine key is one the App can *try*, which is
-            // what choosing a channel needs, even though it is not evidence anything is there.
-            const held = carrying(machineId) || heldSocket(state, machineId, 'relay');
-            const tryable = held || machineId in state.relayEndpoints;
-            return tryable ? { reachable: true, alive: held } : null;
+        endpoints: (machineId, now) => asEndpoints(candidatesFor(state, machineId, now, ['relay'])),
+        // A socket to the relay only when the relay is *carrying* the machine: every machine with a
+        // key has a derived relay address, and holding a stream open for each of those would be a
+        // connection to a machine that never dialled in.
+        socketTarget: (machineId, now) => (carrying(machineId)
+            ? asEndpoints(candidatesFor(state, machineId, now, ['relay']))[0] ?? null
+            : null),
+        accepts: (operation, machineId, now) =>
+            DAEMON_OPERATIONS.has(operation) && candidatesFor(state, machineId, now, ['relay']).length > 0,
+        machine: (machineId, now) => {
+            // Same asymmetry as the LAN, with one extra rule: the relay holding the machine is
+            // itself evidence it is up, because the relay only holds a machine that dialled in.
+            // Every route worth trying makes it reachable — an address derived from the machine key
+            // is one the App can *try* — while being alive requires something to have answered.
+            // The relay holding the machine is reachable with no address at all: it is the relay's
+            // own answer about what it is carrying, and it is the one fact that does not need a
+            // route this App can name.
+            const carried = carrying(machineId);
+            const candidates = orderedCandidates(machineId, candidateInputsFor(state, machineId, { now, routes: ['relay'] }));
+            if (!carried && candidates.length === 0) {
+                return null;
+            }
+            const answered = candidates.some((candidate) =>
+                state.candidateHealth[candidateKey(candidate.machineId, candidate.route, candidate.baseUrl)]?.phase === 'live');
+            return { reachable: true, alive: carried || answered };
         },
         session: (sessionId, machineId) => {
             const answered = state.daemonSessionList[sessionId];

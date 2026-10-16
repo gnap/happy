@@ -23,48 +23,114 @@ const base = {
     page: { kind: 'tail' as const },
 };
 const RELAY = 'https://1.2.3.4/r/' + 'b'.repeat(32);
+const LAN = 'http://192.168.5.87:55673';
+const page = { tag: 'x', dataEncryptionKey: '', entries: [], cursor: 'c', older: 'b', hasNewer: false, hasOlder: false, reset: false };
 
-afterEach(() => { vi.clearAllMocks(); });
+afterEach(async () => {
+    // `clearAllMocks` leaves implementations in place, and the credential is cached per address for
+    // ninety seconds — either one would let a test inherit the previous test's answers.
+    vi.resetAllMocks();
+    const { invalidateLanCredential } = await import('./credentials');
+    for (const address of [LAN, RELAY, 'http://10.99.0.1:55673', 'http://192.168.5.88:55673']) {
+        invalidateLanCredential(address);
+    }
+});
 
-describe('readSessionOverLan relay', () => {
-    it('falls back to the relay when discovery finds nothing', async () => {
-        discoverMachines.mockResolvedValue([]);
+describe('readSessionOverLan', () => {
+    it('reads at an address the machine published, which the read path could not do before', async () => {
+        // The reported symptom in one test: a machine found without mDNS was chosen as "on the LAN"
+        // and the read had no way to try the address it published, so the channel was selected and
+        // then failed — over and over. The browse is not what makes an address usable.
         authenticate.mockResolvedValue({ token: 't', expiresAt: Date.now() + 90_000 });
-        fetchHistory.mockResolvedValue({ tag: 'x', dataEncryptionKey: '', entries: [], cursor: 'c', older: 'b', hasNewer: false, hasOlder: false, reset: false });
-        const read = await readSessionOverLan({ ...base, relayBaseUrl: RELAY, via: 'any' });
-        expect(authenticate).toHaveBeenCalledWith(RELAY, base.machineKey);
-        expect(read?.connection.baseUrl).toBe(RELAY);
-        expect(read?.connection.route).toBe('relay');
-    });
+        fetchHistory.mockResolvedValue(page);
 
-    it('skips the browse entirely when the session is on the relay', async () => {
-        authenticate.mockResolvedValue({ token: 't', expiresAt: Date.now() + 90_000 });
-        fetchHistory.mockResolvedValue({ tag: 'x', dataEncryptionKey: '', entries: [], cursor: 'c', older: 'b', hasNewer: false, hasOlder: false, reset: false });
-        await readSessionOverLan({ ...base, relayBaseUrl: RELAY, via: 'relay' });
+        const attempt = await readSessionOverLan({ ...base, candidates: [{ baseUrl: LAN, route: 'lan' }] });
+
         expect(discoverMachines).not.toHaveBeenCalled();
+        expect(authenticate).toHaveBeenCalledWith(LAN, base.machineKey);
+        expect(attempt.kind).toBe('read');
+        if (attempt.kind === 'read') {
+            expect(attempt.read.connection.baseUrl).toBe(LAN);
+        }
     });
 
-    it('never uses the relay when pinned to the LAN', async () => {
-        discoverMachines.mockResolvedValue([]);
-        const read = await readSessionOverLan({ ...base, relayBaseUrl: RELAY, via: 'lan' });
-        expect(read).toBeNull();
-        expect(authenticate).not.toHaveBeenCalled();
+    it('advances to the next address when one does not answer, and says which failed', async () => {
+        // A machine that lists a direct-attach port before the network it is actually on: the first
+        // address costs a timeout and the second one serves the page.
+        authenticate.mockImplementation(async (baseUrl: string) => {
+            if (baseUrl === 'http://10.99.0.1:55673') {
+                throw new Error('connect timeout');
+            }
+            return { token: 't', expiresAt: Date.now() + 90_000 };
+        });
+        fetchHistory.mockResolvedValue(page);
+
+        const attempt = await readSessionOverLan({
+            ...base,
+            candidates: [{ baseUrl: 'http://10.99.0.1:55673', route: 'lan' }, { baseUrl: LAN, route: 'lan' }],
+        });
+
+        expect(attempt.kind).toBe('read');
+        if (attempt.kind === 'read') {
+            expect(attempt.read.connection.baseUrl).toBe(LAN);
+        }
     });
 
-    it('does not reuse a LAN connection when the session is on the relay', async () => {
-        authenticate.mockResolvedValue({ token: 't2', expiresAt: Date.now() + 90_000 });
-        fetchHistory.mockResolvedValue({ tag: 'x', dataEncryptionKey: '', entries: [], cursor: 'c', older: 'b', hasNewer: false, hasOlder: false, reset: false });
-        const lan = { machineId: 'm1', route: 'lan' as const, baseUrl: 'http://10.0.0.2:55673', token: 't', expiresAt: Date.now() + 90_000 };
-        const read = await readSessionOverLan({ ...base, relayBaseUrl: RELAY, via: 'relay', connection: lan });
-        expect(read?.connection.route).toBe('relay');
+    it('reports an address nothing answered at, rather than a page that never came', async () => {
+        authenticate.mockRejectedValue(new Error('EHOSTUNREACH'));
+
+        const attempt = await readSessionOverLan({ ...base, candidates: [{ baseUrl: LAN, route: 'lan' }] });
+
+        expect(attempt).toMatchObject({ kind: 'unreachable', baseUrl: LAN });
     });
 
-    it('prefers a discovered LAN daemon over the relay', async () => {
-        discoverMachines.mockResolvedValue([{ machineId: 'm1', baseUrl: 'http://10.0.0.2:55673' }]);
+    it('a daemon with no log for this session is not an address failure', async () => {
+        // What the health record must never demote an address for: the address answered.
         authenticate.mockResolvedValue({ token: 't', expiresAt: Date.now() + 90_000 });
-        fetchHistory.mockResolvedValue({ tag: 'x', dataEncryptionKey: '', entries: [], cursor: 'c', older: 'b', hasNewer: false, hasOlder: false, reset: false });
-        const read = await readSessionOverLan({ ...base, relayBaseUrl: RELAY, via: 'any' });
-        expect(read?.connection.baseUrl).toBe('http://10.0.0.2:55673');
-        expect(read?.connection.route).toBe('lan');
+        fetchHistory.mockResolvedValue(null);
+
+        const attempt = await readSessionOverLan({ ...base, candidates: [{ baseUrl: LAN, route: 'lan' }] });
+
+        expect(attempt).toEqual({ kind: 'absent', baseUrl: LAN });
+    });
+
+    it('reports a refusal as the daemon\'s answer, and does not ask other addresses', async () => {
+        const { LanRequestError } = await import('./client') as any;
+        authenticate.mockRejectedValue(new LanRequestError('forbidden', 403));
+
+        const attempt = await readSessionOverLan({
+            ...base,
+            candidates: [{ baseUrl: LAN, route: 'lan' }, { baseUrl: 'http://192.168.5.88:55673', route: 'lan' }],
+        });
+
+        expect(attempt).toEqual({ kind: 'refused', baseUrl: LAN, status: 403 });
+        expect(authenticate).toHaveBeenCalledTimes(1);
+    });
+
+    it('reuses a cached connection only while its address is still one worth trying', async () => {
+        authenticate.mockResolvedValue({ token: 't2', expiresAt: Date.now() + 90_000 });
+        fetchHistory.mockResolvedValue(page);
+        const cached = { machineId: 'm1', route: 'lan' as const, baseUrl: LAN };
+
+        // Still offered: the memory is used directly, and nothing browses for it.
+        const kept = await readSessionOverLan({ ...base, candidates: [{ baseUrl: LAN, route: 'lan' }], connection: cached });
+        expect(kept.kind).toBe('read');
+        if (kept.kind === 'read') {
+            expect(kept.read.connection.baseUrl).toBe(LAN);
+        }
+        expect(discoverMachines).not.toHaveBeenCalled();
+
+        // Demoted and no longer offered: the memory is not used, and the relay is where the read goes.
+        const moved = await readSessionOverLan({ ...base, candidates: [{ baseUrl: RELAY, route: 'relay' }], connection: cached });
+        expect(moved.kind).toBe('read');
+        if (moved.kind === 'read') {
+            expect(moved.read.connection.route).toBe('relay');
+        }
+    });
+
+    it('is an attempt at nothing when there is no address to try', async () => {
+        const attempt = await readSessionOverLan({ ...base, candidates: [] });
+        expect(attempt.kind).toBe('absent');
+        expect(authenticate).not.toHaveBeenCalled();
     });
 });

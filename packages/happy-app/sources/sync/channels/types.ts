@@ -17,7 +17,8 @@
  * clock of its own — which is what makes what the App believes testable instead of inferable.
  */
 
-import type { SessionChannel } from '@/sync/lan/types';
+import type { DaemonRoute, SessionChannel } from '@/sync/lan/types';
+import type { CandidateSource } from './candidates';
 
 /** How a channel's own link is doing, for the header's row of icons. */
 export type ChannelLinkState = 'connected' | 'connecting' | 'off';
@@ -83,6 +84,8 @@ export type ChannelOperation =
     | 'identity'
     /** Ask a machine which sessions it has. */
     | 'listSessions'
+    /** Replay a machine's own log of what it has started and archived. */
+    | 'lifecycle'
     /** Start a new session on a machine. */
     | 'spawn'
     /** Stop a session, or the daemon. */
@@ -133,7 +136,51 @@ export type ChannelDriver = {
      * asked of the same drivers' measurements.
      */
     supports(operation: ChannelOperation): boolean;
+    /**
+     * The endpoints this channel would use for a machine, best first.
+     *
+     * This is the half the channel layer was missing: a driver used to answer *whether* it could
+     * carry something and nothing about *where*, so every call site above it built its own address
+     * list — and they disagreed, because only one of them consulted what the addresses had actually
+     * done lately. Empty means this channel has nothing to offer this machine.
+     *
+     * Ordered and filtered here, by the channel that knows what its own addresses mean: for the LAN
+     * that is the machine's published ones, a browse's sightings and any address this App holds a
+     * connection to, with the proven ones first and the demoted ones left out.
+     */
+    endpoints(machineId: string, now: number): ChannelEndpoint[];
+    /**
+     * The endpoint a socket should be held at for this machine, or null when this channel has
+     * nothing to hold one to.
+     *
+     * A socket is the strongest evidence a channel has — it comes up, answers a heartbeat, and the
+     * address is then *proven* rather than claimed — so which address to hold one at is the
+     * channel's own decision, made from the same ordering as everything else.
+     */
+    socketTarget(machineId: string, now: number): ChannelEndpoint | null;
+    /**
+     * Whether this channel can be asked to do this for this machine, now.
+     *
+     * `supports` is what the *kind* of channel can do; this is that, minus the channels that have
+     * nowhere to send it. A call site asks this and stops choosing: a channel that says yes will
+     * carry it over its own endpoints, and one that says no is not asked twice.
+     */
+    accepts(operation: ChannelOperation, machineId: string, now: number): boolean;
 };
+
+/**
+ * One place a channel can send something.
+ *
+ * The server has no address of its own — it is a single connection, not a set of machines — so it
+ * is named rather than addressed, and everything that carries an operation has to handle both.
+ */
+export type ChannelEndpoint =
+    | { kind: 'address'; route: DaemonRoute; baseUrl: string; source: CandidateSource }
+    | { kind: 'server' };
+
+/** The URL to send to, or null for an endpoint that is not an address (the server). */
+export const endpointBaseUrl = (endpoint: ChannelEndpoint): string | null =>
+    endpoint.kind === 'address' ? endpoint.baseUrl : null;
 
 /** The one answer anything above the drivers needs about a session. */
 export type SessionReach = {

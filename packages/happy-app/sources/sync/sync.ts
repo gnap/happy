@@ -38,7 +38,7 @@ import { AsyncLock } from '@/utils/lock';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
-import { fetchIdentity, fetchLifecycle, restartSessionAt, sessionControlAt } from './lan/client';
+import { fetchIdentity, fetchLifecycle, LanRequestError, restartSessionAt, sessionControlAt, type LanRestartVerdict, type LifecycleEntry } from './lan/client';
 import { accountProofHeaders } from '@/auth/accountProof';
 import { getLanCredential } from './lan/credentials';
 import { readSessionOverLan, listSessionsOverLan, toNormalizedMessages, type LanConnection, type LanSessionRead } from './lan/sessionChannel';
@@ -50,13 +50,16 @@ import { normalizeChannelPriority, pickChannel } from './lan/channelOrder';
 import { channelEnabled, enabledChannels } from '@/utils/enabledChannels';
 import { channelDrivers as buildChannelDrivers } from './channels/measure';
 import { channelAvailability } from './channels/resolve';
+import { candidateInputsFor, orderedCandidates } from './channels/candidates';
+import { carryOperation, type HealthRecorder } from './channels/execute';
+import { endpointBaseUrl, type ChannelDriver, type ChannelOperation } from './channels/types';
 import { sendOverDaemonSocket, sendOverServerHttp, sendOverServerSocket } from './channels/ops';
-import type { ChannelDriver, ChannelReason } from './channels/types';
+import type { ChannelReason } from './channels/types';
 import { FetchSlots } from './fetchSlots';
 import { DaemonConnections, type DaemonTarget } from './lan/daemonConnections';
 import { judgeDaemonPage, pageMovedTheLog, planDaemonRead } from './lan/windowPlan';
 import type { DaemonRoute, LanSessionLogEntry, SessionChannel } from './lan/types';
-import { parseLanEndpoint, parseRelayEndpoint } from './lan/relay';
+import { parseLanEndpoints, parseRelayEndpoint } from './lan/relay';
 import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
 import { systemPrompt } from './prompt/systemPrompt';
 import { fetchArtifact, fetchArtifacts, createArtifact, updateArtifact } from './apiArtifacts';
@@ -346,7 +349,7 @@ class Sync {
             // answer is most likely to have changed.
             if (state.phase === 'live') {
                 const machineId = id.split(':')[0];
-                void this.refreshDaemonVersions([{ machineId, baseUrl: this.lanMachineConnections.get(machineId)?.baseUrl ?? '' }]);
+                void this.refreshDaemonVersions([machineId]);
             }
         },
         // Only the LAN: over the relay the hub is the one that can see a daemon go, and it says so.
@@ -470,6 +473,11 @@ class Sync {
                 if (suspendedFor >= Sync.SUSPENDED_TRUST_MS) {
                     this.recoverFetchesAfterSuspend();
                 }
+                // A long suspension is long enough for a machine to have moved, and this device to
+                // have moved with it. Nothing that failed before it is worth believing now.
+                if (suspendedFor >= Sync.SUSPENDED_TRUST_MS) {
+                    storage.getState().rearmCandidateHealth();
+                }
                 // Probe the socket first — a live connection responds in < 200ms.
                 // If probe fails (1.5s timeout) a fresh connect is triggered.
                 // Only invalidate syncs after the probe settles so data fetches
@@ -569,7 +577,7 @@ class Sync {
             if (Date.now() - lastMachineVersionSweep > Sync.MACHINE_VERSION_SWEEP_MS
                 && storage.getState().socketStatus === 'connected') {
                 lastMachineVersionSweep = Date.now();
-                void this.refreshDaemonVersions(this.machinesWithNoLiveChannel());
+                void this.refreshDaemonVersions(this.machinesWithoutLiveSocket());
             }
 
             const idleMs = Date.now() - this.lastUserActivityAt;
@@ -847,6 +855,10 @@ class Sync {
             this.daemonSocketWatch = storage.subscribe((state, previous) => {
                 if (
                     state.lanSightings !== previous.lanSightings ||
+                    // A published address is where a socket can be opened for a machine no browse
+                    // ever finds, so it is as much a reason to reconcile as a sighting is — and
+                    // without it here, a machine that publishes its address gets no socket at all.
+                    state.lanEndpoints !== previous.lanEndpoints ||
                     state.socketStatus !== previous.socketStatus ||
                     state.channelOverride !== previous.channelOverride
                 ) {
@@ -2412,7 +2424,7 @@ class Sync {
 
         for (const machine of decryptedMachines) {
             storage.getState().applyRelayEndpoint(machine.id, parseRelayEndpoint(machine.id, machine.daemonState));
-            storage.getState().applyLanEndpoint(machine.id, parseLanEndpoint(machine.id, machine.daemonState));
+            storage.getState().applyLanEndpoint(machine.id, parseLanEndpoints(machine.id, machine.daemonState));
         }
         // Replace entire machine state with fetched machines
         storage.getState().applyMachines(decryptedMachines, true);
@@ -2950,6 +2962,11 @@ class Sync {
         // hiccup close and reopen the connection, and `expo-network` reports those hiccups often
         // enough for that to be the bulk of the socket churn.
         this.lanMachineConnections.clear();
+        // And what each address has done, for the same reason: an address that did not answer on the
+        // last network is not evidence about this one. This is one of the few things that re-arms a
+        // demoted address, and it is why a device that moves networks recovers without waiting out a
+        // backoff.
+        storage.getState().rearmCandidateHealth();
         if (reason !== 'regained') {
             // A device that never lost connectivity may have moved networks without a gap — but a
             // return to connectivity is the same network it left.
@@ -3532,7 +3549,9 @@ class Sync {
                     storage.getState().setLoadingOlder(sessionId, false);
                     return;
                 }
-                const read = await readSessionOverLan({
+                // Paging back stays on the route the window was read over — that is the address
+                // this session is known to answer at — and the candidate list puts it first.
+                const attempt = await readSessionOverLan({
                     sessionId,
                     machineId: link.machineId,
                     accountPublicKey: this.encryption.contentDataKey,
@@ -3540,9 +3559,12 @@ class Sync {
                     encryption: this.encryption,
                     page: { kind: 'older', before: link.older },
                     connection: link.connection,
-                    relayBaseUrl: storage.getState().relayEndpoints[link.machineId]?.baseUrl,
-                    via: link.connection.route,
+                    candidates: orderedCandidates(link.machineId, candidateInputsFor(storage.getState(), link.machineId, {
+                        now: Date.now(),
+                        routes: [link.connection.route],
+                    })),
                 });
+                const read = attempt.kind === 'read' ? attempt.read : null;
                 if (!read) {
                     storage.getState().setLoadingOlder(sessionId, false);
                     return;
@@ -4027,7 +4049,7 @@ class Sync {
             }
 
             storage.getState().applyRelayEndpoint(machineId, parseRelayEndpoint(machineId, updatedMachine.daemonState));
-            storage.getState().applyLanEndpoint(machineId, parseLanEndpoint(machineId, updatedMachine.daemonState));
+            storage.getState().applyLanEndpoint(machineId, parseLanEndpoints(machineId, updatedMachine.daemonState));
             // Update storage using applyMachines which rebuilds sessionListViewData
             storage.getState().applyMachines([updatedMachine]);
         } else if (updateData.body.t === 'relationship-updated') {
@@ -4291,36 +4313,36 @@ class Sync {
      * cases that covers.
      */
     /** Every machine this App can reach, with the address it last reached it over and by which route. */
-    private knownMachineAddresses(): { machineId: string; baseUrl: string; route: DaemonRoute }[] {
-        const addresses: { machineId: string; baseUrl: string; route: DaemonRoute }[] = [];
-        // Addresses a machine published for itself come first: they are the ones that survive a
-        // network where discovery finds nothing, and the ones a read would otherwise never try.
-        for (const [machineId, endpoint] of Object.entries(storage.getState().lanEndpoints)) {
-            if (endpoint?.baseUrl) addresses.push({ machineId, baseUrl: endpoint.baseUrl, route: 'lan' });
-        }
-        for (const [machineId, connection] of this.lanMachineConnections) {
-            if (connection?.baseUrl) addresses.push({ machineId, baseUrl: connection.baseUrl, route: connection.route });
-        }
-        for (const [machineId, endpoint] of Object.entries(storage.getState().relayEndpoints)) {
-            if (endpoint?.baseUrl && !addresses.some((entry) => entry.machineId === machineId && entry.route === 'relay')) {
-                addresses.push({ machineId, baseUrl: endpoint.baseUrl, route: 'relay' });
-            }
-        }
-        return addresses;
+    /**
+     * Every machine this device could ask something about.
+     *
+     * Ids, not addresses: which address to use is the channel's answer, and this used to be a second
+     * address builder beside the drivers' — one that consulted neither the health of an address nor
+     * the order the machine ranks them in.
+     */
+    private knownMachineIds(): string[] {
+        const state = storage.getState();
+        return [...new Set([
+            ...Object.keys(state.machines),
+            ...Object.keys(state.lanEndpoints),
+            ...Object.keys(state.relayEndpoints),
+            ...Object.keys(state.lanSightings),
+            ...Object.keys(state.relayDirectory),
+        ])];
     }
 
     /**
-     * The machines this App can reach but is not on a live socket with.
+     * The same set, minus the machines this App is already on a live socket with.
      *
-     * Those are the ones nothing has told us about: a machine the server channel is carrying, or
-     * one whose own socket has dropped. A machine on a live LAN or relay socket is left out, since
+     * Those are the ones nothing has told us about lately: a machine the server channel is carrying,
+     * or one whose own socket has dropped. A machine on a live LAN or relay socket is left out, since
      * that socket coming live is what asked it, and the answer it gave then is the freshest thing
      * anyone could have.
      */
-    private machinesWithNoLiveChannel(): { machineId: string; baseUrl: string; route: DaemonRoute }[] {
+    private machinesWithoutLiveSocket(): string[] {
         const sockets = Object.entries(storage.getState().daemonSockets);
-        return this.knownMachineAddresses().filter((machine) => !sockets.some(
-            ([key, socket]) => key.startsWith(`${machine.machineId}:`) && socket.phase === 'live'
+        return this.knownMachineIds().filter((machineId) => !sockets.some(
+            ([key, socket]) => key.startsWith(`${machineId}:`) && socket.phase === 'live'
         ));
     }
 
@@ -4333,25 +4355,29 @@ class Sync {
      * remembered about when it last answered, because there is no such thing as holding this answer
      * too freshly: whoever asks has a reason to.
      */
-    private async refreshDaemonVersions(machines: { machineId: string; baseUrl: string }[]): Promise<void> {
-        for (const machine of machines) {
-            if (!machine.baseUrl || this.daemonVersionChecks.has(machine.machineId)) {
+    private async refreshDaemonVersions(machineIds: string[]): Promise<void> {
+        for (const machineId of machineIds) {
+            if (this.daemonVersionChecks.has(machineId)) {
                 continue;
             }
-            this.daemonVersionChecks.add(machine.machineId);
+            this.daemonVersionChecks.add(machineId);
             try {
-                const key = this.getMachineKey(machine.machineId);
-                if (!key) continue;
-                const { token } = await getLanCredential(machine.baseUrl, key);
-                const identity = await fetchIdentity(machine.baseUrl, token) as { versions?: { running: string; onDisk: string | null; restartRequired: boolean } };
-                if (identity.versions) {
-                    storage.getState().applyDaemonVersion(machine.machineId, identity.versions);
-                    log.log(`📡 daemon ${machine.machineId.slice(0, 8)} is running ${identity.versions.running}${identity.versions.restartRequired ? ' (restart required)' : ''}`);
+                const versions = await this.carryAtDaemon<{ running: string; onDisk: string | null; restartRequired: boolean }>({
+                    machineId,
+                    operation: 'identity',
+                    run: async (baseUrl, token) => {
+                        const identity = await fetchIdentity(baseUrl, token) as { versions?: { running: string; onDisk: string | null; restartRequired: boolean } };
+                        return identity.versions ?? null;
+                    },
+                });
+                if (versions) {
+                    storage.getState().applyDaemonVersion(machineId, versions);
+                    log.log(`📡 daemon ${machineId.slice(0, 8)} is running ${versions.running}${versions.restartRequired ? ' (restart required)' : ''}`);
                 }
             } catch {
                 // Best effort: a machine that will not answer is reported by its silence elsewhere.
             } finally {
-                this.daemonVersionChecks.delete(machine.machineId);
+                this.daemonVersionChecks.delete(machineId);
             }
         }
     }
@@ -4389,14 +4415,35 @@ class Sync {
         // Each channel reads on its own route and only that route: a session on the relay does not
         // browse for a machine known to be elsewhere, and one on the LAN never goes through the
         // relay. Only the server-failure fallback, which has no channel of its own, tries both.
-        const relayEndpoint = machineId ? storage.getState().relayEndpoints[machineId] : undefined;
         const channel = this.preferredChannel(sessionId);
-        const via = forceRoute ?? (channel === 'server' ? this.fallbackVia() : channel);
+        // Which routes this read may use: the one the channel chose, or every daemon route when it
+        // has fallen back from the server and has no channel of its own. The addresses come from the
+        // candidate list — the machine's own published ones included, which is what the read path
+        // could not reach before and why a machine found without mDNS was never readable on the LAN.
+        const routes: DaemonRoute[] = forceRoute
+            ? [forceRoute]
+            : channel === 'server'
+                ? (this.fallbackVia() === 'any' ? ['lan', 'relay'] : [this.fallbackVia() as DaemonRoute])
+                : [channel as DaemonRoute];
         // The session's own connection when it has one, otherwise whatever this machine was last
         // reached over — same machine, so the same address and a token that covers it.
         const knownConnection = inMemory?.connection ?? (machineId ? this.lanMachineConnections.get(machineId) : undefined);
-        const readPage = (page: Parameters<typeof readSessionOverLan>[0]['page'], connection: LanConnection | null | undefined) =>
-            readSessionOverLan({
+        const candidates = machineId
+            ? orderedCandidates(machineId, candidateInputsFor(storage.getState(), machineId, {
+                now: Date.now(),
+                routes,
+                forRead: true,
+            }))
+            : [];
+        /**
+         * One read, with what it learned about the address written down.
+         *
+         * Only "nothing answered there" counts against an address: a daemon with no log for this
+         * session, or one that refused this device, has said something about itself or the session
+         * and nothing about whether the address works.
+         */
+        const readPage = async (page: Parameters<typeof readSessionOverLan>[0]['page'], connection: LanConnection | null | undefined) => {
+            const attempt = await readSessionOverLan({
                 sessionId,
                 machineId,
                 accountPublicKey,
@@ -4404,9 +4451,15 @@ class Sync {
                 encryption: this.encryption,
                 page,
                 connection,
-                relayBaseUrl: relayEndpoint?.baseUrl,
-                via,
+                candidates,
             });
+            if (machineId && attempt.kind === 'unreachable' && attempt.baseUrl) {
+                storage.getState().candidateFailed(machineId, routes.includes('relay') && attempt.baseUrl.includes('/r/') ? 'relay' : 'lan', attempt.baseUrl);
+            } else if (machineId && attempt.kind === 'read') {
+                storage.getState().candidateSucceeded(machineId, attempt.read.connection.route, attempt.read.connection.baseUrl);
+            }
+            return attempt.kind === 'read' ? attempt.read : null;
+        };
 
         // Converge from where this App is, and only fall back to the newest page when the log has
         // moved further than one page away. Reading forward one page per tick through a backlog is
@@ -4438,23 +4491,15 @@ class Sync {
             // what is held intact and lets the backoff try again. Only when a window is held: with
             // nothing to lose, an empty page is simply what the tail is.
             log.log(`📡 fetchSessionFromDaemon: empty replacement page for ${sessionId}; keeping the window`);
-            this.noteRouteFailure(sessionId, read.connection.route);
             return null;
         }
         if (!read) {
-            // The route was tried and did not serve this session — the daemon has no log for it, or
-            // did not answer at all. Recording that is what keeps the next tick from choosing the
-            // same route and reporting the same thing, and what stops the UI from labelling the
-            // session with a channel that has never carried it.
-            if (via === 'any') {
-                this.noteRouteFailure(sessionId, 'lan');
-                this.noteRouteFailure(sessionId, 'relay');
-            } else {
-                this.noteRouteFailure(sessionId, via);
-            }
+            // Every address was tried and none served this session. What that says about each one has
+            // already been recorded per address, by the read that tried it — a route is no longer
+            // marked down as a whole, which is what used to take a working address out of the
+            // running along with a broken one.
             return null;
         }
-        this.clearRouteFailure(sessionId, read.connection.route);
         this.settleReceivedMessages(read.received);
         const window = replace
             ? { cursor: read.cursor, older: read.older, hasOlder: read.hasOlder }
@@ -4568,43 +4613,128 @@ class Sync {
         method: 'abort' | 'permission',
         params: string,
     ): Promise<boolean> {
-        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
-        const machineKey = machineId ? this.getMachineKey(machineId) : null;
-        if (!machineId || !machineKey) {
-            return false;
+        const done = await this.carrySessionAction<boolean>(sessionId, {
+            operation: 'send',
+            path: `/lan/sessions/${encodeURIComponent(sessionId)}/control`,
+            run: (baseUrl, token, proof) => sessionControlAt(baseUrl, token, sessionId, method, params, proof).then((ok) => (ok ? true : null)),
+        });
+        if (done === true) {
+            log.log(`🔄 ${method} ${sessionId}: handed to the session`);
         }
-        // The same decision the session's messages are read over, so a control call goes the way the
-        // session is already being talked to.
+        return done === true;
+    }
+
+    /**
+     * An action a machine's own channels carry for a session: abort, answer a prompt, restart.
+     *
+     * One method for all of them, because they differ only in what they ask for. The rest is the
+     * same and should not be written once per action: the order the channels are tried in, the
+     * credential per address, the account's proof of *this* request over *this* path, and the rule
+     * that an address which does not answer is a reason to try the machine's next one.
+     *
+     * It used to be written per action — control and restart held the same block twice — and both
+     * took the first address on a route and never the second, so one unreachable address stood for
+     * the whole channel.
+     *
+     * Returns the value the action produced, or null when no daemon channel carried it — which is
+     * the caller's signal to ask the server.
+     */
+    private async carrySessionAction<T>(
+        sessionId: string,
+        action: {
+            operation: ChannelOperation;
+            path: string;
+            run: (baseUrl: string, token: string, proof: Record<string, string> | undefined) => Promise<T | null>;
+        },
+    ): Promise<T | null> {
+        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        if (!machineId) {
+            return null;
+        }
+        // The same decision the session's messages are read over, so an action goes the way the
+        // session is already being talked to. "The server" is not this method's business — the
+        // caller is holding it.
         const preferred = this.preferredChannel(sessionId);
         if (preferred === 'server') {
-            return false;
+            return null;
         }
-        const routes = this.daemonRoutesEnabled();
-        const addresses = this.knownMachineAddresses().filter((address) => address.machineId === machineId);
-        const order: DaemonRoute[] = preferred === 'lan' ? ['lan', 'relay'] : ['relay', 'lan'];
-        for (const route of order) {
-            const address = addresses.find((candidate) => candidate.route === route);
-            if (!address || !routes[route]) {
-                continue;
-            }
-            try {
-                const { token } = await getLanCredential(address.baseUrl, machineKey);
-                // The account's proof of *this* request, built over the path as it is sent: the
-                // machine checks the same bytes, and it is not a party that can be told to trust one.
-                const proof = await accountProofHeaders({
-                    method: 'POST',
-                    path: `/lan/sessions/${encodeURIComponent(sessionId)}/control`,
-                });
-                if (await sessionControlAt(address.baseUrl, token, sessionId, method, params, proof ?? undefined)) {
-                    log.log(`🔄 ${method} ${sessionId} over ${route}: handed to the session`);
-                    return true;
+        const enabled = this.daemonRoutesEnabled();
+        const daemonDrivers = this.channelDrivers().filter(
+            (driver): driver is ChannelDriver => driver.channel !== 'server' && enabled[driver.channel as DaemonRoute] === true,
+        );
+        // A real comparison: the preferred channel first, the rest in the order the device lists
+        // them. `sort` needs an answer that does not depend on which side it is asked about.
+        const rank = (channel: SessionChannel): number => (channel === preferred ? 0 : 1);
+        const order = [...daemonDrivers].sort((a, b) => rank(a.channel) - rank(b.channel));
+
+        return this.carryAtDaemon<T>({
+            machineId,
+            operation: action.operation,
+            proofPath: action.path,
+            drivers: order,
+            run: action.run,
+        });
+    }
+
+    /**
+     * Asks a machine's own channels for something, without the caller naming a route or an address.
+     *
+     * The credential per address and the classification of a refusal live here rather than at each
+     * call site, because they are the same question everywhere: a daemon that answers and refuses is
+     * refusing *this device*, so every one of its addresses would say the same and the attempt is an
+     * answer rather than an address failure. A thrown anything-else is silence, which is exactly what
+     * the address health is for.
+     *
+     * `proofPath` is for the actions the account has to authorise (restart, control): the proof is
+     * built over the path as it will be sent, because the machine checks the bytes it receives.
+     */
+    private async carryAtDaemon<T>(args: {
+        machineId: string;
+        operation: ChannelOperation;
+        proofPath?: string;
+        /** Only these channels, in this order — the caller's policy, e.g. where the session is read. */
+        drivers?: readonly ChannelDriver[];
+        run: (baseUrl: string, token: string, proof: Record<string, string> | undefined) => Promise<T | null>;
+    }): Promise<T | null> {
+        const machineKey = this.getMachineKey(args.machineId);
+        if (!machineKey) {
+            return null;
+        }
+        const drivers = args.drivers ?? this.channelDrivers();
+        const outcome = await carryOperation<T>({
+            drivers,
+            operation: args.operation,
+            machineId: args.machineId,
+            attempt: async (endpoint) => {
+                const baseUrl = endpointBaseUrl(endpoint);
+                if (!baseUrl) {
+                    return { kind: 'refused' };
                 }
-            } catch {
-                // The next route, and then the server: an address that does not answer is a reason to
-                // try another, not a failure to hand back.
-            }
-        }
-        return false;
+                const { token } = await getLanCredential(baseUrl, machineKey);
+                const proof = args.proofPath ? await accountProofHeaders({ method: 'POST', path: args.proofPath }) : null;
+                try {
+                    const value = await args.run(baseUrl, token, proof ?? undefined);
+                    // It answered. Whether the answer is what was wanted is its verdict about the
+                    // request, not something to hold against the address.
+                    return value === null ? { kind: 'absent' } : { kind: 'done', value };
+                } catch (error) {
+                    if (error instanceof LanRequestError) {
+                        return { kind: 'refused', status: error.status };
+                    }
+                    throw error;
+                }
+            },
+            recorder: this.healthRecorder(),
+        });
+        return outcome.kind === 'done' ? outcome.value : null;
+    }
+
+    /** Where an attempt's outcome is written, so the next caller starts from what this one learned. */
+    private healthRecorder(): HealthRecorder {
+        return {
+            succeeded: (machineId, route, baseUrl) => storage.getState().candidateSucceeded(machineId, route, baseUrl),
+            failed: (machineId, route, baseUrl) => storage.getState().candidateFailed(machineId, route, baseUrl),
+        };
     }
 
     /**
@@ -4621,21 +4751,27 @@ class Sync {
     async pullMachineLifecycle(): Promise<void> {
         // One at a time: a machine that is not answering must not hold up the others, and the
         // requests are cheap enough that overlapping them buys nothing.
-        for (const address of this.knownMachineAddresses()) {
-            const machineKey = this.getMachineKey(address.machineId);
-            if (!machineKey) {
-                continue;
-            }
+        //
+        // Once per machine, not once per address. The cursor is the machine's, so replaying the same
+        // log through a second address of the same daemon asks the same question twice and pays a
+        // timeout for every address that does not answer.
+        for (const machineId of this.knownMachineIds()) {
             try {
-                const { token } = await getLanCredential(address.baseUrl, machineKey);
-                const since = storage.getState().lifecycleCursors[address.machineId] ?? 0;
-                const { revision, entries } = await fetchLifecycle(address.baseUrl, token, since);
-                if (entries.length > 0) {
-                    log.log(`🔄 lifecycle ${address.machineId.slice(0, 8)} over ${address.route}: ${entries.length} entr${entries.length === 1 ? 'y' : 'ies'} (rev ${since} → ${revision})`);
+                const since = storage.getState().lifecycleCursors[machineId] ?? 0;
+                const answer = await this.carryAtDaemon<{ revision: number; entries: LifecycleEntry[] }>({
+                    machineId,
+                    operation: 'lifecycle',
+                    run: (baseUrl, token) => fetchLifecycle(baseUrl, token, since),
+                });
+                if (!answer) {
+                    continue;
                 }
-                storage.getState().applyLifecycle(address.machineId, revision, entries);
+                if (answer.entries.length > 0) {
+                    log.log(`🔄 lifecycle ${machineId.slice(0, 8)}: ${answer.entries.length} entr${answer.entries.length === 1 ? 'y' : 'ies'} (rev ${since} → ${answer.revision})`);
+                }
+                storage.getState().applyLifecycle(machineId, answer.revision, answer.entries);
             } catch {
-                // The address may be stale, or the daemon may predate the route.
+                // The machine may be unreachable, or its daemon may predate the route.
             }
         }
     }
@@ -4653,31 +4789,14 @@ class Sync {
         if (preferred === 'server') {
             return null;
         }
-        const routes = this.daemonRoutesEnabled();
-        const addresses = this.knownMachineAddresses().filter((address) => address.machineId === machineId);
-        // The chosen route first, then the other one: an address that has moved is worth one more
-        // try before the restart is handed to a channel the App is not otherwise using.
-        const order: DaemonRoute[] = preferred === 'lan' ? ['lan', 'relay'] : ['relay', 'lan'];
-        for (const route of order) {
-            const address = addresses.find((candidate) => candidate.route === route);
-            if (!address || !routes[route]) {
-                continue;
-            }
-            try {
-                const { token } = await getLanCredential(address.baseUrl, machineKey);
-                const proof = await accountProofHeaders({
-                    method: 'POST',
-                    path: `/lan/sessions/${encodeURIComponent(sessionId)}/restart`,
-                });
-                const verdict = await restartSessionAt(address.baseUrl, token, sessionId, proof ?? undefined);
-                if (verdict) {
-                    log.log(`🔄 restart ${sessionId} over ${route}: ${verdict.success ? 'accepted' : verdict.error ?? 'refused'}`);
-                    return verdict;
-                }
-            } catch {
-                // The next route, and then the server: an address that does not answer is a reason
-                // to try another, not a failure to hand back.
-            }
+        const verdict = await this.carrySessionAction<LanRestartVerdict>(sessionId, {
+            operation: 'restart',
+            path: `/lan/sessions/${encodeURIComponent(sessionId)}/restart`,
+            run: (baseUrl, token, proof) => restartSessionAt(baseUrl, token, sessionId, proof ?? undefined),
+        });
+        if (verdict) {
+            log.log(`🔄 restart ${sessionId}: ${verdict.success ? 'accepted' : verdict.error ?? 'refused'}`);
+            return verdict;
         }
         log.log(`🔄 restart ${sessionId}: no daemon channel answered, asking the server`);
         return null;
@@ -4718,10 +4837,7 @@ class Sync {
         // version is a build id that changes whenever anything is rebuilt. The address is the one
         // that answered, so a machine reached over its relay is asked there too rather than being
         // looked for on a network it is not on.
-        void this.refreshDaemonVersions(answers.map((answer) => ({
-            machineId: answer.machineId,
-            baseUrl: answer.baseUrl,
-        })));
+        void this.refreshDaemonVersions(answers.map((answer) => answer.machineId));
         return sessions.length;
     }
 
@@ -4780,6 +4896,11 @@ class Sync {
             state.socketStatus,
             state.daemonSockets,
             state.lanSightings,
+            // Read by the LAN driver, and the health is what decides whether it says yes: leaving
+            // either out of the key is a cache that answers with a stale driver every time an
+            // address is proven or demoted, which is the common case this work creates.
+            state.lanEndpoints,
+            state.candidateHealth,
             state.relayEndpoints,
             state.relayDirectory,
             state.relayHubConnected,
@@ -4798,23 +4919,6 @@ class Sync {
     }
 
     private channelDriversCache: { key: unknown[]; drivers: ChannelDriver[] } | null = null;
-
-    /** A route that failed to serve this session. Ages out, since a daemon may log it later. */
-    private routeFailures = new Map<string, Partial<Record<DaemonRoute, number>>>();
-
-    private noteRouteFailure(sessionId: string, route: DaemonRoute): void {
-        const failures = this.routeFailures.get(sessionId) ?? {};
-        failures[route] = Date.now();
-        this.routeFailures.set(sessionId, failures);
-    }
-
-    private clearRouteFailure(sessionId: string, route: DaemonRoute): void {
-        const failures = this.routeFailures.get(sessionId);
-        if (failures?.[route] !== undefined) {
-            delete failures[route];
-            this.routeFailures.set(sessionId, failures);
-        }
-    }
 
     private channelReasons = new Map<string, string>();
 
@@ -4863,13 +4967,9 @@ class Sync {
         const serverDown = state.socketStatus === 'disconnected' || state.socketStatus === 'error';
         // Which channels could serve this session, from the same rule the header and the badges are
         // drawn from — they used to be worked out separately, and disagreed about the same session.
-        const lastRead = this.daemonLinks.get(sessionId);
         const available = channelAvailability({
             drivers: this.channelDrivers(),
-            sessionId,
             machineId,
-            failedAt: this.routeFailures.get(sessionId),
-            lastReadRoute: lastRead && lastRead.machineId === machineId ? lastRead.connection.route : undefined,
         });
         const { channel, reachable } = pickChannel(priority, available);
         if (!reachable) {
@@ -4969,6 +5069,7 @@ class Sync {
                     machineId,
                     tag: machine.tag,
                     sessions: Array.isArray(machine.sessions) ? (machine.sessions as RelayDirectoryEntry['sessions']) : [],
+                    ...(machine.reachable ? { reachable: machine.reachable } : {}),
                     at,
                 });
             } else {
@@ -4977,6 +5078,17 @@ class Sync {
         }
         for (const entry of entries) {
             this.relayMachines.set(entry.machineId, { tag: entry.tag, sessions: entry.sessions });
+        }
+        // Where each machine says it can be reached, merged exactly as the server's copy of the same
+        // claim is. This is the relay doing the job the server would otherwise do, and it matters
+        // most when the server is the thing that is gone: without it, a machine on this very network
+        // has no address the App can try.
+        for (const entry of entries) {
+            if (entry.reachable) {
+                const blob = { p2p: entry.reachable };
+                storage.getState().applyLanEndpoint(entry.machineId, parseLanEndpoints(entry.machineId, blob));
+                storage.getState().applyRelayEndpoint(entry.machineId, parseRelayEndpoint(entry.machineId, blob));
+            }
         }
         // Worth a line of its own: a machine the relay is holding but this App cannot name has no
         // relay icon and no relay route, and it looks exactly like a machine that is not on the
@@ -5153,23 +5265,32 @@ class Sync {
             }
         };
 
-        if (routes.lan) {
-            for (const sighting of Object.values(state.lanSightings)) {
-                add(sighting.machineId, 'lan', sighting.baseUrl);
+        // What each channel wants a socket at, asked of the channels. This was four sources assembled
+        // here — sightings, the best published address, the relay's directory, and the sessions being
+        // read — each with its own idea of which address wins, and the loop order decided the answer:
+        // a published address overwrote a mDNS sighting for the same machine simply by being added
+        // second.
+        //
+        // Now the ranking is the one the channels already use for a read, so a socket sits where a
+        // read would go. The relay is the case that needed its own guard: every machine with a key
+        // has a derived relay address, and holding a stream open for each of those would be a
+        // connection to a machine that never dialled in.
+        const now = Date.now();
+        for (const driver of this.channelDrivers()) {
+            if (driver.channel === 'server' || routes[driver.channel as DaemonRoute] !== true) {
+                continue;
             }
-        }
-
-        if (routes.relay) {
-            // The relay's own answer, not a sighting: these are the machines it is holding right
-            // now, which is exactly the set worth holding a connection to.
-            for (const machineId of this.relayMachines.keys()) {
-                const baseUrl = state.relayEndpoints[machineId]?.baseUrl;
+            for (const machineId of this.knownMachineIds()) {
+                const target = driver.socketTarget(machineId, now);
+                const baseUrl = target ? endpointBaseUrl(target) : null;
                 if (baseUrl) {
-                    add(machineId, 'relay', baseUrl);
+                    add(machineId, driver.channel as DaemonRoute, baseUrl);
                 }
             }
         }
 
+        // And the sessions being read, whatever else claims their machines: the address a read came
+        // back over is proof enough that it answers, and it is the connection a send would use.
         for (const link of this.daemonLinks.values()) {
             add(link.machineId, link.connection.route, link.connection.baseUrl);
         }

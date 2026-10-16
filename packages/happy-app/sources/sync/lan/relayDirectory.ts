@@ -22,6 +22,12 @@ export type RelayDirectoryEntry = {
     tag: string;
     /** What the machine published. Empty for a daemon running a CLI that predates the directory. */
     sessions: LanSessionSummary[];
+    /**
+     * Where that machine says it can be reached, as it published it, or undefined if it published
+     * nothing. Kept as it arrived: the relay does not read the blob, and this does not either — it
+     * goes to the same parser the server's copy of it goes through.
+     */
+    reachable?: unknown;
     /** When this answer was received. */
     at: number;
 };

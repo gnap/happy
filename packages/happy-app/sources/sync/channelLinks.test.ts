@@ -10,6 +10,11 @@ const driver = (channel: ChannelDriver['channel'], state: ChannelLinkState | nul
     machine: () => null,
     capable: () => false,
     supports: () => true,
+    // The endpoint members answer nothing here: these cases are about what a driver says, not about
+    // where it would send anything.
+    endpoints: () => [],
+    socketTarget: () => null,
+    accepts: () => true,
 });
 
 describe('channelLinks', () => {
