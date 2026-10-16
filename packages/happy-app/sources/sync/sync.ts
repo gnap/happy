@@ -2883,6 +2883,21 @@ class Sync {
         }
     }
 
+    /**
+     * How long a waiter for a fetch slot waits before looking again.
+     *
+     * The pool reclaims an expired lease on its own, but only when someone asks it for a slot — and
+     * the queue of waiters was pumped *only* by a release. So a holder that never released (a fetch
+     * suspended mid-request on iOS, or one waiting on a wedged SQLite call, whose `finally` never
+     * ran) left every waiter behind it parked for the life of the process, even though its own slot
+     * had long since been reclaimed: opening a session printed "acquiring lock" and then nothing.
+     * A waiter that looks again on its own is what makes the lease worth having.
+     */
+    private static readonly FETCH_SLOT_RETRY_MS = 2_000;
+
+    /** The one timer that keeps looking while waiters exist, so waiting is not tied to a release. */
+    private fetchSlotTimer: ReturnType<typeof setTimeout> | null = null;
+
     private acquireMessageFetchSlot = (): Promise<number> => {
         const token = this.messageFetchSlots.tryAcquire(Date.now());
         if (token !== null) {
@@ -2890,6 +2905,7 @@ class Sync {
         }
         return new Promise<number>((resolve) => {
             this.messageFetchQueue.push(resolve);
+            this.armMessageFetchPump();
         });
     };
 
@@ -2901,6 +2917,19 @@ class Sync {
             return;
         }
         this.pumpMessageFetchQueue();
+    };
+
+    /** Keeps one timer alive for as long as anyone is waiting, and no longer. */
+    private armMessageFetchPump = (): void => {
+        if (this.fetchSlotTimer !== null || this.messageFetchQueue.length === 0) {
+            return;
+        }
+        this.fetchSlotTimer = setTimeout(() => {
+            this.fetchSlotTimer = null;
+            this.pumpMessageFetchQueue();
+            this.armMessageFetchPump();
+        }, Sync.FETCH_SLOT_RETRY_MS);
+        (this.fetchSlotTimer as unknown as { unref?: () => void }).unref?.();
     };
 
     private pumpMessageFetchQueue = (): void => {
