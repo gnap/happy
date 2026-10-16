@@ -38,7 +38,7 @@ import { AsyncLock } from '@/utils/lock';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
-import { fetchIdentity, restartSessionAt, sessionControlAt } from './lan/client';
+import { fetchIdentity, fetchLifecycle, restartSessionAt, sessionControlAt } from './lan/client';
 import { getLanCredential } from './lan/credentials';
 import { readSessionOverLan, listSessionsOverLan, toNormalizedMessages, type LanConnection, type LanSessionRead } from './lan/sessionChannel';
 import { decryptLanEntries } from './lan/history';
@@ -4593,6 +4593,39 @@ class Sync {
         return false;
     }
 
+    /**
+     * Replays what each machine says it has started and archived, from where this App left off.
+     *
+     * The App learns about a session here before the server knows it exists, which is the point:
+     * the machine has it, so the App can be shown it, and the server catching up is a separate
+     * progress. Asked on occasions rather than on a timer — a machine's own socket coming live, and
+     * the hint it sends when its log moves — because the log changes a handful of times a day and a
+     * poll would be all cost.
+     *
+     * Never fatal: an address that has moved is a reason to try again on the next occasion.
+     */
+    async pullMachineLifecycle(): Promise<void> {
+        // One at a time: a machine that is not answering must not hold up the others, and the
+        // requests are cheap enough that overlapping them buys nothing.
+        for (const address of this.knownMachineAddresses()) {
+            const machineKey = this.getMachineKey(address.machineId);
+            if (!machineKey) {
+                continue;
+            }
+            try {
+                const { token } = await getLanCredential(address.baseUrl, machineKey);
+                const since = storage.getState().lifecycleCursors[address.machineId] ?? 0;
+                const { revision, entries } = await fetchLifecycle(address.baseUrl, token, since);
+                if (entries.length > 0) {
+                    log.log(`🔄 lifecycle ${address.machineId.slice(0, 8)} over ${address.route}: ${entries.length} entr${entries.length === 1 ? 'y' : 'ies'} (rev ${since} → ${revision})`);
+                }
+                storage.getState().applyLifecycle(address.machineId, revision, entries);
+            } catch {
+                // The address may be stale, or the daemon may predate the route.
+            }
+        }
+    }
+
     async restartSession(sessionId: string, machineId: string): Promise<{ success: boolean; newSessionId?: string; error?: string } | null> {
         const machineKey = this.getMachineKey(machineId);
         if (!machineKey) {
@@ -5134,6 +5167,13 @@ class Sync {
         const body = (payload as {
             body?: { t?: string; id?: string; entry?: LanSessionLogEntry; anchor?: string; head?: string };
         } | null)?.body;
+        // The machine's own log moved — a session it started, or one it archived. A hint, not the
+        // entry: this asks for what it missed with its own cursor, which is what keeps the replay
+        // per-reader and what makes it an occasion rather than a poll.
+        if (body?.t === 'lifecycle') {
+            void this.pullMachineLifecycle();
+            return;
+        }
         // The daemon's hint that a session's local log grew. It is not a server update, so it never
         // reaches handleUpdate: it only means "read now" instead of waiting for the next poll tick.
         // It stays even though entries are pushed as well — it is what recovers a frame the socket
@@ -5273,6 +5313,9 @@ class Sync {
 
     /** A connection came up: the sessions on that machine no longer need their polling fallback. */
     private onDaemonConnectionReady(target: DaemonTarget): void {
+        // The machine's own log, asked the moment its channel comes up: this is the fastest channel
+        // there is, and the sessions it has are the ones the server may not know about yet.
+        void this.pullMachineLifecycle();
         // A connection that is up is one worth asking again whether it can answer: a daemon that
         // has been updated since the last attempt will say so, and one that has not is written off
         // again after a single missed heartbeat.

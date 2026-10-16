@@ -204,6 +204,35 @@ interface StorageState {
      * can confirm which sessions exist and which are alive, but it cannot build a session row.
      */
     daemonSessionList: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; at: number; restartingSince?: number }>;
+    /**
+     * How far each machine's lifecycle log has been replayed, by machine id.
+     *
+     * In memory rather than persisted, and that is a decision rather than an omission: replaying
+     * from the beginning again is an empty operation, because every entry is idempotent — a create
+     * for a session that is already here does nothing, a delete for one that is already gone does
+     * nothing. Persisting the cursor would save a few bytes of bandwidth per launch and add a way
+     * for the stored position and the stored sessions to disagree.
+     */
+    lifecycleCursors: Record<string, number>;
+    /**
+     * Applies what a machine's own log says, for the sessions the server has not told this App
+     * about.
+     *
+     * A session arrives here before the server knows it exists, which is the whole point: the
+     * machine has it, the App can be shown it, and the server catching up is a separate progress.
+     * Keyed by the server's id when the entry carries one and by the tag when it does not — a
+     * session has a tag from the moment it is spawned and an id only once the server has answered —
+     * so an entry that brings the id replaces the row that was standing in on the tag.
+     */
+    applyLifecycle: (machineId: string, revision: number, entries: {
+        rev: number;
+        at: number;
+        op: 'created' | 'deleted';
+        tag: string;
+        sessionId?: string;
+        directory?: string;
+        agent?: string;
+    }[]) => void;
     /** What each machine last said it was running, asked over a channel it answered on. */
     daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }>;
     /** Replace the daemons' view. Pass null to clear it (the server answered). */
@@ -684,6 +713,7 @@ export const storage = create<StorageState>()((set, get) => {
         relayUnknownTags: [],
         relayHubConnected: false,
         daemonSockets: {},
+        lifecycleCursors: {},
         daemonSessionList: {},
         daemonVersions: {},
         channelOverride: {},
@@ -1951,6 +1981,66 @@ export const storage = create<StorageState>()((set, get) => {
                 ),
             };
         }),
+        applyLifecycle: (machineId, revision, entries) => set((state) => {
+            const cursor = { ...state.lifecycleCursors, [machineId]: revision };
+            if (entries.length === 0) {
+                // A cursor that moved without entries is a reader with nothing to do; recording it
+                // keeps the next ask as small as this one was.
+                return state.lifecycleCursors[machineId] === revision ? state : { ...state, lifecycleCursors: cursor };
+            }
+            const sessions = { ...state.sessions };
+            for (const entry of entries) {
+                const key = entry.sessionId ?? entry.tag;
+                if (entry.op === 'deleted') {
+                    // The tag's placeholder goes with it: an entry that named both is one session
+                    // under two names, and leaving one behind is a row that cannot be dismissed.
+                    delete sessions[key];
+                    delete sessions[entry.tag];
+                    continue;
+                }
+                // The server's copy is richer than anything buildable from a log entry, so it wins
+                // wherever it already exists — this is here for what the server has not said.
+                if (!sessions[key]) {
+                    sessions[key] = {
+                        id: key,
+                        seq: 0,
+                        createdAt: entry.at,
+                        updatedAt: entry.at,
+                        // Not active: nothing has reported it as running. What the machine has said
+                        // is that the session exists, and that is all this row claims.
+                        active: false,
+                        activeAt: entry.at,
+                        metadata: {
+                            // The sentinel this App already renders as a localized "Creating…"
+                            // rather than as a path, for a session that exists but is not ready.
+                            path: '\u200bcreating\u200b',
+                            host: '',
+                            machineId,
+                            ...(entry.directory ? { worktreePath: entry.directory } : {}),
+                        } as any,
+                        metadataVersion: 0,
+                        agentState: null,
+                        agentStateVersion: 0,
+                        thinking: false,
+                        thinkingAt: 0,
+                        presence: entry.at,
+                    };
+                }
+            }
+            return {
+                ...state,
+                sessions,
+                lifecycleCursors: cursor,
+                // The list is built by an action, so a session that arrived without the server has
+                // to be built into it here — the same reason the restart mark rebuilds.
+                sessionListViewData: buildSessionListViewData(
+                    sessions,
+                    state.machines,
+                    state.daemonVersions,
+                    channelDrivers(state, state.localSettings.channelPriority),
+                ),
+            };
+        }),
         applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute; restartingSince?: number }[] | null) => set((state) => {
             if (sessions === null) {
                 if (Object.keys(state.daemonSessionList).length === 0) {
@@ -2430,6 +2520,11 @@ export function useSessionReach(sessionId: string, machineId: string | undefined
 }
 
 /** What each machine last said it is running. Empty until a machine has answered on a channel. */
+/** How far each machine's lifecycle log has been replayed. */
+export function useLifecycleCursors(): Record<string, number> {
+    return storage(useShallow((state) => state.lifecycleCursors));
+}
+
 export function useDaemonVersions(): Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }> {
     return storage(useShallow((state) => state.daemonVersions));
 }
