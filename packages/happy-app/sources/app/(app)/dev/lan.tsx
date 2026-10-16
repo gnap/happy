@@ -118,7 +118,12 @@ export const ChannelBlock = React.memo(function ChannelBlock({ channel, liveness
             {open && <>
             {liveness}
             <Item title="Capable of carrying it" detail={`${capable} of ${ids.length} machines`} showChevron={false} />
-            <Item title={channel === 'lan' ? 'Advertising here' : channel === 'relay' ? 'Machines the relay holds' : 'Machines the server knows'} detail={extra} showChevron={false} />
+            <Item
+                title={channel === 'lan' ? 'Advertising here' : channel === 'relay' ? 'Machines the relay holds' : 'Machines the server knows'}
+                subtitle={channel === 'relay' ? `One connection to the relay; each machine above is a stream on it` : undefined}
+                detail={channel === 'relay' ? `${extra}  ·  ${rows.filter((row) => row.kind === 'name').length} streams` : extra}
+                showChevron={false}
+            />
             {rows.length > 0 && (
                     // Compact on purpose: a machine and what it has are a few short lines, indented
                     // under its name, rather than one full-height row per fact — which is what made
