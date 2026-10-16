@@ -567,13 +567,6 @@ export default function DevScreen() {
                     icon={<Ionicons name="wifi-outline" size={28} color="#007AFF" />}
                     onPress={() => router.push('/dev/lan')}
                 />
-                <Item
-                    title="Channel Priority"
-                    subtitle="Enable, disable and reorder LAN / Relay / Server"
-                    detail={channelPriority.map((c) => c === 'lan' ? 'LAN' : c === 'relay' ? 'Relay' : 'Server').join(' › ')}
-                    icon={<Ionicons name="git-branch-outline" size={28} color="#007AFF" />}
-                    onPress={() => router.push('/dev/channels')}
-                />
                 <RelayRow
                     enabled={relayEnabled}
                     connected={relayHubConnected}
