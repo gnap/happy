@@ -545,12 +545,14 @@ export default function DevScreen() {
                     icon={<Ionicons name="git-branch-outline" size={28} color="#007AFF" />}
                     onPress={() => router.push('/dev/channels')}
                 />
-                <Item
-                    title="Server: API Endpoint"
-                    subtitle="The server this device talks to"
-                    detail={getServerUrl()}
-                    onPress={handleEditServerUrl}
-                />
+                <ItemGroup title="Server" footer="Settings that belong to the server channel, not to the device.">
+                    <Item
+                        title="API Endpoint"
+                        subtitle="The server this device talks to"
+                        detail={getServerUrl()}
+                        onPress={handleEditServerUrl}
+                    />
+                </ItemGroup>
                 <ChannelLivenessGroup />
                 <ConnectionDetailsGroup />
                 <RelayRow
