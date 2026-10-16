@@ -423,65 +423,67 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
     }
 
     /**
-     * expo-sqlite hands out a single connection and `withTransactionAsync` is not re-entrant, so
-     * two sessions saving at once nested their BEGINs and failed with "cannot start a transaction
-     * within a transaction" — then "cannot rollback - no transaction is active" when the loser
-     * rolled back. The cache never persisted while still paying the full cost of the write.
-     * Every statement now goes through one queue.
+     * expo-sqlite hands out a single connection, and one connection cannot have two statements in
+     * flight. Overlapping them fails however the engine notices first, and both ways were seen
+     * here: two saves nested their BEGINs ("cannot start a transaction within a transaction"), and
+     * a read running alongside a write came back "database is locked" and then failed to finalise
+     * its statement — which left the cache saving *nothing at all*, the state a session reverts to
+     * its older messages from after the app has been in the background.
+     *
+     * So every statement goes through one queue, reads included. The reads were left out of this
+     * the first time because the symptom then was a write failing; the connection does not care
+     * which half of a pair is the read.
      */
-    private writeQueue: Promise<unknown> = Promise.resolve();
+    private queue: Promise<unknown> = Promise.resolve();
 
-    private enqueueWrite<T>(work: () => Promise<T>): Promise<T> {
-        const run = this.writeQueue.then(work, work);
-        this.writeQueue = run.catch(() => {});
+    private enqueue<T>(work: () => Promise<T>): Promise<T> {
+        const run = this.queue.then(work, work);
+        this.queue = run.catch(() => {});
         return run;
     }
 
-    /**
-     * sessionId -> the exact message objects last written. A save diffs against this by identity
-     * (the store rebuilds its array per batch but reuses unchanged objects) so it can write only
-     * what changed. Rewriting 2000+ messages took ~1.5s and ran every few seconds; a streaming
-     * session only ever changes the last handful.
-     */
-
     async getSessionCache(sessionId: string): Promise<CachedSessionRow | null> {
         await this.ensureReady();
-        const row = await this.db.getFirstAsync(
-            'SELECT session_id, last_seq, oldest_seq, has_older_messages, schema_version, cached_at, reducer_state FROM session_cache WHERE session_id = ?',
-            [sessionId]
-        ) as Record<string, unknown> | null;
+        return this.enqueue(async () => {
+            const row = await this.db.getFirstAsync(
+                'SELECT session_id, last_seq, oldest_seq, has_older_messages, schema_version, cached_at, reducer_state FROM session_cache WHERE session_id = ?',
+                [sessionId]
+            ) as Record<string, unknown> | null;
 
-        if (!row) return null;
-        return {
-            sessionId: row['session_id'] as string,
-            lastSeq: row['last_seq'] as number,
-            oldestSeq: (row['oldest_seq'] as number) ?? 0,
-            hasOlderMessages: !!row['has_older_messages'],
-            schemaVersion: row['schema_version'] as number,
-            cachedAt: row['cached_at'] as number,
-            reducerStateJson: row['reducer_state'] as string,
-        };
+            if (!row) return null;
+            return {
+                sessionId: row['session_id'] as string,
+                lastSeq: row['last_seq'] as number,
+                oldestSeq: (row['oldest_seq'] as number) ?? 0,
+                hasOlderMessages: !!row['has_older_messages'],
+                schemaVersion: row['schema_version'] as number,
+                cachedAt: row['cached_at'] as number,
+                reducerStateJson: row['reducer_state'] as string,
+            };
+        });
     }
 
     async getSessionMessages(sessionId: string): Promise<Message[]> {
         await this.ensureReady();
-        const rows = await this.db.getAllAsync(
-            'SELECT message_json FROM session_messages WHERE session_id = ? ORDER BY created_at ASC',
-            [sessionId]
-        ) as Record<string, unknown>[];
+        return this.enqueue(async () => {
+            const rows = await this.db.getAllAsync(
+                'SELECT message_json FROM session_messages WHERE session_id = ? ORDER BY created_at ASC',
+                [sessionId]
+            ) as Record<string, unknown>[];
 
-        const messages: Message[] = [];
-        for (const row of rows) {
-            try {
-                messages.push(JSON.parse(row['message_json'] as string) as Message);
-            } catch {
-                // Skip malformed rows
+            const messages: Message[] = [];
+            for (const row of rows) {
+                try {
+                    messages.push(JSON.parse(row['message_json'] as string) as Message);
+                } catch {
+                    // Skip malformed rows
+                }
             }
-        }
-        // Reading is how the database learns what it holds: it has just seen every row, so the next
-        // save can be a delta rather than a rewrite.
-        this.written.set(sessionId, new Map(messages.map((message) => [message.id, message])));
-        return messages;
+            // Reading is how the database learns what it holds: it has just seen every row, so the
+            // next save can be a delta rather than a rewrite.
+            this.written.set(sessionId, new Map(messages.map((message) => [message.id, message])));
+            return messages;
+        });
     }
 
     async saveSessionCache(row: CachedSessionRow, messages: Message[]): Promise<void> {
@@ -508,7 +510,7 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
         const encoded = inserts.map((message) => JSON.stringify(message));
         const started = Date.now();
 
-        await this.enqueueWrite(async () => {
+        await this.enqueue(async () => {
             await this.db.withTransactionAsync(async () => {
                 await this.db.runAsync(
                     `INSERT OR REPLACE INTO session_cache
@@ -564,7 +566,7 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
 
     async clearSessionCache(sessionId: string): Promise<void> {
         await this.ensureReady();
-        await this.enqueueWrite(async () => {
+        await this.enqueue(async () => {
             await this.db.withTransactionAsync(async () => {
                 await this.db.runAsync('DELETE FROM session_cache WHERE session_id = ?', [sessionId]);
                 await this.db.runAsync('DELETE FROM session_messages WHERE session_id = ?', [sessionId]);
@@ -576,34 +578,36 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
 
     async getSessionsListCache(): Promise<CachedSessionListRow | null> {
         await this.ensureReady();
-        // Try with encryption_keys_json first. If the column doesn't exist yet
-        // (pre-migration), fall back to the old schema.
-        try {
-            const row = await this.db.getFirstAsync(
-                'SELECT sessions_json, cached_at, encryption_keys_json FROM sessions_list_cache WHERE id = 1'
-            ) as Record<string, unknown> | null;
-            if (!row) return null;
-            return {
-                sessionsJson: row['sessions_json'] as string,
-                cachedAt: row['cached_at'] as number,
-                encryptionKeysJson: row['encryption_keys_json'] as string | undefined,
-            };
-        } catch {
-            // Column encryption_keys_json doesn't exist yet — fall back.
-            const row = await this.db.getFirstAsync(
-                'SELECT sessions_json, cached_at FROM sessions_list_cache WHERE id = 1'
-            ) as Record<string, unknown> | null;
-            if (!row) return null;
-            return {
-                sessionsJson: row['sessions_json'] as string,
-                cachedAt: row['cached_at'] as number,
-            };
-        }
+        return this.enqueue(async () => {
+            // Try with encryption_keys_json first. If the column doesn't exist yet
+            // (pre-migration), fall back to the old schema.
+            try {
+                const row = await this.db.getFirstAsync(
+                    'SELECT sessions_json, cached_at, encryption_keys_json FROM sessions_list_cache WHERE id = 1'
+                ) as Record<string, unknown> | null;
+                if (!row) return null;
+                return {
+                    sessionsJson: row['sessions_json'] as string,
+                    cachedAt: row['cached_at'] as number,
+                    encryptionKeysJson: row['encryption_keys_json'] as string | undefined,
+                };
+            } catch {
+                // Column encryption_keys_json doesn't exist yet — fall back.
+                const row = await this.db.getFirstAsync(
+                    'SELECT sessions_json, cached_at FROM sessions_list_cache WHERE id = 1'
+                ) as Record<string, unknown> | null;
+                if (!row) return null;
+                return {
+                    sessionsJson: row['sessions_json'] as string,
+                    cachedAt: row['cached_at'] as number,
+                };
+            }
+        });
     }
 
     async saveSessionsListCache(row: CachedSessionListRow): Promise<void> {
         await this.ensureReady();
-        await this.enqueueWrite(async () => {
+        await this.enqueue(async () => {
             try {
                 await this.db.runAsync(
                     'INSERT OR REPLACE INTO sessions_list_cache (id, sessions_json, cached_at, encryption_keys_json) VALUES (1, ?, ?, ?)',
@@ -621,14 +625,14 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
 
     async clearSessionsListCache(): Promise<void> {
         await this.ensureReady();
-        await this.enqueueWrite(async () => {
+        await this.enqueue(async () => {
             await this.db.runAsync('DELETE FROM sessions_list_cache WHERE id = 1');
         });
     }
 
     async clearAllCaches(): Promise<void> {
         await this.ensureReady();
-        await this.enqueueWrite(async () => {
+        await this.enqueue(async () => {
             await this.db.withTransactionAsync(async () => {
                 await this.db.runAsync('DELETE FROM session_cache');
                 await this.db.runAsync('DELETE FROM session_messages');
