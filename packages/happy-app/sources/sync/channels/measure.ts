@@ -30,7 +30,7 @@ export type ChannelState = {
     daemonSessionList: Record<string, { isAlive: boolean; via: string; at: number }>;
     lanSightings: Record<string, { baseUrl?: string; machineId?: string } | undefined>;
     /** Where machines published themselves on this network, for when discovery cannot find them. */
-    lanEndpoints: Record<string, { baseUrls?: string[] } | undefined>;
+    lanEndpoints: Record<string, { baseUrls?: string[]; at?: number } | undefined>;
     /**
      * What is known about each address: whether anything has answered there, and how recently it
      * stopped. This is what makes "the machine is on the LAN" a claim with evidence behind it,
