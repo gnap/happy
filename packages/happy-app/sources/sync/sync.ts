@@ -4657,10 +4657,10 @@ class Sync {
              */
             onServer?: () => Promise<T | null>;
         },
-    ): Promise<{ verdict: T | null; asked: boolean }> {
+    ): Promise<{ verdict: T | null; asked: boolean; refused: boolean }> {
         const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
         if (!machineId) {
-            return { verdict: null, asked: false };
+            return { verdict: null, asked: false, refused: false };
         }
         // The same decision the session's messages are read over, so an action goes the way the
         // session is already being talked to — and the server is one of the channels here, not a
@@ -4747,10 +4747,10 @@ class Sync {
         /** Only these channels, in this order — the caller's policy, e.g. where the session is read. */
         drivers?: readonly ChannelDriver[];
         run: (baseUrl: string, token: string, proof: Record<string, string> | undefined) => Promise<T | null>;
-    }): Promise<{ verdict: T | null; asked: boolean }> {
+    }): Promise<{ verdict: T | null; asked: boolean; refused: boolean }> {
         const machineKey = this.getMachineKey(args.machineId);
         if (!machineKey) {
-            return { verdict: null, asked: false };
+            return { verdict: null, asked: false, refused: false };
         }
         const drivers = args.drivers ?? this.channelDrivers();
         const outcome = await carryOperation<T>({
@@ -4783,6 +4783,9 @@ class Sync {
             // Whether any channel took it on. A channel that answered and refused did not; one that
             // was asked and went quiet did, and the two mean different things to a caller.
             asked: outcome.kind === 'done' || outcome.kind === 'unreachable' || outcome.kind === 'absent',
+            // A channel answered and said no — about this device, or about the action. Asking another
+            // road is not a retry for that.
+            refused: outcome.kind === 'refused',
         };
     }
 
