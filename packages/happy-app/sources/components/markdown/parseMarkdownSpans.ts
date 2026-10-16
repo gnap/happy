@@ -14,7 +14,7 @@ import type { MarkdownSpan } from "./parseMarkdown";
  * first of a pair closes italic (`(?!\*)`), and neither may contain a star. Text with an unmatched
  * delimiter stays plain, which is what it is.
  */
-const pattern = /(\$\$([^$]+)\$\$)|(\$([^$\s]?[^$]*?[^$\s]?)\$)|(\*\*([^*]+)\*\*)|(\*(?!\*)([^*]+)\*(?!\*))|(\[([^\]]+)\](?:\(([^)]+)\))?)|(`(.*?)(?:`|$))/g;
+const pattern = /(\$\$([^$]+)\$\$)|(\$([^$\s]?[^$]*?[^$\s]?)\$)|(\*\*((?:[^*]|\*(?!\*))+?)\*\*)|(\*(?!\*)((?:\*\*|[^*])+?)\*(?!\*))|(\[([^\]]+)\](?:\(([^)]+)\))?)|(`(.*?)(?:`|$))/g;
 
 export function parseMarkdownSpans(markdown: string, header: boolean) {
     const spans: MarkdownSpan[] = [];
