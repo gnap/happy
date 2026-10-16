@@ -11,6 +11,7 @@
  */
 
 import type { Message } from '../typesMessage';
+import { StatementQueue } from './statementQueue';
 import { log } from '@/log';
 import * as SQLite from 'expo-sqlite';
 
@@ -436,12 +437,11 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
      * the first time because the symptom then was a write failing; the connection does not care
      * which half of a pair is the read.
      */
-    private queue: Promise<unknown> = Promise.resolve();
+    /** Every statement on the one connection, with the ones a person is waiting for first. */
+    private statements = new StatementQueue();
 
-    private enqueue<T>(work: () => Promise<T>): Promise<T> {
-        const run = this.queue.then(work, work);
-        this.queue = run.catch(() => {});
-        return run;
+    private enqueue<T>(work: () => Promise<T>, urgent = false): Promise<T> {
+        return this.statements.run(work, urgent);
     }
 
     async getSessionCache(sessionId: string): Promise<CachedSessionRow | null> {
@@ -462,7 +462,7 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
                 cachedAt: row['cached_at'] as number,
                 reducerStateJson: row['reducer_state'] as string,
             };
-        });
+        }, true);
     }
 
     /**
@@ -476,6 +476,7 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
      */
     async getSessionMessages(sessionId: string, limit?: number): Promise<Message[]> {
         await this.ensureReady();
+        // Urgent for the same reason the row above is: this is the read a tap is waiting on.
         return this.enqueue(async () => {
             const rows = limit === undefined
                 ? await this.db.getAllAsync(
@@ -501,7 +502,7 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
             // next save can be a delta rather than a rewrite.
             this.written.set(sessionId, new Map(messages.map((message) => [message.id, message])));
             return messages;
-        });
+        }, true);
     }
 
     async saveSessionCache(row: CachedSessionRow, messages: Message[]): Promise<void> {
@@ -572,7 +573,7 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
             if (ms > 50) {
                 log.log(`📦 sessionCacheDB: wrote ${inserts.length}/${messages.length} messages for ${row.sessionId} in ${ms}ms${rewrite ? ' (rewrite)' : ''}`);
             }
-        });
+        }, true);
 
         this.writtenWatermark.set(row.sessionId, {
             lastSeq: row.lastSeq,
