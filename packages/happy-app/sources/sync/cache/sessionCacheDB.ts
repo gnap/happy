@@ -348,26 +348,7 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
 // SQLite implementation (expo-sqlite) for iOS / Android
 // ---------------------------------------------------------------------------
 
-/**
- * Which file this evaluation of the module opens.
- *
- * A reload re-evaluates this module but not the native side: the connection the previous evaluation
- * opened stays open, and closing it depends on that evaluation having parked its handle — which the
- * one running when the parking was added could not do. Sharing a file with a connection nobody can
- * close means sharing its lock, and the measurements were unambiguous: waiting 0ms, running 2000ms,
- * statement after statement, while a job nobody was waiting for held the database.
- *
- * So each evaluation after the first opens a file of its own, and the lock cannot be shared. In
- * production this module is evaluated once and keeps the single stable name; in development each
- * reload gets a clean cache, and the older files are left where they are — the connection that may
- * still hold one cannot be closed from here, and a file is cheaper than a lock.
- */
-const generationSlot = globalThis as unknown as { __happyCacheDbGeneration?: number };
-const generation = generationSlot.__happyCacheDbGeneration ?? 0;
-generationSlot.__happyCacheDbGeneration = generation + 1;
-const DB_NAME = generation === 0
-    ? 'happy_message_cache_v2.db'
-    : `happy_message_cache_v2_reload${generation}.db`;
+const DB_NAME = 'happy_message_cache_v2.db';
 const SCHEMA_VERSION = 2;
 
 /**
@@ -435,7 +416,6 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
         const t0 = Date.now();
         // Static import so expo-sqlite loads with app bundle (avoids cold-start hang on first session open)
         this.db = await SQLite.openDatabaseAsync(DB_NAME);
-        log.log(`📦 sessionCacheDB: opening ${DB_NAME} (generation ${generation})`);
         // Parked for whichever evaluation of this module comes after this one: see the slot above.
         inheritedSlot.__happyRetiredCacheConnection = this.db;
         this.watchStatements();
