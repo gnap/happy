@@ -39,6 +39,7 @@ import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
 import { fetchIdentity, fetchLifecycle, restartSessionAt, sessionControlAt } from './lan/client';
+import { accountProofHeaders } from '@/auth/accountProof';
 import { getLanCredential } from './lan/credentials';
 import { readSessionOverLan, listSessionsOverLan, toNormalizedMessages, type LanConnection, type LanSessionRead } from './lan/sessionChannel';
 import { decryptLanEntries } from './lan/history';
@@ -4581,7 +4582,13 @@ class Sync {
             }
             try {
                 const { token } = await getLanCredential(address.baseUrl, machineKey);
-                if (await sessionControlAt(address.baseUrl, token, sessionId, method, params)) {
+                // The account's proof of *this* request, built over the path as it is sent: the
+                // machine checks the same bytes, and it is not a party that can be told to trust one.
+                const proof = await accountProofHeaders({
+                    method: 'POST',
+                    path: `/lan/sessions/${encodeURIComponent(sessionId)}/control`,
+                });
+                if (await sessionControlAt(address.baseUrl, token, sessionId, method, params, proof ?? undefined)) {
                     log.log(`🔄 ${method} ${sessionId} over ${route}: handed to the session`);
                     return true;
                 }
@@ -4651,7 +4658,11 @@ class Sync {
             }
             try {
                 const { token } = await getLanCredential(address.baseUrl, machineKey);
-                const verdict = await restartSessionAt(address.baseUrl, token, sessionId);
+                const proof = await accountProofHeaders({
+                    method: 'POST',
+                    path: `/lan/sessions/${encodeURIComponent(sessionId)}/restart`,
+                });
+                const verdict = await restartSessionAt(address.baseUrl, token, sessionId, proof ?? undefined);
                 if (verdict) {
                     log.log(`🔄 restart ${sessionId} over ${route}: ${verdict.success ? 'accepted' : verdict.error ?? 'refused'}`);
                     return verdict;
