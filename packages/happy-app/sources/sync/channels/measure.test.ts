@@ -12,6 +12,7 @@ const state = (over: Partial<ChannelState> = {}): ChannelState => ({
     daemonSockets: {},
     daemonSessionList: {},
     lanSightings: {},
+    lanEndpoints: {},
     relayEndpoints: {},
     relayDirectory: {},
     relayHubConnected: false,

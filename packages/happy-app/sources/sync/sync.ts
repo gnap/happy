@@ -56,7 +56,7 @@ import { FetchSlots } from './fetchSlots';
 import { DaemonConnections, type DaemonTarget } from './lan/daemonConnections';
 import { judgeDaemonPage, pageMovedTheLog, planDaemonRead } from './lan/windowPlan';
 import type { DaemonRoute, LanSessionLogEntry, SessionChannel } from './lan/types';
-import { parseRelayEndpoint } from './lan/relay';
+import { parseLanEndpoint, parseRelayEndpoint } from './lan/relay';
 import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
 import { systemPrompt } from './prompt/systemPrompt';
 import { fetchArtifact, fetchArtifacts, createArtifact, updateArtifact } from './apiArtifacts';
@@ -2412,6 +2412,7 @@ class Sync {
 
         for (const machine of decryptedMachines) {
             storage.getState().applyRelayEndpoint(machine.id, parseRelayEndpoint(machine.id, machine.daemonState));
+            storage.getState().applyLanEndpoint(machine.id, parseLanEndpoint(machine.id, machine.daemonState));
         }
         // Replace entire machine state with fetched machines
         storage.getState().applyMachines(decryptedMachines, true);
@@ -4026,6 +4027,7 @@ class Sync {
             }
 
             storage.getState().applyRelayEndpoint(machineId, parseRelayEndpoint(machineId, updatedMachine.daemonState));
+            storage.getState().applyLanEndpoint(machineId, parseLanEndpoint(machineId, updatedMachine.daemonState));
             // Update storage using applyMachines which rebuilds sessionListViewData
             storage.getState().applyMachines([updatedMachine]);
         } else if (updateData.body.t === 'relationship-updated') {
@@ -4291,6 +4293,11 @@ class Sync {
     /** Every machine this App can reach, with the address it last reached it over and by which route. */
     private knownMachineAddresses(): { machineId: string; baseUrl: string; route: DaemonRoute }[] {
         const addresses: { machineId: string; baseUrl: string; route: DaemonRoute }[] = [];
+        // Addresses a machine published for itself come first: they are the ones that survive a
+        // network where discovery finds nothing, and the ones a read would otherwise never try.
+        for (const [machineId, endpoint] of Object.entries(storage.getState().lanEndpoints)) {
+            if (endpoint?.baseUrl) addresses.push({ machineId, baseUrl: endpoint.baseUrl, route: 'lan' });
+        }
         for (const [machineId, connection] of this.lanMachineConnections) {
             if (connection?.baseUrl) addresses.push({ machineId, baseUrl: connection.baseUrl, route: connection.route });
         }
