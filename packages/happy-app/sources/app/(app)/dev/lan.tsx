@@ -91,16 +91,22 @@ export const ChannelBlock = React.memo(function ChannelBlock({ channel, children
             <Item title={channel === 'lan' ? 'Advertising here' : channel === 'relay' ? 'Machines the relay holds' : 'Machines the server knows'} detail={extra} showChevron={false} />
             {rows.length === 0
                 ? <Item title="No connections" showChevron={false} />
-                : rows.map((row) => row.kind === 'name'
-                    ? <Item key={row.key} title={row.text} showChevron={false} />
-                    : (
-                        <Item
-                            key={row.key}
-                            title={row.text.split('  ')[0]}
-                            detail={row.text.split('  ').slice(1).join('  ')}
-                            showChevron={false}
-                        />
-                    ))}
+                : (
+                    // Compact on purpose: a machine and what it has are a few short lines, indented
+                    // under its name, rather than one full-height row per fact — which is what made
+                    // the expanded block a wall of the same address repeated.
+                    <View style={{ paddingHorizontal: 16, paddingBottom: 10 }}>
+                        {rows.map((row) => row.kind === 'name'
+                            ? <Text key={row.key} style={{ fontSize: 12, fontWeight: '600', color: theme.colors.text, marginTop: 8 }}>{row.text}</Text>
+                            : (
+                                <View key={row.key} style={{ flexDirection: 'row', paddingLeft: 12 }}>
+                                    <Text style={{ fontSize: 11, color: theme.colors.textSecondary, width: 74 }} numberOfLines={1}>{row.text.split('  ')[0]}</Text>
+                                    <Text style={{ fontSize: 11, color: theme.colors.text, width: 66 }} numberOfLines={1}>{row.text.split('  ')[1] ?? ''}</Text>
+                                    <Text style={{ fontSize: 11, color: theme.colors.textSecondary, flexShrink: 1 }} numberOfLines={1}>{row.text.split('  ').slice(2).join('  ')}</Text>
+                                </View>
+                            ))}
+                    </View>
+                )}
             {children}
             </>}
         </ItemGroup>
