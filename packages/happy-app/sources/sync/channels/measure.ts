@@ -98,6 +98,19 @@ function asEndpoints(candidates: readonly Candidate[]): ChannelEndpoint[] {
     }));
 }
 
+/**
+ * Whether anything has *answered* at this address, from this device.
+ *
+ * Two ways, and both are observations rather than claims: a connection this App is holding there
+ * came up and passed its heartbeat, or something this App asked came back. A published address is
+ * neither — it is the machine saying where it is, which on a machine that is on its own network is
+ * an address this device cannot use at all.
+ */
+const answeredAt = (state: ChannelState, candidate: Candidate, now: number): boolean =>
+    state.candidateHealth[candidateKey(candidate.machineId, candidate.route, candidate.baseUrl)]?.phase === 'live'
+    || state.daemonSockets[`${candidate.machineId}:${candidate.route}`]?.phase === 'live'
+        && state.daemonSockets[`${candidate.machineId}:${candidate.route}`]?.baseUrl === candidate.baseUrl;
+
 const heldSocket = (state: ChannelState, machineId: string, route: SessionChannel): boolean =>
     Object.entries(state.daemonSockets).some(
         ([key, socket]) => key.startsWith(`${machineId}:`) && socket.route === route && socket.phase === 'live'
@@ -191,9 +204,16 @@ function lanDriver(state: ChannelState): ChannelDriver {
             if (candidates.length === 0) {
                 return null;
             }
-            const alive = candidates.some((candidate) =>
-                state.candidateHealth[candidateKey(candidate.machineId, candidate.route, candidate.baseUrl)]?.phase === 'live');
-            return { reachable: true, alive };
+            // Reachable **from here**, which is a different question from "the machine says it has an
+            // address". A machine on its own network publishes its own address, and to this device
+            // that is a claim it cannot use — so an address nothing has answered at is a thing worth
+            // *trying*, not reachability. What turns one into the other is an answer: a socket this
+            // App holds coming up, or a read that came back. Discovery and the address probes exist
+            // for exactly this distinction, and reporting a claim as reachability made them pointless.
+            // A sighting is an observation too, and the strongest kind: mDNS reaches this device's
+            // own segment only, so a machine advertising here is on this network.
+            const answered = machineId in state.lanSightings || candidates.some((candidate) => answeredAt(state, candidate, now));
+            return { reachable: answered, alive: answered };
         },
         // Seen once on this network is what earns the glyph, whether or not it is up now.
         // Seen by a browse, or published by the machine itself — the second is what makes the LAN
@@ -268,14 +288,16 @@ function relayDriver(state: ChannelState): ChannelDriver {
             // The relay holding the machine is reachable with no address at all: it is the relay's
             // own answer about what it is carrying, and it is the one fact that does not need a
             // route this App can name.
+            // The same rule as the LAN: an address this App has is a claim until something answers
+            // at it. What the relay *holding* the machine is not a claim — the machine dialled in —
+            // which is why that alone is reachability.
             const carried = carrying(machineId);
             const candidates = orderedCandidates(machineId, candidateInputsFor(state, machineId, { now, routes: ['relay'] }));
             if (!carried && candidates.length === 0) {
                 return null;
             }
-            const answered = candidates.some((candidate) =>
-                state.candidateHealth[candidateKey(candidate.machineId, candidate.route, candidate.baseUrl)]?.phase === 'live');
-            return { reachable: true, alive: carried || answered };
+            const answered = carried || candidates.some((candidate) => answeredAt(state, candidate, now));
+            return { reachable: answered, alive: answered };
         },
         session: (sessionId, machineId) => {
             const answered = state.daemonSessionList[sessionId];

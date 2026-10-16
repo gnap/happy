@@ -93,8 +93,9 @@ describe('what the drivers say about a machine', () => {
         // trying, which is what makes the channel usable at all; only something that answered makes
         // the machine alive, which is what the badge claims.
         expect(machineOf({}, 'lan')).toBeNull();
+        // A browse that resolved it here: mDNS reaches this segment only, so this is an observation.
         expect(machineOf({ lanSightings: { 'machine-1': { baseUrl: LAN } } }, 'lan'))
-            .toEqual({ reachable: true, alive: false });
+            .toEqual({ reachable: true, alive: true });
         expect(machineOf({ daemonSockets: { 'machine-1:lan': socket('lan', 'opening') } }, 'lan')).toBeNull();
         expect(machineOf({ daemonSockets: { 'machine-1:lan': socket('lan', 'live') } }, 'lan'))
             .toBeNull(); // a socket with no address is not an address
@@ -106,6 +107,19 @@ describe('what the drivers say about a machine', () => {
         expect(machineOf(proven, 'lan')).toEqual({ reachable: true, alive: true });
     });
 
+    it('does not call a machine reachable here on the strength of an address it published', () => {
+        // The machine saying where it is, on a machine that is on *its own* network, is an address
+        // this device cannot use at all. Treating that as reachability is what made the App label
+        // sessions on other people's LANs as LAN — and it makes discovery and the address probes
+        // pointless, since their whole job is to tell those cases apart.
+        const claimed = { lanEndpoints: { 'machine-1': { baseUrls: [LAN], at: 0 } } };
+        expect(machineOf(claimed, 'lan')).toEqual({ reachable: false, alive: false });
+        // But it is still a thing worth *trying*: a socket is opened at it, and that socket coming
+        // up is the observation that makes it reachability.
+        expect(machineOf({ ...claimed, daemonSockets: { 'machine-1:lan': { ...socket('lan', 'live'), baseUrl: LAN } } }, 'lan'))
+            .toEqual({ reachable: true, alive: true });
+    });
+
     it('a demoted address stops making the channel reachable, and a proven one does not', () => {
         // The rule that ends the sawtooth: an address that has been failing is out until its backoff
         // expires, instead of becoming eligible again ninety seconds later with nothing new to say.
@@ -115,15 +129,18 @@ describe('what the drivers say about a machine', () => {
             candidateHealth: { [candidateKey('machine-1', 'lan', LAN)]: down },
         };
         expect(machineOf(demoted, 'lan', 1_000)).toBeNull();
-        expect(machineOf(demoted, 'lan', 5_000)).toEqual({ reachable: true, alive: false });
+        // Past its backoff it is offered again — as something to try, since nothing has answered.
+        expect(machineOf(demoted, 'lan', 5_000)).toEqual({ reachable: false, alive: false });
     });
 
     it('tells a relay that is carrying the machine apart from one that merely has an address for it', () => {
         // Every machine key on this device derives a relay address whether or not that machine's
         // daemon ever dialled the hub. That address is worth *trying* — it is a route — but it is
         // not evidence that anything is there, so it routes without making the machine alive.
+        // Derived from the key: every machine has one, whether or not its daemon ever dialled in, so
+        // it is a route to try and not evidence that anything is there.
         expect(machineOf({ relayEndpoints: { 'machine-1': { baseUrl: RELAY, source: 'derived' } } }, 'relay'))
-            .toEqual({ reachable: true, alive: false });
+            .toEqual({ reachable: false, alive: false });
         // A *published* relay route is the machine saying it runs a relay client, and the relay only
         // holds a machine that dialled in — so unlike a published LAN address, this one is evidence.
         // The asymmetry is deliberate: a machine knows which addresses it has, not which of them a
