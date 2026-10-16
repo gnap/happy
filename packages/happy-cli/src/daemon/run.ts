@@ -19,7 +19,7 @@ import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquire
 import { cleanupDaemonState, checkIfDaemonRunningAndCleanupStaleState } from './controlClient';
 import { startDaemonControlServer } from './controlServer';
 import { startUnixSocketServer } from './unixSocketServer';
-import { readFileSync } from 'fs';
+import { readFileSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { projectPath } from '@/projectPath';
 import { getTmuxUtilities, isTmuxAvailable, parseTmuxSessionIdentifier, formatTmuxSessionIdentifier } from '@/utils/tmux';
@@ -30,6 +30,7 @@ import { delay } from '@/utils/time';
 import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSessionSummary } from './lanServer';
 import { RESTARTING_TTL_MS, expiredRestarting } from './restartTracker';
 import { LifecycleLog } from './lifecycleLog';
+import { replayDeletions } from './lifecycleServerReplay';
 import type { UpdateSessionBody } from '@slopus/happy-wire';
 import { versionStateOf } from './versionState';
 import { BUILD_VERSION } from '../version';
@@ -1130,7 +1131,75 @@ export async function startDaemon(): Promise<void> {
      * keeps this cheap and keeps the replay per-reader — and it is the alternative to a reader
      * polling a log that changes a handful of times a day.
      */
+    /**
+     * How far the *server* channel has been replayed to, on disk.
+     *
+     * A file of its own rather than a field in the daemon's state, because the two are written at
+     * very different rates and one of them is a snapshot. Losing this cursor costs one repeated
+     * `DELETE`, which is idempotent, so no atomicity dance is needed to keep it.
+     */
+    const serverReplayCursorFile = join(configuration.happyHomeDir, 'daemon-lifecycle-server-cursor');
+    const readServerCursor = (): number => {
+      try {
+        const raw = readFileSync(serverReplayCursorFile, 'utf-8').trim();
+        const parsed = Number.parseInt(raw, 10);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+      } catch {
+        return 0;
+      }
+    };
+
+    /** One replay at a time: two walks over the same entries would send the same DELETE twice. */
+    let replayingLifecycle = false;
+    /**
+     * Tells the server about the endings in this machine's log.
+     *
+     * The server is the slow channel — on a machine whose connection takes a minute to come up,
+     * doing this inline would mean a deletion that lands only when the network cooperates — so it
+     * has a cursor of its own and this walks whatever is past it, whenever what is past it changes.
+     */
+    const replayLifecycleToServer = async (): Promise<void> => {
+      if (replayingLifecycle) {
+        return;
+      }
+      replayingLifecycle = true;
+      try {
+        const from = readServerCursor();
+        const to = await replayDeletions(lifecycleLog.read(), from, {
+          remove: async (sessionId) => {
+            try {
+              const response = await fetch(`${configuration.serverUrl}/v1/sessions/${encodeURIComponent(sessionId)}`, {
+                method: 'DELETE',
+                headers: { authorization: `Bearer ${credentials.token}` },
+                signal: AbortSignal.timeout(15_000),
+              });
+              // Already gone counts as removed: the server answering 404 is the outcome this was
+              // asking for, and retrying it forever would be a cursor that never moves.
+              return response.ok || response.status === 404;
+            } catch (error) {
+              logger.debug(`[DAEMON RUN] Lifecycle replay: delete ${sessionId} failed`, { error: String(error) });
+              return false;
+            }
+          },
+          advance: (revision) => {
+            try {
+              writeFileSync(serverReplayCursorFile, String(revision), 'utf-8');
+            } catch (error) {
+              logger.debug('[DAEMON RUN] Lifecycle replay: could not record the cursor', { error: String(error) });
+            }
+          },
+        });
+        if (to !== from) {
+          logger.debug(`[DAEMON RUN] Lifecycle replay to server: rev ${from} → ${to}`);
+        }
+      } finally {
+        replayingLifecycle = false;
+      }
+    };
+
     const announceLifecycle = (): void => {
+      // The readers on a socket, and the server — which is one of them, just slower.
+      void replayLifecycleToServer();
       lanServer?.broadcast('update', {
         id: `lan-${++lanEventCounter}`,
         seq: 0,
@@ -2119,6 +2188,10 @@ export async function startDaemon(): Promise<void> {
       if (process.env.DEBUG) {
         logger.debug(`[DAEMON RUN] Health check started at ${new Date().toLocaleString()}`);
       }
+
+      // A deletion the server refused is retried from the same cursor: the machine's log does not
+      // change when the network does, so this is the only thing that ever pushes it forward again.
+      void replayLifecycleToServer();
 
       // A restart whose grace has run out and which never said it finished is called off here —
       // a daemon that died mid-restart, say, or one whose new process never came back. Readers age
