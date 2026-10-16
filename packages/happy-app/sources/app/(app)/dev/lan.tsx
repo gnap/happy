@@ -8,7 +8,7 @@ import { ItemList } from '@/components/ItemList';
 import { sync } from '@/sync/sync';
 import { useLocalSearchParams } from 'expo-router';
 import { Pressable } from 'react-native';
-import { useAllMachines, storage, useMachineBadgeInputs, useLanSightings, useDaemonSockets, useChannelLinks, useRelayDirectory } from '@/sync/storage';
+import { useAllMachines, storage, useMachineBadgeInputs, useLanSightings, useLanEndpoints, useDaemonSockets, useChannelLinks, useRelayDirectory } from '@/sync/storage';
 import type { SessionChannel } from '@/sync/lan/types';
 import { DEFAULT_CHANNEL_PRIORITY, normalizeChannelPriority } from '@/sync/lan/channelOrder';
 import { candidateInputsFor, orderedCandidates } from '@/sync/channels/candidates';
@@ -45,6 +45,7 @@ export const ChannelBlock = React.memo(function ChannelBlock({ channel, liveness
     const health = storage((state) => state.candidateHealth);
     const sightings = useLanSightings();
     const directory = useRelayDirectory();
+    const endpoints = useLanEndpoints();
 
     const [open, setOpen] = React.useState(false);
     const link = links.find((entry) => entry.channel === channel);
@@ -54,6 +55,14 @@ export const ChannelBlock = React.memo(function ChannelBlock({ channel, liveness
     const extra = channel === 'lan' ? `${Object.keys(sightings).length} advertising`
         : channel === 'relay' ? `${Object.keys(directory).length} held`
             : `${ids.length} known`;
+
+    // When a published address was recorded, which is what says *who* wrote it: the server's copy of
+    // a machine's blob is written when that machine last reported, while the machine's own log
+    // arrives as it changes. An address hours old is the server's; a fresh one came over the LAN.
+    const published = channel !== 'lan' ? [] : Object.entries(endpoints).flatMap(([id, entry]) => {
+        const age = entry?.at ? `${Math.max(0, Math.round((Date.now() - entry.at) / 1000))}s ago` : 'no timestamp';
+        return (entry?.baseUrls ?? []).map((baseUrl) => `${age}  ${baseUrl}`);
+    });
 
     const rows = machines.flatMap((machine) => {
         const id = machine.id;
@@ -116,6 +125,7 @@ export const ChannelBlock = React.memo(function ChannelBlock({ channel, liveness
                 rightElement={<Text style={{ fontSize: 13, color: theme.colors.text }}>{`${reaching}/${ids.length} reaching`}</Text>}
             />
             {open && <>
+            {published.map((text, index) => <Item key={`pub-${index}`} title="Published address" subtitle={text} showChevron={false} />)}
             {liveness}
             <Item title="Capable of carrying it" detail={`${capable} of ${ids.length} machines`} showChevron={false} />
             <Item
