@@ -4645,6 +4645,11 @@ class Sync {
             operation: ChannelOperation;
             path: string;
             run: (baseUrl: string, token: string, proof: Record<string, string> | undefined) => Promise<T | null>;
+            /**
+             * How the *server* channel carries this action, when the server is the channel that
+             * accepts it. Left out by callers whose action only a machine can do.
+             */
+            onServer?: () => Promise<T | null>;
         },
     ): Promise<T | null> {
         const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
@@ -4652,28 +4657,59 @@ class Sync {
             return null;
         }
         // The same decision the session's messages are read over, so an action goes the way the
-        // session is already being talked to. "The server" is not this method's business — the
-        // caller is holding it.
+        // session is already being talked to — and the server is one of the channels here, not a
+        // special case bolted on outside: which channel carries it is `accepts` and the order, and
+        // a channel that fails is where the next one starts.
         const preferred = this.preferredChannel(sessionId);
-        if (preferred === 'server') {
-            return null;
-        }
         const enabled = this.daemonRoutesEnabled();
-        const daemonDrivers = this.channelDrivers().filter(
-            (driver): driver is ChannelDriver => driver.channel !== 'server' && enabled[driver.channel as DaemonRoute] === true,
+        const drivers = this.channelDrivers().filter(
+            (driver): driver is ChannelDriver =>
+                driver.channel === 'server' || enabled[driver.channel as DaemonRoute] === true,
         );
         // A real comparison: the preferred channel first, the rest in the order the device lists
         // them. `sort` needs an answer that does not depend on which side it is asked about.
         const rank = (channel: SessionChannel): number => (channel === preferred ? 0 : 1);
-        const order = [...daemonDrivers].sort((a, b) => rank(a.channel) - rank(b.channel));
+        const order = [...drivers].sort((a, b) => rank(a.channel) - rank(b.channel));
 
-        return this.carryAtDaemon<T>({
-            machineId,
-            operation: action.operation,
-            proofPath: action.path,
+        const machineKey = this.getMachineKey(machineId);
+        const outcome = await carryOperation<T>({
             drivers: order,
-            run: action.run,
+            operation: action.operation,
+            machineId,
+            attempt: async (endpoint) => {
+                if (endpoint.kind === 'server') {
+                    if (!action.onServer) {
+                        // A machine's business only: the server has no way to carry this one.
+                        return { kind: 'refused' };
+                    }
+                    try {
+                        const value = await action.onServer();
+                        return value === null ? { kind: 'absent' } : { kind: 'done', value };
+                    } catch (error) {
+                        // The server channel's own transport failing is that channel's answer, not
+                        // something to hold against a machine address: the RPC is encrypted for the
+                        // machine, so an App without that key cannot use this channel at all.
+                        return { kind: 'refused' };
+                    }
+                }
+                if (!machineKey) {
+                    return { kind: 'refused' };
+                }
+                const { token } = await getLanCredential(endpoint.baseUrl, machineKey);
+                const proof = await accountProofHeaders({ method: 'POST', path: action.path });
+                try {
+                    const value = await action.run(endpoint.baseUrl, token, proof ?? undefined);
+                    return value === null ? { kind: 'absent' } : { kind: 'done', value };
+                } catch (error) {
+                    if (error instanceof LanRequestError) {
+                        return { kind: 'refused', status: error.status };
+                    }
+                    throw error;
+                }
+            },
+            recorder: this.healthRecorder(),
         });
+        return outcome.kind === 'done' ? outcome.value : null;
     }
 
     /**
@@ -4793,6 +4829,11 @@ class Sync {
             operation: 'restart',
             path: `/lan/sessions/${encodeURIComponent(sessionId)}/restart`,
             run: (baseUrl, token, proof) => restartSessionAt(baseUrl, token, sessionId, proof ?? undefined),
+            // The server carries the same action by asking the daemon on this App's behalf. It is a
+            // channel like the others: tried when its turn comes, and skipped when it cannot.
+            onServer: () => apiSocket.machineRPC<LanRestartVerdict, { sessionId: string }>(
+                machineId, 'restartSession', { sessionId },
+            ),
         });
         if (verdict) {
             log.log(`🔄 restart ${sessionId}: ${verdict.success ? 'accepted' : verdict.error ?? 'refused'}`);
