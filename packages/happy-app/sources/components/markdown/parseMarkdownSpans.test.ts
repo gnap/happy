@@ -35,6 +35,14 @@ describe('parseMarkdownSpans', () => {
         expect(stylesOf('**b** *i* `c`')).toEqual(['bold:b', 'plain: ', 'italic:i', 'plain: ', 'code:c']);
     });
 
+    it('keeps a bold span that contains a literal star', () => {
+        // The case that showed the first fix was too strict: `[^*]+` made any bold containing a star
+        // fail to match, so only the text before the star stayed bold. A single star is fine inside;
+        // only another pair is not.
+        expect(stylesOf('**a * b** and text')).toEqual(['bold:a * b', 'plain: and text']);
+        expect(stylesOf('**iOS 远端已经被人推过了**')).toEqual(['bold:iOS 远端已经被人推过了']);
+    });
+
     it('leaves a header without emphasis, as before', () => {
         expect(stylesOf('**Title**', true)).toEqual(['plain:Title']);
     });

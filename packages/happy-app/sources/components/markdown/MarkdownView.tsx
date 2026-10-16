@@ -431,18 +431,28 @@ const style = StyleSheet.create((theme) => ({
         fontWeight: '400',
     },
 
-    // The family carries the weight here, not `fontWeight`: the app's fonts are registered per face
-    // (regular / italic / semiBold) and have no bold face at all, so a `fontWeight` is silently
-    // ignored on iOS and the text renders regular — which is why bold showed on the desktop, where
-    // the webview synthesises it, and not on iOS.
+    /**
+     * Emphasis needs both the family and the weight, and for different reasons.
+     *
+     * The family is what gives the Latin text a real face — the app registers its fonts per face and
+     * has no bold one, so `bold` has to mean the semiBold family. The weight is what covers the text
+     * the family has no glyphs for: these fonts carry no CJK, so Chinese characters are drawn by a
+     * system fallback, and that fallback is only emphasised if the weight asks for it — iOS does not
+     * synthesise it otherwise, while the desktop webview does. Which is why a phrase like
+     * `**iOS 远端…**` came out with only "iOS" bold on iOS: the Latin took the semiBold face, and the
+     * Chinese fell back to a regular one.
+     */
     italic: {
         ...Typography.default('italic'),
+        fontStyle: 'italic',
     },
     bold: {
         ...Typography.default('semiBold'),
+        fontWeight: '600',
     },
     semibold: {
         ...Typography.default('semiBold'),
+        fontWeight: '600',
     },
     code: {
         ...Typography.mono(),
