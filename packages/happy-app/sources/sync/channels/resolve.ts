@@ -60,11 +60,7 @@ export function resolveSessionReach(
  * session declares that when it registers, which says what its daemon can do in principle, not
  * that this device can reach it. So a channel is available when this device has seen the machine
  * on it, or is holding a connection to it, or has read this very session over it. The last of those
- * is the strongest — it is the reason a working route is not dropped when a browse is missed — and
- * it is why this takes a session rather than only a machine.
- *
- * A route that has just failed to serve this session is out until that failure ages out, which is
- * what stops a broken channel being chosen again on every tick.
+ * is the strongest — it is the reason a working route is not dropped when a browse is missed.
  */
 export function channelAvailability(args: {
     drivers: readonly ChannelDriver[];

@@ -6,7 +6,12 @@ import type { ChannelDriver } from './channels/types';
 const driver = (
     channel: ChannelDriver['channel'],
     report: { reachable: boolean; alive: boolean } | null,
-): ChannelDriver => ({ channel, link: () => null, session: () => null, machine: () => report, capable: () => true, supports: () => true });
+): ChannelDriver => ({ channel, link: () => null, session: () => null, machine: () => report, capable: () => true, supports: () => true,
+    // The endpoint members answer nothing here: these cases are about what a driver says, not about
+    // where it would send anything.
+    endpoints: () => [],
+    socketTarget: () => null,
+    accepts: () => true, });
 
 describe('resolveMachinePresence', () => {
     it('answers with the first channel, in priority order, that reports it alive', () => {

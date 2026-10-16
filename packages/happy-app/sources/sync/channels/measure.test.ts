@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { channelDrivers, type ChannelState } from './measure';
+import type { ChannelOperation } from './types';
 import { channelsFor, operationSupported } from './resolve';
 import type { ChannelDriver } from './types';
 import type { DaemonConnectionState } from '@/sync/lan/daemonConnections';
@@ -182,5 +183,67 @@ describe('what each channel can do', () => {
         // The action this whole layer was first built for: a session is restarted because its
         // machine has been rebuilt, and the machine's own channel is the one that is up then.
         expect(channelsFor(channels(['lan', 'relay', 'server']), 'restart')).toEqual(['lan', 'relay', 'server']);
+    });
+});
+
+describe('what a driver offers to send to', () => {
+    const endpointsOf = (over: Partial<ChannelState>, channel: ChannelDriver['channel'], now = 0) =>
+        channelDrivers(state(over), ['lan', 'relay', 'server'])
+            .find((driver) => driver.channel === channel)!
+            .endpoints('machine-1', now);
+    const socketOf = (over: Partial<ChannelState>, channel: ChannelDriver['channel'], now = 0) =>
+        channelDrivers(state(over), ['lan', 'relay', 'server'])
+            .find((driver) => driver.channel === channel)!
+            .socketTarget('machine-1', now);
+    const accepts = (over: Partial<ChannelState>, channel: ChannelDriver['channel'], operation: ChannelOperation) =>
+        channelDrivers(state(over), ['lan', 'relay', 'server'])
+            .find((driver) => driver.channel === channel)!
+            .accepts(operation, 'machine-1', 0);
+
+    it('offers the addresses the machine published, in the order it published them', () => {
+        // The half the channel layer was missing: a driver says *whether* it can carry something and
+        // now also *where*, so no call site has to build an address list of its own.
+        const list = endpointsOf({ lanEndpoints: { 'machine-1': { baseUrls: [LAN, 'http://192.168.5.88:55673'], at: 0 } } }, 'lan');
+        expect(list).toEqual([
+            { kind: 'address', route: 'lan', baseUrl: LAN, source: 'published' },
+            { kind: 'address', route: 'lan', baseUrl: 'http://192.168.5.88:55673', source: 'published' },
+        ]);
+    });
+
+    it('leaves a demoted address out, and offers the sibling instead', () => {
+        const other = 'http://10.99.0.1:55673';
+        const down = { phase: 'down' as const, failures: 3, since: 0, retryAt: 5_000 };
+        const list = endpointsOf({
+            lanEndpoints: { 'machine-1': { baseUrls: [other, LAN], at: 0 } },
+            candidateHealth: { [candidateKey('machine-1', 'lan', other)]: down },
+        }, 'lan', 1_000);
+        expect(list.map((endpoint) => (endpoint.kind === 'address' ? endpoint.baseUrl : 'server'))).toEqual([LAN]);
+    });
+
+    it('holds a socket at the best address even before anything has answered there', () => {
+        // That is the point of opening it: a socket coming up is what turns a claimed address into a
+        // proven one, which is the strongest evidence the channel has.
+        expect(socketOf({ lanEndpoints: { 'machine-1': { baseUrls: [LAN], at: 0 } } }, 'lan'))
+            .toEqual({ kind: 'address', route: 'lan', baseUrl: LAN, source: 'published' });
+        expect(socketOf({}, 'lan')).toBeNull();
+        // The server is one connection, not a set of addresses: there is nothing to hold.
+        expect(socketOf({}, 'server')).toBeNull();
+    });
+
+    it('offers the server itself only while its connection is usable', () => {
+        expect(endpointsOf({ socketStatus: 'connected' }, 'server')).toEqual([{ kind: 'server' }]);
+        expect(endpointsOf({ socketStatus: 'disconnected' }, 'server')).toEqual([]);
+        expect(endpointsOf({ socketStatus: 'error' }, 'server')).toEqual([]);
+    });
+
+    it('accepts an operation only when it can both carry it and send it somewhere', () => {
+        const withAddress = { lanEndpoints: { 'machine-1': { baseUrls: [LAN], at: 0 } } };
+        expect(accepts(withAddress, 'lan', 'read')).toBe(true);
+        expect(accepts(withAddress, 'lan', 'relay' as ChannelOperation)).toBe(false);
+        // Nowhere to send it: no address, so nothing is accepted however capable the channel is.
+        expect(accepts({}, 'lan', 'read')).toBe(false);
+        // And starting a session is the server's, whichever channel is asked.
+        expect(accepts(withAddress, 'lan', 'spawn')).toBe(false);
+        expect(accepts(withAddress, 'server', 'spawn')).toBe(true);
     });
 });

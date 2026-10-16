@@ -7,7 +7,14 @@ const driver = (
     channel: ChannelDriver['channel'],
     session: ChannelDriver['session'],
     machine: ChannelDriver['machine'] = () => null,
-): ChannelDriver => ({ channel, session, machine, link: () => null, capable: () => false, supports: () => true });
+) : ChannelDriver => ({
+    channel, session, machine, link: () => null, capable: () => false, supports: () => true,
+    // These cases are about what a driver says about a session and a machine, not about where it
+    // would send anything, so the endpoint members answer nothing.
+    endpoints: () => [],
+    socketTarget: () => null,
+    accepts: () => true,
+});
 
 const says = (channel: ChannelDriver['channel'], reaching: boolean, seenAt?: number): ChannelDriver =>
     driver(channel, () => ({ reaching, seenAt }));

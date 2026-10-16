@@ -9,11 +9,12 @@
  */
 
 import { normalizeChannelPriority } from '@/sync/lan/channelOrder';
-import { candidateInputsFor, orderedCandidates } from './candidates';
-import { candidateKey, channelHealthFor, type CandidateHealth } from './health';
+import { candidateInputsFor, orderedCandidates, type Candidate } from './candidates';
+import { candidateKey, type CandidateHealth } from './health';
 import type { DaemonConnectionState } from '@/sync/lan/daemonConnections';
+import type { DaemonRoute } from '@/sync/lan/types';
 import type { SessionChannel } from '@/sync/lan/types';
-import type { ChannelDriver, ChannelOperation } from './types';
+import type { ChannelDriver, ChannelOperation , ChannelEndpoint } from './types';
 
 /**
  * The slice of the store the drivers read.
@@ -58,6 +59,27 @@ const DAEMON_OPERATIONS: ReadonlySet<ChannelOperation> = new Set([
 ]);
 
 /** A connection this App is holding to a machine, on any route. */
+/**
+ * The endpoints a channel would use for a machine, best first.
+ *
+ * One wrapper around the ordering so the three drivers cannot drift: `routes` is the only thing a
+ * channel decides here, and everything else — health, source ranking, demotions — is the same for
+ * all of them because it is about addresses, not about channels.
+ */
+function candidatesFor(state: ChannelState, machineId: string, now: number, routes: DaemonRoute[]): Candidate[] {
+    return orderedCandidates(machineId, candidateInputsFor(state, machineId, { now, routes }));
+}
+
+/** The same list, in the shape anything outside the channel layer sends to. */
+function asEndpoints(candidates: readonly Candidate[]): ChannelEndpoint[] {
+    return candidates.map((candidate) => ({
+        kind: 'address' as const,
+        route: candidate.route,
+        baseUrl: candidate.baseUrl,
+        source: candidate.source,
+    }));
+}
+
 const heldSocket = (state: ChannelState, machineId: string, route: SessionChannel): boolean =>
     Object.entries(state.daemonSockets).some(
         ([key, socket]) => key.startsWith(`${machineId}:`) && socket.route === route && socket.phase === 'live'
@@ -75,6 +97,10 @@ const heldSocket = (state: ChannelState, machineId: string, route: SessionChanne
  * "connected", "trying", or plainly not there. It is never absent, because unlike the LAN there is
  * nothing conditional about it existing.
  */
+/** Whether the server's own connection is usable at all — the same measurement `machine()` makes. */
+const serverCanCarry = (socketStatus: ChannelState['socketStatus']): boolean =>
+    socketStatus !== 'disconnected' && socketStatus !== 'error';
+
 function serverDriver(state: ChannelState): ChannelDriver {
     return {
         channel: 'server',
@@ -99,6 +125,15 @@ function serverDriver(state: ChannelState): ChannelDriver {
         // on purpose, because starting one is the server's record to keep — and that is the whole
         // reason this axis exists.
         supports: () => true,
+        // The server is one connection rather than a set of addresses, so it is named rather than
+        // addressed — and it offers itself only while that connection is usable.
+        endpoints: () => (serverCanCarry(state.socketStatus) ? [{ kind: 'server' as const }] : []),
+        // No socket to hold: this *is* the socket.
+        socketTarget: () => null,
+        // No operation filter: starting a session is exactly what the server is for, and `supports`
+        // above already says this channel can carry anything. What is left is whether its connection
+        // is usable at all.
+        accepts: () => serverCanCarry(state.socketStatus),
         session: (sessionId) => {
             const session = state.sessions[sessionId];
             if (!session) {
@@ -148,6 +183,12 @@ function lanDriver(state: ChannelState): ChannelDriver {
         capable: (machineId) => machineId in state.lanSightings || machineId in state.lanEndpoints,
         // Capability stays "has this channel ever been had by the machine", which is what the grey
         // glyph means; whether it is reaching it *now* is `machine().alive` above.
+        endpoints: (machineId, now) => asEndpoints(candidatesFor(state, machineId, now, ['lan'])),
+        // A socket is what turns a claimed address into a proven one, so this is the best address
+        // even when nothing has answered there yet — that is the point of opening it.
+        socketTarget: (machineId, now) => asEndpoints(candidatesFor(state, machineId, now, ['lan']))[0] ?? null,
+        accepts: (operation, machineId, now) =>
+            DAEMON_OPERATIONS.has(operation) && candidatesFor(state, machineId, now, ['lan']).length > 0,
         // A machine can serve its own sessions: read them, take a message, restart a process, say
         // what it is running. What it cannot do is start one, or act inside one — those are the
         // server's, and the daemon's API is built that way.
@@ -192,6 +233,10 @@ function relayDriver(state: ChannelState): ChannelDriver {
         // relay client — every machine has one — which is why hosts that never published grew a
         // relay glyph they had not earned.
         capable: (machineId) => carrying(machineId),
+        endpoints: (machineId, now) => asEndpoints(candidatesFor(state, machineId, now, ['relay'])),
+        socketTarget: (machineId, now) => asEndpoints(candidatesFor(state, machineId, now, ['relay']))[0] ?? null,
+        accepts: (operation, machineId, now) =>
+            DAEMON_OPERATIONS.has(operation) && candidatesFor(state, machineId, now, ['relay']).length > 0,
         machine: (machineId, now) => {
             // Same asymmetry as the LAN, with one extra rule: the relay holding the machine is
             // itself evidence it is up, because the relay only holds a machine that dialled in.
