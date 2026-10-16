@@ -523,10 +523,22 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
      */
     private async replaceConnection(): Promise<void> {
         const previous = this.db;
-        this.db = null;
+        // `this.db` is never left null: a statement already in flight reads it again after every
+        // await, and the reset must not turn "the connection is being replaced" into
+        // `Cannot read property 'withTransactionAsync' of null` for the work it is replacing. The
+        // new connection is opened first, and the old one is closed behind it.
         this.initialized = false;
         this.initPromise = null;
         if (!previous) {
+            return;
+        }
+        try {
+            await this.ensureReady();
+            if (this.db === previous) {
+                return;
+            }
+        } catch {
+            // Opening a replacement failed outright; the caller's retry will report why.
             return;
         }
         try {
