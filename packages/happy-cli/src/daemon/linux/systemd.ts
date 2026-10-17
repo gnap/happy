@@ -100,6 +100,11 @@ export function generateServiceContent(): string {
     // Only signal the daemon main PID. `mixed` / `control-group` would SIGKILL every
     // process in the service cgroup and defeat detached session spawns (daemon/run.ts).
     'KillMode=process',
+    // An OOM kill inside this unit must not stop the daemon. Without this, the kernel killing a
+    // session's runaway child (a training pipeline, say) makes systemd stop the whole unit, and
+    // every other session goes with it. Scope-spawned sessions live outside this unit entirely
+    // (linux/sessionScope.ts), but sessions spawned before that switch is turned on do not.
+    'OOMPolicy=continue',
     '',
     '[Install]',
     'WantedBy=default.target',
