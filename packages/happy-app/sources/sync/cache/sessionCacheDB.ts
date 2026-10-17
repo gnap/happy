@@ -663,50 +663,62 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
             return;
         }
 
-        // Serialised before the transaction opens, not inside it: stringifying would otherwise hold
-        // the write lock across the whole loop.
+        // Serialised before any statement runs: stringifying would otherwise happen between two
+        // statements of the save.
         const encoded = inserts.map((message) => JSON.stringify(message));
         const started = Date.now();
 
         await this.enqueue(async () => {
-            await this.db.withTransactionAsync(async () => {
+            // No transaction, deliberately.
+            //
+            // `withTransactionAsync` opens a BEGIN on the native connection and closes it when the
+            // callback finishes. A JS context torn down mid-save — every reload in development,
+            // which is how this App is used — leaves that transaction open on a connection nothing
+            // can reach any more, and the file stays write-locked for the life of the process: every
+            // statement after it waited ~2s on `busy_timeout` until the app was killed. Measured:
+            // 7ms per statement on a cold start, 2000ms after a reload.
+            //
+            // The price is that a save is no longer atomic, and it is paid in the safe direction:
+            // the message rows go first and the `session_cache` row last, so a save that dies
+            // halfway leaves the *previous* row in place — the last statement is what makes the new
+            // window visible. Every row is idempotent (`INSERT OR REPLACE` by key).
+
+            // Nothing is ever deleted here, and that is the point.
+            //
+            // This used to drop the rows for messages that had left the window — and a rewrite
+            // dropped every row for the session outright. But a window shrinks as a matter of
+            // course on this channel: a read that is more than a page behind replaces it with
+            // the newest page, and the whole point of the cache is to be the copy the App can
+            // still show when that page is a small one. Deleting the rows made the shrink
+            // permanent and irreversible, which is what "today's messages are gone" was: the
+            // window was replaced by a page of a few dozen messages, and the save that followed
+            // deleted the hundreds of rows behind it. Rows now accumulate; a window is a view of
+            // what is held, not a licence to discard it.
+            //
+            // One statement per chunk rather than one per message: each round trip crosses into
+            // native, and a burst of messages is the normal case, not the exception. 100 rows x
+            // 4 columns stays well under SQLite's bound-parameter limit.
+            const CHUNK = 100;
+            for (let at = 0; at < inserts.length; at += CHUNK) {
+                const chunk = inserts.slice(at, at + CHUNK);
+                const params: unknown[] = [];
+                for (let j = 0; j < chunk.length; j += 1) {
+                    params.push(row.sessionId, chunk[j].id, chunk[j].createdAt, encoded[at + j]);
+                }
+                await this.db.runAsync(
+                    `INSERT OR REPLACE INTO session_messages
+                        (session_id, message_id, created_at, message_json)
+                     VALUES ${chunk.map(() => '(?, ?, ?, ?)').join(', ')}`,
+                    params
+                );
+            }
+
                 await this.db.runAsync(
                     `INSERT OR REPLACE INTO session_cache
                         (session_id, last_seq, oldest_seq, has_older_messages, schema_version, cached_at, reducer_state)
                      VALUES (?, ?, ?, ?, ?, ?, ?)`,
                     [row.sessionId, row.lastSeq, row.oldestSeq, row.hasOlderMessages ? 1 : 0, row.schemaVersion, row.cachedAt, row.reducerStateJson]
                 );
-
-                // Nothing is ever deleted here, and that is the point.
-                //
-                // This used to drop the rows for messages that had left the window — and a rewrite
-                // dropped every row for the session outright. But a window shrinks as a matter of
-                // course on this channel: a read that is more than a page behind replaces it with
-                // the newest page, and the whole point of the cache is to be the copy the App can
-                // still show when that page is a small one. Deleting the rows made the shrink
-                // permanent and irreversible, which is what "today's messages are gone" was: the
-                // window was replaced by a page of a few dozen messages, and the save that followed
-                // deleted the hundreds of rows behind it. Rows now accumulate; a window is a view of
-                // what is held, not a licence to discard it.
-                //
-                // One statement per chunk rather than one per message: each round trip crosses into
-                // native, and a burst of messages is the normal case, not the exception. 100 rows x
-                // 4 columns stays well under SQLite's bound-parameter limit.
-                const CHUNK = 100;
-                for (let at = 0; at < inserts.length; at += CHUNK) {
-                    const chunk = inserts.slice(at, at + CHUNK);
-                    const params: unknown[] = [];
-                    for (let j = 0; j < chunk.length; j += 1) {
-                        params.push(row.sessionId, chunk[j].id, chunk[j].createdAt, encoded[at + j]);
-                    }
-                    await this.db.runAsync(
-                        `INSERT OR REPLACE INTO session_messages
-                            (session_id, message_id, created_at, message_json)
-                         VALUES ${chunk.map(() => '(?, ?, ?, ?)').join(', ')}`,
-                        params
-                    );
-                }
-            });
 
             this.written.set(row.sessionId, next);
             const ms = Date.now() - started;
@@ -725,10 +737,10 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
     async clearSessionCache(sessionId: string): Promise<void> {
         await this.ensureReady();
         await this.enqueue(async () => {
-            await this.db.withTransactionAsync(async () => {
-                await this.db.runAsync('DELETE FROM session_cache WHERE session_id = ?', [sessionId]);
-                await this.db.runAsync('DELETE FROM session_messages WHERE session_id = ?', [sessionId]);
-            });
+            // Autocommit, for the same reason the save is: a transaction abandoned by a reloaded
+            // JS context holds the file until the process dies.
+            await this.db.runAsync('DELETE FROM session_messages WHERE session_id = ?', [sessionId]);
+            await this.db.runAsync('DELETE FROM session_cache WHERE session_id = ?', [sessionId]);
             this.written.delete(sessionId);
             this.writtenWatermark.delete(sessionId);
         });
@@ -791,11 +803,11 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
     async clearAllCaches(): Promise<void> {
         await this.ensureReady();
         await this.enqueue(async () => {
-            await this.db.withTransactionAsync(async () => {
-                await this.db.runAsync('DELETE FROM session_cache');
-                await this.db.runAsync('DELETE FROM session_messages');
-                await this.db.runAsync('DELETE FROM sessions_list_cache');
-            });
+            // Autocommit, like every other write here: a transaction left open by a context that
+            // was torn down holds the file until the process dies.
+            await this.db.runAsync('DELETE FROM session_messages');
+            await this.db.runAsync('DELETE FROM session_cache');
+            await this.db.runAsync('DELETE FROM sessions_list_cache');
             this.written.clear();
             this.writtenWatermark.clear();
         });
