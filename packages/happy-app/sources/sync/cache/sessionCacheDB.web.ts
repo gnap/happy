@@ -7,6 +7,7 @@
  */
 
 import type { Message } from '../typesMessage';
+import { collapseDuplicateMessages } from '../messageIdentity';
 import { log } from '@/log';
 
 // ---------------------------------------------------------------------------
@@ -42,6 +43,8 @@ export interface ISessionCacheDB {
     initialize(): Promise<void>;
     getSessionCache(sessionId: string): Promise<CachedSessionRow | null>;
     getSessionMessages(sessionId: string): Promise<Message[]>;
+    /** Drops rows that are the same message under a second delivery id. Returns rows removed. */
+    dedupeSessionMessages(sessionId: string): Promise<number>;
     saveSessionCache(row: CachedSessionRow, messages: Message[]): Promise<void>;
     clearSessionCache(sessionId: string): Promise<void>;
     clearAllCaches(): Promise<void>;
@@ -67,6 +70,13 @@ export class MemorySessionCacheDB implements ISessionCacheDB {
 
     async getSessionMessages(sessionId: string): Promise<Message[]> {
         return this.messages.get(sessionId) ?? [];
+    }
+
+    async dedupeSessionMessages(sessionId: string): Promise<number> {
+        const held = this.messages.get(sessionId) ?? [];
+        const kept = collapseDuplicateMessages(held);
+        this.messages.set(sessionId, kept);
+        return held.length - kept.length;
     }
 
     async saveSessionCache(row: CachedSessionRow, messages: Message[]): Promise<void> {
@@ -217,6 +227,40 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
                 resolve(messages);
             };
             req.onerror = () => reject(req.error);
+        });
+    }
+
+    async dedupeSessionMessages(sessionId: string): Promise<number> {
+        await this.initialize();
+        return new Promise((resolve, reject) => {
+            const { messages } = this.getStore('readwrite');
+            const read = messages.get(sessionId);
+            read.onsuccess = () => {
+                const entry = read.result as { sessionId: string; messages: string[] } | undefined;
+                if (!entry?.messages?.length) {
+                    resolve(0);
+                    return;
+                }
+                const parsed: Message[] = [];
+                for (const json of entry.messages) {
+                    try {
+                        parsed.push(JSON.parse(json) as Message);
+                    } catch {
+                        // skip malformed
+                    }
+                }
+                const kept = collapseDuplicateMessages(parsed);
+                const dropped = parsed.length - kept.length;
+                if (dropped === 0) {
+                    resolve(0);
+                    return;
+                }
+                messages.put({ sessionId, messages: kept.map((message) => JSON.stringify(message)) });
+                const tx = messages.transaction;
+                tx.oncomplete = () => resolve(dropped);
+                tx.onerror = () => reject(tx.error);
+            };
+            read.onerror = () => reject(read.error);
         });
     }
 
