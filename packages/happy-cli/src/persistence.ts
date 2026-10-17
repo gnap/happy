@@ -280,6 +280,8 @@ export interface PersistedSession {
   agent: string;
   /** Per-session sandbox config (may be undefined if never set). */
   sandbox?: SandboxConfig | null;
+  /** Transient systemd scope the session ran in, when the daemon spawns scoped sessions. */
+  scopeUnit?: string;
   /** PID of the child process (-1 if unknown after daemon restart). */
   pid: number;
   /** 'running' = active, 'stopped' = exited but not archived. */

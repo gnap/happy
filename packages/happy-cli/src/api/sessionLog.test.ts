@@ -23,7 +23,7 @@ vi.mock('@/ui/logger', () => ({
     logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
 }));
 
-import { appendSessionLog, readSessionLog, readSessionLogSince, sessionLogDir, pruneSessionLogs, type SessionLogEntry } from './sessionLog';
+import { appendSessionLog, collapseSessionLogEntries, readSessionLog, readSessionLogPage, sessionLogDir, pruneSessionLogs, type SessionLogEntry } from './sessionLog';
 
 let home: string;
 /** Distinct tag per test: the torn-tail check is memoised per path within a process. */
@@ -136,18 +136,20 @@ describe('sessionLog', () => {
 
     describe('incremental reads', () => {
         // Without these the LAN client re-reads and re-decrypts the whole log on every poll, so
-        // the cost of a tick grows with the session. The cursor is what makes polling affordable.
+        // the cost of a tick grows with the session. The anchor is what makes polling affordable.
+        const from = (tag: string, since?: string, maxBytes?: number) =>
+            readSessionLogPage({ tag, site: SITE, since, maxBytes });
 
-        it('returns only what was appended after the cursor', () => {
+        it('returns only what was appended after the anchor', () => {
             const tag = tagFor('cursor');
             appendSessionLog(tag, SITE, entry(1));
 
-            const first = readSessionLogSince(tag, SITE);
+            const first = from(tag, '0:0');
             expect(first.entries).toEqual([entry(1)]);
             expect(first.reset).toBe(false);
 
             appendSessionLog(tag, SITE, entry(2));
-            const second = readSessionLogSince(tag, SITE, first.cursor);
+            const second = from(tag, first.cursor);
             expect(second.entries).toEqual([entry(2)]);
             expect(second.reset).toBe(false);
         });
@@ -156,49 +158,212 @@ describe('sessionLog', () => {
             const tag = tagFor('idle');
             appendSessionLog(tag, SITE, entry(1));
 
-            const idle = readSessionLogSince(tag, SITE, readSessionLogSince(tag, SITE).cursor);
+            const idle = from(tag, from(tag, '0:0').cursor);
             expect(idle.entries).toEqual([]);
             expect(idle.reset).toBe(false);
         });
 
-        it('falls back to the whole log when the cursor is unusable', () => {
+        it('falls back to the whole log when the anchor is unusable', () => {
             const tag = tagFor('garbage');
             appendSessionLog(tag, SITE, entry(1));
 
-            const page = readSessionLogSince(tag, SITE, 'not-a-cursor');
+            const page = from(tag, 'not-an-anchor');
             expect(page.entries).toEqual([entry(1)]);
             expect(page.reset).toBe(true);
         });
 
-        it('reports a reset when the cursor segment has been pruned away', () => {
+        it('reports a reset when the anchor segment has been pruned away', () => {
             process.env.HAPPY_SESSION_LOG_SEGMENT_BYTES = '1';
             process.env.HAPPY_SESSION_LOG_KEEP_SEGMENTS = '1';
             const tag = tagFor('pruned');
 
             appendSessionLog(tag, SITE, entry(1));
-            const first = readSessionLogSince(tag, SITE);
+            const first = from(tag, '0:0');
 
-            // The next append rotates into a new segment and drops the one the cursor points at.
+            // The next append rotates into a new segment and drops the one the anchor points at.
             appendSessionLog(tag, SITE, entry(2));
 
-            const page = readSessionLogSince(tag, SITE, first.cursor);
+            const page = from(tag, first.cursor);
             expect(page.reset).toBe(true);
             expect(page.entries).toEqual([entry(2)]);
         });
 
-        it('holds the cursor before a torn line so the repair is still delivered', () => {
+        // A log longer than one response has to be paged: the entries leave as a single frame, and
+        // the relay both refuses to carry one over its frame limit and drops the whole connection
+        // when it sees one — which turns a long session into a reconnect loop rather than a read.
+        it('pages at the byte budget and resumes exactly where it stopped', () => {
+            const tag = tagFor('paging');
+            for (let n = 1; n <= 5; n += 1) {
+                appendSessionLog(tag, SITE, entry(n));
+            }
+            const oneEntry = JSON.stringify(entry(1)).length + 1;
+
+            const first = from(tag, '0:0', oneEntry * 2);
+            expect(first.entries).toEqual([entry(1), entry(2)]);
+            expect(first.hasNewer).toBe(true);
+
+            const second = from(tag, first.cursor, oneEntry * 2);
+            expect(second.entries).toEqual([entry(3), entry(4)]);
+            expect(second.hasNewer).toBe(true);
+
+            const third = from(tag, second.cursor, oneEntry * 2);
+            expect(third.entries).toEqual([entry(5)]);
+            expect(third.hasNewer).toBe(false);
+        });
+
+        it('delivers an entry larger than the budget rather than stalling the reader on it', () => {
+            const tag = tagFor('oversized');
+            appendSessionLog(tag, SITE, entry(1));
+
+            const page = from(tag, '0:0', 1);
+            expect(page.entries).toEqual([entry(1)]);
+            expect(page.hasNewer).toBe(false);
+        });
+
+        it('holds the anchor before a torn line so the repair is still delivered', () => {
             const tag = tagFor('torn-cursor');
             appendSessionLog(tag, SITE, entry(1));
 
             const dir = sessionLogDir(tag, SITE);
             appendFileSync(join(dir, readdirSync(dir)[0]), '{"id":"id-2"');
 
-            const page = readSessionLogSince(tag, SITE);
+            const page = from(tag, '0:0');
             expect(page.entries).toEqual([entry(1)]);
 
             // The writer drops the partial line; whatever lands there next must not be skipped.
             appendSessionLog(tag, SITE, entry(3));
-            expect(readSessionLogSince(tag, SITE, page.cursor).entries).toEqual([entry(3)]);
+            expect(from(tag, page.cursor).entries).toEqual([entry(3)]);
         });
+    });
+
+    describe('newest page and paging back', () => {
+        // A reader that has just opened a session wants the end of the log. Reading from its last
+        // position instead means carrying every entry written while it was away before it can show
+        // anything recent, and on a session like this one that is tens of megabytes and never
+        // finishes. Older pages follow from the same anchors, in the other direction.
+        const tail = (tag: string, maxBytes?: number) => readSessionLogPage({ tag, site: SITE, maxBytes });
+        const before = (tag: string, anchor: string, maxBytes?: number) =>
+            readSessionLogPage({ tag, site: SITE, before: anchor, maxBytes });
+
+        it('reads the newest page when given no anchor at all', () => {
+            const tag = tagFor('tail');
+            for (let n = 1; n <= 3; n += 1) {
+                appendSessionLog(tag, SITE, entry(n));
+            }
+            const oneEntry = JSON.stringify(entry(1)).length + 1;
+
+            const page = tail(tag, oneEntry * 2);
+            expect(page.entries).toEqual([entry(2), entry(3)]);
+            expect(page.hasNewer).toBe(false);
+            expect(page.hasOlder).toBe(true);
+        });
+
+        it('reads back towards the start, one page at a time, ending when it gets there', () => {
+            const tag = tagFor('back');
+            for (let n = 1; n <= 4; n += 1) {
+                appendSessionLog(tag, SITE, entry(n));
+            }
+            const oneEntry = JSON.stringify(entry(1)).length + 1;
+
+            const newest = tail(tag, oneEntry * 2);
+            expect(newest.entries).toEqual([entry(3), entry(4)]);
+
+            const older = before(tag, newest.older, oneEntry * 2);
+            expect(older.entries).toEqual([entry(1), entry(2)]);
+            expect(older.hasOlder).toBe(false);
+            expect(older.hasNewer).toBe(true);
+
+            // The anchors are the same positions read in both directions, so the page after the
+            // older one is exactly the page we started from.
+            expect(readSessionLogPage({ tag, site: SITE, since: older.cursor }).entries).toEqual([entry(3), entry(4)]);
+        });
+
+        it('reaches the whole log from a tail read when it is small enough to be one page', () => {
+            const tag = tagFor('tail-small');
+            appendSessionLog(tag, SITE, entry(1));
+            appendSessionLog(tag, SITE, entry(2));
+
+            const page = tail(tag);
+            expect(page.entries).toEqual([entry(1), entry(2)]);
+            expect(page.hasOlder).toBe(false);
+            expect(page.hasNewer).toBe(false);
+        });
+
+        it('steps over a torn line going back, so older entries stay reachable', () => {
+            const tag = tagFor('torn-back');
+            appendSessionLog(tag, SITE, entry(1));
+            const dir = sessionLogDir(tag, SITE);
+            appendFileSync(join(dir, readdirSync(dir)[0]), '{"id":"torn"');
+            appendSessionLog(tag, SITE, entry(3));
+
+            const newest = tail(tag, 1);
+            expect(newest.entries).toEqual([entry(3)]);
+
+            const older = before(tag, newest.older, Number.MAX_SAFE_INTEGER);
+            expect(older.entries).toEqual([entry(1)]);
+            expect(older.hasOlder).toBe(false);
+        });
+
+        it('walks the whole log back across segments, newest page first', () => {
+            process.env.HAPPY_SESSION_LOG_SEGMENT_BYTES = '1'; // one entry per segment
+            const tag = tagFor('tail-segments');
+            const written: SessionLogEntry[] = [];
+            for (let n = 1; n <= 6; n += 1) {
+                appendSessionLog(tag, SITE, entry(n));
+                written.push(entry(n));
+            }
+            const oneEntry = JSON.stringify(entry(1)).length + 1;
+
+            // Each page holds one entry, so the walk crosses a segment boundary on every step —
+            // which is the case a real log is in whenever it is longer than one page.
+            const collected: SessionLogEntry[] = [];
+            let anchor = tail(tag, oneEntry);
+            collected.unshift(...anchor.entries);
+            expect(anchor.hasNewer).toBe(false);
+            let guard = 0;
+            while (anchor.hasOlder && guard++ < 20) {
+                anchor = before(tag, anchor.older, oneEntry);
+                collected.unshift(...anchor.entries);
+            }
+
+            expect(collected).toEqual(written);
+            expect(before(tag, anchor.older, oneEntry).entries).toEqual([]);
+        });
+    });
+});
+
+describe('collapseSessionLogEntries', () => {
+    const wire = (id: string, localId: string | null, dir: 'in' | 'out', n: number): SessionLogEntry => ({
+        id, localId, dir, at: 1_700_000_000_000 + n, c: `CIPHERTEXT-${localId ?? id}`,
+    });
+
+    it('keeps the acknowledged copy and drops the queued one', () => {
+        const queued = wire('local-1', 'local-1', 'out', 1);
+        const echoed = wire('server-1', 'local-1', 'in', 2);
+        expect(collapseSessionLogEntries([queued, echoed])).toEqual([echoed]);
+    });
+
+    it('keeps the acknowledged copy even when it comes first', () => {
+        const queued = wire('local-1', 'local-1', 'out', 2);
+        const echoed = wire('server-1', 'local-1', 'in', 1);
+        expect(collapseSessionLogEntries([echoed, queued])).toEqual([echoed]);
+    });
+
+    it('keeps the first position, so the page stays in log order', () => {
+        const a = wire('local-a', 'local-a', 'out', 1);
+        const b = wire('local-b', 'local-b', 'out', 2);
+        const echoedA = wire('server-a', 'local-a', 'in', 3);
+        expect(collapseSessionLogEntries([a, b, echoedA])).toEqual([echoedA, b]);
+    });
+
+    it('passes through entries with no identity to collapse on', () => {
+        const noId = wire('only-id', null, 'in', 1);
+        expect(collapseSessionLogEntries([noId])).toEqual([noId]);
+    });
+
+    it('collapses repeated deliveries of the same direction', () => {
+        const first = wire('server-1', 'local-1', 'in', 1);
+        const again = wire('server-2', 'local-1', 'in', 2);
+        expect(collapseSessionLogEntries([first, again])).toEqual([again]);
     });
 });

@@ -19,8 +19,8 @@ import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquire
 import { cleanupDaemonState, checkIfDaemonRunningAndCleanupStaleState } from './controlClient';
 import { startDaemonControlServer } from './controlServer';
 import { startUnixSocketServer } from './unixSocketServer';
-import { readFileSync } from 'fs';
-import { join } from 'path';
+import { readFileSync, writeFileSync } from 'fs';
+import { dirname, join } from 'path';
 import { projectPath } from '@/projectPath';
 import { getTmuxUtilities, isTmuxAvailable, parseTmuxSessionIdentifier, formatTmuxSessionIdentifier } from '@/utils/tmux';
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
@@ -28,12 +28,22 @@ import { stripProfileManagedEnv } from '@/utils/profileEnv';
 import { fetchSessionProfileMeta, PROFILE_META_DEADLINE_MS } from './fetchSessionProfileMeta';
 import { delay } from '@/utils/time';
 import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSessionSummary } from './lanServer';
+import { RESTARTING_TTL_MS, expiredRestarting } from './restartTracker';
+import { LifecycleLog } from './lifecycleLog';
+import { replayToServer } from './lifecycleServerReplay';
+import { ACCOUNT_PROOF_WINDOW_MS } from './accountProof';
+import nacl from 'tweetnacl';
+import type { UpdateSessionBody } from '@slopus/happy-wire';
+import { versionStateOf } from './versionState';
+import { BUILD_VERSION } from '../version';
 import type { ApiMachineClient } from '@/api/apiMachine';
 import { readSessionKey } from '@/api/sessionKeyPersistence';
-import { readSessionLogSince } from '@/api/sessionLog';
-import { encodeBase64, libsodiumEncryptForPublicKey } from '@/api/encryption';
+import { collapseSessionLogEntries, readSessionLogPage } from '@/api/sessionLog';
+import { decodeBase64, encodeBase64, libsodiumEncryptForPublicKey } from '@/api/encryption';
 import { startLanDiscovery, type LanDiscoveryHandle } from './lanDiscovery';
-import { startEndpointPublisher, type EndpointPublisherHandle } from './lanEndpoints';
+import { ENDPOINT_PROTOCOL_VERSION, startEndpointPublisher, type EndpointPublisherHandle, type LanEndpoint } from './lanEndpoints';
+import { startRelayClient, type RelayClientHandle } from './relay/relayClient';
+import { buildSessionScopeUnitName, resolveSessionScopeMode, scopeUnitFromProcCgroup, signalSession, spawnHappyCLIInSessionScope } from './linux/sessionScope';
 
 /** Time to wait for a spawned session to report via /session-started webhook before failing the spawn (Cursor cold start can exceed 30s). */
 const SESSION_WEBHOOK_TIMEOUT_MS = 60_000;
@@ -120,6 +130,14 @@ async function getProfileEnvironmentVariablesForAgent(
     logger.debug('[DAEMON RUN] Failed to get profile environment variables:', error);
     return {};
   }
+}
+
+/** Where a build leaves its version, from the bundle's own location outwards. */
+function versionArtifacts(): string[] {
+  // `argv[1]` is the bundle this daemon was started from: `bun …/dist/index.bun.mjs`.
+  const bundlePath = process.argv[1] ?? '';
+  const bundleDir = dirname(bundlePath);
+  return [join(bundleDir, 'version.json'), join(dirname(bundleDir), 'src', 'version.ts')];
 }
 
 export async function startDaemon(): Promise<void> {
@@ -291,6 +309,7 @@ export async function startDaemon(): Promise<void> {
           sessionTag: session.sessionTag,
           agent: session.agent ?? existing?.agent ?? 'cursor',
           sandbox: existing?.sandbox,
+          scopeUnit: session.scopeUnit ?? existing?.scopeUnit,
           pid: session.pid ?? existing?.pid ?? -1,
           status: 'stopped',
           lastSeq: existing?.lastSeq ?? -1,
@@ -365,25 +384,15 @@ export async function startDaemon(): Promise<void> {
       pidToAwaiter.delete(pid);
       pidToTrackedSession.delete(pid);
 
-      try {
-        if (session.startedBy === 'daemon' && session.childProcess) {
-          session.childProcess.kill('SIGTERM');
-        } else {
-          process.kill(pid, 'SIGTERM');
-        }
-      } catch (err: unknown) {
-        const code = err && typeof err === 'object' && 'code' in err ? (err as NodeJS.ErrnoException).code : undefined;
-        if (code !== 'ESRCH') {
-          logger.debug(`[DAEMON RUN] Failed to terminate PID ${pid}:`, err);
-        }
-      }
+      // A scoped session is stopped through its unit so its children (and their memory) go too.
+      signalSession({ pid, scopeUnit: session.scopeUnit }, 'SIGTERM');
     };
 
     const activeSessionsBySessionId = (sessionId: string): Array<[number, TrackedSession]> =>
       Array.from(pidToTrackedSession.entries())
         .filter(([, session]) => session.happySessionId === sessionId);
 
-    const waitForPidsToExit = async (pids: number[], timeoutMs = 5_000) => {
+    const waitForPidsToExit = async (pids: number[], timeoutMs = 5_000, sessionsByPid?: Map<number, TrackedSession>) => {
       const deadline = Date.now() + timeoutMs;
       let remaining = pids;
 
@@ -398,7 +407,12 @@ export async function startDaemon(): Promise<void> {
 
       for (const pid of remaining) {
         logger.debug(`[DAEMON RUN] PID ${pid} did not exit after SIGTERM; sending SIGKILL`);
-        try { process.kill(pid, 'SIGKILL'); } catch { /* ignore */ }
+        const session = sessionsByPid?.get(pid);
+        if (session?.scopeUnit) {
+          signalSession({ pid, scopeUnit: session.scopeUnit }, 'SIGKILL');
+        } else {
+          try { process.kill(pid, 'SIGKILL'); } catch { /* ignore */ }
+        }
       }
     };
 
@@ -500,6 +514,9 @@ export async function startDaemon(): Promise<void> {
           directory: sessionMetadata.path,
           sessionTag: sessionMetadata.sessionTag,
           agent: (sessionMetadata.flavor as TrackedSession['agent']) ?? 'cursor',
+          // A session that survived a daemon restart is still in its scope; reading it back from
+          // /proc keeps it kill-routable without relying on persisted state.
+          scopeUnit: scopeUnitFromProcCgroup(pid) ?? undefined,
           lastHeartbeat: Date.now(),
         };
         pidToTrackedSession.set(pid, trackedSession);
@@ -513,6 +530,28 @@ export async function startDaemon(): Promise<void> {
       }
       const s = pidToTrackedSession.get(pid);
       if (s?.happySessionId) {
+        // The first moment this machine knows *which* session it started: the tag comes from the
+        // child, and until it does there is nothing to write down that anyone could match. Written
+        // before the session is announced anywhere else, so the log is ahead of every replay.
+        //
+        // Deduplicated on the tag *and* the id rather than the tag alone: a session that is adopted
+        // after a restart is written once without an id, and when the server later names it the same
+        // session has to be written again — a reader keys on the id, and an entry that never carries
+        // one leaves it hanging on a tag forever.
+        const knownLifecycle = lifecycleLog.read();
+        const alreadyWritten = knownLifecycle.some((entry) => entry.op === 'created'
+          && entry.tag === s.sessionTag
+          && entry.sessionId === s.happySessionId);
+        if (s.sessionTag && !alreadyWritten) {
+          lifecycleLog.record({
+            op: 'created',
+            tag: s.sessionTag,
+            sessionId: s.happySessionId,
+            directory: s.directory,
+            agent: s.agent,
+          });
+          announceLifecycle();
+        }
         const existing = sessions[s.happySessionId];
         sessions[s.happySessionId] = {
           sessionId: s.happySessionId,
@@ -520,6 +559,7 @@ export async function startDaemon(): Promise<void> {
           sessionTag: s.sessionTag ?? existing?.sessionTag ?? '',
           agent: s.agent ?? existing?.agent ?? 'cursor',
           sandbox: sessionMetadata.sandbox ?? existing?.sandbox,
+          scopeUnit: s.scopeUnit ?? existing?.scopeUnit,
           pid: pid,
           status: 'running',
           lastSeq: existing?.lastSeq ?? -1,
@@ -530,6 +570,11 @@ export async function startDaemon(): Promise<void> {
       // Each session reports itself every 60s, so this is at most once-per-minute per session.
       persistNow();
     };
+
+    // Whether sessions are spawned into their own systemd scopes. Resolved once: a daemon must not
+    // mix backends, and the switch's effect (unset it, restart) has to be predictable.
+    const sessionScopeMode = resolveSessionScopeMode();
+    logger.info(`[DAEMON RUN] Session spawn backend: ${sessionScopeMode.enabled ? `systemd scope (${sessionScopeMode.slice})` : `direct (${sessionScopeMode.reason})`}`);
 
     // Spawn a new session (sessionId reserved for future --resume functionality)
     const spawnSession = async (options: SpawnSessionOptions): Promise<SpawnSessionResult> => {
@@ -705,6 +750,9 @@ export async function startDaemon(): Promise<void> {
         }
 
         if (useTmux && tmuxSessionName !== undefined) {
+          if (sessionScopeMode.enabled) {
+            logger.info(`[DAEMON RUN] tmux session requested; it will not be placed in a systemd scope (slice=${sessionScopeMode.slice})`);
+          }
           // Try to spawn in tmux session
           const sessionDesc = tmuxSessionName || 'current/most recent session';
           logger.debug(`[DAEMON RUN] Attempting to spawn session in tmux: ${sessionDesc}`);
@@ -879,12 +927,38 @@ export async function startDaemon(): Promise<void> {
           // Sandbox is now handled at the SDK level (claudeRemote.ts passes
           // sandbox settings to query()). The daemon just passes --sandbox-config
           // for metadata purposes; no more sandbox-exec wrapping needed here.
-          const happyProcess = spawnHappyCLI(args, {
-            cwd: directory,
-            detached: true,  // Sessions stay alive when daemon stops
-            stdio: ['ignore', 'pipe', 'pipe'],  // Capture stdout/stderr for debugging
-            env: spawnEnv,
+          //
+          // In scope mode the session starts inside its own transient systemd unit, so its memory
+          // (and anything it spawns) is accounted to that unit rather than to the daemon's. The
+          // PID is unchanged either way: systemd-run execs the command in place.
+          let happyProcess: ReturnType<typeof spawnHappyCLI>;
+          let scopeUnit: string | undefined;
+          if (sessionScopeMode.enabled) {
+            scopeUnit = buildSessionScopeUnitName(sessionId ?? directory);
+            logger.info(`[DAEMON RUN] Spawning session in systemd scope ${scopeUnit} (slice=${sessionScopeMode.slice})`);
+            happyProcess = spawnHappyCLIInSessionScope(args, {
+              cwd: directory,
+              env: spawnEnv,
+              unitName: scopeUnit,
+              slice: sessionScopeMode.slice,
+            });
+          } else {
+            happyProcess = spawnHappyCLI(args, {
+              cwd: directory,
+              detached: true,  // Sessions stay alive when daemon stops
+              stdio: ['ignore', 'pipe', 'pipe'],  // Capture stdout/stderr for debugging
+              env: spawnEnv,
+            });
+          }
+
+          // Keep the child's last words: a scope that fails to start says why on stderr, and that
+          // is the only place the reason exists. Always attached (not just under DEBUG) so the
+          // pipe cannot fill up and stall the child.
+          let stderrTail = '';
+          happyProcess.stderr?.on('data', (data: Buffer) => {
+            stderrTail = (stderrTail + data.toString()).slice(-8192);
           });
+          let settleSpawn: ((result: SpawnSessionResult) => void) | null = null;
 
           // Log output for debugging
           if (process.env.DEBUG) {
@@ -914,11 +988,26 @@ export async function startDaemon(): Promise<void> {
             directory,
             sessionTag: resumeSessionTag,
             agent: options.agent ?? 'cursor',
+            scopeUnit,
             spawnTime: Date.now(),
             message: directoryCreated ? `The path '${directory}' did not exist. We created a new folder and spawned a new session there.` : undefined
           };
 
           pidToTrackedSession.set(happyProcess.pid, trackedSession);
+
+          if (scopeUnit) {
+            // Not a precondition — just proof that the session really left the daemon's cgroup.
+            // A mismatch is logged and nothing else: killing a session over a noisy check would be
+            // worse than the coupling this exists to remove.
+            void (async () => {
+              const deadline = Date.now() + 2000;
+              while (Date.now() < deadline) {
+                if (scopeUnitFromProcCgroup(happyProcess.pid!) === scopeUnit) return;
+                await delay(100);
+              }
+              logger.warn(`[DAEMON RUN] ${scopeUnit}: session PID ${happyProcess.pid} was not found in that scope after 2s`);
+            })();
+          }
 
           happyProcess.on('exit', (code, signal) => {
             const s = pidToTrackedSession.get(happyProcess.pid!);
@@ -928,6 +1017,12 @@ export async function startDaemon(): Promise<void> {
             if (happyProcess.pid) {
               onChildExited(happyProcess.pid, code, signal);
             }
+            // The process is gone, so no webhook is coming; release the spawn wait now instead of
+            // leaving the caller on the full timeout.
+            settleSpawn?.({
+              type: 'error',
+              errorMessage: `Session process exited before it reported itself (code=${code} signal=${signal})${stderrTail.trim() ? `: ${stderrTail.trim().slice(-1000)}` : ''}`,
+            });
           });
 
           happyProcess.on('error', (error) => {
@@ -940,27 +1035,39 @@ export async function startDaemon(): Promise<void> {
               }
               onChildExited(happyProcess.pid, 1, null);
             }
+            settleSpawn?.({ type: 'error', errorMessage: `Failed to start session process: ${error.message}${stderrTail.trim() ? `: ${stderrTail.trim().slice(-1000)}` : ''}` });
           });
 
           // Wait for webhook to populate session with happySessionId
           logger.debug(`[DAEMON RUN] Waiting for session webhook for PID ${happyProcess.pid}`);
 
-          return new Promise((resolve) => {
+          return new Promise<SpawnSessionResult>((resolve) => {
+            let settled = false;
+            let timeout: ReturnType<typeof setTimeout> | undefined;
+            const settle = (result: SpawnSessionResult) => {
+              if (settled) return;
+              settled = true;
+              if (timeout) clearTimeout(timeout);
+              if (happyProcess.pid) pidToAwaiter.delete(happyProcess.pid);
+              resolve(result);
+            };
+
             // Set timeout for webhook
-            const timeout = setTimeout(() => {
-              pidToAwaiter.delete(happyProcess.pid!);
+            timeout = setTimeout(() => {
               logger.debug(`[DAEMON RUN] Session webhook timeout for PID ${happyProcess.pid}`);
-              resolve({
+              settle({
                 type: 'error',
                 errorMessage: `Session webhook timeout for PID ${happyProcess.pid}`
               });
             }, SESSION_WEBHOOK_TIMEOUT_MS);
 
+            // Let the exit/error handlers end this wait early.
+            settleSpawn = settle;
+
             // Register awaiter
             pidToAwaiter.set(happyProcess.pid!, (completedSession) => {
-              clearTimeout(timeout);
               logger.debug(`[DAEMON RUN] Session ${completedSession.happySessionId} fully spawned with webhook`);
-              resolve({
+              settle({
                 type: 'success',
                 sessionId: completedSession.happySessionId!
               });
@@ -994,22 +1101,8 @@ export async function startDaemon(): Promise<void> {
         if (session.happySessionId === sessionId ||
           (sessionId.startsWith('PID-') && pid === parseInt(sessionId.replace('PID-', '')))) {
 
-          if (session.startedBy === 'daemon' && session.childProcess) {
-            try {
-              session.childProcess.kill('SIGTERM');
-              logger.debug(`[DAEMON RUN] Sent SIGTERM to daemon-spawned session ${sessionId}`);
-            } catch (error) {
-              logger.debug(`[DAEMON RUN] Failed to kill session ${sessionId}:`, error);
-            }
-          } else {
-            // For externally started sessions, try to kill by PID
-            try {
-              process.kill(pid, 'SIGTERM');
-              logger.debug(`[DAEMON RUN] Sent SIGTERM to external session PID ${pid}`);
-            } catch (error) {
-              logger.debug(`[DAEMON RUN] Failed to kill external session PID ${pid}:`, error);
-            }
-          }
+          signalSession({ pid, scopeUnit: session.scopeUnit }, 'SIGTERM');
+          logger.debug(`[DAEMON RUN] Sent SIGTERM to session ${sessionId} (PID ${pid}${session.scopeUnit ? `, scope ${session.scopeUnit}` : ''})`);
 
           persistSessionTagBeforeRemove(session);
           logger.debug(`[DAEMON RUN] Stop requested for session ${sessionId}; keeping it tracked until exit is observed`);
@@ -1028,6 +1121,11 @@ export async function startDaemon(): Promise<void> {
       logger.debug(`[DAEMON RUN] Stop by PID: ${pid}`);
       const session = pidToTrackedSession.get(pid);
       if (session) persistSessionTagBeforeRemove(session);
+      if (session?.scopeUnit) {
+        signalSession({ pid, scopeUnit: session.scopeUnit }, 'SIGTERM');
+        logger.debug(`[DAEMON RUN] Sent SIGTERM to ${session.scopeUnit}; waiting for exit before removing from tracking`);
+        return true;
+      }
       try {
         process.kill(pid, 'SIGTERM');
         logger.debug(`[DAEMON RUN] Sent SIGTERM to PID ${pid}; waiting for exit before removing from tracking`);
@@ -1050,6 +1148,14 @@ export async function startDaemon(): Promise<void> {
 
     /** Remove a stopped session from the visible list (explicit user action). */
     const archiveSession = (sessionId: string): boolean => {
+      // Written first: an archived session is a fact every reader has to be able to replay, and the
+      // tracking below is what stops being able to tell them.
+      const archived = stoppedSessions.get(sessionId)
+        ?? [...pidToTrackedSession.values()].find((session) => session.happySessionId === sessionId);
+      if (archived?.sessionTag) {
+        lifecycleLog.record({ op: 'deleted', tag: archived.sessionTag, sessionId });
+        announceLifecycle();
+      }
       let removed = stoppedSessions.delete(sessionId);
       if (removed) {
         logger.debug(`[DAEMON RUN] Archived session ${sessionId}`);
@@ -1070,8 +1176,204 @@ export async function startDaemon(): Promise<void> {
       return removed;
     };
 
-    // Restart a session: kill existing process and spawn a new one reconnecting to the same server session
+    /**
+     * What this machine has started and archived, in order, on disk.
+     *
+     * Written when the fact happens rather than derived from the tracking maps, because those are
+     * snapshots: they say what exists *now*, which is a different kind of statement from "this was
+     * created at this point in the sequence". Everything outside this process replays this.
+     */
+    const lifecycleLog = new LifecycleLog(join(configuration.happyHomeDir, 'daemon-lifecycle.jsonl'));
+
+    /**
+     * Tells whoever is reading on a live socket that the log has moved.
+     *
+     * A hint, not the entry: the reader asks for what it missed, with its own cursor. That is what
+     * keeps this cheap and keeps the replay per-reader — and it is the alternative to a reader
+     * polling a log that changes a handful of times a day.
+     */
+    /**
+     * How far the *server* channel has been replayed to, on disk.
+     *
+     * A file of its own rather than a field in the daemon's state, because the two are written at
+     * very different rates and one of them is a snapshot. Losing this cursor costs one repeated
+     * `DELETE`, which is idempotent, so no atomicity dance is needed to keep it.
+     */
+    const serverReplayCursorFile = join(configuration.happyHomeDir, 'daemon-lifecycle-server-cursor');
+    const readServerCursor = (): number => {
+      try {
+        const raw = readFileSync(serverReplayCursorFile, 'utf-8').trim();
+        const parsed = Number.parseInt(raw, 10);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+      } catch {
+        return 0;
+      }
+    };
+
+    /** One replay at a time: two walks over the same entries would send the same DELETE twice. */
+    let replayingLifecycle = false;
+    /**
+     * Tells the server about the endings in this machine's log.
+     *
+     * The server is the slow channel — on a machine whose connection takes a minute to come up,
+     * doing this inline would mean a deletion that lands only when the network cooperates — so it
+     * has a cursor of its own and this walks whatever is past it, whenever what is past it changes.
+     */
+    const replayLifecycleToServer = async (): Promise<void> => {
+      if (replayingLifecycle) {
+        return;
+      }
+      replayingLifecycle = true;
+      try {
+        const from = readServerCursor();
+        const to = await replayToServer(lifecycleLog.read(), from, {
+          // Where this machine says it can be reached. The server stores the blob without decoding
+          // it, and a client reads it while it is here — a projection of the log entry, not the
+          // record, which is why a write that does not land simply leaves the cursor where it is.
+          publishReachable: async (endpoints, at) => {
+            if (!apiMachineRef) {
+              return false;
+            }
+            try {
+              return await apiMachineRef.tryUpdateDaemonState((state) => ({
+                ...state,
+                status: state?.status ?? 'running',
+                p2p: { v: ENDPOINT_PROTOCOL_VERSION, endpoints, at },
+              }));
+            } catch (error) {
+              logger.debug('[DAEMON RUN] Lifecycle replay: reachable projection failed', { error: String(error) });
+              return false;
+            }
+          },
+          remove: async (sessionId) => {
+            try {
+              const response = await fetch(`${configuration.serverUrl}/v1/sessions/${encodeURIComponent(sessionId)}`, {
+                method: 'DELETE',
+                headers: { authorization: `Bearer ${credentials.token}` },
+                signal: AbortSignal.timeout(15_000),
+              });
+              // Already gone counts as removed: the server answering 404 is the outcome this was
+              // asking for, and retrying it forever would be a cursor that never moves.
+              return response.ok || response.status === 404;
+            } catch (error) {
+              logger.debug(`[DAEMON RUN] Lifecycle replay: delete ${sessionId} failed`, { error: String(error) });
+              return false;
+            }
+          },
+          advance: (revision) => {
+            try {
+              writeFileSync(serverReplayCursorFile, String(revision), 'utf-8');
+            } catch (error) {
+              logger.debug('[DAEMON RUN] Lifecycle replay: could not record the cursor', { error: String(error) });
+            }
+          },
+        });
+        if (to !== from) {
+          logger.debug(`[DAEMON RUN] Lifecycle replay to server: rev ${from} → ${to}`);
+        }
+      } finally {
+        replayingLifecycle = false;
+      }
+    };
+
+/** Nonces already spent, so a lifted signature cannot be used a second time. */
+    const accountProofNonces = new Map<string, number>();
+
+    const announceLifecycle = (): void => {
+      // The readers on a socket, and the server — which is one of them, just slower.
+      void replayLifecycleToServer();
+      // The relay is a reader too, but not one that asks: it answers for this machine, so it is
+      // told. Its own tick would catch up within seconds; this is what makes it immediate.
+      relayClient?.publishDirectory();
+      lanServer?.broadcast('update', {
+        id: `lan-${++lanEventCounter}`,
+        seq: 0,
+        body: { t: 'lifecycle', revision: lifecycleLog.revision() },
+        createdAt: Date.now(),
+      });
+    };
+
+    /**
+     * Sessions this daemon is in the middle of restarting, by session id, and when it started.
+     *
+     * A restart is invisible from outside: the session stops reporting, which is what an ended
+     * session looks like too. This daemon is the only party that knows the difference, so it says
+     * so — as a change to *that session's* state, pushed the same way every other session state
+     * change is, so a reader applies it where it already keeps the session's state and needs to
+     * know nothing new.
+     *
+     * This map is the daemon's own working state, not a store anybody reads: what readers see is
+     * the push, the summary it lists the session in, and the snapshot a reader gets on connect.
+     */
+    const restartingStartedAt = new Map<string, number>();
+
+    /**
+     * The LAN/relay fan-out. Declared here, above the restart path that pushes through it: a
+     * `let` read before its declaration throws, and a restart can be asked for from the moment the
+     * control server is up, which is earlier than the LAN listener is.
+     *
+     * The relay client is here for the same reason and one more: the log moving is what makes both
+     * the LAN hint and the relay's directory refresh, and a log entry can be written by a session
+     * registering with this daemon before the LAN half has finished starting.
+     */
+    let lanServer: LanServerHandle | null = null;
+    let relayClient: RelayClientHandle | null = null;
+    /** Only has to make the envelope's `id` unique; the App does not key on it. */
+    let lanEventCounter = 0;
+
+    /**
+     * Tells every reader of this session that it is, or is no longer, being restarted.
+     *
+     * A session state change, in the server's own envelope shape, so the App's update handler runs
+     * against it unchanged — the same path a session's own metadata and agentState take when the
+     * session forwards them here. What is different is only who is speaking: those are the session
+     * saying something about itself, and this is the daemon saying the one thing about a session it
+     * is in a position to know and the session cannot say, because it is the process being
+     * replaced.
+     *
+     * Deliberately not awaited and not stored: the restart must not wait on it, and a reader that
+     * misses the frame has two other ways to learn the same fact — the session summary it lists,
+     * and the snapshot a reader is handed when it connects.
+     */
+    const announceRestarting = (sessionId: string, startedAt: number | null): void => {
+      logger.debug(`[DAEMON RUN] ${startedAt === null ? 'Restart finished' : 'Restarting'}: ${sessionId}`);
+      const body: UpdateSessionBody = {
+        t: 'update-session',
+        id: sessionId,
+        restartingAt: startedAt,
+      };
+      lanServer?.broadcast('update', {
+        id: `lan-${++lanEventCounter}`,
+        seq: 0,
+        body,
+        createdAt: Date.now(),
+      });
+    };
+
+    /**
+     * Restart a session, announcing it for exactly as long as it takes.
+     *
+     * The announcement brackets the work rather than outliving it: readers are told when it starts
+     * and told again when it is over, so what they draw is the machine's own timing instead of a
+     * grace they have to guess at. The grace still exists behind it, for a daemon that dies
+     * mid-restart and so never gets to say it finished.
+     */
     const restartSession = async (sessionId: string, sandboxConfig?: any): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
+      const startedAt = Date.now();
+      restartingStartedAt.set(sessionId, startedAt);
+      announceRestarting(sessionId, startedAt);
+      try {
+        return await performRestart(sessionId, sandboxConfig);
+      } finally {
+        // Called off once there is an answer, whatever the answer was: the new process is up and
+        // has registered, or the restart did not happen. Either way nothing is in flight.
+        restartingStartedAt.delete(sessionId);
+        announceRestarting(sessionId, null);
+      }
+    };
+
+    // Kill existing process and spawn a new one reconnecting to the same server session
+    const performRestart = async (sessionId: string, sandboxConfig?: any): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
       logger.debug(`[DAEMON RUN] Restart session: ${sessionId}`);
       const persistedState = await readDaemonState();
 
@@ -1151,7 +1453,7 @@ export async function startDaemon(): Promise<void> {
         for (const [pid, session] of activePids) {
           terminateTrackedProcess(pid, session, `restart requested for session ${sessionId}`);
         }
-        await waitForPidsToExit(activePids.map(([pid]) => pid));
+        await waitForPidsToExit(activePids.map(([pid]) => pid), 5_000, new Map(activePids));
       }
 
       // Spawn new process, reconnecting to the same server session via explicit CLI arg.
@@ -1290,9 +1592,6 @@ export async function startDaemon(): Promise<void> {
     // (loopback is its only protection) and can spawn/stop sessions. This one only reads,
     // so widening it to the network does not widen the control surface.
     //
-    let lanServer: LanServerHandle | null = null;
-    /** Only has to make the envelope's `id` unique; the App does not key on it. */
-    let lanEventCounter = 0;
     /**
      * The latest `update-session` state each session has mirrored to us, so a LAN reader that
      * connects late still gets the current agentState/metadata instead of waiting for the server.
@@ -1304,6 +1603,7 @@ export async function startDaemon(): Promise<void> {
     }>();
     let lanDiscovery: LanDiscoveryHandle | null = null;
     let endpointPublisher: EndpointPublisherHandle | null = null;
+    let relayEndpoint: LanEndpoint | null = null;
     // The endpoint publisher needs the machine socket, but that client is created later in
     // startup (it depends on a network round trip). Referencing `apiMachine` directly here
     // would hit the temporal dead zone the moment the first tick ran; this indirection is
@@ -1321,7 +1621,66 @@ export async function startDaemon(): Promise<void> {
           // Captured here because the narrowing on `credentials.encryption` does not survive
           // into the callback below.
           const accountPublicKey = credentials.encryption.publicKey;
-          const started = await startLanServer({
+          /**
+         * What this daemon can say about the sessions it runs.
+         *
+         * One function, two consumers: the LAN API serves it to a reader that asks this machine
+         * directly, and the relay publishes it so an App can list every machine's sessions through
+         * the one relay connection it holds. Both want exactly the same summary.
+         */
+        const sessionSummaries = (): LanSessionSummary[] => {
+          const summaries: LanSessionSummary[] = [...pidToTrackedSession.values()]
+            // A session is listed as soon as the daemon knows it, not once the server acknowledges
+            // it. It has a tag from spawn but no server id until the server answers -- and while
+            // the server is down that is exactly the session a reader most needs to see. Filtering
+            // on the id is what made a waiting session vanish from the LAN list, the relay hub and
+            // the App at once. Only a session with neither name is dropped: nothing could ask for it.
+            .filter(session => session.happySessionId !== undefined || session.sessionTag !== undefined)
+            .map((session): LanSessionSummary => ({
+              ...(session.happySessionId ? { happySessionId: session.happySessionId } : {}),
+              ...(session.sessionTag ? { tag: session.sessionTag } : {}),
+              directory: session.directory ?? '',
+              agent: session.agent ?? '',
+              startedBy: String(session.startedBy),
+              // The session's own metadata, mirrored here when it last updated, and only when the
+              // server has named the session — there is nothing mirrored before that.
+              ...(session.happySessionId && lanSessionState.get(session.happySessionId)?.metadata
+                ? {
+                    metadataVersion: lanSessionState.get(session.happySessionId)!.metadata!.version,
+                    metadata: lanSessionState.get(session.happySessionId)!.metadata!.value,
+                  }
+                : {}),
+              isAlive: session.exitTime
+                ? false
+                : (() => { try { process.kill(session.pid, 0); return true; } catch { return false; } })(),
+              lastHeartbeat: session.lastHeartbeat,
+              ...(session.happySessionId && restartingStartedAt.has(session.happySessionId)
+                ? { restartingSince: restartingStartedAt.get(session.happySessionId)! }
+                : {}),
+            }));
+          // A session being restarted is not tracked for part of that: the old process has been
+          // signalled and the new one has not registered yet. Left out, it would vanish from the
+          // list — and vanishing is how a restart reads from outside, which is the reading this
+          // exists to replace. So the ones this daemon is restarting are added back, not alive and
+          // saying why.
+          const tracked = new Set(summaries.map(summary => summary.happySessionId));
+          const now = Date.now();
+          for (const [id, at] of restartingStartedAt) {
+            if (now - at < RESTARTING_TTL_MS && !tracked.has(id)) {
+              summaries.push({
+                happySessionId: id,
+                directory: '',
+                agent: '',
+                startedBy: 'daemon',
+                isAlive: false,
+                restartingSince: at,
+              });
+            }
+          }
+          return summaries;
+        };
+
+        const started = await startLanServer({
             secret: credentials.encryption.machineKey,
             machineId,
             accountFingerprint,
@@ -1341,20 +1700,78 @@ export async function startDaemon(): Promise<void> {
                   createdAt: Date.now(),
                 });
               }
+              // A reader that connects in the middle of a restart would otherwise never hear about
+              // it: the push went out before it was listening. Same fact, same shape, handed over
+              // with the rest of the session state instead of waited for.
+              for (const id of restartingStartedAt.keys()) {
+                frames.push({
+                  id: `lan-${++lanEventCounter}`,
+                  seq: 0,
+                  body: { t: 'update-session', id, restartingAt: restartingStartedAt.get(id) } satisfies UpdateSessionBody,
+                  createdAt: Date.now(),
+                });
+              }
               return frames;
             },
-            getSessions: () => [...pidToTrackedSession.values()]
-              .filter(session => session.happySessionId !== undefined)
-              .map(session => ({
-                happySessionId: session.happySessionId!,
-                directory: session.directory ?? '',
-                agent: session.agent ?? '',
-                startedBy: String(session.startedBy),
-                isAlive: session.exitTime
-                  ? false
-                  : (() => { try { process.kill(session.pid, 0); return true; } catch { return false; } })(),
-                lastHeartbeat: session.lastHeartbeat,
-              } satisfies LanSessionSummary)),
+            getSessions: sessionSummaries,
+            // The same handler the control server and the server route call, so a restart means one
+            // thing however it was asked for — including every refusal, which is where the rules
+            // about archived sessions and sessions with live processes live.
+            restartSession,
+            // Control calls that act *inside* a running session, forwarded to its own process over
+            // the socket it already holds open. The daemon adds nothing but the routing: it cannot
+            // read the parameters, and the handlers are the same ones the server's rpc-call reaches,
+            // so a permission answered over the LAN is answered exactly as one answered over the
+            // server. Refused when no live session has that id — the one thing the caller needs told
+            // apart, since it cannot otherwise know whether anybody was asked.
+            // Authorising the side-effecting routes by the *account* rather than by the machine key
+            // every paired device holds. The material is already here: the account's public key is
+            // what the mDNS account fingerprint is derived from.
+            accountProof: {
+              verify: (message, signature) => {
+                try {
+                  return nacl.sign.detached.verify(
+                    new TextEncoder().encode(message),
+                    decodeBase64(signature),
+                    accountPublicKey,
+                  );
+                } catch {
+                  // A malformed signature is a refusal, not a crash on a route anyone can reach.
+                  return false;
+                }
+              },
+              nonceSeen: (nonce) => accountProofNonces.has(nonce),
+              rememberNonce: (nonce) => {
+                accountProofNonces.set(nonce, Date.now());
+                // Pruned here rather than on a timer: a nonce only has to outlive the window its
+                // signature was good for, and this is the only moment the set grows.
+                for (const [seen, at] of accountProofNonces) {
+                  if (Date.now() - at > ACCOUNT_PROOF_WINDOW_MS) {
+                    accountProofNonces.delete(seen);
+                  }
+                }
+              },
+            },
+            lifecycle: {
+              revision: () => lifecycleLog.revision(),
+              entriesSince: (since: number) => lifecycleLog.entriesSince(since),
+            },
+            onSessionControl: ({ sessionId, method, params }) => {
+              if (activeSessionsBySessionId(sessionId).length === 0) {
+                return false;
+              }
+              return sendToSession(sessionId, { type: 'rpc', rpc: { method, params } });
+            },
+            // The daemon is the only party that knows both what it is running and what is on disk,
+            // and the two differ whenever the bundle was rebuilt under it. Read per request, since
+            // rebuilding is exactly what happens while it runs.
+            versionState: () => versionStateOf(BUILD_VERSION, versionArtifacts(), (path) => {
+              try {
+                return readFileSync(path, 'utf-8');
+              } catch {
+                return null;
+              }
+            }),
             onSend: ({ sessionId, localId, content }) => {
               // Hand it to the session that owns it. The session routes it exactly as a
               // server-delivered message, so its own outgoing sync then carries it to the server —
@@ -1366,12 +1783,21 @@ export async function startDaemon(): Promise<void> {
               logger.debug(
                 `[DAEMON RUN] LAN user message for ${sessionId}: ${delivered ? 'delivered to session' : 'no live session socket'}`,
               );
+              if (!delivered) {
+                // Nobody will ever send a verdict for a message no session received, so say so now
+                // rather than leaving the App to time out and call it an unexplained failure.
+                lanServer?.broadcast('delivered', { sessionId, localId, delivered: false });
+              }
             },
-            getHistory: (sessionId, since) => {
-              // The client addresses by session id because that is what it learns from the
-              // server; the tag is this side's business.
-              const tracked = [...pidToTrackedSession.values()].find((s) => s.happySessionId === sessionId);
-              const tag = tracked?.sessionTag;
+            getHistory: (address, query) => {
+              // Two ways in. By session id is what a client learns from the server; by tag is
+              // the CLI's own identity, which exists before the server has ever answered -- so a
+              // session waiting out a server stall is still reachable. A tag-addressed read
+              // deliberately does not require the session to be tracked at all: the log is keyed
+              // by (tag, site) on disk, so it survives a daemon restart too.
+              const tag = 'tag' in address
+                ? address.tag
+                : [...pidToTrackedSession.values()].find((s) => s.happySessionId === address.sessionId)?.sessionTag;
               if (!tag) {
                 return null; // not reported yet -- the client should retry, not give up
               }
@@ -1386,17 +1812,49 @@ export async function startDaemon(): Promise<void> {
               const dataEncryptionKey = new Uint8Array(wrapped.length + 1);
               dataEncryptionKey.set([0], 0); // version byte, matching api.ts
               dataEncryptionKey.set(wrapped, 1);
-              const page = readSessionLogSince(tag, machineId, since);
+              const page = readSessionLogPage({ tag, site: machineId, since: query.since, before: query.before });
               return {
                 tag,
                 dataEncryptionKey: encodeBase64(dataEncryptionKey),
-                entries: page.entries,
+                // The page as *messages*, not as wire traffic: the log records both directions,
+                // and this is the boundary where the reader stops paying for that. See
+                // `collapseSessionLogEntries`.
+                entries: collapseSessionLogEntries(page.entries),
                 cursor: page.cursor,
+                older: page.older,
+                hasNewer: page.hasNewer,
+                hasOlder: page.hasOlder,
                 reset: page.reset,
               };
             },
           });
           lanServer = started;
+          if (configuration.relayUrl) {
+            const relayUrl = new URL(configuration.relayUrl);
+            relayClient = startRelayClient({
+              relayUrl: configuration.relayUrl,
+              machineKey: credentials.encryption.machineKey,
+              lanPort: started.port,
+              // What the relay's directory says about this machine, so an App can list this
+              // machine's sessions without asking it, or holding a connection to it.
+              getSessions: sessionSummaries,
+              // And where it can be reached on the LAN, which is the half an App needs when the
+              // server is the thing that is missing.
+              getReachable: () => {
+                const entry = lifecycleLog.latestReachable();
+                return entry ? { endpoints: entry.endpoints, at: entry.at, rev: entry.rev } : null;
+              },
+              // Republish as soon as the relay is (un)available rather than at the next slow tick.
+              onStatus: () => { void endpointPublisher?.tick(); },
+            });
+            relayEndpoint = {
+              t: 'relay',
+              addr: relayUrl.hostname,
+              port: Number(relayUrl.port) || (relayUrl.protocol === 'http:' ? 80 : 443),
+              tag: relayClient.identity.tag,
+            };
+            logger.debug(`[DAEMON RUN] relay client started for ${configuration.relayUrl}, tag ${relayClient.identity.tag}`);
+          }
           lanDiscovery = await startLanDiscovery({ port: started.port, machineId, accountFingerprint });
           logger.debug(`[DAEMON RUN] LAN API listening on port ${started.port}`);
 
@@ -1406,19 +1864,29 @@ export async function startDaemon(): Promise<void> {
           // re-publishes and a settled one stays quiet.
           endpointPublisher = startEndpointPublisher({
             lanPort: started.port,
-            isConnected: () => apiMachineRef?.isSocketConnected() ?? false,
-            publish: async (endpoints) => apiMachineRef
-              ? apiMachineRef.tryUpdateDaemonState((state) => ({
-                  ...state,
-                  status: state?.status ?? 'running',
-                  p2p: endpoints,
-                }))
-              : false,
+            extraEndpoints: () => (relayEndpoint ? [relayEndpoint] : []),
+            // Recorded in this machine's log rather than written to the server: the address is a
+            // fact about this machine, and every channel replays the log at its own pace — a LAN
+            // client directly, the server and the relay each through a cursor of their own.
+            record: (endpoints) => {
+              try {
+                lifecycleLog.recordReachable(endpoints.endpoints, endpoints.at);
+              } catch (error) {
+                logger.debug('[DAEMON RUN] could not record the endpoints', { error: String(error) });
+                return false;
+              }
+              logger.debug(`[DAEMON RUN] reachable recorded: ${endpoints.endpoints.map((e) => `${e.t}:${e.addr}:${e.port}`).join(' ')}`);
+              announceLifecycle();
+              return true;
+            },
           });
           void endpointPublisher.tick();
         } catch (error) {
           // An opt-in feature must never stop the daemon from starting.
           logger.warn('[DAEMON RUN] LAN API not started', { error: String(error) });
+          relayClient?.stop();
+          relayClient = null;
+          relayEndpoint = null;
           await lanServer?.stop().catch(() => undefined);
           await lanDiscovery?.stop().catch(() => undefined);
           lanServer = null;
@@ -1525,6 +1993,7 @@ export async function startDaemon(): Promise<void> {
           exitTime: entry.exitTime,
           lastHeartbeat: entry.lastHeartbeat,
           sandbox: entry.sandbox,
+          scopeUnit: entry.scopeUnit,
         });
       }
     }
@@ -1547,6 +2016,7 @@ export async function startDaemon(): Promise<void> {
           directory: entry.directory,
           sessionTag: entry.sessionTag,
           agent: entry.agent as any,
+          scopeUnit: entry.scopeUnit,
         });
         stoppedFallbackCount++;
       }
@@ -1563,6 +2033,7 @@ export async function startDaemon(): Promise<void> {
           sessionTag: s.sessionTag ?? existing?.sessionTag ?? '',
           agent: s.agent ?? existing?.agent ?? 'cursor',
           sandbox: (s as any).sandbox ?? existing?.sandbox,
+          scopeUnit: s.scopeUnit ?? existing?.scopeUnit,
           pid: s.pid ?? existing?.pid ?? -1,
           status: 'stopped',
           lastSeq: existing?.lastSeq ?? -1,
@@ -1618,6 +2089,7 @@ export async function startDaemon(): Promise<void> {
           directory: tracked.directory ?? sessions[id].directory,
           sessionTag: tracked.sessionTag ?? sessions[id].sessionTag,
           agent: tracked.agent ?? sessions[id].agent,
+          scopeUnit: tracked.scopeUnit ?? sessions[id].scopeUnit,
           pid: tracked.pid,
           status: 'running',
           lastHeartbeat: tracked.lastHeartbeat ?? sessions[id].lastHeartbeat,
@@ -1648,12 +2120,26 @@ export async function startDaemon(): Promise<void> {
     writeDaemonState(fileState);
     logger.debug('[DAEMON RUN] Daemon state written');
 
-    // Prepare initial daemon state
+    // Prepare initial daemon state.
+    //
+    // The build is part of it because the record the App reads is the only place the rest of the
+    // world can learn what this daemon is running: the local state file knows it too, but nothing
+    // else can read that file, and a session judged against a machine's build needs an answer that
+    // exists on the other side. `restartRequired` rides along for the same reason — this process is
+    // the only one that can compare what it is running with what is on the disk.
     const initialDaemonState: DaemonState = {
       status: 'offline',
       pid: process.pid,
       httpPort: controlPort,
-      startedAt: Date.now()
+      startedAt: Date.now(),
+      startedWithCliVersion: BUILD_VERSION,
+      restartRequired: versionStateOf(BUILD_VERSION, versionArtifacts(), (path) => {
+        try {
+          return readFileSync(path, 'utf-8');
+        } catch {
+          return null;
+        }
+      }).restartRequired,
     };
 
     // Create API client
@@ -1839,6 +2325,18 @@ export async function startDaemon(): Promise<void> {
         logger.debug(`[DAEMON RUN] Health check started at ${new Date().toLocaleString()}`);
       }
 
+      // A deletion the server refused is retried from the same cursor: the machine's log does not
+      // change when the network does, so this is the only thing that ever pushes it forward again.
+      void replayLifecycleToServer();
+
+      // A restart whose grace has run out and which never said it finished is called off here —
+      // a daemon that died mid-restart, say, or one whose new process never came back. Readers age
+      // it out on their own, so this is what stops them being told about it at all, and what keeps
+      // a session id per restart from accumulating for the life of the daemon.
+      for (const sessionId of expiredRestarting(restartingStartedAt)) {
+        announceRestarting(sessionId, null);
+      }
+
       // Prune stale sessions
       for (const [pid, session] of pidToTrackedSession.entries()) {
         if (!(await isPidRunningAndNotZombie(pid))) {
@@ -1939,6 +2437,7 @@ export async function startDaemon(): Promise<void> {
       // Withdraw the advertisement before the listener goes away, so peers do not keep a
       // stale record pointing at a closed port.
       endpointPublisher?.stop();
+      relayClient?.stop();
       await lanDiscovery?.stop().catch(() => undefined);
       await lanServer?.stop().catch(() => undefined);
       await cleanupDaemonState();

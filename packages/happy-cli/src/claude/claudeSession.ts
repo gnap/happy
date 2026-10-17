@@ -1,0 +1,1075 @@
+import { EnhancedMode } from "./loop";
+import { query, type QueryOptions, type SDKMessage, type SDKSystemMessage, AbortError, SDKUserMessage, type SDKResultMessage } from '@/claude/sdk'
+import type { Options as SdkOptions, CanUseTool, Query } from '@anthropic-ai/claude-agent-sdk';
+import { mapToClaudeMode } from "./utils/permissionMode";
+import { claudeCheckSession } from "./utils/claudeCheckSession";
+import { join } from 'node:path';
+import { execSync } from 'node:child_process';
+import { parseSpecialCommand } from "@/parsers/specialCommands";
+import { logger } from "@/lib";
+import { PushableAsyncIterable } from "@/utils/PushableAsyncIterable";
+import { Future } from "@/utils/future";
+import { getProjectPath } from "./utils/path";
+import { awaitFileExist } from "@/modules/watcher/awaitFileExist";
+import { systemPrompt } from "./utils/systemPrompt";
+import { PermissionResult } from "./sdk/types";
+import type { JsRuntime } from "./runClaude";
+import { normalizeClaudeModelForSdk } from "./utils/model";
+
+/** Quiet window before a deferred stop fires, so a wrap-up turn that immediately
+ *  spawns the next background task can re-claim the session. */
+const DEFERRED_STOP_DEBOUNCE_MS = 2000;
+
+/** How long to wait for the SDK stream to close after the input stream ended before
+ *  forcing it. Only ever reached when background tasks hold the stream open. */
+const STREAM_CLOSE_GRACE_MS = 10_000;
+
+/**
+ * The names Claude Code uses for the same kinds of work, folded onto one.
+ *
+ * It reports a task twice over its life and does not use the same word both times: the
+ * `task_started` frame introduces it as `local_bash` / `local_agent`, and the end-of-turn snapshot
+ * calls the very same task (`task_id` and all) a `shell` or a `subagent`. Passing both through
+ * would relabel a task mid-flight and move the App's counts without anything having started.
+ */
+const TASK_TYPE_ALIASES: Record<string, string> = {
+    local_bash: 'shell',
+    local_agent: 'subagent',
+    local_monitor: 'monitor',
+    local_workflow: 'workflow',
+    agent: 'subagent',
+};
+
+export function normalizeTaskType(type: string): string {
+    return TASK_TYPE_ALIASES[type] ?? type;
+}
+
+/** The kind of work each tool starts, where the tool is the more precise answer. */
+const TASK_TYPE_BY_TOOL: Record<string, string> = {
+    Bash: 'shell',
+    Monitor: 'monitor',
+    Agent: 'subagent',
+    Task: 'subagent',
+    Workflow: 'workflow',
+};
+
+/**
+ * What kind of work a task is, preferring the tool that started it over the name Claude Code
+ * reports.
+ *
+ * It reports a Monitor task as `local_bash` in the stream and as `shell` in the snapshot — the same
+ * words it uses for a background command — so the reported type cannot tell a watch from a command.
+ * The tool call can: the task names the call that started it, and the call says what it was.
+ */
+export function taskTypeOf(tool: string | undefined, reported: string): string {
+    const byTool = tool === undefined ? undefined : TASK_TYPE_BY_TOOL[tool];
+    return byTool ?? normalizeTaskType(reported);
+}
+
+/** How specific a kind is, so a coarse name never replaces a precise one. */
+const SPECIFICITY: Record<string, number> = { monitor: 2, subagent: 2, workflow: 2, shell: 1 };
+
+/**
+ * The snapshot's view of a task, keeping the better of the two names for it.
+ *
+ * The snapshot is authoritative about *what is running* and about the command line, but not about
+ * what to call the task: when the model gave the tool no `description` of its own, Claude Code
+ * reports the command as the description too. The `task_started` frame that introduced the task
+ * carries a readable title in that same case, so a name worth reading is already in hand and would
+ * be thrown away by a plain replace.
+ */
+export function mergeTask(
+    known: BackgroundTaskForApp | undefined,
+    task: BackgroundTaskForApp,
+): BackgroundTaskForApp {
+    if (!known) return task;
+    const type = (SPECIFICITY[task.type] ?? 0) > (SPECIFICITY[known.type] ?? 0) ? task.type : known.type;
+    if (known.description.length === 0) return type === task.type ? task : { ...task, type };
+    const incoming = task.description.trim();
+    const command = task.command?.trim();
+    if (incoming.length === 0 || (command !== undefined && incoming === command)) {
+        return { ...task, type, description: known.description };
+    }
+    return type === task.type ? task : { ...task, type };
+}
+
+/**
+ * What the App is told about one background task the session has running.
+ *
+ * `description` is Claude Code's own name for the task — normally a readable title, and the thing
+ * the App shows first. The fields below it are the type-specific detail the SDK carries alongside
+ * (`BackgroundTaskSummary` in `sdk.d.ts`), forwarded rather than dropped: for a background command
+ * the title is sometimes the command line itself, and then the command is all there is to show
+ * underneath.
+ */
+export type BackgroundTaskForApp = {
+    id: string;
+    type: string;
+    status: string;
+    description: string;
+    /** Shell tasks: the command line. */
+    command?: string;
+    /** Subagent tasks: which agent definition it runs. */
+    agentType?: string;
+    /** Monitor / MCP tasks: where it watches. */
+    server?: string;
+    tool?: string;
+    /** Workflow tasks. */
+    name?: string;
+};
+
+/** Find the system Claude binary for use with the Agent SDK. */
+function resolveClaudeBinaryPath(): string {
+    // 1. Explicit override
+    if (process.env.HAPPY_CLAUDE_PATH) {
+        logger.debug('[claudeRemote] Using HAPPY_CLAUDE_PATH:', process.env.HAPPY_CLAUDE_PATH);
+        return process.env.HAPPY_CLAUDE_PATH;
+    }
+    // 2. Find via PATH
+    try {
+        const fromPath = execSync('which claude', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+        if (fromPath) {
+            logger.debug('[claudeRemote] Found claude via PATH:', fromPath);
+            return fromPath;
+        }
+    } catch { /* not in PATH */ }
+    // 3. Common fallback locations
+    const fallbacks = [
+        '/home/linuxbrew/.linuxbrew/bin/claude',
+        '/opt/homebrew/bin/claude',
+        '/usr/local/bin/claude',
+        `${process.env.HOME}/.local/bin/claude`,
+    ];
+    for (const p of fallbacks) {
+        try {
+            execSync(`"${p}" --version`, { stdio: ['pipe', 'pipe', 'pipe'] });
+            logger.debug('[claudeRemote] Found claude at fallback:', p);
+            return p;
+        } catch { /* not there */ }
+    }
+    // 4. Last resort: hope 'claude' is on PATH
+    logger.debug('[claudeRemote] No claude binary found, falling back to "claude"');
+    return 'claude';
+}
+
+
+/**
+ * One Claude Code process, and the turns it serves.
+ *
+ * The SDK runs a process per `query()`, and a `query()` runs as many turns as its input stream is
+ * kept open for. This class owns that stream so the process can outlive a turn: the loops here are
+ * the ones that used to live inside `claudeRemote()`, unchanged, with the per-turn callbacks read
+ * from the turn that is currently running.
+ */
+export type ClaudeSessionOpts = {
+
+    // Fixed parameters
+    /**
+     * Which happy session this process belongs to — stable for the life of that session.
+     *
+     * Not `sessionId`: that is the *Claude* conversation, and it is null on a session's first turn
+     * and only learned from the process's own init frame. Keying a live process by it would look up
+     * a different key on the second turn than the first and spawn again, which is the thing this
+     * whole arrangement exists to stop.
+     */
+    processKey?: string,
+    sessionId: string | null,
+    path: string,
+    mcpServers?: Record<string, any>,
+    claudeEnvVars?: Record<string, string>,
+    /** Snapshot of session.claudeEnvVarsGeneration at call time — if it changes mid-turn, return to force re-spawn. */
+    claudeEnvVarsGeneration: number,
+    /** Returns current session.claudeEnvVarsGeneration to detect mid-turn profile changes. */
+    getClaudeEnvVarsGeneration: () => number,
+    claudeArgs?: string[],
+    allowedTools: string[],
+    signal?: AbortSignal,
+    canCallTool: (toolName: string, input: unknown, mode: EnhancedMode, options: { signal: AbortSignal }) => Promise<PermissionResult>,
+    /** Path to temporary settings file with SessionStart hook (required for session tracking) */
+    hookSettingsPath: string,
+    /** Port of the hook server. Used to inline SessionStart hook when sandbox prevents --settings. */
+    hookServerPort: number,
+    /** JavaScript runtime to use for spawning Claude Code (default: 'node') */
+    jsRuntime?: JsRuntime,
+
+    // Dynamic parameters
+    nextMessage: (signal?: AbortSignal) => Promise<{ message: string, mode: EnhancedMode, meta?: unknown } | null>,
+    onReady: (result: SDKResultMessage) => void,
+    /** Called with accurate context size (and optional breakdown) from the running process after each normal turn. */
+    onContextUsage?: (usage: { totalTokens: number; maxTokens: number; breakdown?: { systemPrompt: number; systemTools: number; customAgents: number; skills: number; messages: number; freeSpace: number } }) => void,
+    /** Called with raw markdown when the initial message is a /context local command. */
+    onContextOutput?: (contextMarkdown: string) => void,
+    isAborted: (toolCallId: string) => boolean,
+    /** Called with session_crons from the Stop hook so the launcher can schedule wakeups. */
+    onSessionCrons?: (crons: Array<{ id: string; schedule: string; recurring: boolean; prompt: string }>) => void,
+    /**
+     * Called with the background tasks still running, whenever that set changes.
+     *
+     * The turn deliberately cannot end while these are live — the SDK stream has to stay open to
+     * service them — so without this the App sees a turn that reported itself finished while the
+     * session goes quiet, with nothing to explain the wait.
+     */
+    onBackgroundTasks?: (tasks: BackgroundTaskForApp[]) => void,
+    /** Called immediately before stopSignal is resolved on a normal result, so the
+     *  launcher can mark itself as "stopping" and avoid fetching a new message from
+     *  the queue that would then be discarded by the inputLoop race. */
+    onBeforeStop?: () => void,
+    /**
+     * Called after a normal user-turn result to opportunistically claim a pending
+     * inbox turn. If one is available the launcher sets it up and returns the
+     * inbox prompt; claudeRemote then pushes it directly to the running SDK
+     * session (same process, no --resume) instead of spawning a new one.
+     * Returns null when no inbox turn is queued.
+     */
+    tryConsumeInboxTurn?: () => string | null,
+
+    // Callbacks
+    onSessionFound: (id: string) => void,
+    onThinkingChange?: (thinking: boolean) => void,
+    onMessage: (message: SDKMessage) => void,
+    onCompletionEvent?: (message: string) => void,
+    onSessionReset?: () => void,
+    /** Called when env changed mid-turn — launcher should set this message as pending for re-spawn. */
+    onEnvChanged?: (msg: { message: string; mode: EnhancedMode }) => void;
+    /** Called when the SDK emits the system init message with model/capability info. */
+    onModelInit?: (info: { model: string; version: string; sessionId: string }) => void;
+    /** Per-session sandbox config. When enabled, passed to the SDK as sandbox settings. */
+    sandboxConfig?: import('@/persistence').SandboxConfig;
+};
+
+export class ClaudeSession {
+    /** False once the session's process has been let go; the loops are what set it back. */
+    private alive = false;
+    /** True while a turn is being served: a session serves one turn at a time. */
+    private busy = false;
+    /** Hands the running loops the opts of the turn now being served. */
+    private serve: ((opts: ClaudeSessionOpts) => void) | null = null;
+    /** Resolves the turn the caller is waiting on. */
+    private resolveTurn: (() => void) | null = null;
+    /** Resolved when the current turn is over, so the input loop stops reading the queue for it. */
+    private turnOver = new Future<void>();
+    /** Resolved when the next turn is served, so a paused input loop knows to read the queue again. */
+    private turnReady: (() => void) | null = null;
+    /** Resolved when the session, not the turn, is over. */
+    private sessionEnded = new Future<void>();
+    /** The SDK process, kept so a turn's stop can interrupt it rather than end it. */
+    private response: Query | null = null;
+    /** The abort listener of the turn in flight, so the next turn's replaces it. */
+    private turnAbort: { signal: AbortSignal; listener: () => void } | null = null;
+    /** Whether the turn in flight has already been ended, so it is ended once. */
+    private turnStopRequested = false;
+    /** Clears what the turn being served left behind, before the next one is served. */
+    private resetTurnState: (() => void) | null = null;
+    /** The conversation this process is holding, learned from its own init frame. */
+    private conversationId: string | null = null;
+
+    constructor(private readonly initialOpts: ClaudeSessionOpts) {}
+
+    /**
+     * Whether this session's process can serve another turn.
+     *
+     * `runTurn` is the only thing that sets these, and it sets them around the turn it is serving,
+     * so the answer is "yes" exactly between turns — which is when the launcher asks, on its way
+     * into the next one.
+     */
+    isAlive(): boolean {
+        return this.alive;
+    }
+
+    /**
+     * Whether this process can serve the turn being asked of it.
+     *
+     * The conversation has to be the same one, or the turn would land in the wrong history: a
+     * session that was reset (`--resume` dropped, `/clear`) asks for a conversation this process is
+     * not holding and must get a new process. A caller that asks for no conversation at all — the
+     * first turn of a session, before the id is known — is asking for whatever is running.
+     */
+    acceptsTurn(opts: ClaudeSessionOpts): boolean {
+        if (!this.alive || this.busy) {
+            logger.debug(`[claudeRemote] session declines the turn: alive=${this.alive} busy=${this.busy}`);
+            return false;
+        }
+        if (opts.sessionId === null) {
+            return true;
+        }
+        if (this.conversationId !== null && this.conversationId !== opts.sessionId) {
+            logger.debug(`[claudeRemote] session declines the turn: holds conversation=${this.conversationId} asked=${opts.sessionId}`);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Lets the process go.
+     *
+     * Not immediate: a turn in flight is interrupted first, because the point of the session was to
+     * serve turns and killing one mid-sentence loses work that the App has already been shown.
+     */
+    end(): void {
+        this.sessionEnded.resolve();
+        this.response?.interrupt().catch(() => { /* the process may already be gone */ });
+        // A session going away takes its turn with it: the caller waiting on that turn has to be
+        // released, or it waits for a turn this process is never going to serve.
+        this.turnOver.resolve();
+        const done = this.resolveTurn;
+        this.resolveTurn = null;
+        done?.();
+    }
+
+    /**
+     * Serves one turn: the same process as the last one, with this turn's callbacks and signal.
+     *
+     * The message that starts the turn is not pushed here. The input loop reads it from the queue
+     * with this turn's `nextMessage` — the same path mid-turn messages take — so everything the
+     * launcher does when it hands over a message (echoes, permission-mode changes, deferrals) keeps
+     * happening exactly once, in one place.
+     */
+    async runTurn(opts: ClaudeSessionOpts): Promise<void> {
+        if (!this.alive) {
+            this.alive = true;
+            // Deliberately not awaited: this runs until the session ends, while the caller waits on
+            // the turn below. Caught, because a loop failing is this session's to absorb: unhandled
+            // it reaches the process-level rejection handler, which ends the whole CLI — every
+            // other session on the machine — over one turn that a stop would have merely interrupted.
+            void this.run().catch((error) => this.fail(error));
+        }
+        this.turnOver = new Future<void>();
+        this.turnStopRequested = false;
+        this.resetTurnState?.();
+        this.serve?.(opts);
+        this.busy = true;
+        const ready = this.turnReady;
+        this.turnReady = null;
+        ready?.();
+        this.bindTurnAbort(opts.signal ?? null);
+        await new Promise<void>((resolve) => { this.resolveTurn = resolve; });
+        this.busy = false;
+    }
+
+    /** Ends the session after its loops failed, releasing a turn that would otherwise wait forever. */
+    private fail(error: unknown): void {
+        logger.debug('[claudeRemote] session loops failed:', error, (error as Error)?.stack);
+        this.alive = false;
+        this.end();
+    }
+
+    /** A turn's stop is an interrupt of that turn, not the end of the process the next one uses. */
+    private bindTurnAbort(signal: AbortSignal | null): void {
+        if (this.turnAbort) {
+            this.turnAbort.signal.removeEventListener('abort', this.turnAbort.listener);
+            this.turnAbort = null;
+        }
+        if (!signal) {
+            return;
+        }
+        const listener = () => {
+            this.response?.interrupt().catch(() => { /* the process may already be gone */ });
+        };
+        this.turnAbort = { signal, listener };
+        if (signal.aborted) {
+            listener();
+        } else {
+            signal.addEventListener('abort', listener, { once: true });
+        }
+    }
+
+    /**
+     * Runs the session until it is ended: one process, however many turns.
+     *
+     * The loops are the ones that used to run for a single turn. What changed is who they belong
+     * to: they read `opts` from whichever turn is being served, so a turn's callbacks are in force
+     * while that turn runs and no longer, and the process underneath is untouched by the exchange.
+     */
+    async run(): Promise<void> {
+        let opts = this.initialOpts;
+        this.serve = (next) => { opts = next; };
+
+
+    let currentGeneration = opts.claudeEnvVarsGeneration;
+
+    // Check if session is valid
+    let startFrom = opts.sessionId;
+    if (opts.sessionId && !claudeCheckSession(opts.sessionId, opts.path)) {
+        startFrom = null;
+    }
+    if (!startFrom && opts.claudeArgs) {
+        for (let i = 0; i < opts.claudeArgs.length; i++) {
+            if (opts.claudeArgs[i] === '--resume') {
+                // Check if next arg exists and looks like a session ID
+                if (i + 1 < opts.claudeArgs.length) {
+                    const nextArg = opts.claudeArgs[i + 1];
+                    // If next arg doesn't start with dash and contains dashes, it's likely a UUID
+                    if (!nextArg.startsWith('-') && nextArg.includes('-')) {
+                        startFrom = nextArg;
+                        logger.debug(`[claudeRemote] Found --resume with session ID: ${startFrom}`);
+                        break;
+                    } else {
+                        // Just --resume without UUID - SDK doesn't support this
+                        logger.debug('[claudeRemote] Found --resume without session ID - not supported in remote mode');
+                        break;
+                    }
+                } else {
+                    // --resume at end of args - SDK doesn't support this
+                    logger.debug('[claudeRemote] Found --resume without session ID - not supported in remote mode');
+                    break;
+                }
+            }
+        }
+    }
+
+    // Set environment variables for Claude Code SDK
+    if (opts.claudeEnvVars) {
+        Object.entries(opts.claudeEnvVars).forEach(([key, value]) => {
+            process.env[key] = value;
+        });
+    }
+
+    // Get initial message
+    const initial = await opts.nextMessage();
+    if (!initial) { // No initial message - exit
+        return;
+    }
+
+    // Inbox turns must not resume the main session — its history may be huge
+    // and contain many "No response requested." patterns that poison the model.
+    if (initial.mode.noResume) {
+        startFrom = null;
+    }
+
+    // Handle special commands
+    const specialCommand = parseSpecialCommand(initial.message);
+
+    // Handle /clear command
+    if (specialCommand.type === 'clear') {
+        if (opts.onCompletionEvent) {
+            opts.onCompletionEvent('Context was reset');
+        }
+        if (opts.onSessionReset) {
+            opts.onSessionReset();
+        }
+        return;
+    }
+
+    // /context is a local CLI command. When the caller provides onContextOutput,
+    // let the SDK process it (it emits system/local_command with the markdown),
+    // intercept that message in outputLoop and deliver it — never calling onReady.
+    const isContextCommand = specialCommand.type === 'compact' ? false
+        : initial.message.trim() === '/context';
+    if (isContextCommand && !opts.onContextOutput) {
+        // No handler — skip silently, don't send to model.
+        return;
+    }
+
+    // Handle /compact command
+    let isCompactCommand = false;
+    if (specialCommand.type === 'compact') {
+        logger.debug('[claudeRemote] /compact command detected - will process as normal but with compaction behavior');
+        isCompactCommand = true;
+        if (opts.onCompletionEvent) {
+            opts.onCompletionEvent('Compaction started');
+        }
+    }
+
+    // Prepare SDK options — build against @anthropic-ai/claude-agent-sdk Options type.
+    let mode = initial.mode;
+    const model = normalizeClaudeModelForSdk(initial.mode.model);
+    const fallbackModel = normalizeClaudeModelForSdk(initial.mode.fallbackModel);
+
+    // Build system prompt: customPrompt → use it + our additions, otherwise our additions as plain string.
+    const effectiveSystemPrompt = initial.mode.customSystemPrompt
+        ? initial.mode.customSystemPrompt + '\n\n' + systemPrompt
+        : initial.mode.appendSystemPrompt
+            ? initial.mode.appendSystemPrompt + '\n\n' + systemPrompt
+            : systemPrompt;
+
+    // The SDK's abort controller ends the process, so it belongs to the session: a turn's stop is
+    // an interrupt of that turn (bound in `runTurn`), not the end of the process the next turn uses.
+    const abortController = new AbortController();
+
+    const sdkOptions: SdkOptions = {
+        cwd: opts.path,
+        resume: startFrom ?? undefined,
+        mcpServers: opts.mcpServers as SdkOptions['mcpServers'],
+        permissionMode: mapToClaudeMode(initial.mode.permissionMode),
+        model,
+        fallbackModel,
+        effort: initial.mode.effort,
+        systemPrompt: effectiveSystemPrompt,
+        allowedTools: initial.mode.allowedTools
+            ? initial.mode.allowedTools.concat(opts.allowedTools)
+            : opts.allowedTools,
+        disallowedTools: initial.mode.disallowedTools,
+        canUseTool: ((toolName: string, input: Record<string, unknown>, o: { signal: AbortSignal }) =>
+            opts.canCallTool(toolName, input, mode, o)) as CanUseTool,
+        executable: (opts.jsRuntime ?? 'node') as SdkOptions['executable'],
+        pathToClaudeCodeExecutable: resolveClaudeBinaryPath(),
+        abortController,
+        extraArgs: (!opts.sandboxConfig?.enabled && opts.hookSettingsPath) ? { settings: opts.hookSettingsPath } : undefined,
+        // Pass sandbox config to the SDK so it wraps Bash commands with sandbox-exec
+        // rather than the entire Happy process. Much more resilient.
+        // When sandbox is enabled, we skip extraArgs (--settings) and use inline
+        // hooks instead, because the SDK rejects using both together.
+        sandbox: opts.sandboxConfig?.enabled ? {
+            enabled: true,
+            autoAllowBashIfSandboxed: true,
+            failIfUnavailable: false,
+            enableWeakerNetworkIsolation: opts.sandboxConfig.networkMode === 'allowed',
+            // Never let the model escape the sandbox via dangerouslyDisableSandbox.
+            // This is a security-sensitive setting — the model must not be able to
+            // override the user's sandbox choice on a per-command basis.
+            allowUnsandboxedCommands: false,
+        } : undefined,
+        env: { ...process.env },
+        includeHookEvents: true,
+        hooks: {
+            // SessionStart hook: forwarded inline when sandbox is enabled (can't
+            // use --settings + sandbox together). Mirrors session_hook_forwarder.cjs.
+            SessionStart: opts.sandboxConfig?.enabled ? [{
+                hooks: [async (input) => {
+                    if (input.hook_event_name !== 'SessionStart') return { continue: false };
+                    const body = JSON.stringify({
+                        session_id: input.session_id,
+                        transcript_path: input.transcript_path,
+                        cwd: input.cwd,
+                        hook_event_name: input.hook_event_name,
+                        source: input.source,
+                    });
+                    fetch(`http://127.0.0.1:${opts.hookServerPort}/hook/session-start`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body,
+                        signal: AbortSignal.timeout(5000),
+                    }).catch(() => {}); // silently ignore — don't break Claude
+                    return { continue: false };
+                }],
+            }] : undefined,
+            // Stop hook: collect pending crons so the launcher can schedule wakeups
+            // and keep the session alive across turns.
+            Stop: [{
+                hooks: [async (input) => {
+                    if (input.hook_event_name !== 'Stop') return { continue: false };
+                    // The authoritative "what is still running" snapshot, offered at the one moment
+                    // it is needed: deciding whether this turn can end. It is also what lets the set
+                    // drain — a task whose completion frame went missing is simply not in here.
+                    applyBackgroundTasks((input.background_tasks ?? []).map((task) => ({
+                        id: task.id,
+                        type: normalizeTaskType(task.type),
+                        status: task.status,
+                        description: task.description,
+                        command: task.command,
+                        agentType: task.agent_type,
+                        server: task.server,
+                        tool: task.tool,
+                        name: task.name,
+                    })));
+                    const crons = input.session_crons ?? [];
+                    if (crons.length > 0) {
+                        logger.debug(`[claudeRemote] Stop hook: ${crons.length} pending crons`);
+                        opts.onSessionCrons?.(crons.map((c: { id: string; schedule: string; recurring: boolean; prompt: string }) => ({
+                            id: c.id,
+                            schedule: c.schedule,
+                            recurring: c.recurring,
+                            prompt: c.prompt,
+                        })));
+                        return { continue: true };
+                    }
+                    return { continue: false };
+                }],
+            }],
+        },
+    };
+
+    // Track thinking state
+    let thinking = false;
+    /** Session ID assigned by Claude Code on system_init; used for countTokens calls. */
+    let currentSessionId: string | null = null;
+    const updateThinking = (newThinking: boolean) => {
+        if (thinking !== newThinking) {
+            thinking = newThinking;
+            logger.debug(`[claudeRemote] Thinking state changed to: ${thinking}`);
+            if (opts.onThinkingChange) {
+                opts.onThinkingChange(thinking);
+            }
+        }
+    };
+
+    // Push initial message
+    let messages = new PushableAsyncIterable<SDKUserMessage>();
+    const initialFiles = (initial as any).files;
+    messages.push({
+        type: 'user',
+        message: {
+            role: 'user',
+            content: initialFiles && initialFiles.length > 0
+                ? [{ type: 'text', text: initial.message },
+                   ...initialFiles.map((f: any) => ({ type: 'image', source: { type: 'base64', media_type: f.mimeType, data: f.data } }))]
+                : initial.message,
+        },
+    });
+
+    // Start the SDK query.
+    // Cast through any because our permissive SDKUserMessage type differs from the
+    // SDK's strict ContentBlockParam[] type. At runtime the formats are compatible.
+    const response = query({
+        prompt: messages as any,
+        options: sdkOptions,
+    });
+
+    updateThinking(true);
+    this.response = response;
+
+    const stopSignal = this.sessionEnded;
+    /** Resolved when outputLoop finishes, so inputLoop can tell whether the SDK
+     *  stream closed on its own after the input stream ended. */
+    const outputDone = new Future<void>();
+
+    /** Live background task ids. While this is non-empty Claude Code holds the query stream open
+     *  to service the tasks and may run further turns on its own, so ending the input stream would
+     *  strand the session with no way to accept user messages — the stream cannot be reopened once
+     *  ended.
+     *
+     *  Filled from three places, because no single one is sufficient on this CLI: the Stop hook's
+     *  `background_tasks` is the authoritative snapshot at each turn end (`applyBackgroundTasks`),
+     *  `task_started` adds between snapshots, and `task_notification` removes. */
+    const liveBackgroundTasks = new Set<string>();
+    /** A normal result arrived while background tasks were still running; the stop
+     *  is replayed once they drain. */
+    let stopDeferred = false;
+    let deferredStopTimer: ReturnType<typeof setTimeout> | null = null;
+
+    /**
+     * Ends the turn being served, leaving the process for the next one.
+     *
+     * `onBeforeStop` first, and only once: the launcher uses it to know that a message fetched
+     * right now would be discarded, and to stash it instead of losing it.
+     */
+    const endTurn = () => {
+        if (this.turnStopRequested) {
+            logger.debug('[claudeRemote] endTurn ignored: this turn was already ended');
+            return;
+        }
+        this.turnStopRequested = true;
+        // No turn is in flight from here, which is what tells the input loop to wait for the next
+        // one instead of racing the boundary it has just crossed.
+        this.busy = false;
+        opts.onBeforeStop?.();
+        this.turnOver.resolve();
+        const done = this.resolveTurn;
+        this.resolveTurn = null;
+        done?.();
+    };
+    this.resetTurnState = () => {
+        stopDeferred = false;
+        if (deferredStopTimer) {
+            clearTimeout(deferredStopTimer);
+            deferredStopTimer = null;
+        }
+    };
+
+    function scheduleDeferredStop(): void {
+        if (deferredStopTimer) clearTimeout(deferredStopTimer);
+        deferredStopTimer = setTimeout(() => {
+            deferredStopTimer = null;
+            if (!stopDeferred || liveBackgroundTasks.size > 0) return;
+            // A turn is running again — its result takes the normal stop path.
+            if (thinking) return;
+            logger.debug('[claudeRemote] background tasks drained — completing deferred stop');
+            stopDeferred = false;
+            endTurn();
+        }, DEFERRED_STOP_DEBOUNCE_MS);
+    }
+
+    /** What the App is shown about each live task, keyed the same way the drain logic keys ids. */
+    type LiveBackgroundTask = BackgroundTaskForApp;
+    const backgroundTaskSummaries = new Map<string, LiveBackgroundTask>();
+    /** Which tool each `tool_use` call was, so a task can be attributed to the tool that started it. */
+    const toolNamesByCallId = new Map<string, string>();
+
+    function emitBackgroundTasks(): void {
+        opts.onBackgroundTasks?.([...backgroundTaskSummaries.values()]);
+    }
+
+    /**
+     * Replaces the live set with the SDK's own view of what is still running.
+     *
+     * The authoritative form, and the reason the defer below can be trusted: a task whose
+     * completion frame was missed is simply absent from the next snapshot, so the set always
+     * drains. Growing it incrementally alone would leave a finished task holding the turn open
+     * forever, which is the failure the old comment on `liveBackgroundTasks` describes.
+     */
+    function applyBackgroundTasks(tasks: readonly LiveBackgroundTask[]): void {
+        const previous = new Map(backgroundTaskSummaries);
+        liveBackgroundTasks.clear();
+        backgroundTaskSummaries.clear();
+        for (const task of tasks) {
+            liveBackgroundTasks.add(task.id);
+            backgroundTaskSummaries.set(task.id, mergeTask(previous.get(task.id), task));
+        }
+        logger.debug(`[claudeRemote] background tasks live: ${liveBackgroundTasks.size}`);
+        emitBackgroundTasks();
+        if (stopDeferred && liveBackgroundTasks.size === 0) scheduleDeferredStop();
+    }
+
+    // Input Loop: continuously reads user messages from the queue
+    // and pushes them to the SDK. Independent of output processing.
+    const session = this;
+    /** True when the loop below stopped because the session is over, not to re-spawn for a change. */
+    let inputExitedForSession = false;
+    async function inputLoop(): Promise<void> {
+        while (true) {
+            // Between turns nobody is waiting for a message: the launcher hands the next one over
+            // when it calls runTurn, which is what wakes this loop. Reading the queue here in the
+            // meantime would start a turn with no one to serve it.
+            // Wait for a turn to be in flight before reading the queue. The race below pits the
+            // queue read against this turn's end, so entering it without a turn — against the
+            // *previous* turn's already-resolved `turnOver` — settles the race at once and throws
+            // away the message just claimed, leaving it in the launcher's pending with nothing
+            // left to ask for it. The session ending here has to wake this wait too: nothing else
+            // will, and a loop that never returns keeps the process alive for good.
+            let sessionOver = false;
+            while (!session.busy) {
+                sessionOver = await Promise.race([
+                    new Promise<void>((resolve) => { session.turnReady = resolve; }).then(() => false),
+                    stopSignal.promise.then(() => true),
+                ]);
+                if (sessionOver) break;
+            }
+            if (sessionOver) {
+                inputExitedForSession = true;
+                break;
+            }
+            const endOfTurn = session.turnOver;
+            // This read is the loop's own, and the race below can be won by a boundary instead of by
+            // a message. Leaving it running would park it in the queue holding the place the next
+            // read needs, so an abandoned read is torn down here rather than left behind.
+            const read = new AbortController();
+            const raced = await Promise.race([
+                opts.nextMessage(read.signal).then((message) => ({ kind: 'message' as const, message })),
+                endOfTurn.promise.then(() => ({ kind: 'turn' as const })),
+                stopSignal.promise.then(() => ({ kind: 'session' as const })),
+            ]);
+            if (raced.kind !== 'message') read.abort();
+            if (raced.kind === 'session') {
+                inputExitedForSession = true;
+                break;
+            }
+            // The turn is over; wait for the next one rather than reading the queue for this one.
+            if (raced.kind === 'turn') continue;
+            const next = raced.message;
+            if (next === null || next === undefined) {
+                // Null ends *this turn*, not the session: the launcher answers it when it has kept
+                // the message back for the next one — an isolated command (/compact), a mode
+                // change, a stop already in flight. The stream belongs to the session now, so
+                // closing it here would take away the session's ability to send anything ever
+                // again; end the turn and wait to be woken for the next one.
+                logger.debug(`[claudeRemote] null from nextMessage — ending the turn (busy=${session.busy}, turnStopRequested=${session.turnStopRequested}, alive=${session.isAlive()})`);
+                endTurn();
+                continue;
+            }
+
+            const latestGeneration = opts.getClaudeEnvVarsGeneration();
+            if (latestGeneration !== currentGeneration) {
+                logger.debug(`[claudeRemote] Profile env changed (gen ${currentGeneration} → ${latestGeneration}), returning to re-spawn`);
+                opts.onEnvChanged?.({ message: next.message, mode: next.mode });
+                // A process built with the other env is the only thing that can serve this message,
+                // so this session is done, not interrupted. Ending it is also what lets the launcher
+                // reach that replacement — a session that went away with a turn still open would
+                // leave the launcher waiting on it for good.
+                session.end();
+                break;
+            }
+            currentGeneration = latestGeneration;
+            mode = next.mode;
+            updateThinking(true);
+            const nextFiles = (next as any).files;
+            const meta = next.meta as Record<string, unknown> | undefined;
+            const msg: Record<string, unknown> = {
+                type: 'user',
+                message: {
+                    role: 'user',
+                    content: nextFiles && nextFiles.length > 0
+                        ? [{ type: 'text', text: next.message },
+                           ...nextFiles.map((f: any) => ({ type: 'image', source: { type: 'base64', media_type: f.mimeType, data: f.data } }))]
+                        : next.message,
+                },
+            };
+            // Plumb cron metadata through so the SDK and the session protocol
+            // mapper recognise auto-continuation messages.
+            if (meta?.origin === 'auto-continuation') {
+                msg.origin = { kind: 'auto-continuation' };
+                if (meta.cronId) (msg as any).cronId = meta.cronId;
+            }
+            messages.push(msg as any);
+        }
+        messages.end();
+
+        // The loop exited for a re-spawn (mode change, env change, …) rather than a
+        // stop, so nothing has told Claude Code to wind down. With background tasks
+        // alive it keeps the stream open indefinitely and claudeRemote() would never
+        // return. Force it — background tasks do not survive a re-spawn anyway.
+        if (inputExitedForSession || liveBackgroundTasks.size === 0) return;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const closed = await Promise.race([
+            outputDone.promise.then(() => true),
+            new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), STREAM_CLOSE_GRACE_MS); }),
+        ]);
+        clearTimeout(timer);
+        if (closed) return;
+        logger.debug(`[claudeRemote] stream still open after input end with ${liveBackgroundTasks.size} background task(s) — aborting`);
+        abortController.abort();
+    }
+
+    // Output Loop: processes all SDK response messages.
+    // Task-notifications are reported (onReady) but never trigger
+    // input-side actions. Normal results call onReady and continue;
+    // the input loop handles fetching the next message.
+    async function outputLoop(): Promise<void> {
+        try {
+            for await (const message of response) {
+                // Force-verbose: log every assistant message block type for debugging.
+                if (message.type === 'assistant') {
+                    const ac = (message as any).message?.content;
+                    if (Array.isArray(ac)) {
+                        for (const block of ac) {
+                            if (block?.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string') {
+                                toolNamesByCallId.set(block.id, block.name);
+                            }
+                        }
+                        const names = ac.map((b: any) => `${b.type}:${b.name ?? '?'}`).join(', ');
+                        logger.debug(`[claudeRemote] ASSISTANT blocks: ${names}`);
+                    }
+                }
+                logger.debugLargeJson(`[claudeRemote] Message ${message.type}`, message);
+                if (message.type === 'user') {
+                    logger.debug(`[claudeRemote] USER echo origin=${JSON.stringify((message as any).origin)} cronId=${(message as any).cronId} content=${JSON.stringify((message as any).message?.content)?.slice(0, 120)}`);
+                }
+
+                // /context local command: intercept system/local_command and deliver
+                // markdown via onContextOutput without letting it reach the App.
+                if (
+                    isContextCommand &&
+                    message.type === 'system' &&
+                    (message as any).subtype === 'local_command'
+                ) {
+                    const content: string = (message as any).content ?? '';
+                    logger.debug('[claudeRemote] /context local_command output intercepted');
+                    opts.onContextOutput?.(content);
+                    endTurn();
+                    continue;
+                }
+
+                // Diagnostic: log all system messages to trace task_notification pipeline
+                if (message.type === 'system') {
+                    const sysMsg = message as Record<string, unknown>;
+                    logger.debug(`[claudeRemote] SYSTEM subtype=${sysMsg.subtype} tool_use_id=${sysMsg.tool_use_id} task_id=${sysMsg.task_id} status=${sysMsg.status}`);
+                }
+
+                // Some CLI builds push the full set as a stream message. This one does not — the
+                // string appears nowhere in the bundled binary — so what actually feeds the set
+                // here is the Stop hook, plus the per-task events below. Kept anyway: the two are
+                // not mutually exclusive, and a newer CLI may well resume sending it.
+                if (message.type === 'system' && (message as Record<string, unknown>).subtype === 'background_tasks_changed') {
+                    const tasks = (message as Record<string, unknown>).tasks as Array<{ task_id: string; type?: string; status?: string; description?: string }> | undefined;
+                    applyBackgroundTasks((tasks ?? []).map((task) => ({
+                        id: task.task_id,
+                        type: task.type ?? '',
+                        status: task.status ?? '',
+                        description: task.description ?? '',
+                    })));
+                }
+
+                opts.onMessage(message);
+
+                // System init
+                if (message.type === 'system' && message.subtype === 'init') {
+                    const systemInit = message as SDKSystemMessage;
+
+                    if (systemInit.model && systemInit.session_id) {
+                        session.conversationId = systemInit.session_id;
+                        opts.onModelInit?.({
+                            model: systemInit.model,
+                            version: (systemInit as any).claude_code_version || '',
+                            sessionId: systemInit.session_id,
+                        });
+                    }
+
+                    if (systemInit.session_id) {
+                        logger.debug(`[claudeRemote] Waiting for session file: ${systemInit.session_id}`);
+                        const projectDir = getProjectPath(opts.path);
+                        const found = await awaitFileExist(join(projectDir, `${systemInit.session_id}.jsonl`));
+                        logger.debug(`[claudeRemote] Session file found: ${systemInit.session_id} ${found}`);
+                        currentSessionId = systemInit.session_id;
+                        opts.onSessionFound(systemInit.session_id);
+
+                    }
+                }
+
+                // Background task lifecycle (Workflow, Agent, etc.)
+                // Route through onMessage so the App receives progress envelopes.
+                if (message.type === 'system'
+                    && (message.subtype === 'task_notification'
+                        || message.subtype === 'task_started'
+                        || message.subtype === 'task_progress')) {
+                    opts.onMessage(message);
+                }
+
+                // Keep the live set current between snapshots, so a task that starts mid-turn is
+                // already accounted for by the time the result arrives. Both events carry the same
+                // `task_id` space as the Stop hook's snapshot, so the three sources agree.
+                if (message.type === 'system' && message.subtype === 'task_started') {
+                    const started = message as { task_id?: string; tool_use_id?: string; description?: string; subagent_type?: string; task_type?: string };
+                    if (started.task_id) {
+                        liveBackgroundTasks.add(started.task_id);
+                        backgroundTaskSummaries.set(started.task_id, {
+                            id: started.task_id,
+                            type: taskTypeOf(started.tool_use_id ? toolNamesByCallId.get(started.tool_use_id) : undefined, started.task_type ?? started.subagent_type ?? 'task'),
+                            status: 'running',
+                            description: started.description ?? '',
+                        });
+                        emitBackgroundTasks();
+                    }
+                }
+                if (message.type === 'system' && message.subtype === 'task_notification') {
+                    const settled = (message as { task_id?: string }).task_id;
+                    if (settled && liveBackgroundTasks.delete(settled)) {
+                        backgroundTaskSummaries.delete(settled);
+                        emitBackgroundTasks();
+                        if (stopDeferred && liveBackgroundTasks.size === 0) scheduleDeferredStop();
+                    }
+                }
+
+                // Wake Claude on background task completion so it can process
+                // the results even if the turn already ended. Skipped while a stop is
+                // deferred: there Claude Code runs its own wrap-up turn for the task
+                // (a result with origin.kind === 'task-notification'), and pushing here
+                // too would queue a duplicate turn.
+                if (message.type === 'system' && message.subtype === 'task_notification' && !thinking && !stopDeferred) {
+                    const tn = message as any;
+                    if (tn.status === 'completed' && !messages.done) {
+                        logger.debug('[claudeRemote] Background task completed — waking Claude');
+                        updateThinking(true);
+                        messages.push({
+                            type: 'user',
+                            message: { role: 'user', content: tn.summary || 'Task completed.' },
+                        });
+                    }
+                }
+
+                // Result handling
+                if (message.type === 'result') {
+                    updateThinking(false);
+
+                    const isTaskNotification = (message as any).origin?.kind === 'task-notification';
+                    const hasTerminalReason = typeof (message as any).terminal_reason === 'string'
+                        && (message as any).terminal_reason.length > 0;
+
+                    // Interstitial: feed result back to Claude, continue draining
+                    if (isTaskNotification && !hasTerminalReason) {
+                        logger.debug('[claudeRemote] Task-notification (interstitial) — feeding result back to Claude');
+                        const taskResult = (message as unknown as SDKResultMessage).result || '';
+                        updateThinking(true);
+                        if (!messages.done) {
+                            messages.push({
+                                type: 'user',
+                                message: { role: 'user', content: taskResult || 'Continue.' },
+                            });
+                        }
+                        continue;
+                    }
+
+                    // Terminal task-notification: SDK-internal turn complete.
+                    // Notify App but leave the input loop alone.
+                    if (isTaskNotification && hasTerminalReason) {
+                        logger.debug('[claudeRemote] Task-notification (terminal) — reporting, not touching input loop');
+                        opts.onReady(message as unknown as SDKResultMessage);
+                        // This turn ran because a background task finished. If it did not
+                        // spawn a replacement, the user turn that was waiting on those
+                        // tasks can finally stop.
+                        if (stopDeferred && liveBackgroundTasks.size === 0) scheduleDeferredStop();
+                        continue;
+                    }
+
+                    // Normal result (user-initiated turn)
+                    logger.debug('[claudeRemote] Result received');
+                    if (isCompactCommand) {
+                        logger.debug('[claudeRemote] Compaction completed');
+                        opts.onCompletionEvent?.('Compaction completed');
+                        isCompactCommand = false;
+                    }
+                    opts.onReady(message as unknown as SDKResultMessage);
+
+                    // Opportunistically continue in-process with a pending inbox turn.
+                    // Mirrors the interstitial task-notification path: push the inbox
+                    // prompt directly into the running SDK session so the agent can
+                    // handle it without a new --resume spawn. Falls back to the normal
+                    // stop path (new claudeRemote() + resume) when no inbox turn is queued.
+                    const inboxPrompt = opts.tryConsumeInboxTurn?.();
+                    if (inboxPrompt && !messages.done) {
+                        logger.debug('[claudeRemote] Continuing in-process with inbox turn');
+                        updateThinking(true);
+                        messages.push({
+                            type: 'user',
+                            message: { role: 'user', content: inboxPrompt },
+                        });
+                        continue;
+                    }
+
+                    // Background tasks keep the SDK stream open past the end of this
+                    // turn, so stopping now would close the input stream for good while
+                    // the session stays alive. Stay in-process instead: the input loop
+                    // keeps accepting user messages, and the stop is replayed once the
+                    // tasks drain.
+                    if (liveBackgroundTasks.size > 0) {
+                        logger.debug(`[claudeRemote] Result with ${liveBackgroundTasks.size} background task(s) live — keeping input loop open`);
+                        stopDeferred = true;
+                        continue;
+                    }
+
+                    // The turn is over. The input loop stops reading the queue for it and waits for
+                    // the next turn; the process stays where it is, for that turn to use.
+                    logger.debug('[claudeRemote] Turn complete — keeping the process for the next turn');
+                    endTurn();
+                }
+
+                // Abort check
+                if (message.type === 'user') {
+                    const msg = message as SDKUserMessage;
+                    if (msg.message.role === 'user' && Array.isArray(msg.message.content)) {
+                        for (let c of msg.message.content) {
+                            if (c.type === 'tool_result' && c.tool_use_id && opts.isAborted(c.tool_use_id)) {
+                                logger.debug('[claudeRemote] Tool aborted, exiting claudeRemote');
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e) {
+            if (e instanceof AbortError) {
+                logger.debug('[claudeRemote] Aborted');
+            } else {
+                throw e;
+            }
+        } finally {
+            if (deferredStopTimer) clearTimeout(deferredStopTimer);
+            stopSignal.resolve();
+            outputDone.resolve();
+            updateThinking(false);
+        }
+    }
+
+    // Run both loops concurrently. They are the session's now, not a turn's: this resolves when the
+    // session is ended, however many turns have been served in the meantime.
+    logger.debug('[claudeRemote] session loops starting');
+    try {
+        await Promise.all([inputLoop(), outputLoop()]);
+    } finally {
+        logger.debug('[claudeRemote] session loops ended');
+        messages.end();
+        updateThinking(false);
+        this.alive = false;
+        this.response = null;
+        this.turnAbort = null;
+    }
+    }
+}

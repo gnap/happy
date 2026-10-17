@@ -31,7 +31,7 @@ import { detectWorktree } from '../utils/createSessionMetadata';
 import { startOfflineReconnection, connectionState } from '@/utils/serverConnectionErrors';
 import { claudeLocal } from '@/claude/claudeLocal';
 import { createSessionScanner } from '@/claude/utils/sessionScanner';
-import { createBackoff } from '@/utils/time';
+import { createBackoff, delay } from '@/utils/time';
 import { Session } from './session';
 import { applySandboxPermissionPolicy, resolveInitialClaudePermissionMode, resolveStoredSessionPermissionMode } from './utils/permissionMode';
 import { claudeModelCodeForMetadata, normalizeClaudeModelForSdk } from './utils/model';
@@ -177,14 +177,31 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         } : {}),
     };
 
+    // The server's answer is asked for immediately but not always waited on. What this process
+    // needs from it splits in two: its own identity (tag, site, key) is local, and the
+    // server-assigned id plus the stored metadata/agentState were saved the last time it answered.
+    // Only the seq cursor -- where "now" is -- is the server's alone. So a tag that has been
+    // through the server before starts at once from that record, and the daemon hello (hence the
+    // LAN channel) does not sit behind one slow HTTP call; ApiSessionClient holds server ingest
+    // until the real answer lands, and the LAN path and outbox never needed it.
+    const serverAnswer = api.getOrCreateSession({ tag: sessionTag, site: machineId, metadata, state, existingEncryptionKey });
+    const cachedSession = api.loadCachedSession({ tag: sessionTag, site: machineId, metadata, existingEncryptionKey });
+
     // When started by the daemon, the machine is already registered — skip the redundant call.
-    // Otherwise, parallelize machine registration and session creation since they are independent.
-    let [, response] = await Promise.all([
-        options.startedBy === 'daemon'
-            ? Promise.resolve(null)
-            : api.getOrCreateMachine({ machineId, metadata: initialMachineMetadata }),
-        api.getOrCreateSession({ tag: sessionTag, site: machineId, metadata, state, existingEncryptionKey }),
-    ]);
+    // Machine registration and session creation are independent, so they run together.
+    const machineRegistration = options.startedBy === 'daemon'
+        ? Promise.resolve(null)
+        : api.getOrCreateMachine({ machineId, metadata: initialMachineMetadata });
+
+    let response: Awaited<typeof serverAnswer>;
+    if (cachedSession) {
+        logger.debug(`[START] Starting from cached session binding ${cachedSession.id}; server answer pending`);
+        response = cachedSession;
+        machineRegistration.catch((error: unknown) => logger.debug('[START] Machine registration failed:', error));
+        serverAnswer.catch(() => {});
+    } else {
+        [, response] = await Promise.all([machineRegistration, serverAnswer]);
+    }
 
     // The server was unreachable at startup. What to do about it depends on who is driving
     // this session, and the two cases are disjoint: a daemon-spawned session is rejected above
@@ -318,6 +335,16 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         // Report the outcome either way. A rejection is the one case the App cannot otherwise
         // learn about, and it must not be left showing a message as sent.
         reportLanDelivery(payload.localId, delivered);
+    }, (rpc) => {
+        // The same handlers the server's rpc-call reaches, reached from the daemon instead. Nothing
+        // is answered back over this path on purpose: abort and permission have no verdict the App
+        // reads, so the daemon's acceptance is the whole of what it needs.
+        // Prefixed here rather than by the sender: the prefix is the session's own id, and the
+        // daemon is not the party that owns it.
+        void session.rpcHandlerManager.handleRequest({
+            method: `${response.id}:${rpc.method}`,
+            params: rpc.params ?? '',
+        });
     });
     // Cleanup socket on graceful exit
     process.on('beforeExit', () => stopSocketClient());
@@ -343,8 +370,36 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     const sessionClientOpts = options.resumeAfterSeq !== undefined
         ? { initialLastSeq: options.resumeAfterSeq }
         : undefined;
-    const session = api.sessionSyncClient(response, true, sessionClientOpts);
+    const session = api.sessionSyncClient(response, true, {
+        ...sessionClientOpts,
+        serverCursorPending: cachedSession !== null,
+    });
     writeSessionPidFile(session.sessionId);
+
+    if (cachedSession) {
+        // Settle the one thing the cache could not supply. Retried without limit for the same
+        // reason the cold-start wait is: giving up leaves the session alive but deaf to the App.
+        void (async () => {
+            let fresh = await serverAnswer.catch((error: unknown) => {
+                logger.debug('[START] Server session create failed:', error);
+                return null;
+            });
+            for (let wait = 5_000; !fresh; wait = Math.min(wait * 2, 60_000)) {
+                await delay(wait);
+                fresh = await api.getOrCreateSession({ tag: sessionTag, site: machineId, metadata, state, existingEncryptionKey })
+                    .catch((error: unknown) => {
+                        logger.debug('[START] Still cannot reach the server for the session cursor:', error);
+                        return null;
+                    });
+            }
+            if (!session.resolveServerSession(fresh)) {
+                // The binding was written back by that call, so the next start is correct; this
+                // process is addressed to an id the server no longer recognises.
+                logger.warn('[START] Cached session id is not the server\'s; exiting so the next start rebinds');
+                process.exit(1);
+            }
+        })();
+    }
 
     // Announce that this session can be served over the LAN. Declared here rather than inferred by
     // the client from a version: a client has to know before it picks a channel, and it cannot ask
@@ -880,13 +935,28 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     process.on('SIGHUP', () => { exitSignalName = 'SIGHUP'; void cleanup(false); });
 
     // Handle uncaught exceptions and rejections
+    // A write to a pipe whose reader went away (EPIPE) is a lost write, not a corrupt process.
+    // Tearing the whole session down for it turned one raced spawn into hours of "offline".
+    const isBrokenPipe = (value: unknown): boolean => {
+        const code = (value as { code?: unknown } | null)?.code;
+        return code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED';
+    };
+
     process.on('uncaughtException', (error) => {
-        logger.debug('[START] Uncaught exception:', error);
+        if (isBrokenPipe(error)) {
+            logger.debug('[START] Ignoring broken pipe (uncaught exception):', error);
+            return;
+        }
+        logger.debug('[START] Uncaught exception:', error, (error as Error)?.stack);
         void cleanup(false);
     });
 
     process.on('unhandledRejection', (reason) => {
-        logger.debug('[START] Unhandled rejection:', reason);
+        if (isBrokenPipe(reason)) {
+            logger.debug('[START] Ignoring broken pipe (unhandled rejection):', reason, (reason as Error)?.stack);
+            return;
+        }
+        logger.debug('[START] Unhandled rejection:', reason, (reason as Error)?.stack);
         void cleanup(false);
     });
 

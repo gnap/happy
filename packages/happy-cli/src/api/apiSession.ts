@@ -31,6 +31,7 @@ import axios from 'axios';
 import { resolveSessionLastSeq } from './sessionLastSeq';
 import { loadOutbox, outboxPath, pruneOutboxes, saveOutbox } from './outboxPersistence';
 import { appendSessionLog, pruneSessionLogs, sessionLogDir, type SessionLogEntry } from './sessionLog';
+import { rememberSessionMetadata } from './sessionBinding';
 import {
     buildAgentMessagePayload,
     buildCodexPayload,
@@ -249,6 +250,13 @@ type IncomingMessage = {
     localId?: string | null;
 };
 
+/**
+ * How often a session may tell LAN readers its log grew. Long enough that a burst of writes costs
+ * one hint instead of one per write, short enough that a reader which missed a frame recovers
+ * within a poll interval.
+ */
+const LOG_GROW_MIN_INTERVAL_MS = 2_000;
+
 export class ApiSessionClient extends EventEmitter {
     private readonly token: string;
     /** Server-assigned session id. Distinct from `sid` below. */
@@ -448,6 +456,13 @@ export class ApiSessionClient extends EventEmitter {
         activeSubagents: new Set<string>(),
     };
     private lastSeq: number;
+    /**
+     * True while this client was built from a cached binding and the server has not yet said where
+     * "now" is. `lastSeq` is meaningless in that window, so nothing may read from, or advance, the
+     * server cursor; the LAN path and the outbox are unaffected because neither depends on it.
+     */
+    private serverCursorPending = false;
+    private initialLastSeqHint: number | undefined;
     private pendingOutbox: Array<{ content: string; localId: string }> = [];
     private readonly sendSync: InvalidateSync;
     private readonly receiveSync: InvalidateSync;
@@ -475,7 +490,7 @@ export class ApiSessionClient extends EventEmitter {
         token: string,
         session: Session,
         private websocketOnly: boolean = true,
-        opts?: { initialLastSeq?: number },
+        opts?: { initialLastSeq?: number; serverCursorPending?: boolean },
     ) {
         super()
         this.token = token;
@@ -506,7 +521,9 @@ export class ApiSessionClient extends EventEmitter {
         this.requestedMetadata = session.requestedMetadata ?? null;
         this.encryptionKey = session.encryptionKey;
         this.encryptionVariant = session.encryptionVariant;
-        this.lastSeq = resolveSessionLastSeq(session.seq, opts?.initialLastSeq);
+        this.initialLastSeqHint = opts?.initialLastSeq;
+        this.serverCursorPending = opts?.serverCursorPending === true;
+        this.lastSeq = this.serverCursorPending ? 0 : resolveSessionLastSeq(session.seq, opts?.initialLastSeq);
         if (opts?.initialLastSeq !== undefined && this.lastSeq !== opts.initialLastSeq) {
             logger.debug(
                 `[API] Session ${session.id} resume cursor adjusted: requested=${opts.initialLastSeq}, `
@@ -698,6 +715,11 @@ export class ApiSessionClient extends EventEmitter {
                 forwardSessionEventToDaemon(data.body as unknown as Record<string, unknown>);
 
                 if (data.body.t === 'new-message') {
+                    if (this.serverCursorPending) {
+                        // Anything pushed before the cursor is known sits at or below "now", which is
+                        // where a restart deliberately picks up from; it would be skipped anyway.
+                        return;
+                    }
                     const messageSeq = data.body.message?.seq;
                     const isEncrypted = data.body.message?.content?.t === 'encrypted';
                     const acceptSeq = typeof messageSeq === 'number' && this.lastSeq > 0 && messageSeq === this.lastSeq + 1;
@@ -765,6 +787,7 @@ export class ApiSessionClient extends EventEmitter {
                         const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.metadata.value));
                         this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
                         this.metadataVersion = data.body.metadata.version;
+                        rememberSessionMetadata(this.sid, data.body.metadata.value, data.body.metadata.version);
                         this.emit('metadata-updated', this.metadata);
                         // First metadata push after (re)connect: now safe to sync static fields
                         // without clobbering App-side fields that arrived in this push.
@@ -811,6 +834,34 @@ export class ApiSessionClient extends EventEmitter {
         // from App before socket connected). Otherwise we only fetch after socket 'connect' or
         // after connect_error (fallback poll every 8s), so new sessions can appear unresponsive.
         this.receiveSync.invalidate();
+    }
+
+    /**
+     * Take the server's answer for a client that started without it.
+     *
+     * Only the cursor is settled here, because it is the one value a stale copy cannot stand in
+     * for. Versions are raised, never lowered: a newer one only means the server saw writes this
+     * process has not, and a lower one would turn the next update into a guaranteed mismatch.
+     * Metadata and agentState content are not replaced -- the server pushes them on connect, and
+     * overwriting a local edit made during the outage would lose it.
+     *
+     * Returns false when the server names a different session than the one this client was
+     * addressed to, which the caller must treat as fatal: everything keyed on the old id is wrong.
+     */
+    resolveServerSession(fresh: Session): boolean {
+        if (fresh.id !== this.sessionId) {
+            logger.warn('[API] server session id differs from the cached one', { cached: this.sessionId, fresh: fresh.id });
+            return false;
+        }
+        this.metadataVersion = Math.max(this.metadataVersion, fresh.metadataVersion);
+        this.agentStateVersion = Math.max(this.agentStateVersion, fresh.agentStateVersion);
+        if (this.serverCursorPending) {
+            this.lastSeq = resolveSessionLastSeq(fresh.seq, this.initialLastSeqHint);
+            this.serverCursorPending = false;
+            logger.debug(`[API] Session ${this.sessionId} server cursor resolved: lastSeq=${this.lastSeq} (server seq=${fresh.seq ?? 0})`);
+            this.receiveSync.invalidate();
+        }
+        return true;
     }
 
     onUserMessage(callback: (data: UserMessage) => void) {
@@ -939,13 +990,13 @@ export class ApiSessionClient extends EventEmitter {
         // them, so a message that arrives on the socket fast path and is later re-fetched over
         // HTTP would otherwise be logged twice.
         if (incoming.ct) {
-            appendSessionLog(this.sid, this.site, {
+            this.noteLogHead(appendSessionLog(this.sid, this.site, {
                 id: incoming.id ?? incoming.localId ?? String(seq ?? ''),
                 localId: incoming.localId ?? null,
                 dir: 'in',
                 at: Date.now(),
                 c: incoming.ct,
-            });
+            }));
             this.announceLogGrowth();
         }
 
@@ -1328,6 +1379,9 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     private async fetchMessages() {
+        if (this.serverCursorPending) {
+            return;
+        }
         const untilSeq = this.receiveCatchUpUntilSeq;
         const startLastSeq = this.lastSeq;
         let afterSeq = this.lastSeq;
@@ -1547,7 +1601,9 @@ export class ApiSessionClient extends EventEmitter {
                 const maxSeq = messages.reduce((acc, message) => (
                     message.seq > acc ? message.seq : acc
                 ), this.lastSeq);
-                this.lastSeq = maxSeq;
+                if (!this.serverCursorPending) {
+                    this.lastSeq = maxSeq;
+                }
                 logger.debug(`[API] flushOutbox via HTTP: sent ${chunk.length} message(s) to server (replies visible in app)`);
                 return;
             } catch (error: unknown) {
@@ -1612,7 +1668,8 @@ export class ApiSessionClient extends EventEmitter {
         };
         // Same synchronous block and the same ciphertext string as the outbox push, so the two
         // stores can never disagree about what the bytes were.
-        appendSessionLog(this.sid, this.site, entry);
+        const anchor = appendSessionLog(this.sid, this.site, entry);
+        this.noteLogHead(anchor);
         // The entry itself, not only the hint that one exists. `log-grew` tells a LAN reader there
         // is something to read, which still costs it a round trip to find out what — so a session
         // on the LAN would trail one on the server by a fetch for every message, and an agent
@@ -1624,7 +1681,10 @@ export class ApiSessionClient extends EventEmitter {
         // that reads it from the log converge on identical bytes; `localId` is what they dedupe on.
         // Addressed by the server session id, not the tag the log is filed under: the App demuxes
         // the machine-wide socket on it, exactly as it does for the server channel.
-        forwardSessionEventToDaemon({ t: 'log-entry', id: this.sessionId, entry });
+        // The position travels with the entry, so a reader can say "I am up to date" without
+        // asking: the daemon's own log is the authority on where it ends, and the reader has just
+        // been told.
+        forwardSessionEventToDaemon({ t: 'log-entry', id: this.sessionId, entry, anchor });
         this.announceLogGrowth();
         this.persistOutboxNow();
         if (invalidate) {
@@ -1927,6 +1987,7 @@ export class ApiSessionClient extends EventEmitter {
                     const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
                     this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
                     this.metadataVersion = answer.version;
+                    rememberSessionMetadata(this.sid, answer.metadata, answer.version);
                     this.mirrorStateToDaemon({ metadata: { version: answer.version, value: answer.metadata } });
                     this.emit('metadata-updated', this.metadata);
                 } else if (answer.result === 'version-mismatch') {
@@ -1934,6 +1995,7 @@ export class ApiSessionClient extends EventEmitter {
                         this.metadataVersion = answer.version;
                         const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
                         this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
+                        rememberSessionMetadata(this.sid, answer.metadata, answer.version);
                         this.emit('metadata-updated', this.metadata);
                     }
                     throw new Error('Metadata version mismatch');
@@ -1951,9 +2013,48 @@ export class ApiSessionClient extends EventEmitter {
      * about agentState or metadata until the server's slow session list says so.
      */
     /** Tells LAN readers there is something new to read; the entries themselves stay in the log. */
-    private announceLogGrowth(): void {
-        forwardSessionEventToDaemon({ t: 'log-grew', id: this.sessionId });
+    /**
+     * Tells LAN readers that the log grew — at most once per window, plus one trailing hint.
+     *
+     * The entry itself is pushed as it is written (`log-entry`), so this is only the safety net for
+     * a reader that missed frames; acting on it costs that reader a full round trip. Sending one
+     * per append made every written entry cost every reader a fetch, and the fetch found nothing
+     * because the entry had already arrived — a session under load was read several times a second
+     * for no new bytes. The trailing hint matters more than the leading one: it is what a reader
+     * that missed the last frame recovers from, and it would be lost if coalescing only kept the
+     * first.
+     */
+    /** The end of the log, as the last append named it; what a hint reports as the head. */
+    private lastLogAnchor: string | null = null;
+
+    private noteLogHead(anchor: string | null): void {
+        if (anchor) {
+            this.lastLogAnchor = anchor;
+        }
     }
+
+    private announceLogGrowth(): void {
+        const now = Date.now();
+        const since = now - this.lastLogGrewAt;
+        if (since >= LOG_GROW_MIN_INTERVAL_MS) {
+            this.lastLogGrewAt = now;
+            forwardSessionEventToDaemon({ t: 'log-grew', id: this.sessionId, head: this.lastLogAnchor });
+            return;
+        }
+        if (this.logGrewTimer) {
+            return;
+        }
+        this.logGrewTimer = setTimeout(() => {
+            this.logGrewTimer = null;
+            this.lastLogGrewAt = Date.now();
+            forwardSessionEventToDaemon({ t: 'log-grew', id: this.sessionId, head: this.lastLogAnchor });
+        }, LOG_GROW_MIN_INTERVAL_MS - since);
+        this.logGrewTimer.unref?.();
+    }
+
+    /** When the last `log-grew` hint went out, and the pending trailing one. */
+    private lastLogGrewAt = 0;
+    private logGrewTimer: ReturnType<typeof setTimeout> | null = null;
 
     private mirrorStateToDaemon(change: { metadata?: { version: number; value: string }; agentState?: { version: number; value: string | null } }): void {
         forwardSessionEventToDaemon({ t: 'update-session', id: this.sessionId, ...change });
