@@ -1,4 +1,5 @@
 import { normalizeRawMessage, type NormalizedMessage } from '@/sync/typesRaw';
+import { collapseDuplicateMessages } from '@/sync/messageIdentity';
 import { Encryption } from '@/sync/encryption/encryption';
 import { discoverMachines } from './discovery';
 import { fetchHistory, fetchSessions, LanRequestError } from './client';
@@ -121,7 +122,11 @@ export function toNormalizedMessages(entries: DecryptedLanEntry[]): NormalizedMe
             messages.push(normalized);
         }
     }
-    return messages;
+    // A log entry is a wire event, and one message can be two of them: the queued `out` entry and
+    // the `in` echo the server sends back carry the same `localId` and the same ciphertext. The
+    // page a reader wants is messages, so the copies are collapsed here — see
+    // `collapseDuplicateMessages`. One entry at a time (the live socket) passes through unchanged.
+    return collapseDuplicateMessages(messages);
 }
 
 /**

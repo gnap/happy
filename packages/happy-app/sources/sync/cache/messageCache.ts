@@ -22,6 +22,7 @@ import {
 import type { ReducerState } from '../reducer/reducer';
 import type { Message } from '../typesMessage';
 import type { Session } from '../storageTypes';
+import { collapseDuplicateMessages } from '../messageIdentity';
 import { log } from '@/log';
 import { bump } from '../metrics';
 
@@ -59,6 +60,17 @@ export function isCacheEnabled(session: Session | null | undefined, servedByDaem
  * this number is what an open costs; sixty messages is several screens and tens of milliseconds.
  */
 const HYDRATE_MESSAGE_LIMIT = 60;
+
+/**
+ * Sessions whose rows have already been straightened in this evaluation of the module.
+ *
+ * The cache older than the projection fix may hold the same message twice — the queued copy and
+ * the server's echo — because a page of wire entries was stored before the boundary collapsed
+ * them. Left on disk, those rows come back on every open forever, and the user's only escape is
+ * "rebuild cache", which is a manual wipe standing in for a correctness property. The repair is
+ * a delete, not a wipe: one row survives per message.
+ */
+const repairedSessions = new Set<string>();
 
 export interface LoadedCache {
     messages: Message[];
@@ -105,6 +117,15 @@ export async function loadMessageCache(session: Session, servedByDaemon = false)
 
     try {
         const db = getSessionCacheDB();
+        // Straighten rows written before the projection collapsed the two wire directions of one
+        // message. Idempotent and local: it deletes the redundant row, never the cache. Scheduled
+        // *after* the read below, because an open must not wait on housekeeping — on a reload the
+        // connection is shared with a context that is gone, and every extra statement costs the
+        // busy timeout. The read is clean either way: the projection collapses the window.
+        const repair = !repairedSessions.has(session.id);
+        if (repair) {
+            repairedSessions.add(session.id);
+        }
         const tStart = Date.now();
         // Don't block fetchMessages if DB is still initializing (e.g. preload not done). Skip cache after timeout.
         const CACHE_LOAD_TIMEOUT_MS = 3000;
@@ -141,15 +162,28 @@ export async function loadMessageCache(session: Session, servedByDaemon = false)
         // through the channel's paging rather than through this read.
         const messages = await db.getSessionMessages(session.id, HYDRATE_MESSAGE_LIMIT + 1);
         const tMessages = Date.now();
-        const truncated = messages.length > HYDRATE_MESSAGE_LIMIT;
-        const hydrating = truncated ? messages.slice(-HYDRATE_MESSAGE_LIMIT) : messages;
+        // The rows were written from a page of wire entries, where one message can be two (the
+        // queued copy and the server's echo). Collapse before taking the window, so the window is
+        // sixty *messages* rather than sixty rows — and so a duplicate that survived on disk is
+        // never what the store is handed.
+        const collapsed = collapseDuplicateMessages(messages);
+        // The read is cut when it returns more rows than the window; the collapse can bring the
+        // count back down without changing that fact.
+        const truncated = messages.length > HYDRATE_MESSAGE_LIMIT || collapsed.length > HYDRATE_MESSAGE_LIMIT;
+        const hydrating = collapsed.length > HYDRATE_MESSAGE_LIMIT ? collapsed.slice(-HYDRATE_MESSAGE_LIMIT) : collapsed;
         const tDeserialize = Date.now();
-        const reducerState = deserializeReducerStateOrCreate(cacheRow.reducerStateJson);
+        // Trimmed to the window this load hands back: the persisted state was written by a window
+        // that may have contained a row the collapse just removed, and a state entry naming a
+        // message the store does not hold is a reference nothing can resolve.
+        const reducerState = trimReducerState(
+            deserializeReducerStateOrCreate(cacheRow.reducerStateJson),
+            new Set(hydrating.map((message) => message.id)),
+        );
         // Where the milliseconds of an open actually go. The row read, the message rows and the
         // reducer state are three different sizes — one row, sixty rows, one blob whose size is the
         // session's history — and the totals so far say the messages are not the expensive part.
         log.log(
-            `📦 messageCache: kind=${truncated ? 'truncated' : 'whole'} ` +
+            `📦 messageCache: kind=${truncated ? 'truncated' : 'whole'} session=${session.id} ` +
             `row=${tRow - tStart}ms messages=${tMessages - tRow}ms(${hydrating.length}) ` +
             `reducerState=${Date.now() - tDeserialize}ms(${cacheRow.reducerStateJson.length}b)`
         );
@@ -164,6 +198,18 @@ export async function loadMessageCache(session: Session, servedByDaemon = false)
             : cacheRow.oldestSeq;
 
         log.log(`📦 messageCache: loaded ${hydrating.length} messages for ${session.id} (lastSeq=${cacheRow.lastSeq}, oldestSeq=${oldestSeq}, hasOlderMessages=${cacheRow.hasOlderMessages}, truncated=${truncated})`);
+        if (repair) {
+            void db.dedupeSessionMessages(session.id)
+                .then((dropped) => {
+                    if (dropped > 0) {
+                        log.log(`📦 messageCache: repaired ${dropped} duplicate rows for ${session.id}`);
+                    }
+                })
+                .catch((e) => {
+                    // Not fatal: the window above is already clean.
+                    log.log(`📦 messageCache: duplicate repair failed for ${session.id}: ${e}`);
+                });
+        }
         return {
             messages: hydrating,
             reducerState,

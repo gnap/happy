@@ -179,6 +179,36 @@ describe('loadMessageCache', () => {
         expect(await db.getSessionCache(session.id)).not.toBeNull();
     });
 
+    it('hands back one message when a row was stored per wire direction, and repairs the rows', async () => {
+        // What a page of wire entries used to be saved as: the queued copy under its local id,
+        // and the server's echo under the server id — the same message, twice.
+        const session = { ...makeSession('cursor'), id: 'sess-duplicated' };
+        const queued: Message = { kind: 'user-text', id: 'local-1', localId: 'local-1', createdAt: 1000, text: 'hello' };
+        const echoed: Message = { kind: 'user-text', id: 'server-1', localId: 'local-1', createdAt: 1000, text: 'hello' };
+        const other: Message = { kind: 'user-text', id: 'local-2', localId: 'local-2', createdAt: 2000, text: 'later' };
+        await db.saveSessionCache(
+            {
+                sessionId: session.id,
+                lastSeq: 10,
+                oldestSeq: 0,
+                hasOlderMessages: false,
+                schemaVersion: SERIALIZER_SCHEMA_VERSION,
+                cachedAt: Date.now(),
+                reducerStateJson: serializeReducerStateToJson(createReducer()),
+            },
+            [queued, echoed, other],
+        );
+
+        const result = await loadMessageCache(session);
+
+        expect(result).not.toBeNull();
+        expect(result!.messages.map((message) => message.id)).toEqual(['server-1', 'local-2']);
+        // The redundant row is gone from disk as well, so it cannot return on the next open. The
+        // repair runs after the window so an open never waits on it.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect((await db.getSessionMessages(session.id)).map((message) => message.id)).toEqual(['server-1', 'local-2']);
+    });
+
     it('falls back to empty reducerState when reducerStateJson is invalid', async () => {
         const session = makeSession('cursor');
         await db.saveSessionCache(

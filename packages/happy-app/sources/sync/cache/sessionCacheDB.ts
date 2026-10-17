@@ -11,6 +11,7 @@
  */
 
 import type { Message } from '../typesMessage';
+import { collapseDuplicateMessages } from '../messageIdentity';
 import { StatementQueue } from './statementQueue';
 import { log } from '@/log';
 import * as SQLite from 'expo-sqlite';
@@ -90,6 +91,15 @@ export interface ISessionCacheDB {
     initialize(): Promise<void>;
     getSessionCache(sessionId: string): Promise<CachedSessionRow | null>;
     getSessionMessages(sessionId: string, limit?: number): Promise<Message[]>;
+    /**
+     * Drops the rows that are the same message under a second delivery id.
+     *
+     * The wire log records a message once per direction — the queued copy under its local id, the
+     * server's echo under the server id — and a build that stored pages of wire entries persisted
+     * both. One row survives per `localId`: the copy carrying the server id when there is one.
+     * Local and idempotent; returns how many rows it removed.
+     */
+    dedupeSessionMessages(sessionId: string): Promise<number>;
     saveSessionCache(row: CachedSessionRow, messages: Message[]): Promise<void>;
     clearSessionCache(sessionId: string): Promise<void>;
     clearAllCaches(): Promise<void>;
@@ -116,6 +126,13 @@ export class MemorySessionCacheDB implements ISessionCacheDB {
     async getSessionMessages(sessionId: string, limit?: number): Promise<Message[]> {
         const held = this.messages.get(sessionId) ?? [];
         return limit === undefined ? held : held.slice(-limit);
+    }
+
+    async dedupeSessionMessages(sessionId: string): Promise<number> {
+        const held = this.messages.get(sessionId) ?? [];
+        const kept = collapseDuplicateMessages(held);
+        this.messages.set(sessionId, kept);
+        return held.length - kept.length;
     }
 
     async saveSessionCache(row: CachedSessionRow, messages: Message[]): Promise<void> {
@@ -259,6 +276,40 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
                 resolve(messages);
             };
             req.onerror = () => reject(req.error);
+        });
+    }
+
+    async dedupeSessionMessages(sessionId: string): Promise<number> {
+        await this.initialize();
+        return new Promise((resolve, reject) => {
+            const { messages } = this.getStore('readwrite');
+            const read = messages.get(sessionId);
+            read.onsuccess = () => {
+                const entry = read.result as { sessionId: string; messages: string[] } | undefined;
+                if (!entry?.messages?.length) {
+                    resolve(0);
+                    return;
+                }
+                const parsed: Message[] = [];
+                for (const json of entry.messages) {
+                    try {
+                        parsed.push(JSON.parse(json) as Message);
+                    } catch {
+                        // Skip malformed, as the read does.
+                    }
+                }
+                const kept = collapseDuplicateMessages(parsed);
+                const dropped = parsed.length - kept.length;
+                if (dropped === 0) {
+                    resolve(0);
+                    return;
+                }
+                messages.put({ sessionId, messages: kept.map((message) => JSON.stringify(message)) });
+                const tx = messages.transaction;
+                tx.oncomplete = () => resolve(dropped);
+                tx.onerror = () => reject(tx.error);
+            };
+            read.onerror = () => reject(read.error);
         });
     }
 
@@ -444,6 +495,10 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
                 message_id      TEXT NOT NULL,
                 created_at      INTEGER NOT NULL DEFAULT 0,
                 message_json    TEXT NOT NULL,
+                -- The identity every delivery of one message agrees on. The primary key is the
+                -- delivery id, which is not stable across the wire's two directions; this column
+                -- is what the unique index below holds the cache to one row per *message*.
+                local_id        TEXT,
                 PRIMARY KEY (session_id, message_id)
             );
 
@@ -464,10 +519,65 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
         } catch {
             // Column already exists or table doesn't exist yet — either is fine.
         }
+        await this.migrateMessageIdentity();
         log.log(`📦 sessionCacheDB: execAsync (schema) took ${Date.now() - t2}ms`);
 
         this.initialized = true;
         log.log(`📦 sessionCacheDB: full init took ${Date.now() - t0}ms total`);
+    }
+
+    /**
+     * One row per message, once.
+     *
+     * The table used to be keyed only by the id a delivery carried, and one message has two of
+     * those: the local id on the wire's queued direction, and the server id on the echo. A build
+     * that stored a page of wire entries therefore stored the same message twice, and every open
+     * read the copies back. The column and the unique index make that state unrepresentable from
+     * now on; this pass converts what is already on disk, keeping the copy that carries the
+     * server id. `user_version` makes it run once — the conversion is a table scan, and doing it
+     * on every launch would be a standing cost for a problem that cannot recur.
+     */
+    private async migrateMessageIdentity(): Promise<void> {
+        const version = await this.db.getFirstAsync('PRAGMA user_version') as { user_version: number } | null;
+        if ((version?.user_version ?? 0) >= 1) {
+            return;
+        }
+        const started = Date.now();
+        try {
+            await this.db.execAsync('ALTER TABLE session_messages ADD COLUMN local_id TEXT');
+        } catch {
+            // The column already exists: a fresh install that created it above, or a migration
+            // that got this far before failing later.
+        }
+        await this.db.execAsync(`
+            UPDATE session_messages
+               SET local_id = json_extract(message_json, '$.localId')
+             WHERE local_id IS NULL
+               AND json_valid(message_json)
+               AND json_extract(message_json, '$.localId') IS NOT NULL;
+
+            DELETE FROM session_messages
+             WHERE local_id IS NOT NULL
+               AND message_id NOT IN (
+                   SELECT message_id FROM (
+                       SELECT message_id,
+                              ROW_NUMBER() OVER (
+                                  PARTITION BY session_id, local_id
+                                  ORDER BY (message_id != local_id) DESC, created_at DESC
+                              ) AS rn
+                         FROM session_messages
+                        WHERE local_id IS NOT NULL
+                   )
+                    WHERE rn = 1
+               );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_local
+                ON session_messages(session_id, local_id)
+                WHERE local_id IS NOT NULL;
+
+            PRAGMA user_version = 1;
+        `);
+        log.log(`📦 sessionCacheDB: message identity migration took ${Date.now() - started}ms`);
     }
 
     private async ensureReady(): Promise<void> {
@@ -645,6 +755,46 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
         }, true);
     }
 
+    async dedupeSessionMessages(sessionId: string): Promise<number> {
+        await this.ensureReady();
+        return this.enqueue(async () => {
+            // Only the identity fields: reading the whole message JSON is the cost this cache
+            // exists to avoid, and the decision needs three columns.
+            const rows = await this.db.getAllAsync(
+                `SELECT message_id AS id, local_id AS localId, created_at AS createdAt
+                   FROM session_messages
+                  WHERE session_id = ? AND local_id IS NOT NULL`,
+                [sessionId]
+            ) as { id: string; localId: string | null; createdAt: number }[];
+            const identified = rows
+                .filter((row) => typeof row.localId === 'string' && row.localId !== '')
+                .map((row) => ({ id: row.id, localId: row.localId as string, createdAt: Number(row.createdAt) }));
+            if (identified.length === 0) {
+                return 0;
+            }
+            const survivors = new Set(collapseDuplicateMessages(identified).map((row) => row.id));
+            const doomed = identified.filter((row) => !survivors.has(row.id)).map((row) => row.id);
+            if (doomed.length === 0) {
+                return 0;
+            }
+            const CHUNK = 100;
+            for (let at = 0; at < doomed.length; at += CHUNK) {
+                const chunk = doomed.slice(at, at + CHUNK);
+                await this.db.runAsync(
+                    `DELETE FROM session_messages
+                     WHERE session_id = ? AND message_id IN (${chunk.map(() => '?').join(', ')})`,
+                    [sessionId, ...chunk]
+                );
+            }
+            // What the database holds just changed, and the next save's delta is computed
+            // against what it is believed to hold: forgetting the row set is what makes the
+            // first save after this one rewrite rather than assume a row that is gone.
+            this.written.delete(sessionId);
+            log.log(`📦 sessionCacheDB: dropped ${doomed.length} duplicate message rows for ${sessionId}`);
+            return doomed.length;
+        }, true);
+    }
+
     async saveSessionCache(row: CachedSessionRow, messages: Message[]): Promise<void> {
         await this.ensureReady();
         const { next, inserts, rewrite } = diffMessages(this.written.get(row.sessionId), messages);
@@ -663,50 +813,67 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
             return;
         }
 
-        // Serialised before the transaction opens, not inside it: stringifying would otherwise hold
-        // the write lock across the whole loop.
+        // Serialised before any statement runs: stringifying would otherwise happen between two
+        // statements of the save.
         const encoded = inserts.map((message) => JSON.stringify(message));
         const started = Date.now();
 
         await this.enqueue(async () => {
-            await this.db.withTransactionAsync(async () => {
+            // No transaction, deliberately.
+            //
+            // `withTransactionAsync` opens a BEGIN on the native connection and closes it when the
+            // callback finishes. A JS context torn down mid-save — every reload in development,
+            // which is how this App is used — leaves that transaction open on a connection nothing
+            // can reach any more, and the file stays write-locked for the life of the process: every
+            // statement after it waited ~2s on `busy_timeout` until the app was killed. Measured:
+            // 7ms per statement on a cold start, 2000ms after a reload.
+            //
+            // The price is that a save is no longer atomic, and it is paid in the safe direction:
+            // the message rows go first and the `session_cache` row last, so a save that dies
+            // halfway leaves the *previous* row in place — the last statement is what makes the new
+            // window visible. Every row is idempotent (`INSERT OR REPLACE` by key).
+
+            // Nothing is ever deleted here, and that is the point.
+            //
+            // This used to drop the rows for messages that had left the window — and a rewrite
+            // dropped every row for the session outright. But a window shrinks as a matter of
+            // course on this channel: a read that is more than a page behind replaces it with
+            // the newest page, and the whole point of the cache is to be the copy the App can
+            // still show when that page is a small one. Deleting the rows made the shrink
+            // permanent and irreversible, which is what "today's messages are gone" was: the
+            // window was replaced by a page of a few dozen messages, and the save that followed
+            // deleted the hundreds of rows behind it. Rows now accumulate; a window is a view of
+            // what is held, not a licence to discard it.
+            //
+            // One statement per chunk rather than one per message: each round trip crosses into
+            // native, and a burst of messages is the normal case, not the exception. 100 rows x
+            // 4 columns stays well under SQLite's bound-parameter limit.
+            const CHUNK = 100;
+            for (let at = 0; at < inserts.length; at += CHUNK) {
+                const chunk = inserts.slice(at, at + CHUNK);
+                const params: unknown[] = [];
+                for (let j = 0; j < chunk.length; j += 1) {
+                    const message = chunk[j];
+                    // The identity column, not the delivery id: the unique index turns a second
+                    // delivery of the same message into a replacement of its row rather than a
+                    // second row. `INSERT OR REPLACE` is what performs that merge.
+                    const localId = 'localId' in message ? message.localId ?? null : null;
+                    params.push(row.sessionId, message.id, message.createdAt, encoded[at + j], localId);
+                }
+                await this.db.runAsync(
+                    `INSERT OR REPLACE INTO session_messages
+                        (session_id, message_id, created_at, message_json, local_id)
+                     VALUES ${chunk.map(() => '(?, ?, ?, ?, ?)').join(', ')}`,
+                    params
+                );
+            }
+
                 await this.db.runAsync(
                     `INSERT OR REPLACE INTO session_cache
                         (session_id, last_seq, oldest_seq, has_older_messages, schema_version, cached_at, reducer_state)
                      VALUES (?, ?, ?, ?, ?, ?, ?)`,
                     [row.sessionId, row.lastSeq, row.oldestSeq, row.hasOlderMessages ? 1 : 0, row.schemaVersion, row.cachedAt, row.reducerStateJson]
                 );
-
-                // Nothing is ever deleted here, and that is the point.
-                //
-                // This used to drop the rows for messages that had left the window — and a rewrite
-                // dropped every row for the session outright. But a window shrinks as a matter of
-                // course on this channel: a read that is more than a page behind replaces it with
-                // the newest page, and the whole point of the cache is to be the copy the App can
-                // still show when that page is a small one. Deleting the rows made the shrink
-                // permanent and irreversible, which is what "today's messages are gone" was: the
-                // window was replaced by a page of a few dozen messages, and the save that followed
-                // deleted the hundreds of rows behind it. Rows now accumulate; a window is a view of
-                // what is held, not a licence to discard it.
-                //
-                // One statement per chunk rather than one per message: each round trip crosses into
-                // native, and a burst of messages is the normal case, not the exception. 100 rows x
-                // 4 columns stays well under SQLite's bound-parameter limit.
-                const CHUNK = 100;
-                for (let at = 0; at < inserts.length; at += CHUNK) {
-                    const chunk = inserts.slice(at, at + CHUNK);
-                    const params: unknown[] = [];
-                    for (let j = 0; j < chunk.length; j += 1) {
-                        params.push(row.sessionId, chunk[j].id, chunk[j].createdAt, encoded[at + j]);
-                    }
-                    await this.db.runAsync(
-                        `INSERT OR REPLACE INTO session_messages
-                            (session_id, message_id, created_at, message_json)
-                         VALUES ${chunk.map(() => '(?, ?, ?, ?)').join(', ')}`,
-                        params
-                    );
-                }
-            });
 
             this.written.set(row.sessionId, next);
             const ms = Date.now() - started;
@@ -725,10 +892,10 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
     async clearSessionCache(sessionId: string): Promise<void> {
         await this.ensureReady();
         await this.enqueue(async () => {
-            await this.db.withTransactionAsync(async () => {
-                await this.db.runAsync('DELETE FROM session_cache WHERE session_id = ?', [sessionId]);
-                await this.db.runAsync('DELETE FROM session_messages WHERE session_id = ?', [sessionId]);
-            });
+            // Autocommit, for the same reason the save is: a transaction abandoned by a reloaded
+            // JS context holds the file until the process dies.
+            await this.db.runAsync('DELETE FROM session_messages WHERE session_id = ?', [sessionId]);
+            await this.db.runAsync('DELETE FROM session_cache WHERE session_id = ?', [sessionId]);
             this.written.delete(sessionId);
             this.writtenWatermark.delete(sessionId);
         });
@@ -791,11 +958,11 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
     async clearAllCaches(): Promise<void> {
         await this.ensureReady();
         await this.enqueue(async () => {
-            await this.db.withTransactionAsync(async () => {
-                await this.db.runAsync('DELETE FROM session_cache');
-                await this.db.runAsync('DELETE FROM session_messages');
-                await this.db.runAsync('DELETE FROM sessions_list_cache');
-            });
+            // Autocommit, like every other write here: a transaction left open by a context that
+            // was torn down holds the file until the process dies.
+            await this.db.runAsync('DELETE FROM session_messages');
+            await this.db.runAsync('DELETE FROM session_cache');
+            await this.db.runAsync('DELETE FROM sessions_list_cache');
             this.written.clear();
             this.writtenWatermark.clear();
         });
@@ -842,6 +1009,10 @@ class LazySessionCacheDB implements ISessionCacheDB {
 
     async getSessionMessages(sessionId: string, limit?: number): Promise<Message[]> {
         return (await this.ensureDelegate()).getSessionMessages(sessionId, limit);
+    }
+
+    async dedupeSessionMessages(sessionId: string): Promise<number> {
+        return (await this.ensureDelegate()).dedupeSessionMessages(sessionId);
     }
 
     async saveSessionCache(row: CachedSessionRow, messages: Message[]): Promise<void> {
