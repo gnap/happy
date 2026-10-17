@@ -256,6 +256,9 @@ describe('ApiSessionClient local message log', () => {
                 t: 'log-entry',
                 id: 'test-session-id',
                 entry: { id: 'env-lan', localId: 'env-lan', dir: 'out', at: logged.at, c: logged.c },
+                // The boundary after the appended entry: the reader's "I am up to date" without
+                // a round trip. Opaque here — its presence is the contract.
+                anchor: expect.any(String),
             },
         ]);
     });
