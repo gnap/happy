@@ -123,18 +123,36 @@ export function getHappyCliLaunchSpec(runtime: HappyCliRuntime = getConfiguredHa
 }
 
 /**
+ * The executable and argv that run the Happy CLI with the given arguments.
+ *
+ * Split out of `spawnHappyCLI` so a caller that has to put something in front of the command —
+ * the daemon launching a session inside its own systemd scope — gets the same executable, the
+ * same runtime flags, and the same entrypoint check, rather than a second copy of them.
+ */
+export function buildHappyCliCommand(args: string[]): { executable: string; argv: string[] } {
+  const spec = getHappyCliLaunchSpec();
+
+  // Sanity check of the entrypoint path exists
+  if (!existsSync(spec.entrypoint)) {
+    const errorMessage = `Entrypoint ${spec.entrypoint} does not exist for runtime ${spec.runtime}`;
+    logger.debug(`[SPAWN HAPPY CLI] ${errorMessage}`);
+    throw new Error(errorMessage);
+  }
+
+  return { executable: spec.executable, argv: [...spec.argsPrefix, ...args] };
+}
+
+/**
  * Spawn the Happy CLI with the given arguments in a cross-platform way.
- * 
+ *
  * This function bypasses the wrapper scripts (`bin/happy.mjs` / `bin/happy-bun.mjs`)
  * and spawns the actual CLI entrypoint directly with the configured runtime.
- * 
+ *
  * @param args - Arguments to pass to the Happy CLI
  * @param options - Spawn options (same as child_process.spawn)
  * @returns ChildProcess instance
  */
 export function spawnHappyCLI(args: string[], options: SpawnOptions = {}): ChildProcess {
-  const spec = getHappyCliLaunchSpec();
-
   let directory: string | URL | undefined;
   if ('cwd' in options) {
     directory = options.cwd
@@ -149,12 +167,6 @@ export function spawnHappyCLI(args: string[], options: SpawnOptions = {}): Child
   const fullCommand = `happy ${args.join(' ')}`;
   logger.debug(`[SPAWN HAPPY CLI] Spawning: ${fullCommand} in ${directory}`);
 
-  // Sanity check of the entrypoint path exists
-  if (!existsSync(spec.entrypoint)) {
-    const errorMessage = `Entrypoint ${spec.entrypoint} does not exist for runtime ${spec.runtime}`;
-    logger.debug(`[SPAWN HAPPY CLI] ${errorMessage}`);
-    throw new Error(errorMessage);
-  }
-
-  return spawn(spec.executable, [...spec.argsPrefix, ...args], options);
+  const { executable, argv } = buildHappyCliCommand(args);
+  return spawn(executable, argv, options);
 }

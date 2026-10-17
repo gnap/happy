@@ -43,6 +43,7 @@ import { decodeBase64, encodeBase64, libsodiumEncryptForPublicKey } from '@/api/
 import { startLanDiscovery, type LanDiscoveryHandle } from './lanDiscovery';
 import { ENDPOINT_PROTOCOL_VERSION, startEndpointPublisher, type EndpointPublisherHandle, type LanEndpoint } from './lanEndpoints';
 import { startRelayClient, type RelayClientHandle } from './relay/relayClient';
+import { buildSessionScopeUnitName, resolveSessionScopeMode, scopeUnitFromProcCgroup, signalSession, spawnHappyCLIInSessionScope } from './linux/sessionScope';
 
 /** Time to wait for a spawned session to report via /session-started webhook before failing the spawn (Cursor cold start can exceed 30s). */
 const SESSION_WEBHOOK_TIMEOUT_MS = 60_000;
@@ -308,6 +309,7 @@ export async function startDaemon(): Promise<void> {
           sessionTag: session.sessionTag,
           agent: session.agent ?? existing?.agent ?? 'cursor',
           sandbox: existing?.sandbox,
+          scopeUnit: session.scopeUnit ?? existing?.scopeUnit,
           pid: session.pid ?? existing?.pid ?? -1,
           status: 'stopped',
           lastSeq: existing?.lastSeq ?? -1,
@@ -382,25 +384,15 @@ export async function startDaemon(): Promise<void> {
       pidToAwaiter.delete(pid);
       pidToTrackedSession.delete(pid);
 
-      try {
-        if (session.startedBy === 'daemon' && session.childProcess) {
-          session.childProcess.kill('SIGTERM');
-        } else {
-          process.kill(pid, 'SIGTERM');
-        }
-      } catch (err: unknown) {
-        const code = err && typeof err === 'object' && 'code' in err ? (err as NodeJS.ErrnoException).code : undefined;
-        if (code !== 'ESRCH') {
-          logger.debug(`[DAEMON RUN] Failed to terminate PID ${pid}:`, err);
-        }
-      }
+      // A scoped session is stopped through its unit so its children (and their memory) go too.
+      signalSession({ pid, scopeUnit: session.scopeUnit }, 'SIGTERM');
     };
 
     const activeSessionsBySessionId = (sessionId: string): Array<[number, TrackedSession]> =>
       Array.from(pidToTrackedSession.entries())
         .filter(([, session]) => session.happySessionId === sessionId);
 
-    const waitForPidsToExit = async (pids: number[], timeoutMs = 5_000) => {
+    const waitForPidsToExit = async (pids: number[], timeoutMs = 5_000, sessionsByPid?: Map<number, TrackedSession>) => {
       const deadline = Date.now() + timeoutMs;
       let remaining = pids;
 
@@ -415,7 +407,12 @@ export async function startDaemon(): Promise<void> {
 
       for (const pid of remaining) {
         logger.debug(`[DAEMON RUN] PID ${pid} did not exit after SIGTERM; sending SIGKILL`);
-        try { process.kill(pid, 'SIGKILL'); } catch { /* ignore */ }
+        const session = sessionsByPid?.get(pid);
+        if (session?.scopeUnit) {
+          signalSession({ pid, scopeUnit: session.scopeUnit }, 'SIGKILL');
+        } else {
+          try { process.kill(pid, 'SIGKILL'); } catch { /* ignore */ }
+        }
       }
     };
 
@@ -517,6 +514,9 @@ export async function startDaemon(): Promise<void> {
           directory: sessionMetadata.path,
           sessionTag: sessionMetadata.sessionTag,
           agent: (sessionMetadata.flavor as TrackedSession['agent']) ?? 'cursor',
+          // A session that survived a daemon restart is still in its scope; reading it back from
+          // /proc keeps it kill-routable without relying on persisted state.
+          scopeUnit: scopeUnitFromProcCgroup(pid) ?? undefined,
           lastHeartbeat: Date.now(),
         };
         pidToTrackedSession.set(pid, trackedSession);
@@ -559,6 +559,7 @@ export async function startDaemon(): Promise<void> {
           sessionTag: s.sessionTag ?? existing?.sessionTag ?? '',
           agent: s.agent ?? existing?.agent ?? 'cursor',
           sandbox: sessionMetadata.sandbox ?? existing?.sandbox,
+          scopeUnit: s.scopeUnit ?? existing?.scopeUnit,
           pid: pid,
           status: 'running',
           lastSeq: existing?.lastSeq ?? -1,
@@ -569,6 +570,11 @@ export async function startDaemon(): Promise<void> {
       // Each session reports itself every 60s, so this is at most once-per-minute per session.
       persistNow();
     };
+
+    // Whether sessions are spawned into their own systemd scopes. Resolved once: a daemon must not
+    // mix backends, and the switch's effect (unset it, restart) has to be predictable.
+    const sessionScopeMode = resolveSessionScopeMode();
+    logger.info(`[DAEMON RUN] Session spawn backend: ${sessionScopeMode.enabled ? `systemd scope (${sessionScopeMode.slice})` : `direct (${sessionScopeMode.reason})`}`);
 
     // Spawn a new session (sessionId reserved for future --resume functionality)
     const spawnSession = async (options: SpawnSessionOptions): Promise<SpawnSessionResult> => {
@@ -744,6 +750,9 @@ export async function startDaemon(): Promise<void> {
         }
 
         if (useTmux && tmuxSessionName !== undefined) {
+          if (sessionScopeMode.enabled) {
+            logger.info(`[DAEMON RUN] tmux session requested; it will not be placed in a systemd scope (slice=${sessionScopeMode.slice})`);
+          }
           // Try to spawn in tmux session
           const sessionDesc = tmuxSessionName || 'current/most recent session';
           logger.debug(`[DAEMON RUN] Attempting to spawn session in tmux: ${sessionDesc}`);
@@ -918,12 +927,38 @@ export async function startDaemon(): Promise<void> {
           // Sandbox is now handled at the SDK level (claudeRemote.ts passes
           // sandbox settings to query()). The daemon just passes --sandbox-config
           // for metadata purposes; no more sandbox-exec wrapping needed here.
-          const happyProcess = spawnHappyCLI(args, {
-            cwd: directory,
-            detached: true,  // Sessions stay alive when daemon stops
-            stdio: ['ignore', 'pipe', 'pipe'],  // Capture stdout/stderr for debugging
-            env: spawnEnv,
+          //
+          // In scope mode the session starts inside its own transient systemd unit, so its memory
+          // (and anything it spawns) is accounted to that unit rather than to the daemon's. The
+          // PID is unchanged either way: systemd-run execs the command in place.
+          let happyProcess: ReturnType<typeof spawnHappyCLI>;
+          let scopeUnit: string | undefined;
+          if (sessionScopeMode.enabled) {
+            scopeUnit = buildSessionScopeUnitName(sessionId ?? directory);
+            logger.info(`[DAEMON RUN] Spawning session in systemd scope ${scopeUnit} (slice=${sessionScopeMode.slice})`);
+            happyProcess = spawnHappyCLIInSessionScope(args, {
+              cwd: directory,
+              env: spawnEnv,
+              unitName: scopeUnit,
+              slice: sessionScopeMode.slice,
+            });
+          } else {
+            happyProcess = spawnHappyCLI(args, {
+              cwd: directory,
+              detached: true,  // Sessions stay alive when daemon stops
+              stdio: ['ignore', 'pipe', 'pipe'],  // Capture stdout/stderr for debugging
+              env: spawnEnv,
+            });
+          }
+
+          // Keep the child's last words: a scope that fails to start says why on stderr, and that
+          // is the only place the reason exists. Always attached (not just under DEBUG) so the
+          // pipe cannot fill up and stall the child.
+          let stderrTail = '';
+          happyProcess.stderr?.on('data', (data: Buffer) => {
+            stderrTail = (stderrTail + data.toString()).slice(-8192);
           });
+          let settleSpawn: ((result: SpawnSessionResult) => void) | null = null;
 
           // Log output for debugging
           if (process.env.DEBUG) {
@@ -953,11 +988,26 @@ export async function startDaemon(): Promise<void> {
             directory,
             sessionTag: resumeSessionTag,
             agent: options.agent ?? 'cursor',
+            scopeUnit,
             spawnTime: Date.now(),
             message: directoryCreated ? `The path '${directory}' did not exist. We created a new folder and spawned a new session there.` : undefined
           };
 
           pidToTrackedSession.set(happyProcess.pid, trackedSession);
+
+          if (scopeUnit) {
+            // Not a precondition — just proof that the session really left the daemon's cgroup.
+            // A mismatch is logged and nothing else: killing a session over a noisy check would be
+            // worse than the coupling this exists to remove.
+            void (async () => {
+              const deadline = Date.now() + 2000;
+              while (Date.now() < deadline) {
+                if (scopeUnitFromProcCgroup(happyProcess.pid!) === scopeUnit) return;
+                await delay(100);
+              }
+              logger.warn(`[DAEMON RUN] ${scopeUnit}: session PID ${happyProcess.pid} was not found in that scope after 2s`);
+            })();
+          }
 
           happyProcess.on('exit', (code, signal) => {
             const s = pidToTrackedSession.get(happyProcess.pid!);
@@ -967,6 +1017,12 @@ export async function startDaemon(): Promise<void> {
             if (happyProcess.pid) {
               onChildExited(happyProcess.pid, code, signal);
             }
+            // The process is gone, so no webhook is coming; release the spawn wait now instead of
+            // leaving the caller on the full timeout.
+            settleSpawn?.({
+              type: 'error',
+              errorMessage: `Session process exited before it reported itself (code=${code} signal=${signal})${stderrTail.trim() ? `: ${stderrTail.trim().slice(-1000)}` : ''}`,
+            });
           });
 
           happyProcess.on('error', (error) => {
@@ -979,27 +1035,39 @@ export async function startDaemon(): Promise<void> {
               }
               onChildExited(happyProcess.pid, 1, null);
             }
+            settleSpawn?.({ type: 'error', errorMessage: `Failed to start session process: ${error.message}${stderrTail.trim() ? `: ${stderrTail.trim().slice(-1000)}` : ''}` });
           });
 
           // Wait for webhook to populate session with happySessionId
           logger.debug(`[DAEMON RUN] Waiting for session webhook for PID ${happyProcess.pid}`);
 
-          return new Promise((resolve) => {
+          return new Promise<SpawnSessionResult>((resolve) => {
+            let settled = false;
+            let timeout: ReturnType<typeof setTimeout> | undefined;
+            const settle = (result: SpawnSessionResult) => {
+              if (settled) return;
+              settled = true;
+              if (timeout) clearTimeout(timeout);
+              if (happyProcess.pid) pidToAwaiter.delete(happyProcess.pid);
+              resolve(result);
+            };
+
             // Set timeout for webhook
-            const timeout = setTimeout(() => {
-              pidToAwaiter.delete(happyProcess.pid!);
+            timeout = setTimeout(() => {
               logger.debug(`[DAEMON RUN] Session webhook timeout for PID ${happyProcess.pid}`);
-              resolve({
+              settle({
                 type: 'error',
                 errorMessage: `Session webhook timeout for PID ${happyProcess.pid}`
               });
             }, SESSION_WEBHOOK_TIMEOUT_MS);
 
+            // Let the exit/error handlers end this wait early.
+            settleSpawn = settle;
+
             // Register awaiter
             pidToAwaiter.set(happyProcess.pid!, (completedSession) => {
-              clearTimeout(timeout);
               logger.debug(`[DAEMON RUN] Session ${completedSession.happySessionId} fully spawned with webhook`);
-              resolve({
+              settle({
                 type: 'success',
                 sessionId: completedSession.happySessionId!
               });
@@ -1033,22 +1101,8 @@ export async function startDaemon(): Promise<void> {
         if (session.happySessionId === sessionId ||
           (sessionId.startsWith('PID-') && pid === parseInt(sessionId.replace('PID-', '')))) {
 
-          if (session.startedBy === 'daemon' && session.childProcess) {
-            try {
-              session.childProcess.kill('SIGTERM');
-              logger.debug(`[DAEMON RUN] Sent SIGTERM to daemon-spawned session ${sessionId}`);
-            } catch (error) {
-              logger.debug(`[DAEMON RUN] Failed to kill session ${sessionId}:`, error);
-            }
-          } else {
-            // For externally started sessions, try to kill by PID
-            try {
-              process.kill(pid, 'SIGTERM');
-              logger.debug(`[DAEMON RUN] Sent SIGTERM to external session PID ${pid}`);
-            } catch (error) {
-              logger.debug(`[DAEMON RUN] Failed to kill external session PID ${pid}:`, error);
-            }
-          }
+          signalSession({ pid, scopeUnit: session.scopeUnit }, 'SIGTERM');
+          logger.debug(`[DAEMON RUN] Sent SIGTERM to session ${sessionId} (PID ${pid}${session.scopeUnit ? `, scope ${session.scopeUnit}` : ''})`);
 
           persistSessionTagBeforeRemove(session);
           logger.debug(`[DAEMON RUN] Stop requested for session ${sessionId}; keeping it tracked until exit is observed`);
@@ -1067,6 +1121,11 @@ export async function startDaemon(): Promise<void> {
       logger.debug(`[DAEMON RUN] Stop by PID: ${pid}`);
       const session = pidToTrackedSession.get(pid);
       if (session) persistSessionTagBeforeRemove(session);
+      if (session?.scopeUnit) {
+        signalSession({ pid, scopeUnit: session.scopeUnit }, 'SIGTERM');
+        logger.debug(`[DAEMON RUN] Sent SIGTERM to ${session.scopeUnit}; waiting for exit before removing from tracking`);
+        return true;
+      }
       try {
         process.kill(pid, 'SIGTERM');
         logger.debug(`[DAEMON RUN] Sent SIGTERM to PID ${pid}; waiting for exit before removing from tracking`);
@@ -1394,7 +1453,7 @@ export async function startDaemon(): Promise<void> {
         for (const [pid, session] of activePids) {
           terminateTrackedProcess(pid, session, `restart requested for session ${sessionId}`);
         }
-        await waitForPidsToExit(activePids.map(([pid]) => pid));
+        await waitForPidsToExit(activePids.map(([pid]) => pid), 5_000, new Map(activePids));
       }
 
       // Spawn new process, reconnecting to the same server session via explicit CLI arg.
@@ -1931,6 +1990,7 @@ export async function startDaemon(): Promise<void> {
           exitTime: entry.exitTime,
           lastHeartbeat: entry.lastHeartbeat,
           sandbox: entry.sandbox,
+          scopeUnit: entry.scopeUnit,
         });
       }
     }
@@ -1953,6 +2013,7 @@ export async function startDaemon(): Promise<void> {
           directory: entry.directory,
           sessionTag: entry.sessionTag,
           agent: entry.agent as any,
+          scopeUnit: entry.scopeUnit,
         });
         stoppedFallbackCount++;
       }
@@ -1969,6 +2030,7 @@ export async function startDaemon(): Promise<void> {
           sessionTag: s.sessionTag ?? existing?.sessionTag ?? '',
           agent: s.agent ?? existing?.agent ?? 'cursor',
           sandbox: (s as any).sandbox ?? existing?.sandbox,
+          scopeUnit: s.scopeUnit ?? existing?.scopeUnit,
           pid: s.pid ?? existing?.pid ?? -1,
           status: 'stopped',
           lastSeq: existing?.lastSeq ?? -1,
@@ -2024,6 +2086,7 @@ export async function startDaemon(): Promise<void> {
           directory: tracked.directory ?? sessions[id].directory,
           sessionTag: tracked.sessionTag ?? sessions[id].sessionTag,
           agent: tracked.agent ?? sessions[id].agent,
+          scopeUnit: tracked.scopeUnit ?? sessions[id].scopeUnit,
           pid: tracked.pid,
           status: 'running',
           lastHeartbeat: tracked.lastHeartbeat ?? sessions[id].lastHeartbeat,
