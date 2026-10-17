@@ -38,7 +38,7 @@ import { versionStateOf } from './versionState';
 import { BUILD_VERSION } from '../version';
 import type { ApiMachineClient } from '@/api/apiMachine';
 import { readSessionKey } from '@/api/sessionKeyPersistence';
-import { readSessionLogPage } from '@/api/sessionLog';
+import { collapseSessionLogEntries, readSessionLogPage } from '@/api/sessionLog';
 import { decodeBase64, encodeBase64, libsodiumEncryptForPublicKey } from '@/api/encryption';
 import { startLanDiscovery, type LanDiscoveryHandle } from './lanDiscovery';
 import { ENDPOINT_PROTOCOL_VERSION, startEndpointPublisher, type EndpointPublisherHandle, type LanEndpoint } from './lanEndpoints';
@@ -1816,7 +1816,10 @@ export async function startDaemon(): Promise<void> {
               return {
                 tag,
                 dataEncryptionKey: encodeBase64(dataEncryptionKey),
-                entries: page.entries,
+                // The page as *messages*, not as wire traffic: the log records both directions,
+                // and this is the boundary where the reader stops paying for that. See
+                // `collapseSessionLogEntries`.
+                entries: collapseSessionLogEntries(page.entries),
                 cursor: page.cursor,
                 older: page.older,
                 hasNewer: page.hasNewer,

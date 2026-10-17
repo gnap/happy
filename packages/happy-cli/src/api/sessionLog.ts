@@ -206,6 +206,55 @@ export type SessionLogPage = {
 };
 
 /**
+ * Projects a page of this log onto the conversation it records.
+ *
+ * This file records the wire in both directions, so one message appears twice: appended as `out`
+ * under its local id when the session queues it, and again as `in` under the server id when the
+ * server echoes it — same localId, same ciphertext, two entries. That is the right shape for a
+ * traffic record and the wrong one for a history *reader*: shipping both copies doubles the bytes
+ * on the wire, doubles what the client decrypts, and gives it two ids for one message.
+ *
+ * So the projection happens here, before the page leaves the machine. `localId` is the identity
+ * both directions agree on, and the acknowledged copy (`id !== localId`, the echo carrying the
+ * server id) is the one kept. Entries without a localId are passed through: they have no identity
+ * to collapse on.
+ *
+ * A pair split across two pages is still two entries — each page can only collapse what it holds —
+ * but the reader's own identity check closes that edge, and it can only ever be one entry per
+ * side of a boundary.
+ */
+export function collapseSessionLogEntries(entries: SessionLogEntry[]): SessionLogEntry[] {
+  const result: SessionLogEntry[] = [];
+  const at = new Map<string, number>();
+  for (const entry of entries) {
+    if (!entry.localId) {
+      result.push(entry);
+      continue;
+    }
+    const index = at.get(entry.localId);
+    if (index === undefined) {
+      at.set(entry.localId, result.length);
+      result.push(entry);
+    } else if (preferredEntry(entry, result[index])) {
+      // Replaced in place: the surviving entry keeps the position of the first delivery, so the
+      // page stays in log order.
+      result[index] = entry;
+    }
+  }
+  return result;
+}
+
+/** The acknowledged copy wins; between two of the same kind, the later write does. */
+function preferredEntry(candidate: SessionLogEntry, current: SessionLogEntry): boolean {
+  const candidateAcknowledged = candidate.id !== candidate.localId;
+  const currentAcknowledged = current.id !== current.localId;
+  if (candidateAcknowledged !== currentAcknowledged) {
+    return candidateAcknowledged;
+  }
+  return candidate.at >= current.at;
+}
+
+/**
  * How much one page may weigh. Sized for the *reader*, not for the log: a page travels over the
  * LAN or, worse, over the relay to a phone on cellular, and a reader that cannot finish a page
  * re-reads it forever. Small enough that one page is a short transfer, large enough that a long

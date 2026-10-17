@@ -23,7 +23,7 @@ vi.mock('@/ui/logger', () => ({
     logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
 }));
 
-import { appendSessionLog, readSessionLog, readSessionLogPage, sessionLogDir, pruneSessionLogs, type SessionLogEntry } from './sessionLog';
+import { appendSessionLog, collapseSessionLogEntries, readSessionLog, readSessionLogPage, sessionLogDir, pruneSessionLogs, type SessionLogEntry } from './sessionLog';
 
 let home: string;
 /** Distinct tag per test: the torn-tail check is memoised per path within a process. */
@@ -329,5 +329,41 @@ describe('sessionLog', () => {
             expect(collected).toEqual(written);
             expect(before(tag, anchor.older, oneEntry).entries).toEqual([]);
         });
+    });
+});
+
+describe('collapseSessionLogEntries', () => {
+    const wire = (id: string, localId: string | null, dir: 'in' | 'out', n: number): SessionLogEntry => ({
+        id, localId, dir, at: 1_700_000_000_000 + n, c: `CIPHERTEXT-${localId ?? id}`,
+    });
+
+    it('keeps the acknowledged copy and drops the queued one', () => {
+        const queued = wire('local-1', 'local-1', 'out', 1);
+        const echoed = wire('server-1', 'local-1', 'in', 2);
+        expect(collapseSessionLogEntries([queued, echoed])).toEqual([echoed]);
+    });
+
+    it('keeps the acknowledged copy even when it comes first', () => {
+        const queued = wire('local-1', 'local-1', 'out', 2);
+        const echoed = wire('server-1', 'local-1', 'in', 1);
+        expect(collapseSessionLogEntries([echoed, queued])).toEqual([echoed]);
+    });
+
+    it('keeps the first position, so the page stays in log order', () => {
+        const a = wire('local-a', 'local-a', 'out', 1);
+        const b = wire('local-b', 'local-b', 'out', 2);
+        const echoedA = wire('server-a', 'local-a', 'in', 3);
+        expect(collapseSessionLogEntries([a, b, echoedA])).toEqual([echoedA, b]);
+    });
+
+    it('passes through entries with no identity to collapse on', () => {
+        const noId = wire('only-id', null, 'in', 1);
+        expect(collapseSessionLogEntries([noId])).toEqual([noId]);
+    });
+
+    it('collapses repeated deliveries of the same direction', () => {
+        const first = wire('server-1', 'local-1', 'in', 1);
+        const again = wire('server-2', 'local-1', 'in', 2);
+        expect(collapseSessionLogEntries([first, again])).toEqual([again]);
     });
 });
