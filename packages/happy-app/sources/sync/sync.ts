@@ -262,6 +262,16 @@ class Sync {
      * fetch that was mid-request will not be resumed by anything this App can wait for.
      */
     private static readonly SUSPENDED_TRUST_MS = 45_000;
+    /**
+     * How long a trip through `background` has to last before its in-flight work is distrusted.
+     *
+     * Not the 45s above: iOS suspends the process within a few seconds of a real background, and a
+     * fetch that was mid-request then may never settle. Waiting 45s to forget it is what leaves a
+     * session's lock held and every later read queued behind a request that will never answer.
+     * The floor exists because a pull-down of Control Center reports `inactive` and can bounce back
+     * within a second; that is not a suspension and its sockets are still good.
+     */
+    private static readonly BACKGROUND_RECOVERY_MIN_MS = 5_000;
     private messageFetchSlots = new FetchSlots(Sync.MAX_CONCURRENT_MESSAGE_FETCHES, Sync.MESSAGE_FETCH_LEASE_MS);
     private messageFetchQueue: ((token: number) => void)[] = [];
     private sessionDataKeys = new Map<string, Uint8Array>(); // Store session data encryption keys internally
@@ -342,6 +352,14 @@ class Sync {
         onDelivered: (_target, result) => { this.onLanDelivered(result); },
         onReady: (target) => { this.onDaemonConnectionReady(target); },
         onDropped: (target) => { this.onDaemonConnectionDropped(target); },
+        onAddressUnusable: (target, reason) => {
+            // A socket that will not open or stay open is evidence about the *address*, and the
+            // candidate list ranks a socket's own address first. Recording it is what lets the
+            // next reconcile move the socket to a sighting at the machine's new address instead
+            // of retrying the old one for as long as the App runs.
+            log.log(`📡 ${target.route} address did not work for ${target.machineId.slice(0, 8)} (${target.baseUrl}): ${reason}`);
+            storage.getState().candidateFailed(target.machineId, target.route, target.baseUrl);
+        },
         onHeartbeatUnsupported: (target) => { this.onDaemonHeartbeatUnsupported(target); },
         onStateChange: (id, state) => {
             storage.getState().setDaemonSocketStatus(id, state);
@@ -390,6 +408,12 @@ class Sync {
     private appState: AppStateStatus = AppState.currentState;
     /** When the App went to the background, so a resume can tell a hop from a suspension. */
     private backgroundedAt: number | null = null;
+    /**
+     * Whether the last non-active transition was a real `background`, not the transient `inactive`
+     * iOS reports for a notification shade or an app-switch animation. Only the former suspends
+     * the process, and only the former invalidates a socket.
+     */
+    private wentToBackground = false;
     private appStateSubscription: ReturnType<typeof AppState.addEventListener> | null = null;
     private networkStateSubscription: ReturnType<typeof Network.addNetworkStateListener> | null = null;
     currentVisibleSessionId: string | null = null;
@@ -470,9 +494,23 @@ class Sync {
                 // In-flight fetches cannot be trusted across a real suspension, and the timers that
                 // would have retried them are about to restart against locks they still hold.
                 const suspendedFor = this.backgroundedAt === null ? 0 : Date.now() - this.backgroundedAt;
+                const resumedFromBackground = this.wentToBackground;
                 this.backgroundedAt = null;
-                if (suspendedFor >= Sync.SUSPENDED_TRUST_MS) {
+                this.wentToBackground = false;
+                // A real trip through `background` suspends JS even when it is short, and it takes
+                // the machine sockets with it. They read as open here — iOS kills the socket, not
+                // the variable — so each one has to prove itself before anything is written on it.
+                // The server socket is handled below; the daemon's LAN/relay sockets were not
+                // handled at all, which is the minute-wide gap in which pushes stop, sends go into
+                // a dead socket and the delivery timers have nothing to wait for.
+                if (resumedFromBackground && suspendedFor >= Sync.BACKGROUND_RECOVERY_MIN_MS) {
                     this.recoverFetchesAfterSuspend();
+                    this.connections.probeAfterResume();
+                    this.relayHub?.probeAfterResume();
+                    // A message waiting for a delivery verdict was waiting for a pong that died
+                    // with the suspension. Requeue it now instead of at its own timeout, so the
+                    // send ladder can use whatever channel the probe actually finds.
+                    this.recoverPendingOutbox();
                 }
                 // A long suspension is long enough for a machine to have moved, and this device to
                 // have moved with it. Nothing that failed before it is worth believing now.
@@ -494,6 +532,12 @@ class Sync {
                 });
             } else {
                 log.log(`📱 App state changed to: ${nextAppState}`);
+                // `inactive` is an overlay (Control Center, an app-switch animation) and can come
+                // back in a second; only `background` is a suspension, and only its sockets are
+                // suspect on the way back.
+                if (nextAppState === 'background') {
+                    this.wentToBackground = true;
+                }
                 // A coalesced cache write may be waiting on a timer that suspension will not run.
                 // This is the last reliable moment before the App can be killed, so write now.
                 this.backgroundedAt = Date.now();
@@ -860,6 +904,10 @@ class Sync {
                     // ever finds, so it is as much a reason to reconcile as a sighting is — and
                     // without it here, a machine that publishes its address gets no socket at all.
                     state.lanEndpoints !== previous.lanEndpoints ||
+                    // Health is what ranks one address over another for a socket. A machine whose
+                    // address moved is reachable at the new one while the socket keeps retrying
+                    // the old one — until the failure is recorded and this asks again.
+                    state.candidateHealth !== previous.candidateHealth ||
                     state.socketStatus !== previous.socketStatus ||
                     state.channelOverride !== previous.channelOverride
                 ) {
@@ -5577,6 +5625,10 @@ class Sync {
 
     /** A connection came up: the sessions on that machine no longer need their polling fallback. */
     private onDaemonConnectionReady(target: DaemonTarget): void {
+        // A socket that came up is proof about the address, and the same fact the read path
+        // records: it keeps a working address at the front of the candidate list and clears a run
+        // of failures the socket may have accumulated while the machine was restarting.
+        storage.getState().candidateSucceeded(target.machineId, target.route, target.baseUrl);
         // The machine's own log, asked the moment its channel comes up: this is the fastest channel
         // there is, and the sessions it has are the ones the server may not know about yet.
         void this.pullMachineLifecycle();
