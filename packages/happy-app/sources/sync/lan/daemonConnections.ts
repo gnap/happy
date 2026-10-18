@@ -52,9 +52,28 @@ type LiveConnection = {
     /** When the outstanding heartbeat was sent, or null while the daemon has answered the last one. */
     awaitingBeatSince: number | null;
     beatTimer: ReturnType<typeof setTimeout> | null;
+    /**
+     * Set while a resume probe is in flight.
+     *
+     * A socket that survived an App suspension is not evidence that anything is still on the other
+     * end: iOS kills the process's network activity while it is suspended, and the socket keeps
+     * reading as open. Until the daemon answers a probe sent *after* the resume, this connection is
+     * not written on — a write into it succeeds locally and disappears.
+     */
+    suspect: boolean;
+    /** The short deadline for that probe. */
+    probeTimer: ReturnType<typeof setTimeout> | null;
 };
 
 const DEFAULT_HEARTBEAT = { intervalMs: 15_000, timeoutMs: 45_000 };
+/**
+ * How long a daemon has to answer the probe sent on resume.
+ *
+ * One RTT, not the heartbeat's 45 seconds: the point of probing at resume is to find a dead socket
+ * now, so the session can read again and the outbox can fall back to the server. A live daemon on
+ * the LAN answers in milliseconds.
+ */
+const DEFAULT_RESUME_PROBE_MS = 2_000;
 
 type DaemonConnectionDeps = {
     /** Opens one connection, or returns null when it could not be established. */
@@ -73,6 +92,16 @@ type DaemonConnectionDeps = {
     onReady?: (target: DaemonTarget) => void;
     /** A connection went away without this App asking: whatever it was carrying has lost its push. */
     onDropped?: (target: DaemonTarget) => void;
+    /**
+     * An address that did not work: it refused the socket, dropped one, or stopped answering.
+     *
+     * This is the socket layer's only way to say anything about an *address*, and it exists because
+     * nothing else could: the candidate list ranks a socket's address first, so an address that
+     * moved (a machine whose DHCP lease changed after a reboot) kept being chosen for the socket
+     * forever while reads — which record their own failures — quietly moved to the new one. The
+     * machine looked reachable in the list and "connecting" in the header at the same time.
+     */
+    onAddressUnusable?: (target: DaemonTarget, reason: string) => void;
     /**
      * A connection turned out not to answer heartbeats, and is being kept anyway.
      *
@@ -93,6 +122,8 @@ type DaemonConnectionDeps = {
      * side, so without this the channel would simply stop delivering and nothing would notice.
      */
     heartbeat?: { intervalMs: number; timeoutMs: number };
+    /** How long a resume probe may take; production uses the default. */
+    resumeProbeMs?: number;
     /**
      * Which routes this App checks liveness on itself.
      *
@@ -206,11 +237,64 @@ export class DaemonConnections {
         if (!live) {
             return null;
         }
+        // A socket that has not answered the probe sent after the App came back is a guess, not a
+        // channel. Sending on it is what turns "message stuck" into "message lost": the write is
+        // accepted here and nobody ever reads it.
+        if (live.suspect) {
+            return null;
+        }
         const { intervalMs } = this.deps.heartbeat ?? DEFAULT_HEARTBEAT;
         if (live.awaitingBeatSince !== null && Date.now() - live.awaitingBeatSince >= intervalMs) {
             return null;
         }
         return { handle: live.handle, baseUrl: live.target.baseUrl, machineId: live.target.machineId };
+    }
+
+    /**
+     * Re-proves every live socket after the App comes back from a suspension.
+     *
+     * Nothing else in this manager is told about AppState, and the periodic heartbeat is too slow
+     * to be the answer: iOS suspends the process within seconds, freezing the 15s beat timer, and
+     * a socket killed while suspended still reads as open here. Without this, the first honest
+     * answer is up to a whole beat plus its 45s timeout away — a minute in which pushes are gone,
+     * reads are invalidated into nothing and messages are written into a socket whose peer is not
+     * there. Marking the connection suspect is half the fix: until the probe is answered, `trusted`
+     * refuses it, so a send falls back to the server or stays queued instead of disappearing.
+     */
+    probeAfterResume(): void {
+        const probeMs = this.deps.resumeProbeMs ?? DEFAULT_RESUME_PROBE_MS;
+        for (const [id, live] of [...this.live]) {
+            if (live.probeTimer !== null) {
+                clearTimeout(live.probeTimer);
+                live.probeTimer = null;
+            }
+            // A heartbeat was already in flight when the App was suspended. Its pong died with the
+            // suspension, so this is a connection known to be unproven — reconnect now rather than
+            // wait the heartbeat's full timeout for an answer that cannot arrive.
+            if (live.awaitingBeatSince !== null) {
+                this.endConnection(live.target, 'the heartbeat sent before the suspension was never answered');
+                continue;
+            }
+            live.suspect = true;
+            if (!live.handle.ping()) {
+                this.endConnection(live.target, 'the socket would not take a resume probe');
+                continue;
+            }
+            const sentAt = Date.now();
+            live.awaitingBeatSince = sentAt;
+            live.probeTimer = setTimeout(() => {
+                const entry = this.live.get(id);
+                if (!entry || entry.handle !== live.handle) {
+                    return;
+                }
+                entry.probeTimer = null;
+                // Still the same beat: nothing came back. A later beat cannot count as the answer.
+                if (entry.awaitingBeatSince === sentAt) {
+                    this.endConnection(entry.target, 'the resume probe was not answered');
+                }
+            }, probeMs);
+            (live.probeTimer as unknown as { unref?: () => void }).unref?.();
+        }
     }
 
     has(machineId: string, route: DaemonRoute): boolean {
@@ -258,6 +342,9 @@ export class DaemonConnections {
         if (live.beatTimer) {
             clearTimeout(live.beatTimer);
         }
+        if (live.probeTimer) {
+            clearTimeout(live.probeTimer);
+        }
         this.live.delete(id);
         this.deps.log(`🔌 closing the ${live.target.route} connection to ${live.target.machineId.slice(0, 8)} (${live.target.baseUrl}): ${reason}`);
         live.handle.close();
@@ -293,6 +380,7 @@ export class DaemonConnections {
                 // the daemon is still wanted, so the manager retries on its own schedule. Without
                 // this, `want` being idempotent meant nothing ever tried again — the connection sat
                 // wanted and idle until some unrelated change moved the address.
+                this.deps.onAddressUnusable?.(target, 'the address did not answer');
                 this.scheduleRetry(target);
                 return;
             }
@@ -308,6 +396,8 @@ export class DaemonConnections {
                 connectedAt: Date.now(),
                 awaitingBeatSince: null,
                 beatTimer: null,
+                suspect: false,
+                probeTimer: null,
             });
             this.drops.delete(id);
             this.retryAt.delete(id);
@@ -335,6 +425,14 @@ export class DaemonConnections {
         const live = this.live.get(id);
         if (live) {
             live.awaitingBeatSince = null;
+            // A pong to the resume probe is what makes the socket trustworthy again. A pong to an
+            // earlier, pre-suspension beat cannot get here — it died with the suspension — so any
+            // answer that arrives now is proof of the peer after the App returned.
+            live.suspect = false;
+            if (live.probeTimer !== null) {
+                clearTimeout(live.probeTimer);
+                live.probeTimer = null;
+            }
         }
     }
 
@@ -404,7 +502,11 @@ export class DaemonConnections {
         if (live.beatTimer) {
             clearTimeout(live.beatTimer);
         }
+        if (live.probeTimer) {
+            clearTimeout(live.probeTimer);
+        }
         this.deps.log(`🔌 closing the ${target.route} connection to ${target.machineId.slice(0, 8)} (${target.baseUrl}): ${reason}`);
+        this.deps.onAddressUnusable?.(target, reason);
         this.deps.onDropped?.(target);
         live.handle.close();
         if (this.desired.get(id)?.baseUrl === target.baseUrl) {
@@ -430,6 +532,7 @@ export class DaemonConnections {
         }
         this.live.delete(id);
         this.deps.log(`🔌 ${target.route} connection to ${target.machineId.slice(0, 8)} dropped: code=${info.code ?? 'none'} reason=${info.reason || 'none'}`);
+        this.deps.onAddressUnusable?.(target, `the socket dropped (${info.code ?? 'no code'} ${info.reason || 'no reason'})`);
         this.deps.onDropped?.(target);
         if (this.desired.get(id)?.baseUrl !== target.baseUrl) {
             this.publish(id);

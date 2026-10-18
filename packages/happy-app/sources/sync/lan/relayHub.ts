@@ -78,6 +78,14 @@ const STREAM_OPEN_TIMEOUT_MS = 5_000;
  */
 const HUB_BEAT_INTERVAL_MS = 15_000;
 const HUB_BEAT_TIMEOUT_MS = 45_000;
+/**
+ * How long the relay has to answer a probe sent when the App comes back from a suspension.
+ *
+ * One RTT, not the heartbeat's 45 seconds: a hub that survived the suspension reads as connected
+ * here even when the OS tore its socket down, and the beats that would notice are frozen for as
+ * long as the App is suspended.
+ */
+const HUB_RESUME_PROBE_MS = 2_000;
 /** Long enough not to hammer a relay that is restarting, short enough to recover quickly. */
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
@@ -339,6 +347,38 @@ export class RelayHub {
             this.scheduleReconnect();
         };
         socket.onerror = () => { /* onclose follows */ };
+    }
+
+    /**
+     * Re-proves the hub after the App comes back from a suspension.
+     *
+     * A suspended App freezes the 15s beat timer, and the socket the relay saw die is still
+     * `connected` here when the App returns. Every stream through it looks alive for the same
+     * reason, so without this the recovery of each machine waits for the heartbeat timeout.
+     */
+    probeAfterResume(): void {
+        const socket = this.socket;
+        if (!socket || !this.connected) {
+            return;
+        }
+        if (this.awaitingBeatSince !== null) {
+            // The beat in flight was suspended with the App; its pong is not coming.
+            try { socket.close(); } catch { /* gone */ }
+            return;
+        }
+        if (!this.send({ t: 'ping' })) {
+            try { socket.close(); } catch { /* gone */ }
+            return;
+        }
+        const sentAt = Date.now();
+        this.awaitingBeatSince = sentAt;
+        const timer = setTimeout(() => {
+            if (this.socket === socket && this.connected && this.awaitingBeatSince === sentAt) {
+                this.log('🔁 relay hub did not answer the resume probe; reconnecting');
+                try { socket.close(); } catch { /* gone */ }
+            }
+        }, HUB_RESUME_PROBE_MS);
+        (timer as unknown as { unref?: () => void }).unref?.();
     }
 
     /**

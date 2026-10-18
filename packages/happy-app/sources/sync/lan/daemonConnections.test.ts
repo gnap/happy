@@ -13,9 +13,11 @@ const target = (over: Partial<DaemonTarget> = {}): DaemonTarget => ({
 });
 
 /** A manager wired to a fake opener that records what it was asked for. */
-function makeManager() {
+function makeManager(overrides: { resumeProbeMs?: number; heartbeat?: { intervalMs: number; timeoutMs: number } } = {}) {
     const opens: { target: DaemonTarget; handlers: any; handle: LanSocketHandle }[] = [];
     const state: [string, unknown][] = [];
+    const dropped: string[] = [];
+    const unusable: { machineId: string; route: string; baseUrl: string; reason: string }[] = [];
     const manager = new DaemonConnections({
         open: async (t, handlers) => {
             const handle = { baseUrl: t.baseUrl, send: vi.fn(() => true), ping: vi.fn(() => true), close: vi.fn() } as unknown as LanSocketHandle;
@@ -24,12 +26,15 @@ function makeManager() {
         },
         onUpdate: () => {},
         onDelivered: () => {},
+        onDropped: (t) => { dropped.push(t.machineId); },
+        onAddressUnusable: (t, reason) => { unusable.push({ machineId: t.machineId, route: t.route, baseUrl: t.baseUrl, reason }); },
         onStateChange: (route, s) => { state.push([route, s]); },
         log: () => {},
         retryDelayMs: () => 0,
-        heartbeat: { intervalMs: 1, timeoutMs: 4 },
+        heartbeat: overrides.heartbeat ?? { intervalMs: 1, timeoutMs: 4 },
+        resumeProbeMs: overrides.resumeProbeMs ?? 60_000,
     });
-    return { manager, opens, state };
+    return { manager, opens, state, dropped, unusable };
 }
 
 describe('DaemonConnections', () => {
@@ -225,6 +230,92 @@ describe('DaemonConnections', () => {
         // A late answer restores it: a slow pong must not cost a reconnect.
         opens[0].handlers.onBeat();
         expect(manager.trusted('m1', 'lan')?.handle).toBe(opens[0].handle);
+    });
+
+    describe('resume probe', () => {
+        const quiet = { intervalMs: 60_000, timeoutMs: 60_000 };
+
+        it('refuses to write on a socket until it answers the probe sent after resume', async () => {
+            const { manager, opens } = makeManager({ heartbeat: quiet, resumeProbeMs: 50 });
+            manager.want(target());
+            await tick();
+            expect(manager.trusted('m1', 'lan')).not.toBeNull();
+
+            manager.probeAfterResume();
+
+            // The socket still reads as open, but that is a guess until the daemon answers it.
+            expect(manager.current('m1', 'lan')).not.toBeNull();
+            expect(manager.trusted('m1', 'lan')).toBeNull();
+
+            opens[0].handlers.onBeat();
+            expect(manager.trusted('m1', 'lan')?.handle).toBe(opens[0].handle);
+        });
+
+        it('reconnects a socket that never answers the resume probe', async () => {
+            const { manager, opens, dropped } = makeManager({ heartbeat: quiet, resumeProbeMs: 5 });
+            manager.want(target());
+            await tick();
+
+            manager.probeAfterResume();
+            await new Promise((resolve) => setTimeout(resolve, 20));
+
+            expect(dropped).toEqual(['m1']);
+            expect(opens[0].handle.close).toHaveBeenCalled();
+            expect(opens).toHaveLength(2);
+            expect(manager.trusted('m1', 'lan')?.handle).toBe(opens[1].handle);
+        });
+
+        it('does not wait for a heartbeat that was in flight when the App was suspended', async () => {
+            // Its pong died with the suspension. Waiting the heartbeat timeout is waiting for an
+            // answer that cannot come, so the connection is written off as soon as the App returns.
+            const { manager, opens, dropped } = makeManager({
+                heartbeat: { intervalMs: 1, timeoutMs: 60_000 },
+                resumeProbeMs: 50,
+            });
+            manager.want(target());
+            await new Promise((resolve) => setTimeout(resolve, 10));
+
+            manager.probeAfterResume();
+            await tick();
+
+            expect(dropped).toEqual(['m1']);
+            expect(opens).toHaveLength(2);
+        });
+    });
+
+    it('reports the address when a live socket drops, so the next reconcile can move off it', async () => {
+        const { manager, opens, unusable } = makeManager();
+        manager.want(target());
+        await tick();
+
+        opens[0].handlers.onClosed({ deliberate: false, code: 1006 });
+
+        expect(unusable).toHaveLength(1);
+        expect(unusable[0]).toMatchObject({ machineId: 'm1', route: 'lan', baseUrl: 'http://10.0.0.2:55673' });
+    });
+
+    it('reports an address whose open produced no socket', async () => {
+        const unusable: string[] = [];
+        let attempt = 0;
+        const manager = new DaemonConnections({
+            open: async (t) => {
+                attempt += 1;
+                if (attempt > 1) {
+                    return { baseUrl: t.baseUrl, send: () => true, ping: () => true, close: () => {} } as unknown as LanSocketHandle;
+                }
+                return null;
+            },
+            onUpdate: () => {},
+            onDelivered: () => {},
+            onAddressUnusable: (t) => { unusable.push(t.baseUrl); },
+            onStateChange: () => {},
+            log: () => {},
+            retryDelayMs: () => 1,
+        });
+        manager.want(target());
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(unusable).toContain('http://10.0.0.2:55673');
+        expect(manager.current('m1', 'lan')).not.toBeNull();
     });
 
     it('drops every daemon not listed when asked for a set', async () => {
