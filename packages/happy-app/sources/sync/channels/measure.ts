@@ -276,7 +276,9 @@ function lanDriver(state: ChannelState): ChannelDriver {
         session: (sessionId, machineId) => {
             const answered = state.daemonSessionList[sessionId];
             if (answered?.via === 'lan') {
-                return { reaching: answered.isAlive, seenAt: answered.at };
+                // The machine's own summary of its sessions, so its "not alive" is the fact rather
+                // than this channel's view of it. The socket below is an inference and is not.
+                return { reaching: answered.isAlive, fromOwner: true, seenAt: answered.at };
             }
             if (machineId && heldSocket(state, machineId, 'lan')) {
                 return { reaching: true };
@@ -351,12 +353,14 @@ function relayDriver(state: ChannelState): ChannelDriver {
         session: (sessionId, machineId) => {
             const answered = state.daemonSessionList[sessionId];
             if (answered?.via === 'relay') {
-                return { reaching: answered.isAlive, seenAt: answered.at };
+                return { reaching: answered.isAlive, fromOwner: true, seenAt: answered.at };
             }
             const entry = machineId ? state.relayDirectory[machineId] : undefined;
             const published = entry?.sessions.find((session) => session.happySessionId === sessionId);
             if (entry && published) {
-                return { reaching: published.isAlive, seenAt: entry.at };
+                // The relay republishes the machine's own summary verbatim, so this is the same
+                // answer from the same party, carried rather than inferred.
+                return { reaching: published.isAlive, fromOwner: true, seenAt: entry.at };
             }
             if (machineId && heldSocket(state, machineId, 'relay')) {
                 return { reaching: true };

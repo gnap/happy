@@ -32,6 +32,11 @@ export function resolveSessionReach(
     // — the LAN reaches a session by holding the machine open, which dates nothing.
     let reaching: ChannelDriver['channel'] | null = null;
     let seenAt: number | undefined;
+    // The exception to "a negative does not end the search": the machine running the session is
+    // the only party that can see whether its process exists, so its own answer is the fact and
+    // not a channel's view of it. Once it has said no, asking the server is asking a record that
+    // says active until something corrects it — and nothing does when a reboot does the killing.
+    let settledByOwner = false;
     for (const driver of drivers) {
         const report = driver.session(sessionId, machineId, now);
         if (!report) {
@@ -40,8 +45,14 @@ export function resolveSessionReach(
         if (report.seenAt !== undefined && (seenAt === undefined || report.seenAt > seenAt)) {
             seenAt = report.seenAt;
         }
-        if (report.reaching && reaching === null) {
+        if (report.reaching && reaching === null && !settledByOwner) {
             reaching = driver.channel;
+        }
+        // Still asked of every channel afterwards, because `seenAt` may come from another: this
+        // settles whether the session is being reached, not when it was last heard.
+        if (report.fromOwner && !report.reaching) {
+            settledByOwner = true;
+            reaching = null;
         }
     }
     return reaching === null

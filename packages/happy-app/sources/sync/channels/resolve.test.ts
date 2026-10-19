@@ -21,6 +21,10 @@ const says = (channel: ChannelDriver['channel'], reaching: boolean, seenAt?: num
 
 const silent = (channel: ChannelDriver['channel']): ChannelDriver => driver(channel, () => null);
 
+/** The owning machine answering about its own session, which is the fact and not a view of it. */
+const owner = (channel: ChannelDriver['channel'], reaching: boolean, seenAt?: number): ChannelDriver =>
+    driver(channel, () => ({ reaching, fromOwner: true, seenAt }));
+
 describe('resolveSessionReach', () => {
     it('answers with the channel the device prefers, not the first that answers at all', () => {
         // The policy is the order: a session the server still holds *and* the LAN is serving is on
@@ -51,6 +55,37 @@ describe('resolveSessionReach', () => {
         expect(reach.channel).toBeNull();
         // The most recent word still dates the session, whoever it came from.
         expect(reach.seenAt).toBe(30);
+    });
+
+    it('takes the owning machine at its word when it says the session is not running', () => {
+        // The reboot case. Every session process is killed, so nothing ever told the server, whose
+        // record still says active; the machine, which is the only party that can see the process,
+        // lists the session and reports it not alive. Believing the server here is what offered a
+        // send to a session with nowhere to go.
+        const reach = resolveSessionReach('sess-1', 'machine-1', [
+            owner('lan', false, 30),
+            says('server', true, 10),
+        ]);
+        expect(reach.online).toBe(false);
+        expect(reach.channel).toBeNull();
+        expect(reach.seenAt).toBe(30);
+    });
+
+    it('still lets the owner say the session is running', () => {
+        const reach = resolveSessionReach('sess-1', 'machine-1', [
+            owner('lan', true, 30),
+            says('server', false, 10),
+        ]);
+        expect(reach).toEqual({ online: true, channel: 'lan', seenAt: 30 });
+    });
+
+    it('does not let a non-owner negative end the search', () => {
+        // The existing rule, kept: only the machine running the session may settle it with a no.
+        const reach = resolveSessionReach('sess-1', 'machine-1', [
+            says('lan', false, 30),
+            owner('relay', true, 20),
+        ]);
+        expect(reach).toEqual({ online: true, channel: 'relay', seenAt: 30 });
     });
 
     it('treats a channel with nothing to say as having nothing to say', () => {
