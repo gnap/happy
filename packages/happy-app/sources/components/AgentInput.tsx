@@ -63,8 +63,14 @@ interface AgentInputProps {
         color: string;
         dotColor: string;
         isPulsing?: boolean;
-        /** How the session is being reached; when given, its glyph replaces the plain dot. */
-        channel?: { kind: SessionChannel; pinned: boolean };
+        /**
+         * How the session is being reached; when given, its glyph replaces the plain dot.
+         *
+         * `link` is that channel's own connection to the machine. It can be reconnecting while the
+         * session still reads over the channel — reachable, not linked — and the glyph is coloured
+         * by it so the input bar and the app header cannot say different things about the LAN.
+         */
+        channel?: { kind: SessionChannel; pinned: boolean; link?: 'connected' | 'connecting' | 'off' | null };
         cliStatus?: {
             claude: boolean | null;
             codex: boolean | null;
@@ -387,6 +393,19 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     const styles = stylesheet;
     const { theme } = useUnistyles();
     const screenWidth = useWindowDimensions().width;
+    /**
+     * The channel glyph's own colour: its link, not the session's state.
+     *
+     * The dot used to be drawn entirely in the session status colour, so a LAN session whose socket
+     * was reconnecting looked exactly like a healthy one — while its messages were going out over
+     * the server. The text beside it still says what the session is doing; the glyph says how the
+     * channel it names is doing.
+     */
+    const channelLink = props.connectionStatus?.channel?.link ?? null;
+    const channelTint = channelLink === 'connected' ? theme.colors.status.connected
+        : channelLink === 'connecting' ? theme.colors.status.connecting
+            : channelLink === 'off' ? theme.colors.status.disconnected
+                : null;
 
     const hasText = props.value.trim().length > 0;
 
@@ -888,13 +907,13 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                 <>
                                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
                                         <StatusDot
-                                            color={props.connectionStatus.dotColor}
+                                            color={channelTint ?? props.connectionStatus.dotColor}
                                             isPulsing={props.connectionStatus.isPulsing}
                                             size={props.connectionStatus.channel ? 12 : 6}
                                             icon={props.connectionStatus.channel ? CHANNEL_ICONS[props.connectionStatus.channel.kind] : undefined}
                                         />
                                         {props.connectionStatus.channel?.pinned && (
-                                            <Ionicons name="pin" size={9} color={props.connectionStatus.dotColor} />
+                                            <Ionicons name="pin" size={9} color={channelTint ?? props.connectionStatus.dotColor} />
                                         )}
                                         <Text style={{
                                             fontSize: 11,

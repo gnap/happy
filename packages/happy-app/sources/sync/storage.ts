@@ -11,7 +11,7 @@ import type { RelayDirectoryEntry } from './lan/relayDirectory';
 import { advanceLanEndpoint, advanceRelayEndpoint, parseLanEndpoints, parseRelayEndpoint } from './lan/relay';
 import type { LifecycleEntry } from './lan/client';
 import type { DaemonConnectionState } from './lan/daemonConnections';
-import { machineBadgeInputs, resolveMachinePresence, type MachineCapability, type MachinePresence, type MachineReach } from './machinePresence';
+import { machineBadgeInputs, resolveMachinePresence, type MachineCapability, type MachineLink, type MachinePresence, type MachineReach } from './machinePresence';
 import { channelLinks } from './channelLinks';
 import { enabledChannels } from '@/utils/enabledChannels';
 import { sessionIsRestarting } from '@/utils/sessionRestart';
@@ -2763,7 +2763,7 @@ export function useMachinePresenceMap(): Record<string, MachinePresence> {
  * machines, where a hook cannot be called per row. One question, asked of the same drivers, from
  * whatever row is being drawn.
  */
-export function useMachineBadgeInputs(): (machineId: string) => { reach: MachineReach; capability: MachineCapability } {
+export function useMachineBadgeInputs(): (machineId: string) => { reach: MachineReach; capability: MachineCapability; link: MachineLink } {
     const channelState = storage(useShallow(selectChannelState));
     const priority = storage(useShallow((state) => state.localSettings.channelPriority));
     return React.useCallback(
