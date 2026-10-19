@@ -382,6 +382,17 @@ class Sync {
     private lanSessionKeys = new Map<string, Uint8Array>();
     /** LAN sends awaiting the session's verdict, so a lost one cannot sit "sending" forever. */
     private lanSendTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+    /**
+     * When this App last asked a machine to start a session that had no process.
+     *
+     * One window, not one attempt forever: a session that exits again has to be wakeable, and two
+     * flushes inside the window must not start it twice. Nothing else has to be running for a wake
+     * — the daemon serves it, and after a reboot the daemon is the only thing up.
+     */
+    private lastSessionWakeAt = new Map<string, number>();
+    /** How many times a single outgoing message has been answered with "no process". One retry. */
+    private deliveryWakeAttempts = new Map<string, number>();
+    private static readonly SESSION_WAKE_WINDOW_MS = 20_000;
 
     /** How long a LAN send waits for the session's verdict before it is treated as lost. */
     private static readonly LAN_DELIVERY_TIMEOUT_MS = 15_000;
@@ -2867,6 +2878,27 @@ class Sync {
             return;
         }
         const batch = pending.slice();
+
+        // A session the machine itself reports as not running cannot take a message, and writing
+        // one anyway is what times out: the socket accepts it, no process is there to read it.
+        // Starting the process is the daemon's own call, so it works when this is the only session
+        // and it is down — which is the state a reboot leaves every session in.
+        if (this.sessionReportedDown(sessionId)) {
+            const wake = await this.wakeSession(sessionId);
+            if (wake === 'failed') {
+                for (const msg of batch) {
+                    storage.getState().failOutboxEntries(
+                        [msg.localId],
+                        'The session is not running, and this machine could not start it.',
+                    );
+                }
+                pending.splice(0, batch.length);
+                if (pending.length === 0) {
+                    this.pendingOutbox.delete(sessionId);
+                }
+                return;
+            }
+        }
 
         // The walk itself lives in `channels/ops.ts`, where its order and what each rung's answer
         // means are pinned down by tests rather than by reading this method. What stays here is the
@@ -5612,7 +5644,7 @@ class Sync {
     }
 
     /** The session's verdict on a message sent over its connection. */
-    private onLanDelivered(result: { sessionId: string; localId: string; delivered: boolean }): void {
+    private async onLanDelivered(result: { sessionId: string; localId: string; delivered: boolean }): Promise<void> {
         const timer = this.lanSendTimeouts.get(result.localId);
         if (timer) {
             clearTimeout(timer);
@@ -5623,12 +5655,69 @@ class Sync {
         // looks sent forever.
         if (result.delivered) {
             storage.getState().markOutboxMessageAcked(result.localId);
-        } else {
-            storage.getState().failOutboxEntries(
-                [result.localId],
-                'The session could not read this message.',
-            );
+            return;
         }
+        // "No process" is not a failed message. The daemon is up — it is who answered — and starting
+        // the session is something it can do with no other session running. One retry: a process
+        // that still is not there the second time is a refusal, and the message says so.
+        const attempts = this.deliveryWakeAttempts.get(result.localId) ?? 0;
+        if (attempts < 1) {
+            this.deliveryWakeAttempts.set(result.localId, attempts + 1);
+            const wake = await this.wakeSession(result.sessionId);
+            if (wake !== 'failed') {
+                this.getSendSync(result.sessionId).invalidate();
+                return;
+            }
+        }
+        storage.getState().failOutboxEntries(
+            [result.localId],
+            'The session could not read this message.',
+        );
+    }
+
+    /**
+     * Whether the machine that owns this session has said its process is not running.
+     *
+     * Only an explicit "not alive" counts. No report is not a down session — it is a machine this
+     * device has not heard a roster from, and waking on that would restart sessions that are fine.
+     */
+    private sessionReportedDown(sessionId: string): boolean {
+        const state = storage.getState();
+        const listed = state.daemonSessionList[sessionId];
+        if (listed) {
+            return listed.isAlive === false;
+        }
+        const machineId = state.sessions[sessionId]?.metadata?.machineId;
+        const published = machineId
+            ? state.relayDirectory[machineId]?.sessions.find((session) => session.happySessionId === sessionId)
+            : undefined;
+        return published?.isAlive === false;
+    }
+
+    /**
+     * Ask the owning machine to start this session's process.
+     *
+     * The daemon answers this with no session running at all: it is the process that LaunchDaemon
+     * brings back, and the sessions are what it starts. A second ask inside the window is not a
+     * second start — the first one is still the answer.
+     */
+    private async wakeSession(sessionId: string): Promise<'woken' | 'recent' | 'failed'> {
+        const last = this.lastSessionWakeAt.get(sessionId) ?? 0;
+        if (Date.now() - last < Sync.SESSION_WAKE_WINDOW_MS) {
+            return 'recent';
+        }
+        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        if (!machineId) {
+            return 'failed';
+        }
+        this.lastSessionWakeAt.set(sessionId, Date.now());
+        const verdict = await this.restartSession(sessionId, machineId);
+        if (verdict?.success) {
+            log.log(`🔄 wake ${sessionId}: the machine is starting its process`);
+            return 'woken';
+        }
+        log.log(`🔄 wake ${sessionId}: ${verdict?.error ?? 'no channel could start it'}`);
+        return 'failed';
     }
 
     /** A connection came up: the sessions on that machine no longer need their polling fallback. */

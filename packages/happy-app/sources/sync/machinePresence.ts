@@ -177,8 +177,19 @@ export function machineChannelIcons(
     capability: MachineCapability,
     link?: MachineLink,
 ): { channel: SessionChannel; state: ChannelLinkState }[] {
-    const stateFor = (channel: SessionChannel, reached: boolean): ChannelLinkState =>
-        link?.[channel] ?? (reached ? 'connected' : 'off');
+    // A live or reconnecting stream is the finer answer, and it wins: that is the socket whose
+    // flap used to be drawn as a healthy green. A stream that is simply *absent* is not. The
+    // channel belongs to the machine — the relay holding the daemon, the LAN having seen it — and
+    // none of that requires a session process. Treating a missing stream as "offline" made the
+    // relay glyph follow whichever session happened to be running, and with none running, which is
+    // every machine just after it reboots, there was no channel left to wake one on.
+    const stateFor = (channel: SessionChannel, reached: boolean): ChannelLinkState => {
+        const reported = link?.[channel];
+        if (reported === 'connected' || reported === 'connecting') {
+            return reported;
+        }
+        return reached ? 'connected' : 'off';
+    };
     return priority.flatMap((channel): { channel: SessionChannel; state: ChannelLinkState }[] => {
         if (channel === 'server') {
             // Always drawn while switched on: a server that does not report the machine is still a
