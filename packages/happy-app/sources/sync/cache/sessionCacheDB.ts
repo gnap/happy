@@ -352,9 +352,17 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
             const tx = this.db!.transaction([STORE_SESSIONS_LIST], 'readonly');
             const req = tx.objectStore(STORE_SESSIONS_LIST).get(1);
             req.onsuccess = () => {
-                const row = req.result as { id: number; sessionsJson: string; cachedAt: number } | undefined;
+                // The wrapped session keys are read back as well as written. Without them a cold
+                // start restores every session's text and none of its key, so the only way left to
+                // a key is the server -- and a device whose server is unreachable sits on sessions
+                // it can display but not decrypt, offering no send.
+                const row = req.result as CachedSessionListRow | undefined;
                 if (!row) { resolve(null); return; }
-                resolve({ sessionsJson: row.sessionsJson, cachedAt: row.cachedAt });
+                resolve({
+                    sessionsJson: row.sessionsJson,
+                    cachedAt: row.cachedAt,
+                    encryptionKeysJson: row.encryptionKeysJson,
+                });
             };
             req.onerror = () => reject(req.error);
         });

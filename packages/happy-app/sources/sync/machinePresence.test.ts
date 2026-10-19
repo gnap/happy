@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveMachinePresence } from './machinePresence';
+import { machineChannelIcons, resolveMachinePresence, type MachineCapability, type MachineLink, type MachineReach } from './machinePresence';
 import type { ChannelDriver } from './channels/types';
 
 /** A channel that reports the machine alive, reachable-but-not-alive, or says nothing about it. */
@@ -39,5 +39,36 @@ describe('resolveMachinePresence', () => {
     it('is offline when no channel reports it, rather than when none has heard of it', () => {
         expect(resolveMachinePresence([driver('lan', null), driver('server', null)], 'machine-1')).toBe('offline');
         expect(resolveMachinePresence([], 'machine-1')).toBe('offline');
+    });
+});
+
+const reachable: MachineReach = { server: false, lan: true, relay: true };
+const capable: MachineCapability = { lan: true, relay: true };
+
+describe('machineChannelIcons', () => {
+    it('shows the relay up when the relay holds the machine, with no session stream open', () => {
+        // The reboot case. Every session process is dead, so nothing has opened a stream, and the
+        // socket layer's "idle" used to paint the glyph offline — which is what left no channel to
+        // wake a session on.
+        const link: MachineLink = { server: null, lan: null, relay: 'off' };
+        const icons = machineChannelIcons(['lan', 'relay', 'server'], reachable, capable, link);
+        expect(icons.find((icon) => icon.channel === 'relay')?.state).toBe('connected');
+    });
+
+    it('still lets a stream that is coming up say so', () => {
+        const link: MachineLink = { server: null, lan: 'connecting', relay: 'connected' };
+        const icons = machineChannelIcons(['lan', 'relay'], reachable, capable, link);
+        expect(icons.map((icon) => icon.state)).toEqual(['connecting', 'connected']);
+    });
+
+    it('stays off when the machine is not reachable and nothing is connected', () => {
+        const link: MachineLink = { server: null, lan: 'off', relay: 'off' };
+        const icons = machineChannelIcons(
+            ['lan', 'relay'],
+            { server: false, lan: false, relay: false },
+            capable,
+            link,
+        );
+        expect(icons.map((icon) => icon.state)).toEqual(['off', 'off']);
     });
 });

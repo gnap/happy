@@ -35,6 +35,18 @@ export type ChannelSessionReport = {
      * announced by the session.
      */
     reaching: boolean;
+    /**
+     * Whether this is the owning machine's own answer about the session, rather than an inference.
+     *
+     * It is what lets a *negative* mean something. Ordinarily a channel saying it is not reaching a
+     * session says nothing about whether another one is, so the search goes on — but the machine
+     * running the session is the only party that can see its process, and when it lists the session
+     * and reports it not alive, that is the fact itself. Treating it as silence sends the question
+     * on to the server, whose record says active until something tells it otherwise, and a process
+     * killed by a reboot tells nobody. The session then reads as online with nothing behind it,
+     * and the send that follows fails on a delivery timeout.
+     */
+    fromOwner?: boolean;
     /** When this channel last heard from the session, if it says. */
     seenAt?: number;
 };
