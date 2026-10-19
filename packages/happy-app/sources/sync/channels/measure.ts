@@ -14,7 +14,7 @@ import { candidateKey, type CandidateHealth } from './health';
 import type { DaemonConnectionState } from '@/sync/lan/daemonConnections';
 import type { DaemonRoute } from '@/sync/lan/types';
 import type { SessionChannel } from '@/sync/lan/types';
-import type { ChannelDriver, ChannelOperation , ChannelEndpoint } from './types';
+import type { ChannelDriver, ChannelLinkState, ChannelOperation , ChannelEndpoint } from './types';
 
 /**
  * The slice of the store the drivers read.
@@ -195,6 +195,29 @@ function serverDriver(state: ChannelState): ChannelDriver {
  * open over the LAN — which is enough, because the LAN's reader is the machine, so a session being
  * read there is one the machine is serving whatever the server last heard from it.
  */
+/**
+ * How this App's socket to one machine over one route is doing, or null when it holds none.
+ *
+ * The per-machine counterpart of `link()`. The header asks whether the transport is up at all; a
+ * machine row asks about that machine. Reads over the LAN keep working with the socket down, so a
+ * machine can be reachable and its link reconnecting at once — this is the second half of that
+ * answer, and the reason the two used to disagree in opposite directions: the header showed a dead
+ * link, the row showed a green reachable machine.
+ */
+function machineLinkFor(state: ChannelState, machineId: string, route: DaemonRoute): ChannelLinkState | null {
+    const socket = state.daemonSockets[`${machineId}:${route}`];
+    if (!socket) {
+        return null;
+    }
+    if (socket.phase === 'live') {
+        return 'connected';
+    }
+    if (socket.phase === 'opening' || socket.phase === 'retrying') {
+        return 'connecting';
+    }
+    return 'off';
+}
+
 function lanDriver(state: ChannelState): ChannelDriver {
     const anySocket = (): boolean =>
         Object.values(state.daemonSockets).some((socket) => socket.route === 'lan' && socket.phase === 'live');
@@ -203,6 +226,7 @@ function lanDriver(state: ChannelState): ChannelDriver {
         link: () => (anySocket() ? 'connected'
             : Object.keys(state.lanSightings).length > 0 ? 'connecting'
                 : null),
+        machineLink: (machineId) => machineLinkFor(state, machineId, 'lan'),
         machine: (machineId, now) => {
             // Every address this machine could be reached at, minus the ones that have been tried and
             // demoted. A machine with an address nothing has tried yet is reachable — that is what
@@ -282,6 +306,7 @@ function relayDriver(state: ChannelState): ChannelDriver {
         // The relay is its one connection to the hub, not the per-machine streams it carries: while
         // it is switched on and not yet reached, the App is trying, which is the blue.
         link: () => (state.relayHubConnected ? 'connected' : 'connecting'),
+        machineLink: (machineId) => machineLinkFor(state, machineId, 'relay'),
         // Same operations as the LAN: it is the same daemon and the same API, reached the other way.
         supports: (operation) => DAEMON_OPERATIONS.has(operation),
         // The relay vouches for what it is holding, and the machine vouches for a route it

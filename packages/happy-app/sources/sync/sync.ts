@@ -5462,9 +5462,17 @@ class Sync {
             }
         }
 
-        // And the sessions being read, whatever else claims their machines: the address a read came
-        // back over is proof enough that it answers, and it is the connection a send would use.
+        // And the sessions being read — but only where a channel named nothing. A read's address is
+        // proof that it answers, and for a machine no sighting or published endpoint covers it is
+        // the only address there is. It is not a better answer than the channel's, though: the
+        // same machine is usually reachable under two equally good addresses (its mDNS name and
+        // its IP), a read may hold either one, and letting it overwrite the ranking moved the live
+        // socket from one to the other every time a scan or a read reconciled. Each move closes a
+        // working socket and reopens it, which is the "connecting" the user watches.
         for (const link of this.daemonLinks.values()) {
+            if (targets.has(`${link.machineId}:${link.connection.route}`)) {
+                continue;
+            }
             add(link.machineId, link.connection.route, link.connection.baseUrl);
         }
 

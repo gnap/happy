@@ -381,7 +381,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                 // session, and while a key is being fetched that is exactly what a reader wants to
                 // see — a page that says only "handshaking" cannot be told apart from one whose
                 // channel is dead, which is the state this text is most often mistaken for.
-                const channel = { kind: sessionChannel.channel, pinned: sessionChannel.pinned };
+                const channel = { kind: sessionChannel.channel, pinned: sessionChannel.pinned, link: sessionChannel.link };
                 if (!hasEncryption) {
                     return {
                         text: t('session.encrypting'),

@@ -1,5 +1,5 @@
 import type { SessionChannel } from './lan/types';
-import type { ChannelDriver } from './channels/types';
+import type { ChannelDriver, ChannelLinkState } from './channels/types';
 
 /**
  * How a machine is currently reachable from this device.
@@ -102,6 +102,23 @@ export type MachineReach = {
     relay: boolean;
 };
 
+/**
+ * How each channel's own connection to this machine is doing.
+ *
+ * Not the same question as `MachineReach`, which says whether the channel can carry anything for
+ * the machine — the LAN can serve a read over HTTP while its push/send socket is reconnecting. The
+ * badge used to draw only `reach`, so a machine whose LAN socket was down sat there green while
+ * the header said the LAN link was connecting: two answers to two questions, drawn as one.
+ *
+ * `null` means the channel holds no per-machine connection to report on (the server has one for
+ * everything, the LAN may have nothing wanted for a machine); the reach answer stands in then.
+ */
+export type MachineLink = {
+    server: ChannelLinkState | null;
+    lan: ChannelLinkState | null;
+    relay: ChannelLinkState | null;
+};
+
 /** Whether a channel is one this machine can be reached over at all, beyond being switched on. */
 export type MachineCapability = {
     /** Undefined when the App has never seen the machine anywhere; only a sighting justifies the icon. */
@@ -128,10 +145,16 @@ export function machineBadgeInputs(
     drivers: readonly ChannelDriver[],
     machineId: string,
     now: number = Date.now(),
-): { reach: MachineReach; capability: MachineCapability } {
+): { reach: MachineReach; capability: MachineCapability; link: MachineLink } {
     const reach: MachineReach = { server: false, lan: false, relay: false };
     const capability: MachineCapability = { lan: false, relay: false };
+    const link: MachineLink = { server: null, lan: null, relay: null };
     for (const driver of drivers) {
+        // The link is the per-machine answer when the driver holds one; the server's single
+        // connection is the same for every machine and answers through its global `link()`.
+        link[driver.channel] = driver.machineLink
+            ? driver.machineLink(machineId)
+            : driver.link();
         if (driver.channel === 'server') {
             reach.server = driver.machine(machineId, now)?.alive === true;
             continue;
@@ -140,24 +163,32 @@ export function machineBadgeInputs(
         reach[driver.channel] = driver.machine(machineId, now)?.alive === true;
         capability[driver.channel] = driver.capable(machineId);
     }
-    return { reach, capability };
+    return { reach, capability, link };
 }
 
+/**
+ * Each glyph's state: the channel's own link when it has one for this machine, else how far the
+ * channel reaches it. A link is the finer answer — reachable-but-reconnecting is exactly the state
+ * that used to be drawn as a healthy green — so it wins where it exists.
+ */
 export function machineChannelIcons(
     priority: readonly SessionChannel[],
     reach: MachineReach,
     capability: MachineCapability,
-): { channel: SessionChannel; up: boolean }[] {
-    return priority.flatMap((channel): { channel: SessionChannel; up: boolean }[] => {
+    link?: MachineLink,
+): { channel: SessionChannel; state: ChannelLinkState }[] {
+    const stateFor = (channel: SessionChannel, reached: boolean): ChannelLinkState =>
+        link?.[channel] ?? (reached ? 'connected' : 'off');
+    return priority.flatMap((channel): { channel: SessionChannel; state: ChannelLinkState }[] => {
         if (channel === 'server') {
             // Always drawn while switched on: a server that does not report the machine is still a
             // channel the App could use, so grey is the honest colour rather than absent.
-            return [{ channel, up: reach.server }];
+            return [{ channel, state: stateFor('server', reach.server) }];
         }
         if (channel === 'lan') {
-            return capability.lan ? [{ channel, up: reach.lan }] : [];
+            return capability.lan ? [{ channel, state: stateFor('lan', reach.lan) }] : [];
         }
-        return capability.relay ? [{ channel, up: reach.relay }] : [];
+        return capability.relay ? [{ channel, state: stateFor('relay', reach.relay) }] : [];
     });
 }
 

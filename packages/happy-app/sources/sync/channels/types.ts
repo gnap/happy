@@ -110,6 +110,15 @@ export type ChannelDriver = {
      */
     link(): ChannelLinkState | null;
     /**
+     * How this channel's link to *one machine* is doing, or null when it holds nothing for it.
+     *
+     * The global `link()` answers "is this transport up at all", which is the header's question.
+     * A machine list asks a narrower one — is this machine's own connection up — and the two can
+     * disagree: one machine's socket can be reconnecting while another's is live. A driver that
+     * holds per-machine connections answers here; the server, which has one connection, does not.
+     */
+    machineLink?(machineId: string): ChannelLinkState | null;
+    /**
      * What this channel can say about a session, or null when it has nothing to say about that one
      * — a machine it has never seen, a session it does not know.
      *

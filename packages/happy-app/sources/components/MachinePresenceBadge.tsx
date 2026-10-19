@@ -1,8 +1,15 @@
 import React from 'react';
 import { View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { StyleSheet } from 'react-native-unistyles';
-import { CHANNEL_ICONS, machineChannelIcons, type MachineCapability, type MachineReach } from '@/sync/machinePresence';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import {
+    CHANNEL_ICONS,
+    machineChannelIcons,
+    type MachineCapability,
+    type MachineLink,
+    type MachineReach,
+} from '@/sync/machinePresence';
+import type { ChannelLinkState } from '@/sync/channels/types';
 import { useLocalSetting } from '@/sync/storage';
 
 const CONNECTED = '#34C759';
@@ -23,9 +30,9 @@ function logDecision(
     priority: readonly string[],
     reach: MachineReach,
     capability: MachineCapability,
-    icons: { channel: string; up: boolean }[],
+    icons: { channel: string; state: ChannelLinkState }[],
 ): void {
-    const drew = icons.map((icon) => `${icon.channel}:${icon.up ? 'up' : 'down'}`).join(' ') || '(none)';
+    const drew = icons.map((icon) => `${icon.channel}:${icon.state}`).join(' ') || '(none)';
     const reached = [reach.lan ? 'lan' : '', reach.relay ? 'relay' : '', reach.server ? 'server' : ''].filter(Boolean).join(' ') || 'none';
     const summary = `${machineId ?? '?'} | ${priority.join('>')} | drew ${drew} | capable lan=${capability.lan} relay=${capability.relay} | reach ${reached}`;
     if (summary !== lastLogged) {
@@ -35,33 +42,52 @@ function logDecision(
 }
 
 /**
- * How a machine is reachable: one icon per enabled channel in priority order, green when that
- * channel reaches the machine now, grey when it does not.
+ * How each channel's link to this machine is doing: one icon per enabled channel in priority order,
+ * green when its own connection is live, the theme's "in progress" colour while it is connecting,
+ * and dimmed when it is not there.
  *
- * Two inputs rather than one, because a machine can be reachable over several channels at once and
- * a single "how is it reachable" answer can only name one of them: `reach` says which channels are
- * getting through right now, `capability` says which of them this machine is on at all. Only
- * channels switched on in the priority setting appear, the LAN icon only once the machine has been
- * seen on this network, and the relay icon only when the relay itself vouches for the machine.
+ * Three inputs, because they answer three different questions: `capability` says whether the icon
+ * is drawn at all, `link` says what that channel's connection to this machine is doing right now
+ * (a LAN socket reconnecting while reads still work is the state this used to hide), and `reach`
+ * stands in where a channel holds no per-machine link to report.
  */
 export const MachinePresenceBadge = React.memo(function MachinePresenceBadge({
     reach,
     capability,
+    link,
     /** Which machine this is about, for the log line only — an icon's absence has to be traceable. */
     machineId,
 }: {
     reach: MachineReach;
     capability: MachineCapability;
+    link?: MachineLink;
     machineId?: string;
 }) {
     const priority = useLocalSetting('channelPriority');
-    const icons = machineChannelIcons(priority, reach, capability);
+    const { theme } = useUnistyles();
+    const icons = machineChannelIcons(priority, reach, capability, link);
     logDecision(machineId, priority, reach, capability, icons);
+
+    const colorFor = (state: ChannelLinkState): { color: string; opacity: number } => {
+        if (state === 'connected') {
+            return { color: CONNECTED, opacity: 1 };
+        }
+        if (state === 'connecting') {
+            return { color: theme.colors.status.connecting, opacity: 1 };
+        }
+        return { color: DOWN, opacity: 1 };
+    };
 
     return (
         <View style={styles.container}>
-            {icons.map(({ channel, up }) => (
-                <Ionicons key={channel} name={CHANNEL_ICONS[channel]} size={10} color={up ? CONNECTED : DOWN} />
+            {icons.map(({ channel, state }) => (
+                <Ionicons
+                    key={channel}
+                    name={CHANNEL_ICONS[channel]}
+                    size={10}
+                    color={colorFor(state).color}
+                    style={{ opacity: colorFor(state).opacity }}
+                />
             ))}
         </View>
     );

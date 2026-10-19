@@ -286,9 +286,16 @@ function SessionInfoContent({ session }: { session: Session }) {
     const connectionWord = sessionStatus.state === 'restarting'
         ? t('status.restarting')
         : sessionStatus.isConnected ? t('status.online') : t('status.offline');
-    const connectionTint = sessionStatus.state === 'restarting'
+    // The channel glyph answers about the channel's own link, which is not the same as whether the
+    // session is reachable: the LAN can serve reads while its push/send socket is reconnecting, and
+    // that is the state a green glyph used to hide.
+    const channelLinkTint = channel.link === 'connected' ? '#34C759'
+        : channel.link === 'connecting' ? theme.colors.status.connecting
+            : channel.link === 'off' ? '#8E8E93'
+                : null;
+    const connectionTint = channelLinkTint ?? (sessionStatus.state === 'restarting'
         ? sessionStatus.statusColor
-        : sessionStatus.isConnected ? "#34C759" : "#8E8E93";
+        : sessionStatus.isConnected ? "#34C759" : "#8E8E93");
     // What the decision was made of, once per session: an answer nobody can check is how this
     // question became a mystery in the first place.
     const loggedDecision = React.useRef<string | null>(null);
@@ -470,7 +477,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                     )}
                     <Item
                         title={t('sessionInfo.connectionStatus')}
-                        detail={`${connectionWord} · ${channel.channel === 'lan' ? t('status.lan') : channel.channel === 'relay' ? t('sessionInfo.channelRelay') : t('sessionInfo.channelServer')}`}
+                        detail={`${connectionWord} · ${channel.channel === 'lan' ? t('status.lan') : channel.channel === 'relay' ? t('sessionInfo.channelRelay') : t('sessionInfo.channelServer')}${channel.link === 'connecting' ? ` · ${t('status.connecting')}` : channel.link === 'off' ? ` · ${t('status.disconnected')}` : ''}`}
                         subtitle={channelSubtitle}
                         subtitleLines={0}
                         icon={<Ionicons name={CHANNEL_ICONS[channel.channel]} size={29} color={connectionTint} />}
