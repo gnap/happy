@@ -36,6 +36,7 @@ import nacl from 'tweetnacl';
 import type { UpdateSessionBody } from '@slopus/happy-wire';
 import { versionStateOf } from './versionState';
 import { sessionTagOf } from './sessionTag';
+import { mergeSessionRoster } from './sessionRoster';
 import { BUILD_VERSION } from '../version';
 import type { ApiMachineClient } from '@/api/apiMachine';
 import { readSessionKey } from '@/api/sessionKeyPersistence';
@@ -1659,6 +1660,13 @@ export async function startDaemon(): Promise<void> {
                 ? { restartingSince: restartingStartedAt.get(session.happySessionId)! }
                 : {}),
             }));
+          // And every session this machine has on disk that is not among them. A process exiting
+          // changes whether a session is alive, not whether it exists — only archiving means that
+          // — so the durable store is what this list is of, and the live index above is what says
+          // which of them are running. See `mergeSessionRoster` for what a reboot did without it.
+          const roster = mergeSessionRoster(summaries, sessions, archivedSessionIds);
+          summaries.length = 0;
+          summaries.push(...roster);
           // A session being restarted is not tracked for part of that: the old process has been
           // signalled and the new one has not registered yet. Left out, it would vanish from the
           // list — and vanishing is how a restart reads from outside, which is the reading this
