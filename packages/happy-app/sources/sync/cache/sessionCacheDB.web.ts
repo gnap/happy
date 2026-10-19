@@ -6,6 +6,7 @@
  * file exports the same interface using IndexedDB (or in-memory as fallback).
  */
 
+import { mergeForCache, newestMessages } from './messageMerge';
 import type { Message } from '../typesMessage';
 import { collapseDuplicateMessages } from '../messageIdentity';
 import { log } from '@/log';
@@ -206,7 +207,7 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
         });
     }
 
-    async getSessionMessages(sessionId: string): Promise<Message[]> {
+    async getSessionMessages(sessionId: string, limit?: number): Promise<Message[]> {
         await this.initialize();
         return new Promise((resolve, reject) => {
             const req = this.getStore().messages.get(sessionId);
@@ -224,7 +225,10 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
                         // skip malformed
                     }
                 }
-                resolve(messages);
+                // Oldest first and capped. The stored array is in the store's newest-first order, and
+                // returning it as it was made hydration's `slice(-limit)` take the oldest messages
+                // instead of the newest — which then got written back over the record.
+                resolve(newestMessages(messages, limit));
             };
             req.onerror = () => reject(req.error);
         });
@@ -277,8 +281,24 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
                 cachedAt: row.cachedAt,
                 reducerState: row.reducerStateJson,
             });
-            const messageBlobs = messages.map((m) => JSON.stringify(m));
-            messagesStore.put({ sessionId: row.sessionId, messages: messageBlobs });
+            // Merged with what the record already holds, not written over it: the window is what is
+            // on screen, and it can be narrower than what was cached — an open on a narrow window, a
+            // tail read after a long absence. Replacing deleted the rest, which is how cached
+            // messages disappeared on this backend while the SQLite one kept them.
+            const existing = messagesStore.get(row.sessionId);
+            existing.onsuccess = () => {
+                const held = (existing.result as { messages?: string[] } | undefined)?.messages ?? [];
+                const decoded: Message[] = [];
+                for (const json of held) {
+                    try {
+                        decoded.push(JSON.parse(json) as Message);
+                    } catch {
+                        // skip malformed
+                    }
+                }
+                const merged = mergeForCache(decoded, messages).map((m) => JSON.stringify(m));
+                messagesStore.put({ sessionId: row.sessionId, messages: merged });
+            };
             const tx = cache.transaction;
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
