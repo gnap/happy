@@ -381,8 +381,9 @@ export class ClaudeSession {
      * while that turn runs and no longer, and the process underneath is untouched by the exchange.
      */
     async run(): Promise<void> {
-        let opts = this.initialOpts;
-        this.serve = (next) => { opts = next; };
+        try {
+            let opts = this.initialOpts;
+            this.serve = (next) => { opts = next; };
 
 
     let currentGeneration = opts.claudeEnvVarsGeneration;
@@ -1071,5 +1072,18 @@ export class ClaudeSession {
         this.response = null;
         this.turnAbort = null;
     }
+        } finally {
+            // run() exited before loops started (null initial message, /clear, /context without handler).
+            // Release the turn runTurn() is waiting on, or it hangs forever.
+            logger.debug(`[claudeRemote] run() finally: alive=${this.alive} busy=${this.busy} resolveTurn=${this.resolveTurn ? 'waiting' : 'null'}`);
+            if (this.resolveTurn) {
+                logger.debug('[claudeRemote] run() exited early, releasing pending turn');
+                const done = this.resolveTurn;
+                this.resolveTurn = null;
+                this.alive = false;
+                this.busy = false;
+                done();
+            }
+        }
     }
 }
