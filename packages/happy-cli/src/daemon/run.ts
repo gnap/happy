@@ -35,6 +35,8 @@ import { ACCOUNT_PROOF_WINDOW_MS } from './accountProof';
 import nacl from 'tweetnacl';
 import type { UpdateSessionBody } from '@slopus/happy-wire';
 import { versionStateOf } from './versionState';
+import { sessionTagOf } from './sessionTag';
+import { mergeSessionRoster } from './sessionRoster';
 import { BUILD_VERSION } from '../version';
 import type { ApiMachineClient } from '@/api/apiMachine';
 import { readSessionKey } from '@/api/sessionKeyPersistence';
@@ -1658,6 +1660,13 @@ export async function startDaemon(): Promise<void> {
                 ? { restartingSince: restartingStartedAt.get(session.happySessionId)! }
                 : {}),
             }));
+          // And every session this machine has on disk that is not among them. A process exiting
+          // changes whether a session is alive, not whether it exists — only archiving means that
+          // — so the durable store is what this list is of, and the live index above is what says
+          // which of them are running. See `mergeSessionRoster` for what a reboot did without it.
+          const roster = mergeSessionRoster(summaries, sessions, archivedSessionIds);
+          summaries.length = 0;
+          summaries.push(...roster);
           // A session being restarted is not tracked for part of that: the old process has been
           // signalled and the new one has not registered yet. Left out, it would vanish from the
           // list — and vanishing is how a restart reads from outside, which is the reading this
@@ -1792,12 +1801,12 @@ export async function startDaemon(): Promise<void> {
             getHistory: (address, query) => {
               // Two ways in. By session id is what a client learns from the server; by tag is
               // the CLI's own identity, which exists before the server has ever answered -- so a
-              // session waiting out a server stall is still reachable. A tag-addressed read
-              // deliberately does not require the session to be tracked at all: the log is keyed
-              // by (tag, site) on disk, so it survives a daemon restart too.
+              // session waiting out a server stall is still reachable. Neither requires the
+              // session to be tracked: the log is keyed by (tag, site) on disk, so both survive a
+              // daemon restart. See `sessionTagOf` for why the id side has to read two stores.
               const tag = 'tag' in address
                 ? address.tag
-                : [...pidToTrackedSession.values()].find((s) => s.happySessionId === address.sessionId)?.sessionTag;
+                : sessionTagOf(address.sessionId, pidToTrackedSession.values(), sessions);
               if (!tag) {
                 return null; // not reported yet -- the client should retry, not give up
               }
