@@ -303,9 +303,16 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
             const tx = this.db!.transaction([STORE_SESSIONS_LIST], 'readonly');
             const req = tx.objectStore(STORE_SESSIONS_LIST).get(1);
             req.onsuccess = () => {
-                const row = req.result as { id: number; sessionsJson: string; cachedAt: number } | undefined;
+                // See the note on the other IndexedDB reader: the keys are saved with the list and
+                // have to come back with it, or a cold start has no way to a session key but the
+                // server.
+                const row = req.result as CachedSessionListRow | undefined;
                 if (!row) { resolve(null); return; }
-                resolve({ sessionsJson: row.sessionsJson, cachedAt: row.cachedAt });
+                resolve({
+                    sessionsJson: row.sessionsJson,
+                    cachedAt: row.cachedAt,
+                    encryptionKeysJson: row.encryptionKeysJson,
+                });
             };
             req.onerror = () => reject(req.error);
         });
