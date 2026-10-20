@@ -7,6 +7,7 @@ import {
     clearAllMessageCaches,
 } from './messageCache';
 import { MemorySessionCacheDB, overrideSessionCacheDB, resetSessionCacheDB } from './sessionCacheDB';
+import { overrideHotWindowStore, saveHotWindow, type HotWindowStore } from './hotWindow';
 import { createReducer } from '../reducer/reducer';
 import { serializeReducerStateToJson, SERIALIZER_SCHEMA_VERSION } from './reducerStateSerializer';
 import type { Session } from '../storageTypes';
@@ -53,6 +54,14 @@ function makeMessages(count: number): Message[] {
         kind: 'user-text' as const,
         text: `Message ${i}`,
     }));
+}
+
+class HotStore implements HotWindowStore {
+    private values = new Map<string, string>();
+    getString(key: string): string | undefined { return this.values.get(key); }
+    set(key: string, value: string): void { this.values.set(key, value); }
+    delete(key: string): void { this.values.delete(key); }
+    getAllKeys(): string[] { return [...this.values.keys()]; }
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +130,32 @@ describe('loadMessageCache', () => {
 
     afterEach(() => {
         resetSessionCacheDB();
+        overrideHotWindowStore(null);
+    });
+
+    it('answers from the hot window without waiting on the database', async () => {
+        const session = { ...makeSession('cursor'), id: 'sess-hot' };
+        overrideHotWindowStore(new HotStore());
+        saveHotWindow(session.id, {
+            messages: makeMessages(2),
+            reducerStateJson: serializeReducerStateToJson(createReducer()),
+            lastSeq: 9,
+            oldestSeq: 1,
+            hasOlderMessages: false,
+        });
+        // A database read at this point is a failure: the hot path exists precisely so that a tap
+        // does not wait for SQLite — or for the JS thread to get to its callback.
+        const failing = new MemorySessionCacheDB();
+        failing.getSessionCache = async () => { throw new Error('database must not be read'); };
+        failing.getSessionMessages = async () => { throw new Error('database must not be read'); };
+        overrideSessionCacheDB(failing);
+
+        const result = await loadMessageCache(session);
+
+        expect(result).not.toBeNull();
+        expect(result!.messages.map((message) => message.id)).toEqual(['m0', 'm1']);
+        expect(result!.lastSeq).toBe(9);
+        expect(result!.oldestSeq).toBe(1);
     });
 
     it('returns null for non-cursor sessions', async () => {
