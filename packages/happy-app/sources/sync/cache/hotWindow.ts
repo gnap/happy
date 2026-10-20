@@ -50,6 +50,17 @@ export function overrideHotWindowStore(override: HotWindowStore | null): void {
     injected = override;
 }
 
+/**
+ * The same synchronous store, for the other caches that want a first-frame copy.
+ *
+ * The session list is the other thing a cold start cannot afford to await: it is what the home
+ * screen draws before anything else exists. Sharing the accessor keeps one place where MMKV is
+ * resolved (and one place a test can substitute).
+ */
+export function getSyncStore(): HotWindowStore | null {
+    return getStore();
+}
+
 function getStore(): HotWindowStore | null {
     if (injected !== undefined) {
         return injected;

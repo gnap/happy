@@ -9,8 +9,12 @@
  */
 
 import { getSessionCacheDB } from './sessionCacheDB';
+import { getSyncStore } from './hotWindow';
 import type { Session } from '../storageTypes';
 import { log } from '@/log';
+
+/** The synchronous copy the home screen draws before SQLite answers. */
+const SESSIONS_LIST_HOT_KEY = 'sessions-list-hot-v1';
 
 type SessionListEntry = Omit<Session, 'presence'> & { presence?: Session['presence'] };
 
@@ -46,6 +50,33 @@ export async function preloadSessionsListCache(): Promise<void> {
  * Try to load the cached session list. Returns null if empty or unavailable.
  */
 export async function loadSessionsListCache(): Promise<{ sessions: SessionListEntry[]; cachedAt: number; encryptionKeys: CachedEncryptionKeys } | null> {
+    // The synchronous copy first. The home screen is drawn from this list; asking SQLite for it —
+    // and waiting behind whatever else the JS thread is doing — is the cold-start delay this
+    // cache exists to remove.
+    const store = getSyncStore();
+    if (store) {
+        const raw = store.getString(SESSIONS_LIST_HOT_KEY);
+        if (raw) {
+            try {
+                const hot = JSON.parse(raw) as {
+                    sessions?: SessionListEntry[];
+                    cachedAt?: number;
+                    encryptionKeys?: CachedEncryptionKeys;
+                };
+                if (Array.isArray(hot.sessions)) {
+                    console.warn(`📦 sessionsListCache: hot copy — ${hot.sessions.length} sessions`);
+                    return {
+                        sessions: hot.sessions,
+                        cachedAt: Number(hot.cachedAt) || 0,
+                        encryptionKeys: hot.encryptionKeys ?? {},
+                    };
+                }
+            } catch {
+                // Fall through to the archive; a corrupt synchronous copy is not a reason to be
+                // without a list.
+            }
+        }
+    }
     try {
         const db = getSessionCacheDB();
         const row = await db.getSessionsListCache();
@@ -76,13 +107,28 @@ export async function loadSessionsListCache(): Promise<{ sessions: SessionListEn
  * Persist the decrypted session list after a successful fetch.
  */
 export async function saveSessionsListCache(sessions: SessionListEntry[], encryptionKeys?: CachedEncryptionKeys): Promise<void> {
+    const cachedAt = Date.now();
+    const keysJson = encryptionKeys && Object.keys(encryptionKeys).length > 0
+        ? JSON.stringify(encryptionKeys) : undefined;
+    // Synchronous copy first: the next cold start draws the list from it, and the database write
+    // below is the archive rather than the source of the first frame.
+    const store = getSyncStore();
+    if (store) {
+        try {
+            store.set(SESSIONS_LIST_HOT_KEY, JSON.stringify({
+                sessions,
+                cachedAt,
+                encryptionKeys: encryptionKeys ?? {},
+            }));
+        } catch {
+            // The archive below still has it; the next start pays the asynchronous path.
+        }
+    }
     try {
         const db = getSessionCacheDB();
-        const keysJson = encryptionKeys && Object.keys(encryptionKeys).length > 0
-            ? JSON.stringify(encryptionKeys) : undefined;
         await db.saveSessionsListCache({
             sessionsJson: JSON.stringify(sessions),
-            cachedAt: Date.now(),
+            cachedAt,
             encryptionKeysJson: keysJson,
         });
         console.warn(`📦 sessionsListCache: saved ${sessions.length} sessions (keys=${encryptionKeys ? Object.keys(encryptionKeys).length : 0})`);
@@ -99,6 +145,14 @@ export async function saveSessionsListCache(sessions: SessionListEntry[], encryp
  * Clear the session list cache. Called on logout.
  */
 export async function clearSessionsListCache(): Promise<void> {
+    const store = getSyncStore();
+    if (store) {
+        try {
+            store.delete(SESSIONS_LIST_HOT_KEY);
+        } catch {
+            // ignore
+        }
+    }
     try {
         const db = getSessionCacheDB();
         await db.clearSessionsListCache();
