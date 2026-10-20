@@ -65,6 +65,10 @@ export function useLanScanner(): void {
                     console.log(`📡 LAN scanner: this account's fingerprint is ${await accountFingerprintOf(accountPublicKey)}`);
                 }
                 let rawCount = 0;
+                // How long the browse actually took, so a fixed-timeout scan — the shape this
+                // replaced, where a daemon answering in 50ms still cost the whole timeout — is
+                // visible in the log rather than inferred.
+                const scanStartedAt = Date.now();
                 const found = await discoverMachines({
                     accountPublicKey,
                     timeoutMs: SCAN_TIMEOUT_MS,
@@ -86,7 +90,9 @@ export function useLanScanner(): void {
                     lastLoggedIds = key;
                     const detail = found.map((m) => `${m.machineId.slice(0, 8)}@${m.host}:${m.port}`).join(', ');
                     console.log(
-                        `📡 LAN scan: ${rawCount} advertised, ${found.length} for this account` + (detail ? ` — ${detail}` : '')
+                        `📡 LAN scan: ${rawCount} advertised, ${found.length} for this account` +
+                        ` in ${Date.now() - scanStartedAt}ms` +
+                        (detail ? ` — ${detail}` : '')
                     );
                 }
                 const at = Date.now();

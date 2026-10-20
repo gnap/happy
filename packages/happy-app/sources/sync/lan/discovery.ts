@@ -64,6 +64,44 @@ function toDiscoveredMachine(service: ZeroconfService): DiscoveredMachine | null
     };
 }
 
+/** A short grace period after the first answer; production uses this. */
+const DEFAULT_SETTLE_MS = 400;
+
+/**
+ * The browse, as a stream rather than a fixed window.
+ *
+ * `scan()` collects for its whole timeout and only then resolves. That is the wrong shape for an
+ * App that wants to know whether the machine is there *now*: the daemon answers in tens of
+ * milliseconds, and the remaining seconds change nothing except that the first sighting — and the
+ * LAN channel built on it — appears seconds late. `scanStream()` yields each resolved service as
+ * it arrives, so this can collect for a short settle window after the first one and return.
+ *
+ * Breaking the loop runs the generator's cleanup, which stops the native scan.
+ */
+async function scanUntilSettled(
+    zeroconf: typeof import('expo-zeroconf'),
+    type: string,
+    options: { timeoutMs: number; settleMs: number },
+): Promise<ZeroconfService[]> {
+    const services: ZeroconfService[] = [];
+    const startedAt = Date.now();
+    let firstFoundAt: number | null = null;
+    const stream = zeroconf.scanStream(type, { timeoutMs: options.timeoutMs, autoResolve: true });
+    for await (const service of stream) {
+        services.push(service);
+        if (firstFoundAt === null) {
+            firstFoundAt = Date.now();
+        }
+        if (Date.now() - firstFoundAt >= options.settleMs) {
+            break;
+        }
+        if (Date.now() - startedAt >= options.timeoutMs) {
+            break;
+        }
+    }
+    return services;
+}
+
 /**
  * Browses for `_happy._tcp` and returns the daemons that belong to `accountPublicKey`.
  *
@@ -76,6 +114,17 @@ export async function discoverMachines(options: {
     accountPublicKey: Uint8Array;
     /** How long to browse before giving up. mDNS needs a moment; 5s is the module default. */
     timeoutMs?: number;
+    /**
+     * How long to keep collecting after the first machine answers, before returning.
+     *
+     * A browse is a *stream* of answers, not one lookup: the daemon on a LAN answers in tens of
+     * milliseconds, but the module's `scan()` only resolves when its whole timeout expires — four
+     * seconds in which the App already knows the machine is there and keeps waiting as if it did
+     * not. This is the compromise between "first answer" and "every machine on the network": collect
+     * for this long after the first one, then stop. The rest of the window was only ever useful for
+     * machines that advertise late, and those are picked up by the next scan.
+     */
+    settleMs?: number;
     /**
      * Called with how many services the browse actually saw, before the account filter runs.
      * Lets a caller distinguish "nothing is advertising" (network, or the local-network
@@ -118,9 +167,9 @@ export async function discoverMachines(options: {
             return [];
         }
         try {
-            services = await zeroconf.scan(LAN_SERVICE_TYPE, {
+            services = await scanUntilSettled(zeroconf, LAN_SERVICE_TYPE, {
                 timeoutMs: options.timeoutMs ?? 5000,
-                autoResolve: true,
+                settleMs: options.settleMs ?? DEFAULT_SETTLE_MS,
             });
         } catch {
             // A failed browse is not an error worth propagating — the caller retries or falls back.

@@ -19,7 +19,9 @@ import {
     deserializeReducerStateOrCreate,
     SERIALIZER_SCHEMA_VERSION,
 } from './reducerStateSerializer';
-import type { ReducerState } from '../reducer/reducer';
+import { clearAllHotWindows, clearHotWindow, loadHotWindow, saveHotWindow } from './hotWindow';
+import { MAX_REDUCER_STATE_BYTES } from './limits';
+import { createReducer, type ReducerState } from '../reducer/reducer';
 import type { Message } from '../typesMessage';
 import type { Session } from '../storageTypes';
 import { collapseDuplicateMessages } from '../messageIdentity';
@@ -115,6 +117,31 @@ export async function loadMessageCache(session: Session, servedByDaemon = false)
         return null;
     }
 
+    // The synchronous window first. It is what makes opening a conversation independent of both
+    // the database's queue and the JS thread's queue: the messages a screen needs are already in
+    // memory-mapped storage, and the return happens before the first await. SQLite below is the
+    // fallback for sessions with no hot copy and the archive for everything older.
+    const hotStartedAt = Date.now();
+    const hot = loadHotWindow(session.id);
+    if (hot) {
+        const messages = collapseDuplicateMessages(hot.messages);
+        const reducerState = trimReducerState(
+            deserializeReducerStateOrCreate(hot.reducerStateJson),
+            new Set(messages.map((message) => message.id)),
+        );
+        log.log(
+            `📦 messageCache: hot window ${messages.length} messages for ${session.id}` +
+            ` in ${Date.now() - hotStartedAt}ms (${hot.bytes}b)`
+        );
+        return {
+            messages,
+            reducerState,
+            lastSeq: hot.lastSeq,
+            oldestSeq: hot.oldestSeq,
+            hasOlderMessages: hot.hasOlderMessages,
+        };
+    }
+
     try {
         const db = getSessionCacheDB();
         // Straighten rows written before the projection collapsed the two wire directions of one
@@ -127,14 +154,11 @@ export async function loadMessageCache(session: Session, servedByDaemon = false)
             repairedSessions.add(session.id);
         }
         const tStart = Date.now();
-        // Don't block fetchMessages if DB is still initializing (e.g. preload not done). Skip cache after timeout.
-        const CACHE_LOAD_TIMEOUT_MS = 3000;
-        const cacheRow = await Promise.race([
-            db.getSessionCache(session.id),
-            new Promise<null>((_, reject) =>
-                setTimeout(() => reject(new Error('cache load timeout')), CACHE_LOAD_TIMEOUT_MS)
-            ),
-        ]);
+        // Awaited, not raced against a timer. The timer used to return `null` at three seconds,
+        // which — on a busy JS thread — fired after the query had already done its work and threw
+        // the result away, turning a slow open into an empty one that waited for the network. A
+        // local read has no useful deadline; the caller has the hot window for the fast path.
+        const cacheRow = await db.getSessionCache(session.id);
         const tRow = Date.now();
         if (!cacheRow) {
             log.log(`📦 messageCache: no cache row for ${session.id}`);
@@ -300,8 +324,34 @@ export async function saveMessageCache(
         // `trimReducerState`. The window's own state is untouched — this is the copy that goes to
         // disk.
         const newest = [...messages].sort((a, b) => b.createdAt - a.createdAt).slice(0, HYDRATE_MESSAGE_LIMIT);
-        const reducerStateJson = serializeReducerStateToJson(trimReducerState(reducerState, new Set(newest.map((message) => message.id))));
+        let reducerStateJson = serializeReducerStateToJson(trimReducerState(reducerState, new Set(newest.map((message) => message.id))));
+        if (reducerStateJson.length > MAX_REDUCER_STATE_BYTES) {
+            // The state is a projection of the window; past this size it is carrying something the
+            // trim does not take, and deserialising it costs more than rebuilding it from the
+            // messages. A fresh state is correct, just not free.
+            log.log(
+                `📦 messageCache: dropping oversized reducer state for ${session.id}` +
+                ` (${reducerStateJson.length}b > ${MAX_REDUCER_STATE_BYTES}b)`
+            );
+            reducerStateJson = serializeReducerStateToJson(createReducer());
+        }
         const stateMs = Date.now() - started;
+        // The window's own floor, not the store's: the hot copy holds sixty messages, and reporting
+        // the oldest seq the *store* reached would make the next paging read skip everything
+        // between the two. Same rule the database load applies to a truncated window.
+        const floors = newest.map((message) => message.seq).filter((seq): seq is number => typeof seq === 'number');
+        const truncated = messages.length > newest.length;
+        const hotOldestSeq = truncated && floors.length === newest.length ? Math.min(...floors) : oldestSeq;
+        // The synchronous copy a tap reads, written before the database on purpose: the next open
+        // must not depend on this connection being free, or on the JS thread getting to the SQLite
+        // callback in time. It is the same window and the same state the row below describes.
+        saveHotWindow(session.id, {
+            messages: newest,
+            reducerStateJson,
+            lastSeq,
+            oldestSeq: hotOldestSeq,
+            hasOlderMessages,
+        });
         const row = {
             sessionId: session.id,
             lastSeq,
@@ -332,6 +382,9 @@ export async function saveMessageCache(
  * when a session is deleted.
  */
 export async function clearMessageCache(sessionId: string): Promise<void> {
+    // The synchronous copy goes first: a rebuild that cleared SQLite but left the hot window would
+    // reopen to the very conversation it was rebuilding away from.
+    clearHotWindow(sessionId);
     try {
         const db = getSessionCacheDB();
         await db.clearSessionCache(sessionId);
@@ -346,6 +399,7 @@ export async function clearMessageCache(sessionId: string): Promise<void> {
  * Clear all session caches. Used on logout.
  */
 export async function clearAllMessageCaches(): Promise<void> {
+    clearAllHotWindows();
     try {
         const db = getSessionCacheDB();
         await db.clearAllCaches();

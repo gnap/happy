@@ -12,6 +12,7 @@
 
 import type { Message } from '../typesMessage';
 import { collapseDuplicateMessages } from '../messageIdentity';
+import { MAX_CACHED_MESSAGES, MAX_REDUCER_STATE_BYTES } from './limits';
 import { StatementQueue } from './statementQueue';
 import { log } from '@/log';
 import * as SQLite from 'expo-sqlite';
@@ -535,57 +536,84 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
     }
 
     /**
-     * One row per message, once.
+     * Brings on-disk state up to what this build reads, once.
      *
-     * The table used to be keyed only by the id a delivery carried, and one message has two of
-     * those: the local id on the wire's queued direction, and the server id on the echo. A build
-     * that stored a page of wire entries therefore stored the same message twice, and every open
-     * read the copies back. The column and the unique index make that state unrepresentable from
-     * now on; this pass converts what is already on disk, keeping the copy that carries the
-     * server id. `user_version` makes it run once — the conversion is a table scan, and doing it
-     * on every launch would be a standing cost for a problem that cannot recur.
+     * Two conversions, both table scans too expensive to repeat on every launch:
+     *
+     * - v1: one row per message. The table used to be keyed only by the id a delivery carried, and
+     *   one message has two of those (the local id on the wire's queued direction and the server id
+     *   on the echo), so a page of wire entries stored the same message twice. The column and the
+     *   unique index make that unrepresentable from now on.
+     * - v2: a bounded window. The table used to keep every message ever seen and reducer states
+     *   that could reach tens of megabytes; the write path is bounded now, and this converts what
+     *   is already there. A state past the cap is dropped, not trimmed: rebuilding it from the
+     *   window is the reducer's job and costs less than deserialising it forever.
+     *
+     * `user_version` gates both, so a database converted here never pays for it again.
      */
     private async migrateMessageIdentity(): Promise<void> {
         const version = await this.db.getFirstAsync('PRAGMA user_version') as { user_version: number } | null;
-        if ((version?.user_version ?? 0) >= 1) {
+        const from = version?.user_version ?? 0;
+        if (from >= 2) {
             return;
         }
         const started = Date.now();
-        try {
-            await this.db.execAsync('ALTER TABLE session_messages ADD COLUMN local_id TEXT');
-        } catch {
-            // The column already exists: a fresh install that created it above, or a migration
-            // that got this far before failing later.
+        if (from < 1) {
+            try {
+                await this.db.execAsync('ALTER TABLE session_messages ADD COLUMN local_id TEXT');
+            } catch {
+                // The column already exists: a fresh install that created it above, or a migration
+                // that got this far before failing later.
+            }
+            await this.db.execAsync(`
+                UPDATE session_messages
+                   SET local_id = json_extract(message_json, '$.localId')
+                 WHERE local_id IS NULL
+                   AND json_valid(message_json)
+                   AND json_extract(message_json, '$.localId') IS NOT NULL;
+
+                DELETE FROM session_messages
+                 WHERE local_id IS NOT NULL
+                   AND message_id NOT IN (
+                       SELECT message_id FROM (
+                           SELECT message_id,
+                                  ROW_NUMBER() OVER (
+                                      PARTITION BY session_id, local_id
+                                      ORDER BY (message_id != local_id) DESC, created_at DESC
+                                  ) AS rn
+                             FROM session_messages
+                            WHERE local_id IS NOT NULL
+                       )
+                        WHERE rn = 1
+                   );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_local
+                    ON session_messages(session_id, local_id)
+                    WHERE local_id IS NOT NULL;
+            `);
         }
         await this.db.execAsync(`
-            UPDATE session_messages
-               SET local_id = json_extract(message_json, '$.localId')
-             WHERE local_id IS NULL
-               AND json_valid(message_json)
-               AND json_extract(message_json, '$.localId') IS NOT NULL;
-
             DELETE FROM session_messages
-             WHERE local_id IS NOT NULL
-               AND message_id NOT IN (
-                   SELECT message_id FROM (
-                       SELECT message_id,
-                              ROW_NUMBER() OVER (
-                                  PARTITION BY session_id, local_id
-                                  ORDER BY (message_id != local_id) DESC, created_at DESC
-                              ) AS rn
-                         FROM session_messages
-                        WHERE local_id IS NOT NULL
-                   )
-                    WHERE rn = 1
-               );
+             WHERE message_id IN (
+                 SELECT message_id FROM (
+                     SELECT message_id,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY session_id
+                                ORDER BY created_at DESC
+                            ) AS rn
+                       FROM session_messages
+                 )
+                  WHERE rn > ${MAX_CACHED_MESSAGES}
+             );
 
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_local
-                ON session_messages(session_id, local_id)
-                WHERE local_id IS NOT NULL;
+            UPDATE session_cache
+               SET reducer_state = '{}'
+             WHERE length(reducer_state) > ${MAX_REDUCER_STATE_BYTES};
 
-            PRAGMA user_version = 1;
+            PRAGMA wal_checkpoint(TRUNCATE);
+            PRAGMA user_version = 2;
         `);
-        log.log(`📦 sessionCacheDB: message identity migration took ${Date.now() - started}ms`);
+        log.log(`📦 sessionCacheDB: cache migration took ${Date.now() - started}ms`);
     }
 
     private async ensureReady(): Promise<void> {

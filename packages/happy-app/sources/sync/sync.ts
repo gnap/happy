@@ -72,6 +72,7 @@ import { FeedItem } from './feedTypes';
 import { UserProfile } from './friendTypes';
 import { resolveMessageModeMeta, resolveMessageProfileEnv } from './messageMeta';
 import { loadMessageCache, saveMessageCache, clearMessageCache, clearAllMessageCaches, preloadSessionCacheDB, getCachedLastSeq } from './cache/messageCache';
+import { MAX_CACHED_MESSAGES } from './cache/limits';
 import { preloadSessionsListCache, loadSessionsListCache, saveSessionsListCache, clearSessionsListCache } from './cache/sessionsListCache';
 import { olderAfterSeq } from './cacheSegment';
 import { overrideSessionCacheDB, IndexedDBSessionCacheDB } from './cache/sessionCacheDB';
@@ -653,17 +654,31 @@ class Sync {
 
     /** Invalidate all data syncs (called on app resume / window becoming visible). */
     #invalidateAllSyncs() {
-        this.purchasesSync.invalidate();
-        this.profileSync.invalidate();
-        this.machinesSync.invalidate();
-        this.pushTokenSync.invalidate();
+        // The list and the presence behind it first: they are what the screens being resumed draw.
+        // Everything else updates state that is already on screen, and must not take the JS thread
+        // at the same instant a session hydrates — measured on a device, a hydration that took
+        // 50ms on a quiet thread took six seconds beside feed/artifacts/friends/machines landing
+        // together. Spacing them out costs a second of freshness nobody is waiting on.
         this.sessionsSync.invalidate();
-        this.nativeUpdateSync.invalidate();
-        log.log('🖥️ Invalidating artifacts sync');
-        this.artifactsSync.invalidate();
-        this.friendsSync.invalidate();
-        this.friendRequestsSync.invalidate();
-        this.feedSync.invalidate();
+        this.machinesSync.invalidate();
+        this.#invalidateBackgroundSyncs();
+    }
+
+    /** Syncs whose answers update a screen that is already rendered, spaced out behind an open. */
+    #invalidateBackgroundSyncs(delayMs: number = 800) {
+        const background = [
+            this.profileSync,
+            this.purchasesSync,
+            this.pushTokenSync,
+            this.nativeUpdateSync,
+            this.artifactsSync,
+            this.friendsSync,
+            this.friendRequestsSync,
+            this.feedSync,
+        ];
+        background.forEach((sync, index) => {
+            setTimeout(() => sync.invalidate(), delayMs + index * 250);
+        });
     }
 
     /**
@@ -1007,19 +1022,12 @@ class Sync {
         }
 
         // Invalidate sync
-        log.log('🔄 #init: Invalidating all syncs');
-        this.sessionsSync.invalidate();
+        log.log('🔄 #init: Invalidating syncs');
+        // The same split as a resume: the list, its machines and its settings now; the rest as
+        // state updates after the first screen and the first session open have had the thread.
+        this.#invalidateAllSyncs();
         this.settingsSync.invalidate();
-        this.profileSync.invalidate();
-        this.purchasesSync.invalidate();
-        this.machinesSync.invalidate();
-        this.pushTokenSync.invalidate();
-        this.nativeUpdateSync.invalidate();
-        this.friendsSync.invalidate();
-        this.friendRequestsSync.invalidate();
-        this.artifactsSync.invalidate();
-        this.feedSync.invalidate();
-        log.log('🔄 #init: All syncs invalidated, including artifacts');
+        log.log('🔄 #init: Essential syncs invalidated, the rest staggered');
 
         // Wait for both sessions and machines to load, then mark as ready.
         // Use a timeout so we still call applyReady() if fetch keeps failing (e.g. network/401);
@@ -1170,7 +1178,12 @@ class Sync {
         // A session on a daemon channel is one the CLI keeps a log for, whatever the server has
         // managed to tell us about it.
         const servedByDaemon = this.preferredChannel(sessionId) !== 'server';
-        const saved = await saveMessageCache(session, sessionMsgs.messages, sessionMsgs.reducerState, lastSeq, oldestSeq, hasOlderMessages, servedByDaemon);
+        // The store may hold a whole session in memory; the cache keeps the newest window and lets
+        // the channel page the rest back if it is needed. `messages` is sorted newest-first.
+        const cachedMessages = sessionMsgs.messages.length > MAX_CACHED_MESSAGES
+            ? sessionMsgs.messages.slice(0, MAX_CACHED_MESSAGES)
+            : sessionMsgs.messages;
+        const saved = await saveMessageCache(session, cachedMessages, sessionMsgs.reducerState, lastSeq, oldestSeq, hasOlderMessages, servedByDaemon);
         // The window's anchors are written only once the messages they describe are on disk, and
         // never before. A crash between the two then leaves anchors *older* than the window they
         // belong to, which costs a re-read that dedup absorbs — the other order would leave them
@@ -1792,7 +1805,11 @@ class Sync {
         // still go out and fail, which is the connection the setting exists to stop — the fallback
         // in the catch would reach the same place, but only after trying.
         if (!channelEnabled(this.channelPriority(), 'server')) {
-            await this.fetchSessionListFromDaemons().catch((error) => {
+            // In the background, not awaited: the list the App is showing is the cached one, and a
+            // daemon list — which begins with an mDNS browse — is an update to that state, not a
+            // prerequisite for rendering it. Awaiting it here made a local-first screen wait on
+            // network I/O whose answer only adds rows.
+            void this.fetchSessionListFromDaemons().catch((error) => {
                 log.log(`📡 fetchSessions: daemon session list failed: ${String(error)}`);
             });
             return;
@@ -2029,11 +2046,13 @@ class Sync {
             // (the app's own copy survives, and `sessionsListCache` covers a cold start), but the
             // daemon can say which sessions exist and are alive right now — including one this app
             // has never seen, which is exactly the case a cached list cannot cover.
-            try {
-                await this.fetchSessionListFromDaemons();
-            } catch (lanError) {
+            // Fire and forget, for the same reason as the server-disabled branch above: this is a
+            // state update fed by the LAN, and the screen already has the cached list. Awaiting it
+            // put a 4-second mDNS browse behind every failed server fetch, which read as the list
+            // itself being slow.
+            void this.fetchSessionListFromDaemons().catch((lanError) => {
                 log.log(`📡 fetchSessions: LAN list failed: ${String(lanError)}`);
-            }
+            });
             // No spinner risk: sessionListViewData is initialised to [] on applyReady, so an
             // empty store already renders the empty state. _forceFullRefreshPending is also only
             // cleared inside the try, so a failed attempt stays pending and the next invalidation
