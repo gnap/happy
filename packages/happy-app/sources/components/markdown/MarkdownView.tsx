@@ -677,6 +677,12 @@ const style = StyleSheet.create((theme) => ({
         borderBottomWidth: 1,
         borderBottomColor: theme.colors.divider,
         alignItems: 'flex-start',
+        // A column is as wide as its widest cell, and the table sits in a horizontal scroll — so
+        // without a ceiling one long sentence becomes one absurdly wide column that is read by
+        // scrolling sideways instead of wrapping. The cap is what makes the text wrap; the scroll
+        // stays for tables with many columns, which are wide for a legitimate reason.
+        maxWidth: 220,
+        flexShrink: 1,
     },
     tableCellFirst: {
         borderTopWidth: 0,
