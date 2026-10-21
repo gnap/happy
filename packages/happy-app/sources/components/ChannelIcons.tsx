@@ -20,8 +20,9 @@ function linkColor(
         return { color: theme.colors.status.connected, opacity: 1 };
     }
     if (state === 'connecting') {
-        // White in the dark theme, blue in the light one: the theme already knows what "in
-        // progress" looks like against its own header.
+        // Blue in both themes — the dark one uses the iOS system blue for contrast against its
+        // near-black header. It used to be white there, which read as a lit channel rather than
+        // one still being reached, and sat too close to the header's own foreground.
         return { color: theme.colors.status.connecting, opacity: 1 };
     }
     // The header's own foreground, dimmed — but not into invisibility. At 0.45 on a near-black
