@@ -497,6 +497,12 @@ export async function startDaemon(): Promise<void> {
           existingSession.sessionTag = sessionMetadata.sessionTag;
         }
         existingSession.lastHeartbeat = Date.now();
+        // It just reported itself, so it is running: whatever an earlier disconnect wrote down
+        // about it is no longer true.
+        existingSession.exitTime = undefined;
+        existingSession.exitReason = undefined;
+        existingSession.exitCode = undefined;
+        existingSession.exitSignal = undefined;
         logger.debug(`[DAEMON RUN] Updated daemon-spawned session ${sessionId} with metadata`);
 
         // Resolve any awaiter for this PID
@@ -1577,12 +1583,23 @@ export async function startDaemon(): Promise<void> {
       onSessionDisconnect(sessionId) {
         if (!sessionId) return;
         logger.debug(`[DAEMON RUN] Socket session disconnected: ${sessionId}`);
-        // Move to stoppedSessions — same as process exit handler
         const tracked = Array.from(pidToTrackedSession.values()).find(s => s.happySessionId === sessionId);
-        if (tracked && tracked.pid > 0) {
-          tracked.exitTime = Date.now();
-          onSessionEnding(sessionId, tracked.pid, 'socket disconnected');
+        if (!tracked || tracked.pid <= 0) {
+          return;
         }
+        // The socket is a channel, not the process. A session that lost it may well still be
+        // running and about to reconnect — and marking it exited here made the LAN summary (and
+        // so the App, whose owner-channel answer is final) read a live session as offline for as
+        // long as its process lived. Only a process that is actually gone is an exit; the child's
+        // own exit event and the PID checks are the authority on that.
+        try {
+          process.kill(tracked.pid, 0);
+          return;
+        } catch {
+          // Gone: fall through and record the exit.
+        }
+        tracked.exitTime = Date.now();
+        onSessionEnding(sessionId, tracked.pid, 'socket disconnected');
       },
     });
     logger.debug(`[DAEMON RUN] Unix socket server started at ${socketPath}`);
@@ -2289,13 +2306,26 @@ export async function startDaemon(): Promise<void> {
 
           lastSpawnAttemptBySessionId[id] = now;
           const autoSandbox = sessionEntry.sandbox ?? undefined;
-          spawnSession({
-            directory,
-            agent,
-            resumeSessionTag: tag,
-            resumeAfterSeq,
-            sandboxConfig: autoSandbox,
-          }).catch((err: unknown) => {
+          // Recover the profile the session was last using, the same way a user-initiated restart
+          // does. Without it the child starts with the daemon's baseline environment and *no*
+          // ANTHROPIC credentials, and an inbox turn that arrives before the next user message is
+          // answered with "Not logged in" — which is exactly what a post-reboot respawn looked
+          // like. Bounded, because a stalled server must not hold up the poll: no profile simply
+          // means the child learns it from the next user message, as before.
+          void (async () => {
+            const recoveredProfile = await Promise.race([
+              fetchSessionProfileMeta(id),
+              delay(PROFILE_META_DEADLINE_MS).then(() => null),
+            ]);
+            await spawnSession({
+              directory,
+              agent,
+              resumeSessionTag: tag,
+              resumeAfterSeq,
+              environmentVariables: recoveredProfile?.environmentVariables ?? undefined,
+              sandboxConfig: autoSandbox,
+            });
+          })().catch((err: unknown) => {
             logger.debug(`[DAEMON RUN] Auto-respawn failed for session ${id}:`, err);
           });
         }
