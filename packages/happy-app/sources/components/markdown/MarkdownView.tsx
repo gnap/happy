@@ -396,7 +396,7 @@ function RenderTableBlock(props: {
                                 rather than wrapping the row's height open. */}
                             {/* Stretched like the cells' own text, so a header uses the column's
                                 whole width before it truncates instead of hanging at its content. */}
-                            <Text style={[style.tableHeaderText, { alignSelf: 'stretch' }]} numberOfLines={1}>
+                            <Text style={[style.tableHeaderText, { alignSelf: 'stretch' }]} numberOfLines={2}>
                                 <RenderSpans spans={renderTableCellSpans(header)} baseStyle={style.tableHeaderText} />
                             </Text>
                         </View>
