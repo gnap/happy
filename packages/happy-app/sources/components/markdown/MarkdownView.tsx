@@ -390,7 +390,9 @@ function RenderTableBlock(props: {
                         >
                             {/* A header is a label, not prose: one line, and a long one truncates
                                 rather than wrapping the row's height open. */}
-                            <Text style={style.tableHeaderText} numberOfLines={1} ellipsizeMode="tail">
+                            {/* Stretched like the cells' own text, so a header uses the column's
+                                whole width before it truncates instead of hanging at its content. */}
+                            <Text style={[style.tableHeaderText, { alignSelf: 'stretch' }]} numberOfLines={1} ellipsizeMode="tail">
                                 <RenderSpans spans={renderTableCellSpans(header)} baseStyle={style.tableHeaderText} />
                             </Text>
                         </View>
