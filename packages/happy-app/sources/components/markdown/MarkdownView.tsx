@@ -372,44 +372,47 @@ function RenderTableBlock(props: {
 
     return (
         <View style={[style.tableContainer, props.first && style.first, props.last && style.last]}>
-            {/* No horizontal scroll: the table is as wide as the message column, which is what a
-                table of prose should be. A wide table was being read by scrolling sideways instead
-                of wrapping; a table with many columns shares the width between them. */}
+            {/* Rows, not columns. A column-first layout gave every column its own vertical
+                rhythm, so once cells wrapped the same row was a different height in each column and
+                the table read as ragged. A row is a horizontal stack whose cells stretch to the
+                tallest one in it, and equal shares of the width keep the columns lined up. */}
             <View style={style.tableContent}>
-                    {/* Render each column as a vertical container */}
+                <View style={style.tableRow}>
                     {props.headers.map((header, colIndex) => (
                         <View
-                            key={`column-${colIndex}`}
-                            // Equal shares of the width, so every cell in a column lines up and the
-                            // table ends where the message does.
+                            key={`header-${colIndex}`}
                             style={[
-                                style.tableColumn,
-                                style.tableColumnFlexible,
-                                colIndex === columnCount - 1 && style.tableColumnLast
+                                style.tableCell,
+                                style.tableHeaderCell,
+                                style.tableCellFlexible,
+                                colIndex === columnCount - 1 && style.tableCellLast,
                             ]}
                         >
-                            {/* Header cell for this column */}
-                            <View style={[style.tableCell, style.tableHeaderCell, style.tableCellFirst]}>
-                                <Text style={style.tableHeaderText}>
-                                    <RenderSpans spans={renderTableCellSpans(header)} baseStyle={style.tableHeaderText} />
-                                </Text>
-                            </View>
-                            {/* Data cells for this column */}
-                            {props.rows.map((row, rowIndex) => (
-                                <View
-                                    key={`cell-${rowIndex}-${colIndex}`}
-                                    style={[
-                                        style.tableCell,
-                                        isLastRow(rowIndex) && style.tableCellLast
-                                    ]}
-                                >
-                                    <Text style={style.tableCellText}>
-                                        <RenderSpans spans={renderTableCellSpans(row[colIndex])} baseStyle={style.tableCellText} />
-                                    </Text>
-                                </View>
-                            ))}
+                            <Text style={style.tableHeaderText}>
+                                <RenderSpans spans={renderTableCellSpans(header)} baseStyle={style.tableHeaderText} />
+                            </Text>
                         </View>
                     ))}
+                </View>
+                {props.rows.map((row, rowIndex) => (
+                    <View key={`row-${rowIndex}`} style={style.tableRow}>
+                        {props.headers.map((_header, colIndex) => (
+                            <View
+                                key={`cell-${rowIndex}-${colIndex}`}
+                                style={[
+                                    style.tableCell,
+                                    style.tableCellFlexible,
+                                    isLastRow(rowIndex) && style.tableCellLastRow,
+                                    colIndex === columnCount - 1 && style.tableCellLast,
+                                ]}
+                            >
+                                <Text style={style.tableCellText}>
+                                    <RenderSpans spans={renderTableCellSpans(row[colIndex])} baseStyle={style.tableCellText} />
+                                </Text>
+                            </View>
+                        ))}
+                    </View>
+                ))}
             </View>
         </View>
     );
@@ -662,8 +665,17 @@ const style = StyleSheet.create((theme) => ({
     tableContent: {
         flexDirection: 'row',
     },
-    /** A column takes an equal share of the message width; the text wraps inside it. */
-    tableColumnFlexible: {
+    /** A row of the table: its cells stretch to the tallest, which is what lines the rows up. */
+    tableRow: {
+        flexDirection: 'row',
+        alignItems: 'stretch',
+    },
+    /** A cell takes an equal share of the message width; the text wraps inside it. */
+    /** The last row's cells have no bottom border of their own — the container draws the edge. */
+    tableCellLastRow: {
+        borderBottomWidth: 0,
+    },
+    tableCellFlexible: {
         flexGrow: 1,
         flexBasis: 0,
         minWidth: 72,
