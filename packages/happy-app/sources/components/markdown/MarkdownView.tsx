@@ -663,7 +663,9 @@ const style = StyleSheet.create((theme) => ({
         flexGrow: 0,
     },
     tableContent: {
-        flexDirection: 'row',
+        // A column of rows. This used to be `row` because the table was built as a row of columns;
+        // after the switch to row-first layout the leftover direction stacked every row side by side.
+        flexDirection: 'column',
     },
     /** A row of the table: its cells stretch to the tallest, which is what lines the rows up. */
     tableRow: {
