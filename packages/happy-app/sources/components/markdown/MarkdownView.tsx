@@ -367,6 +367,9 @@ function RenderTableBlock(props: {
         parseMarkdownSpans(value && value.length > 0 ? value : '\u00A0', false)
     );
     const columnCount = props.headers.length;
+    // Columns share the width by how much label each holds, within bounds. Equal shares cut a
+    // header longer than its share, and a header is a label: it should neither wrap nor be cut.
+    const shares = props.headers.map((header) => Math.min(3, Math.max(1, Math.ceil((header ?? '').length / 8))));
     const rowCount = props.rows.length;
     const isLastRow = (rowIndex: number) => rowIndex === rowCount - 1;
 
@@ -385,6 +388,7 @@ function RenderTableBlock(props: {
                                 style.tableCell,
                                 style.tableHeaderCell,
                                 style.tableCellFlexible,
+                                { flexGrow: shares[colIndex] },
                                 colIndex === columnCount - 1 && style.tableCellLast,
                             ]}
                         >
@@ -392,7 +396,7 @@ function RenderTableBlock(props: {
                                 rather than wrapping the row's height open. */}
                             {/* Stretched like the cells' own text, so a header uses the column's
                                 whole width before it truncates instead of hanging at its content. */}
-                            <Text style={[style.tableHeaderText, { alignSelf: 'stretch' }]} numberOfLines={1} ellipsizeMode="tail">
+                            <Text style={[style.tableHeaderText, { alignSelf: 'stretch' }]} numberOfLines={1}>
                                 <RenderSpans spans={renderTableCellSpans(header)} baseStyle={style.tableHeaderText} />
                             </Text>
                         </View>
@@ -406,6 +410,7 @@ function RenderTableBlock(props: {
                                 style={[
                                     style.tableCell,
                                     style.tableCellFlexible,
+                                { flexGrow: shares[colIndex] },
                                     isLastRow(rowIndex) && style.tableCellLastRow,
                                     colIndex === columnCount - 1 && style.tableCellLast,
                                 ]}
