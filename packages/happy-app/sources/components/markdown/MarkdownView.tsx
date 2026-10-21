@@ -367,51 +367,62 @@ function RenderTableBlock(props: {
         parseMarkdownSpans(value && value.length > 0 ? value : '\u00A0', false)
     );
     const columnCount = props.headers.length;
+    // Columns share the width by how much label each holds, within bounds. Equal shares cut a
+    // header longer than its share, and a header is a label: it should neither wrap nor be cut.
+    const shares = props.headers.map((header) => Math.min(3, Math.max(1, Math.ceil((header ?? '').length / 8))));
     const rowCount = props.rows.length;
     const isLastRow = (rowIndex: number) => rowIndex === rowCount - 1;
 
     return (
         <View style={[style.tableContainer, props.first && style.first, props.last && style.last]}>
-            <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={Platform.OS !== 'web'}
-                nestedScrollEnabled={true}
-                style={style.tableScrollView}
-            >
-                <View style={style.tableContent}>
-                    {/* Render each column as a vertical container */}
+            {/* Rows, not columns. A column-first layout gave every column its own vertical
+                rhythm, so once cells wrapped the same row was a different height in each column and
+                the table read as ragged. A row is a horizontal stack whose cells stretch to the
+                tallest one in it, and equal shares of the width keep the columns lined up. */}
+            <View style={style.tableContent}>
+                <View style={style.tableRow}>
                     {props.headers.map((header, colIndex) => (
                         <View
-                            key={`column-${colIndex}`}
+                            key={`header-${colIndex}`}
                             style={[
-                                style.tableColumn,
-                                colIndex === columnCount - 1 && style.tableColumnLast
+                                style.tableCell,
+                                style.tableHeaderCell,
+                                style.tableCellFlexible,
+                                { flexGrow: shares[colIndex] },
+                                colIndex === columnCount - 1 && style.tableCellLast,
                             ]}
                         >
-                            {/* Header cell for this column */}
-                            <View style={[style.tableCell, style.tableHeaderCell, style.tableCellFirst]}>
-                                <Text style={style.tableHeaderText}>
-                                    <RenderSpans spans={renderTableCellSpans(header)} baseStyle={style.tableHeaderText} />
-                                </Text>
-                            </View>
-                            {/* Data cells for this column */}
-                            {props.rows.map((row, rowIndex) => (
-                                <View
-                                    key={`cell-${rowIndex}-${colIndex}`}
-                                    style={[
-                                        style.tableCell,
-                                        isLastRow(rowIndex) && style.tableCellLast
-                                    ]}
-                                >
-                                    <Text style={style.tableCellText}>
-                                        <RenderSpans spans={renderTableCellSpans(row[colIndex])} baseStyle={style.tableCellText} />
-                                    </Text>
-                                </View>
-                            ))}
+                            {/* A header is a label, not prose: one line, and a long one truncates
+                                rather than wrapping the row's height open. */}
+                            {/* Stretched like the cells' own text, so a header uses the column's
+                                whole width before it truncates instead of hanging at its content. */}
+                            <Text style={[style.tableHeaderText, { alignSelf: 'stretch' }]} numberOfLines={2}>
+                                <RenderSpans spans={renderTableCellSpans(header)} baseStyle={style.tableHeaderText} />
+                            </Text>
                         </View>
                     ))}
                 </View>
-            </ScrollView>
+                {props.rows.map((row, rowIndex) => (
+                    <View key={`row-${rowIndex}`} style={style.tableRow}>
+                        {props.headers.map((_header, colIndex) => (
+                            <View
+                                key={`cell-${rowIndex}-${colIndex}`}
+                                style={[
+                                    style.tableCell,
+                                    style.tableCellFlexible,
+                                { flexGrow: shares[colIndex] },
+                                    isLastRow(rowIndex) && style.tableCellLastRow,
+                                    colIndex === columnCount - 1 && style.tableCellLast,
+                                ]}
+                            >
+                                <Text style={style.tableCellText}>
+                                    <RenderSpans spans={renderTableCellSpans(row[colIndex])} baseStyle={style.tableCellText} />
+                                </Text>
+                            </View>
+                        ))}
+                    </View>
+                ))}
+            </View>
         </View>
     );
 }
@@ -650,6 +661,9 @@ const style = StyleSheet.create((theme) => ({
     //
 
     tableContainer: {
+        // `stretch` depends on the parent's alignment; the width does not. A table is as wide as the
+        // message it sits in, whatever the block around it does.
+        width: '100%',
         marginVertical: 8,
         borderWidth: 1,
         borderColor: theme.colors.divider,
@@ -661,7 +675,30 @@ const style = StyleSheet.create((theme) => ({
         flexGrow: 0,
     },
     tableContent: {
+        // A column of rows. This used to be `row` because the table was built as a row of columns;
+        // after the switch to row-first layout the leftover direction stacked every row side by side.
+        flexDirection: 'column',
+        // Stretched, not shrink-to-fit: without this the table was as wide as its widest cell rather
+        // than as wide as the message, so the cells' text ran out of width long before the column did.
+        alignSelf: 'stretch',
+    },
+    /** A row of the table: its cells stretch to the tallest, which is what lines the rows up. */
+    tableRow: {
         flexDirection: 'row',
+        alignItems: 'stretch',
+        // A row stretches to the table's width, so a table with little content is still as wide as
+        // the message instead of shrinking to its cells.
+        alignSelf: 'stretch',
+    },
+    /** A cell takes an equal share of the message width; the text wraps inside it. */
+    /** The last row's cells have no bottom border of their own — the container draws the edge. */
+    tableCellLastRow: {
+        borderBottomWidth: 0,
+    },
+    tableCellFlexible: {
+        flexGrow: 1,
+        flexBasis: 0,
+        minWidth: 72,
     },
     tableColumn: {
         flexDirection: 'column',
@@ -677,6 +714,8 @@ const style = StyleSheet.create((theme) => ({
         borderBottomWidth: 1,
         borderBottomColor: theme.colors.divider,
         alignItems: 'flex-start',
+        // The width comes from the column now, and the text wraps inside it.
+        flexShrink: 1,
     },
     tableCellFirst: {
         borderTopWidth: 0,
