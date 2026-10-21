@@ -341,7 +341,10 @@ export const darkTheme = {
 
         status: { // App Connection Status
             connected: '#34C759',
-            connecting: '#FFFFFF',
+            // The iOS dark-mode system blue. "In progress" is the same idea in both themes, and
+            // white said something else: it read as a lit channel, or as the header's own
+            // foreground, rather than as one still being reached.
+            connecting: '#0A84FF',
             disconnected: '#8E8E93',
             error: '#FF453A',
             default: '#8E8E93',
