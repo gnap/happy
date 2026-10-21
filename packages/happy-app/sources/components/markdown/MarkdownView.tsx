@@ -668,6 +668,9 @@ const style = StyleSheet.create((theme) => ({
         // A column of rows. This used to be `row` because the table was built as a row of columns;
         // after the switch to row-first layout the leftover direction stacked every row side by side.
         flexDirection: 'column',
+        // Stretched, not shrink-to-fit: without this the table was as wide as its widest cell rather
+        // than as wide as the message, so the cells' text ran out of width long before the column did.
+        alignSelf: 'stretch',
     },
     /** A row of the table: its cells stretch to the tallest, which is what lines the rows up. */
     tableRow: {
