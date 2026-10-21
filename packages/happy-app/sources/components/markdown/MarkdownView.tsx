@@ -372,19 +372,19 @@ function RenderTableBlock(props: {
 
     return (
         <View style={[style.tableContainer, props.first && style.first, props.last && style.last]}>
-            <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={Platform.OS !== 'web'}
-                nestedScrollEnabled={true}
-                style={style.tableScrollView}
-            >
-                <View style={style.tableContent}>
+            {/* No horizontal scroll: the table is as wide as the message column, which is what a
+                table of prose should be. A wide table was being read by scrolling sideways instead
+                of wrapping; a table with many columns shares the width between them. */}
+            <View style={style.tableContent}>
                     {/* Render each column as a vertical container */}
                     {props.headers.map((header, colIndex) => (
                         <View
                             key={`column-${colIndex}`}
+                            // Equal shares of the width, so every cell in a column lines up and the
+                            // table ends where the message does.
                             style={[
                                 style.tableColumn,
+                                style.tableColumnFlexible,
                                 colIndex === columnCount - 1 && style.tableColumnLast
                             ]}
                         >
@@ -410,8 +410,7 @@ function RenderTableBlock(props: {
                             ))}
                         </View>
                     ))}
-                </View>
-            </ScrollView>
+            </View>
         </View>
     );
 }
@@ -663,6 +662,12 @@ const style = StyleSheet.create((theme) => ({
     tableContent: {
         flexDirection: 'row',
     },
+    /** A column takes an equal share of the message width; the text wraps inside it. */
+    tableColumnFlexible: {
+        flexGrow: 1,
+        flexBasis: 0,
+        minWidth: 72,
+    },
     tableColumn: {
         flexDirection: 'column',
         borderRightWidth: 1,
@@ -677,11 +682,7 @@ const style = StyleSheet.create((theme) => ({
         borderBottomWidth: 1,
         borderBottomColor: theme.colors.divider,
         alignItems: 'flex-start',
-        // A column is as wide as its widest cell, and the table sits in a horizontal scroll — so
-        // without a ceiling one long sentence becomes one absurdly wide column that is read by
-        // scrolling sideways instead of wrapping. The cap is what makes the text wrap; the scroll
-        // stays for tables with many columns, which are wide for a legitimate reason.
-        maxWidth: 220,
+        // The width comes from the column now, and the text wraps inside it.
         flexShrink: 1,
     },
     tableCellFirst: {
