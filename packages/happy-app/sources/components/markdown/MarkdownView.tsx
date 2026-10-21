@@ -388,7 +388,9 @@ function RenderTableBlock(props: {
                                 colIndex === columnCount - 1 && style.tableCellLast,
                             ]}
                         >
-                            <Text style={style.tableHeaderText}>
+                            {/* A header is a label, not prose: one line, and a long one truncates
+                                rather than wrapping the row's height open. */}
+                            <Text style={style.tableHeaderText} numberOfLines={1} ellipsizeMode="tail">
                                 <RenderSpans spans={renderTableCellSpans(header)} baseStyle={style.tableHeaderText} />
                             </Text>
                         </View>
