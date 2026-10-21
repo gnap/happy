@@ -661,6 +661,9 @@ const style = StyleSheet.create((theme) => ({
     //
 
     tableContainer: {
+        // `stretch` depends on the parent's alignment; the width does not. A table is as wide as the
+        // message it sits in, whatever the block around it does.
+        width: '100%',
         marginVertical: 8,
         borderWidth: 1,
         borderColor: theme.colors.divider,
@@ -683,6 +686,9 @@ const style = StyleSheet.create((theme) => ({
     tableRow: {
         flexDirection: 'row',
         alignItems: 'stretch',
+        // A row stretches to the table's width, so a table with little content is still as wide as
+        // the message instead of shrinking to its cells.
+        alignSelf: 'stretch',
     },
     /** A cell takes an equal share of the message width; the text wraps inside it. */
     /** The last row's cells have no bottom border of their own — the container draws the edge. */
