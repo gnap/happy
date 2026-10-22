@@ -1378,3 +1378,70 @@ describe('ApiSessionClient v3 messages API migration', () => {
         expect(client.getOutboundTransportMode()).toBe('http');
     });
 });
+
+describe('lazy tool results', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        mockAxiosGet.mockResolvedValue(makeEmptyFetchResponse());
+        mockIo.mockReturnValue({
+            connected: true,
+            connect: vi.fn(),
+            on: vi.fn(),
+            off: vi.fn(),
+            emit: vi.fn(),
+            emitWithAck: vi.fn(async () => ({ result: 'error' })),
+            volatile: { emit: vi.fn() },
+            close: vi.fn(),
+        });
+    });
+
+    const makeClient = () => new ApiSessionClient('fake-token', makeSession()) as any;
+
+    const start = (call: string, name: string) => ({
+        id: `start-${call}`, time: 0, role: 'agent' as const,
+        ev: { t: 'tool-call-start', call, name, args: {} },
+    }) as any;
+
+    const end = (call: string, result: unknown) => ({
+        id: `end-${call}`, time: 0, role: 'agent' as const,
+        ev: { t: 'tool-call-end', call, result },
+    }) as any;
+
+    it('truncates a command result and remembers the tool that produced it', () => {
+        const client = makeClient();
+        const stdout = Array.from({ length: 200 }, (_, i) => `line ${i}`).join('\n');
+
+        client.maybeLazyEncodeToolResult(start('c1', 'Bash'));
+        const encoded = client.maybeLazyEncodeToolResult(end('c1', {
+            stdout, stderr: '', interrupted: false, isImage: false, noOutputExpected: false,
+        }));
+
+        expect(encoded.ev.result._lazyResult).toBe(true);
+        // The preview is bounded by lines and by characters; the full output is on disk.
+        expect(encoded.ev.result.stdout.split('\n').filter(Boolean).length).toBeLessThanOrEqual(15);
+        expect(encoded.ev.result.stdout.length).toBeLessThan(stdout.length);
+    });
+
+    it('bounds a single-line result by characters, which a line limit cannot', () => {
+        const client = makeClient();
+        const stdout = 'x'.repeat(10_000);
+
+        client.maybeLazyEncodeToolResult(start('c2', 'Bash'));
+        const encoded = client.maybeLazyEncodeToolResult(end('c2', {
+            stdout, stderr: '', interrupted: false, isImage: false, noOutputExpected: false,
+        }));
+
+        expect(encoded.ev.result.stdout.length).toBeLessThanOrEqual(2_000);
+        expect(encoded.ev.result._lazyResult).toBe(true);
+    });
+
+    it('leaves a result the App draws whole alone', () => {
+        const client = makeClient();
+        const result = { filePath: '/x', oldString: 'a', newString: 'b' };
+
+        client.maybeLazyEncodeToolResult(start('c3', 'Edit'));
+        const encoded = client.maybeLazyEncodeToolResult(end('c3', result));
+
+        expect(encoded.ev.result).toBe(result);
+    });
+});

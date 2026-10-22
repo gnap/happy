@@ -154,6 +154,10 @@ const LAZY_RESULT_STRIP_FIELDS_BY_TOOL: Record<string, string[]> = {
 const LAZY_RESULT_PREVIEW_FIELDS_BY_TOOL: Record<string, string[]> = {
     CursorEdit: ['diffString'],
     CursorWrite: ['diffString'],
+    // A command's output is the reason to open the card, not something the transcript shows — and
+    // it is the largest single field in a Claude session's message stream. The first lines stay for
+    // the card's context; the rest is fetched when the detail view opens.
+    Bash: ['stdout', 'stderr'],
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -195,8 +199,15 @@ function extractA2ATextFromParts(parts: unknown): string | null {
     return texts.join('\n');
 }
 
-/** Max lines kept in the compact diffString preview. */
+/** Max lines kept in the compact preview. */
 const LAZY_DIFF_STRING_MAX_LINES = 15;
+/**
+ * Max characters kept in a preview field.
+ *
+ * The line bound alone does nothing for output that has no newlines — a minified JSON body or a
+ * one-line trace is a single "line" however long it is.
+ */
+const LAZY_PREVIEW_MAX_CHARS = 2_000;
 
 /**
  * Characters per field kept in the compact (wire) copy for non-diff fields.
@@ -396,7 +407,10 @@ export class ApiSessionClient extends EventEmitter {
         for (const field of previewFields ?? []) {
             if (typeof successObj[field] === 'string') {
                 const original = successObj[field] as string;
-                const truncated = truncateByLines(original, LAZY_DIFF_STRING_MAX_LINES);
+                const byLines = truncateByLines(original, LAZY_DIFF_STRING_MAX_LINES);
+                const truncated = byLines.length > LAZY_PREVIEW_MAX_CHARS
+                    ? byLines.slice(0, LAZY_PREVIEW_MAX_CHARS)
+                    : byLines;
                 if (truncated.length < original.length) {
                     compactSuccess[field] = truncated;
                     wasTruncated = true;
@@ -1822,10 +1836,42 @@ export class ApiSessionClient extends EventEmitter {
         suppressNextUserText(this.claudeSessionProtocolState, count);
     }
 
+    /** Tool call id → name, from the start envelope that named it to the end that returned. */
+    private pendingToolNames = new Map<string, string>();
+
+    /**
+     * Encode a tool result at the same exit point the arguments are encoded at.
+     *
+     * The result envelope names no tool — it carries only the call id — so the name is remembered
+     * from the start envelope that preceded it. Claude's results were the ones missing this: the
+     * cursor and ACP loops encode before sending, while the Claude mapper emitted the provider's
+     * result whole, command output and all.
+     */
+    private maybeLazyEncodeToolResult(envelope: SessionEnvelope): SessionEnvelope {
+        if (!LAZY_TOOL_CONTENT_ENABLED) return envelope;
+        const ev = envelope.ev as Record<string, unknown>;
+        if (ev.t === 'tool-call-start') {
+            const call = typeof ev.call === 'string' ? ev.call : null;
+            const name = typeof ev.name === 'string' ? ev.name : null;
+            if (call && name) {
+                this.pendingToolNames.set(call, name);
+            }
+            return envelope;
+        }
+        if (ev.t !== 'tool-call-end') return envelope;
+        const call = typeof ev.call === 'string' ? ev.call : null;
+        if (!call) return envelope;
+        const name = this.pendingToolNames.get(call);
+        this.pendingToolNames.delete(call);
+        if (!name || !('result' in ev)) return envelope;
+        const encoded = this.maybeLazyEncodeResult(name, call, ev.result);
+        return encoded === ev.result ? envelope : { ...envelope, ev: { ...ev, result: encoded } } as SessionEnvelope;
+    }
+
     sendSessionProtocolMessage(envelope: SessionEnvelope, extraMeta?: Record<string, unknown>) {
         // Apply lazy encoding at the single exit point so all code paths
         // (Claude via sendClaudeSessionMessage, Cursor via direct call, etc.) are covered.
-        const finalEnvelope = this.withWriterIdentity(this.maybeLazyEncodeEnvelope(envelope));
+        const finalEnvelope = this.withWriterIdentity(this.maybeLazyEncodeEnvelope(this.maybeLazyEncodeToolResult(envelope)));
         if (finalEnvelope.role === 'user' && finalEnvelope.ev.t === 'text') {
             const stack = new Error().stack?.split('\n').slice(1, 4).map(s => s.trim()).join(' <- ');
             logger.debug(`[API] USER ENVELOPE: "${(finalEnvelope.ev as any).text?.slice(0,50)}" callstack: ${stack}`);
