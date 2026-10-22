@@ -52,6 +52,8 @@ import { channelDrivers as buildChannelDrivers } from './channels/measure';
 import { channelAvailability } from './channels/resolve';
 import { candidateInputsFor, orderedCandidates } from './channels/candidates';
 import { carryOperation, type HealthRecorder } from './channels/execute';
+import { fetchToolContent } from './lan/client';
+import { getToolCallFullContent as getToolCallFullContentFromServer, type GetToolCallFullContentResponse } from './ops';
 import { readRoutes } from './channels/readRoute';
 import { endpointBaseUrl, type ChannelDriver, type ChannelOperation } from './channels/types';
 import { sendBatch, type SendResult } from './channels/ops';
@@ -4702,6 +4704,40 @@ class Sync {
      * moved since. Neither is discovered afresh: a restart is a rare, deliberate act and one that has
      * already failed is better reported than turned into a browse.
      */
+    /**
+     * One tool call's full input and result, from whichever channel has it.
+     *
+     * The message stream carries a truncated copy — that is what keeps a session's log, its pages
+     * and its relay traffic small — and the detail view asks for the rest when the user opens it.
+     * The machine keeps that rest beside the session's working tree and serves it to an
+     * account-signed request; the session process serves the same payload over the server RPC.
+     * Asking the machine first is what lets the detail view open when the server is the thing that
+     * is down, which is the case the LAN channel exists for.
+     */
+    async getToolCallFullContent(sessionId: string, callId: string): Promise<GetToolCallFullContentResponse> {
+        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        if (machineId && this.getMachineKey(machineId)) {
+            const carried = await this.carryAtDaemon<{ args?: unknown; result?: unknown }>({
+                machineId,
+                operation: 'read',
+                // The daemon serves this one only to the account: the payload is plaintext, unlike
+                // the ciphertext every other route carries.
+                proofAction: { operation: 'tool-content', target: `${sessionId}:${callId}` },
+                run: (baseUrl, token, proof) => fetchToolContent(baseUrl, token, sessionId, callId, proof),
+            });
+            if (carried.verdict) {
+                return {
+                    success: true,
+                    // The file on disk was written from the tool's arguments, which are an object;
+                    // the daemon passes the JSON through without inspecting it.
+                    args: carried.verdict.args as Record<string, unknown> | undefined,
+                    result: carried.verdict.result,
+                };
+            }
+        }
+        return getToolCallFullContentFromServer(sessionId, callId);
+    }
+
     /**
      * Hands a control call to the session over a channel this App already has to its machine.
      *

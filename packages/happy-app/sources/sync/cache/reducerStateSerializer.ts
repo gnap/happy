@@ -13,7 +13,7 @@
 import { ReducerState, createReducer } from '../reducer/reducer';
 import { TracerState, createTracer } from '../reducer/reducerTracer';
 import type { NormalizedMessage } from '../typesRaw';
-import type { ToolCall } from '../typesMessage';
+import type { MessageFile, ToolCall } from '../typesMessage';
 import type { MessageMeta } from '../typesMessageMeta';
 import type { AgentEvent } from '../typesRaw';
 
@@ -27,11 +27,18 @@ export interface PersistedReducerMessage {
     localId?: string | null;
     createdAt: number;
     role: 'user' | 'agent';
+    /**
+     * The server's seq. Persisted because the state is now what the window keeps: the display
+     * messages are materialised from it, and their seq is what dedup and paging compare.
+     */
+    seq?: number;
     text: string | null;
     isThinking?: boolean;
     event: AgentEvent | null;
     tool: ToolCall | null;
     meta?: MessageMeta;
+    /** Attachments on a user message — the display projection reads them from the state. */
+    files?: MessageFile[];
 }
 
 interface PersistedStoredPermission {
@@ -94,7 +101,18 @@ export interface PersistedReducerState {
     };
 }
 
-export const SERIALIZER_SCHEMA_VERSION = 1;
+/**
+ * The persisted shape's version.
+ *
+ * 3 is the shape whose reducer messages carry `seq` and `files`, because the hot window now keeps
+ * the state and derives the messages from it rather than storing both. A state of any other
+ * version is ignored and the reducer starts fresh — the message rows are unaffected, so the only
+ * loss is cross-request continuity for a tool call that was running across the upgrade.
+ *
+ * (2 is skipped on purpose: an earlier build on this device wrote that number with a different
+ * message shape, and accepting it as this one would restore fields it never had.)
+ */
+export const SERIALIZER_SCHEMA_VERSION = 3;
 
 // ---------------------------------------------------------------------------
 // Serialization

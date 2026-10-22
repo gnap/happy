@@ -136,9 +136,15 @@ describe('loadMessageCache', () => {
     it('answers from the hot window without waiting on the database', async () => {
         const session = { ...makeSession('cursor'), id: 'sess-hot' };
         overrideHotWindowStore(new HotStore());
+        // The window keeps the reducer state; the messages are materialised from it, so the state
+        // has to be the one that describes them.
+        const state = createReducer();
+        state.messages.set('m0', { id: 'm0', realID: null, createdAt: 1000, role: 'user', text: 'Message 0', event: null, tool: null });
+        state.messages.set('m1', { id: 'm1', realID: null, createdAt: 1001, role: 'user', text: 'Message 1', event: null, tool: null });
         saveHotWindow(session.id, {
-            messages: makeMessages(2),
-            reducerStateJson: serializeReducerStateToJson(createReducer()),
+            reducerStateJson: serializeReducerStateToJson(state),
+            messages: null,
+            messageCount: 2,
             lastSeq: 9,
             oldestSeq: 1,
             hasOlderMessages: false,
@@ -153,9 +159,69 @@ describe('loadMessageCache', () => {
         const result = await loadMessageCache(session);
 
         expect(result).not.toBeNull();
-        expect(result!.messages.map((message) => message.id)).toEqual(['m0', 'm1']);
+        // Newest first: the order the window has always stored, and the store sorts on apply.
+        expect(result!.messages.map((message) => message.id)).toEqual(['m1', 'm0']);
         expect(result!.lastSeq).toBe(9);
         expect(result!.oldestSeq).toBe(1);
+    });
+
+    it('reads the rows when the hot state no longer covers its window', async () => {
+        const session = { ...makeSession('cursor'), id: 'sess-stale' };
+        overrideHotWindowStore(new HotStore());
+        // Saving with a state that holds none of the window's messages is exactly the mismatch a
+        // changed shape or a partial write leaves behind. A shorter window is not what it means.
+        await saveMessageCache(session, makeMessages(2), createReducer(), 9);
+
+        const result = await loadMessageCache(session);
+
+        expect(result).not.toBeNull();
+        expect(result!.messages.map((message) => message.id)).toEqual(['m0', 'm1']);
+    });
+
+    it('materialises a tool call from the state the window kept', async () => {
+        const session = makeSession('cursor');
+        overrideHotWindowStore(new HotStore());
+        const state = createReducer();
+        state.messages.set('t1', {
+            id: 't1', realID: 'r1', createdAt: 2000, role: 'agent', text: null, event: null,
+            tool: {
+                name: 'Bash', state: 'completed', input: { command: 'ls' },
+                createdAt: 2000, startedAt: 2000, completedAt: 2001,
+                description: null, result: 'ok',
+            },
+        });
+        const toolMessage: Message = {
+            kind: 'tool-call', id: 't1', localId: null, createdAt: 2000,
+            tool: state.messages.get('t1')!.tool!, children: [],
+        };
+
+        await saveMessageCache(session, [toolMessage], state, 5);
+        const loaded = await loadMessageCache(session);
+
+        // The window stored the state and nothing else; the tool call a screen draws is its
+        // projection, and it has to survive the round trip with its input and result.
+        expect(loaded?.messages).toHaveLength(1);
+        expect(loaded!.messages[0]).toMatchObject({ kind: 'tool-call', id: 't1' });
+        const tool = (loaded!.messages[0] as Extract<Message, { kind: 'tool-call' }>).tool;
+        expect(tool.name).toBe('Bash');
+        expect(tool.result).toBe('ok');
+    });
+
+    it('keeps the messages when the state is too large to store', async () => {
+        const session = makeSession('cursor');
+        overrideHotWindowStore(new HotStore());
+        const state = createReducer();
+        // Trimmed to the window, but still past the size the cache is willing to deserialise on
+        // open. The messages become the window; the state is the copy that is let go.
+        state.messages.set('m0', {
+            id: 'm0', realID: null, createdAt: 1000, role: 'agent',
+            text: 'x'.repeat(300_000), event: null, tool: null,
+        });
+        await saveMessageCache(session, makeMessages(1), state, 5);
+
+        const result = await loadMessageCache(session);
+
+        expect(result?.messages.map((message) => message.id)).toEqual(['m0']);
     });
 
     it('returns null for non-cursor sessions', async () => {

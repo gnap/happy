@@ -154,6 +154,37 @@ export async function fetchIdentity(baseUrl: string, token: string): Promise<Lan
     return (await response.json()) as LanIdentity;
 }
 
+/**
+ * One tool call's full input and result, from the machine's own copy.
+ *
+ * The message stream carries a truncated payload; this is the detail view asking for the rest. It
+ * is plaintext on the daemon's disk, so the request carries the account's proof as well as the
+ * token — the machine key alone is not enough for this one.
+ *
+ * Returns null for 404, the daemon's way of saying this machine has no such call — a caller then
+ * asks the server, which may still have the session process.
+ */
+export async function fetchToolContent(
+    baseUrl: string,
+    token: string,
+    sessionId: string,
+    callId: string,
+    proof?: Record<string, string>,
+): Promise<{ args?: unknown; result?: unknown } | null> {
+    const response = await request(
+        `${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/tool-content/${encodeURIComponent(callId)}`,
+        { token, headers: proof },
+    );
+    if (response.status === 404) {
+        return null;
+    }
+    if (!response.ok) {
+        throw new LanRequestError('tool content request failed', response.status);
+    }
+    const body = (await response.json()) as { args?: unknown; result?: unknown };
+    return { args: body.args, result: body.result };
+}
+
 export async function fetchSessions(baseUrl: string, token: string): Promise<LanSessionSummary[]> {
     const response = await request(`${baseUrl}/lan/sessions`, { token });
     if (!response.ok) {

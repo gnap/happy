@@ -1,17 +1,23 @@
 import * as React from 'react';
-import { View, ScrollView, StyleSheet } from 'react-native';
+import { View, ScrollView, StyleSheet, ActivityIndicator } from 'react-native';
 import { ToolCall } from '@/sync/typesMessage';
 import { Metadata } from '@/sync/storageTypes';
 import { knownTools } from '@/components/tools/knownTools';
 import { toolFullViewStyles } from '../ToolFullView';
 import { CommandView } from '@/components/CommandView';
+import { useLazyToolInput } from './useLazyToolInput';
 
 interface BashViewFullProps {
     tool: ToolCall;
     metadata: Metadata | null;
+    sessionId?: string;
+    messageId?: string;
 }
 
-export const BashViewFull = React.memo<BashViewFullProps>(({ tool, metadata }) => {
+export const BashViewFull = React.memo<BashViewFullProps>(({ tool, metadata, sessionId, messageId }) => {
+    // A long command's output is truncated on the wire and fetched here, when the detail view is
+    // what the user asked for — the transcript's card never shows stdout at all.
+    const { loading } = useLazyToolInput(tool, sessionId, messageId);
     const { input, result, state } = tool;
 
     // Parse the result
@@ -39,6 +45,9 @@ export const BashViewFull = React.memo<BashViewFullProps>(({ tool, metadata }) =
 
     return (
         <View style={styles.container}>
+            {loading && (
+                <ActivityIndicator size="small" style={{ marginBottom: 8 }} />
+            )}
             <View style={styles.terminalContainer}>
                 <ScrollView 
                     horizontal
