@@ -321,7 +321,14 @@ const styles = StyleSheet.create((theme) => ({
     marginHorizontal: 16,
     marginBottom: 12,
     borderRadius: 16,
-    alignSelf: 'flex-start',
+    // The full width of the feed, not the width of the widest thing inside.
+    //
+    // It was `flex-start`, which shrink-wraps: text still looked full width because a long
+    // paragraph measures at the available width, but anything that sizes to its content — a
+    // table, most visibly — came out as wide as its cells, and every `width: '100%'` inside it
+    // resolved against that content width. That is why a table was much narrower than the body
+    // text beside it, and why its cells wrapped in a sliver.
+    alignSelf: 'stretch',
   },
   agentEventContainer: {
     marginHorizontal: 8,
