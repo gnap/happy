@@ -6,7 +6,50 @@ import { Profile, profileDefaults, profileParse } from './profile';
 import type { RelayEndpoint } from './lan/types';
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 
-const mmkv = new MMKV();
+/**
+ * Settings and per-session preferences, written so that a full disk cannot take a screen down.
+ *
+ * On web `react-native-mmkv` is `localStorage`: one budget shared with the hot caches, and a write
+ * past it throws `QuotaExceededError` *synchronously*. These writes happen inside store actions,
+ * which means React meets the throw while a screen is rendering and the nearest error boundary
+ * takes the screen — measured in the desktop webview, where `saveSessionProfileIds` was the last
+ * hundred bytes over. Persisting is best-effort by nature: the state in memory is already right,
+ * and the value already on disk is a usable older one.
+ */
+const storage = new MMKV();
+const mmkv: Pick<MMKV, 'getString' | 'set' | 'delete' | 'clearAll'> = {
+    getString: (key) => {
+        try {
+            return storage.getString(key);
+        } catch {
+            return undefined;
+        }
+    },
+    set: (key, value) => {
+        try {
+            storage.set(key, value);
+        } catch (error) {
+            // Once per key is enough to explain the silence; a full store would otherwise log on
+            // every keystroke that triggers a save.
+            console.error(`persistence: could not write ${key}`, String(error));
+        }
+    },
+    delete: (key) => {
+        try {
+            storage.delete(key);
+        } catch {
+            // A delete that fails changes nothing that was readable.
+        }
+    },
+    clearAll: () => {
+        try {
+            storage.clearAll();
+        } catch {
+            // Same: a failed clear leaves what was there.
+        }
+    },
+};
+
 const NEW_SESSION_DRAFT_KEY = 'new-session-draft-v1';
 
 export type NewSessionAgentType = 'claude' | 'codex' | 'cursor' | 'cursor-acp' | 'gemini';
