@@ -325,6 +325,73 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         })).toBe(true);
     });
 
+    it('drops the result fields the App never draws for an edit', () => {
+        const state = { currentTurnId: null };
+        // The tool_use names the call; the result carries only the id, so the name has to be kept
+        // between the two envelopes for the result to be recognised.
+        mapClaudeLogMessageToSessionEnvelopes({
+            type: 'assistant',
+            uuid: 'a-edit',
+            message: {
+                role: 'assistant',
+                content: [{ type: 'tool_use', id: 'edit-1', name: 'Edit', input: { file_path: '/x', old_string: 'a', new_string: 'b' } }],
+            },
+        } as any, state);
+
+        const result = mapClaudeLogMessageToSessionEnvelopes({
+            type: 'user',
+            uuid: 'u-edit',
+            message: {
+                role: 'user',
+                content: [{ type: 'tool_result', tool_use_id: 'edit-1', content: 'ok' }],
+            },
+            toolUseResult: {
+                filePath: '/x',
+                oldString: 'a',
+                newString: 'b',
+                originalFile: 'x'.repeat(5000),
+                replaceAll: false,
+                structuredPatch: [{ hunks: [] }],
+                userModified: false,
+            },
+        } as any, state);
+
+        const end = result.envelopes.find((envelope) => envelope.ev.t === 'tool-call-end');
+        // The diff the App draws is rebuilt from the arguments, so the provider's copies of it are
+        // the larger half of the payload and travel nowhere.
+        expect(end?.ev).toEqual({
+            t: 'tool-call-end',
+            call: 'edit-1',
+            result: { filePath: '/x', replaceAll: false, userModified: false },
+        });
+    });
+
+    it('leaves a result whole for a tool whose output the App shows', () => {
+        const state = { currentTurnId: null };
+        mapClaudeLogMessageToSessionEnvelopes({
+            type: 'assistant',
+            uuid: 'a-bash',
+            message: {
+                role: 'assistant',
+                content: [{ type: 'tool_use', id: 'bash-1', name: 'Bash', input: { command: 'ls' } }],
+            },
+        } as any, state);
+
+        const stdout = 'x'.repeat(5000);
+        const result = mapClaudeLogMessageToSessionEnvelopes({
+            type: 'user',
+            uuid: 'u-bash',
+            message: {
+                role: 'user',
+                content: [{ type: 'tool_result', tool_use_id: 'bash-1', content: 'ok' }],
+            },
+            toolUseResult: { stdout, stderr: '', interrupted: false, isImage: false, noOutputExpected: false },
+        } as any, state);
+
+        const end = result.envelopes.find((envelope) => envelope.ev.t === 'tool-call-end');
+        expect((end?.ev as { result?: { stdout?: string } }).result?.stdout).toBe(stdout);
+    });
+
     it('does not emit envelopes for summary messages', () => {
         const result = mapClaudeLogMessageToSessionEnvelopes({
             type: 'summary',

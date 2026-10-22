@@ -24,6 +24,13 @@ export type ClaudeSessionProtocolState = {
     sdkTaskIdToCallId?: Map<string, string>;
     /** Provider call IDs that are TaskCreate calls (for result parsing in user handler). */
     taskCreateCallIds?: Set<string>;
+    /**
+     * Tool call id → tool name, kept until the result arrives.
+     *
+     * A `tool_result` block carries only the call id; the result payload does not name its tool.
+     * Knowing the name is what lets the result be trimmed to what the App actually draws.
+     */
+    toolNamesByCall?: Map<string, string>;
     /** Number of upcoming non-sidechain user text messages to suppress (e.g. inbox turn prompts). */
     suppressNextUserTextCount?: number;
 };
@@ -161,6 +168,47 @@ function ensureTaskCreateCallIds(state: ClaudeSessionProtocolState): Set<string>
         state.taskCreateCallIds = new Set<string>();
     }
     return state.taskCreateCallIds;
+}
+
+function toolNamesByCall(state: ClaudeSessionProtocolState): Map<string, string> {
+    if (!state.toolNamesByCall) {
+        state.toolNamesByCall = new Map<string, string>();
+    }
+    return state.toolNamesByCall;
+}
+
+/**
+ * Result fields the App never draws for a tool.
+ *
+ * Claude's Edit/Write results carry the provider's own copies of what the request already said: the
+ * whole file before the change, a structured patch of it, and the old and new strings again. The App
+ * draws an edit's diff from the tool's *arguments* (`EditViewFull` reads `old_string`/`new_string`),
+ * and nothing reads these fields — checked across the App, not assumed.
+ *
+ * They are dropped from the wire rather than made lazy: there is nothing to fetch them back for, and
+ * a lazy marker would buy an RPC on opening the card for data no view shows. Measured on a Claude
+ * session, this is the larger half of the tool result payload, and it travels over the relay on
+ * every page read.
+ */
+const UNUSED_RESULT_FIELDS_BY_TOOL: Record<string, readonly string[]> = {
+    Edit: ['oldString', 'newString', 'originalFile', 'structuredPatch'],
+    MultiEdit: ['oldString', 'newString', 'originalFile', 'structuredPatch'],
+    Write: ['content', 'originalFile', 'structuredPatch'],
+};
+
+function trimUnusedResultFields(toolName: string | undefined, result: unknown): unknown {
+    if (!toolName || !result || typeof result !== 'object') return result;
+    const fields = UNUSED_RESULT_FIELDS_BY_TOOL[toolName];
+    if (!fields) return result;
+    const source = result as Record<string, unknown>;
+    let trimmed: Record<string, unknown> | null = null;
+    for (const field of fields) {
+        if (Object.prototype.hasOwnProperty.call(source, field)) {
+            trimmed ??= { ...source };
+            delete trimmed[field];
+        }
+    }
+    return trimmed ?? result;
 }
 
 function parseTaskCreateResult(result: unknown): { id: string; subject: string } | null {
@@ -659,6 +707,7 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
             if (block.type === 'tool_use') {
                 const call = typeof block.id === 'string' && block.id.length > 0 ? block.id : createId();
                 const name = typeof block.name === 'string' && block.name.length > 0 ? block.name : 'unknown';
+                toolNamesByCall(state).set(call, name);
                 const args = toToolArgs(block.input);
                 const title = toolTitle(name, block.input);
                 const sessionSubagentForCall = ensureSessionSubagentIdForProviderSubagent(state, call);
@@ -835,6 +884,10 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
         }
         for (const block of blocks) {
             if (block.type === 'tool_result' && typeof block.tool_use_id === 'string' && block.tool_use_id.length > 0) {
+                // One result per call: take the name with the result, so the map does not grow for
+                // the life of the session.
+                const resultToolName = toolNamesByCall(state).get(block.tool_use_id);
+                toolNamesByCall(state).delete(block.tool_use_id);
                 const bgTaskId = extractBackgroundTaskId(block, message);
                 if (bgTaskId) {
                     ensureBgTaskIdToCallId(state).set(bgTaskId, block.tool_use_id);
@@ -885,7 +938,7 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                 // Prefer structured toolUseResult (from Workflow/Agent/Monitor async_launched)
                 // over the plain-text content so the App's isIntermediate check works.
                 const tur = (message as Record<string, unknown>).toolUseResult;
-                const resultContent = tur ?? block.content;
+                const resultContent = trimUnusedResultFields(resultToolName, tur ?? block.content);
                 if (tur) {
                     logger.debug(`[mapper] Using toolUseResult for call=${block.tool_use_id} hasStatus=${(tur as any).status}`);
                 }
