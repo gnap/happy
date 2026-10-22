@@ -354,9 +354,10 @@ function RenderSpans(props: { spans: MarkdownSpan[], baseStyle?: any }) {
     </>)
 }
 
-// Table rendering uses column-first layout to ensure consistent column widths.
-// Each column is rendered as a vertical container with all its cells (header + data).
-// This ensures that cells in the same column have the same width, determined by the widest content.
+// A table is laid out in rows: each row is a horizontal stack whose cells divide the table's width
+// between them, and the row's cells stretch to the tallest so the lines below stay level. The
+// column-first version gave every column its own vertical rhythm, so once cells wrapped the same
+// row was a different height in every column and the table read as ragged.
 function RenderTableBlock(props: {
     headers: string[],
     rows: string[][],
