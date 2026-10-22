@@ -160,6 +160,17 @@ const LAZY_RESULT_PREVIEW_FIELDS_BY_TOOL: Record<string, string[]> = {
     Bash: ['stdout', 'stderr'],
 };
 
+/**
+ * Preview fields nested inside a wrapper object.
+ *
+ * A read's result is `{ file: { content } }`, not a flat payload — the same rule as the top-level
+ * preview, which cannot reach inside it. The content is the whole file the App shows only when the
+ * detail view is opened.
+ */
+const LAZY_RESULT_NESTED_PREVIEW_FIELDS_BY_TOOL: Record<string, [string, string][]> = {
+    Read: [['file', 'content']],
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
     return !!value && typeof value === 'object';
 }
@@ -381,7 +392,10 @@ export class ApiSessionClient extends EventEmitter {
         if (!LAZY_TOOL_CONTENT_ENABLED) return output;
         const stripFields = LAZY_RESULT_STRIP_FIELDS_BY_TOOL[toolName];
         const previewFields = LAZY_RESULT_PREVIEW_FIELDS_BY_TOOL[toolName];
-        if ((!stripFields || stripFields.length === 0) && (!previewFields || previewFields.length === 0)) return output;
+        const nestedFields = LAZY_RESULT_NESTED_PREVIEW_FIELDS_BY_TOOL[toolName];
+        if ((!stripFields || stripFields.length === 0)
+            && (!previewFields || previewFields.length === 0)
+            && (!nestedFields || nestedFields.length === 0)) return output;
         if (!output || typeof output !== 'object') return output;
 
         const r = output as Record<string, unknown>;
@@ -415,6 +429,23 @@ export class ApiSessionClient extends EventEmitter {
                     compactSuccess[field] = truncated;
                     wasTruncated = true;
                 }
+            }
+        }
+
+        // Nested previews (a read's file contents) use the same bounds as the flat ones.
+        for (const [outer, inner] of nestedFields ?? []) {
+            const container = successObj[outer];
+            if (!isRecord(container) || typeof container[inner] !== 'string') {
+                continue;
+            }
+            const original = container[inner] as string;
+            const byLines = truncateByLines(original, LAZY_DIFF_STRING_MAX_LINES);
+            const preview = byLines.length > LAZY_PREVIEW_MAX_CHARS
+                ? byLines.slice(0, LAZY_PREVIEW_MAX_CHARS)
+                : byLines;
+            if (preview.length < original.length) {
+                compactSuccess[outer] = { ...container, [inner]: preview };
+                wasTruncated = true;
             }
         }
 

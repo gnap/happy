@@ -1435,6 +1435,22 @@ describe('lazy tool results', () => {
         expect(encoded.ev.result._lazyResult).toBe(true);
     });
 
+    it('previews a file read, whose content sits inside a wrapper', () => {
+        const client = makeClient();
+        const content = Array.from({ length: 300 }, (_, i) => `line ${i}`).join('\n');
+
+        client.maybeLazyEncodeToolResult(start('r1', 'Read'));
+        const encoded = client.maybeLazyEncodeToolResult(end('r1', {
+            type: 'text',
+            file: { filePath: '/x', content, numLines: 300, startLine: 1, totalLines: 300 },
+        }));
+
+        // The same rule as a command's output: the detail view is what asks for the file.
+        expect(encoded.ev.result._lazyResult).toBe(true);
+        expect(encoded.ev.result.file.content.length).toBeLessThan(content.length);
+        expect(encoded.ev.result.file.filePath).toBe('/x');
+    });
+
     it('leaves a result the App draws whole alone', () => {
         const client = makeClient();
         const result = { filePath: '/x', oldString: 'a', newString: 'b' };
