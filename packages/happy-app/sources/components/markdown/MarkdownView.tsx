@@ -366,10 +366,6 @@ function RenderTableBlock(props: {
     const renderTableCellSpans = (value: string | undefined) => (
         parseMarkdownSpans(value && value.length > 0 ? value : '\u00A0', false)
     );
-    // The rows need a definite width for `flexGrow` to divide; on native the stretch chain above
-    // does not reach them, so the table ended up as wide as its narrowest cells and the text wrapped
-    // in a sliver. Measured once per layout — the container is the width the message gives it.
-    const [width, setWidth] = React.useState<number | null>(null);
     const columnCount = props.headers.length;
     // Columns share the width by how much label each holds, within bounds. Equal shares cut a
     // header longer than its share, and a header is a label: it should neither wrap nor be cut.
@@ -378,16 +374,13 @@ function RenderTableBlock(props: {
     const isLastRow = (rowIndex: number) => rowIndex === rowCount - 1;
 
     return (
-        <View
-            style={[style.tableContainer, props.first && style.first, props.last && style.last]}
-            onLayout={(event) => setWidth(event.nativeEvent.layout.width)}
-        >
+        <View style={[style.tableContainer, props.first && style.first, props.last && style.last]}>
             {/* Rows, not columns. A column-first layout gave every column its own vertical
                 rhythm, so once cells wrapped the same row was a different height in each column and
                 the table read as ragged. A row is a horizontal stack whose cells stretch to the
                 tallest one in it, and equal shares of the width keep the columns lined up. */}
             <View style={style.tableContent}>
-                <View style={[style.tableRow, width !== null ? { width } : null]}>
+                <View style={style.tableRow}>
                     {props.headers.map((header, colIndex) => (
                         <View
                             key={`header-${colIndex}`}
@@ -410,7 +403,7 @@ function RenderTableBlock(props: {
                     ))}
                 </View>
                 {props.rows.map((row, rowIndex) => (
-                    <View key={`row-${rowIndex}`} style={[style.tableRow, width !== null ? { width } : null]}>
+                    <View key={`row-${rowIndex}`} style={style.tableRow}>
                         {props.headers.map((_header, colIndex) => (
                             <View
                                 key={`cell-${rowIndex}-${colIndex}`}
