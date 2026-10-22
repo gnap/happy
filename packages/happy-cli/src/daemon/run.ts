@@ -1853,6 +1853,28 @@ export async function startDaemon(): Promise<void> {
                 reset: page.reset,
               };
             },
+            getToolContent: async ({ sessionId, callId }) => {
+              // The session's own directory, which the daemon pinned at spawn and the persisted
+              // record keeps after a restart. A session this machine never ran has no content
+              // anywhere, and the 404 sends the caller to the server.
+              const live = [...pidToTrackedSession.values()]
+                .find((session) => session.happySessionId === sessionId)?.directory;
+              const directory = live || sessions[sessionId]?.directory;
+              if (!directory) {
+                return null;
+              }
+              const readJson = async (path: string): Promise<unknown> => {
+                try {
+                  return JSON.parse(await fs.readFile(path, 'utf8')) as unknown;
+                } catch {
+                  return undefined;
+                }
+              };
+              const base = join(directory, '.happy', 'tool-content');
+              const args = await readJson(join(base, `${callId}.json`));
+              const result = await readJson(join(base, `${callId}_result.json`));
+              return args === undefined && result === undefined ? null : { args, result };
+            },
           });
           lanServer = started;
           if (configuration.relayUrl) {
