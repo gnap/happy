@@ -131,7 +131,11 @@ export async function loadMessageCache(session: Session, servedByDaemon = false)
         if (hot.reducerStateJson) {
             const storedState = deserializeReducerStateFromJson(hot.reducerStateJson);
             const materialized = storedState ? materializeReducerMessages(storedState) : [];
-            if (storedState && materialized.length === hot.messageCount) {
+            // The state's projection is the window: a few reducer entries can legitimately have no
+            // display form (a streamed chunk folded into another message), so the count can come out
+            // slightly lower than the messages that were saved. Only an empty projection means the
+            // state is not this window at all — a changed shape, or a write that did not land.
+            if (storedState && materialized.length > 0) {
                 const messages = collapseDuplicateMessages(materialized);
                 const reducerState = trimReducerState(
                     storedState,
