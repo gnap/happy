@@ -353,19 +353,17 @@ export class ApiMachineClient {
         const serverUrl = configuration.serverUrl;
         logger.debug(`[API MACHINE] Connecting to ${serverUrl}`);
 
-        const socketOptions = this.websocketOnly
+        // Polling is where a hanging request leaks a connection, so it is never the starting
+        // transport on Bun — it used to be pinned there as a workaround, which is exactly what made
+        // an unreachable server cost a socket per attempt. Node keeps the upgrade path.
+        const socketOptions = this.websocketOnly || isBun()
             ? {
                 transports: ['websocket'],
                 upgrade: false,
               }
-            : isBun()
-                ? {
-                    transports: ['polling'],
-                    upgrade: false,
-                  }
-                : {
-                    transports: ['polling', 'websocket'],
-                  };
+            : {
+                transports: ['polling', 'websocket'],
+              };
 
         this.socket = io(serverUrl, {
             ...socketOptions,
@@ -379,6 +377,9 @@ export class ApiMachineClient {
             reconnection: true,
             reconnectionDelay: 1000,
             reconnectionDelayMax: 5000,
+            // See apiSession.ts: an attempt that never completes must not be left dangling.
+            timeout: 20_000,
+            requestTimeout: 30_000,
             ...(isNode() && { agent: serverHttpsAgent as any }),
         });
 

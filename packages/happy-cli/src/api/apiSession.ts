@@ -626,6 +626,12 @@ export class ApiSessionClient extends EventEmitter {
             reconnectionAttempts: Infinity,
             reconnectionDelay: 1000,
             reconnectionDelayMax: 5000,
+            // A connection attempt that never completes has to be torn down: left alone it stays an
+            // ESTABLISHED socket the OS holds, and an unreachable server plus an infinite reconnect
+            // loop turns that into thousands of them until no ephemeral ports are left.
+            timeout: 20_000,
+            // Engine.IO's own bound for a hanging polling request, for the transports that use it.
+            requestTimeout: 30_000,
             transports: this.websocketOnly ? ['websocket'] : ['polling', 'websocket'],
             withCredentials: true,
             autoConnect: false,
