@@ -1,4 +1,5 @@
 import { lanProofFor } from './client';
+import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
 import type { SocketLike } from './relayHub';
 import { bump } from '@/sync/metrics';
 
@@ -154,7 +155,10 @@ export async function openLanSocket(options: {
     // sockets rarely, not to reuse a nonce that is still holding a token up.
     let nonce: string;
     try {
-        const response = await fetch(`${options.baseUrl}/lan/challenge`, { method: 'POST' });
+        // Bounded: the socket below has a 5s open timeout, but this request happens *before* the
+        // socket exists, so an unreachable daemon would otherwise leave one request pending per
+        // attempt — the same shape as a socket left connecting.
+        const response = await fetchWithTimeout(`${options.baseUrl}/lan/challenge`, { method: 'POST' }, 10_000);
         if (!response.ok) {
             return null;
         }

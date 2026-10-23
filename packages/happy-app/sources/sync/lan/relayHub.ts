@@ -87,6 +87,9 @@ const HUB_BEAT_TIMEOUT_MS = 45_000;
  */
 const HUB_RESUME_PROBE_MS = 2_000;
 /** Long enough not to hammer a relay that is restarting, short enough to recover quickly. */
+/** How long a relay handshake may take before the socket is abandoned and retried. */
+const RELAY_HUB_OPEN_TIMEOUT_MS = 15_000;
+
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 
@@ -274,7 +277,30 @@ export class RelayHub {
             return;
         }
         this.socket = socket;
+        // The OS can take over a minute to give up on a black-holed connect, and until it does
+        // there is no close and no reconnect: every machine behind the relay reads as unreachable
+        // while the hub sits on a socket that will never open. Bound the handshake.
+        let opened = false;
+        const openTimer = setTimeout(() => {
+            if (opened || this.socket !== socket) {
+                return;
+            }
+            this.log('🔁 relay hub did not open in time; reconnecting');
+            try {
+                socket.close();
+            } catch {
+                /* already gone */
+            }
+            // Some runtimes do not fire onclose for a socket closed mid-handshake.
+            if (this.socket === socket) {
+                this.socket = null;
+                this.scheduleReconnect();
+            }
+        }, RELAY_HUB_OPEN_TIMEOUT_MS);
+        (openTimer as unknown as { unref?: () => void }).unref?.();
         socket.onopen = () => {
+            opened = true;
+            clearTimeout(openTimer);
             this.log('🔁 relay hub connected');
         };
         socket.onmessage = (event) => {
@@ -323,6 +349,7 @@ export class RelayHub {
             }
         };
         socket.onclose = () => {
+            clearTimeout(openTimer);
             this.socket = null;
             if (this.beatTimer) {
                 clearTimeout(this.beatTimer);
