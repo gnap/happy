@@ -1416,10 +1416,10 @@ describe('lazy tool results', () => {
         const client = makeClient();
         const stdout = Array.from({ length: 200 }, (_, i) => `line ${i}`).join('\n');
 
-        client.maybeLazyEncodeToolResult(start('c1', 'Bash'));
+        const name = client.noteToolEnvelope(start('c1', 'Bash').ev);
         const encoded = client.maybeLazyEncodeToolResult(end('c1', {
             stdout, stderr: '', interrupted: false, isImage: false, noOutputExpected: false,
-        }));
+        }), name);
 
         expect(encoded.ev.result._lazyResult).toBe(true);
         // The preview is bounded by lines and by characters; the full output is on disk.
@@ -1431,10 +1431,10 @@ describe('lazy tool results', () => {
         const client = makeClient();
         const stdout = 'x'.repeat(10_000);
 
-        client.maybeLazyEncodeToolResult(start('c2', 'Bash'));
+        const name = client.noteToolEnvelope(start('c2', 'Bash').ev);
         const encoded = client.maybeLazyEncodeToolResult(end('c2', {
             stdout, stderr: '', interrupted: false, isImage: false, noOutputExpected: false,
-        }));
+        }), name);
 
         expect(encoded.ev.result.stdout.length).toBeLessThanOrEqual(2_000);
         expect(encoded.ev.result._lazyResult).toBe(true);
@@ -1444,11 +1444,11 @@ describe('lazy tool results', () => {
         const client = makeClient();
         const content = Array.from({ length: 300 }, (_, i) => `line ${i}`).join('\n');
 
-        client.maybeLazyEncodeToolResult(start('r1', 'Read'));
+        const name = client.noteToolEnvelope(start('r1', 'Read').ev);
         const encoded = client.maybeLazyEncodeToolResult(end('r1', {
             type: 'text',
             file: { filePath: '/x', content, numLines: 300, startLine: 1, totalLines: 300 },
-        }));
+        }), name);
 
         // The same rule as a command's output: the detail view is what asks for the file.
         expect(encoded.ev.result._lazyResult).toBe(true);
@@ -1460,8 +1460,8 @@ describe('lazy tool results', () => {
         const client = makeClient();
         const result = { filePath: '/x', oldString: 'a', newString: 'b' };
 
-        client.maybeLazyEncodeToolResult(start('c3', 'Edit'));
-        const encoded = client.maybeLazyEncodeToolResult(end('c3', result));
+        const name = client.noteToolEnvelope(start('c3', 'Edit').ev);
+        const encoded = client.maybeLazyEncodeToolResult(end('c3', result), name);
 
         expect(encoded.ev.result).toBe(result);
     });
