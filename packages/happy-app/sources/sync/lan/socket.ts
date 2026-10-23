@@ -56,6 +56,55 @@ function toWebSocketBase(baseUrl: string): string {
     return baseUrl.replace(/^http/, 'ws');
 }
 
+type LanFrameHandlers = {
+    onBeat?: () => void;
+    onUpdate?: (payload: unknown) => void;
+    onDelivered?: (result: { sessionId: string; localId: string; delivered: boolean }) => void;
+    /**
+     * An ephemeral update — currently a session's activity (including whether it is thinking).
+     *
+     * The server channel has always carried these; the LAN only had the turn boundaries the
+     * session writes into its log. Routing the frame here is what lets both channels feed the same
+     * handler instead of the LAN guessing.
+     */
+    onEphemeral?: (payload: unknown) => void;
+};
+
+/**
+ * What one frame means, if anything.
+ *
+ * Exported so the routing — which event goes to which handler, and that an unknown event is
+ * ignored rather than guessed at — can be pinned without a socket.
+ */
+export function dispatchLanFrame(frame: unknown, handlers: LanFrameHandlers): void {
+    const parsed = frame as LanSocketFrame;
+    if (!parsed || typeof parsed.event !== 'string') {
+        return;
+    }
+    if (parsed.event === 'pong') {
+        handlers.onBeat?.();
+        return;
+    }
+    if (parsed.event === 'update') {
+        handlers.onUpdate?.(parsed.payload);
+        return;
+    }
+    if (parsed.event === 'ephemeral') {
+        handlers.onEphemeral?.(parsed.payload);
+        return;
+    }
+    if (parsed.event === 'delivered') {
+        const result = parsed.payload as { sessionId?: unknown; localId?: unknown; delivered?: unknown };
+        if (typeof result?.localId === 'string') {
+            handlers.onDelivered?.({
+                sessionId: typeof result.sessionId === 'string' ? result.sessionId : '',
+                localId: result.localId,
+                delivered: result.delivered === true,
+            });
+        }
+    }
+}
+
 /**
  * Opens an authenticated socket to a daemon. Returns null when it cannot be established —
  * no challenge, a rejected proof, or a socket that never opens — leaving the caller to carry on
@@ -66,6 +115,8 @@ export async function openLanSocket(options: {
     machineKey: Uint8Array;
     /** Called for every `update` payload the daemon pushes. */
     onUpdate: (payload: unknown) => void;
+    /** Called for every `ephemeral` payload the daemon pushes — session activity, for now. */
+    onEphemeral?: (payload: unknown) => void;
     /** Called once the socket closes, for any reason; the caller decides whether to reopen. */
     /**
      * The socket ended, and how. `deliberate` is this App's own close; otherwise the code and
@@ -133,26 +184,7 @@ export async function openLanSocket(options: {
         } catch {
             return;
         }
-        // An unknown event is ignored rather than guessed at, so a daemon that learns to push more
-        // cannot make an older App misread it.
-        if (frame.event === 'pong') {
-            options.onBeat?.();
-            return;
-        }
-        if (frame.event === 'update') {
-            options.onUpdate(frame.payload);
-            return;
-        }
-        if (frame.event === 'delivered') {
-            const result = frame.payload as { sessionId?: unknown; localId?: unknown; delivered?: unknown };
-            if (typeof result?.localId === 'string') {
-                options.onDelivered?.({
-                    sessionId: typeof result.sessionId === 'string' ? result.sessionId : '',
-                    localId: result.localId,
-                    delivered: result.delivered === true,
-                });
-            }
-        }
+        dispatchLanFrame(frame, options);
     };
 
     // Wait for the upgrade before handing the socket out, so the caller's two outcomes are

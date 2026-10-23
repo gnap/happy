@@ -349,6 +349,10 @@ class Sync {
             // relay routes to that machine. The protocol is identical — same upgrade path, same
             // frames — because the transport is the only thing that differs.
             connect: target.route === 'relay' ? this.relayStreamFor(target.machineId) : undefined,
+            // The daemon forwards the session's own keepAlive now, so the LAN channel can say
+            // "thinking" the way the server channel always has. Same handler as the server's
+            // ephemeral updates; the payload shape is identical on purpose.
+            onEphemeral: (payload) => { this.handleEphemeralUpdate(payload); },
             ...handlers,
         }),
         onUpdate: (target, payload) => { this.onDaemonUpdate(target.route, payload); },
