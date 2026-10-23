@@ -151,6 +151,14 @@ export type LanServerOptions = {
    */
   getHistory: (address: LanSessionAddress, query: { since?: string; before?: string }) => LanHistory | null;
   /**
+   * The full input and result of one tool call, for a detail view that was opened.
+   *
+   * The message stream carries a truncated copy — that is what keeps a session's log, its pages and
+   * its relay traffic small — and the full payload stays in the session's own directory beside the
+   * working tree. Null when this machine has no such session, or no such call on disk.
+   */
+  getToolContent?: (args: { sessionId: string; callId: string }) => Promise<{ args?: unknown; result?: unknown } | null> | { args?: unknown; result?: unknown } | null;
+  /**
    * A user message the App sent over the LAN socket. `content` is the same ciphertext the server
    * route carries, so this stays end-to-end encrypted — the LAN is plain HTTP, which is exactly
    * why the payload must not be readable here.
@@ -744,6 +752,42 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       `cursor=${history.cursor} older=${history.older} from=${clientAddress(request)}`,
     );
     return reply.send({ v: LAN_PROTOCOL_VERSION, ...history });
+  });
+
+  /**
+   * One tool call's full input and result.
+   *
+   * Unlike everything else this API carries, the answer is *plaintext* — the session wrote it that
+   * way beside the working tree, and it can contain file contents and command output. So the
+   * machine key every paired device holds is not enough here: the account has to sign for it, the
+   * same proof the actions that change something require.
+   */
+  app.get('/lan/sessions/:sessionId/tool-content/:callId', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (!opts.getToolContent) {
+      return reply.code(404).send({ error: 'this daemon does not serve tool content' });
+    }
+    const { sessionId, callId } = request.params as { sessionId: string; callId: string };
+    // A call id names a file on disk; anything that could walk out of that directory stops here.
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(callId)) {
+      logger.debug(`[lan] tool-content refused: callId=${callId.slice(0, 40)}`);
+      return reply.code(400).send({ error: 'that is not a tool call id' });
+    }
+    const target = `${sessionId}:${callId}`;
+    if (!requireAccountProof(request, { operation: 'tool-content', target })) {
+      return reply.code(403).send({ error: 'account proof required' });
+    }
+    const content = await opts.getToolContent({ sessionId, callId });
+    if (!content) {
+      logger.debug(`[lan] tool-content 404 ${target}`);
+      return reply.code(404).send({ error: 'no such tool content on this machine' });
+    }
+    logger.debug(
+      `[lan] tool-content ${target} args=${content.args !== undefined} result=${content.result !== undefined} from=${clientAddress(request)}`,
+    );
+    return reply.send({ v: LAN_PROTOCOL_VERSION, ...content });
   });
 
   /**

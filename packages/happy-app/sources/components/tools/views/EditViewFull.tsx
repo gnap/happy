@@ -7,8 +7,8 @@ import { ToolDiffView } from '@/components/tools/ToolDiffView';
 import { trimIdent } from '@/utils/trimIdent';
 import { useLazyToolInput } from './useLazyToolInput';
 
-export const EditViewFull = React.memo<ToolViewProps>(({ tool, metadata, sessionId }) => {
-    const { resolvedInput, loading } = useLazyToolInput(tool, sessionId);
+export const EditViewFull = React.memo<ToolViewProps>(({ tool, metadata, sessionId, messageId }) => {
+    const { resolvedInput, loading } = useLazyToolInput(tool, sessionId, messageId);
 
     let oldString = '';
     let newString = '';

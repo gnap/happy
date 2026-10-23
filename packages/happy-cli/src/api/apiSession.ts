@@ -19,6 +19,7 @@ import { RpcHandlerManager } from './rpc/RpcHandlerManager';
 import { registerCommonHandlers } from '../modules/common/registerCommonHandlers';
 import { calculateCost } from '@/utils/pricing';
 import { forwardSessionEventToDaemon } from '@/daemon/unixSocketClient';
+import { WorktreeStatusWatcher, changesWorktree, readWorktreeStatus, type WorktreeStatus } from '@/utils/worktreeStatus';
 import { type SessionEnvelope, type SessionTurnEndStatus } from '@slopus/happy-wire';
 import {
     closeClaudeTurnWithStatus,
@@ -154,6 +155,21 @@ const LAZY_RESULT_STRIP_FIELDS_BY_TOOL: Record<string, string[]> = {
 const LAZY_RESULT_PREVIEW_FIELDS_BY_TOOL: Record<string, string[]> = {
     CursorEdit: ['diffString'],
     CursorWrite: ['diffString'],
+    // A command's output is the reason to open the card, not something the transcript shows — and
+    // it is the largest single field in a Claude session's message stream. The first lines stay for
+    // the card's context; the rest is fetched when the detail view opens.
+    Bash: ['stdout', 'stderr'],
+};
+
+/**
+ * Preview fields nested inside a wrapper object.
+ *
+ * A read's result is `{ file: { content } }`, not a flat payload — the same rule as the top-level
+ * preview, which cannot reach inside it. The content is the whole file the App shows only when the
+ * detail view is opened.
+ */
+const LAZY_RESULT_NESTED_PREVIEW_FIELDS_BY_TOOL: Record<string, [string, string][]> = {
+    Read: [['file', 'content']],
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -195,8 +211,15 @@ function extractA2ATextFromParts(parts: unknown): string | null {
     return texts.join('\n');
 }
 
-/** Max lines kept in the compact diffString preview. */
+/** Max lines kept in the compact preview. */
 const LAZY_DIFF_STRING_MAX_LINES = 15;
+/**
+ * Max characters kept in a preview field.
+ *
+ * The line bound alone does nothing for output that has no newlines — a minified JSON body or a
+ * one-line trace is a single "line" however long it is.
+ */
+const LAZY_PREVIEW_MAX_CHARS = 2_000;
 
 /**
  * Characters per field kept in the compact (wire) copy for non-diff fields.
@@ -370,7 +393,10 @@ export class ApiSessionClient extends EventEmitter {
         if (!LAZY_TOOL_CONTENT_ENABLED) return output;
         const stripFields = LAZY_RESULT_STRIP_FIELDS_BY_TOOL[toolName];
         const previewFields = LAZY_RESULT_PREVIEW_FIELDS_BY_TOOL[toolName];
-        if ((!stripFields || stripFields.length === 0) && (!previewFields || previewFields.length === 0)) return output;
+        const nestedFields = LAZY_RESULT_NESTED_PREVIEW_FIELDS_BY_TOOL[toolName];
+        if ((!stripFields || stripFields.length === 0)
+            && (!previewFields || previewFields.length === 0)
+            && (!nestedFields || nestedFields.length === 0)) return output;
         if (!output || typeof output !== 'object') return output;
 
         const r = output as Record<string, unknown>;
@@ -396,11 +422,31 @@ export class ApiSessionClient extends EventEmitter {
         for (const field of previewFields ?? []) {
             if (typeof successObj[field] === 'string') {
                 const original = successObj[field] as string;
-                const truncated = truncateByLines(original, LAZY_DIFF_STRING_MAX_LINES);
+                const byLines = truncateByLines(original, LAZY_DIFF_STRING_MAX_LINES);
+                const truncated = byLines.length > LAZY_PREVIEW_MAX_CHARS
+                    ? byLines.slice(0, LAZY_PREVIEW_MAX_CHARS)
+                    : byLines;
                 if (truncated.length < original.length) {
                     compactSuccess[field] = truncated;
                     wasTruncated = true;
                 }
+            }
+        }
+
+        // Nested previews (a read's file contents) use the same bounds as the flat ones.
+        for (const [outer, inner] of nestedFields ?? []) {
+            const container = successObj[outer];
+            if (!isRecord(container) || typeof container[inner] !== 'string') {
+                continue;
+            }
+            const original = container[inner] as string;
+            const byLines = truncateByLines(original, LAZY_DIFF_STRING_MAX_LINES);
+            const preview = byLines.length > LAZY_PREVIEW_MAX_CHARS
+                ? byLines.slice(0, LAZY_PREVIEW_MAX_CHARS)
+                : byLines;
+            if (preview.length < original.length) {
+                compactSuccess[outer] = { ...container, [inner]: preview };
+                wasTruncated = true;
             }
         }
 
@@ -581,6 +627,12 @@ export class ApiSessionClient extends EventEmitter {
             reconnectionAttempts: Infinity,
             reconnectionDelay: 1000,
             reconnectionDelayMax: 5000,
+            // A connection attempt that never completes has to be torn down: left alone it stays an
+            // ESTABLISHED socket the OS holds, and an unreachable server plus an infinite reconnect
+            // loop turns that into thousands of them until no ephemeral ports are left.
+            timeout: 20_000,
+            // Engine.IO's own bound for a hanging polling request, for the transports that use it.
+            requestTimeout: 30_000,
             transports: this.websocketOnly ? ['websocket'] : ['polling', 'websocket'],
             withCredentials: true,
             autoConnect: false,
@@ -1822,10 +1874,84 @@ export class ApiSessionClient extends EventEmitter {
         suppressNextUserText(this.claudeSessionProtocolState, count);
     }
 
+    /** Tool call id → name, from the start envelope that named it to the end that returned. */
+    private pendingToolNames = new Map<string, string>();
+    /** The session's working tree, once a tool has made it worth asking about. */
+    private worktreeStatus: WorktreeStatusWatcher | null = null;
+
+    /**
+     * Encode a tool result at the same exit point the arguments are encoded at.
+     *
+     * The result envelope names no tool — it carries only the call id — so the name is remembered
+     * from the start envelope that preceded it. Claude's results were the ones missing this: the
+     * cursor and ACP loops encode before sending, while the Claude mapper emitted the provider's
+     * result whole, command output and all.
+     */
+    private maybeLazyEncodeToolResult(envelope: SessionEnvelope, toolName: string | undefined): SessionEnvelope {
+        if (!LAZY_TOOL_CONTENT_ENABLED) return envelope;
+        const ev = envelope.ev as Record<string, unknown>;
+        if (ev.t !== 'tool-call-end' || !toolName || !('result' in ev)) return envelope;
+        const call = typeof ev.call === 'string' ? ev.call : null;
+        if (!call) return envelope;
+        const encoded = this.maybeLazyEncodeResult(toolName, call, ev.result);
+        return encoded === ev.result ? envelope : { ...envelope, ev: { ...ev, result: encoded } } as SessionEnvelope;
+    }
+
+    /**
+     * The tool name an envelope carries, and the one place a result's consequences start.
+     *
+     * A result envelope names no tool, so the name is remembered from the start envelope that
+     * preceded it and dropped with the result. Two things read it: the lazy encoder, and the
+     * working-tree watcher — a tool that can write is the signal that the tree may have moved.
+     */
+    private noteToolEnvelope(ev: Record<string, unknown>): string | undefined {
+        const call = typeof ev.call === 'string' ? ev.call : null;
+        if (ev.t === 'tool-call-start') {
+            const name = typeof ev.name === 'string' ? ev.name : null;
+            if (call && name) {
+                this.pendingToolNames.set(call, name);
+            }
+            return name ?? undefined;
+        }
+        if (ev.t === 'tool-call-end') {
+            if (!call) return undefined;
+            const name = this.pendingToolNames.get(call);
+            this.pendingToolNames.delete(call);
+            if (changesWorktree(name)) {
+                this.worktreeStatusWatcher().trigger();
+            }
+            return name;
+        }
+        return undefined;
+    }
+
+    /** The session's own working tree, asked only after something that can write to it. */
+    private worktreeStatusWatcher(): WorktreeStatusWatcher {
+        if (!this.worktreeStatus) {
+            const cwd = this.metadata?.path ?? process.cwd();
+            this.worktreeStatus = new WorktreeStatusWatcher({
+                read: () => readWorktreeStatus(cwd),
+                publish: (status) => { void this.publishWorktreeStatus(status); },
+            });
+        }
+        return this.worktreeStatus;
+    }
+
+    private async publishWorktreeStatus(status: WorktreeStatus): Promise<void> {
+        try {
+            // The App draws its badge from this; it is a normal metadata field, so it travels the
+            // same way the rest of the session's state does.
+            await this.updateMetadata((metadata) => ({ ...metadata, gitStatus: status }));
+        } catch (error) {
+            logger.debug('[worktree-status] publish failed', { error });
+        }
+    }
+
     sendSessionProtocolMessage(envelope: SessionEnvelope, extraMeta?: Record<string, unknown>) {
         // Apply lazy encoding at the single exit point so all code paths
         // (Claude via sendClaudeSessionMessage, Cursor via direct call, etc.) are covered.
-        const finalEnvelope = this.withWriterIdentity(this.maybeLazyEncodeEnvelope(envelope));
+        const toolName = this.noteToolEnvelope(envelope.ev as Record<string, unknown>);
+        const finalEnvelope = this.withWriterIdentity(this.maybeLazyEncodeEnvelope(this.maybeLazyEncodeToolResult(envelope, toolName)));
         if (finalEnvelope.role === 'user' && finalEnvelope.ev.t === 'text') {
             const stack = new Error().stack?.split('\n').slice(1, 4).map(s => s.trim()).join(' <- ');
             logger.debug(`[API] USER ENVELOPE: "${(finalEnvelope.ev as any).text?.slice(0,50)}" callstack: ${stack}`);
@@ -1897,6 +2023,10 @@ export class ApiSessionClient extends EventEmitter {
         // Both directions must be reliable: volatile thinking=true is often dropped (App stuck idle),
         // volatile thinking=false left sessions stuck "thinking" on flaky WSS.
         this.socket.emit('session-alive', payload);
+        // The machine's own readers have no server to hear this from. Forwarding it is what lets
+        // the LAN channel say "thinking" live, instead of only inferring it from the turn
+        // boundaries written into the log.
+        forwardSessionEventToDaemon({ t: 'session-alive', ...payload });
     }
 
     /**
@@ -2140,6 +2270,8 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     async close() {
+        this.worktreeStatus?.stop();
+        this.worktreeStatus = null;
         logger.debug('[API] socket.close() called');
         this.closing = true;
         if (this.a2aInboxStateSyncTimer !== null) {

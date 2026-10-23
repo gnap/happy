@@ -603,7 +603,7 @@ interface GetToolCallFullContentRequest {
     callId: string;
 }
 
-interface GetToolCallFullContentResponse {
+export interface GetToolCallFullContentResponse {
     success: boolean;
     args?: Record<string, unknown>;
     result?: unknown;

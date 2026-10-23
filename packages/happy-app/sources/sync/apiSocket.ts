@@ -224,6 +224,13 @@ class ApiSocket {
             reconnectionDelayMax: RECONNECT_DELAY_MAX,
             reconnectionAttempts: Infinity,
             randomizationFactor: RECONNECT_RANDOMIZATION_FACTOR,
+            // A connection attempt that never completes has to be torn down. socket.io's own
+            // default is 20s; naming it keeps that true if the default ever moves. The polling
+            // fallback had no bound at all: a long-poll request that hangs is another socket held
+            // for as long as the server keeps it open, and an unreachable server plus an infinite
+            // reconnect loop is how that becomes thousands of them.
+            timeout: 20_000,
+            requestTimeout: 30_000,
         });
 
         this.setupEventHandlers();

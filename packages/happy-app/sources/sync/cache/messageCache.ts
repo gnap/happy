@@ -16,12 +16,13 @@ import { getSessionCacheDB } from './sessionCacheDB';
 import {
     serializeReducerStateToJson,
     trimReducerState,
+    deserializeReducerStateFromJson,
     deserializeReducerStateOrCreate,
     SERIALIZER_SCHEMA_VERSION,
 } from './reducerStateSerializer';
 import { clearAllHotWindows, clearHotWindow, loadHotWindow, saveHotWindow } from './hotWindow';
 import { MAX_REDUCER_STATE_BYTES } from './limits';
-import { createReducer, type ReducerState } from '../reducer/reducer';
+import { createReducer, materializeReducerMessages, type ReducerState } from '../reducer/reducer';
 import type { Message } from '../typesMessage';
 import type { Session } from '../storageTypes';
 import { collapseDuplicateMessages } from '../messageIdentity';
@@ -124,22 +125,62 @@ export async function loadMessageCache(session: Session, servedByDaemon = false)
     const hotStartedAt = Date.now();
     const hot = loadHotWindow(session.id);
     if (hot) {
-        const messages = collapseDuplicateMessages(hot.messages);
-        const reducerState = trimReducerState(
-            deserializeReducerStateOrCreate(hot.reducerStateJson),
-            new Set(messages.map((message) => message.id)),
-        );
-        log.log(
-            `📦 messageCache: hot window ${messages.length} messages for ${session.id}` +
-            ` in ${Date.now() - hotStartedAt}ms (${hot.bytes}b)`
-        );
-        return {
-            messages,
-            reducerState,
-            lastSeq: hot.lastSeq,
-            oldestSeq: hot.oldestSeq,
-            hasOlderMessages: hot.hasOlderMessages,
-        };
+        // The window keeps one copy: the reducer state when it was small enough, and the messages
+        // themselves when it was not. A state that no longer produces the window it was saved with
+        // (a partial write, a changed shape) is a miss, not a shorter window.
+        if (hot.reducerStateJson) {
+            const storedState = deserializeReducerStateFromJson(hot.reducerStateJson);
+            const materialized = storedState ? materializeReducerMessages(storedState) : [];
+            // The state's projection is the window: a few reducer entries can legitimately have no
+            // display form (a streamed chunk folded into another message), so the count can come out
+            // slightly lower than the messages that were saved. Only an empty projection means the
+            // state is not this window at all — a changed shape, or a write that did not land.
+            if (storedState && materialized.length > 0) {
+                const messages = collapseDuplicateMessages(materialized);
+                const reducerState = trimReducerState(
+                    storedState,
+                    new Set(messages.map((message) => message.id)),
+                );
+                log.log(
+                    `📦 messageCache: hot window ${messages.length} messages for ${session.id}` +
+                    ` in ${Date.now() - hotStartedAt}ms (${hot.bytes}b)`
+                );
+                return {
+                    messages,
+                    reducerState,
+                    lastSeq: hot.lastSeq,
+                    oldestSeq: hot.oldestSeq,
+                    hasOlderMessages: hot.hasOlderMessages,
+                };
+            }
+            log.log(
+                `📦 messageCache: hot state for ${session.id} holds ${materialized.length} of ${hot.messageCount}` +
+                ' messages; falling back to the copy in the window'
+            );
+        }
+        if (hot.messages) {
+            const messages = collapseDuplicateMessages(hot.messages);
+            if (messages.length === hot.messageCount) {
+                // The state was dropped as oversized, so there is no state to hand the next ingest:
+                // a fresh one is correct, just not free to rebuild from the archive.
+                const reducerState = trimReducerState(
+                    deserializeReducerStateOrCreate(undefined),
+                    new Set(messages.map((message) => message.id)),
+                );
+                log.log(
+                    `📦 messageCache: hot messages ${messages.length} for ${session.id}` +
+                    ` in ${Date.now() - hotStartedAt}ms (${hot.bytes}b, state dropped)`
+                );
+                return {
+                    messages,
+                    reducerState,
+                    lastSeq: hot.lastSeq,
+                    oldestSeq: hot.oldestSeq,
+                    hasOlderMessages: hot.hasOlderMessages,
+                };
+            }
+        }
+        log.log(`📦 messageCache: hot window for ${session.id} did not cover its ${hot.messageCount} messages; reading the rows`);
     }
 
     try {
@@ -325,6 +366,7 @@ export async function saveMessageCache(
         // disk.
         const newest = [...messages].sort((a, b) => b.createdAt - a.createdAt).slice(0, HYDRATE_MESSAGE_LIMIT);
         let reducerStateJson = serializeReducerStateToJson(trimReducerState(reducerState, new Set(newest.map((message) => message.id))));
+        let stateDropped = false;
         if (reducerStateJson.length > MAX_REDUCER_STATE_BYTES) {
             // The state is a projection of the window; past this size it is carrying something the
             // trim does not take, and deserialising it costs more than rebuilding it from the
@@ -334,6 +376,7 @@ export async function saveMessageCache(
                 ` (${reducerStateJson.length}b > ${MAX_REDUCER_STATE_BYTES}b)`
             );
             reducerStateJson = serializeReducerStateToJson(createReducer());
+            stateDropped = true;
         }
         const stateMs = Date.now() - started;
         // The window's own floor, not the store's: the hot copy holds sixty messages, and reporting
@@ -345,9 +388,12 @@ export async function saveMessageCache(
         // The synchronous copy a tap reads, written before the database on purpose: the next open
         // must not depend on this connection being free, or on the JS thread getting to the SQLite
         // callback in time. It is the same window and the same state the row below describes.
+        // One copy, never two: the state when it survived, and the messages themselves when it was
+        // dropped for size. A session full of tool output takes the second path most of the time.
         saveHotWindow(session.id, {
-            messages: newest,
-            reducerStateJson,
+            reducerStateJson: stateDropped ? null : reducerStateJson,
+            messages: stateDropped ? newest : null,
+            messageCount: newest.length,
             lastSeq,
             oldestSeq: hotOldestSeq,
             hasOlderMessages,

@@ -81,6 +81,11 @@ vi.mock('@/utils/time', () => ({
     delay: mockDelay
 }));
 
+const { mockForwardToDaemon } = vi.hoisted(() => ({ mockForwardToDaemon: vi.fn() }));
+vi.mock('@/daemon/unixSocketClient', () => ({
+    forwardSessionEventToDaemon: mockForwardToDaemon,
+}));
+
 type SocketHandler = (...args: any[]) => void;
 type SocketHandlers = Record<string, SocketHandler[]>;
 
@@ -1376,5 +1381,117 @@ describe('ApiSessionClient v3 messages API migration', () => {
             expect(mockAxiosPost).toHaveBeenCalledTimes(1);
         });
         expect(client.getOutboundTransportMode()).toBe('http');
+    });
+});
+
+describe('lazy tool results', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        mockAxiosGet.mockResolvedValue(makeEmptyFetchResponse());
+        mockIo.mockReturnValue({
+            connected: true,
+            connect: vi.fn(),
+            on: vi.fn(),
+            off: vi.fn(),
+            emit: vi.fn(),
+            emitWithAck: vi.fn(async () => ({ result: 'error' })),
+            volatile: { emit: vi.fn() },
+            close: vi.fn(),
+        });
+    });
+
+    const makeClient = () => new ApiSessionClient('fake-token', makeSession()) as any;
+
+    const start = (call: string, name: string) => ({
+        id: `start-${call}`, time: 0, role: 'agent' as const,
+        ev: { t: 'tool-call-start', call, name, args: {} },
+    }) as any;
+
+    const end = (call: string, result: unknown) => ({
+        id: `end-${call}`, time: 0, role: 'agent' as const,
+        ev: { t: 'tool-call-end', call, result },
+    }) as any;
+
+    it('truncates a command result and remembers the tool that produced it', () => {
+        const client = makeClient();
+        const stdout = Array.from({ length: 200 }, (_, i) => `line ${i}`).join('\n');
+
+        const name = client.noteToolEnvelope(start('c1', 'Bash').ev);
+        const encoded = client.maybeLazyEncodeToolResult(end('c1', {
+            stdout, stderr: '', interrupted: false, isImage: false, noOutputExpected: false,
+        }), name);
+
+        expect(encoded.ev.result._lazyResult).toBe(true);
+        // The preview is bounded by lines and by characters; the full output is on disk.
+        expect(encoded.ev.result.stdout.split('\n').filter(Boolean).length).toBeLessThanOrEqual(15);
+        expect(encoded.ev.result.stdout.length).toBeLessThan(stdout.length);
+    });
+
+    it('bounds a single-line result by characters, which a line limit cannot', () => {
+        const client = makeClient();
+        const stdout = 'x'.repeat(10_000);
+
+        const name = client.noteToolEnvelope(start('c2', 'Bash').ev);
+        const encoded = client.maybeLazyEncodeToolResult(end('c2', {
+            stdout, stderr: '', interrupted: false, isImage: false, noOutputExpected: false,
+        }), name);
+
+        expect(encoded.ev.result.stdout.length).toBeLessThanOrEqual(2_000);
+        expect(encoded.ev.result._lazyResult).toBe(true);
+    });
+
+    it('previews a file read, whose content sits inside a wrapper', () => {
+        const client = makeClient();
+        const content = Array.from({ length: 300 }, (_, i) => `line ${i}`).join('\n');
+
+        const name = client.noteToolEnvelope(start('r1', 'Read').ev);
+        const encoded = client.maybeLazyEncodeToolResult(end('r1', {
+            type: 'text',
+            file: { filePath: '/x', content, numLines: 300, startLine: 1, totalLines: 300 },
+        }), name);
+
+        // The same rule as a command's output: the detail view is what asks for the file.
+        expect(encoded.ev.result._lazyResult).toBe(true);
+        expect(encoded.ev.result.file.content.length).toBeLessThan(content.length);
+        expect(encoded.ev.result.file.filePath).toBe('/x');
+    });
+
+    it('leaves a result the App draws whole alone', () => {
+        const client = makeClient();
+        const result = { filePath: '/x', oldString: 'a', newString: 'b' };
+
+        const name = client.noteToolEnvelope(start('c3', 'Edit').ev);
+        const encoded = client.maybeLazyEncodeToolResult(end('c3', result), name);
+
+        expect(encoded.ev.result).toBe(result);
+    });
+});
+
+describe('session keepAlive', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        mockAxiosGet.mockResolvedValue(makeEmptyFetchResponse());
+        mockIo.mockReturnValue({
+            connected: true,
+            connect: vi.fn(),
+            on: vi.fn(),
+            off: vi.fn(),
+            emit: vi.fn(),
+            emitWithAck: vi.fn(async () => ({ result: 'error' })),
+            volatile: { emit: vi.fn() },
+            close: vi.fn(),
+        });
+    });
+
+    it('mirrors the heartbeat to the machine, so its LAN readers can say "thinking"', () => {
+        const client = new ApiSessionClient('fake-token', makeSession());
+
+        client.keepAlive(true, 'remote');
+
+        // The server hears this over its socket; the machine's own readers have no server to hear
+        // it from. Same payload, one extra hop.
+        expect(mockForwardToDaemon).toHaveBeenCalledWith(
+            expect.objectContaining({ t: 'session-alive', thinking: true, sid: 'test-session-id' }),
+        );
     });
 });

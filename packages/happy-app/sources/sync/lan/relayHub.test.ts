@@ -65,6 +65,36 @@ const hubWith = () => {
     return { hub, socket: FakeSocket.last! };
 };
 
+describe('relay hub handshake', () => {
+    it('abandons a handshake that never opens, and retries', () => {
+        // A black-holed connect can sit for over a minute at the OS level, with no close and no
+        // reconnect — every machine behind the relay reads as unreachable the whole time.
+        vi.useFakeTimers();
+        const { hub, socket } = hubWith();
+        expect(socket.closed).toBe(false);
+
+        vi.advanceTimersByTime(15_000);
+        expect(socket.closed).toBe(true);
+
+        // The close schedules the ordinary reconnect, which opens a fresh socket.
+        vi.advanceTimersByTime(1_000);
+        expect(FakeSocket.last).not.toBe(socket);
+        hub.close();
+    });
+
+    it('leaves a socket that opened alone', () => {
+        vi.useFakeTimers();
+        const { hub, socket } = hubWith();
+        socket.accept();
+        // Past the handshake bound, and past the first heartbeat (which only asks, and is not
+        // answered here until its own 45s timeout): the socket that opened is not the one this
+        // timer is for.
+        vi.advanceTimersByTime(20_000);
+        expect(socket.closed).toBe(false);
+        hub.close();
+    });
+});
+
 describe('relayHubUrl', () => {
     it('turns the relay base URL into the hub endpoint', () => {
         expect(relayHubUrl('https://relay.example')).toBe('wss://relay.example/client');

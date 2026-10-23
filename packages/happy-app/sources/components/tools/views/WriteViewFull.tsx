@@ -6,8 +6,8 @@ import { ToolDiffView } from '@/components/tools/ToolDiffView';
 import { knownTools } from '@/components/tools/knownTools';
 import { useLazyToolInput } from './useLazyToolInput';
 
-export const WriteViewFull = React.memo<ToolViewProps>(({ tool, sessionId }) => {
-    const { resolvedInput, loading } = useLazyToolInput(tool, sessionId);
+export const WriteViewFull = React.memo<ToolViewProps>(({ tool, sessionId, messageId }) => {
+    const { resolvedInput, loading } = useLazyToolInput(tool, sessionId, messageId);
 
     let contents = '';
     const parsed = knownTools.Write.input.safeParse(resolvedInput);

@@ -1629,6 +1629,28 @@ function processContextUsageData(state: ReducerState, cu: {
 }
 
 
+/**
+ * The display messages a reducer state stands for.
+ *
+ * The state is the copy the cache keeps: it is what the next ingest needs, and every message a
+ * screen draws is already a projection of it. The window used to write that projection *as well*,
+ * so each message was stored twice — 671KB for a 60-message Claude window, 312KB of it the second
+ * copy. Materialising on load is that copy removed.
+ *
+ * Newest first, the order the window used to be written in. The store sorts by time on apply, so
+ * this only has to be stable.
+ */
+export function materializeReducerMessages(state: ReducerState): Message[] {
+    const messages: Message[] = [];
+    for (const reducerMessage of state.messages.values()) {
+        const message = convertReducerMessageToMessage(reducerMessage, state);
+        if (message) {
+            messages.push(message);
+        }
+    }
+    return messages.sort((a, b) => b.createdAt - a.createdAt);
+}
+
 function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: ReducerState): Message | null {
     if (reducerMsg.role === 'user' && reducerMsg.text !== null) {
         return {

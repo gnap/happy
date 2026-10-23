@@ -5,7 +5,7 @@
  * daemon and no `configuration`.
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import nacl from 'tweetnacl';
 import { startLanServer, lanProofFor, LAN_PROTOCOL_VERSION, type LanHistory, type LanServerHandle, type LanSessionSummary } from './lanServer';
 import { accountProofMessage } from './accountProof';
@@ -36,11 +36,14 @@ let proofCounter = 0;
 function signed(path: string, init: { token?: string; body?: unknown } = {}) {
     const nonce = `nonce-${++proofCounter}`;
     const at = Date.now();
-    const operation = path.endsWith('/restart') ? 'restart' : 'control';
-    const target = path.split('/sessions/')[1]?.split('/')[0] ?? '-';
+    const isToolContent = path.includes('/tool-content/');
+    const operation = isToolContent ? 'tool-content' : path.endsWith('/restart') ? 'restart' : 'control';
+    const target = isToolContent
+        ? path.split('/tool-content/')[1] ? `${path.split('/sessions/')[1]?.split('/')[0] ?? '-'}:${path.split('/tool-content/')[1]}` : '-'
+        : path.split('/sessions/')[1]?.split('/')[0] ?? '-';
     const message = accountProofMessage({ operation, target, nonce, at, bodyDigest: '' });
     return {
-        method: 'POST',
+        method: isToolContent ? 'GET' : 'POST',
         ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
         headers: {
             ...(init.token ? { authorization: `Bearer ${init.token}` } : {}),
@@ -82,6 +85,8 @@ let controlled: { sessionId: string; method: string; params: string }[] = [];
 let liveSessions: Set<string> = new Set(['sess-1']);
 /** The daemon's lifecycle log, as the route reads it. */
 let lifecycleEntries: { rev: number; op: string; tag: string }[] = [];
+/** The full tool payload this machine can read; unset by default, like a daemon from before the route. */
+let toolContentHandler: ((args: { sessionId: string; callId: string }) => Promise<{ args?: unknown; result?: unknown } | null>) | undefined;
 /** Left unset by default, which is how a daemon that predates the route behaves. */
 let restartHandler: ((sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>) | undefined;
 
@@ -106,6 +111,7 @@ async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
         // Only when a test asked for it: a daemon without the handler is a daemon from before the
         // route existed, and the 404 it answers is what sends a caller to the server instead.
         ...(restartHandler ? { restartSession: restartHandler } : {}),
+        ...(toolContentHandler ? { getToolContent: toolContentHandler } : {}),
         lifecycle: {
             revision: () => lifecycleEntries.length,
             entriesSince: (since: number) => lifecycleEntries.filter((entry) => entry.rev > since),
@@ -165,6 +171,7 @@ afterEach(async () => {
     liveSessions = new Set(['sess-1']);
     lifecycleEntries = [];
     restartHandler = undefined;
+    toolContentHandler = undefined;
     proofNonces = new Set();
 });
 
@@ -650,5 +657,60 @@ describe('the lifecycle log over the LAN', () => {
     it('is not reachable without a token', async () => {
         await start();
         expect((await fetch(url('/lan/lifecycle'))).status).toBe(401);
+    });
+});
+
+describe('lanServer tool content', () => {
+    const CONTENT = { args: { command: 'ls' }, result: { stdout: 'x'.repeat(50_000) } };
+
+    beforeEach(() => {
+        toolContentHandler = async ({ sessionId, callId }) =>
+            sessionId === 'sess-1' && callId === 'call-1' ? CONTENT : null;
+    });
+
+    it('serves the full payload to the account', async () => {
+        await start();
+        const token = await getToken();
+
+        const res = await fetch(
+            url('/lan/sessions/sess-1/tool-content/call-1'),
+            signed('/lan/sessions/sess-1/tool-content/call-1', { token }) as RequestInit,
+        );
+
+        expect(res.status).toBe(200);
+        const body = await res.json() as { args?: unknown; result?: { stdout?: string } };
+        expect(body.args).toEqual({ command: 'ls' });
+        expect(body.result?.stdout).toHaveLength(50_000);
+    });
+
+    it('refuses the plaintext payload without the account proof', async () => {
+        await start();
+        const token = await getToken();
+
+        // The machine key is a transport credential every paired device holds; this content can be
+        // a working tree's secrets, so it is the account that has to ask for it.
+        const res = await fetch(url('/lan/sessions/sess-1/tool-content/call-1'), authorized(token));
+
+        expect(res.status).toBe(403);
+    });
+
+    it('refuses a call id that could leave the content directory', async () => {
+        await start();
+        const token = await getToken();
+        const path = '/lan/sessions/sess-1/tool-content/..%2F..%2Fetc%2Fpasswd';
+
+        const res = await fetch(url(path), signed(path, { token }) as RequestInit);
+
+        expect(res.status).toBe(400);
+    });
+
+    it('answers 404 for a call this machine does not have', async () => {
+        await start();
+        const token = await getToken();
+        const path = '/lan/sessions/sess-1/tool-content/call-2';
+
+        const res = await fetch(url(path), signed(path, { token }) as RequestInit);
+
+        expect(res.status).toBe(404);
     });
 });

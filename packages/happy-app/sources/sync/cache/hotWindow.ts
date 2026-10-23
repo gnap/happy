@@ -12,25 +12,37 @@
  * already had. SQLite remains the archive — the older rows, the paging source, the copy that
  * survives a hot-window miss — this is only the part a tap is waiting for.
  *
- * What is stored is the *window*, not the history: sixty messages and the reducer state trimmed to
- * them. Keeping more would move the cost this exists to remove back onto the synchronous path.
+ * What is stored is the *window*, not the history: the reducer state trimmed to the newest sixty
+ * messages, and the messages themselves materialised from it on load rather than written beside it.
+ * Keeping more — or keeping both copies — would move the cost this exists to remove back onto the
+ * synchronous path.
  */
 
 import type { MMKV } from 'react-native-mmkv';
 import type { Message } from '../typesMessage';
-
-/** Bump when the stored shape changes; an old window is ignored, and SQLite answers instead. */
-const HOT_WINDOW_VERSION = 1;
+/**
+ * Bump when the stored shape changes; an old window is ignored, and SQLite answers instead.
+ *
+ * 2 is the shape that keeps only the reducer state. The messages a screen draws are materialised
+ * from it on load, instead of being written a second time beside it — see `materializeReducerMessages`.
+ */
+const HOT_WINDOW_VERSION = 2;
 const KEY_PREFIX = 'hot-window:';
 const INDEX_KEY = 'hot-window-index';
 /**
- * How many sessions keep a hot window.
+ * How much of the synchronous store the hot windows may take, and how many sessions they may span.
  *
- * One window is tens to hundreds of kilobytes, and the point is that the sessions a person has
- * opened recently are instant. Unbounded, this becomes a second, synchronous copy of the cache;
- * the least recently used are dropped and the next open falls back to SQLite.
+ * The count alone was not enough. It assumed a window was "tens of hundreds of kilobytes"; a long
+ * conversation's window is two to three hundred, and eight of them plus the session list filled the
+ * webview's whole localStorage budget — measured at 2.6M characters, which WebKit counts as UTF-16,
+ * so 5.2MB against a 5MB quota. Once there, *every* write fails, including settings and drafts, and
+ * one of those throws inside a store action and takes the screen with it.
+ *
+ * So the cache keeps a budget as well as a count: enough recent sessions to be instant, and never
+ * the whole quota. Eviction is oldest-first; the window just written is never dropped.
  */
 const MAX_HOT_SESSIONS = 8;
+const MAX_HOT_BYTES = 1_000_000;
 
 /** The slice of MMKV this file uses. Narrow so a test can stand in for it. */
 export type HotWindowStore = Pick<MMKV, 'getString' | 'set' | 'delete' | 'getAllKeys'>;
@@ -80,11 +92,34 @@ function getStore(): HotWindowStore | null {
     return store;
 }
 
-type Index = Record<string, number>;
+/** When a window was last written, and how much of the budget it holds. */
+type IndexEntry = { at: number; bytes: number };
+type Index = Record<string, IndexEntry>;
 
 export type HotWindow = {
-    messages: Message[];
-    reducerStateJson: string;
+    /**
+     * The window as the reducer knows it — the preferred copy.
+     *
+     * It is what the next ingest needs, and the display messages are a projection of it; storing
+     * the projection too is what made a window twice the size of its content.
+     */
+    reducerStateJson: string | null;
+    /**
+     * The messages, stored only when the reducer state was too large to keep.
+     *
+     * The cache drops an oversized state before saving (deserialising it would cost more than the
+     * open it serves), and for a session full of tool output that is the common case. Then the
+     * messages are the window — still one copy, not two.
+     */
+    messages: Message[] | null;
+    /**
+     * How many messages the window holds.
+     *
+     * Not used to hydrate, but to check the copy: a state or list that no longer produces the
+     * window it was saved with (a partial write, a different shape) is a cache miss, not a
+     * shorter window.
+     */
+    messageCount: number;
     lastSeq: number;
     oldestSeq: number;
     hasOlderMessages: boolean;
@@ -104,7 +139,23 @@ function readIndex(mmkv: HotWindowStore): Index {
     }
     try {
         const parsed = JSON.parse(raw) as unknown;
-        return parsed && typeof parsed === 'object' ? parsed as Index : {};
+        if (!parsed || typeof parsed !== 'object') {
+            return {};
+        }
+        // An index written before the budget existed stored bare timestamps. Read them, so the
+        // first save after an upgrade still knows what it can evict rather than starting over.
+        const index: Index = {};
+        for (const [sessionId, value] of Object.entries(parsed as Record<string, unknown>)) {
+            if (typeof value === 'number') {
+                // Its size was not recorded; read it once so the first save after the upgrade
+                // accounts for what is already on disk instead of letting it sit outside the budget.
+                index[sessionId] = { at: value, bytes: mmkv.getString(keyFor(sessionId))?.length ?? 0 };
+            } else if (value && typeof value === 'object') {
+                const entry = value as { at?: unknown; bytes?: unknown };
+                index[sessionId] = { at: Number(entry.at) || 0, bytes: Number(entry.bytes) || 0 };
+            }
+        }
+        return index;
     } catch {
         return {};
     }
@@ -131,12 +182,15 @@ export function loadHotWindow(sessionId: string): HotWindow | null {
     }
     try {
         const parsed = JSON.parse(raw) as StoredHotWindow;
-        if (parsed?.v !== HOT_WINDOW_VERSION || !Array.isArray(parsed.messages)) {
+        const hasState = typeof parsed?.reducerStateJson === 'string';
+        const hasMessages = Array.isArray(parsed?.messages);
+        if (parsed?.v !== HOT_WINDOW_VERSION || (!hasState && !hasMessages)) {
             return null;
         }
         return {
-            messages: parsed.messages,
-            reducerStateJson: typeof parsed.reducerStateJson === 'string' ? parsed.reducerStateJson : '{}',
+            reducerStateJson: hasState ? parsed.reducerStateJson : null,
+            messages: hasMessages ? parsed.messages : null,
+            messageCount: Number(parsed.messageCount) || 0,
             lastSeq: Number(parsed.lastSeq) || 0,
             oldestSeq: Number(parsed.oldestSeq) || 0,
             hasOlderMessages: parsed.hasOlderMessages === true,
@@ -149,8 +203,9 @@ export function loadHotWindow(sessionId: string): HotWindow | null {
 
 /** Replaces the window for a session and keeps the index to the most recently written ones. */
 export function saveHotWindow(sessionId: string, window: {
-    messages: Message[];
-    reducerStateJson: string;
+    reducerStateJson: string | null;
+    messages: Message[] | null;
+    messageCount: number;
     lastSeq: number;
     oldestSeq: number;
     hasOlderMessages: boolean;
@@ -159,21 +214,23 @@ export function saveHotWindow(sessionId: string, window: {
     if (!mmkv) {
         return;
     }
-    if (window.messages.length === 0) {
+    if (window.messageCount === 0) {
         clearHotWindow(sessionId);
         return;
     }
     const stored: StoredHotWindow = {
         v: HOT_WINDOW_VERSION,
-        messages: window.messages,
         reducerStateJson: window.reducerStateJson,
+        messages: window.messages,
+        messageCount: window.messageCount,
         lastSeq: window.lastSeq,
         oldestSeq: window.oldestSeq,
         hasOlderMessages: window.hasOlderMessages,
         savedAt: Date.now(),
     };
+    const json = JSON.stringify(stored);
     try {
-        mmkv.set(keyFor(sessionId), JSON.stringify(stored));
+        mmkv.set(keyFor(sessionId), json);
     } catch {
         // A failed hot write is not fatal: the archive below still has the messages, and the next
         // open pays the asynchronous path instead of the synchronous one.
@@ -181,19 +238,33 @@ export function saveHotWindow(sessionId: string, window: {
     }
 
     const index = readIndex(mmkv);
-    index[sessionId] = stored.savedAt;
-    const oldest = Object.entries(index)
-        .sort(([, a], [, b]) => a - b)
-        .slice(0, Math.max(0, Object.keys(index).length - MAX_HOT_SESSIONS));
-    for (const [id] of oldest) {
+    index[sessionId] = { at: stored.savedAt, bytes: json.length };
+    const oldestFirst = Object.entries(index).sort(([, a], [, b]) => a.at - b.at);
+    let count = oldestFirst.length;
+    let bytes = oldestFirst.reduce((sum, [, entry]) => sum + entry.bytes, 0);
+    for (const [id, entry] of oldestFirst) {
+        if (count <= MAX_HOT_SESSIONS && bytes <= MAX_HOT_BYTES) {
+            break;
+        }
+        // The window just written is the one being opened; it stays even if it is over budget on
+        // its own, because evicting it would leave the session it was written for without one.
+        if (id === sessionId) {
+            continue;
+        }
         delete index[id];
+        count -= 1;
+        bytes -= entry.bytes;
         try {
             mmkv.delete(keyFor(id));
         } catch {
             // ignore
         }
     }
-    mmkv.set(INDEX_KEY, JSON.stringify(index));
+    try {
+        mmkv.set(INDEX_KEY, JSON.stringify(index));
+    } catch {
+        // The windows themselves are still there; the index only decides what to evict next time.
+    }
 }
 
 export function clearHotWindow(sessionId: string): void {

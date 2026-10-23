@@ -1534,6 +1534,22 @@ export async function startDaemon(): Promise<void> {
         // against this channel. The outer `seq` is the user-wide counter the App explicitly
         // ignores for cursors; the ordering it does use, the session-internal `message.seq`,
         // travels inside `body` and is passed through untouched.
+        // A session's keepAlive, on its way to the machine's own readers. The server turns this
+        // into an `activity` ephemeral frame; the LAN does the same here, in the same shape, so the
+        // App's ephemeral handler runs unchanged against either channel. It is not a server-shaped
+        // update, so it must not fall through to the `update` broadcast below.
+        if (sessionId && event.t === 'session-alive') {
+          const alive = event as { time?: unknown; thinking?: unknown };
+          const at = typeof alive.time === 'number' ? alive.time : Date.now();
+          lanServer?.broadcast('ephemeral', {
+            type: 'activity',
+            id: sessionId,
+            active: true,
+            activeAt: at,
+            thinking: alive.thinking === true,
+          });
+          return;
+        }
         if (sessionId && event.t === 'update-session') {
           const change = event as { metadata?: { version: number; value: string }; agentState?: { version: number; value: string | null } };
           const known = lanSessionState.get(sessionId) ?? {};
@@ -1852,6 +1868,28 @@ export async function startDaemon(): Promise<void> {
                 hasOlder: page.hasOlder,
                 reset: page.reset,
               };
+            },
+            getToolContent: async ({ sessionId, callId }) => {
+              // The session's own directory, which the daemon pinned at spawn and the persisted
+              // record keeps after a restart. A session this machine never ran has no content
+              // anywhere, and the 404 sends the caller to the server.
+              const live = [...pidToTrackedSession.values()]
+                .find((session) => session.happySessionId === sessionId)?.directory;
+              const directory = live || sessions[sessionId]?.directory;
+              if (!directory) {
+                return null;
+              }
+              const readJson = async (path: string): Promise<unknown> => {
+                try {
+                  return JSON.parse(await fs.readFile(path, 'utf8')) as unknown;
+                } catch {
+                  return undefined;
+                }
+              };
+              const base = join(directory, '.happy', 'tool-content');
+              const args = await readJson(join(base, `${callId}.json`));
+              const result = await readJson(join(base, `${callId}_result.json`));
+              return args === undefined && result === undefined ? null : { args, result };
             },
           });
           lanServer = started;

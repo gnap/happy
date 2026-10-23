@@ -2,6 +2,7 @@ import { z } from 'zod'
 import type { Update, UpdateMachineBody } from '@slopus/happy-wire';
 import { UsageSchema } from '@/claude/types'
 import type { SandboxConfig } from '@/persistence'
+import type { WorktreeStatus } from '@/utils/worktreeStatus';
 
 export {
   SessionMessageContentSchema,
@@ -348,6 +349,11 @@ export type Metadata = {
   profileId?: string | null
   sandbox?: SandboxConfig | null
   dangerouslySkipPermissions?: boolean | null
+  /**
+   * The session's working tree, computed by the session process when a tool may have written to
+   * it. The App draws its badge from this instead of asking the machine for four git commands.
+   */
+  gitStatus?: WorktreeStatus,
   /** Periodic /context fetch result — provides real-time context window usage to the App. */
   contextUsage?: {
     currentTokens: number
@@ -444,6 +450,7 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
     profileId,
     dangerouslySkipPermissions,
     contextUsage,
+    gitStatus,
   } = metadata;
 
   return {
@@ -479,6 +486,7 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
     ...(flavor !== undefined ? { flavor } : {}),
     ...(sandbox !== undefined ? { sandbox } : {}),
     ...(dangerouslySkipPermissions !== undefined ? { dangerouslySkipPermissions } : {}),
+    ...(gitStatus !== undefined ? { gitStatus } : {}),
   } as AppCompatibleSessionMetadata;
 }
 

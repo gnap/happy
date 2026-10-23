@@ -15,8 +15,14 @@ import { useLocalSetting } from '@/sync/storage';
 const CONNECTED = '#34C759';
 const DOWN = '#8E8E93';
 
-/** The last set this logged, so the line appears when a decision changes rather than on every render. */
-let lastLogged: string | null = null;
+/**
+ * The last set each machine logged, so the line appears when a decision changes rather than on
+ * every render.
+ *
+ * Per machine: one shared value is overwritten as soon as a list draws two of them, and then every
+ * render of either one logs — which is how this turned into a flood instead of a diagnostic.
+ */
+const lastLogged = new Map<string, string>();
 
 /**
  * Says which icons were drawn, and which channels were left out for not being on this machine.
@@ -35,8 +41,9 @@ function logDecision(
     const drew = icons.map((icon) => `${icon.channel}:${icon.state}`).join(' ') || '(none)';
     const reached = [reach.lan ? 'lan' : '', reach.relay ? 'relay' : '', reach.server ? 'server' : ''].filter(Boolean).join(' ') || 'none';
     const summary = `${machineId ?? '?'} | ${priority.join('>')} | drew ${drew} | capable lan=${capability.lan} relay=${capability.relay} | reach ${reached}`;
-    if (summary !== lastLogged) {
-        lastLogged = summary;
+    const key = machineId ?? '?';
+    if (lastLogged.get(key) !== summary) {
+        lastLogged.set(key, summary);
         console.log(`📡 machine channels: ${summary}`);
     }
 }
