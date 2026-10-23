@@ -1980,6 +1980,10 @@ export class ApiSessionClient extends EventEmitter {
         // Both directions must be reliable: volatile thinking=true is often dropped (App stuck idle),
         // volatile thinking=false left sessions stuck "thinking" on flaky WSS.
         this.socket.emit('session-alive', payload);
+        // The machine's own readers have no server to hear this from. Forwarding it is what lets
+        // the LAN channel say "thinking" live, instead of only inferring it from the turn
+        // boundaries written into the log.
+        forwardSessionEventToDaemon({ t: 'session-alive', ...payload });
     }
 
     /**

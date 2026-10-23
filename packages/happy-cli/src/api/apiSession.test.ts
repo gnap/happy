@@ -81,6 +81,11 @@ vi.mock('@/utils/time', () => ({
     delay: mockDelay
 }));
 
+const { mockForwardToDaemon } = vi.hoisted(() => ({ mockForwardToDaemon: vi.fn() }));
+vi.mock('@/daemon/unixSocketClient', () => ({
+    forwardSessionEventToDaemon: mockForwardToDaemon,
+}));
+
 type SocketHandler = (...args: any[]) => void;
 type SocketHandlers = Record<string, SocketHandler[]>;
 
@@ -1459,5 +1464,34 @@ describe('lazy tool results', () => {
         const encoded = client.maybeLazyEncodeToolResult(end('c3', result));
 
         expect(encoded.ev.result).toBe(result);
+    });
+});
+
+describe('session keepAlive', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        mockAxiosGet.mockResolvedValue(makeEmptyFetchResponse());
+        mockIo.mockReturnValue({
+            connected: true,
+            connect: vi.fn(),
+            on: vi.fn(),
+            off: vi.fn(),
+            emit: vi.fn(),
+            emitWithAck: vi.fn(async () => ({ result: 'error' })),
+            volatile: { emit: vi.fn() },
+            close: vi.fn(),
+        });
+    });
+
+    it('mirrors the heartbeat to the machine, so its LAN readers can say "thinking"', () => {
+        const client = new ApiSessionClient('fake-token', makeSession());
+
+        client.keepAlive(true, 'remote');
+
+        // The server hears this over its socket; the machine's own readers have no server to hear
+        // it from. Same payload, one extra hop.
+        expect(mockForwardToDaemon).toHaveBeenCalledWith(
+            expect.objectContaining({ t: 'session-alive', thinking: true, sid: 'test-session-id' }),
+        );
     });
 });
