@@ -376,6 +376,23 @@ describe('Api server error handling', () => {
             expect((sanitized as Record<string, unknown>).startedBy).toBeUndefined();
             expect((sanitized as Record<string, unknown>).lifecycleState).toBeUndefined();
         });
+
+        it('keeps the working tree the session publishes', () => {
+            // The sanitizer is a whitelist applied on every write *and* on every received push: a
+            // field missing from it is silently dropped in both directions, which is exactly the
+            // trap this test exists for.
+            const gitStatus = {
+                branch: 'main', isDirty: true, modifiedCount: 1, untrackedCount: 0, stagedCount: 0,
+                lastUpdatedAt: 42, stagedLinesAdded: 0, stagedLinesRemoved: 0,
+                unstagedLinesAdded: 3, unstagedLinesRemoved: 1,
+                linesAdded: 3, linesRemoved: 1, linesChanged: 4,
+                upstreamBranch: 'origin/main', aheadCount: 1, behindCount: 0, stashCount: 0,
+            };
+
+            const sanitized = sanitizeSessionMetadataForApp({ ...testMetadata, gitStatus });
+
+            expect(sanitized.gitStatus).toEqual(gitStatus);
+        });
     });
 
     describe('session metadata sync helpers', () => {

@@ -19,6 +19,7 @@ import { RpcHandlerManager } from './rpc/RpcHandlerManager';
 import { registerCommonHandlers } from '../modules/common/registerCommonHandlers';
 import { calculateCost } from '@/utils/pricing';
 import { forwardSessionEventToDaemon } from '@/daemon/unixSocketClient';
+import { WorktreeStatusWatcher, changesWorktree, readWorktreeStatus, type WorktreeStatus } from '@/utils/worktreeStatus';
 import { type SessionEnvelope, type SessionTurnEndStatus } from '@slopus/happy-wire';
 import {
     closeClaudeTurnWithStatus,
@@ -1875,6 +1876,8 @@ export class ApiSessionClient extends EventEmitter {
 
     /** Tool call id → name, from the start envelope that named it to the end that returned. */
     private pendingToolNames = new Map<string, string>();
+    /** The session's working tree, once a tool has made it worth asking about. */
+    private worktreeStatus: WorktreeStatusWatcher | null = null;
 
     /**
      * Encode a tool result at the same exit point the arguments are encoded at.
@@ -1884,31 +1887,71 @@ export class ApiSessionClient extends EventEmitter {
      * cursor and ACP loops encode before sending, while the Claude mapper emitted the provider's
      * result whole, command output and all.
      */
-    private maybeLazyEncodeToolResult(envelope: SessionEnvelope): SessionEnvelope {
+    private maybeLazyEncodeToolResult(envelope: SessionEnvelope, toolName: string | undefined): SessionEnvelope {
         if (!LAZY_TOOL_CONTENT_ENABLED) return envelope;
         const ev = envelope.ev as Record<string, unknown>;
+        if (ev.t !== 'tool-call-end' || !toolName || !('result' in ev)) return envelope;
+        const call = typeof ev.call === 'string' ? ev.call : null;
+        if (!call) return envelope;
+        const encoded = this.maybeLazyEncodeResult(toolName, call, ev.result);
+        return encoded === ev.result ? envelope : { ...envelope, ev: { ...ev, result: encoded } } as SessionEnvelope;
+    }
+
+    /**
+     * The tool name an envelope carries, and the one place a result's consequences start.
+     *
+     * A result envelope names no tool, so the name is remembered from the start envelope that
+     * preceded it and dropped with the result. Two things read it: the lazy encoder, and the
+     * working-tree watcher — a tool that can write is the signal that the tree may have moved.
+     */
+    private noteToolEnvelope(ev: Record<string, unknown>): string | undefined {
+        const call = typeof ev.call === 'string' ? ev.call : null;
         if (ev.t === 'tool-call-start') {
-            const call = typeof ev.call === 'string' ? ev.call : null;
             const name = typeof ev.name === 'string' ? ev.name : null;
             if (call && name) {
                 this.pendingToolNames.set(call, name);
             }
-            return envelope;
+            return name ?? undefined;
         }
-        if (ev.t !== 'tool-call-end') return envelope;
-        const call = typeof ev.call === 'string' ? ev.call : null;
-        if (!call) return envelope;
-        const name = this.pendingToolNames.get(call);
-        this.pendingToolNames.delete(call);
-        if (!name || !('result' in ev)) return envelope;
-        const encoded = this.maybeLazyEncodeResult(name, call, ev.result);
-        return encoded === ev.result ? envelope : { ...envelope, ev: { ...ev, result: encoded } } as SessionEnvelope;
+        if (ev.t === 'tool-call-end') {
+            if (!call) return undefined;
+            const name = this.pendingToolNames.get(call);
+            this.pendingToolNames.delete(call);
+            if (changesWorktree(name)) {
+                this.worktreeStatusWatcher().trigger();
+            }
+            return name;
+        }
+        return undefined;
+    }
+
+    /** The session's own working tree, asked only after something that can write to it. */
+    private worktreeStatusWatcher(): WorktreeStatusWatcher {
+        if (!this.worktreeStatus) {
+            const cwd = this.metadata?.path ?? process.cwd();
+            this.worktreeStatus = new WorktreeStatusWatcher({
+                read: () => readWorktreeStatus(cwd),
+                publish: (status) => { void this.publishWorktreeStatus(status); },
+            });
+        }
+        return this.worktreeStatus;
+    }
+
+    private async publishWorktreeStatus(status: WorktreeStatus): Promise<void> {
+        try {
+            // The App draws its badge from this; it is a normal metadata field, so it travels the
+            // same way the rest of the session's state does.
+            await this.updateMetadata((metadata) => ({ ...metadata, gitStatus: status }));
+        } catch (error) {
+            logger.debug('[worktree-status] publish failed', { error });
+        }
     }
 
     sendSessionProtocolMessage(envelope: SessionEnvelope, extraMeta?: Record<string, unknown>) {
         // Apply lazy encoding at the single exit point so all code paths
         // (Claude via sendClaudeSessionMessage, Cursor via direct call, etc.) are covered.
-        const finalEnvelope = this.withWriterIdentity(this.maybeLazyEncodeEnvelope(this.maybeLazyEncodeToolResult(envelope)));
+        const toolName = this.noteToolEnvelope(envelope.ev as Record<string, unknown>);
+        const finalEnvelope = this.withWriterIdentity(this.maybeLazyEncodeEnvelope(this.maybeLazyEncodeToolResult(envelope, toolName)));
         if (finalEnvelope.role === 'user' && finalEnvelope.ev.t === 'text') {
             const stack = new Error().stack?.split('\n').slice(1, 4).map(s => s.trim()).join(' <- ');
             logger.debug(`[API] USER ENVELOPE: "${(finalEnvelope.ev as any).text?.slice(0,50)}" callstack: ${stack}`);
@@ -2227,6 +2270,8 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     async close() {
+        this.worktreeStatus?.stop();
+        this.worktreeStatus = null;
         logger.debug('[API] socket.close() called');
         this.closing = true;
         if (this.a2aInboxStateSyncTimer !== null) {
