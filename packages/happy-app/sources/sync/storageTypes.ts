@@ -69,6 +69,31 @@ export const MetadataSchema = z.object({
 	        }).optional(),
 	        fetchedAt: z.number().optional(),
 	    }).optional(),
+	    /**
+	     * The session's working tree, computed by the CLI when a tool may have written to it.
+	     *
+	     * Present on sessions whose CLI is new enough to publish it; absent means the App still
+	     * falls back to asking the machine for `git status` over the socket.
+	     */
+	    gitStatus: z.object({
+	        branch: z.string().nullable(),
+	        isDirty: z.boolean(),
+	        modifiedCount: z.number(),
+	        untrackedCount: z.number(),
+	        stagedCount: z.number(),
+	        lastUpdatedAt: z.number(),
+	        stagedLinesAdded: z.number(),
+	        stagedLinesRemoved: z.number(),
+	        unstagedLinesAdded: z.number(),
+	        unstagedLinesRemoved: z.number(),
+	        linesAdded: z.number(),
+	        linesRemoved: z.number(),
+	        linesChanged: z.number(),
+	        upstreamBranch: z.string().nullable().optional(),
+	        aheadCount: z.number().optional(),
+	        behindCount: z.number().optional(),
+	        stashCount: z.number().optional(),
+	    }).optional(),
 }).passthrough();
 
 

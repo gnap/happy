@@ -8,6 +8,7 @@ import { storage } from './storage';
 import { ApiEphemeralUpdateSchema, ApiMessage, ApiUpdateContainerSchema } from './apiTypes';
 import type { ApiEphemeralActivityUpdate } from './apiTypes';
 import { Session, Machine } from './storageTypes';
+import type { GitStatus, Metadata } from './storageTypes';
 import { InvalidateSync } from '@/utils/sync';
 import { ActivityUpdateAccumulator } from './reducer/activityUpdateAccumulator';
 import { randomUUID } from 'expo-crypto';
@@ -1070,8 +1071,11 @@ class Sync {
         this.currentVisibleSessionId = sessionId;
         this.getMessagesSync(sessionId).invalidate();
 
-        // Also invalidate git status sync for this session
-        gitStatusSync.getSync(sessionId).invalidate();
+        // Only for a session whose CLI does not publish its working tree: those still have to be
+        // asked over the socket, and that is the round trip this is replacing.
+        if (!this.gitStatusPublished(sessionId)) {
+            gitStatusSync.getSync(sessionId).invalidate();
+        }
 
         // Rate-limited single-session refresh: when the user opens a cached
         // session, invalidate the sessions list sync so the delta fetch picks
@@ -1966,6 +1970,7 @@ class Sync {
             // Apply to storage — full refresh replaces stale cache, delta merges.
             const applyStart = performance.now();
             this.applySessions(decryptedSessions, fullRefresh);
+            this.applyPublishedGitStatus(decryptedSessions);
             // The server answered, so the LAN's view of the list is no longer the fallback.
             storage.getState().applyDaemonSessionList(null);
             // Record timestamp for next delta fetch.
@@ -3790,7 +3795,9 @@ class Sync {
             // session is on screen.
             if (this.currentVisibleSessionId) {
                 this.getMessagesSync(this.currentVisibleSessionId).invalidate();
-                gitStatusSync.invalidate(this.currentVisibleSessionId);
+                if (!this.gitStatusPublished(this.currentVisibleSessionId)) {
+                    gitStatusSync.invalidate(this.currentVisibleSessionId);
+                }
             }
             for (const sync of this.sendSync.values()) {
                 sync.invalidate();
@@ -3938,8 +3945,10 @@ class Sync {
                             this.enqueueMessages(updateData.body.sid, [lastMessage]);
                         }
                     }
-                    // Refresh git status only when turn is done (ready), not on every mutable tool result
-                    if (shouldClearThinking) {
+                    // Refresh git status only when turn is done (ready), not on every mutable tool
+                    // result — and not at all for a session whose CLI publishes it: the last tool
+                    // result already scheduled a fresh one.
+                    if (shouldClearThinking && !this.gitStatusPublished(updateData.body.sid)) {
                         gitStatusSync.invalidate(updateData.body.sid);
                     }
 
@@ -4065,6 +4074,12 @@ class Sync {
                         : session.metadataVersion,
                     updatedAt: updateData.createdAt
                 }]);
+
+                // A working tree the session published is the badge, as soon as it says so — no
+                // round trip, and no waiting for a turn boundary.
+                if (metadata?.gitStatus) {
+                    this.applyPublishedGitStatus([{ id: updateData.body.id, metadata }]);
+                }
 
                 // Git status is refreshed on ready/turn-end only (see new-message), not on every agentState push
                 if (updateData.body.agentState) {
@@ -4773,6 +4788,53 @@ class Sync {
             return 'done';
         }
         return outcome.refused ? 'refused' : 'unavailable';
+    }
+
+    /** Whether this session's CLI publishes its working tree in metadata. */
+    private gitStatusPublished(sessionId: string): boolean {
+        return storage.getState().sessions[sessionId]?.metadata?.gitStatus !== undefined;
+    }
+
+    /**
+     * Takes the working tree a session published and makes it the App's badge.
+     *
+     * The CLI computes it where the tree is; this is the other end of that. Equal values are
+     * skipped rather than rewritten — the metadata arrives again on every reconnect and on every
+     * list refresh, and an unchanged badge is not news.
+     */
+    private applyPublishedGitStatus(sessions: readonly { id: string; metadata?: Metadata | null }[]): void {
+        const store = storage.getState();
+        for (const session of sessions) {
+            const status = session.metadata?.gitStatus;
+            if (!status) {
+                continue;
+            }
+            const current = store.sessionGitStatus[session.id];
+            if (current && this.sameGitStatus(current, status)) {
+                continue;
+            }
+            store.applyGitStatus(session.id, status);
+        }
+    }
+
+    /** Everything the badge draws, without the timestamp that changes on every computation. */
+    private sameGitStatus(a: GitStatus, b: GitStatus): boolean {
+        return a.branch === b.branch
+            && a.isDirty === b.isDirty
+            && a.modifiedCount === b.modifiedCount
+            && a.untrackedCount === b.untrackedCount
+            && a.stagedCount === b.stagedCount
+            && a.stagedLinesAdded === b.stagedLinesAdded
+            && a.stagedLinesRemoved === b.stagedLinesRemoved
+            && a.unstagedLinesAdded === b.unstagedLinesAdded
+            && a.unstagedLinesRemoved === b.unstagedLinesRemoved
+            && a.linesAdded === b.linesAdded
+            && a.linesRemoved === b.linesRemoved
+            && a.linesChanged === b.linesChanged
+            && (a.upstreamBranch ?? null) === (b.upstreamBranch ?? null)
+            && (a.aheadCount ?? 0) === (b.aheadCount ?? 0)
+            && (a.behindCount ?? 0) === (b.behindCount ?? 0)
+            && (a.stashCount ?? 0) === (b.stashCount ?? 0);
     }
 
     /**
@@ -6249,6 +6311,7 @@ class Sync {
         const active = storage.getState().getActiveSessions();
         const channelBefore = new Map(sessions.map((s) => [s.id, this.preferredChannel(s.id)]));
         storage.getState().applySessions(sessions, fullRefresh);
+        this.applyPublishedGitStatus(sessions);
         const newActive = storage.getState().getActiveSessions();
         this.applySessionDiff(active, newActive);
 
