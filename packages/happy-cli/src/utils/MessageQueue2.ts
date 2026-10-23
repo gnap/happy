@@ -21,7 +21,7 @@ interface QueueItem<T> {
  */
 export class MessageQueue2<T> {
     public queue: QueueItem<T>[] = []; // Made public for testing
-    private waiter: ((hasMessages: boolean) => void) | null = null;
+    private waiters = new Set<(hasMessages: boolean) => void>();
     private closed = false;
     private onMessageHandler: ((message: string, mode: T) => void) | null = null;
     modeHasher: (mode: T) => string;
@@ -67,12 +67,7 @@ export class MessageQueue2<T> {
         }
 
         // Notify waiter if any
-        if (this.waiter) {
-            logger.debug(`[MessageQueue2] Notifying waiter`);
-            const waiter = this.waiter;
-            this.waiter = null;
-            waiter(true);
-        }
+        this.notifyWaiters(true);
 
         logger.debug(`[MessageQueue2] push() completed. Queue size: ${this.queue.length}`);
     }
@@ -103,12 +98,7 @@ export class MessageQueue2<T> {
         }
 
         // Notify waiter if any
-        if (this.waiter) {
-            logger.debug(`[MessageQueue2] Notifying waiter for immediate message`);
-            const waiter = this.waiter;
-            this.waiter = null;
-            waiter(true);
-        }
+        this.notifyWaiters(true);
 
         logger.debug(`[MessageQueue2] pushImmediate() completed. Queue size: ${this.queue.length}`);
     }
@@ -137,12 +127,7 @@ export class MessageQueue2<T> {
             this.onMessageHandler(message, mode);
         }
 
-        if (this.waiter) {
-            logger.debug(`[MessageQueue2] Notifying waiter for isolated message`);
-            const waiter = this.waiter;
-            this.waiter = null;
-            waiter(true);
-        }
+        this.notifyWaiters(true);
 
         logger.debug(`[MessageQueue2] pushIsolated() completed. Queue size: ${this.queue.length}`);
     }
@@ -177,12 +162,7 @@ export class MessageQueue2<T> {
         }
 
         // Notify waiter if any
-        if (this.waiter) {
-            logger.debug(`[MessageQueue2] Notifying waiter for isolated message`);
-            const waiter = this.waiter;
-            this.waiter = null;
-            waiter(true);
-        }
+        this.notifyWaiters(true);
 
         logger.debug(`[MessageQueue2] pushIsolateAndClear() completed. Queue size: ${this.queue.length}`);
     }
@@ -212,12 +192,7 @@ export class MessageQueue2<T> {
         }
 
         // Notify waiter if any
-        if (this.waiter) {
-            logger.debug(`[MessageQueue2] Notifying waiter`);
-            const waiter = this.waiter;
-            this.waiter = null;
-            waiter(true);
-        }
+        this.notifyWaiters(true);
 
         logger.debug(`[MessageQueue2] unshift() completed. Queue size: ${this.queue.length}`);
     }
@@ -230,8 +205,8 @@ export class MessageQueue2<T> {
         this.queue = [];
         this.closed = false;
 
-        // Clear waiter without calling it since we're not closing
-        this.waiter = null;
+        // Clear waiters without calling them since we're not closing
+        this.waiters.clear();
     }
 
     /**
@@ -242,11 +217,7 @@ export class MessageQueue2<T> {
         this.closed = true;
 
         // Notify any waiting caller
-        if (this.waiter) {
-            const waiter = this.waiter;
-            this.waiter = null;
-            waiter(false);
-        }
+        this.notifyWaiters(false);
     }
 
     /**
@@ -268,12 +239,7 @@ export class MessageQueue2<T> {
         if (this.closed) {
             return;
         }
-        if (this.waiter) {
-            logger.debug('[MessageQueue2] Poking waiter');
-            const waiter = this.waiter;
-            this.waiter = null;
-            waiter(true);
-        }
+        this.notifyWaiters(true);
     }
 
     /**
@@ -383,6 +349,20 @@ export class MessageQueue2<T> {
     /**
      * Wait for messages to arrive
      */
+    /**
+     * Wakes every blocked reader. Each re-checks the queue for itself, so a reader that finds
+     * nothing — because another took the message — is free to go back to waiting.
+     *
+     * A set rather than a single slot: a reader that is abandoned clears its own entry, and one
+     * that dies must not be able to strand the next one, or take the wake-up meant for it.
+     */
+    private notifyWaiters(hasMessages: boolean): void {
+        const waiters = [...this.waiters];
+        this.waiters.clear();
+        logger.debug(`[MessageQueue2] Notifying ${waiters.length} waiter(s)`);
+        for (const waiter of waiters) waiter(hasMessages);
+    }
+
     private waitForMessages(abortSignal?: AbortSignal): Promise<boolean> {
         return new Promise((resolve) => {
             let abortHandler: (() => void) | null = null;
@@ -391,10 +371,7 @@ export class MessageQueue2<T> {
             if (abortSignal) {
                 abortHandler = () => {
                     logger.debug('[MessageQueue2] Wait aborted');
-                    // Clear waiter if it's still set
-                    if (this.waiter === waiterFunc) {
-                        this.waiter = null;
-                    }
+                    this.waiters.delete(waiterFunc);
                     resolve(false);
                 };
                 abortSignal.addEventListener('abort', abortHandler);
@@ -405,6 +382,7 @@ export class MessageQueue2<T> {
                 if (abortHandler && abortSignal) {
                     abortSignal.removeEventListener('abort', abortHandler);
                 }
+                this.waiters.delete(waiterFunc);
                 resolve(hasMessages);
             };
 
@@ -426,7 +404,7 @@ export class MessageQueue2<T> {
             }
 
             // Set the waiter
-            this.waiter = waiterFunc;
+            this.waiters.add(waiterFunc);
             logger.debug('[MessageQueue2] Waiting for messages...');
         });
     }

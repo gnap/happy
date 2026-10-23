@@ -17,7 +17,16 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
-import { getHappyCliLaunchSpec, spawnHappyCLI } from './spawnHappyCLI';
+import { buildHappyCliCommand, getHappyCliLaunchSpec, spawnHappyCLI } from './spawnHappyCLI';
+
+describe('buildHappyCliCommand', () => {
+  it('is the single source of the executable, flags and entrypoint a spawn needs', () => {
+    const spec = getHappyCliLaunchSpec();
+    const { executable, argv } = buildHappyCliCommand(['daemon', 'start']);
+    expect(executable).toBe(spec.executable);
+    expect(argv).toEqual([...spec.argsPrefix, 'daemon', 'start']);
+  });
+});
 
 describe('spawnHappyCLI', () => {
   beforeEach(() => {

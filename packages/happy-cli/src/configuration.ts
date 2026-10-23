@@ -12,8 +12,20 @@ import { join } from 'node:path'
 import { BUILD_VERSION } from './version'
 import { isNode } from '@/utils/runtime'
 
-/** HTTPS agent that forces IPv4 for server requests (avoids ETIMEDOUT on IPv6-unreachable hosts). */
-export const serverHttpsAgent = new https.Agent({ family: 4 })
+/**
+ * HTTPS agent for server requests.
+ *
+ * Forces IPv4 (avoids ETIMEDOUT on IPv6-unreachable hosts) and keeps connections alive: without
+ * keep-alive every request is a fresh TCP + TLS handshake, and while the server is unreachable
+ * those handshakes pile up as ESTABLISHED sockets until the machine runs out of ephemeral ports.
+ */
+export const serverHttpsAgent = new https.Agent({
+    family: 4,
+    keepAlive: true,
+    maxSockets: 8,
+    maxFreeSockets: 4,
+    timeout: 30_000,
+})
 export const DEFAULT_DAEMON_HTTP_PORT = 55672
 
 function parseDaemonHttpPort(rawPort: unknown): number | null {
@@ -88,6 +100,8 @@ class Configuration {
    * listener falls back to an ephemeral port if this one is taken.
    */
   public readonly lanPort: number
+  /** Public relay (HAPPY_RELAY_URL, e.g. https://47.80.241.214) used when the server is unreachable. Default off. */
+  public readonly relayUrl: string | null
 
   constructor() {
     // Server configuration - priority: parameter > environment > default
@@ -120,6 +134,7 @@ class Configuration {
     // unless the user asks for it. See src/daemon/lanServer.ts for what it exposes.
     this.enableLan = ['true', '1', 'yes'].includes(process.env.HAPPY_LAN_ENABLED?.toLowerCase() || '');
     this.lanPort = Number(process.env.HAPPY_LAN_PORT) || 55673;
+    this.relayUrl = process.env.HAPPY_RELAY_URL?.trim() || null;
 
     this.currentCliVersion = BUILD_VERSION
 

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ApiClient } from './api';
 import axios from 'axios';
 import { connectionState } from '@/utils/serverConnectionErrors';
+import { logger } from '@/ui/logger';
 import { buildSyncedSessionMetadata, sanitizeSessionMetadataForApp, shouldSyncSessionMetadata } from './types';
 
 // Use vi.hoisted to ensure mock functions are available when vi.mock factory runs
@@ -19,8 +20,17 @@ vi.mock('axios', () => ({
 }));
 
 vi.mock('@/ui/logger', () => ({
+    // The whole method set, not just `debug`. A mock missing one a code path reaches throws
+    // `logger.warn is not a function` from inside that path, which reads as the path being broken
+    // when it is only the stand-in that is incomplete — and the throw lands before the handling
+    // being tested, so the assertions see a crash rather than the outcome.
     logger: {
-        debug: vi.fn()
+        debug: vi.fn(),
+        debugLargeJson: vi.fn(),
+        info: vi.fn(),
+        infoDeveloper: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
     }
 }));
 
@@ -84,7 +94,10 @@ describe('Api server error handling', () => {
 
     describe('getOrCreateSession', () => {
         it('should return null when Happy server is unreachable (ECONNREFUSED)', async () => {
-            const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+            // The offline notice is emitted through `logger.warn`, and `@/ui/logger` is mocked in
+            // this file — so a spy on `console` watches a channel nothing writes to any more. Spy
+            // the logger's own method, which is what the code actually calls.
+            const consoleSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
 
             // Mock axios to throw connection refused error
             mockPost.mockRejectedValue({ code: 'ECONNREFUSED' });
@@ -105,7 +118,10 @@ describe('Api server error handling', () => {
 
         it('should return null when Happy server cannot be found (ENOTFOUND)', async () => {
             connectionState.reset();
-            const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+            // The offline notice is emitted through `logger.warn`, and `@/ui/logger` is mocked in
+            // this file — so a spy on `console` watches a channel nothing writes to any more. Spy
+            // the logger's own method, which is what the code actually calls.
+            const consoleSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
 
             // Mock axios to throw DNS resolution error
             mockPost.mockRejectedValue({ code: 'ENOTFOUND' });
@@ -126,7 +142,10 @@ describe('Api server error handling', () => {
 
         it('should return null when Happy server times out (ETIMEDOUT)', async () => {
             connectionState.reset();
-            const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+            // The offline notice is emitted through `logger.warn`, and `@/ui/logger` is mocked in
+            // this file — so a spy on `console` watches a channel nothing writes to any more. Spy
+            // the logger's own method, which is what the code actually calls.
+            const consoleSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
 
             // Mock axios to throw timeout error
             mockPost.mockRejectedValue({ code: 'ETIMEDOUT' });
@@ -147,7 +166,10 @@ describe('Api server error handling', () => {
 
         it('should return null when session endpoint returns 404', async () => {
             connectionState.reset();
-            const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+            // The offline notice is emitted through `logger.warn`, and `@/ui/logger` is mocked in
+            // this file — so a spy on `console` watches a channel nothing writes to any more. Spy
+            // the logger's own method, which is what the code actually calls.
+            const consoleSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
 
             // Mock axios to return 404
             mockPost.mockRejectedValue({
@@ -175,7 +197,10 @@ describe('Api server error handling', () => {
 
         it('should return null when server returns 500 Internal Server Error', async () => {
             connectionState.reset();
-            const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+            // The offline notice is emitted through `logger.warn`, and `@/ui/logger` is mocked in
+            // this file — so a spy on `console` watches a channel nothing writes to any more. Spy
+            // the logger's own method, which is what the code actually calls.
+            const consoleSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
 
             // Mock axios to return 500 error
             mockPost.mockRejectedValue({
@@ -198,7 +223,10 @@ describe('Api server error handling', () => {
 
         it('should return null when server returns 503 Service Unavailable', async () => {
             connectionState.reset();
-            const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+            // The offline notice is emitted through `logger.warn`, and `@/ui/logger` is mocked in
+            // this file — so a spy on `console` watches a channel nothing writes to any more. Spy
+            // the logger's own method, which is what the code actually calls.
+            const consoleSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
 
             // Mock axios to return 503 error
             mockPost.mockRejectedValue({
@@ -230,7 +258,10 @@ describe('Api server error handling', () => {
             ).rejects.toThrow('Failed to get or create session: Invalid API key');
 
             // Should not show the offline mode message
-            const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+            // The offline notice is emitted through `logger.warn`, and `@/ui/logger` is mocked in
+            // this file — so a spy on `console` watches a channel nothing writes to any more. Spy
+            // the logger's own method, which is what the code actually calls.
+            const consoleSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
             expect(consoleSpy).not.toHaveBeenCalledWith(
                 expect.stringContaining('⚠️  Happy server unreachable')
             );
@@ -241,7 +272,10 @@ describe('Api server error handling', () => {
     describe('getOrCreateMachine', () => {
         it('should return minimal machine object when server is unreachable (ECONNREFUSED)', async () => {
             connectionState.reset();
-            const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+            // The offline notice is emitted through `logger.warn`, and `@/ui/logger` is mocked in
+            // this file — so a spy on `console` watches a channel nothing writes to any more. Spy
+            // the logger's own method, which is what the code actually calls.
+            const consoleSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
 
             // Mock axios to throw connection refused error
             mockPost.mockRejectedValue({ code: 'ECONNREFUSED' });
@@ -277,7 +311,10 @@ describe('Api server error handling', () => {
 
         it('should return minimal machine object when server endpoint returns 404', async () => {
             connectionState.reset();
-            const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+            // The offline notice is emitted through `logger.warn`, and `@/ui/logger` is mocked in
+            // this file — so a spy on `console` watches a channel nothing writes to any more. Spy
+            // the logger's own method, which is what the code actually calls.
+            const consoleSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
 
             // Mock axios to return 404
             mockPost.mockRejectedValue({
@@ -338,6 +375,23 @@ describe('Api server error handling', () => {
             expect((sanitized as Record<string, unknown>).happyToolsDir).toBeUndefined();
             expect((sanitized as Record<string, unknown>).startedBy).toBeUndefined();
             expect((sanitized as Record<string, unknown>).lifecycleState).toBeUndefined();
+        });
+
+        it('keeps the working tree the session publishes', () => {
+            // The sanitizer is a whitelist applied on every write *and* on every received push: a
+            // field missing from it is silently dropped in both directions, which is exactly the
+            // trap this test exists for.
+            const gitStatus = {
+                branch: 'main', isDirty: true, modifiedCount: 1, untrackedCount: 0, stagedCount: 0,
+                lastUpdatedAt: 42, stagedLinesAdded: 0, stagedLinesRemoved: 0,
+                unstagedLinesAdded: 3, unstagedLinesRemoved: 1,
+                linesAdded: 3, linesRemoved: 1, linesChanged: 4,
+                upstreamBranch: 'origin/main', aheadCount: 1, behindCount: 0, stashCount: 0,
+            };
+
+            const sanitized = sanitizeSessionMetadataForApp({ ...testMetadata, gitStatus });
+
+            expect(sanitized.gitStatus).toEqual(gitStatus);
         });
     });
 

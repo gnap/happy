@@ -53,7 +53,7 @@ function fieldMatch(pattern: string, value: number, _min: number, _max: number):
 }
 import { RemoteModeDisplay } from "@/ui/ink/RemoteModeDisplay";
 import React from "react";
-import { claudeRemote } from "./claudeRemote";
+import { claudeRemote, endClaudeSessions } from "./claudeRemote";
 import { PermissionHandler } from "./utils/permissionHandler";
 import { Future } from "@/utils/future";
 import { SDKAssistantMessage, SDKMessage, SDKUserMessage } from "./sdk";
@@ -152,6 +152,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     let cronLoopPromise: Promise<void> | null = null;
     let abortController: AbortController | null = null;
     let abortFuture: Future<void> | null = null;
+    /** Turn numbers, so a turn's entry and exit can be paired in the log. */
+    let launcherTurnSeq = 0;
 
     async function abort() {
         if (abortController && !abortController.signal.aborted) {
@@ -470,10 +472,11 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         // See: https://github.com/anthropics/happy-cli/issues/143
         let previousSessionId: string | null = null;
         while (!exitReason) {
+            const turnId = ++launcherTurnSeq;
             // Before each turn, peek inbox: if there are unread messages,
             // push an isolated inbox turn to the message queue.
             session.a2aInboxTurn?.peekInbox();
-            logger.debug('[remote]: launch');
+            logger.debug(`[remote]: launch #${turnId}`);
             messageBuffer.addMessage('═'.repeat(40), 'status');
 
             // Only reset parent chain and show "new session" message when session ID actually changes
@@ -551,6 +554,9 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             turnSucceeded = false;
             try {
                 const remoteResult = await claudeRemote({
+                    // The process belongs to the happy session, not to the turn: this is what the
+                    // next turn looks the running process up by.
+                    processKey: session.client.sessionId,
                     sessionId: session.sessionId,
                     path: session.path,
                     allowedTools: session.allowedTools ?? [],
@@ -564,7 +570,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     isAborted: (toolCallId: string) => {
                         return permissionHandler.isAborted(toolCallId);
                     },
-                    nextMessage: async () => {
+                    nextMessage: async (signal?: AbortSignal) => {
                         if (pending) {
                             let p = pending;
                             pending = null;
@@ -596,7 +602,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             return p;
                         }
 
-                        const msg = await session.queue.waitForMessagesAndGetAsString(controller.signal);
+                        const msg = await session.queue.waitForMessagesAndGetAsString(linkedAbort([controller.signal, signal]));
 
                         // If the turn is stopping (stopSignal about to resolve), the inputLoop
                         // will discard our return value. Stash the message in pending so
@@ -655,7 +661,12 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 };
                             }
                             wasInboxTurn = false;
-                            if ((modeHash && msg.hash !== modeHash) || msg.isolate) {
+                            // Deferred only when a turn is already under way — that is the case this
+                            // exists for: a mode change, or an isolated command that must not be
+                            // joined to the turn in flight. With no turn under way the message *is*
+                            // the turn's, and answering null would leave the session's own first
+                            // fetch with nothing, stashed for a turn that never comes.
+                            if (modeHash && (msg.hash !== modeHash || msg.isolate)) {
                                 logger.info(`[remote] nextMessage returning null (mode changed): modeHash=${modeHash?.slice(0,8)} msgHash=${msg.hash?.slice(0,8)} isolate=${msg.isolate}`);
                                 pending = { message: msg.message, mode: msg.mode, meta: msg.meta, hash: msg.hash };
                                 return null;
@@ -844,6 +855,13 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         session.client.updateAgentState(s => ({ ...s, crons: cronState }));
                         logger.debug(`[remote] stored ${crons.length} crons from Stop hook`);
                     },
+                    onBackgroundTasks: (tasks) => {
+                        // Rides in agentState because that is what the App already subscribes to and
+                        // keeps current. Without it a turn that reported itself finished while the
+                        // SDK stream stays open for background work is indistinguishable from an
+                        // idle session that has stopped answering.
+                        session.client.updateAgentState(s => ({ ...s, backgroundTasks: tasks }));
+                    },
                     onBeforeStop: () => { turnStopping = true; },
                     tryConsumeInboxTurn: () => {
                         const inboxHooks = session.a2aInboxTurn;
@@ -882,7 +900,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                 }
             } finally {
 
-                logger.debug('[remote]: launch finally');
+                logger.debug(`[remote]: launch #${turnId} finally`);
 
                 // Terminate all ongoing tool calls
                 for (let [toolCallId, { parentToolCallId }] of ongoingToolCalls) {
@@ -905,7 +923,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                 abortController = null;
                 abortFuture?.resolve(undefined);
                 abortFuture = null;
-                logger.debug('[remote]: launch done');
+                logger.debug(`[remote]: launch #${turnId} done`);
                 permissionHandler.reset();
                 if (session.claudeTurnActiveRef) {
                     session.claudeTurnActiveRef.current = false;
@@ -927,6 +945,10 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             }
         }
     } finally {
+
+        // The launcher is done with these sessions; their processes were kept alive across turns
+        // and would otherwise outlive the CLI that spawned them.
+        endClaudeSessions();
 
         // Clean up permission handler
         permissionHandler.reset();
@@ -952,4 +974,24 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     }
 
     return exitReason || 'exit';
+}
+
+/**
+ * A signal that aborts as soon as any of these does.
+ *
+ * The queue read takes one signal and two things can end it: the turn being aborted, and the input
+ * loop walking away from the read it started. Both have to reach the queue, or the read stays
+ * behind holding a place the next one needs.
+ */
+function linkedAbort(signals: Array<AbortSignal | undefined>): AbortSignal {
+    const controller = new AbortController();
+    for (const signal of signals) {
+        if (!signal) continue;
+        if (signal.aborted) {
+            controller.abort();
+            break;
+        }
+        signal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+    return controller.signal;
 }

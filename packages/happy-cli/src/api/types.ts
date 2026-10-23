@@ -2,6 +2,7 @@ import { z } from 'zod'
 import type { Update, UpdateMachineBody } from '@slopus/happy-wire';
 import { UsageSchema } from '@/claude/types'
 import type { SandboxConfig } from '@/persistence'
+import type { WorktreeStatus } from '@/utils/worktreeStatus';
 
 export {
   SessionMessageContentSchema,
@@ -162,6 +163,16 @@ export const DaemonStateSchema = z.object({
       z.enum(['mobile-app', 'cli', 'os-signal', 'unknown']),
       z.string() // Forward compatibility
     ]).optional(),
+  /**
+   * The build this daemon is running, and whether the one on disk is a different one.
+   *
+   * Declared here because this schema is the gate: zod keeps what it is told about and drops the
+   * rest, so the daemon can put its build into the state it uploads and have it arrive as nothing.
+   * It is also the only place the App can read a machine's build from when it has no route to that
+   * machine — the local state file knows it, but nothing outside the machine can read that file.
+   */
+  startedWithCliVersion: z.string().optional(),
+  restartRequired: z.boolean().optional(),
   /**
    * Where this machine can be reached on the LAN, published so a client can cache it while
    * the server is healthy and fall back to it when the server is not. Only populated when
@@ -338,6 +349,11 @@ export type Metadata = {
   profileId?: string | null
   sandbox?: SandboxConfig | null
   dangerouslySkipPermissions?: boolean | null
+  /**
+   * The session's working tree, computed by the session process when a tool may have written to
+   * it. The App draws its badge from this instead of asking the machine for four git commands.
+   */
+  gitStatus?: WorktreeStatus,
   /** Periodic /context fetch result — provides real-time context window usage to the App. */
   contextUsage?: {
     currentTokens: number
@@ -434,6 +450,7 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
     profileId,
     dangerouslySkipPermissions,
     contextUsage,
+    gitStatus,
   } = metadata;
 
   return {
@@ -469,6 +486,7 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
     ...(flavor !== undefined ? { flavor } : {}),
     ...(sandbox !== undefined ? { sandbox } : {}),
     ...(dangerouslySkipPermissions !== undefined ? { dangerouslySkipPermissions } : {}),
+    ...(gitStatus !== undefined ? { gitStatus } : {}),
   } as AppCompatibleSessionMetadata;
 }
 

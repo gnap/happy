@@ -25,6 +25,8 @@ interface SessionSocketState {
      * indistinguishable.
      */
     onDeliver: ((payload: { sessionId: string; localId: string; content: string }) => void) | null;
+    /** A control call forwarded by the daemon for this session to act on. */
+    onRpc: ((rpc: { method: string; params?: string }) => void) | null;
 }
 
 let state: SessionSocketState = {
@@ -34,6 +36,7 @@ let state: SessionSocketState = {
     stopped: false,
     onHeartbeatFallback: null,
     onDeliver: null,
+    onRpc: null,
 };
 
 function send(socket: Socket, msg: Record<string, unknown>): void {
@@ -87,6 +90,13 @@ function connect(helloPayload: Record<string, unknown>): Socket {
                     socket.end();
                     process.exit(0);
                 }
+                if (msg.type === 'rpc' && msg.rpc) {
+                    // A control call the daemon took in over its own API and is forwarding: abort a
+                    // turn, answer a permission request. Handled off the socket callback for the same
+                    // reason a delivery is — a slow handler must not stall the heartbeat.
+                    const rpc = msg.rpc as { method: string; params?: string };
+                    setTimeout(() => state.onRpc?.(rpc), 0);
+                }
                 if (msg.type === 'deliver' && msg.deliver) {
                     // A user message the daemon took in over its LAN API. Handled off the socket
                     // callback so a slow handler cannot stall the heartbeat.
@@ -132,10 +142,13 @@ export function startUnixSocketClient(
     helloPayload: Record<string, unknown>,
     heartbeatFallback?: () => void,
     onDeliver?: (payload: { sessionId: string; localId: string; content: string }) => void,
+    /** Forwarded control calls: the same handlers the server's rpc-call reaches. */
+    onRpc?: (rpc: { method: string; params?: string }) => void,
 ): () => void {
     state.stopped = false;
     state.onHeartbeatFallback = heartbeatFallback ?? null;
     state.onDeliver = onDeliver ?? null;
+    state.onRpc = onRpc ?? null;
     connect(helloPayload);
 
     return () => {

@@ -19,6 +19,7 @@ import { RpcHandlerManager } from './rpc/RpcHandlerManager';
 import { registerCommonHandlers } from '../modules/common/registerCommonHandlers';
 import { calculateCost } from '@/utils/pricing';
 import { forwardSessionEventToDaemon } from '@/daemon/unixSocketClient';
+import { WorktreeStatusWatcher, changesWorktree, readWorktreeStatus, type WorktreeStatus } from '@/utils/worktreeStatus';
 import { type SessionEnvelope, type SessionTurnEndStatus } from '@slopus/happy-wire';
 import {
     closeClaudeTurnWithStatus,
@@ -31,6 +32,7 @@ import axios from 'axios';
 import { resolveSessionLastSeq } from './sessionLastSeq';
 import { loadOutbox, outboxPath, pruneOutboxes, saveOutbox } from './outboxPersistence';
 import { appendSessionLog, pruneSessionLogs, sessionLogDir, type SessionLogEntry } from './sessionLog';
+import { rememberSessionMetadata } from './sessionBinding';
 import {
     buildAgentMessagePayload,
     buildCodexPayload,
@@ -153,6 +155,21 @@ const LAZY_RESULT_STRIP_FIELDS_BY_TOOL: Record<string, string[]> = {
 const LAZY_RESULT_PREVIEW_FIELDS_BY_TOOL: Record<string, string[]> = {
     CursorEdit: ['diffString'],
     CursorWrite: ['diffString'],
+    // A command's output is the reason to open the card, not something the transcript shows — and
+    // it is the largest single field in a Claude session's message stream. The first lines stay for
+    // the card's context; the rest is fetched when the detail view opens.
+    Bash: ['stdout', 'stderr'],
+};
+
+/**
+ * Preview fields nested inside a wrapper object.
+ *
+ * A read's result is `{ file: { content } }`, not a flat payload — the same rule as the top-level
+ * preview, which cannot reach inside it. The content is the whole file the App shows only when the
+ * detail view is opened.
+ */
+const LAZY_RESULT_NESTED_PREVIEW_FIELDS_BY_TOOL: Record<string, [string, string][]> = {
+    Read: [['file', 'content']],
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -194,8 +211,15 @@ function extractA2ATextFromParts(parts: unknown): string | null {
     return texts.join('\n');
 }
 
-/** Max lines kept in the compact diffString preview. */
+/** Max lines kept in the compact preview. */
 const LAZY_DIFF_STRING_MAX_LINES = 15;
+/**
+ * Max characters kept in a preview field.
+ *
+ * The line bound alone does nothing for output that has no newlines — a minified JSON body or a
+ * one-line trace is a single "line" however long it is.
+ */
+const LAZY_PREVIEW_MAX_CHARS = 2_000;
 
 /**
  * Characters per field kept in the compact (wire) copy for non-diff fields.
@@ -248,6 +272,13 @@ type IncomingMessage = {
     id?: string | null;
     localId?: string | null;
 };
+
+/**
+ * How often a session may tell LAN readers its log grew. Long enough that a burst of writes costs
+ * one hint instead of one per write, short enough that a reader which missed a frame recovers
+ * within a poll interval.
+ */
+const LOG_GROW_MIN_INTERVAL_MS = 2_000;
 
 export class ApiSessionClient extends EventEmitter {
     private readonly token: string;
@@ -362,7 +393,10 @@ export class ApiSessionClient extends EventEmitter {
         if (!LAZY_TOOL_CONTENT_ENABLED) return output;
         const stripFields = LAZY_RESULT_STRIP_FIELDS_BY_TOOL[toolName];
         const previewFields = LAZY_RESULT_PREVIEW_FIELDS_BY_TOOL[toolName];
-        if ((!stripFields || stripFields.length === 0) && (!previewFields || previewFields.length === 0)) return output;
+        const nestedFields = LAZY_RESULT_NESTED_PREVIEW_FIELDS_BY_TOOL[toolName];
+        if ((!stripFields || stripFields.length === 0)
+            && (!previewFields || previewFields.length === 0)
+            && (!nestedFields || nestedFields.length === 0)) return output;
         if (!output || typeof output !== 'object') return output;
 
         const r = output as Record<string, unknown>;
@@ -388,11 +422,31 @@ export class ApiSessionClient extends EventEmitter {
         for (const field of previewFields ?? []) {
             if (typeof successObj[field] === 'string') {
                 const original = successObj[field] as string;
-                const truncated = truncateByLines(original, LAZY_DIFF_STRING_MAX_LINES);
+                const byLines = truncateByLines(original, LAZY_DIFF_STRING_MAX_LINES);
+                const truncated = byLines.length > LAZY_PREVIEW_MAX_CHARS
+                    ? byLines.slice(0, LAZY_PREVIEW_MAX_CHARS)
+                    : byLines;
                 if (truncated.length < original.length) {
                     compactSuccess[field] = truncated;
                     wasTruncated = true;
                 }
+            }
+        }
+
+        // Nested previews (a read's file contents) use the same bounds as the flat ones.
+        for (const [outer, inner] of nestedFields ?? []) {
+            const container = successObj[outer];
+            if (!isRecord(container) || typeof container[inner] !== 'string') {
+                continue;
+            }
+            const original = container[inner] as string;
+            const byLines = truncateByLines(original, LAZY_DIFF_STRING_MAX_LINES);
+            const preview = byLines.length > LAZY_PREVIEW_MAX_CHARS
+                ? byLines.slice(0, LAZY_PREVIEW_MAX_CHARS)
+                : byLines;
+            if (preview.length < original.length) {
+                compactSuccess[outer] = { ...container, [inner]: preview };
+                wasTruncated = true;
             }
         }
 
@@ -448,6 +502,13 @@ export class ApiSessionClient extends EventEmitter {
         activeSubagents: new Set<string>(),
     };
     private lastSeq: number;
+    /**
+     * True while this client was built from a cached binding and the server has not yet said where
+     * "now" is. `lastSeq` is meaningless in that window, so nothing may read from, or advance, the
+     * server cursor; the LAN path and the outbox are unaffected because neither depends on it.
+     */
+    private serverCursorPending = false;
+    private initialLastSeqHint: number | undefined;
     private pendingOutbox: Array<{ content: string; localId: string }> = [];
     private readonly sendSync: InvalidateSync;
     private readonly receiveSync: InvalidateSync;
@@ -475,7 +536,7 @@ export class ApiSessionClient extends EventEmitter {
         token: string,
         session: Session,
         private websocketOnly: boolean = true,
-        opts?: { initialLastSeq?: number },
+        opts?: { initialLastSeq?: number; serverCursorPending?: boolean },
     ) {
         super()
         this.token = token;
@@ -506,7 +567,9 @@ export class ApiSessionClient extends EventEmitter {
         this.requestedMetadata = session.requestedMetadata ?? null;
         this.encryptionKey = session.encryptionKey;
         this.encryptionVariant = session.encryptionVariant;
-        this.lastSeq = resolveSessionLastSeq(session.seq, opts?.initialLastSeq);
+        this.initialLastSeqHint = opts?.initialLastSeq;
+        this.serverCursorPending = opts?.serverCursorPending === true;
+        this.lastSeq = this.serverCursorPending ? 0 : resolveSessionLastSeq(session.seq, opts?.initialLastSeq);
         if (opts?.initialLastSeq !== undefined && this.lastSeq !== opts.initialLastSeq) {
             logger.debug(
                 `[API] Session ${session.id} resume cursor adjusted: requested=${opts.initialLastSeq}, `
@@ -564,6 +627,12 @@ export class ApiSessionClient extends EventEmitter {
             reconnectionAttempts: Infinity,
             reconnectionDelay: 1000,
             reconnectionDelayMax: 5000,
+            // A connection attempt that never completes has to be torn down: left alone it stays an
+            // ESTABLISHED socket the OS holds, and an unreachable server plus an infinite reconnect
+            // loop turns that into thousands of them until no ephemeral ports are left.
+            timeout: 20_000,
+            // Engine.IO's own bound for a hanging polling request, for the transports that use it.
+            requestTimeout: 30_000,
             transports: this.websocketOnly ? ['websocket'] : ['polling', 'websocket'],
             withCredentials: true,
             autoConnect: false,
@@ -698,6 +767,11 @@ export class ApiSessionClient extends EventEmitter {
                 forwardSessionEventToDaemon(data.body as unknown as Record<string, unknown>);
 
                 if (data.body.t === 'new-message') {
+                    if (this.serverCursorPending) {
+                        // Anything pushed before the cursor is known sits at or below "now", which is
+                        // where a restart deliberately picks up from; it would be skipped anyway.
+                        return;
+                    }
                     const messageSeq = data.body.message?.seq;
                     const isEncrypted = data.body.message?.content?.t === 'encrypted';
                     const acceptSeq = typeof messageSeq === 'number' && this.lastSeq > 0 && messageSeq === this.lastSeq + 1;
@@ -765,6 +839,7 @@ export class ApiSessionClient extends EventEmitter {
                         const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.metadata.value));
                         this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
                         this.metadataVersion = data.body.metadata.version;
+                        rememberSessionMetadata(this.sid, data.body.metadata.value, data.body.metadata.version);
                         this.emit('metadata-updated', this.metadata);
                         // First metadata push after (re)connect: now safe to sync static fields
                         // without clobbering App-side fields that arrived in this push.
@@ -811,6 +886,34 @@ export class ApiSessionClient extends EventEmitter {
         // from App before socket connected). Otherwise we only fetch after socket 'connect' or
         // after connect_error (fallback poll every 8s), so new sessions can appear unresponsive.
         this.receiveSync.invalidate();
+    }
+
+    /**
+     * Take the server's answer for a client that started without it.
+     *
+     * Only the cursor is settled here, because it is the one value a stale copy cannot stand in
+     * for. Versions are raised, never lowered: a newer one only means the server saw writes this
+     * process has not, and a lower one would turn the next update into a guaranteed mismatch.
+     * Metadata and agentState content are not replaced -- the server pushes them on connect, and
+     * overwriting a local edit made during the outage would lose it.
+     *
+     * Returns false when the server names a different session than the one this client was
+     * addressed to, which the caller must treat as fatal: everything keyed on the old id is wrong.
+     */
+    resolveServerSession(fresh: Session): boolean {
+        if (fresh.id !== this.sessionId) {
+            logger.warn('[API] server session id differs from the cached one', { cached: this.sessionId, fresh: fresh.id });
+            return false;
+        }
+        this.metadataVersion = Math.max(this.metadataVersion, fresh.metadataVersion);
+        this.agentStateVersion = Math.max(this.agentStateVersion, fresh.agentStateVersion);
+        if (this.serverCursorPending) {
+            this.lastSeq = resolveSessionLastSeq(fresh.seq, this.initialLastSeqHint);
+            this.serverCursorPending = false;
+            logger.debug(`[API] Session ${this.sessionId} server cursor resolved: lastSeq=${this.lastSeq} (server seq=${fresh.seq ?? 0})`);
+            this.receiveSync.invalidate();
+        }
+        return true;
     }
 
     onUserMessage(callback: (data: UserMessage) => void) {
@@ -939,13 +1042,13 @@ export class ApiSessionClient extends EventEmitter {
         // them, so a message that arrives on the socket fast path and is later re-fetched over
         // HTTP would otherwise be logged twice.
         if (incoming.ct) {
-            appendSessionLog(this.sid, this.site, {
+            this.noteLogHead(appendSessionLog(this.sid, this.site, {
                 id: incoming.id ?? incoming.localId ?? String(seq ?? ''),
                 localId: incoming.localId ?? null,
                 dir: 'in',
                 at: Date.now(),
                 c: incoming.ct,
-            });
+            }));
             this.announceLogGrowth();
         }
 
@@ -1328,6 +1431,9 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     private async fetchMessages() {
+        if (this.serverCursorPending) {
+            return;
+        }
         const untilSeq = this.receiveCatchUpUntilSeq;
         const startLastSeq = this.lastSeq;
         let afterSeq = this.lastSeq;
@@ -1547,7 +1653,9 @@ export class ApiSessionClient extends EventEmitter {
                 const maxSeq = messages.reduce((acc, message) => (
                     message.seq > acc ? message.seq : acc
                 ), this.lastSeq);
-                this.lastSeq = maxSeq;
+                if (!this.serverCursorPending) {
+                    this.lastSeq = maxSeq;
+                }
                 logger.debug(`[API] flushOutbox via HTTP: sent ${chunk.length} message(s) to server (replies visible in app)`);
                 return;
             } catch (error: unknown) {
@@ -1612,7 +1720,8 @@ export class ApiSessionClient extends EventEmitter {
         };
         // Same synchronous block and the same ciphertext string as the outbox push, so the two
         // stores can never disagree about what the bytes were.
-        appendSessionLog(this.sid, this.site, entry);
+        const anchor = appendSessionLog(this.sid, this.site, entry);
+        this.noteLogHead(anchor);
         // The entry itself, not only the hint that one exists. `log-grew` tells a LAN reader there
         // is something to read, which still costs it a round trip to find out what — so a session
         // on the LAN would trail one on the server by a fetch for every message, and an agent
@@ -1624,7 +1733,10 @@ export class ApiSessionClient extends EventEmitter {
         // that reads it from the log converge on identical bytes; `localId` is what they dedupe on.
         // Addressed by the server session id, not the tag the log is filed under: the App demuxes
         // the machine-wide socket on it, exactly as it does for the server channel.
-        forwardSessionEventToDaemon({ t: 'log-entry', id: this.sessionId, entry });
+        // The position travels with the entry, so a reader can say "I am up to date" without
+        // asking: the daemon's own log is the authority on where it ends, and the reader has just
+        // been told.
+        forwardSessionEventToDaemon({ t: 'log-entry', id: this.sessionId, entry, anchor });
         this.announceLogGrowth();
         this.persistOutboxNow();
         if (invalidate) {
@@ -1762,10 +1874,84 @@ export class ApiSessionClient extends EventEmitter {
         suppressNextUserText(this.claudeSessionProtocolState, count);
     }
 
+    /** Tool call id → name, from the start envelope that named it to the end that returned. */
+    private pendingToolNames = new Map<string, string>();
+    /** The session's working tree, once a tool has made it worth asking about. */
+    private worktreeStatus: WorktreeStatusWatcher | null = null;
+
+    /**
+     * Encode a tool result at the same exit point the arguments are encoded at.
+     *
+     * The result envelope names no tool — it carries only the call id — so the name is remembered
+     * from the start envelope that preceded it. Claude's results were the ones missing this: the
+     * cursor and ACP loops encode before sending, while the Claude mapper emitted the provider's
+     * result whole, command output and all.
+     */
+    private maybeLazyEncodeToolResult(envelope: SessionEnvelope, toolName: string | undefined): SessionEnvelope {
+        if (!LAZY_TOOL_CONTENT_ENABLED) return envelope;
+        const ev = envelope.ev as Record<string, unknown>;
+        if (ev.t !== 'tool-call-end' || !toolName || !('result' in ev)) return envelope;
+        const call = typeof ev.call === 'string' ? ev.call : null;
+        if (!call) return envelope;
+        const encoded = this.maybeLazyEncodeResult(toolName, call, ev.result);
+        return encoded === ev.result ? envelope : { ...envelope, ev: { ...ev, result: encoded } } as SessionEnvelope;
+    }
+
+    /**
+     * The tool name an envelope carries, and the one place a result's consequences start.
+     *
+     * A result envelope names no tool, so the name is remembered from the start envelope that
+     * preceded it and dropped with the result. Two things read it: the lazy encoder, and the
+     * working-tree watcher — a tool that can write is the signal that the tree may have moved.
+     */
+    private noteToolEnvelope(ev: Record<string, unknown>): string | undefined {
+        const call = typeof ev.call === 'string' ? ev.call : null;
+        if (ev.t === 'tool-call-start') {
+            const name = typeof ev.name === 'string' ? ev.name : null;
+            if (call && name) {
+                this.pendingToolNames.set(call, name);
+            }
+            return name ?? undefined;
+        }
+        if (ev.t === 'tool-call-end') {
+            if (!call) return undefined;
+            const name = this.pendingToolNames.get(call);
+            this.pendingToolNames.delete(call);
+            if (changesWorktree(name)) {
+                this.worktreeStatusWatcher().trigger();
+            }
+            return name;
+        }
+        return undefined;
+    }
+
+    /** The session's own working tree, asked only after something that can write to it. */
+    private worktreeStatusWatcher(): WorktreeStatusWatcher {
+        if (!this.worktreeStatus) {
+            const cwd = this.metadata?.path ?? process.cwd();
+            this.worktreeStatus = new WorktreeStatusWatcher({
+                read: () => readWorktreeStatus(cwd),
+                publish: (status) => { void this.publishWorktreeStatus(status); },
+            });
+        }
+        return this.worktreeStatus;
+    }
+
+    private async publishWorktreeStatus(status: WorktreeStatus): Promise<void> {
+        try {
+            // The App draws its badge from this; it is a normal metadata field, so it travels the
+            // same way the rest of the session's state does.
+            await this.updateMetadata((metadata) => ({ ...metadata, gitStatus: status }));
+        } catch (error) {
+            logger.debug('[worktree-status] publish failed', { error });
+        }
+    }
+
     sendSessionProtocolMessage(envelope: SessionEnvelope, extraMeta?: Record<string, unknown>) {
         // Apply lazy encoding at the single exit point so all code paths
         // (Claude via sendClaudeSessionMessage, Cursor via direct call, etc.) are covered.
-        const finalEnvelope = this.withWriterIdentity(this.maybeLazyEncodeEnvelope(envelope));
+        const toolName = this.noteToolEnvelope(envelope.ev as Record<string, unknown>);
+        const finalEnvelope = this.withWriterIdentity(this.maybeLazyEncodeEnvelope(this.maybeLazyEncodeToolResult(envelope, toolName)));
         if (finalEnvelope.role === 'user' && finalEnvelope.ev.t === 'text') {
             const stack = new Error().stack?.split('\n').slice(1, 4).map(s => s.trim()).join(' <- ');
             logger.debug(`[API] USER ENVELOPE: "${(finalEnvelope.ev as any).text?.slice(0,50)}" callstack: ${stack}`);
@@ -1837,6 +2023,10 @@ export class ApiSessionClient extends EventEmitter {
         // Both directions must be reliable: volatile thinking=true is often dropped (App stuck idle),
         // volatile thinking=false left sessions stuck "thinking" on flaky WSS.
         this.socket.emit('session-alive', payload);
+        // The machine's own readers have no server to hear this from. Forwarding it is what lets
+        // the LAN channel say "thinking" live, instead of only inferring it from the turn
+        // boundaries written into the log.
+        forwardSessionEventToDaemon({ t: 'session-alive', ...payload });
     }
 
     /**
@@ -1927,6 +2117,7 @@ export class ApiSessionClient extends EventEmitter {
                     const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
                     this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
                     this.metadataVersion = answer.version;
+                    rememberSessionMetadata(this.sid, answer.metadata, answer.version);
                     this.mirrorStateToDaemon({ metadata: { version: answer.version, value: answer.metadata } });
                     this.emit('metadata-updated', this.metadata);
                 } else if (answer.result === 'version-mismatch') {
@@ -1934,6 +2125,7 @@ export class ApiSessionClient extends EventEmitter {
                         this.metadataVersion = answer.version;
                         const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
                         this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
+                        rememberSessionMetadata(this.sid, answer.metadata, answer.version);
                         this.emit('metadata-updated', this.metadata);
                     }
                     throw new Error('Metadata version mismatch');
@@ -1951,9 +2143,48 @@ export class ApiSessionClient extends EventEmitter {
      * about agentState or metadata until the server's slow session list says so.
      */
     /** Tells LAN readers there is something new to read; the entries themselves stay in the log. */
-    private announceLogGrowth(): void {
-        forwardSessionEventToDaemon({ t: 'log-grew', id: this.sessionId });
+    /**
+     * Tells LAN readers that the log grew — at most once per window, plus one trailing hint.
+     *
+     * The entry itself is pushed as it is written (`log-entry`), so this is only the safety net for
+     * a reader that missed frames; acting on it costs that reader a full round trip. Sending one
+     * per append made every written entry cost every reader a fetch, and the fetch found nothing
+     * because the entry had already arrived — a session under load was read several times a second
+     * for no new bytes. The trailing hint matters more than the leading one: it is what a reader
+     * that missed the last frame recovers from, and it would be lost if coalescing only kept the
+     * first.
+     */
+    /** The end of the log, as the last append named it; what a hint reports as the head. */
+    private lastLogAnchor: string | null = null;
+
+    private noteLogHead(anchor: string | null): void {
+        if (anchor) {
+            this.lastLogAnchor = anchor;
+        }
     }
+
+    private announceLogGrowth(): void {
+        const now = Date.now();
+        const since = now - this.lastLogGrewAt;
+        if (since >= LOG_GROW_MIN_INTERVAL_MS) {
+            this.lastLogGrewAt = now;
+            forwardSessionEventToDaemon({ t: 'log-grew', id: this.sessionId, head: this.lastLogAnchor });
+            return;
+        }
+        if (this.logGrewTimer) {
+            return;
+        }
+        this.logGrewTimer = setTimeout(() => {
+            this.logGrewTimer = null;
+            this.lastLogGrewAt = Date.now();
+            forwardSessionEventToDaemon({ t: 'log-grew', id: this.sessionId, head: this.lastLogAnchor });
+        }, LOG_GROW_MIN_INTERVAL_MS - since);
+        this.logGrewTimer.unref?.();
+    }
+
+    /** When the last `log-grew` hint went out, and the pending trailing one. */
+    private lastLogGrewAt = 0;
+    private logGrewTimer: ReturnType<typeof setTimeout> | null = null;
 
     private mirrorStateToDaemon(change: { metadata?: { version: number; value: string }; agentState?: { version: number; value: string | null } }): void {
         forwardSessionEventToDaemon({ t: 'update-session', id: this.sessionId, ...change });
@@ -2039,6 +2270,8 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     async close() {
+        this.worktreeStatus?.stop();
+        this.worktreeStatus = null;
         logger.debug('[API] socket.close() called');
         this.closing = true;
         if (this.a2aInboxStateSyncTimer !== null) {

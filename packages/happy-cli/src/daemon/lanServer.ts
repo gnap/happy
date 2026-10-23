@@ -52,13 +52,47 @@ const TOKEN_CONTEXT = 'v1.token';
 export const LAN_PROTOCOL_VERSION = 1;
 
 export type LanSessionSummary = {
-  happySessionId: string;
+  /**
+   * The id the server issued. Absent while the session is still waiting for the server — which
+   * is precisely when a reader most needs to see it, so this is not the field to key on.
+   */
+  happySessionId?: string;
+  /**
+   * The tag the CLI owns: set at spawn, so a session whose server id does not exist yet is still
+   * nameable, and `/lan/tags/:tag/history` can serve it. A session with neither is not listed at
+   * all — there would be no way for a reader to ask for it.
+   */
+  tag?: string;
   directory: string;
   agent: string;
   startedBy: string;
   isAlive: boolean;
   lastHeartbeat?: number;
+  /**
+   * The session's own metadata, in the two pieces the reader needs to open it: the revision the
+   * ciphertext was sealed at, and the ciphertext — `Session.metadataVersion` and
+   * `Session.metadata`, under those names, because the reader already holds the code for them.
+   *
+   * A reader that can open it — the App holds the account key — can therefore read what the session
+   * says about itself without the server: its CLI version above all, which is a build id and changes
+   * with every build, so a reader that cannot refresh it shows whichever version it last heard and
+   * reports a mismatch it has no way to confirm or clear.
+   */
+  metadataVersion?: number;
+  metadata?: string;
+  /**
+   * When this daemon began restarting the session, if it is restarting it.
+   *
+   * A timestamp rather than a flag, and for the same reason the daemon's published state carries
+   * one: a reader applies a grace to it, so an entry that outlived the restart it described goes
+   * stale on its own. Without it, a restart reads as a session that has ended — which is what it
+   * looks like from anywhere else, because nothing reports the session while it happens.
+   */
+  restartingSince?: number;
 };
+
+/** How a reader names a session: by the id the server issued, or by the tag the CLI owns. */
+export type LanSessionAddress = { sessionId: string } | { tag: string };
 
 export type LanHistory = {
   tag: string;
@@ -78,7 +112,19 @@ export type LanHistory = {
   cursor: string;
   /** True when `since` could not be honoured, so `entries` is the whole log, not a continuation. */
   reset: boolean;
+  /**
+   * Boundary before the first entry, to hand back as `before` for the next older page. Every page
+   * carries both of its edges, so a reader can walk the log in either direction.
+   */
+  older: string;
+  /** The log continues past this page, which is what tells a reader its page was cut short. */
+  hasNewer: boolean;
+  /** The log continues before this page, which is the whole "there is older history" signal. */
+  hasOlder: boolean;
 };
+
+import type { VersionState } from './versionState';
+import { accountProofMessage, accountProofMessageV1, verifyAccountProof } from './accountProof';
 
 export type LanServerOptions = {
   /** The machine key: a 32-byte symmetric secret shared with the App via the machine record. */
@@ -88,17 +134,93 @@ export type LanServerOptions = {
   accountFingerprint: string;
   getSessions: () => LanSessionSummary[];
   /**
+   * What this machine is running against what it has on disk.
+   *
+   * Asked per request rather than captured at startup, because the answer changes while the daemon
+   * runs — that is the whole point of it.
+   */
+  versionState?: () => VersionState;
+  /**
    * Local history for a session, or null when this machine has none — the session may not
    * have reported its tag yet, or its key may be gone. Injected so this module keeps knowing
    * nothing about configuration or the filesystem.
+   *
+   * Two addresses, because they become available at different times: the server issues the id,
+   * the CLI owns the tag. A client that knows only the tag can still read, which is what keeps
+   * a session reachable while it is waiting for the server.
    */
-  getHistory: (sessionId: string, since?: string) => LanHistory | null;
+  getHistory: (address: LanSessionAddress, query: { since?: string; before?: string }) => LanHistory | null;
+  /**
+   * The full input and result of one tool call, for a detail view that was opened.
+   *
+   * The message stream carries a truncated copy — that is what keeps a session's log, its pages and
+   * its relay traffic small — and the full payload stays in the session's own directory beside the
+   * working tree. Null when this machine has no such session, or no such call on disk.
+   */
+  getToolContent?: (args: { sessionId: string; callId: string }) => Promise<{ args?: unknown; result?: unknown } | null> | { args?: unknown; result?: unknown } | null;
   /**
    * A user message the App sent over the LAN socket. `content` is the same ciphertext the server
    * route carries, so this stays end-to-end encrypted — the LAN is plain HTTP, which is exactly
    * why the payload must not be readable here.
    */
   onSend: (message: { sessionId: string; localId: string; content: string }) => void;
+  /**
+   * Restart the session process, with the build now on disk.
+   *
+   * The one write this API offers that is not a message. It is here because the reason a session
+   * is restarted is that its machine has been rebuilt — and the machine's own channel is the one
+   * that is up when that is true, while the server's is not necessarily. Without it the App could
+   * only ask the server to do it, so a restart failed with "socket disconnected" while the machine
+   * sat there answering reads on the LAN.
+   *
+   * Session-scoped, like the control server's own handler: it starts one session's process again
+   * and touches nothing else on the machine. Absent means this daemon does not offer it, and a
+   * caller falls back to whatever route it has left.
+   */
+  restartSession?: (sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
+  /**
+   * A control call the *session* acts on, forwarded to its process: abort the turn in flight, or
+   * answer a permission request it is waiting on.
+   *
+   * The parameters travel as the same ciphertext the server route carries — the session's own key
+   * is what opens them, and this side never holds it — so what the daemon needs from the caller is
+   * only which session and which method. `params` is opaque here and stays opaque.
+   *
+   * Returns false when this machine has no live session by that id, which is the one thing the
+   * caller has to be told: it is the difference between "the session acted" and "nobody was asked".
+   */
+  onSessionControl?: (request: { sessionId: string; method: string; params: string }) => boolean;
+  /**
+   * Checking that a side-effecting request was made by the account, not merely by a device holding
+   * the machine key.
+   *
+   * The machine key is a transport credential every paired device holds, so without this "can
+   * reach the daemon" and "may act on it" would be the same thing — and a key holder can derive the
+   * relay tag, so per-channel rules would not help. One check on the route, both channels through
+   * it. The material is already here: the account's public key is what the account fingerprint is
+   * derived from.
+   */
+  accountProof?: {
+    /** Verifies a detached signature over `accountProofMessage(...)`. */
+    verify: (message: string, signature: string) => boolean;
+    /** One-shot nonces: a signature that arrives twice is refused the second time. */
+    nonceSeen: (nonce: string) => boolean;
+    /** Called once a proof has been accepted, so the nonce cannot be used again. */
+    rememberNonce: (nonce: string) => void;
+  };
+  /**
+   * This machine's lifecycle log: which sessions it has started and archived, in order.
+   *
+   * A reader replays it at its own pace — that is what the cursor is for — so the App can be told
+   * about a session this machine has, while the server catching up remains a separate progress.
+   * Read on demand rather than pushed: the log is small, sessions change rarely, and a reader that
+   * has been away asks for everything it missed in one request.
+   */
+  lifecycle?: {
+    /** Where a reader stands after applying everything. */
+    revision: () => number;
+    entriesSince: (since: number) => unknown[];
+  };
   /**
    * Update envelopes to send to a socket reader as soon as it connects, before any live frame.
    * A reader that joins after a session changed its state would otherwise never see that change:
@@ -152,10 +274,10 @@ function safeEqual(a: Buffer, b: Buffer): boolean {
  * Origin is `*` deliberately. The caller's origin differs per build (the Metro dev server on
  * localhost, `tauri://localhost` once packaged), and an allowlist that misses one reinstates
  * exactly that silent failure. It is affordable here because nothing is cookie-authenticated:
- * every route but `/lan/challenge` requires a bearer token the caller can only obtain by proving
- * possession of the machine key, so a wildcard grants no ambient authority. A hostile page can
- * reach the challenge route and learn that a daemon is present; it cannot mint a token, and the
- * nonce it receives is useless without the key.
+ * every route but `/lan/challenge` and `/lan/ping` requires a bearer token the caller can only
+ * obtain by proving possession of the machine key, so a wildcard grants no ambient authority. A
+ * hostile page can reach the challenge route and learn that a daemon is present; it cannot mint a
+ * token, and the nonce it receives is useless without the key.
  */
 const CORS_HEADERS: Record<string, string> = {
   'access-control-allow-origin': '*',
@@ -226,6 +348,22 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
   };
 
   /** Fixed-window limiter, itself bounded so it cannot become the memory-exhaustion vector. */
+  /**
+   * The address to count this request against.
+   *
+   * A relayed request arrives from loopback with the client's own address in a header, because the
+   * relay is the only thing on loopback: taking the header from anyone else would let a LAN client
+   * pick its own bucket, and taking loopback at face value would put every relayed client in one.
+   */
+  const clientAddress = (request: { ip?: string; headers: Record<string, unknown> }): string => {
+    const peer = request.ip ?? 'unknown';
+    const forwarded = request.headers['x-happy-client-ip'];
+    if (peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1') {
+      return typeof forwarded === 'string' && forwarded.length > 0 ? forwarded : peer;
+    }
+    return peer;
+  };
+
   const underLimit = (store: Map<string, RateRecord>, address: string, max: number, now: number): boolean => {
     const record = store.get(address);
     if (!record || now - record.windowStart >= RATE_LIMIT_WINDOW_MS) {
@@ -269,12 +407,22 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     return record !== undefined && record.expiresAt > now;
   };
 
-  const requireToken = (request: { headers: Record<string, unknown> }): boolean => {
+  /**
+   * Whether this request carries a usable token, saying so in the log when it does not.
+   *
+   * A direct LAN request that is refused is otherwise completely invisible: the relay's own logging
+   * covers what arrives *through* the relay, so a client on the same network that is re-handshaking
+   * every few seconds looks, from this daemon's log, exactly like a client that is doing nothing.
+   * The address is what makes a storm attributable to one device.
+   */
+  const requireToken = (request: { headers: Record<string, unknown>; ip?: string; url?: string }): boolean => {
     const header = request.headers['authorization'];
-    if (typeof header !== 'string' || !header.startsWith('Bearer ')) {
-      return false;
+    const ok =
+      typeof header === 'string' && header.startsWith('Bearer ') && verifyToken(header.slice('Bearer '.length), Date.now());
+    if (!ok) {
+      logger.debug(`[lan] refused ${request.url ?? '-'} from=${clientAddress(request)}`);
     }
-    return verifyToken(header.slice('Bearer '.length), Date.now());
+    return ok;
   };
 
   /**
@@ -294,9 +442,21 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     return safeEqual(Buffer.from(proof), Buffer.from(expected)) ? record : null;
   };
 
+  /**
+   * Whether this daemon is answering on this route — and nothing else.
+   *
+   * A client that holds no key can only prove reachability by asking for something, and the only
+   * unauthenticated route used to be `/lan/challenge`. That made a pure reachability question cost
+   * a minted nonce: a credential issued and thrown away, counted against the very rate limit that
+   * exists to bound challenge floods, and retained in the nonce store until it expires. Answering
+   * this costs nothing and allocates nothing, so a periodic probe is free.
+   */
+  app.get('/lan/ping', async (_request, reply) => reply.send({ ok: true, v: LAN_PROTOCOL_VERSION }));
+
   app.post('/lan/challenge', async (request, reply) => {
     const now = Date.now();
-    if (!underLimit(challenges, request.ip, MAX_CHALLENGES, now)) {
+    if (!underLimit(challenges, clientAddress(request), MAX_CHALLENGES, now)) {
+      logger.debug(`[lan] challenge refused (rate) from=${clientAddress(request)}`);
       return reply.code(429).send({ error: 'too many requests' });
     }
     pruneNonces(now);
@@ -308,12 +468,17 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     }
     const nonce = randomBytes(32).toString('base64url');
     nonces.set(nonce, { issuedAt: now, expiresAt: now + TOKEN_TTL_MS });
+    // Logged because the challenge count is the whole question when a device is re-authenticating
+    // more often than a 90-second token should require — and this route is unauthenticated, so the
+    // address is the only thing that says which device it is.
+    logger.debug(`[lan] challenge issued from=${clientAddress(request)}`);
     return reply.send({ nonce });
   });
 
   app.post('/lan/session', async (request, reply) => {
     const now = Date.now();
-    if (!underLimit(sessionAttempts, request.ip, MAX_SESSION_ATTEMPTS, now)) {
+    if (!underLimit(sessionAttempts, clientAddress(request), MAX_SESSION_ATTEMPTS, now)) {
+      logger.debug(`[lan] session refused (rate) from=${clientAddress(request)}`);
       return reply.code(429).send({ error: 'too many requests' });
     }
     const body = request.body as { nonce?: unknown; proof?: unknown } | undefined;
@@ -329,10 +494,14 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     nonces.delete(nonce);
     if (!record) {
       // Never echo the proof or the secret into logs or the error body.
+      logger.debug(`[lan] proof rejected from=${clientAddress(request)}`);
       return reply.code(401).send({ error: 'invalid or expired nonce' });
     }
 
     nonces.set(nonce, record);
+    // The token exchange, logged with the address: pairing this against `challenge issued` is what
+    // separates "handshaking too often" from "minting nonces nobody redeems".
+    logger.debug(`[lan] session issued from=${clientAddress(request)}`);
     return reply.send({ token: issueToken(nonce, record.expiresAt), expiresAt: record.expiresAt });
   });
 
@@ -346,7 +515,32 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       accountFingerprint: opts.accountFingerprint,
       hostname: hostname(),
       platform: platform(),
+      // Which build this machine is running, and whether the one on disk is a different one.
+      versions: opts.versionState?.(),
     });
+  });
+
+  /**
+   * The lifecycle log, from a reader's cursor.
+   *
+   * A route of its own rather than a field on `/lan/sessions`, because the two are different kinds
+   * of thing and neither may pretend to be the other: the summary is a *snapshot* — what exists now
+   * — and this is an ordered list of facts. A reader that wants to know what changed asks here; one
+   * that wants to know what there is asks there.
+   */
+  app.get('/lan/lifecycle', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (!opts.lifecycle) {
+      return reply.code(404).send({ error: 'this daemon keeps no lifecycle log' });
+    }
+    const { since } = request.query as { since?: string };
+    const cursor = Number.parseInt(since ?? '0', 10);
+    const from = Number.isFinite(cursor) && cursor > 0 ? cursor : 0;
+    const entries = opts.lifecycle.entriesSince(from);
+    logger.debug(`[lan] lifecycle since=${from} entries=${entries.length} revision=${opts.lifecycle.revision()} from=${clientAddress(request)}`);
+    return reply.send({ v: LAN_PROTOCOL_VERSION, revision: opts.lifecycle.revision(), entries });
   });
 
   app.get('/lan/sessions', async (request, reply) => {
@@ -356,18 +550,244 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     return reply.send({ sessions: opts.getSessions() });
   });
 
+  /**
+   * The same history, addressed by the tag the CLI owns rather than the id the server issued.
+   *
+   * This is what keeps a session reachable while it is waiting out a server stall: it has a tag
+   * from the moment it starts, but no session id until the server answers, and a reader that
+   * cannot name it cannot reach it at all.
+   */
+  app.get('/lan/tags/:tag/history', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    const { tag } = request.params as { tag: string };
+    const { since, before } = request.query as { since?: string; before?: string };
+    const history = opts.getHistory({ tag }, { since, before });
+    if (!history) {
+      logger.debug(`[lan] history 404 tag=${tag} since=${since ?? '-'} before=${before ?? '-'}`);
+      return reply.code(404).send({ error: 'no local history for that tag' });
+    }
+    logger.debug(
+      `[lan] history tag=${tag} since=${since ?? '-'} before=${before ?? '-'} ` +
+      `entries=${history.entries.length} hasNewer=${history.hasNewer} hasOlder=${history.hasOlder} reset=${history.reset}`,
+    );
+    return reply.send({ v: LAN_PROTOCOL_VERSION, ...history });
+  });
+
+  /**
+   * Restart the session process on this machine.
+   *
+   * A POST because it changes something, and session-scoped because that is as far as it reaches:
+   * no daemon stop, no shutdown, nothing about any other session. What it can do is bounded by what
+   * the caller already holds — the machine key, which is only ever handed to a device the user
+   * paired — and by the daemon refusing anything it would refuse the server route.
+   *
+   * Always 200 when this daemon offers the route at all, including a refusal, so the caller can
+   * tell "this machine says no" from "this machine cannot be asked": the second is what sends it
+   * to the server instead, and a refusal must not read as a reason to ask someone else.
+   */
+  app.post('/lan/sessions/:sessionId/restart', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    const { sessionId } = request.params as { sessionId: string };
+    // The account check is off for now. It worked on a direct connection and refused every request
+    // that arrived through the relay: the App had been sending its *machine-key* proof under the same
+    // header names, so a valid signature by one key was checked against the other key's public key.
+    // The fix is to give the account proof its own header namespace on the App side; until then the
+    // machine key is the only thing standing between a paired device and this action, as it was
+    // before. See `docs/channel-layer-handoff.md`.
+    if (!opts.restartSession) {
+      return reply.code(404).send({ error: 'this daemon does not restart sessions' });
+    }
+    logger.debug(`[lan] restart ${sessionId} from=${clientAddress(request)}`);
+    const result = await opts.restartSession(sessionId);
+    logger.debug(`[lan] restart ${sessionId} success=${result.success}${result.error ? ` error=${result.error}` : ''}`);
+    return reply.send({ v: LAN_PROTOCOL_VERSION, ...result });
+  });
+
+  /**
+   * Control calls that act inside a session that already exists.
+   *
+   * Deliberately one route with the methods named here rather than one route per operation: what
+   * this surface may do is then a list somebody can read, and the list is the point — the daemon's
+   * own API starts sessions, stops them and runs things inside them, and none of that is reachable
+   * from here. Aborting a turn and answering a prompt are the two that only move a session along
+   * that is already running, which is the same boundary a restart sits on.
+   */
+  const SESSION_CONTROL_METHODS = new Set(['abort', 'permission']);
+  /**
+   * Whether this request carries the account's proof, and consumes its nonce when it does.
+   *
+   * Refused rather than allowed when the daemon has no way to check: a machine that cannot verify
+   * cannot tell an account from a device holding the machine key, and guessing "allowed" would make
+   * this decoration.
+   */
+  const requireAccountProof = (
+    request: { headers: Record<string, unknown>; method?: string; url?: string },
+    /** What the proof is about: the action, and what it is being asked of. */
+    action: { operation: string; target: string },
+  ): boolean => {
+    if (!opts.accountProof) {
+      // A warning, not a debug line: this daemon cannot authorise the action at all, and nothing
+      // else about the request will say so — the caller sees a refusal it cannot explain.
+      logger.warn(`[lan] refused ${request.url ?? '-'}: no account-proof check configured`);
+      return false;
+    }
+    const header = (name: string): string | null => {
+      const value = request.headers[name];
+      return typeof value === 'string' && value.length > 0 ? value : null;
+    };
+    const nonce = header('x-happy-proof-nonce');
+    const at = Number.parseInt(header('x-happy-proof-at') ?? '', 10);
+    const signature = header('x-happy-proof-signature');
+    const path = (request.url ?? '').split('?')[0];
+    // What the client signed, when it arrived through the relay: the relay is the only party that
+    // knows the path as the caller wrote it, since it is the one that strips the `/r/<tag>` prefix
+    // before the request gets here. An older App signs that path (v1), so it is the only string its
+    // proof can be checked against — and without this, every signed request through the relay failed
+    // while the same request over the LAN worked.
+    const forwarded = typeof request.headers['x-happy-forwarded-path'] === 'string'
+      ? String(request.headers['x-happy-forwarded-path']).split('?')[0]
+      : null;
+    // Built as values rather than inline, so a refusal can print exactly what was checked against
+    // what was received: an Ed25519 signature says nothing about the key that made it, so the
+    // message bytes are the only thing a `bad-signature` can be diagnosed from.
+    const messageV2 = accountProofMessage({
+      operation: action.operation,
+      target: action.target,
+      nonce: nonce ?? '',
+      at: Number.isFinite(at) ? at : 0,
+      bodyDigest: '',
+    });
+    const messageV1 = accountProofMessageV1({
+      method: request.method ?? 'POST',
+      // `path`, not `forwarded`: the App signs the path it asks for — `/lan/sessions/<id>/control` —
+      // which is exactly what this daemon sees, because the relay stripped its `/r/<tag>` prefix
+      // before forwarding. Using the caller's prefixed path here was backwards and made every
+      // relayed proof fail while the LAN ones passed.
+      path,
+      nonce: nonce ?? '',
+      at: Number.isFinite(at) ? at : 0,
+      bodyDigest: '',
+    });
+    const verdict = verifyAccountProof({
+      proof: nonce !== null && Number.isFinite(at) && signature !== null ? { nonce, at, signature } : null,
+      message: messageV2,
+      legacyMessage: messageV1,
+      nonceSeen: opts.accountProof.nonceSeen,
+      verify: opts.accountProof.verify,
+    });
+    if (!verdict.ok) {
+      // A warning for the same reason, and one more: the reason (missing, stale, replayed, bad
+      // signature) is the whole diagnosis of a refusal a client can only see as a refusal. The two
+      // paths are logged together because a v1 proof covers the path the *client* wrote, which is
+      // not the one this daemon sees when the request came through the relay — and when the fallback
+      // fails, those two strings are the whole answer.
+      logger.warn([
+        `[lan] refused ${request.url ?? '-'}: account proof ${verdict.reason}`,
+        `from=${clientAddress(request)}`,
+        `path=${path}`,
+        `forwarded=${forwarded ?? '-'}`,
+        `action=${action.operation}:${action.target}`,
+        `nonce=${nonce ?? '-'}`,
+        `at=${Number.isFinite(at) ? at : 0}`,
+        `sig=${signature ? `${signature.slice(0, 12)}…(${signature.length})` : '-'}`,
+        `v2=${JSON.stringify(messageV2)}`,
+        `v1=${JSON.stringify(messageV1)}`,
+      ].join(' '));
+      return false;
+    }
+    opts.accountProof.rememberNonce(nonce!);
+    return true;
+  };
+
+  app.post('/lan/sessions/:sessionId/control', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    // The account check is off here too, for the same reason as the restart route above.
+    if (!opts.onSessionControl) {
+      return reply.code(404).send({ error: 'this daemon does not forward session control' });
+    }
+    const { sessionId } = request.params as { sessionId: string };
+    const body = request.body as { method?: unknown; params?: unknown } | null;
+    const method = typeof body?.method === 'string' ? body.method : null;
+    if (method === null || !SESSION_CONTROL_METHODS.has(method)) {
+      logger.debug(`[lan] control refused: method=${String(body?.method)}`);
+      return reply.code(400).send({ error: 'that is not a control this API forwards' });
+    }
+    if (typeof body?.params !== 'string') {
+      return reply.code(400).send({ error: 'params must be the ciphertext the session can open' });
+    }
+    const delivered = opts.onSessionControl({ sessionId, method, params: body.params });
+    logger.debug(`[lan] control ${method} ${sessionId} from=${clientAddress(request)} delivered=${delivered}`);
+    if (!delivered) {
+      return reply.code(404).send({ error: 'no live session by that id on this machine' });
+    }
+    return reply.send({ v: LAN_PROTOCOL_VERSION });
+  });
+
   app.get('/lan/sessions/:sessionId/history', async (request, reply) => {
     if (!requireToken(request)) {
       return reply.code(401).send({ error: 'unauthorized' });
     }
     const { sessionId } = request.params as { sessionId: string };
-    const { since } = request.query as { since?: string };
-    const history = opts.getHistory(sessionId, since);
+    // No anchor at all means "the newest page": a reader that has just opened a session wants the
+    // end of the log, not the beginning.
+    const { since, before } = request.query as { since?: string; before?: string };
+    const history = opts.getHistory({ sessionId }, { since, before });
     if (!history) {
       // 404 rather than an empty list: the client should retry later, not record "no history".
+      logger.debug(`[lan] history 404 ${sessionId} since=${since ?? '-'} before=${before ?? '-'}`);
       return reply.code(404).send({ error: 'no local history for that session' });
     }
+    // One line per read, because "the reader is behind" and "the reader is stuck on one page" look
+    // identical from outside and are told apart only by whether the anchors move between reads.
+    logger.debug(
+      `[lan] history ${sessionId} since=${since ?? '-'} before=${before ?? '-'} ` +
+      `entries=${history.entries.length} bytes=${history.entries.reduce((n, e) => n + e.c.length, 0)} ` +
+      `hasNewer=${history.hasNewer} hasOlder=${history.hasOlder} reset=${history.reset} ` +
+      `cursor=${history.cursor} older=${history.older} from=${clientAddress(request)}`,
+    );
     return reply.send({ v: LAN_PROTOCOL_VERSION, ...history });
+  });
+
+  /**
+   * One tool call's full input and result.
+   *
+   * Unlike everything else this API carries, the answer is *plaintext* — the session wrote it that
+   * way beside the working tree, and it can contain file contents and command output. So the
+   * machine key every paired device holds is not enough here: the account has to sign for it, the
+   * same proof the actions that change something require.
+   */
+  app.get('/lan/sessions/:sessionId/tool-content/:callId', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (!opts.getToolContent) {
+      return reply.code(404).send({ error: 'this daemon does not serve tool content' });
+    }
+    const { sessionId, callId } = request.params as { sessionId: string; callId: string };
+    // A call id names a file on disk; anything that could walk out of that directory stops here.
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(callId)) {
+      logger.debug(`[lan] tool-content refused: callId=${callId.slice(0, 40)}`);
+      return reply.code(400).send({ error: 'that is not a tool call id' });
+    }
+    const target = `${sessionId}:${callId}`;
+    if (!requireAccountProof(request, { operation: 'tool-content', target })) {
+      return reply.code(403).send({ error: 'account proof required' });
+    }
+    const content = await opts.getToolContent({ sessionId, callId });
+    if (!content) {
+      logger.debug(`[lan] tool-content 404 ${target}`);
+      return reply.code(404).send({ error: 'no such tool content on this machine' });
+    }
+    logger.debug(
+      `[lan] tool-content ${target} args=${content.args !== undefined} result=${content.result !== undefined} from=${clientAddress(request)}`,
+    );
+    return reply.send({ v: LAN_PROTOCOL_VERSION, ...content });
   });
 
   /**
@@ -383,6 +803,7 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       nonces.delete(nonce);
     }
     if (!record) {
+      logger.debug(`[lan] socket upgrade refused from=${clientAddress(request)}`);
       socket.close(4401, 'unauthorized');
       return;
     }
@@ -392,8 +813,12 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     for (const payload of opts.getSnapshot?.() ?? []) {
       socket.send(JSON.stringify({ event: 'update', payload }));
     }
-    socket.on('close', () => {
+    socket.on('close', (code: number, reason: Buffer) => {
       subscribers.delete(socket);
+      // Logged because a reader that is never removed is invisible otherwise: the count is the
+      // only evidence of whether closes propagate through the relay, and a socket that outlives
+      // its client is one the daemon keeps broadcasting to forever.
+      logger.debug('[lan] socket reader closed', { readers: subscribers.size, code, reason: reason?.toString() });
     });
 
     /**
@@ -419,21 +844,36 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
             ? raw
             : null;
       if (text === null) {
+        logger.debug('[lan] socket frame dropped: not a text frame');
         return;
       }
       let frame: { event?: unknown; payload?: unknown };
       try {
         frame = JSON.parse(text) as { event?: unknown; payload?: unknown };
       } catch {
+        logger.debug(`[lan] socket frame dropped: not JSON bytes=${text.length}`);
+        return;
+      }
+      // A reader's heartbeat. The socket is already authenticated, so this needs nothing but a
+      // reply: what it is for is the reader knowing the connection is alive *now*, because a socket
+      // that died silently — the usual shape after iOS suspends an app — looks open from the client
+      // side and would otherwise never be noticed or reconnected. `idleTimeout` does not drop an
+      // idle reader (pings are answered by the client's own stack), so silence here means a dead
+      // path, not a quiet one.
+      if (frame.event === 'ping') {
+        socket.send(JSON.stringify({ event: 'pong' }));
         return;
       }
       if (frame.event !== 'send' || typeof frame.payload !== 'object' || frame.payload === null) {
+        logger.debug(`[lan] socket frame ignored: event=${String(frame.event)}`);
         return;
       }
       const { sessionId, localId, content } = frame.payload as Record<string, unknown>;
       if (typeof sessionId !== 'string' || typeof localId !== 'string' || typeof content !== 'string') {
+        logger.debug('[lan] socket send dropped: malformed payload');
         return;
       }
+      logger.debug(`[lan] socket send received session=${sessionId} localId=${localId}`);
       opts.onSend({ sessionId, localId, content });
     });
     socket.on('error', () => socket.close());

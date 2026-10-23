@@ -32,6 +32,8 @@ export interface TrackedSession {
   spawnTime?: number;
   /** Per-session sandbox config, preserved for stopped sessions so respawns reuse it */
   sandbox?: SandboxConfig | null;
+  /** Transient systemd scope the session runs in (Linux scope mode only). */
+  scopeUnit?: string;
 
   // --- Exit tracking ---
   /** Process exit code (0 = normal, non-zero = error, null = killed by signal) */
