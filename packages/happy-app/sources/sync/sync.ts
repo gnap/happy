@@ -2094,7 +2094,15 @@ class Sync {
                 const visibleId = this.currentVisibleSessionId;
                 for (const session of decryptedSessions) {
                     if (session.metadata?.flavor !== 'cursor' && session.metadata?.flavor !== 'acp-cursor' && session.metadata?.flavor !== 'claude') continue;
-                    if (!session.active && session.id !== visibleId) continue; // skip unless active or visible
+                    // Only the visible session and active ones get an eager catch-up: hidden,
+                    // inactive sessions read when opened. The `session.active` flag can be stale
+                    // on a daemon channel, so a visible-but-not-active session must not be skipped.
+                    if (!session.active && session.id !== visibleId) continue;
+                    // Do not trigger a message fetch for a session that already has messages in the
+                    // store — applyMessages/applyWindow handle deltas from pushes, and the fetch
+                    // would just duplicate work the socket already did.
+                    const alreadyLoaded = (storage.getState().sessionMessages[session.id]?.messages.length ?? 0) > 0;
+                    if (alreadyLoaded && session.id !== visibleId) continue;
                     try {
                         const cached = await getCachedLastSeq(session.id);
                         if (cached != null && cached < session.seq) {
@@ -3177,9 +3185,9 @@ class Sync {
         }
         this.lastNetworkChangeHandledAt = now;
         this.reconcileDaemonSockets();
-        for (const syncer of this.messagesSync.values()) {
-            syncer.invalidate();
-        }
+        // A network change invalidating every session causes a fetch storm that delays the
+        // session the user is actually looking at. Use the scheduler instead.
+        this.readScheduler.markStale();
     }
 
     /** A network report is a hint, not an event: several arrive for one change. */
