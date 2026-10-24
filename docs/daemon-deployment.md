@@ -46,14 +46,18 @@ kill inside the unit does not stop the daemon).
 ## Installing, macOS (LaunchDaemon)
 
 ```bash
+bash packages/happy-cli/scripts/install-macos-daemon.sh --dry-run   # show the plist it would install
 sudo bash packages/happy-cli/scripts/install-macos-daemon.sh
 ```
 
-It backs up the LaunchAgent plist, removes it (an agent and a daemon with one label fight), installs
-`/Library/LaunchDaemons/com.happy-cli.daemon.plist`, and bootstraps it in the system domain. The
-plist runs as the user (`UserName=gnap`), not root, and deliberately carries no `ANTHROPIC_*`
-credentials — those are injected per session from the profile. Rollback is printed by the script and
-documented in `macos-daemon-launchd.md`.
+It **generates** the daemon plist from the agent's rather than copying it: it names the user and
+group (`UserName=gnap`, `GroupName=staff`, overridable with `HAPPY_DAEMON_USER` / `_GROUP` / `_UID`),
+sets `ProcessType=Interactive` and `ThrottleInterval=10`, adds `HAPPY_PROJECT_ROOT` (derived from the
+script's own location, since a system daemon has no relationship to the repo), and strips every
+`ANTHROPIC_*` / `DEEPSEEK_*` / `CLAUDE_CODE_*` key — those are injected per session from the profile.
+It then backs up the agent, removes it (an agent and a daemon with one label fight), installs
+`/Library/LaunchDaemons/com.happy-cli.daemon.plist`, and bootstraps it in the system domain. Rollback
+is printed by the script and documented in `macos-daemon-launchd.md`.
 
 ## The env file: one source of truth
 
