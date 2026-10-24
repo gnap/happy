@@ -19,7 +19,7 @@ import { relayBaseUrlFor, relayTagFor } from './lan/relayTag';
 import * as Notifications from 'expo-notifications';
 import * as Network from 'expo-network';
 import { registerPushToken } from './apiPush';
-import { Platform, AppState, type AppStateStatus } from 'react-native';
+import { Platform, AppState, InteractionManager, type AppStateStatus } from 'react-native';
 import { isRunningOnMac, isRunningInTauri } from '@/utils/platform';
 import { NormalizedMessage, normalizeRawMessage, RawRecord } from './typesRaw';
 import type { MessageMeta } from './typesMessageMeta';
@@ -670,28 +670,33 @@ class Sync {
             // but no data flowing) won't self-recover without a nudge.
             apiSocket.checkHealthAndReconnect();
 
-            // Only while the server channel is carrying the App at all — that is the channel with
-            // nothing to notify with. A machine on a live LAN or relay socket has already been
-            // asked, by that socket coming live, and asking it again on a timer would be the poll
-            // this is trying not to be.
-            if (Date.now() - lastMachineVersionSweep > Sync.MACHINE_VERSION_SWEEP_MS
-                && storage.getState().socketStatus === 'connected') {
-                lastMachineVersionSweep = Date.now();
-                void this.refreshDaemonVersions(this.machinesWithoutLiveSocket());
-            }
+            // The refresh waits for the UI to be idle. It is never urgent, and running it while a
+            // screen is being opened was measured on a device as an extra 200-260ms before the
+            // session's first render — the navigation was queued behind a list fetch.
+            InteractionManager.runAfterInteractions(() => {
+                // Only while the server channel is carrying the App at all — that is the channel
+                // with nothing to notify with. A machine on a live LAN or relay socket has already
+                // been asked, by that socket coming live, and asking it again on a timer would be
+                // the poll this is trying not to be.
+                if (Date.now() - lastMachineVersionSweep > Sync.MACHINE_VERSION_SWEEP_MS
+                    && storage.getState().socketStatus === 'connected') {
+                    lastMachineVersionSweep = Date.now();
+                    void this.refreshDaemonVersions(this.machinesWithoutLiveSocket());
+                }
 
-            const idleMs = Date.now() - this.lastUserActivityAt;
-            if (idleMs > 600_000) {
-                log.log(`🕐 Skipping periodic session refresh — idle for ${Math.round(idleMs / 1000)}s`);
-                return;
-            }
-            // Every FULL_REFRESH_INTERVAL, do a full fetch to purge stale sessions
-            // that were deleted/archived on the server and won't appear in deltas.
-            if (Date.now() - this.lastFullRefreshAt >= Sync.FULL_REFRESH_INTERVAL_MS) {
-                this.#refreshSessionsFull();
-                return; // refreshSessionsFull already invalidates
-            }
-            this.sessionsSync.invalidate();
+                const idleMs = Date.now() - this.lastUserActivityAt;
+                if (idleMs > 600_000) {
+                    log.log(`🕐 Skipping periodic session refresh — idle for ${Math.round(idleMs / 1000)}s`);
+                    return;
+                }
+                // Every FULL_REFRESH_INTERVAL, do a full fetch to purge stale sessions
+                // that were deleted/archived on the server and won't appear in deltas.
+                if (Date.now() - this.lastFullRefreshAt >= Sync.FULL_REFRESH_INTERVAL_MS) {
+                    this.#refreshSessionsFull();
+                    return; // refreshSessionsFull already invalidates
+                }
+                this.sessionsSync.invalidate();
+            });
         }, Sync.SESSION_REFRESH_INTERVAL_MS);
     }
 
@@ -720,7 +725,11 @@ class Sync {
             this.feedSync,
         ];
         background.forEach((sync, index) => {
-            setTimeout(() => sync.invalidate(), delayMs + index * 250);
+            // After the current interaction (a tap, a navigation animation), not in the middle of
+            // it: these are updates to a screen that is already drawn.
+            InteractionManager.runAfterInteractions(() => {
+                setTimeout(() => sync.invalidate(), delayMs + index * 250);
+            });
         });
     }
 
