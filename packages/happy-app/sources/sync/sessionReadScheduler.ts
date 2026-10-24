@@ -26,6 +26,12 @@ type SchedulerDeps = {
      * Called on each tick, so it may change with the connection state.
      */
     shouldPoll: (sessionId: string) => boolean;
+    /**
+     * Whether the owner that created this scheduler is still the live one. A hot reload can leave
+     * a scheduler from an earlier evaluation running; it must not keep reading a session no
+     * current screen asked for.
+     */
+    isActive: () => boolean;
     intervalMs: number;
     log: (message: string) => void;
 };
@@ -42,6 +48,10 @@ export class SessionReadScheduler {
 
     /** The screen changed. The new session is read now; the timer follows the screen. */
     setVisible(sessionId: string | null): void {
+        if (!this.deps.isActive()) {
+            this.stop();
+            return;
+        }
         if (this.visible === sessionId) {
             if (sessionId) {
                 this.wake(sessionId, 'visible');
@@ -57,6 +67,10 @@ export class SessionReadScheduler {
 
     /** Something says this session may have changed: a push, an open, a route that now serves it. */
     wake(sessionId: string, reason: string): void {
+        if (!this.deps.isActive()) {
+            this.stop();
+            return;
+        }
         this.queued.add(sessionId);
         if (this.pumpScheduled) {
             return;
@@ -113,6 +127,10 @@ export class SessionReadScheduler {
             return;
         }
         this.timer = setInterval(() => {
+            if (!this.deps.isActive()) {
+                this.stop();
+                return;
+            }
             if (this.visible === null) {
                 return;
             }

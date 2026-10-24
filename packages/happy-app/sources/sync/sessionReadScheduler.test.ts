@@ -8,6 +8,7 @@ describe('SessionReadScheduler', () => {
     const make = () => new SessionReadScheduler({
         read: (sessionId) => { reads.push(sessionId); },
         shouldPoll: () => pollable,
+        isActive: () => true,
         intervalMs: 2_000,
         log: () => {},
     });
@@ -60,6 +61,26 @@ describe('SessionReadScheduler', () => {
 
         scheduler.setVisible(null);
         await vi.advanceTimersByTimeAsync(10_000);
+
+        expect(reads).toEqual([]);
+        expect(scheduler.pollingVisible).toBe(false);
+    });
+
+    it('stops itself when a reload supersedes its owner', async () => {
+        let active = true;
+        const scheduler = new SessionReadScheduler({
+            read: (sessionId) => { reads.push(sessionId); },
+            shouldPoll: () => true,
+            isActive: () => active,
+            intervalMs: 2_000,
+            log: () => {},
+        });
+        scheduler.setVisible('a');
+        await flush();
+        reads.length = 0;
+
+        active = false;
+        await vi.advanceTimersByTimeAsync(4_000);
 
         expect(reads).toEqual([]);
         expect(scheduler.pollingVisible).toBe(false);

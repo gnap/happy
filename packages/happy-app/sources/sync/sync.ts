@@ -142,6 +142,16 @@ function traceUpdate(message: () => string): void {
     }
 }
 
+/**
+ * The evaluation of this module that currently owns the App.
+ *
+ * A hot reload constructs a new Sync while the previous one's objects are still reachable from
+ * timers and listeners. Stopping the previous one at evaluation time covers the normal case; this
+ * is the backstop for an instance that was missed — a stale scheduler tick checks it and stops
+ * itself instead of scheduling reads no screen asked for.
+ */
+let activeSyncInstance: object | null = null;
+
 class Sync {
     private static readonly BACKGROUND_SEND_TIMEOUT_MS = 30_000;
     private static readonly DESKTOP_SESSION_REFRESH_COOLDOWN_MS = 15_000;
@@ -314,8 +324,13 @@ class Sync {
      * on screen. Transports report changes; they do not own timers of their own.
      */
     private readScheduler = new SessionReadScheduler({
-        read: (sessionId) => { this.getMessagesSync(sessionId).invalidate(); },
-        shouldPoll: (sessionId) => this.visibleNeedsPolling(sessionId),
+        read: (sessionId) => {
+            if (activeSyncInstance === this) {
+                this.getMessagesSync(sessionId).invalidate();
+            }
+        },
+        shouldPoll: (sessionId) => activeSyncInstance === this && this.visibleNeedsPolling(sessionId),
+        isActive: () => activeSyncInstance === this,
         intervalMs: Sync.LAN_POLL_INTERVAL_MS,
         log: (message) => { log.log(message); },
     });
@@ -502,6 +517,9 @@ class Sync {
     private lastRecalculationTime = 0;
 
     constructor() {
+        // This evaluation owns the background work from here; any earlier instance's scheduler
+        // will notice and stop itself.
+        activeSyncInstance = this;
         // On web (browser + Tauri/Linux), expo-sqlite is unavailable – use IndexedDB for persistent cache
         // so desktop/Linux doesn't refetch on every launch (same behaviour as iOS SQLite cache).
         if (Platform.OS === 'web') {
@@ -1114,6 +1132,9 @@ class Sync {
 
 
     onSessionVisible = (sessionId: string) => {
+        if (activeSyncInstance !== this) {
+            return;
+        }
         this.currentVisibleSessionId = sessionId;
         // The scheduler owns the fallback poll and the read order from here; setting the visible
         // session also wakes it once for the first read.
@@ -1153,6 +1174,9 @@ class Sync {
     }
 
     onSessionHidden = (sessionId: string) => {
+        if (activeSyncInstance !== this) {
+            return;
+        }
         if (this.currentVisibleSessionId === sessionId) {
             this.currentVisibleSessionId = null;
             // The one fallback timer follows the screen. A hidden session refreshes when it is
