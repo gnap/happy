@@ -250,8 +250,18 @@ class Sync {
     private sessionQueueProcessing = new Set<string>();
     private _loggedMissingSessionForSid = new Set<string>();
     private sessionMessageLocks = new Map<string, AsyncLock>();
-    /** Sessions whose persisted window has been consulted in this process. */
+    /** Sessions whose persisted window has been consulted (and applied) in this process. */
     private hydratedSessions = new Set<string>();
+    /** In-flight hydrations, so two opens of one session read the cache once. */
+    private hydratingSessions = new Map<string, Promise<void>>();
+    /**
+     * How long a message lock may be held before it is treated as abandoned.
+     *
+     * Longer than the read path's own cap (a LAN page is bounded at 45s): a fetch legitimately
+     * holding the lock that long is slow, not stuck. Past it, no `finally` is coming — the shape a
+     * request the OS cancelled without rejecting leaves behind — and the next caller resets it.
+     */
+    private static readonly STUCK_MESSAGE_LOCK_MS = 60_000;
     private sessionSendLocks = new Map<string, AsyncLock>();
     /** Limit concurrent message fetches to avoid network congestion (e.g. 150 sessions all requesting at once on reconnect). */
     private static readonly MAX_CONCURRENT_MESSAGE_FETCHES = 5;
@@ -1075,6 +1085,9 @@ class Sync {
 
     onSessionVisible = (sessionId: string) => {
         this.currentVisibleSessionId = sessionId;
+        // Start the cached window now, before the sync invalidation is scheduled: the tap's first
+        // frame must not be a function of the network, a fetch slot or another fetch's lock.
+        void this.hydrateSession(sessionId);
         this.getMessagesSync(sessionId).invalidate();
 
         // Only for a session whose CLI does not publish its working tree: those still have to be
@@ -1231,6 +1244,9 @@ class Sync {
 
         // Clear the in-memory Zustand messages so the UI shows a loading state
         storage.getState().deleteSessionMessages(sessionId);
+        // The hydration markers belong to the window that was just dropped.
+        this.hydratedSessions.delete(sessionId);
+        this.hydratingSessions.delete(sessionId);
 
         // Trigger a fresh full fetch
         this.onSessionVisible(sessionId);
@@ -3165,6 +3181,9 @@ class Sync {
         const waiting = this.messageFetchQueue.length;
         this.messageFetchSlots.reset();
         this.pumpMessageFetchQueue();
+        // A hydration suspended mid-read will never settle either; drop it so the next open reads
+        // again instead of awaiting a promise from the previous JS execution.
+        this.hydratingSessions.clear();
         for (const lock of this.sessionMessageLocks.values()) {
             lock.reset();
         }
@@ -3306,54 +3325,97 @@ class Sync {
      * newest 100 messages on cold start instead of paginating the full history.
      * Incremental updates (after a cache hit) still fetch from lastSeq forward.
      */
+    /**
+     * Applies the persisted window to the store, before anything takes the message lock.
+     *
+     * This used to run *inside* that lock, so a tap waited for whatever fetch was already in
+     * flight for the same session — usually the one that hung and is the reason the lock is stuck.
+     * Reading local state has no business waiting for network work, and the screen's first frame is
+     * exactly this read; the lock now protects only the network half.
+     *
+     * It is also retried when a session is marked hydrated but holds nothing: the old code marked
+     * before the read, so a cancelled read (backgrounding, a reload) left the session permanently
+     * skipped — the "opens empty every time" shape.
+     */
+    private hydrateSession = async (sessionId: string): Promise<void> => {
+        const inFlight = this.hydratingSessions.get(sessionId);
+        if (inFlight) {
+            return inFlight;
+        }
+        const state = storage.getState();
+        const session = state.sessions[sessionId];
+        if (!session) {
+            return;
+        }
+        const existing = state.sessionMessages[sessionId]?.messages ?? [];
+        if (existing.length > 0) {
+            // Something is already on screen — a push, a read, a previous hydration. It may be
+            // newer than the cached window, and replacing it would be a regression dressed as a
+            // load. Nothing to do.
+            this.hydratedSessions.add(sessionId);
+            return;
+        }
+        this.hydratedSessions.delete(sessionId);
+
+        const run = (async () => {
+            const startedAt = Date.now();
+            try {
+                const cached = await loadMessageCache(session, this.preferredChannel(sessionId) !== 'server');
+                if (!cached) {
+                    log.log(`💬 hydrate: no cache for ${sessionId} (will read from the channel)`);
+                    return;
+                }
+                // A live delivery may have landed while the cache was being read. The store is
+                // newer than the window in that case; leave it alone.
+                if ((storage.getState().sessionMessages[sessionId]?.messages.length ?? 0) > 0) {
+                    this.hydratedSessions.add(sessionId);
+                    return;
+                }
+                storage.getState().applyHydratedCache(
+                    sessionId,
+                    cached.messages,
+                    cached.reducerState,
+                    cached.oldestSeq,
+                    cached.hasOlderMessages,
+                    cached.lastSeq,
+                );
+                this.sessionLastSeq.set(sessionId, cached.lastSeq);
+                // Marked only once the window is in the store. Marking first meant a cancelled
+                // read disabled the cache for the rest of the process.
+                this.hydratedSessions.add(sessionId);
+                log.log(
+                    `💬 hydrate: applied ${cached.messages.length} cached messages for ${sessionId}` +
+                    ` in ${Date.now() - startedAt}ms (lastSeq=${cached.lastSeq}, oldestSeq=${cached.oldestSeq})`
+                );
+            } catch (error) {
+                log.log(`💬 hydrate: failed for ${sessionId}: ${String(error)}`);
+            } finally {
+                this.hydratingSessions.delete(sessionId);
+            }
+        })();
+        this.hydratingSessions.set(sessionId, run);
+        return run;
+    };
+
     private fetchMessages = async (sessionId: string) => {
+        // The cached window first, outside the lock: this is the tap's first frame.
+        await this.hydrateSession(sessionId);
         log.log(`💬 fetchMessages starting for session ${sessionId} - acquiring lock`);
         const lock = this.getSessionMessageLock(sessionId);
+        const held = lock.heldFor(Date.now());
+        if (held > Sync.STUCK_MESSAGE_LOCK_MS) {
+            log.log(`💬 fetchMessages: resetting a message lock held ${Math.round(held / 1000)}s for ${sessionId}`);
+            lock.reset();
+        }
+        const lockRequestedAt = Date.now();
         await lock.inLock(async () => {
+            const waited = Date.now() - lockRequestedAt;
+            if (waited > 500) {
+                log.log(`💬 fetchMessages: waited ${waited}ms for the message lock (${sessionId})`);
+            }
             const slot = await this.acquireMessageFetchSlot();
             log.log(`💬 fetchMessages: got lock for ${sessionId}`);
             try {
-                // --- Cache: cold-start hydration ---
-                // Before the channel is chosen, not after. The cache is channel-agnostic — it holds
-                // whatever either channel last delivered — so it is the one thing here that must
-                // not be skipped for any session. Hydrating below the LAN branch meant a LAN
-                // session never hydrated at all: reopening the app showed an empty conversation
-                // and then re-read and re-decrypted its whole log before anything appeared.
-                //
-                // Load first — even if encryption isn't ready yet, cached messages provide instant
-                // display while the network fetch waits.
-                const session = storage.getState().sessions[sessionId];
-                // Asked once per session per process, and *this* is what answers it — not `isLoaded`.
-                // `isLoaded` means "there is something to render", and every path that applies
-                // messages sets it: a push over the daemon socket, a read the socket or the session
-                // list triggered while the user was elsewhere. On a phone with a daemon on the
-                // network that happens within seconds of launch, which used to make this gate skip
-                // the cache for every session — and a session opened afterwards showed only what
-                // had arrived since, with the persisted conversation never read at all.
-                if (!this.hydratedSessions.has(sessionId)) {
-                    this.hydratedSessions.add(sessionId);
-                    // Timed because this is the whole of what the user waits for when they tap a
-                    // session: reading the window out of the cache, deserialising the reducer state
-                    // and handing it to the store. It is the one number that says whether opening a
-                    // conversation is instant or a hitch.
-                    const hydrationStartedAt = Date.now();
-                    const cached = await loadMessageCache(session, this.preferredChannel(sessionId) !== 'server');
-                    if (cached) {
-                        storage.getState().applyHydratedCache(
-                            sessionId,
-                            cached.messages,
-                            cached.reducerState,
-                            cached.oldestSeq,
-                            cached.hasOlderMessages,
-                            cached.lastSeq,
-                        );
-                        this.sessionLastSeq.set(sessionId, cached.lastSeq);
-                        log.log(`💬 fetchMessages: hydrated ${cached.messages.length} messages for ${sessionId} in ${Date.now() - hydrationStartedAt}ms (lastSeq=${cached.lastSeq}, oldestSeq=${cached.oldestSeq})`);
-                    } else {
-                        log.log(`💬 fetchMessages: no cache for ${sessionId} (will fetch from server)`);
-                    }
-                }
-
                 // A channel is chosen per session, and everything after this point is the same
                 // whichever one it was: the read's bytes go through `ingestChannelRead`.
                 //
@@ -4030,6 +4092,8 @@ class Sync {
             // bulk-delete by session. It's small and self-limiting (only live claims), so just
             // leave entries to expire naturally (they'll never match again after session deletion).
             this.sessionMessageLocks.delete(sessionId);
+            this.hydratedSessions.delete(sessionId);
+            this.hydratingSessions.delete(sessionId);
             this.sessionMessageQueue.delete(sessionId);
             this.sessionQueueProcessing.delete(sessionId);
 
