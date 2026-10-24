@@ -3182,14 +3182,6 @@ class Sync {
     private lastNetworkChangeHandledAt = 0;
 
     /**
-     * Declares everything the App had in flight void, for a resume after iOS suspended it.
-     *
-     * A fetch that was mid-request when the App was suspended may never see its abort, so neither
-     * its `finally` nor the lock it holds can be waited on. Clearing them here is what stops the
-     * resume from inheriting those wedges: the timers all restart on 'active', and every one of
-     * them would otherwise be a no-op against a lock that is still held.
-     */
-    /**
      * What the channel currently holds for a session, for the Dev Tools page.
      *
      * A conversation that is missing messages cannot be diagnosed from the outside: "delivered but
