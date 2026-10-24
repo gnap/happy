@@ -518,6 +518,27 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
         }
         await this.migrateMessageIdentity();
         log.log(`📦 sessionCacheDB: execAsync (schema) took ${Date.now() - t2}ms`);
+        // What the file itself is carrying. An uncontended schema exec of a second or more is
+        // native-or-disk time, not JS contention — and its usual companion is a database that
+        // grew (WAL recovery on first write) or an engine that changed (an SDK upgrade swapped
+        // the vendored SQLite). One line at every cold start is how those two stay told apart.
+        try {
+            const diag = await this.db.getFirstAsync(
+                `SELECT (SELECT page_count FROM pragma_page_count) AS pages,
+                        (SELECT page_size FROM pragma_page_size) AS pageSize,
+                        (SELECT freelist_count FROM pragma_freelist_count) AS freePages,
+                        sqlite_version() AS sqlite`
+            ) as { pages: number; pageSize: number; freePages: number; sqlite: string } | null;
+            if (diag) {
+                const mb = Math.round((diag.pages * diag.pageSize) / 1048576);
+                log.log(
+                    `📦 sessionCacheDB: sqlite ${diag.sqlite}, ${diag.pages} pages × ${diag.pageSize}b` +
+                    ` (${mb}MB, ${diag.freePages} free)`
+                );
+            }
+        } catch {
+            // Diagnostics only.
+        }
 
         this.initialized = true;
         log.log(`📦 sessionCacheDB: full init took ${Date.now() - t0}ms total`);
@@ -731,6 +752,27 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
         await this.enqueue(() => this.db.execAsync(`PRAGMA wal_checkpoint(TRUNCATE);`));
         if (total > 0) {
             log.log(`📦 sessionCacheDB: background migration removed ${total} legacy rows in ${Date.now() - started}ms`);
+        }
+        // The file never shrinks on its own: deletes and REPLACE churn leave free pages behind,
+        // and SQLite walks around them forever. Measured on a device after a few weeks of use:
+        // 170MB with 62% of the pages free, and statements running seconds with an empty queue.
+        // One VACUUM when the file is mostly holes rewrites it to its live size and is worth
+        // the seconds it costs — it runs on the background queue, after the app is up.
+        try {
+            const diag = await this.enqueue(() => this.db.getFirstAsync(
+                `SELECT (SELECT page_count FROM pragma_page_count) AS pages,
+                        (SELECT freelist_count FROM pragma_freelist_count) AS free`
+            )) as { pages: number; free: number } | null;
+            if (diag && diag.pages > 1000 && diag.free / diag.pages > 0.3) {
+                const vacuumStarted = Date.now();
+                await this.enqueue(() => this.db.execAsync('VACUUM;'));
+                log.log(
+                    `📦 sessionCacheDB: vacuumed the file (${diag.free}/${diag.pages} pages were free)` +
+                    ` in ${Date.now() - vacuumStarted}ms`
+                );
+            }
+        } catch {
+            // A vacuum that fails leaves the file as it was.
         }
     }
 
