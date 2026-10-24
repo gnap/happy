@@ -469,6 +469,8 @@ class Sync {
     private wentToBackground = false;
     private appStateSubscription: ReturnType<typeof AppState.addEventListener> | null = null;
     private networkStateSubscription: ReturnType<typeof Network.addNetworkStateListener> | null = null;
+    /** Undoes the server-socket reconnect subscription, for a superseded evaluation. */
+    private reconnectedCleanup: (() => void) | null = null;
     currentVisibleSessionId: string | null = null;
     private lastDesktopSessionRefreshAt = 0;
     private lastSessionRefreshAt = 0;
@@ -3202,6 +3204,41 @@ class Sync {
         };
     }
 
+    /**
+     * Stops what a superseded module evaluation left running.
+     *
+     * Metro replaces this module on a hot reload without tearing down the old instance's timers or
+     * listeners. The two then share the store and the socket: the old one kept a two-second poll
+     * alive for a session no longer on screen (observed as `read scheduled … (visible)` for a
+     * session the user had already left) and both reacted to every push. One evaluation owns the
+     * background work; the next stops it before taking over.
+     */
+    stopBackgroundWork(): void {
+        this.readScheduler.stop();
+        if (this.sessionsRefreshInterval !== null) {
+            clearInterval(this.sessionsRefreshInterval);
+            this.sessionsRefreshInterval = null;
+        }
+        for (const timer of this.cacheSaveTimers.values()) {
+            clearTimeout(timer);
+        }
+        this.cacheSaveTimers.clear();
+        this.reconnectedCleanup?.();
+        this.reconnectedCleanup = null;
+        this.appStateSubscription?.remove();
+        this.appStateSubscription = null;
+        this.networkStateSubscription?.remove();
+        this.networkStateSubscription = null;
+        for (const sync of this.messagesSync.values()) {
+            sync.stop();
+        }
+        this.messagesSync.clear();
+        for (const sync of this.sendSync.values()) {
+            sync.stop();
+        }
+        this.sendSync.clear();
+    }
+
     recoverFetchesAfterSuspend(): void {
         const waiting = this.messageFetchQueue.length;
         this.messageFetchSlots.reset();
@@ -3885,7 +3922,7 @@ class Sync {
         apiSocket.onMessage('ephemeral', this.handleEphemeralUpdate.bind(this));
 
         // Subscribe to connection state changes
-        apiSocket.onReconnected(() => {
+        this.reconnectedCleanup = apiSocket.onReconnected(() => {
             log.log('🔌 Socket reconnected');
             // Only a gap long enough to have missed events is worth refetching everything. The
             // server socket can flap every few seconds (observed on a device), and invalidating
@@ -6468,8 +6505,14 @@ class Sync {
 
 }
 
-// Global singleton instance
+// Global singleton instance. A reload evaluates this module again; the previous instance is
+// stopped first so its timers and listeners do not keep working beside the new one.
+const previousSync = (globalThis as unknown as { __happyActiveSync?: { stop?: () => void } }).__happyActiveSync;
+previousSync?.stop?.();
 export const sync = new Sync();
+(globalThis as unknown as { __happyActiveSync?: { stop?: () => void } }).__happyActiveSync = {
+    stop: () => sync.stopBackgroundWork(),
+};
 
 //
 // Init sequence
