@@ -44,6 +44,7 @@ import { accountProofHeaders } from '@/auth/accountProof';
 import { getLanCredential } from './lan/credentials';
 import { readSessionOverLan, listSessionsOverLan, toNormalizedMessages, type LanConnection, type LanSessionRead } from './lan/sessionChannel';
 import { decryptLanEntries } from './lan/history';
+import { SessionReadScheduler } from './sessionReadScheduler';
 import { openLanSocket, type LanSocketHandle } from './lan/socket';
 import { DEFAULT_RELAY_URL, RelayHub, relayHubUrl, relayOriginOf, type HubMachine, type SocketLike } from './lan/relayHub';
 import type { RelayDirectoryEntry } from './lan/relayDirectory';
@@ -292,15 +293,24 @@ class Sync {
     private machineDataKeys = new Map<string, Uint8Array>(); // Store machine data encryption keys internally
     private artifactDataKeys = new Map<string, Uint8Array>(); // Store artifact data encryption keys internally
     /**
-     * Per-session LAN polling while the server is not answering, keyed by sessionId.
+     * How often the visible session's fallback poll runs.
      *
-     * The LAN channel has no push — the daemon serves a snapshot of its log — so a one-shot read
-     * would freeze a session the moment it switched. Polling is what makes the switch an actual
-     * channel rather than a single look. It runs only while the server is unreachable: the moment
-     * a server fetch succeeds the poll is stopped (see `fetchMessages`), so this cannot quietly
-     * become a permanent second source of traffic.
+     * One tick per two seconds, for one session: cheap, because the cursor means only newly
+     * written entries come back. It used to be one such timer per session, which turned a server
+     * outage into a fetch storm.
      */
-    private daemonPollTimers = new Map<string, ReturnType<typeof setInterval>>();
+    private static readonly LAN_POLL_INTERVAL_MS = 2_000;
+
+    /**
+     * The one thing that decides which session is read, and the single fallback poll for the one
+     * on screen. Transports report changes; they do not own timers of their own.
+     */
+    private readScheduler = new SessionReadScheduler({
+        read: (sessionId) => { this.getMessagesSync(sessionId).invalidate(); },
+        shouldPoll: (sessionId) => this.visibleNeedsPolling(sessionId),
+        intervalMs: Sync.LAN_POLL_INTERVAL_MS,
+        log: (message) => { log.log(message); },
+    });
     /**
      * Per-session LAN state: where to resume reading, and the connection that position came from.
      * Both are kept with the machine that issued them — a cursor addresses a position in one
@@ -976,9 +986,10 @@ class Sync {
                         apiSocket.setServerEnabled(serverNow);
                     }
                     this.reconcileDaemonSockets();
-                    for (const syncer of this.messagesSync.values()) {
-                        syncer.invalidate();
-                    }
+                    // A new channel order changes where the open conversation is read from; the
+                    // hidden ones read on open. Invalidating every message sync here made one
+                    // setting change into a read of every session at once.
+                    this.readScheduler.markStale();
                 }
             });
             this.reconcileDaemonSockets();
@@ -1085,6 +1096,9 @@ class Sync {
 
     onSessionVisible = (sessionId: string) => {
         this.currentVisibleSessionId = sessionId;
+        // The scheduler owns the fallback poll and the read order from here; setting the visible
+        // session also wakes it once for the first read.
+        this.readScheduler.setVisible(sessionId);
         // Start the cached window now, before the sync invalidation is scheduled: the tap's first
         // frame must not be a function of the network, a fetch slot or another fetch's lock.
         void this.hydrateSession(sessionId);
@@ -1122,6 +1136,9 @@ class Sync {
     onSessionHidden = (sessionId: string) => {
         if (this.currentVisibleSessionId === sessionId) {
             this.currentVisibleSessionId = null;
+            // The one fallback timer follows the screen. A hidden session refreshes when it is
+            // opened again, not on a timer of its own.
+            this.readScheduler.setVisible(null);
         }
     }
 
@@ -3357,36 +3374,60 @@ class Sync {
         }
         this.hydratedSessions.delete(sessionId);
 
+        type Loaded = Awaited<ReturnType<typeof loadMessageCache>>;
+        const apply = (cached: Loaded, startedAt: number): void => {
+            if (!cached) {
+                return;
+            }
+            // A live delivery may have landed while the cache was being read. The store is newer
+            // than the window in that case; leave it alone.
+            if ((storage.getState().sessionMessages[sessionId]?.messages.length ?? 0) > 0) {
+                this.hydratedSessions.add(sessionId);
+                return;
+            }
+            storage.getState().applyHydratedCache(
+                sessionId,
+                cached.messages,
+                cached.reducerState,
+                cached.oldestSeq,
+                cached.hasOlderMessages,
+                cached.lastSeq,
+            );
+            this.sessionLastSeq.set(sessionId, cached.lastSeq);
+            // Marked only once the window is in the store. Marking first meant a cancelled read
+            // disabled the cache for the rest of the process.
+            this.hydratedSessions.add(sessionId);
+            log.log(
+                `💬 hydrate: applied ${cached.messages.length} cached messages for ${sessionId}` +
+                ` in ${Date.now() - startedAt}ms (lastSeq=${cached.lastSeq}, oldestSeq=${cached.oldestSeq})`
+            );
+        };
+
         const run = (async () => {
             const startedAt = Date.now();
             try {
-                const cached = await loadMessageCache(session, this.preferredChannel(sessionId) !== 'server');
-                if (!cached) {
+                const pending = loadMessageCache(session, this.preferredChannel(sessionId) !== 'server');
+                // The hot window resolves before the first await, so this deadline only ever bites
+                // the SQLite fallback — and on a device that fallback was measured at 19–31s while
+                // the cache connection was contended. Waiting that long is what an empty screen is;
+                // the channel can fill the session, and the read is left running so its result is
+                // still applied if it lands while the store is empty.
+                const outcome = await Promise.race([
+                    pending,
+                    new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 2_000)),
+                ]);
+                if (outcome === 'timeout') {
+                    log.log(`💬 hydrate: cache read for ${sessionId} still running after 2s; the channel will fill it`);
+                    void pending
+                        .then((cached) => { apply(cached, startedAt); })
+                        .catch(() => { /* the channel is already carrying this session */ });
+                    return;
+                }
+                if (!outcome) {
                     log.log(`💬 hydrate: no cache for ${sessionId} (will read from the channel)`);
                     return;
                 }
-                // A live delivery may have landed while the cache was being read. The store is
-                // newer than the window in that case; leave it alone.
-                if ((storage.getState().sessionMessages[sessionId]?.messages.length ?? 0) > 0) {
-                    this.hydratedSessions.add(sessionId);
-                    return;
-                }
-                storage.getState().applyHydratedCache(
-                    sessionId,
-                    cached.messages,
-                    cached.reducerState,
-                    cached.oldestSeq,
-                    cached.hasOlderMessages,
-                    cached.lastSeq,
-                );
-                this.sessionLastSeq.set(sessionId, cached.lastSeq);
-                // Marked only once the window is in the store. Marking first meant a cancelled
-                // read disabled the cache for the rest of the process.
-                this.hydratedSessions.add(sessionId);
-                log.log(
-                    `💬 hydrate: applied ${cached.messages.length} cached messages for ${sessionId}` +
-                    ` in ${Date.now() - startedAt}ms (lastSeq=${cached.lastSeq}, oldestSeq=${cached.oldestSeq})`
-                );
+                apply(outcome, startedAt);
             } catch (error) {
                 log.log(`💬 hydrate: failed for ${sessionId}: ${String(error)}`);
             } finally {
@@ -5924,11 +5965,9 @@ class Sync {
         // has been updated since the last attempt will say so, and one that has not is written off
         // again after a single missed heartbeat.
         this.unverifiedMachines.delete(target.machineId);
-        for (const [sessionId, channel] of this.daemonLinks) {
-            if (channel.machineId === target.machineId && channel.connection.route === target.route) {
-                this.stopDaemonPolling(sessionId);
-            }
-        }
+        // A connection that came up may have missed pushes while it was down. The session on
+        // screen is read once to close the gap; hidden sessions read when opened.
+        this.readScheduler.markStale();
         // Anything still waiting for a verdict may have been written into the socket this replaced.
         // The queue still holds it, so a connection coming up is the moment to try it again — this
         // is what turns "the message you sent while the channel was flapping" into a delay rather
@@ -5950,11 +5989,9 @@ class Sync {
      */
     private onDaemonHeartbeatUnsupported(target: DaemonTarget): void {
         this.unverifiedMachines.add(target.machineId);
-        for (const [sessionId, channel] of this.daemonLinks) {
-            if (channel.machineId === target.machineId) {
-                this.startDaemonPolling(sessionId);
-            }
-        }
+        // The daemon cannot push; the visible session's scheduler poll is the fallback. Hidden
+        // sessions on this machine read when opened — a timer each was a fetch storm.
+        this.readScheduler.markStale();
     }
 
     /** A connection went away: whatever it was carrying has just lost its push. */
@@ -5968,13 +6005,10 @@ class Sync {
         // exists precisely to bound that. A token that really has gone stale is handled where it is
         // discovered: the read that gets a 401 replaces it and retries.
         // Named by the daemon, not by the address: a machine that dropped is the machine whose
-        // sessions lost their push, and with one connection per machine an address can no longer be
-        // standing in for that.
-        for (const [sessionId, channel] of this.daemonLinks) {
-            if (channel.machineId === target.machineId && channel.connection.route === target.route) {
-                this.getMessagesSync(sessionId).invalidate();
-            }
-        }
+        // sessions lost their push. The session on screen is re-read now; the others when they are
+        // opened — invalidating every session on the machine was one transport's death becoming a
+        // read of every conversation on it.
+        this.readScheduler.markStale();
         const known = this.lanMachineConnections.get(target.machineId);
         if (known && known.route === target.route) {
             this.lanMachineConnections.delete(target.machineId);
@@ -6176,56 +6210,54 @@ class Sync {
             this.stopDaemonPolling(sessionId);
             return true;
         }
+        if (!read && this.describeChannel(sessionId).reason !== 'pinned') {
+            // The daemon has no log for this session; a two-second poll cannot create one, it
+            // appears when the session writes. With the server down, *every* session the daemon
+            // did not own was polled this way — a fetch storm that held the JS thread and the
+            // cache, measured as repeated `fetchMessages starting` for six or more sessions a
+            // second. A pinned session is the exception: it chose this channel deliberately and
+            // nothing else would retry it.
+            this.stopDaemonPolling(sessionId);
+            return false;
+        }
         this.startDaemonPolling(sessionId);
         return read !== null;
     };
 
     /**
-     * How often to re-read the LAN while the server is unavailable.
+     * Whether the visible session's push channel is missing, so its fallback poll is needed.
      *
-     * This is short because a tick is now cheap: the cursor means only newly-written entries come
-     * back, and the reused connection means no mDNS browse and no handshake. At the old interval
-     * a tick re-read and re-decrypted the session's whole log and re-ran discovery, so the cost
-     * per tick grew with the session and the channel got slower the longer it was used.
+     * This is not "the server is unreachable" — that was the old condition, and it made one
+     * transport's state a reason to read every session. It is a fact about this session: the route
+     * it is on cannot push right now, and its screen is waiting to look current. A live socket, or
+     * a connected server for a server-routed session, means the push exists and no poll is needed.
      */
-    private static readonly LAN_POLL_INTERVAL_MS = 2_000;
-
-    /**
-     * Keeps re-reading a session over the LAN until the server answers again.
-     *
-     * Started by the fallback in `fetchMessages` and stopped by its success path, so the polling
-     * exists exactly as long as the server does not — a session that switches back does not leave
-     * a timer behind.
-     */
-    private startDaemonPolling(sessionId: string): void {
-        if (this.daemonPollTimers.has(sessionId)) {
-            return;
+    private visibleNeedsPolling(sessionId: string): boolean {
+        const channel = this.preferredChannel(sessionId);
+        if (channel === 'server') {
+            return !apiSocket.isConnected;
         }
-        const timer = setInterval(() => {
-            // Through the same entry point the server path uses, so a tick takes the session lock
-            // and a fetch slot rather than racing whatever else is reading this session. The
-            // override is re-read there, so a channel switch also takes effect on the next tick.
-            this.getMessagesSync(sessionId).invalidate();
-        }, Sync.LAN_POLL_INTERVAL_MS);
-        // Node/web only; keeps the timer from holding the process open in tests.
-        (timer as unknown as { unref?: () => void }).unref?.();
-        this.daemonPollTimers.set(sessionId, timer);
-        log.log(`📡 LAN mode: polling ${sessionId} every ${Sync.LAN_POLL_INTERVAL_MS / 1000}s until the server answers`);
+        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        if (!machineId) {
+            return false;
+        }
+        // A daemon that cannot answer heartbeats cannot push either; reads are the only source.
+        if (this.unverifiedMachines.has(machineId)) {
+            return true;
+        }
+        return this.connections.current(machineId, channel) === null;
     }
 
-    private stopDaemonPolling(sessionId: string): void {
-        const timer = this.daemonPollTimers.get(sessionId);
-        if (!timer) {
-            return;
-        }
-        clearInterval(timer);
-        this.daemonPollTimers.delete(sessionId);
-        log.log(`📡 LAN mode: stopped polling ${sessionId}`);
-        // The socket is deliberately left alone. It used to be closed once no polling session
-        // remained, back when polling was the mechanism and the socket only existed to shorten its
-        // interval — under that reading an idle socket was waste. It is the mechanism now, so
-        // tying it to the fallback's bookkeeping would close the channel the moment it started
-        // carrying the session, and reopening it would look exactly like a flapping connection.
+    /**
+     * Kept for the call sites: a channel fallback no longer owns a timer. The scheduler polls the
+     * visible session and nothing else; hidden sessions are read when they are opened.
+     */
+    private startDaemonPolling(_sessionId: string): void {
+        this.readScheduler.markStale();
+    }
+
+    private stopDaemonPolling(_sessionId: string): void {
+        // The scheduler's timer follows visibility, not per-session bookkeeping.
     }
 
     //

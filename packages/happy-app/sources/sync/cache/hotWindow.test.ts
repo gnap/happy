@@ -1,8 +1,9 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
     clearAllHotWindows,
     clearHotWindow,
     loadHotWindow,
+    overrideHotWindowLimitsForTests,
     overrideHotWindowStore,
     saveHotWindow,
     type HotWindowStore,
@@ -41,6 +42,14 @@ describe('hot window', () => {
     beforeEach(() => {
         store = new MemoryStore();
         overrideHotWindowStore(store);
+        // The budget the tests exercise is the web one; the native one is larger and would need
+        // far more data to reach.
+        overrideHotWindowLimitsForTests({ sessions: 8, bytes: 1_000_000 });
+    });
+
+    afterEach(() => {
+        overrideHotWindowLimitsForTests(null);
+        overrideHotWindowStore(null);
     });
 
     it('round-trips the state a tap reads from', () => {
