@@ -39,6 +39,7 @@ import { ActivityIndicator, Platform, Pressable, Text, View } from 'react-native
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useUnistyles } from 'react-native-unistyles';
 import { sessionIsRestarting } from '@/utils/sessionRestart';
+import { log } from '@/log';
 import type { ModelMode, PermissionMode } from '@/components/PermissionModeSelector';
 
 export const SessionView = React.memo((props: { id: string }) => {
@@ -55,6 +56,11 @@ export const SessionView = React.memo((props: { id: string }) => {
     const isTablet = useIsTablet();
     /** How this session is being reached, which the header draws from. */
     const reach = useSessionReach(sessionId, session?.metadata?.machineId);
+
+    // The other half of tap-to-screen: the press log is the tap, this is the screen being on it.
+    useFocusEffect(React.useCallback(() => {
+        log.log(`🖥️ session screen focused: ${sessionId}`);
+    }, [sessionId]));
 
     // Compute header props based on session state
     const headerProps = useMemo(() => {
