@@ -634,6 +634,9 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
      */
     /** Every statement on the one connection, with the ones a person is waiting for first. */
     private statements = new StatementQueue();
+    /** A replacement in flight, so several locked statements open one connection, not several. */
+    private replacing: Promise<void> | null = null;
+    private lastReplacedAt = 0;
 
     /**
      * Statement timings, but only the ones worth seeing.
@@ -653,22 +656,25 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
 
     /**
      * Past every statement this file issues with room to spare: a save of a whole window measured
-     * 1.1 s, and a read of one row is milliseconds.
+     * 1.1 s, and a read of one row is milliseconds. Raised from ten seconds after a device log
+     * showed the detector firing during ordinary use — the timer includes the JS thread's delay in
+     * getting to the callback, not just the statement — and every firing made things worse.
      */
-    private static readonly STUCK_STATEMENT_MS = 10_000;
+    private static readonly STUCK_STATEMENT_MS = 90_000;
 
     private enqueue<T>(work: () => Promise<T>, urgent = false): Promise<T> {
-        // A job that never finishes must not take the cache with it. The queue and the connection
-        // are module state, and a reload hands them to a context whose promises will never settle —
-        // so the head of the queue can be a statement nobody is waiting for any more, with every
-        // new statement behind it. Past the ceiling, both are abandoned: the new statement gets a
-        // queue and a connection of its own, and the old ones are left to whatever native state
-        // they hold.
+        // A job that never finishes must not take the cache with it. But the previous answer —
+        // dropping the queue and opening another connection — was a second fault: the old
+        // connection kept the file, the new one waited on it, and every statement behind the new
+        // one paid. On a device this ran repeatedly (16:01–16:02), with opens taking 6–8s and
+        // statements waiting 20–47s; the "recovery" was the outage. New work is refused instead, so
+        // callers fall back to the hot window or the network, and the stuck job is left alone.
         if (this.statements.stuckFor > ExpoSQLiteSessionCacheDB.STUCK_STATEMENT_MS) {
-            log.log(`📦 sessionCacheDB: a statement has been running ${this.statements.stuckFor}ms; abandoning the queue and its connection`);
-            this.statements = new StatementQueue();
-            this.watchStatements();
-            void this.replaceConnection();
+            log.log(
+                `📦 sessionCacheDB: a statement has been running ${Math.round(this.statements.stuckFor / 1000)}s;` +
+                ' refusing new cache work until it finishes'
+            );
+            return Promise.reject(new Error('cache busy: a statement has been running too long'));
         }
         return this.statements.run(async () => {
             try {
@@ -699,7 +705,25 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
      * where closing it can hang, and a reset that never returns would be a worse failure than the
      * lock it is fixing.
      */
-    private async replaceConnection(): Promise<void> {
+    private replaceConnection(): Promise<void> {
+        if (this.replacing) {
+            // Several statements can meet the lock at once. One new connection is the whole
+            // answer; a second is one more contender for the same file.
+            return this.replacing;
+        }
+        if (Date.now() - this.lastReplacedAt < 5_000) {
+            // A replacement just happened and the file is still locked. Opening another will not
+            // change that; let this caller fail and fall back instead of adding to the pile.
+            return Promise.resolve();
+        }
+        this.replacing = this.doReplaceConnection().finally(() => {
+            this.replacing = null;
+            this.lastReplacedAt = Date.now();
+        });
+        return this.replacing;
+    }
+
+    private async doReplaceConnection(): Promise<void> {
         const previous = this.db;
         // `this.db` is never left null: a statement already in flight reads it again after every
         // await, and the reset must not turn "the connection is being replaced" into

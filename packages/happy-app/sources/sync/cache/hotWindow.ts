@@ -40,9 +40,43 @@ const INDEX_KEY = 'hot-window-index';
  *
  * So the cache keeps a budget as well as a count: enough recent sessions to be instant, and never
  * the whole quota. Eviction is oldest-first; the window just written is never dropped.
+ *
+ * The budget is for the webview, where this store shares a 5MB localStorage with settings and
+ * drafts. On native MMKV there is no such quota, and eight sessions was too few in practice: a run
+ * with several active sessions saved more than eight windows before the user tapped, so the taps
+ * fell back to SQLite. Native keeps more.
  */
-const MAX_HOT_SESSIONS = 8;
-const MAX_HOT_BYTES = 1_000_000;
+/**
+ * The budget, resolved lazily so this module has no runtime dependency on React Native.
+ *
+ * Importing `react-native` at module scope makes the cache unloadable in unit tests (React
+ * Native's source is not plain TypeScript to the test transform) and in any environment without
+ * the RN runtime. The web check is the only thing needed, and it costs one lookup on the first
+ * save.
+ */
+let limits: { sessions: number; bytes: number } | null = null;
+
+/** Pin the budget in a test; null restores the platform default. */
+export function overrideHotWindowLimitsForTests(limit: { sessions: number; bytes: number } | null): void {
+    limits = limit;
+}
+
+function getLimits(): { sessions: number; bytes: number } {
+    if (limits) {
+        return limits;
+    }
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { Platform } = require('react-native') as { Platform: { OS: string } };
+        limits = Platform.OS === 'web'
+            ? { sessions: 8, bytes: 1_000_000 }
+            : { sessions: 24, bytes: 8_000_000 };
+    } catch {
+        // Not a React Native runtime (a unit test); the native budget is the safe default.
+        limits = { sessions: 24, bytes: 8_000_000 };
+    }
+    return limits;
+}
 
 /** The slice of MMKV this file uses. Narrow so a test can stand in for it. */
 export type HotWindowStore = Pick<MMKV, 'getString' | 'set' | 'delete' | 'getAllKeys'>;
@@ -243,7 +277,8 @@ export function saveHotWindow(sessionId: string, window: {
     let count = oldestFirst.length;
     let bytes = oldestFirst.reduce((sum, [, entry]) => sum + entry.bytes, 0);
     for (const [id, entry] of oldestFirst) {
-        if (count <= MAX_HOT_SESSIONS && bytes <= MAX_HOT_BYTES) {
+        const { sessions, bytes: budget } = getLimits();
+        if (count <= sessions && bytes <= budget) {
             break;
         }
         // The window just written is the one being opened; it stays even if it is over budget on

@@ -124,6 +124,11 @@ export async function loadMessageCache(session: Session, servedByDaemon = false)
     // fallback for sessions with no hot copy and the archive for everything older.
     const hotStartedAt = Date.now();
     const hot = loadHotWindow(session.id);
+    if (!hot) {
+        // Says why an open is about to pay the asynchronous path: no window for this session yet
+        // (never saved by this build), evicted, or the store is unavailable.
+        log.log(`📦 messageCache: hot miss for ${session.id}; falling back to SQLite`);
+    }
     if (hot) {
         // The window keeps one copy: the reducer state when it was small enough, and the messages
         // themselves when it was not. A state that no longer produces the window it was saved with
@@ -263,6 +268,30 @@ export async function loadMessageCache(session: Session, servedByDaemon = false)
             : cacheRow.oldestSeq;
 
         log.log(`📦 messageCache: loaded ${hydrating.length} messages for ${session.id} (lastSeq=${cacheRow.lastSeq}, oldestSeq=${oldestSeq}, hasOlderMessages=${cacheRow.hasOlderMessages}, truncated=${truncated})`);
+        // Seed the synchronous copy from the archive. A window used to become hot only when a
+        // save wrote it, and a session whose history does not change never saves — so every open
+        // of it paid SQLite. Seeding after a successful hydration is what makes the *next* open
+        // the one the hot window exists for. Deferred so this open's bytes are not delayed by
+        // serialising the window.
+        const hotSeed = {
+            reducerStateJson: null,
+            messages: hydrating,
+            messageCount: hydrating.length,
+            lastSeq: cacheRow.lastSeq,
+            oldestSeq,
+            hasOlderMessages: cacheRow.hasOlderMessages || truncated,
+        };
+        setTimeout(() => {
+            try {
+                // A save may have written a newer window while this read was in flight; that one
+                // is closer to the present than the archive this read came from.
+                if (!loadHotWindow(session.id)) {
+                    saveHotWindow(session.id, hotSeed);
+                }
+            } catch {
+                // The archive is still there; the next open simply pays it again.
+            }
+        }, 0);
         if (repair) {
             void db.dedupeSessionMessages(session.id)
                 .then((dropped) => {
