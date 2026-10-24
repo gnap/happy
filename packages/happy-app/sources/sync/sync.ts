@@ -3243,6 +3243,14 @@ class Sync {
             clearTimeout(timer);
         }
         this.cacheSaveTimers.clear();
+        for (const timer of this.logGrewReadTimers.values()) {
+            clearTimeout(timer);
+        }
+        this.logGrewReadTimers.clear();
+        for (const timer of this.messageReadDeadlines.values()) {
+            clearTimeout(timer);
+        }
+        this.messageReadDeadlines.clear();
         this.reconnectedCleanup?.();
         this.reconnectedCleanup = null;
         this.appStateSubscription?.remove();
@@ -3503,6 +3511,28 @@ class Sync {
         return run;
     };
 
+    /**
+     * The deadline for a message read that fell through to the server.
+     *
+     * A disconnected socket is the server saying it is not answering, so an HTTP read to it is not
+     * going to fare better — and that read holds this session's only read lock, which means every
+     * tick behind it waits too. Measured on a device during a daemon restart with the server down:
+     * one request sat on its thirty-second deadline and the session showed nothing new the whole
+     * time. A short deadline lets the next tick try the channel that is actually up.
+     */
+    private serverReadOptions(): RequestInit | undefined {
+        if (apiSocket.isConnected) {
+            return undefined;
+        }
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5_000);
+        (timer as unknown as { unref?: () => void }).unref?.();
+        return { signal: controller.signal };
+    }
+
+    /** Deadlines for in-flight server message reads, so `stopBackgroundWork` can clear them. */
+    private messageReadDeadlines = new Map<string, ReturnType<typeof setTimeout>>();
+
     private fetchMessages = async (sessionId: string) => {
         // The cached window first, outside the lock: this is the tap's first frame.
         await this.hydrateSession(sessionId);
@@ -3586,11 +3616,41 @@ class Sync {
                     : latestAnchor;
 
                 log.log(`💬 fetchMessages: requesting after_seq=${afterSeq} for ${sessionId} (storedNewestSeq=${storedNewestSeq}, sessionSeq=${sessionSeq})`);
-                const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
-                if (!response.ok) {
-                    throw new Error(`Failed to fetch messages for ${sessionId}: ${response.status}`);
+                // The deadline covers the body as well as the request. The socket's own abort
+                // stops a request that never answered, but a response that arrived and then
+                // stalled mid-body is past it: nothing rejects the `json()` read, and a read that
+                // neither completes nor fails holds this session's lock, fetch slot and sync for
+                // as long as it sits there. Measured on a device against a sick server: one read
+                // wedged a session for minutes with every later invalidate swallowed behind it.
+                const read = (async () => {
+                    const response = await apiSocket.request(
+                        `/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`,
+                        this.serverReadOptions(),
+                    );
+                    if (!response.ok) {
+                        throw new Error(`Failed to fetch messages for ${sessionId}: ${response.status}`);
+                    }
+                    return await response.json() as V3GetSessionMessagesResponse;
+                })();
+                read.catch(() => { /* the race below may already have moved on */ });
+                let data: V3GetSessionMessagesResponse;
+                try {
+                    data = await Promise.race([
+                        read,
+                        new Promise<never>((_, reject) => {
+                            this.messageReadDeadlines.set(
+                                sessionId,
+                                setTimeout(() => reject(new Error('server read stalled past its deadline')), 35_000),
+                            );
+                        }),
+                    ]);
+                } finally {
+                    const timer = this.messageReadDeadlines.get(sessionId);
+                    if (timer) {
+                        clearTimeout(timer);
+                        this.messageReadDeadlines.delete(sessionId);
+                    }
                 }
-                const data = await response.json() as V3GetSessionMessagesResponse;
                 const messages = Array.isArray(data.messages) ? data.messages : [];
 
                 let maxSeq = afterSeq;
@@ -4753,6 +4813,7 @@ class Sync {
          * session, or one that refused this device, has said something about itself or the session
          * and nothing about whether the address works.
          */
+        let lastReadFailure: string | null = null;
         const readPage = async (page: Parameters<typeof readSessionOverLan>[0]['page'], connection: LanConnection | null | undefined) => {
             const attempt = await readSessionOverLan({
                 sessionId,
@@ -4768,6 +4829,9 @@ class Sync {
                 storage.getState().candidateFailed(machineId, routes.includes('relay') && attempt.baseUrl.includes('/r/') ? 'relay' : 'lan', attempt.baseUrl);
             } else if (machineId && attempt.kind === 'read') {
                 storage.getState().candidateSucceeded(machineId, attempt.read.connection.route, attempt.read.connection.baseUrl);
+            }
+            if (attempt.kind !== 'read') {
+                lastReadFailure = `${attempt.kind}${'reason' in attempt && typeof attempt.reason === 'string' ? `: ${attempt.reason}` : ''}`;
             }
             return attempt.kind === 'read' ? attempt.read : null;
         };
@@ -4814,6 +4878,7 @@ class Sync {
             // already been recorded per address, by the read that tried it — a route is no longer
             // marked down as a whole, which is what used to take a working address out of the
             // running along with a broken one.
+            log.log(`📡 fetchSessionFromDaemon: no page for ${sessionId} on ${routes.join('>')}${machineId ? ` (${machineId.slice(0, 8)})` : ''}: ${lastReadFailure ?? 'no candidate answered'}`);
             return null;
         }
         this.settleReceivedMessages(read.received);
@@ -5846,7 +5911,7 @@ class Sync {
             if (this.isAtLogHead(body.id, body.head)) {
                 return;
             }
-            this.messagesSync.get(body.id)?.invalidate();
+            this.scheduleLogGrewRead(body.id);
             return;
         }
         // An entry the session wrote to its log, pushed as it was appended. Applying it here is what
@@ -5899,6 +5964,52 @@ class Sync {
 
     /** The last head a hint reported, per session: what the positions above are compared against. */
     private lastHintHeads = new Map<string, string>();
+    /** A pending read for a `log-grew` that may yet be answered by the socket itself. */
+    private logGrewReadTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    /** When this session was last read because of a `log-grew`. */
+    private lastLogGrewReadAt = new Map<string, number>();
+
+    /**
+     * How long a `log-grew` hint waits for the entry it is about to push.
+     *
+     * The hint and the entries travel the same socket, and the hint regularly arrives first. Reading
+     * on the hint alone meant an active session was read — a hundred messages decrypted and applied
+     * — every couple of seconds for messages that had already been pushed, which held the JS thread
+     * and the cache queue and made the session the person was looking at the slowest one. Half a
+     * second is longer than the gap between the two frames and far shorter than a person notices.
+     */
+    private static readonly LOG_GROW_GRACE_MS = 500;
+    /**
+     * The floor between two hint-driven reads of the same session.
+     *
+     * A hint that keeps finding the reader behind despite the socket delivering entries is a
+     * genuine gap (a frame the socket missed), and one read closes it. Repeating the read every
+     * time the daemon appends is not a gap — it is a reader chasing a writer, and the live socket
+     * is what is carrying that traffic.
+     */
+    private static readonly LOG_GROW_READ_MIN_INTERVAL_MS = 5_000;
+
+    private scheduleLogGrewRead(sessionId: string): void {
+        if (this.logGrewReadTimers.has(sessionId)) {
+            return;
+        }
+        const timer = setTimeout(() => {
+            this.logGrewReadTimers.delete(sessionId);
+            // By now the entry the hint was about has almost certainly been pushed and applied.
+            const head = this.lastHintHeads.get(sessionId);
+            if (head && head !== '(none)' && this.isAtLogHead(sessionId, head)) {
+                return;
+            }
+            const last = this.lastLogGrewReadAt.get(sessionId) ?? 0;
+            if (Date.now() - last < Sync.LOG_GROW_READ_MIN_INTERVAL_MS) {
+                return;
+            }
+            this.lastLogGrewReadAt.set(sessionId, Date.now());
+            this.messagesSync.get(sessionId)?.invalidate();
+        }, Sync.LOG_GROW_GRACE_MS);
+        (timer as unknown as { unref?: () => void }).unref?.();
+        this.logGrewReadTimers.set(sessionId, timer);
+    }
 
     private notePushedPosition(sessionId: string, anchor: string | undefined): void {
         if (!anchor || this.compareAnchors(anchor, this.pushedPositions.get(sessionId)) <= 0) {
