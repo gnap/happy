@@ -302,6 +302,14 @@ class Sync {
     private static readonly LAN_POLL_INTERVAL_MS = 2_000;
 
     /**
+     * How long the server socket must have been down before its return refreshes everything.
+     *
+     * A flap of a few seconds missed nothing a visible session's catch-up does not cover; a gap of
+     * half a minute may have missed list and side-data events, so the refetch is worth its cost.
+     */
+    private static readonly RECONNECT_REFRESH_MS = 30_000;
+
+    /**
      * The one thing that decides which session is read, and the single fallback poll for the one
      * on screen. Transports report changes; they do not own timers of their own.
      */
@@ -3879,14 +3887,21 @@ class Sync {
         // Subscribe to connection state changes
         apiSocket.onReconnected(() => {
             log.log('🔌 Socket reconnected');
-            this.lastDesktopSessionRefreshAt = Date.now();
-            this.sessionsSync.invalidate();
-            this.machinesSync.invalidate();
-            log.log('🔌 Socket reconnected: Invalidating artifacts sync');
-            this.artifactsSync.invalidate();
-            this.friendsSync.invalidate();
-            this.friendRequestsSync.invalidate();
-            this.feedSync.invalidate();
+            // Only a gap long enough to have missed events is worth refetching everything. The
+            // server socket can flap every few seconds (observed on a device), and invalidating
+            // the session list, the machine list and four side syncs on each flap kept the JS
+            // thread busy exactly when a conversation was being opened — the navigation waited
+            // behind work that the next event or the periodic refresh would have done anyway.
+            const downFor = Date.now() - (storage.getState().socketLastDisconnectedAt ?? 0);
+            if (downFor >= Sync.RECONNECT_REFRESH_MS) {
+                this.lastDesktopSessionRefreshAt = Date.now();
+                this.sessionsSync.invalidate();
+                this.machinesSync.invalidate();
+                this.artifactsSync.invalidate();
+                this.friendsSync.invalidate();
+                this.friendRequestsSync.invalidate();
+                this.feedSync.invalidate();
+            }
             // Refresh the session the user is looking at, and only that one.
             //
             // This used to fan out over every session the store reports as *active*, which in this
@@ -6235,7 +6250,10 @@ class Sync {
     private visibleNeedsPolling(sessionId: string): boolean {
         const channel = this.preferredChannel(sessionId);
         if (channel === 'server') {
-            return !apiSocket.isConnected;
+            // There is no second route to poll here: the server socket reconnects on its own, and
+            // repeating an HTTP read every two seconds while it is down only adds timeouts. The
+            // session refreshes when the socket returns, or when the person opens it again.
+            return false;
         }
         const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
         if (!machineId) {
@@ -6245,7 +6263,14 @@ class Sync {
         if (this.unverifiedMachines.has(machineId)) {
             return true;
         }
-        return this.connections.current(machineId, channel) === null;
+        // A live socket pushes; nothing to poll.
+        if (this.connections.current(machineId, channel) !== null) {
+            return false;
+        }
+        // No socket: the only useful poll is of a daemon that has served this session before.
+        // A session the daemon has no log for is answered by the server, which is covered above —
+        // polling the daemon every two seconds cannot create a log that is not there.
+        return this.daemonLinks.get(sessionId)?.connection.route === channel;
     }
 
     /**
