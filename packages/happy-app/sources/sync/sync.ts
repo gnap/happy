@@ -2087,31 +2087,20 @@ class Sync {
             void saveSessionsListCache(allValues, accumulatedKeys);
             this._loggedMissingSessionForSid.clear();
 
-            // Eagerly catch up messages for active sessions (agent is running) and
-            // the currently visible session (user is looking at it). Inactive/
-            // non-visible sessions are loaded lazily when the user opens them.
+            // Eagerly catch up messages for the currently visible session only. A daemon socket
+            // pushes `log-grew` for every session on its machine, so a background agent's messages
+            // arrive without a fetch; and a session the user is not looking at hydrates from the
+            // hot window when opened. Invalidating every "active" session here was the fetch storm
+            // that delayed the one session the user was actually opening — on a daemon channel the
+            // active flag is stale (every online session reads active), so it matched six or more.
             void (async () => {
                 const visibleId = this.currentVisibleSessionId;
+                if (!visibleId) return;
                 for (const session of decryptedSessions) {
-                    if (session.metadata?.flavor !== 'cursor' && session.metadata?.flavor !== 'acp-cursor' && session.metadata?.flavor !== 'claude') continue;
-                    // Only the visible session and active ones get an eager catch-up: hidden,
-                    // inactive sessions read when opened. The `session.active` flag can be stale
-                    // on a daemon channel, so a visible-but-not-active session must not be skipped.
-                    if (!session.active && session.id !== visibleId) continue;
-                    // Do not trigger a message fetch for a session that already has messages in the
-                    // store — applyMessages/applyWindow handle deltas from pushes, and the fetch
-                    // would just duplicate work the socket already did.
-                    const alreadyLoaded = (storage.getState().sessionMessages[session.id]?.messages.length ?? 0) > 0;
-                    if (alreadyLoaded && session.id !== visibleId) continue;
+                    if (session.id !== visibleId) continue;
                     try {
                         const cached = await getCachedLastSeq(session.id);
                         if (cached != null && cached < session.seq) {
-                            // Skip the HTTP fetch only when the seq gap is small (< 100)
-                            // AND WebSocket recently delivered messages — the WS path can
-                            // fill a small gap on its own, avoiding a redundant HTTP round-trip.
-                            // For large gaps (e.g. after Linux sleep/wake or long disconnect),
-                            // the WS only delivers new messages going forward, so an HTTP
-                            // gap-fill is required regardless of WS recency.
                             const gapSize = session.seq - cached;
                             const lastWsAt = this.sessionLastWsMessageAt.get(session.id) ?? 0;
                             const wsGap = Date.now() - lastWsAt;
@@ -2119,8 +2108,6 @@ class Sync {
                                 log.log(`📥 fetchSessions: skipping redundant message fetch for ${session.id} (gap=${gapSize}, WS delivered ${wsGap}ms ago, cached=${cached} < seq=${session.seq})`);
                                 continue;
                             }
-                            // Skip if encryption keys are not available — can never fetch
-                            // (e.g. session archived/deleted on another device).
                             if (!this.encryption.getSessionEncryption(session.id)) {
                                 log.log(`📥 fetchSessions: skipping message sync for ${session.id} — encryption not ready`);
                                 continue;
