@@ -521,6 +521,10 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
 
         this.initialized = true;
         log.log(`📦 sessionCacheDB: full init took ${Date.now() - t0}ms total`);
+        // The v3 bounding pass can delete thousands of legacy rows; running it inline held the
+        // connection for 34s on a device and every read behind it waited. Kick it off after init
+        // returns, so opens and saves keep flowing while it works.
+        void this.runBackgroundMigration();
     }
 
     /**
@@ -585,27 +589,15 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
             `);
         }
         await this.db.execAsync(`
-            DELETE FROM session_messages
-             WHERE message_id IN (
-                 SELECT message_id FROM (
-                     SELECT message_id,
-                            ROW_NUMBER() OVER (
-                                PARTITION BY session_id
-                                ORDER BY created_at DESC
-                            ) AS rn
-                       FROM session_messages
-                 )
-                  WHERE rn > ${MAX_CACHED_MESSAGES}
-             );
-
-            UPDATE session_cache
-               SET reducer_state = '{}'
-             WHERE length(reducer_state) > ${MAX_REDUCER_STATE_BYTES};
-
-            PRAGMA wal_checkpoint(TRUNCATE);
-            PRAGMA user_version = 3;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_local
+                ON session_messages(session_id, local_id)
+                WHERE local_id IS NOT NULL;
         `);
-        log.log(`📦 sessionCacheDB: cache migration v3 took ${Date.now() - started}ms`);
+        // Mark the schema version so runBackgroundMigration knows what has been done.
+        // The heavy DELETE that used to live here now runs in the background: it took 34s
+        // on a device and blocked every read and write behind it.
+        await this.db.execAsync(`PRAGMA user_version = 3;`);
+        log.log(`📦 sessionCacheDB: cache migration v3 schema done in ${Date.now() - started}ms`);
     }
 
     private async ensureReady(): Promise<void> {
@@ -688,6 +680,58 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
                 return await work();
             }
         }, urgent);
+    }
+
+    /**
+     * Deletes legacy rows that exceed the window, in small batches so the connection stays
+     * available to reads and saves while it runs.
+     *
+     * The blocking version took 34s on a device because it ran as one large DELETE inside the init
+     * sequence. This version yields between batches and runs entirely outside the init path.
+     */
+    private async runBackgroundMigration(): Promise<void> {
+        const version = await this.db.getFirstAsync('PRAGMA user_version') as { user_version: number } | null;
+        if ((version?.user_version ?? 0) < 3) {
+            return;
+        }
+        const BATCH = 200;
+        const started = Date.now();
+        let total = 0;
+        while (true) {
+            const result = await this.enqueue(async () => {
+                const r = await this.db.runAsync(
+                    `DELETE FROM session_messages
+                      WHERE message_id IN (
+                          SELECT message_id FROM (
+                              SELECT message_id,
+                                     ROW_NUMBER() OVER (
+                                         PARTITION BY session_id
+                                         ORDER BY created_at DESC
+                                     ) AS rn
+                                FROM session_messages
+                          )
+                           WHERE rn > ${MAX_CACHED_MESSAGES}
+                          LIMIT ?
+                      )`,
+                    [BATCH]
+                );
+                return r.changes;
+            });
+            total += result;
+            if (result < BATCH) {
+                break;
+            }
+            // Yield so waiting reads and saves can run before the next batch.
+            await new Promise<void>((resolve) => setTimeout(resolve, 50));
+        }
+        // Oversized reducer states — those are single rows, fast to update.
+        await this.enqueue(() => this.db.execAsync(
+            `UPDATE session_cache SET reducer_state = '{}' WHERE length(reducer_state) > ${MAX_REDUCER_STATE_BYTES};`
+        ));
+        await this.enqueue(() => this.db.execAsync(`PRAGMA wal_checkpoint(TRUNCATE);`));
+        if (total > 0) {
+            log.log(`📦 sessionCacheDB: background migration removed ${total} legacy rows in ${Date.now() - started}ms`);
+        }
     }
 
     /**
