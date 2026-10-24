@@ -542,7 +542,11 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
     private async migrateMessageIdentity(): Promise<void> {
         const version = await this.db.getFirstAsync('PRAGMA user_version') as { user_version: number } | null;
         const from = version?.user_version ?? 0;
-        if (from >= 2) {
+        // v3 re-runs the bounding pass for databases that reached 2 before it existed. On a device
+        // that left 14,258 rows older than two days and sessions at 968-1033 rows: the save path
+        // was bounded by then, so the rows were pure legacy, and no gate would ever have removed
+        // them because the version alone said the work was done.
+        if (from >= 3) {
             return;
         }
         const started = Date.now();
@@ -599,9 +603,9 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
              WHERE length(reducer_state) > ${MAX_REDUCER_STATE_BYTES};
 
             PRAGMA wal_checkpoint(TRUNCATE);
-            PRAGMA user_version = 2;
+            PRAGMA user_version = 3;
         `);
-        log.log(`📦 sessionCacheDB: cache migration took ${Date.now() - started}ms`);
+        log.log(`📦 sessionCacheDB: cache migration v3 took ${Date.now() - started}ms`);
     }
 
     private async ensureReady(): Promise<void> {

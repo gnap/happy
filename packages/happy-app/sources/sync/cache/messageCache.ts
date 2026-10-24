@@ -21,7 +21,7 @@ import {
     SERIALIZER_SCHEMA_VERSION,
 } from './reducerStateSerializer';
 import { clearAllHotWindows, clearHotWindow, loadHotWindow, saveHotWindow } from './hotWindow';
-import { MAX_REDUCER_STATE_BYTES } from './limits';
+import { MAX_CACHED_MESSAGES, MAX_REDUCER_STATE_BYTES } from './limits';
 import { createReducer, materializeReducerMessages, type ReducerState } from '../reducer/reducer';
 import type { Message } from '../typesMessage';
 import type { Session } from '../storageTypes';
@@ -390,10 +390,16 @@ export async function saveMessageCache(
     try {
         const started = Date.now();
         const db = getSessionCacheDB();
+        // The cache is a window, not the store. Enforced here as well as at the caller: one path
+        // that forgot the bound is how sessions reached 968-1033 rows on a device even after the
+        // window was introduced, and those rows were then read and migrated forever.
+        const bounded = messages.length > MAX_CACHED_MESSAGES
+            ? [...messages].sort((a, b) => b.createdAt - a.createdAt).slice(0, MAX_CACHED_MESSAGES)
+            : messages;
         // Trimmed to the window a load hands back, so what is written is what will be read: see
         // `trimReducerState`. The window's own state is untouched — this is the copy that goes to
         // disk.
-        const newest = [...messages].sort((a, b) => b.createdAt - a.createdAt).slice(0, HYDRATE_MESSAGE_LIMIT);
+        const newest = [...bounded].sort((a, b) => b.createdAt - a.createdAt).slice(0, HYDRATE_MESSAGE_LIMIT);
         let reducerStateJson = serializeReducerStateToJson(trimReducerState(reducerState, new Set(newest.map((message) => message.id))));
         let stateDropped = false;
         if (reducerStateJson.length > MAX_REDUCER_STATE_BYTES) {
