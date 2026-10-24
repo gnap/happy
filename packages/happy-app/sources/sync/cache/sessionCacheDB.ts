@@ -25,34 +25,24 @@ import * as SQLite from 'expo-sqlite';
  * both matched rather than one assumed.
  */
 /**
- * The connection the *previous* evaluation of this module left open, if there was one.
+ * The database object a *previous* evaluation of this module created, if there was one.
  *
- * A reload re-evaluates this module but not the native side: the connection the last
- * evaluation opened stays open, and the object that could close it is about to be garbage. So the
- * handle is parked here — on `globalThis`, which every evaluation of the module shares — and the
- * next one closes it before opening its own. Without this the old connection holds the database
- * while the new one works: statements wait, saves fail locked, and the whole cache crawls until
- * the ten-second detector gives up on it. Measured: statements waiting 51-65 seconds.
+ * A reload re-evaluates this module but not the native side: the previous `LazySessionCacheDB`
+ * and its one SQLite connection are still alive. Closing that connection from here did not work —
+ * the handle belongs to a JS context that is gone, and the close either failed or never landed —
+ * so every reload added a second connection to the same file. They then blocked each other: on a
+ * device, statements were measured at 10–16 seconds after a few reloads, and a 387KB session-list
+ * parse appeared to take 51 seconds because the JS thread was continuously busy behind them.
+ *
+ * So the instance itself is parked on `globalThis`, which every evaluation shares, and the next
+ * evaluation takes it over instead of opening a connection of its own. There is only ever one
+ * connection, and the queue and its bookkeeping survive the reload with it.
  *
  * In production this runs exactly never, because the module is evaluated once — which is also why
  * nothing else would have caught it.
  */
-const inheritedSlot = globalThis as unknown as { __happyRetiredCacheConnection?: unknown };
-const inherited = inheritedSlot.__happyRetiredCacheConnection;
-inheritedSlot.__happyRetiredCacheConnection = null;
-if (inherited) {
-    try {
-        // Bounded, and never awaited: a connection wedged by a statement whose caller is gone is
-        // the case where closing can hang, and the module still has to finish loading.
-        void Promise.race([
-            (inherited as { closeAsync: () => Promise<void> }).closeAsync(),
-            new Promise((resolve) => setTimeout(resolve, 2_000)),
-        ]).catch(() => undefined);
-        log.log('📦 sessionCacheDB: closed the connection a previous load of this module left open');
-    } catch {
-        // Not closable from here; the new connection is opened regardless.
-    }
-}
+const sessionCacheSlot = globalThis as unknown as { __happySessionCacheDB?: ISessionCacheDB };
+const inheritedDb = sessionCacheSlot.__happySessionCacheDB;
 
 function isLocked(error: unknown): boolean {
     const message = String(error);
@@ -476,8 +466,6 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
         const t0 = Date.now();
         // Static import so expo-sqlite loads with app bundle (avoids cold-start hang on first session open)
         this.db = await SQLite.openDatabaseAsync(DB_NAME);
-        // Parked for whichever evaluation of this module comes after this one: see the slot above.
-        inheritedSlot.__happyRetiredCacheConnection = this.db;
         this.watchStatements();
         log.log(`📦 sessionCacheDB: openDatabaseAsync took ${Date.now() - t0}ms`);
 
@@ -1114,7 +1102,9 @@ let _instance: ISessionCacheDB | null = null;
  */
 export function getSessionCacheDB(): ISessionCacheDB {
     if (!_instance) {
-        _instance = new LazySessionCacheDB();
+        // The previous evaluation's instance, when there is one: same connection, same queue.
+        _instance = inheritedDb ?? new LazySessionCacheDB();
+        sessionCacheSlot.__happySessionCacheDB = _instance;
     }
     return _instance;
 }
@@ -1124,6 +1114,7 @@ export function getSessionCacheDB(): ISessionCacheDB {
  */
 export function overrideSessionCacheDB(db: ISessionCacheDB): void {
     _instance = db;
+    sessionCacheSlot.__happySessionCacheDB = db;
 }
 
 /**
@@ -1131,4 +1122,5 @@ export function overrideSessionCacheDB(db: ISessionCacheDB): void {
  */
 export function resetSessionCacheDB(): void {
     _instance = null;
+    delete sessionCacheSlot.__happySessionCacheDB;
 }
