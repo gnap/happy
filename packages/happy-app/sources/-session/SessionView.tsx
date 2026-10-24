@@ -62,6 +62,15 @@ export const SessionView = React.memo((props: { id: string }) => {
         log.log(`🖥️ session screen focused: ${sessionId}`);
     }, [sessionId]));
 
+    // One line on the screen's first render. Between the press and the focus log there are two
+    // different costs — navigation and rendering this screen — and a single "opening is slow"
+    // number cannot tell them apart.
+    const firstRender = React.useRef(false);
+    if (!firstRender.current) {
+        firstRender.current = true;
+        log.log(`🖥️ session view first render: ${sessionId}`);
+    }
+
     // Compute header props based on session state
     const headerProps = useMemo(() => {
         if (!isDataReady) {
