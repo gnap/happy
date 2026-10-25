@@ -15,6 +15,7 @@ import { collapseDuplicateMessages } from '../messageIdentity';
 import { MAX_CACHED_MESSAGES, MAX_REDUCER_STATE_BYTES } from './limits';
 import { StatementQueue } from './statementQueue';
 import { log } from '@/log';
+import { InteractionManager } from 'react-native';
 import * as SQLite from 'expo-sqlite';
 
 /**
@@ -652,9 +653,13 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
      * pays seconds. Nothing under a fifth of a second is reported, so a healthy cache says nothing.
      */
     private watchStatements = () => {
-        this.statements.onStatement = ({ waited, ran, depth }) => {
+        this.statements.onStatement = ({ waited, ran, depth, beats }) => {
             if (waited > 200 || ran > 200) {
-                log.log(`📦 sessionCacheDB: statement waited=${waited}ms ran=${ran}ms queued behind ${depth - 1}`);
+                // `beats` is how many 250ms ticks fired while the statement ran: the full count
+                // means the JS thread was free and the connection itself was slow; far fewer
+                // means the thread was blocked elsewhere and this number is partly its debt.
+                log.log(`📦 sessionCacheDB: statement waited=${waited}ms ran=${ran}ms (beats ${beats}/` +
+                    `${Math.ceil(ran / 250)}) queued behind ${depth - 1}`);
             }
         };
     };
@@ -951,6 +956,16 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
             return;
         }
 
+        // A save yields to whatever interaction is in flight before it starts, and then queues
+        // behind reads. Both are the same measurement: a statement runs synchronously on the JS
+        // thread (a heartbeat ticker inside the statement queue did not fire once during
+        // multi-second saves), so a save beginning mid-gesture freezes it for its whole duration —
+        // the tap that lands during a 300ms-3.4s write, and the 23s outlier, are the "sometimes
+        // tapping from the list sticks" a device showed. Encoding happens after the yield too:
+        // stringifying a burst of messages is thread time as well.
+        await new Promise<void>((resolve) => {
+            InteractionManager.runAfterInteractions(() => resolve());
+        });
         // Serialised before any statement runs: stringifying would otherwise happen between two
         // statements of the save.
         const encoded = inserts.map((message) => JSON.stringify(message));
@@ -1018,7 +1033,7 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
             if (ms > 50) {
                 log.log(`📦 sessionCacheDB: wrote ${inserts.length}/${messages.length} messages for ${row.sessionId} in ${ms}ms${rewrite ? ' (rewrite)' : ''}`);
             }
-        }, true);
+        }, false);
 
         this.writtenWatermark.set(row.sessionId, {
             lastSeq: row.lastSeq,

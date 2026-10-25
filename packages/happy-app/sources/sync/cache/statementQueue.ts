@@ -49,7 +49,7 @@ export class StatementQueue {
      * ahead of whom — and taking is the connection's, which is where a statement left un-finalised
      * by an earlier failure shows up as seconds rather than milliseconds.
      */
-    onStatement: ((statement: { waited: number; ran: number; depth: number }) => void) | null = null;
+    onStatement: ((statement: { waited: number; ran: number; depth: number; beats: number }) => void) | null = null;
 
     /**
      * How long the job in flight has been running, or 0 when the connection is free.
@@ -83,6 +83,14 @@ export class StatementQueue {
                 const waited = Date.now() - next.queuedAt;
                 const ranAt = Date.now();
                 this.runningSince = ranAt;
+                // A heartbeat, running while the statement does: if the JS thread is free, its
+                // ticker fires on schedule; if it is blocked, the ticks stop. Comparing the two
+                // after the fact is what tells a slow *connection* from a slow *everything else*
+                // wearing the connection's number — a statement reported as 23s that ticked the
+                // whole way through was native work, one that ticked twice was waiting for the
+                // thread to come back.
+                let beats = 0;
+                const ticker = setInterval(() => { beats += 1; }, 250);
                 try {
                     next.resolve(await next.work());
                 } catch (error) {
@@ -90,8 +98,9 @@ export class StatementQueue {
                     // runs either way, which is what keeps one bad save from stalling the cache.
                     next.reject(error);
                 } finally {
+                    clearInterval(ticker);
                     this.runningSince = null;
-                    this.onStatement?.({ waited, ran: Date.now() - ranAt, depth: next.depth });
+                    this.onStatement?.({ waited, ran: Date.now() - ranAt, depth: next.depth, beats });
                 }
             }
         } finally {
