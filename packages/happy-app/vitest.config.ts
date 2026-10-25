@@ -33,6 +33,8 @@ export default defineConfig({
             // tests never ran. Nothing under test opens a real database, so the native module is
             // kept out of the graph rather than dragging the React Native runtime in to satisfy it.
             'expo-sqlite': resolve('./sources/test-utils/expoSqliteStub.ts'),
+            // Same reason as above, reached via `sessionCacheDB`'s interaction yield.
+            'react-native': resolve('./sources/test-utils/reactNativeStub.ts'),
         },
     },
 })
