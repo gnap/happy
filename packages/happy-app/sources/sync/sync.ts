@@ -1301,6 +1301,8 @@ class Sync {
 
         // Reset in-memory seq so the next fetch starts from 0
         this.sessionLastSeq.delete(sessionId);
+        this.serverNewestSeq.delete(sessionId);
+        this.serverSessionSeq.delete(sessionId);
 
         // Clear the in-memory Zustand messages so the UI shows a loading state
         storage.getState().deleteSessionMessages(sessionId);
@@ -3533,6 +3535,45 @@ class Sync {
     /** Deadlines for in-flight server message reads, so `stopBackgroundWork` can clear them. */
     private messageReadDeadlines = new Map<string, ReturnType<typeof setTimeout>>();
 
+    /**
+     * The highest server-seq this App actually holds, per session — the server axis's watermark.
+     *
+     * Written only where server bytes were applied (this path and its fetch result); a daemon
+     * read advancing its own counter must not move it, which is the whole point of the field:
+     * the store's `newestSeq` cannot say this, because both channels write it.
+     */
+    private serverNewestSeq = new Map<string, number>();
+    /**
+     * The last seq the server itself reported for a session, learned from a server-served list.
+     *
+     * `session.seq` in the store cannot be trusted for the axis: when the server cannot answer,
+     * the session list is served by a daemon, whose per-session counter is a different numbering.
+     * This map remembers the server's number past such a fallback, so the up-to-date guard keeps
+     * comparing like with like even while the list itself is daemon-numbered.
+     */
+    private serverSessionSeq = new Map<string, number>();
+    /**
+     * Which axis the session list in the store is currently numbered on. A daemon-served list
+     * sets 'daemon', a server answer sets 'server'.
+     */
+    private sessionsListAxis: 'server' | 'daemon' = 'server';
+
+    /**
+     * The server-axis position of a session, for guards and fetch anchors.
+     *
+     * When the list came from the server, its `seq` is exactly that and is always the freshest
+     * such number this App has. When the list came from a daemon, the store's `seq` is on the
+     * daemon's axis and comparing against it would be meaningless in both directions — the last
+     * number the server itself reported is used instead, and zero (never seen) means "no basis
+     * to skip a fetch", which is the only safe answer.
+     */
+    private serverAxisSeq(sessionId: string, storeSeq: number): number {
+        if (this.sessionsListAxis === 'server') {
+            return storeSeq;
+        }
+        return this.serverSessionSeq.get(sessionId) ?? 0;
+    }
+
     private fetchMessages = async (sessionId: string) => {
         // The cached window first, outside the lock: this is the tap's first frame.
         await this.hydrateSession(sessionId);
@@ -3581,16 +3622,19 @@ class Sync {
 
                 const cachedLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
                 const currentSession = storage.getState().sessions[sessionId];
-                const sessionSeq = currentSession?.seq ?? 0;
-                // Use the store's actual newestSeq (highest seq actually applied to the
-                // message list) rather than sessionLastSeq (highest seq ever seen via WS).
-                // WS fast-path updates sessionLastSeq but messages can be missed during a
-                // disconnect, leaving gaps that sessionLastSeq would wrongly hide.
-                const storedNewestSeq = storage.getState().sessionMessages[sessionId]?.newestSeq ?? 0;
+                // The server's own numbering, and nothing else. The store's newestSeq mixes axes —
+                // daemon reads and the daemon's session list both carry the daemon's counter —
+                // so comparing it against the server's said "already up to date" about messages
+                // this App had never seen (measured: local 3260 vs server 3082 on one session),
+                // and anchoring a fetch from it asked the server for a position past its end,
+                // which it answered with nothing. The server-axis watermark below is written
+                // only by this path, so the comparison is at last apples to apples.
+                const sessionSeq = this.serverAxisSeq(sessionId, currentSession?.seq ?? 0);
+                const storedNewestSeq = this.serverNewestSeq.get(sessionId) ?? 0;
 
                 // Already up-to-date: skip the API call and loading indicator entirely.
-                if (storedNewestSeq > 0 && storedNewestSeq >= sessionSeq) {
-                    log.log(`💬 fetchMessages: already up-to-date for ${sessionId} (newestSeq=${storedNewestSeq} >= seq=${sessionSeq}), skipping fetch`);
+                if (storedNewestSeq > 0 && storedNewestSeq >= sessionSeq && sessionSeq > 0) {
+                    log.log(`💬 fetchMessages: already up-to-date for ${sessionId} (serverNewestSeq=${storedNewestSeq} >= serverSeq=${sessionSeq}), skipping fetch`);
                     return;
                 }
 
@@ -3736,6 +3780,11 @@ class Sync {
 
                 // Update the high-water mark for the progress bar.
                 storage.getState().setNewestSeq(sessionId, maxSeq);
+                // The server axis moved: both the watermark of what is held and the last
+                // position the server itself reported for this session. The latter is what the
+                // up-to-date guard compares against while the session list is daemon-numbered.
+                this.serverNewestSeq.set(sessionId, Math.max(this.serverNewestSeq.get(sessionId) ?? 0, maxSeq));
+                this.serverSessionSeq.set(sessionId, Math.max(this.serverSessionSeq.get(sessionId) ?? 0, maxSeq));
 
                 // --- Cache: persist once the page has settled ---
                 // With the window this fetch established, not the store's — `applyMessages` does not
@@ -4260,6 +4309,8 @@ class Sync {
             this.sendSync.delete(sessionId);
             this.pendingOutbox.delete(sessionId);
             this.sessionLastSeq.delete(sessionId);
+            this.serverNewestSeq.delete(sessionId);
+            this.serverSessionSeq.delete(sessionId);
             this.sentMessageLocalIds.delete(sessionId);
             // claimedServerMessageIds is keyed by serverId not sessionId, so we can't easily
             // bulk-delete by session. It's small and self-limiting (only live claims), so just
@@ -5422,6 +5473,10 @@ class Sync {
             return 0;
         }
         const sessions = answers.flatMap((answer) => answer.sessions.map((session) => ({ ...session, via: answer.via })));
+        // Daemon-numbered from here until a server answer replaces it: a session's `seq` in this
+        // list is the daemon's own counter, and comparisons against the server's axis must not
+        // read it (see `serverAxisSeq`).
+        this.sessionsListAxis = 'daemon';
         storage.getState().applyDaemonSessionList(sessions);
         for (const answer of answers) {
             log.log(`📡 fetchSessions: server unreachable — daemon ${answer.machineId.slice(0, 8)} reports ${answer.sessions.length} session(s) via ${answer.via}`);
@@ -6643,6 +6698,12 @@ class Sync {
     })[], fullRefresh?: boolean) => {
         const active = storage.getState().getActiveSessions();
         const channelBefore = new Map(sessions.map((s) => [s.id, this.preferredChannel(s.id)]));
+        // The server's own list: its seqs are the server axis, the freshest such numbers this App
+        // can hold, and the axis flag retires whatever the daemon fallback last wrote.
+        this.sessionsListAxis = 'server';
+        for (const applied of sessions) {
+            this.serverSessionSeq.set(applied.id, applied.seq);
+        }
         storage.getState().applySessions(sessions, fullRefresh);
         this.applyPublishedGitStatus(sessions);
         const newActive = storage.getState().getActiveSessions();
