@@ -106,6 +106,38 @@ function recordTimestamp(content: unknown, fallback: number): number {
  * differently, the same message would land twice under two shapes and dedup on `localId` would
  * have nothing to match on. Entries that do not decrypt are skipped rather than guessed at.
  */
+/**
+ * The same projection, yielding as it goes.
+ *
+ * A page a read brings back can be hundreds of entries, and each one is a JSON parse plus the
+ * zod transforms — all of it on the JS thread, measured as multi-second stays during which a tap
+ * starved. One hop per `every` entries bounds any waiting interaction to one chunk's worth of
+ * work. The live socket's single entry keeps the synchronous shape above.
+ */
+export async function toNormalizedMessagesChunked(entries: DecryptedLanEntry[], every = 25): Promise<NormalizedMessage[]> {
+    const messages: NormalizedMessage[] = [];
+    let sinceYield = 0;
+    for (const entry of entries) {
+        if (entry.content === null) {
+            continue;
+        }
+        const normalized = normalizeRawMessage(
+            entry.id,
+            entry.localId,
+            recordTimestamp(entry.content, entry.at),
+            entry.content
+        );
+        if (normalized) {
+            messages.push(normalized);
+        }
+        if (++sinceYield >= every) {
+            sinceYield = 0;
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+    }
+    return collapseDuplicateMessages(messages);
+}
+
 export function toNormalizedMessages(entries: DecryptedLanEntry[]): NormalizedMessage[] {
     const messages: NormalizedMessage[] = [];
     for (const entry of entries) {
@@ -308,7 +340,7 @@ export async function readSessionOverLan(options: {
             return {
                 machineId: connection.machineId,
                 tag: history.tag,
-                messages: toNormalizedMessages(decrypted.entries),
+                messages: await toNormalizedMessagesChunked(decrypted.entries),
                 received: received(decrypted.entries),
                 decryptedCount: decrypted.decryptedCount,
                 total: decrypted.entries.length,

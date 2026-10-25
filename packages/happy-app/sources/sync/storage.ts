@@ -1463,8 +1463,12 @@ export const storage = create<StorageState>()((set, get) => {
             // older"). Identity is `localId` where there is one (the field every delivery agrees
             // on) and the delivery id otherwise; a page carrying nothing new leaves the window
             // exactly as it was instead of rolling it back.
+            // The merge result when it took the append-only fast path, for the reducer decision
+            // below; `as unknown as` because `Message` and `NormalizedMessage` differ only in
+            // which fields are optional, and the merge treats both as `Identified`.
+            let appendOnlyMerge: ReturnType<typeof mergePageIntoWindow<{ id: string }>> | null = null;
             if (held && held.messages.length > 0) {
-                const merged = mergePageIntoWindow(held.messages as unknown as Parameters<typeof mergePageIntoWindow>[0], messages);
+                const merged = mergePageIntoWindow(held.messages as unknown as Message[], messages as unknown as Message[]);
                 const mergedOldest = held.oldestSeq > 0 && oldestSeq > 0
                     ? Math.min(held.oldestSeq, oldestSeq)
                     : Math.max(held.oldestSeq, oldestSeq);
@@ -1476,16 +1480,33 @@ export const storage = create<StorageState>()((set, get) => {
                 }
                 if (merged) {
                     messages = merged.messages as unknown as NormalizedMessage[];
+                    // Append-only pages (everything the page added is at or after the window's
+                    // newest) can run through the held reducer state; anything else falls back
+                    // to the full rebuild below.
+                    const heldNewestAt = held.messages.length > 0 ? held.messages[0].createdAt : Infinity;
+                    if (merged.added.every((message) => (message.createdAt ?? 0) >= heldNewestAt)) {
+                        appendOnlyMerge = merged;
+                    }
                 }
                 oldestSeq = mergedOldest;
                 newestSeq = mergedNewest;
                 hasOlderMessages = mergedHasOlder;
             }
-            // A fresh reducer over the merged set, because the incoming page can interleave with
-            // what was held: the previous reducer state alone cannot describe the union, and a
-            // stale tool state carried across a merge is exactly the artifact it would show.
-            const reducerState = createReducer();
-            const reducerResult = reducer(reducerState, messages, session?.agentState ?? undefined);
+            // The state the reducer starts from, and the messages it is asked to process. The
+            // common case — a follow read whose page is entirely newer than what is held — runs
+            // only the added subset through the HELD reducer state: the same thing the append
+            // path has always done, and what keeps an active session's read cycle from
+            // re-reducing a hundred-and-fifty messages to learn about three new ones. A page
+            // that interleaves with what is held keeps the full rebuild below: the reducer is a
+            // sequence processor, and out-of-order entries against a state that never saw their
+            // neighbours is how tool states go wrong.
+            let reducerState: ReducerState = createReducer();
+            let reduceInput = messages;
+            if (appendOnlyMerge && appendOnlyMerge !== null) {
+                reducerState = held.reducerState;
+                reduceInput = appendOnlyMerge.added as unknown as NormalizedMessage[];
+            }
+            const reducerResult = reducer(reducerState, reduceInput, session?.agentState ?? undefined);
 
             const messagesMap: Record<string, Message> = {};
             for (const msg of reducerResult.messages) {
