@@ -4873,6 +4873,24 @@ class Sync {
             log.log(`📡 fetchSessionFromDaemon: empty replacement page for ${sessionId}; keeping the window`);
             return null;
         }
+        // A replacement page that carries nothing newer than the window would only shrink it —
+        // a fresh daemon with a short log replacing a long server-sourced window, which is the
+        // "switched channels and the conversation got shorter and older" shape. `createdAt`,
+        // not seq: the two channels number messages on different axes. The read still counts as
+        // served below — key registration, cursors and outbox settling all carry on; only the
+        // store's window is left alone.
+        let keepWindow = false;
+        if (read && replace && hasWindow) {
+            const held = storage.getState().sessionMessages[sessionId]?.messages ?? [];
+            const heldNewest = held.length > 0 ? held[held.length - 1].createdAt : 0;
+            const pageNewest = read.messages.length > 0
+                ? Math.max(...read.messages.map((message) => message.createdAt))
+                : 0;
+            if (pageNewest <= heldNewest) {
+                keepWindow = true;
+                log.log(`📡 fetchSessionFromDaemon: replacement page for ${sessionId} is not newer than the window; keeping the window`);
+            }
+        }
         if (!read) {
             // Every address was tried and none served this session. What that says about each one has
             // already been recorded per address, by the read that tried it — a route is no longer
@@ -4913,14 +4931,16 @@ class Sync {
 
         const oldestSeq = minSeqOf(read.messages);
         const newestSeq = maxSeqOf(read.messages);
-        if (replace) {
+        if (replace && !keepWindow) {
             // The page becomes the window: everything before it is "older", reachable by scrolling,
             // and nothing that was held is merged with it — merging is what would hide the range
             // between them.
             storage.getState().applyWindow(sessionId, read.messages, oldestSeq, newestSeq, read.hasOlder);
             this.sessionLastSeq.set(sessionId, Math.max(this.sessionLastSeq.get(sessionId) ?? 0, newestSeq));
-        } else {
+        } else if (!replace) {
             // Adjacent by construction, so the shared pipeline's append and dedup apply: a repeat
+            // of a page already applied lands as "nothing new". (A kept window takes neither
+            // branch: the page had nothing newer than it.)
             // of a page already applied lands as "nothing new".
             this.ingestChannelRead(sessionId, { messages: read.messages, sessionKey: read.sessionKey });
             if (newestSeq > 0) {
@@ -6136,6 +6156,24 @@ class Sync {
     }
 
     /** A connection came up: the sessions on that machine no longer need their polling fallback. */
+    /**
+     * Whether a machine's connection change is one the session on screen is served by.
+     *
+     * Every socket flap used to re-read the visible session — and with several machines' relay
+     * sockets cycling every few seconds, that was a re-read per flap, each one paying a full
+     * channel round (LAN probe timeouts, relay, then the server) while holding the session's read
+     * lock. A flap on a machine that does not own the visible session changes nothing for it.
+     */
+    private markVisibleStaleForMachine(machineId: string): void {
+        const visible = this.readScheduler.visibleSessionId;
+        if (!visible) {
+            return;
+        }
+        if (storage.getState().sessions[visible]?.metadata?.machineId === machineId) {
+            this.readScheduler.markStale();
+        }
+    }
+
     private onDaemonConnectionReady(target: DaemonTarget): void {
         // A socket that came up is proof about the address, and the same fact the read path
         // records: it keeps a working address at the front of the candidate list and clears a run
@@ -6150,7 +6188,7 @@ class Sync {
         this.unverifiedMachines.delete(target.machineId);
         // A connection that came up may have missed pushes while it was down. The session on
         // screen is read once to close the gap; hidden sessions read when opened.
-        this.readScheduler.markStale();
+        this.markVisibleStaleForMachine(target.machineId);
         // Anything still waiting for a verdict may have been written into the socket this replaced.
         // The queue still holds it, so a connection coming up is the moment to try it again — this
         // is what turns "the message you sent while the channel was flapping" into a delay rather
@@ -6174,7 +6212,7 @@ class Sync {
         this.unverifiedMachines.add(target.machineId);
         // The daemon cannot push; the visible session's scheduler poll is the fallback. Hidden
         // sessions on this machine read when opened — a timer each was a fetch storm.
-        this.readScheduler.markStale();
+        this.markVisibleStaleForMachine(target.machineId);
     }
 
     /** A connection went away: whatever it was carrying has just lost its push. */
@@ -6191,7 +6229,7 @@ class Sync {
         // sessions lost their push. The session on screen is re-read now; the others when they are
         // opened — invalidating every session on the machine was one transport's death becoming a
         // read of every conversation on it.
-        this.readScheduler.markStale();
+        this.markVisibleStaleForMachine(target.machineId);
         const known = this.lanMachineConnections.get(target.machineId);
         if (known && known.route === target.route) {
             this.lanMachineConnections.delete(target.machineId);

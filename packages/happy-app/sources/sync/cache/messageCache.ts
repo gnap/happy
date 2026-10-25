@@ -373,6 +373,9 @@ export async function getCachedLastSeq(sessionId: string): Promise<number | null
  * No-op if caching is disabled for this session.
  */
 /** False when the rows did not land, so a caller that stores something *about* them can hold off. */
+/** What the last save of each session wrote, so an unchanged one costs nothing. */
+const lastSaveFingerprints = new Map<string, string>();
+
 export async function saveMessageCache(
     session: Session,
     messages: Message[],
@@ -385,6 +388,16 @@ export async function saveMessageCache(
     if (!isCacheEnabled(session, servedByDaemon)) {
         log.log(`📦 messageCache: skip save for ${session.id} (flavor=${session.metadata?.flavor ?? 'none'}, not cursor)`);
         return false;
+    }
+
+    // A save of exactly what the last one wrote is not worth its serialisation. The reducer state
+    // is a projection of the messages (it is only ever mutated by reducing them), so the message
+    // set plus the window edges describe everything the row would say — and the expensive part of
+    // a save was measured as exactly this no-op: re-serialising a ~500KB state on every tick for
+    // a session whose store had not changed, only to drop it for size again.
+    const fingerprint = `${messages.length}|${messages[messages.length - 1]?.id ?? ''}|${lastSeq}|${oldestSeq}|${hasOlderMessages}`;
+    if (lastSaveFingerprints.get(session.id) === fingerprint) {
+        return true;
     }
 
     try {
@@ -451,6 +464,7 @@ export async function saveMessageCache(
         const slow = totalMs > 200 ? ` in ${totalMs}ms (reducer state ${stateMs}ms)` : '';
         log.log(`📦 messageCache: saved ${messages.length} messages for ${session.id} (lastSeq=${lastSeq}, oldestSeq=${oldestSeq}, hasOlderMessages=${hasOlderMessages})${slow}`);
         notifyCachedLastSeq(session.id, lastSeq);
+        lastSaveFingerprints.set(session.id, fingerprint);
         return true;
     } catch (err) {
         log.log(`📦 messageCache: save error for ${session.id}: ${err}`);

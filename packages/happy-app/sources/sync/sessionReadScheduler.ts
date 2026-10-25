@@ -105,6 +105,11 @@ export class SessionReadScheduler {
         return this.timer !== null;
     }
 
+    /** The session on screen, or null — for callers deciding whether an event concerns it. */
+    get visibleSessionId(): string | null {
+        return this.visible;
+    }
+
     stop(): void {
         if (this.timer !== null) {
             clearInterval(this.timer);
