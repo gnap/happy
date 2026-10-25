@@ -89,7 +89,7 @@
     "axios": "^1.10.0",
     "color": "^5.0.0",
     "diff": "^8.0.2",
-    "expo": "~57.0.0",
+    "expo": "~57.0.31",
     "expo-application": "~57.0.2",
     "expo-asset": "~57.0.6",
     "expo-audio": "~57.0.2",
