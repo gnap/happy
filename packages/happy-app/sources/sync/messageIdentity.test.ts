@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { collapseDuplicateMessages } from './messageIdentity';
+import { collapseDuplicateMessages, mergePageIntoWindow } from './messageIdentity';
 
 const queued = { id: 'local-1', localId: 'local-1', createdAt: 100 };
 const echoed = { id: 'server-1', localId: 'local-1', createdAt: 100 };
@@ -34,5 +34,59 @@ describe('collapseDuplicateMessages', () => {
     it('collapses more than two deliveries of one message', () => {
         const third = { id: 'server-1', localId: 'local-1', createdAt: 300 };
         expect(collapseDuplicateMessages([queued, third, echoed])).toEqual([third]);
+    });
+});
+
+describe('mergePageIntoWindow', () => {
+    const held = [
+        { id: 'server-1', localId: 'local-1', createdAt: 100 },
+        { id: 'server-2', localId: 'local-2', createdAt: 200 },
+        { id: 'server-3', localId: 'local-3', createdAt: 300 },
+    ];
+
+    it('returns null for a page the window already holds', () => {
+        expect(mergePageIntoWindow(held, [...held])).toBeNull();
+    });
+
+    it('returns null for a shorter page of the same messages — the shrinking replacement', () => {
+        expect(mergePageIntoWindow(held, held.slice(1))).toBeNull();
+    });
+
+    it('adds messages the window does not hold, around what it does', () => {
+        const fresh = { id: 'server-4', localId: 'local-4', createdAt: 400 };
+        const result = mergePageIntoWindow(held, [held[2], fresh]);
+        expect(result).not.toBeNull();
+        expect(result!.fresh).toBe(1);
+        expect(result!.messages).toEqual([...held, fresh]);
+    });
+
+    it('merges a non-adjacent page by time rather than replacing the window', () => {
+        // The fresh-daemon shape: the page starts after a gap and is shorter than what is held.
+        const page = [
+            { id: 'daemon-9', localId: 'local-9', createdAt: 250 },
+        ];
+        const result = mergePageIntoWindow(held, page);
+        expect(result!.messages).toHaveLength(4);
+        expect(result!.messages.map((m) => m.createdAt)).toEqual([100, 200, 250, 300]);
+    });
+
+    it('upgrades a held queued copy to the page copy carrying the server id', () => {
+        const window = [
+            { id: 'local-2', localId: 'local-2', createdAt: 200 },
+        ];
+        const page = [
+            { id: 'server-2', localId: 'local-2', createdAt: 200 },
+        ];
+        const result = mergePageIntoWindow(window, page);
+        expect(result).toBeNull(); // no *new* message: the caller leaves its state alone
+    });
+
+    it('sorts the merged set by createdAt', () => {
+        const page = [
+            { id: 'daemon-0', localId: 'local-0', createdAt: 50 },
+            { id: 'daemon-9', localId: 'local-9', createdAt: 350 },
+        ];
+        const result = mergePageIntoWindow(held, page);
+        expect(result!.messages.map((m) => m.createdAt)).toEqual([50, 100, 200, 300, 350]);
     });
 });
