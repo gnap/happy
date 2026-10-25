@@ -5,6 +5,7 @@ import { computeBitmap } from "./cacheSegment";
 import { createReducer, reducer, ReducerState } from "./reducer/reducer";
 import { bump } from './metrics';
 import { Message } from "./typesMessage";
+import { mergePageIntoWindow } from "./messageIdentity";
 import { NormalizedMessage } from "./typesRaw";
 import type { DaemonRoute, LanSighting, RelayEndpoint, SessionChannel } from './lan/types';
 import type { RelayDirectoryEntry } from './lan/relayDirectory';
@@ -1452,11 +1453,38 @@ export const storage = create<StorageState>()((set, get) => {
         applyWindow: (sessionId: string, messages: NormalizedMessage[], oldestSeq: number, newestSeq: number, hasOlderMessages: boolean) => set((state) => {
             bump('storeWrites');
             bump('messagesApplied', messages.length);
-            // A fresh reducer over the page, because the window it replaces is gone: the previous
-            // reducer state describes messages that are no longer held, and running the new page
-            // through it would carry their tool state into a window that does not contain them.
-            const reducerState = createReducer();
             const session = state.sessions[sessionId];
+            const held = state.sessionMessages[sessionId];
+
+            // The page MERGES into whatever is held rather than replacing it. A channel is a
+            // source, and no source has the right to discard messages this App already showed —
+            // the replace shape was what made a fresh daemon's short log shrink a long
+            // server-sourced window ("switched channels and the conversation got shorter and
+            // older"). Identity is `localId` where there is one (the field every delivery agrees
+            // on) and the delivery id otherwise; a page carrying nothing new leaves the window
+            // exactly as it was instead of rolling it back.
+            if (held && held.messages.length > 0) {
+                const merged = mergePageIntoWindow(held.messages as unknown as Parameters<typeof mergePageIntoWindow>[0], messages);
+                const mergedOldest = held.oldestSeq > 0 && oldestSeq > 0
+                    ? Math.min(held.oldestSeq, oldestSeq)
+                    : Math.max(held.oldestSeq, oldestSeq);
+                const mergedNewest = Math.max(held.newestSeq, newestSeq);
+                const mergedHasOlder = held.hasOlderMessages || hasOlderMessages;
+                if (!merged && mergedOldest === held.oldestSeq && mergedNewest === held.newestSeq && mergedHasOlder === held.hasOlderMessages) {
+                    // Nothing this page carries is new, and the edges did not move.
+                    return state;
+                }
+                if (merged) {
+                    messages = merged.messages as unknown as NormalizedMessage[];
+                }
+                oldestSeq = mergedOldest;
+                newestSeq = mergedNewest;
+                hasOlderMessages = mergedHasOlder;
+            }
+            // A fresh reducer over the merged set, because the incoming page can interleave with
+            // what was held: the previous reducer state alone cannot describe the union, and a
+            // stale tool state carried across a merge is exactly the artifact it would show.
+            const reducerState = createReducer();
             const reducerResult = reducer(reducerState, messages, session?.agentState ?? undefined);
 
             const messagesMap: Record<string, Message> = {};
