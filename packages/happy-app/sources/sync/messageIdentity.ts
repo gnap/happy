@@ -84,28 +84,28 @@ export function collapseDuplicateMessages<T extends Identified>(messages: T[]): 
  * Returns null when the page brings nothing the window does not already hold, so a caller can
  * leave its state untouched rather than rewrite it to say the same thing.
  */
-export function mergePageIntoWindow<T extends Identified>(held: T[], page: T[]): { messages: T[]; fresh: number } | null {
+export function mergePageIntoWindow<T extends Identified>(held: T[], page: T[]): { messages: T[]; added: T[]; fresh: number } | null {
     const byIdentity = new Map<string, T>();
     const keyOf = (message: T): string => message.localId ?? message.id;
     const queuedCopy = (message: T): boolean => message.localId != null && message.id === message.localId;
     for (const message of held) {
         byIdentity.set(keyOf(message), message);
     }
-    let fresh = 0;
+    const added: T[] = [];
     for (const message of page) {
         const key = keyOf(message);
         const current = byIdentity.get(key);
         if (!current) {
-            fresh += 1;
+            added.push(message);
             byIdentity.set(key, message);
         } else if (!queuedCopy(message) && queuedCopy(current)) {
             byIdentity.set(key, message);
         }
     }
-    if (fresh === 0) {
+    if (added.length === 0) {
         return null;
     }
     const messages = [...byIdentity.values()];
     messages.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
-    return { messages, fresh };
+    return { messages, added, fresh: added.length };
 }
