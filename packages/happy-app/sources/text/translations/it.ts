@@ -582,6 +582,15 @@ export const it: TranslationStructure = {
     },
 
     tools: {
+
+
+        countdown: {
+
+            in: ({ time }: { time: string }) => `tra ${time}`,
+
+            due: 'adesso',
+
+        },
         fullView: {
             description: 'Descrizione',
             inputParams: 'Parametri di input',

@@ -560,6 +560,15 @@ export const ru: TranslationStructure = {
     },
 
     tools: {
+
+
+        countdown: {
+
+            in: ({ time }: { time: string }) => `через ${time}`,
+
+            due: 'уже пора',
+
+        },
         fullView: {
             description: 'Описание',
             inputParams: 'Входные параметры',

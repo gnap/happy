@@ -565,6 +565,15 @@ export const en: TranslationStructure = {
     },
 
     tools: {
+
+
+        countdown: {
+
+            in: ({ time }: { time: string }) => `in ${time}`,
+
+            due: 'due now',
+
+        },
         fullView: {
             description: 'Description',
             inputParams: 'Input Parameters',

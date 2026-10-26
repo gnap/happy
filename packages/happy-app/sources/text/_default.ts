@@ -549,6 +549,10 @@ export const en = {
     },
 
     tools: {
+        countdown: {
+            in: ({ time }: { time: string }) => `in ${time}`,
+            due: 'due now',
+        },
         fullView: {
             description: 'Description',
             inputParams: 'Input Parameters',

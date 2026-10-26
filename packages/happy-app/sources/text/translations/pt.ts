@@ -550,6 +550,15 @@ export const pt: TranslationStructure = {
     },
 
     tools: {
+
+
+        countdown: {
+
+            in: ({ time }: { time: string }) => `em ${time}`,
+
+            due: 'agora',
+
+        },
         fullView: {
             description: 'Descrição',
             inputParams: 'Parâmetros de entrada',
