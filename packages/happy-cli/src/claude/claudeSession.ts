@@ -83,14 +83,47 @@ export function mergeTask(
     task: BackgroundTaskForApp,
 ): BackgroundTaskForApp {
     if (!known) return task;
+    // The Stop hook's snapshot knows what is running, but not when it started or when it stops:
+    // the deadline came from the tool call, which only the incremental set saw. Keep it.
+    // Identity is kept when there is nothing to add: a merge that changes nothing should not
+    // replace the object, and one caller asserts exactly that.
+    const carriesTiming = (task.deadlineAt === undefined && known.deadlineAt !== undefined)
+        || (task.startedAt === undefined && known.startedAt !== undefined);
+    const timed: BackgroundTaskForApp = carriesTiming
+        ? {
+            ...task,
+            ...(task.deadlineAt === undefined && known.deadlineAt !== undefined ? { deadlineAt: known.deadlineAt } : {}),
+            ...(task.startedAt === undefined && known.startedAt !== undefined ? { startedAt: known.startedAt } : {}),
+        }
+        : task;
     const type = (SPECIFICITY[task.type] ?? 0) > (SPECIFICITY[known.type] ?? 0) ? task.type : known.type;
-    if (known.description.length === 0) return type === task.type ? task : { ...task, type };
+    if (known.description.length === 0) return type === timed.type ? timed : { ...timed, type };
     const incoming = task.description.trim();
     const command = task.command?.trim();
     if (incoming.length === 0 || (command !== undefined && incoming === command)) {
-        return { ...task, type, description: known.description };
+        return { ...timed, type, description: known.description };
     }
-    return type === task.type ? task : { ...task, type };
+    return type === timed.type ? timed : { ...timed, type };
+}
+
+/**
+ * How long the tool that started a task said it may run, in milliseconds.
+ *
+ * Only two tools say: a monitor's `timeout_ms` (unless it is persistent, which means no deadline at
+ * all) and a background command's `timeout`. Everything else — subagents, workflows — runs until it
+ * is done, and a countdown invented for those would be a lie with a clock on it.
+ */
+export function toolTimeoutMs(toolName: string, input: unknown): number | null {
+    if (!input || typeof input !== 'object') return null;
+    const args = input as Record<string, unknown>;
+    if (toolName === 'Monitor') {
+        if (args.persistent === true) return null;
+        return typeof args.timeout_ms === 'number' && args.timeout_ms > 0 ? args.timeout_ms : null;
+    }
+    if (toolName === 'Bash') {
+        return typeof args.timeout === 'number' && args.timeout > 0 ? args.timeout : null;
+    }
+    return null;
 }
 
 /**
@@ -116,6 +149,15 @@ export type BackgroundTaskForApp = {
     tool?: string;
     /** Workflow tasks. */
     name?: string;
+    /**
+     * When this task stops on its own, when the tool that started it said so.
+     *
+     * A monitor's `timeout_ms` and a background command's `timeout` are the only deadlines the
+     * session is given; subagents have none. The App draws a countdown from this beside the task.
+     */
+    deadlineAt?: number;
+    /** When the task was first seen running. */
+    startedAt?: number;
 };
 
 /** Find the system Claude binary for use with the Agent SDK. */
@@ -685,6 +727,8 @@ export class ClaudeSession {
     const backgroundTaskSummaries = new Map<string, LiveBackgroundTask>();
     /** Which tool each `tool_use` call was, so a task can be attributed to the tool that started it. */
     const toolNamesByCallId = new Map<string, string>();
+    /** When each call's task will stop on its own, where the tool said so. */
+    const toolDeadlineByCallId = new Map<string, number>();
 
     function emitBackgroundTasks(): void {
         opts.onBackgroundTasks?.([...backgroundTaskSummaries.values()]);
@@ -834,6 +878,12 @@ export class ClaudeSession {
                         for (const block of ac) {
                             if (block?.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string') {
                                 toolNamesByCallId.set(block.id, block.name);
+                                const timeoutMs = toolTimeoutMs(block.name, block.input);
+                                if (timeoutMs !== null) {
+                                    toolDeadlineByCallId.set(block.id, Date.now() + timeoutMs);
+                                } else {
+                                    toolDeadlineByCallId.delete(block.id);
+                                }
                             }
                         }
                         const names = ac.map((b: any) => `${b.type}:${b.name ?? '?'}`).join(', ');
@@ -921,11 +971,14 @@ export class ClaudeSession {
                     const started = message as { task_id?: string; tool_use_id?: string; description?: string; subagent_type?: string; task_type?: string };
                     if (started.task_id) {
                         liveBackgroundTasks.add(started.task_id);
+                        const deadlineAt = started.tool_use_id ? toolDeadlineByCallId.get(started.tool_use_id) : undefined;
                         backgroundTaskSummaries.set(started.task_id, {
                             id: started.task_id,
                             type: taskTypeOf(started.tool_use_id ? toolNamesByCallId.get(started.tool_use_id) : undefined, started.task_type ?? started.subagent_type ?? 'task'),
                             status: 'running',
                             description: started.description ?? '',
+                            startedAt: Date.now(),
+                            ...(deadlineAt !== undefined ? { deadlineAt } : {}),
                         });
                         emitBackgroundTasks();
                     }
