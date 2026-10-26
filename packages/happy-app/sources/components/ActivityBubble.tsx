@@ -5,6 +5,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { Text } from '@/components/StyledText';
 import { Typography } from '@/constants/Typography';
 import { FloatingOverlay } from '@/components/FloatingOverlay';
+import { useCountdown, formatCountdown } from '@/hooks/useCountdown';
+import { t } from '@/text';
 
 /**
  * The details behind an activity badge, as a bubble above it.
@@ -21,7 +23,13 @@ import { FloatingOverlay } from '@/components/FloatingOverlay';
  */
 
 /** One item: the state it is in, what it is, and — for a background command — what it runs. */
-export type ActivityDetailLine = { status: string; text: string; detail?: string };
+export type ActivityDetailLine = {
+    status: string;
+    text: string;
+    detail?: string;
+    /** When this item stops on its own; only tasks whose tool declared a timeout have one. */
+    deadlineAt?: number;
+};
 
 /** A group of items under a heading — the heading is the kind of work, as the CLI named it. */
 export type ActivityDetailSection = { label: string; lines: ActivityDetailLine[] };
@@ -59,6 +67,7 @@ export const ActivityBubble = React.memo(function ActivityBubble({
                                             {line.detail}
                                         </Text>
                                     ) : null}
+                                    <ActivityCountdown deadlineAt={line.deadlineAt} />
                                 </View>
                             </View>
                         ))}
@@ -68,6 +77,20 @@ export const ActivityBubble = React.memo(function ActivityBubble({
         </View>
     );
 });
+
+/**
+ * How long a task has left, in the bubble that says what the task is.
+ *
+ * A deadline that has passed says nothing: the task either stopped at it or outlived it, and a line
+ * reading "due" for the rest of the session is noise about a moment, not about the work.
+ */
+function ActivityCountdown({ deadlineAt }: { deadlineAt: number | undefined }) {
+    const remaining = useCountdown(deadlineAt);
+    if (remaining === null || remaining <= 0) {
+        return null;
+    }
+    return <Text style={stylesheet.detail}>{t('tools.countdown.in', { time: formatCountdown(remaining) })}</Text>;
+}
 
 const stylesheet = StyleSheet.create((theme) => ({
     bubble: {
