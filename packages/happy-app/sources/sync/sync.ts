@@ -3317,6 +3317,11 @@ class Sync {
             clearTimeout(timer);
         }
         this.messageReadDeadlines.clear();
+        for (const timer of this.pushedEntryTimers.values()) {
+            clearTimeout(timer);
+        }
+        this.pushedEntryTimers.clear();
+        this.pushedEntryBatches.clear();
         this.reconnectedCleanup?.();
         this.reconnectedCleanup = null;
         this.appStateSubscription?.remove();
@@ -3805,6 +3810,13 @@ class Sync {
                     normalizedMessages.push(normalized);
 
                     this.applySessionThinkingFromRawContent(sessionId, decrypted.content);
+                    // A page can be a hundred entries and each one is a JSON parse plus the
+                    // reducer's normalization — all on the JS thread. One hop per 25 bounds any
+                    // interaction's wait to a chunk instead of the whole page (the daemon path
+                    // was given the same treatment; this is the server path).
+                    if ((i + 1) % 25 === 0) {
+                        await new Promise((resolve) => setTimeout(resolve, 0));
+                    }
                 }
 
                 this.ingestChannelRead(sessionId, { messages: normalizedMessages });
@@ -3985,10 +3997,14 @@ class Sync {
 
                 const decryptedMessages = await encryption.decryptMessages(olderApiMessages);
                 const normalizedMessages: NormalizedMessage[] = [];
-                for (const decrypted of decryptedMessages) {
+                for (let i = 0; i < decryptedMessages.length; i++) {
+                    const decrypted = decryptedMessages[i];
                     if (!decrypted) continue;
                     const normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
                     if (normalized) normalizedMessages.push(normalized);
+                    if ((i + 1) % 25 === 0) {
+                        await new Promise((resolve) => setTimeout(resolve, 0));
+                    }
                 }
 
                 const newHasOlderMessages = newOldestSeq > 1;
@@ -6086,7 +6102,11 @@ class Sync {
         // applying both would be the one path the dedup is not set up to cover.
         if (body?.t === 'log-entry' && body.id && body.entry) {
             if (this.preferredChannel(body.id) === route) {
-                void this.applyPushedDaemonEntry(body.id, body.entry, body.anchor);
+                // An agent streaming output appends entries in bursts; applying and rendering each
+                // one separately re-rendered the whole visible list per entry, which is the
+                // "message page takes seconds to update" shape. Entries are batched into one
+                // store update instead.
+                this.queuePushedEntry(body.id, body.entry, body.anchor);
             }
             return;
         }
@@ -6126,6 +6146,68 @@ class Sync {
      * a read was what brought it.
      */
     private pushedPositions = new Map<string, string>();
+
+    /** Entries pushed but not yet applied, per session, and the timer that will apply them. */
+    private pushedEntryBatches = new Map<string, { entries: LanSessionLogEntry[]; anchors: (string | undefined)[] }>();
+    private pushedEntryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    /** Long enough to merge a streaming burst, short enough to read as live. */
+    private static readonly PUSH_BATCH_MS = 100;
+
+    private queuePushedEntry(sessionId: string, entry: LanSessionLogEntry, anchor: string | undefined): void {
+        let batch = this.pushedEntryBatches.get(sessionId);
+        if (!batch) {
+            batch = { entries: [], anchors: [] };
+            this.pushedEntryBatches.set(sessionId, batch);
+        }
+        batch.entries.push(entry);
+        batch.anchors.push(anchor);
+        if (this.pushedEntryTimers.has(sessionId)) {
+            return;
+        }
+        const timer = setTimeout(() => {
+            this.pushedEntryTimers.delete(sessionId);
+            const pending = this.pushedEntryBatches.get(sessionId);
+            this.pushedEntryBatches.delete(sessionId);
+            if (pending && pending.entries.length > 0) {
+                void this.applyPushedEntries(sessionId, pending.entries, pending.anchors);
+            }
+        }, Sync.PUSH_BATCH_MS);
+        (timer as unknown as { unref?: () => void }).unref?.();
+        this.pushedEntryTimers.set(sessionId, timer);
+    }
+
+    /** One store update for a burst of pushed entries — see `queuePushedEntry`. */
+    private async applyPushedEntries(sessionId: string, entries: LanSessionLogEntry[], anchors: (string | undefined)[]): Promise<void> {
+        const sessionKey = this.lanSessionKeys.get(sessionId);
+        if (!sessionKey) {
+            // Same rule as a single pushed entry: without the key the position must not move.
+            return;
+        }
+        try {
+            const decrypted = await decryptLanEntries(this.encryption, sessionKey, entries);
+            const messages = toNormalizedMessages(decrypted);
+            if (messages.length > 0) {
+                const fresh = this.ingestChannelRead(sessionId, { messages });
+                log.log(`📡 LAN entries applied for ${sessionId}: ${fresh} new of ${messages.length} (batched)`);
+            }
+            const received: string[] = [];
+            for (const entry of entries) {
+                if (entry.dir === 'in' && entry.localId) {
+                    received.push(entry.localId);
+                }
+            }
+            this.settleReceivedMessages(received);
+            let newest: string | undefined;
+            for (const anchor of anchors) {
+                if (anchor && (!newest || this.compareAnchors(anchor, newest) > 0)) {
+                    newest = anchor;
+                }
+            }
+            this.notePushedPosition(sessionId, newest);
+        } catch (error) {
+            log.log(`📡 LAN entries for ${sessionId} could not be applied: ${String(error)}`);
+        }
+    }
 
     /** The last head a hint reported, per session: what the positions above are compared against. */
     private lastHintHeads = new Map<string, string>();
