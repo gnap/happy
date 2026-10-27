@@ -39,5 +39,8 @@
     "@types/parse-path": "7.0.3",
     "expo-modules-autolinking": "~57.0.16"
   },
-  "version": "1.0.0"
+  "version": "1.0.0",
+  "dependencies": {
+    "async-limiter": "^2.0.0"
+  }
 }
