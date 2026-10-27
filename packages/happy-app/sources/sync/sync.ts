@@ -536,7 +536,18 @@ class Sync {
             overrideSessionCacheDB(new IndexedDBSessionCacheDB());
         }
 
-        this.sessionsSync = new InvalidateSync(this.fetchSessions);
+        // Every session-list fetch defers behind the interaction already under way — event-driven
+        // ones (a reconnect, a push) included, not just the periodic timer. A full fetch is a
+        // ~1MB response whose parse and decrypt are JS-thread work, and a reconnect tends to
+        // happen exactly when a person has just come back and is tapping into a conversation:
+        // without this the tap waited behind the whole cycle. What the screen shows meanwhile is
+        // the cached list, which is what a session list is for.
+        this.sessionsSync = new InvalidateSync(async () => {
+            await new Promise<void>((resolve) => {
+                InteractionManager.runAfterInteractions(() => resolve());
+            });
+            await this.fetchSessions();
+        });
         this.settingsSync = new InvalidateSync(this.syncSettings);
         this.profileSync = new InvalidateSync(this.fetchProfile);
         this.purchasesSync = new InvalidateSync(this.syncPurchases);
