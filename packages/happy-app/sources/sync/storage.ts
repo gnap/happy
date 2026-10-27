@@ -2058,9 +2058,21 @@ export const storage = create<StorageState>()((set, get) => {
                 sessionListViewData
             };
         }),
-        setDaemonSocketStatus: (id, status) => set((state) => ({
-            daemonSockets: { ...state.daemonSockets, [id]: status },
-        })),
+        setDaemonSocketStatus: (id, status) => set((state) => {
+            const previous = state.daemonSockets[id];
+            // A publish that says the same thing is not a change. `publish` builds a fresh object
+            // on every call, and during a retrying connection it is called once per transition on
+            // top of the ones that changed nothing — each one used to wake the list rebuild below.
+            if (previous
+                && previous.phase === status.phase
+                && previous.baseUrl === status.baseUrl
+                && previous.attempt === status.attempt
+                && previous.retryAt === status.retryAt
+                && previous.connectedAt === status.connectedAt) {
+                return state;
+            }
+            return { daemonSockets: { ...state.daemonSockets, [id]: status } };
+        }),
         clearLanSightings: () => set((state) => (Object.keys(state.lanSightings).length === 0 ? state : { ...state, lanSightings: {} })),
         // Replaced wholesale, unlike the LAN's sightings: the relay is answering a question rather
         // than reporting one observation, so what it leaves out is genuinely gone — a machine that
@@ -2534,6 +2546,18 @@ const builtFrom: {
     relayDirectory: unknown;
     socketStatus: unknown;
     daemonSessionList: unknown;
+    channelPriority: unknown;
+    /**
+     * What the list's channel-derived output is made of, for the last build.
+     *
+     * A channel write is not a list change unless an answer the list draws changed. `daemonSockets`
+     * gets a new identity on every retry transition — opening, retrying, opening — and a
+     * reconnecting channel can produce those several times a second. Rebuilding the whole list for
+     * each one (and re-rendering every row with it) is what made the list unresponsive while a
+     * channel was merely trying. This signature is the answers, so a transition nobody can see
+     * costs nothing.
+     */
+    channelSignature: string | null;
 } = {
     sessions: null,
     machines: null,
@@ -2543,21 +2567,47 @@ const builtFrom: {
     relayDirectory: null,
     socketStatus: null,
     daemonSessionList: null,
+    channelPriority: null,
+    channelSignature: null,
 };
 
+/**
+ * The part of the list that comes from channels, as one comparable string.
+ *
+ * Exactly the facts the list draws from them: for each session, whether anything is reaching it
+ * and whether restarting it would change its build. Both are cheap reads — a few map lookups per
+ * driver — which is what makes this cheaper than rebuilding the list to find out it is the same.
+ */
+function channelSignatureOf(state: {
+    sessions: Record<string, Session>;
+    machines: Record<string, { metadata?: { happyCliVersion?: string } | null; daemonState?: { startedWithCliVersion?: string } | null }>;
+    daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }>;
+}, drivers: readonly ChannelDriver[]): string {
+    const parts: string[] = [];
+    for (const session of Object.values(state.sessions)) {
+        const online = resolveSessionReach(session.id, session.metadata?.machineId, drivers).online ? '1' : '0';
+        const restart = sessionNeedsRestart(session, state.machines, state.daemonVersions) ? '1' : '0';
+        parts.push(`${session.id}:${online}:${restart}`);
+    }
+    parts.sort();
+    return parts.join('|');
+}
+
 storage.subscribe((state) => {
-    if (
-        builtFrom.sessions === state.sessions
-        && builtFrom.machines === state.machines
-        && builtFrom.daemonVersions === state.daemonVersions
-        && builtFrom.daemonSockets === state.daemonSockets
-        && builtFrom.lanSightings === state.lanSightings
-        && builtFrom.relayDirectory === state.relayDirectory
-        && builtFrom.socketStatus === state.socketStatus
-        && builtFrom.daemonSessionList === state.daemonSessionList
-    ) {
+    const contentChanged = builtFrom.sessions !== state.sessions
+        || builtFrom.machines !== state.machines
+        || builtFrom.daemonVersions !== state.daemonVersions;
+    const channelChanged = builtFrom.daemonSockets !== state.daemonSockets
+        || builtFrom.lanSightings !== state.lanSightings
+        || builtFrom.relayDirectory !== state.relayDirectory
+        || builtFrom.socketStatus !== state.socketStatus
+        || builtFrom.daemonSessionList !== state.daemonSessionList
+        || builtFrom.channelPriority !== state.localSettings.channelPriority;
+    if (!contentChanged && !channelChanged) {
         return;
     }
+    const drivers = channelDrivers(state, state.localSettings.channelPriority);
+    const signature = channelSignatureOf(state, drivers);
     builtFrom.sessions = state.sessions;
     builtFrom.machines = state.machines;
     builtFrom.daemonVersions = state.daemonVersions;
@@ -2566,12 +2616,18 @@ storage.subscribe((state) => {
     builtFrom.relayDirectory = state.relayDirectory;
     builtFrom.socketStatus = state.socketStatus;
     builtFrom.daemonSessionList = state.daemonSessionList;
+    builtFrom.channelPriority = state.localSettings.channelPriority;
+    const signatureChanged = signature !== builtFrom.channelSignature;
+    builtFrom.channelSignature = signature;
+    if (!contentChanged && !signatureChanged) {
+        return;
+    }
     storage.setState({
         sessionListViewData: buildSessionListViewData(
             state.sessions,
             state.machines,
             state.daemonVersions,
-            channelDrivers(state, state.localSettings.channelPriority),
+            drivers,
         ),
     });
 });
@@ -2785,7 +2841,8 @@ export function useMachinePresenceMap(): Record<string, MachinePresence> {
     const machines = storage(useShallow((state) => state.machines));
     const channelState = storage(useShallow(selectChannelState));
     const priority = storage(useShallow((state) => state.localSettings.channelPriority));
-    return React.useMemo(() => {
+    const previous = React.useRef<Record<string, MachinePresence>>({});
+    const next = React.useMemo(() => {
         // The channels that are switched on, in the order this device prefers them — decided in one
         // place now instead of here, in the header and in the resolver, each slightly differently.
         const drivers = channelDrivers(channelState, priority);
@@ -2803,6 +2860,19 @@ export function useMachinePresenceMap(): Record<string, MachinePresence> {
         }
         return map;
     }, [machines, channelState, priority]);
+    // A channel transition rebuilds this map even when no machine's answer moved — a socket going
+    // from retrying to opening is a new `daemonSockets` object and the same presence for every
+    // machine. Handing that new object to the list re-renders it for nothing, so the previous map
+    // is kept whenever the answers are equal.
+    return React.useMemo(() => {
+        const keys = Object.keys(next);
+        const same = keys.length === Object.keys(previous.current).length
+            && keys.every((id) => previous.current[id] === next[id]);
+        if (!same) {
+            previous.current = next;
+        }
+        return previous.current;
+    }, [next]);
 }
 
 /**
