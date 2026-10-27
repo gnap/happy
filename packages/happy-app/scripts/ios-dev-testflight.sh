@@ -55,6 +55,16 @@ if [[ ! -d "$IOS_DIR/Happydev.xcodeproj" ]] || [[ "${RUN_PREBUILD:-0}" == "1" ]]
   (cd "$IOS_DIR" && pod install)
 fi
 
+# Pin the SQLite engine the same way the device-build script does: the vendored copy in
+# the repo wins over whatever `yarn prebuild`/`pod install` re-materialised from the
+# package (3.50.3 on SDK 57 has a documented slow-query regression — expo/expo #40977).
+SQLITE_PIN="$APP_DIR/vendor/sqlite-3.46.1"
+if [[ -f "$SQLITE_PIN/sqlite3.c" && -f "$SQLITE_PIN/sqlite3.h" ]]; then
+  cp "$SQLITE_PIN/sqlite3.c" "$SQLITE_PIN/sqlite3.h" "$APP_DIR/node_modules/expo-sqlite/vendor/sqlite3/" 2>/dev/null || true
+  cp "$SQLITE_PIN/sqlite3.c" "$SQLITE_PIN/sqlite3.h" "$APP_DIR/node_modules/expo-sqlite/ios/" 2>/dev/null || true
+  echo "Pinned SQLite: $(grep -m1 'define SQLITE_VERSION ' "$SQLITE_PIN/sqlite3.h")"
+fi
+
 cd "$IOS_DIR"
 mkdir -p "$IOS_DIR/build"
 
@@ -68,17 +78,35 @@ bash "$SCRIPT_DIR/patch-revenuecat-swift64.sh"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$IOS_DIR/Happydev/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $MARKETING_VERSION" "$IOS_DIR/Happydev/Info.plist"
 
+# Self-contained signing keychain: an unlocked keychain created from the exported
+# certificate + key, so signing never depends on the login keychain (which may be locked
+# and cannot be unlocked from a daemon-spawned session).
+SIGN_KEYCHAIN="$HOME/Library/Keychains/happy-build.keychain-db"
+EXTRA_SIGN_ARGS=()
+if [[ -f "$SIGN_KEYCHAIN" ]]; then
+  security unlock-keychain -p "" "$SIGN_KEYCHAIN" 2>/dev/null || true
+  security list-keychains -d user -s "$SIGN_KEYCHAIN" "$HOME/Library/Keychains/login.keychain-db" /Library/Keychains/System.keychain
+  # Archive unsigned and sign at export. Command-line signing settings apply to every
+  # target in the workspace, and Swift packages (RaTeX) refuse a provisioning profile —
+  # `RaTeX_RaTeX does not support provisioning profiles`. The export step re-signs the
+  # whole app (frames included) with the distribution identity and the profile.
+  EXTRA_SIGN_ARGS=(
+    CODE_SIGNING_ALLOWED=NO
+    CODE_SIGNING_REQUIRED=NO
+  )
+  echo "==> Signing keychain: $SIGN_KEYCHAIN"
+fi
+
 echo "==> Archiving Happydev (Debug) team=$DEVELOPMENT_TEAM bundle=$BUNDLE_ID version=$MARKETING_VERSION build=$BUILD_NUMBER"
 xcodebuild -workspace Happydev.xcworkspace -scheme Happydev \
   -configuration Debug \
   -destination "generic/platform=iOS" \
   -archivePath "$ARCHIVE_PATH" \
   -derivedDataPath build \
-  -allowProvisioningUpdates \
   DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
   PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
-  CODE_SIGN_STYLE=Automatic \
   MARKETING_VERSION="$MARKETING_VERSION" \
+  "${EXTRA_SIGN_ARGS[@]}" \
   CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
   archive
 

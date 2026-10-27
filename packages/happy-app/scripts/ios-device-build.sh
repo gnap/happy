@@ -39,6 +39,15 @@ fi
 if [[ -d "$IOS_DIR" ]]; then
   SQLITE_VENDOR="$APP_DIR/node_modules/expo-sqlite/vendor/sqlite3"
   SQLITE_IOS="$APP_DIR/node_modules/expo-sqlite/ios"
+  # Pin the SQLite engine when a version is vendored in the repo. expo-sqlite bundles whatever
+  # upstream ships (3.50.3 on SDK 57, which has a documented slow-query regression — expo/expo
+  # #40977), and `yarn install` re-materialises exactly that. Swapping the amalgamation here,
+  # after install and before the copy into the pod, compiles the pinned version instead.
+  SQLITE_PIN="$APP_DIR/vendor/sqlite-3.46.1"
+  if [[ -f "$SQLITE_PIN/sqlite3.c" && -f "$SQLITE_PIN/sqlite3.h" ]]; then
+    cp "$SQLITE_PIN/sqlite3.c" "$SQLITE_PIN/sqlite3.h" "$SQLITE_VENDOR/"
+    echo "Pinned SQLite engine: $(grep -m1 'define SQLITE_VERSION ' "$SQLITE_PIN/sqlite3.h")"
+  fi
   if [[ -d "$SQLITE_VENDOR" ]]; then
     cp "$SQLITE_VENDOR/sqlite3.c" "$SQLITE_VENDOR/sqlite3.h" "$SQLITE_IOS/"
   fi
