@@ -4112,9 +4112,16 @@ class Sync {
             // thread busy exactly when a conversation was being opened — the navigation waited
             // behind work that the next event or the periodic refresh would have done anyway.
             const downFor = Date.now() - (storage.getState().socketLastDisconnectedAt ?? 0);
+            // The list is always re-read, however short the outage. A `new-session` push that
+            // arrived while the socket was down is gone for good, and the periodic refresh that
+            // would eventually cover it runs every five minutes and is skipped entirely when the
+            // person has been idle — which is exactly the "a session I created in another client
+            // does not appear here" shape. One delta request behind a 30s cooldown is the cheap
+            // half of this handler; the side syncs below are the expensive half and keep the gap
+            // threshold.
+            this.lastDesktopSessionRefreshAt = Date.now();
+            this.sessionsSync.invalidate();
             if (downFor >= Sync.RECONNECT_REFRESH_MS) {
-                this.lastDesktopSessionRefreshAt = Date.now();
-                this.sessionsSync.invalidate();
                 this.machinesSync.invalidate();
                 this.artifactsSync.invalidate();
                 this.friendsSync.invalidate();
