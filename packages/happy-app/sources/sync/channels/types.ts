@@ -232,4 +232,6 @@ export type ChannelReason =
     | 'no-machine-key'
     | 'not-on-network'
     | 'server-down-relay'
-    | 'by-priority';
+    | 'by-priority'
+    /** The daemon route answered for this session and had nothing to serve it. */
+    | 'daemon-absent';
