@@ -1508,7 +1508,12 @@ export const storage = create<StorageState>()((set, get) => {
             }
             const reducerResult = reducer(reducerState, reduceInput, session?.agentState ?? undefined);
 
-            const messagesMap: Record<string, Message> = {};
+            // The incremental path starts from what is already held and overlays what the reducer
+            // produced for the added messages — exactly what `applyMessages` does for an append.
+            // Building the map from the reducer's output alone collapses the window: a run over
+            // an *added subset* returns that subset, not the projection of everything held, so
+            // the screen would show only the newest few messages and nothing else.
+            const messagesMap: Record<string, Message> = appendOnlyMerge && held ? { ...held.messagesMap } : {};
             for (const msg of reducerResult.messages) {
                 messagesMap[msg.id] = msg;
             }
