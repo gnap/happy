@@ -3598,6 +3598,15 @@ class Sync {
 
     /** Deadlines for in-flight server message reads, so `stopBackgroundWork` can clear them. */
     private messageReadDeadlines = new Map<string, ReturnType<typeof setTimeout>>();
+    /**
+     * Sessions whose daemon route answered and could not serve them, and until when.
+     *
+     * The resolver's input, so that "which channel is this session on" has one answer: while the
+     * mark is live the session resolves to the server with `daemon-absent`; when it ages out the
+     * daemon is tried again.
+     */
+    private daemonUnavailableUntil = new Map<string, number>();
+    private static readonly DAEMON_ABSENT_RETRY_MS = 60_000;
 
     /**
      * The highest server-seq this App actually holds, per session — the server axis's watermark.
@@ -3672,10 +3681,15 @@ class Sync {
                 // mean the daemon and nothing else.
                 if (this.preferredChannel(sessionId) !== 'server') {
                     const served = await this.fetchMessagesViaDaemon(sessionId);
-                    if (served || this.describeChannel(sessionId).reason === 'pinned') {
-                        return;
+                    // No silent fallback inside a read: the channel is the resolver's answer,
+                    // and a read that disagrees with it is how one session ended up with two
+                    // current channels (logged as `relay (by-priority)` and `asking the server`
+                    // in the same breath). A failure is reported back to the resolver — the next
+                    // tick resolves to the server explicitly, with the reason on record.
+                    if (!served) {
+                        log.log(`📡 fetchMessages: daemon could not serve ${sessionId}; the resolver will place it`);
                     }
-                    log.log(`📡 fetchMessages: daemon could not serve ${sessionId}; asking the server`);
+                    return;
                 }
 
                 const encryption = this.encryption.getSessionEncryption(sessionId);
@@ -5700,6 +5714,11 @@ class Sync {
             // take either: the session is simply unreachable, and says so.
             return [enabledChannels(priority).server ? 'server' : priority[0], 'not-on-network'];
         }
+        if ((channel === 'lan' || channel === 'relay') && (this.daemonUnavailableUntil.get(sessionId) ?? 0) > Date.now()) {
+            // The daemon route for this session answered and had nothing recently — the resolver
+            // says so explicitly instead of letting each read discover it again.
+            return [enabledChannels(priority).server ? 'server' : channel, 'daemon-absent'];
+        }
         if (channel === 'lan') {
             return ['lan', 'reachable'];
         }
@@ -6536,6 +6555,14 @@ class Sync {
             storage.getState().setFetching(sessionId, true);
         }
         const read = await this.fetchSessionFromDaemon(sessionId);
+        if (read) {
+            this.daemonUnavailableUntil.delete(sessionId);
+        } else {
+            // The daemon route answered for this session and had nothing (or nothing came back
+            // at all). Recorded per session so the resolver — not the read path — decides where
+            // the next tick goes, and the daemon is tried again once this ages out.
+            this.daemonUnavailableUntil.set(sessionId, Date.now() + Sync.DAEMON_ABSENT_RETRY_MS);
+        }
         log.log(
             read
                 ? `📡 fetchMessages: on LAN — read ${read.messages.length} message(s), ${read.decryptedCount}/${read.total} decrypted`
