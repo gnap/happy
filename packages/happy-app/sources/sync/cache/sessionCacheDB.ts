@@ -532,9 +532,17 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
             ) as { pages: number; pageSize: number; freePages: number; sqlite: string } | null;
             if (diag) {
                 const mb = Math.round((diag.pages * diag.pageSize) / 1048576);
+                // A WAL that never gets checkpointed grows without bound, and every commit pays
+                // for it. PASSIVE does not block writers; its `log` field is the WAL's frame
+                // count, which is the number that would show it.
+                let walFrames = -1;
+                try {
+                    const wal = await this.db.getFirstAsync('PRAGMA wal_checkpoint(PASSIVE)') as { log?: number } | null;
+                    walFrames = wal?.log ?? -1;
+                } catch { /* diagnostic only */ }
                 log.log(
                     `📦 sessionCacheDB: sqlite ${diag.sqlite}, ${diag.pages} pages × ${diag.pageSize}b` +
-                    ` (${mb}MB, ${diag.freePages} free)`
+                    ` (${mb}MB, ${diag.freePages} free, wal ${walFrames} frames)`
                 );
             }
         } catch {
@@ -672,6 +680,22 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
      */
     private static readonly STUCK_STATEMENT_MS = 90_000;
 
+    /**
+     * A statement that has not answered in this long is treated as the connection's problem
+     * rather than the work's. Measured on a device: a four-row INSERT took 120 seconds, a
+     * two-row one 39, each holding everything behind it. Callers fall back — the hot window and
+     * the channel both still work — so abandoning the wait costs a cache write, not the App.
+     */
+    private static readonly STATEMENT_DEADLINE_MS = 10_000;
+    /**
+     * After two statements in a row run past their deadline, the database is written off for a
+     * while: everything rejects immediately instead of queueing behind a connection that is not
+     * answering, and the cache degrades to the hot window until the cooldown ends.
+     */
+    private static readonly CACHE_COOLDOWN_MS = 300_000;
+    private statementStalls = 0;
+    private cacheCoolingUntil = 0;
+
     private enqueue<T>(work: () => Promise<T>, urgent = false): Promise<T> {
         // A job that never finishes must not take the cache with it. But the previous answer —
         // dropping the queue and opening another connection — was a second fault: the old
@@ -686,7 +710,10 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
             );
             return Promise.reject(new Error('cache busy: a statement has been running too long'));
         }
-        return this.statements.run(async () => {
+        if (Date.now() < this.cacheCoolingUntil) {
+            return Promise.reject(new Error('cache cooling down after stalled statements'));
+        }
+        const queued = this.statements.run(async () => {
             try {
                 return await work();
             } catch (error) {
@@ -706,6 +733,30 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
                 return await work();
             }
         }, urgent);
+        // The race abandons the wait, not the statement — nothing here can cancel a native call —
+        // but the caller gets an answer now, and the next statement re-tests the connection.
+        let deadline: ReturnType<typeof setTimeout> | null = null;
+        const capped = Promise.race([
+            queued.then((value) => {
+                this.statementStalls = 0;
+                return value;
+            }),
+            new Promise<never>((_, reject) => {
+                deadline = setTimeout(() => {
+                    this.statementStalls += 1;
+                    if (this.statementStalls >= 2) {
+                        this.cacheCoolingUntil = Date.now() + ExpoSQLiteSessionCacheDB.CACHE_COOLDOWN_MS;
+                        this.statementStalls = 0;
+                        log.log('📦 sessionCacheDB: statements are not answering; cache cooling down for 5 minutes (hot window only)');
+                    }
+                    reject(new Error('statement deadline passed'));
+                }, ExpoSQLiteSessionCacheDB.STATEMENT_DEADLINE_MS);
+                (deadline as unknown as { unref?: () => void }).unref?.();
+            }),
+        ]);
+        return capped.finally(() => {
+            if (deadline !== null) clearTimeout(deadline);
+        });
     }
 
     /**
