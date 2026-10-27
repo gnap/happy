@@ -28,6 +28,16 @@ import { discoverMachines, accountFingerprintOf } from '@/sync/lan/discovery';
  */
 const SCAN_INTERVAL_MS = 60_000;
 const SCAN_TIMEOUT_MS = 4_000;
+/**
+ * One follow-up browse, soon after a scan that was triggered by waking up or by the network
+ * changing.
+ *
+ * A browse fired the instant the app becomes active can come back empty: the radio has just
+ * rejoined, or mDNS has not seen the multicast group yet. Accepting that as "nothing is here"
+ * leaves the session on the server until the next minute's tick — which is exactly the case this
+ * scan exists for. One retry is enough; the ordinary cadence covers everything after it.
+ */
+const FIRST_SCAN_RETRY_MS = 5_000;
 
 export function useLanScanner(): void {
     React.useEffect(() => {
@@ -41,13 +51,13 @@ export function useLanScanner(): void {
         let warnedNotSignedIn = false;
         let warnedUnavailable = false;
 
-        const scanOnce = async () => {
+        const scanOnce = async (): Promise<boolean> => {
             // `sync.encryption` is only set once the user is signed in and the master secret has
             // been derived; the account public key is the input the discovery filter needs.
             const accountPublicKey = sync.encryption?.contentDataKey;
             // Switched off in the channel priority setting: do not browse at all.
             if (!channelEnabled(storage.getState().localSettings.channelPriority, 'lan')) {
-                return;
+                return false;
             }
             if (!accountPublicKey || cancelled) {
                 // Before sign-in there is no account key, so the scan cannot be filtered to this
@@ -56,7 +66,7 @@ export function useLanScanner(): void {
                     warnedNotSignedIn = true;
                     console.log('📡 LAN scanner: waiting for sign-in (no account key yet)');
                 }
-                return;
+                return false;
             }
             try {
                 if (lastLoggedIds === null) {
@@ -81,7 +91,7 @@ export function useLanScanner(): void {
                     },
                 });
                 if (cancelled) {
-                    return;
+                    return false;
                 }
                 // Keyed on the raw count too, so "the browse stopped seeing anything" is visible
                 // even while the account-filtered result stays empty.
@@ -105,17 +115,41 @@ export function useLanScanner(): void {
                         at,
                     }))
                 );
+                return found.length > 0;
             } catch {
                 // A failed browse is routine (radio state, permissions, no daemons). The TTL keeps
                 // the previous sightings alive; the next tick retries.
+                return false;
             }
+        };
+
+        let retryTimer: ReturnType<typeof setTimeout> | null = null;
+        const clearRetry = () => {
+            if (retryTimer !== null) {
+                clearTimeout(retryTimer);
+                retryTimer = null;
+            }
+        };
+        /** A browse for an occasion, with one follow-up if it finds nothing and one is expected soon. */
+        const scanNow = () => {
+            void scanOnce().then((found) => {
+                if (found || cancelled || appState !== 'active' || retryTimer !== null) {
+                    return;
+                }
+                retryTimer = setTimeout(() => {
+                    retryTimer = null;
+                    if (!cancelled && appState === 'active') {
+                        void scanOnce();
+                    }
+                }, FIRST_SCAN_RETRY_MS);
+            });
         };
 
         const start = () => {
             if (timer !== null) {
                 return;
             }
-            void scanOnce();
+            scanNow();
             timer = setInterval(() => { void scanOnce(); }, SCAN_INTERVAL_MS);
         };
 
@@ -124,6 +158,7 @@ export function useLanScanner(): void {
                 clearInterval(timer);
                 timer = null;
             }
+            clearRetry();
         };
 
         if (appState === 'active') {
@@ -152,8 +187,11 @@ export function useLanScanner(): void {
                     return;
                 }
                 if (appState === 'active') {
+                    // `start` browses now when it is not already running; stopping first is what
+                    // makes a network change take the fresh scan and its retry rather than wait
+                    // for the ordinary interval.
+                    stop();
                     start();
-                    void scanOnce();
                 }
             });
 

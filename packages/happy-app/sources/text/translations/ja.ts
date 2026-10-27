@@ -585,6 +585,15 @@ export const ja: TranslationStructure = {
     },
 
     tools: {
+
+
+        countdown: {
+
+            in: ({ time }: { time: string }) => `${time}後`,
+
+            due: 'まもなく',
+
+        },
         fullView: {
             description: '説明',
             inputParams: '入力パラメータ',

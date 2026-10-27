@@ -552,6 +552,15 @@ export const zhHans: TranslationStructure = {
     },
 
     tools: {
+
+
+        countdown: {
+
+            in: ({ time }: { time: string }) => `${time}后`,
+
+            due: '即将到点',
+
+        },
         fullView: {
             description: '描述',
             inputParams: '输入参数',

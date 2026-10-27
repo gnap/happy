@@ -35,6 +35,15 @@ export type ActivityTask = {
     tool?: string;
     /** Workflow tasks. */
     name?: string;
+    /**
+     * When this task stops on its own, when the tool that started it said so.
+     *
+     * Only monitors (`timeout_ms`, unless persistent) and background commands (`timeout`) carry
+     * one; subagents and workflows run until they are done. Absent means no deadline, not "unknown".
+     */
+    deadlineAt?: number;
+    /** When the task was first seen running. */
+    startedAt?: number;
 };
 
 /**

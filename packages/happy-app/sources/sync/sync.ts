@@ -505,6 +505,16 @@ class Sync {
     private lastNetworkConnected: boolean | null = null;
     /** Last known network type; used to detect interface switches (e.g. WiFi → Cellular). */
     private lastNetworkType: Network.NetworkStateType | null = null;
+    /**
+     * The device's own address last time we looked.
+     *
+     * The one fact that changes when a phone moves between two WiFi networks: `isConnected` stays
+     * true and `type` stays WIFI, so the network listener below has no transition to report. Every
+     * LAN address this App holds was derived against the old network, which is why a resume that
+     * finds a different address has to be treated as a network move even though the OS never said
+     * one happened.
+     */
+    private lastDeviceIp: string | null = null;
     private backgroundSendTimeout: ReturnType<typeof setTimeout> | null = null;
     private backgroundSendNotificationId: string | null = null;
     private backgroundSendStartedAt: number | null = null;
@@ -564,6 +574,10 @@ class Sync {
                     this.failPendingOutboxMessages('Message failed to send in background after 30s. Please retry.');
                 }
                 log.log('📱 App became active');
+                // Ask where this device is now. A trip through `background` is the usual place a
+                // network change hides: the listener was suspended, and a move between two WiFi
+                // networks never produced a transition for it to report anyway.
+                void this.detectNetworkMove();
                 // In-flight fetches cannot be trusted across a real suspension, and the timers that
                 // would have retried them are about to restart against locks they still hold.
                 const suspendedFor = this.backgroundedAt === null ? 0 : Date.now() - this.backgroundedAt;
@@ -3157,6 +3171,35 @@ class Sync {
      * quiet. What is stale is everything about *how* to reach a machine: the address, the token
      * bound to the connection, the socket, and the sightings that described the old network.
      */
+    /**
+     * Treats a changed device address as the network move it is.
+     *
+     * `expo-network` reports connectivity and interface type, not which network: a phone that
+     * joins another WiFi is still connected, still `WIFI`, and the listener stays silent. Its own
+     * address is the difference, and it is the fact every LAN candidate was evaluated against —
+     * so a change here re-arms what the last network taught us, exactly as a reported switch does.
+     */
+    private async detectNetworkMove(): Promise<void> {
+        if (Platform.OS === 'web') {
+            return;
+        }
+        let ip: string;
+        try {
+            ip = await Network.getIpAddressAsync();
+        } catch {
+            return; // no address to compare is not evidence of a move
+        }
+        if (!ip || ip === '0.0.0.0') {
+            return;
+        }
+        const previous = this.lastDeviceIp;
+        this.lastDeviceIp = ip;
+        if (previous !== null && previous !== ip) {
+            log.log(`🌐 Device address changed (${previous} → ${ip}); treating it as a network move`);
+            this.onNetworkChanged('switched');
+        }
+    }
+
     private onNetworkChanged(reason: 'lost' | 'regained' | 'switched'): void {
         // Only what is *known* about reaching a machine is discarded — the cached address and the
         // token bound to it, and the sightings, which describe the network we were on. The sockets
@@ -4069,9 +4112,16 @@ class Sync {
             // thread busy exactly when a conversation was being opened — the navigation waited
             // behind work that the next event or the periodic refresh would have done anyway.
             const downFor = Date.now() - (storage.getState().socketLastDisconnectedAt ?? 0);
+            // The list is always re-read, however short the outage. A `new-session` push that
+            // arrived while the socket was down is gone for good, and the periodic refresh that
+            // would eventually cover it runs every five minutes and is skipped entirely when the
+            // person has been idle — which is exactly the "a session I created in another client
+            // does not appear here" shape. One delta request behind a 30s cooldown is the cheap
+            // half of this handler; the side syncs below are the expensive half and keep the gap
+            // threshold.
+            this.lastDesktopSessionRefreshAt = Date.now();
+            this.sessionsSync.invalidate();
             if (downFor >= Sync.RECONNECT_REFRESH_MS) {
-                this.lastDesktopSessionRefreshAt = Date.now();
-                this.sessionsSync.invalidate();
                 this.machinesSync.invalidate();
                 this.artifactsSync.invalidate();
                 this.friendsSync.invalidate();

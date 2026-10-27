@@ -60,7 +60,14 @@ const taskSections = (groups: ActivityGroup[]): ActivityDetailSection[] =>
         label: KIND_LABELS[group.type]?.() ?? group.type,
         lines: group.tasks.map((task) => {
             const { title, detail } = activityTaskText(task);
-            return { status: task.status, text: title, detail };
+            return {
+                status: task.status,
+                text: title,
+                detail,
+                // A task with a deadline says how long it has left; the bubble is where someone
+                // asks what the count behind the badge is made of.
+                ...(task.deadlineAt !== undefined ? { deadlineAt: task.deadlineAt } : {}),
+            };
         }),
     }));
 

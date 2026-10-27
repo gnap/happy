@@ -146,6 +146,10 @@ export const AgentStateSchema = z.object({
         server: z.string().optional(),
         tool: z.string().optional(),
         name: z.string().optional(),
+        /** When the task stops on its own, when its tool said so (monitor / background command). */
+        deadlineAt: z.number().optional(),
+        /** When the task was first seen running. */
+        startedAt: z.number().optional(),
     })).optional(),
     /**
      * Declared by a CLI that can serve this session over the LAN socket — it keeps the message log

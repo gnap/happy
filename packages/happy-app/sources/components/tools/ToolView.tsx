@@ -221,7 +221,15 @@ export const ToolView = ((props: ToolViewProps) => {
                     // children but its content IS the user-facing question UI. ListAgents is the
                     // same shape of thing: its answer is the content, and a card that hid it would
                     // make the reader open the message page to learn nothing happened.
-                    if (!hasChildren && tool.name !== 'AskUserQuestion' && tool.name !== 'ListAgents' && tool.state !== 'error') {
+                    // The scheduling and watch cards are the same shape: their content is the
+                    // answer (a countdown), not a list of child calls. A card that hid it would
+                    // leave the reader with a title and no idea when anything happens.
+                    const drawsOwnContent = tool.name === 'AskUserQuestion'
+                        || tool.name === 'ListAgents'
+                        || tool.name === 'ScheduleWakeup'
+                        || tool.name === 'CronCreate'
+                        || tool.name === 'Monitor';
+                    if (!hasChildren && !drawsOwnContent && tool.state !== 'error') {
                         return null;
                     }
                     return (

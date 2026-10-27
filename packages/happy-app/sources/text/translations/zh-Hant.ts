@@ -551,6 +551,15 @@ export const zhHant: TranslationStructure = {
     },
 
     tools: {
+
+
+        countdown: {
+
+            in: ({ time }: { time: string }) => `${time}後`,
+
+            due: '即將到點',
+
+        },
         fullView: {
             description: '描述',
             inputParams: '輸入參數',

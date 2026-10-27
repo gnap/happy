@@ -1287,7 +1287,7 @@ export const knownTools = {
             return cmd ? `Watch: ${cmd.slice(0, 60)}` : 'Monitor';
         },
         icon: ICON_MONITOR,
-        minimal: true,
+        // Not minimal: the card's content is the watch's remaining time, not raw JSON.
         isMutable: false,
         input: z.object({
             description: z.string().optional(),
@@ -1306,7 +1306,7 @@ export const knownTools = {
             return prompt.slice(0, 80) || `Cron: ${opts.tool.input?.cron || '?'}`;
         },
         icon: ICON_SCHEDULE,
-        minimal: true,
+        // Not minimal: the card draws the countdown to the next fire.
         noStatus: true,
         input: z.object({
             cron: z.string(),
@@ -1320,6 +1320,19 @@ export const knownTools = {
             return recurring ? 'recurring schedule' : 'one-shot schedule';
         },
     },
+    'ToolSearch': {
+        title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const query = typeof opts.tool.input?.query === 'string' ? opts.tool.input.query : '';
+            return query ? `Search tools: ${query}` : 'Tool Search';
+        },
+        icon: (size: number = 24, color: string = '#000') => <Ionicons name="search-outline" size={size} color={color} />,
+        minimal: true,
+        noStatus: true,
+        input: z.object({
+            query: z.string().optional(),
+            max_results: z.number().optional(),
+        }).partial().passthrough(),
+    },
     'TaskOutput': { title: 'Task Output', icon: ICON_TERMINAL, minimal: true, noStatus: true, input: z.object({ task_id: z.string() }).partial().passthrough() },
     'TaskStop':   { title: 'Stop Task',   icon: ICON_TERMINAL, minimal: true, noStatus: true, input: z.object({ task_id: z.string() }).partial().passthrough() },
     'TaskList':  { title: 'Task List',   icon: ICON_TODO,    minimal: true, noStatus: true, input: z.object({}).partial().passthrough() },
@@ -1331,7 +1344,7 @@ export const knownTools = {
             return reason ? `Wakeup: ${reason}` : 'Scheduled Wakeup';
         },
         icon: ICON_SCHEDULE,
-        minimal: true,
+        // Not minimal: the card draws the countdown to the wake.
         noStatus: true,
         input: z.object({
             delaySeconds: z.number(),

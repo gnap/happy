@@ -550,6 +550,15 @@ export const ca: TranslationStructure = {
     },
 
     tools: {
+
+
+        countdown: {
+
+            in: ({ time }: { time: string }) => `en ${time}`,
+
+            due: 'ara',
+
+        },
         fullView: {
             description: 'Descripció',
             inputParams: 'Paràmetres d\'entrada',

@@ -28,6 +28,9 @@ import { AgentViewFull } from './AgentViewFull';
 import { SkillView } from './SkillView';
 import { SendMessageView } from './SendMessageView';
 import { ListAgentsView } from './ListAgentsView';
+import { ScheduleWakeupView } from './ScheduleWakeupView';
+import { CronCreateView } from './CronCreateView';
+import { MonitorView } from './MonitorView';
 
 export type ToolViewProps = {
     tool: ToolCall;
@@ -68,6 +71,9 @@ export const toolViewRegistry: Record<string, ToolViewComponent> = {
     ListAgents: ListAgentsView,
     Workflow: TaskView,
     workflow: TaskView,
+    ScheduleWakeup: ScheduleWakeupView,
+    CronCreate: CronCreateView,
+    Monitor: MonitorView,
     // Gemini tools (lowercase)
     edit: GeminiEditView,
     execute: GeminiExecuteView,
