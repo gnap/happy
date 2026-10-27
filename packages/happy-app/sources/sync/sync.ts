@@ -6769,7 +6769,12 @@ class Sync {
         if (fresh.length === 0) {
             return 0;
         }
+        const applyStartedAt = Date.now();
         this.applyMessages(sessionId, fresh);
+        const applyMs = Date.now() - applyStartedAt;
+        if (applyMs > 30) {
+            log.log(`⏱️ store apply for ${sessionId}: ${applyMs}ms for ${fresh.length} message(s)`);
+        }
         // Persist because the store changed, not because a request succeeded — see
         // `scheduleCacheSave`. This is what makes the cache independent of which channel
         // delivered the messages, and of whether that channel's fetch also went through.

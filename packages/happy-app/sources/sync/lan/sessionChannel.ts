@@ -4,6 +4,7 @@ import { Encryption } from '@/sync/encryption/encryption';
 import { discoverMachines } from './discovery';
 import { fetchHistory, fetchSessions, LanRequestError } from './client';
 import { getLanCredential, invalidateLanCredential } from './credentials';
+import { log } from '@/log';
 import { decryptLanEntries, decryptLanHistory, type DecryptedLanEntry } from './history';
 
 import type { DaemonRoute, LanSessionSummary } from './types';
@@ -336,11 +337,21 @@ export async function readSessionOverLan(options: {
             if (!history) {
                 return null;
             }
+            const decryptStartedAt = Date.now();
             const decrypted = await decryptLanHistory(options.encryption, history);
+            const decryptMs = Date.now() - decryptStartedAt;
             return {
                 machineId: connection.machineId,
                 tag: history.tag,
-                messages: await toNormalizedMessagesChunked(decrypted.entries),
+                messages: await (async () => {
+                    const normalizeStartedAt = Date.now();
+                    const normalized = await toNormalizedMessagesChunked(decrypted.entries);
+                    log.log(
+                        `⏱️ lan read: decrypt ${decryptMs}ms normalize ${Date.now() - normalizeStartedAt}ms` +
+                        ` (${decrypted.entries.length} entries)`
+                    );
+                    return normalized;
+                })(),
                 received: received(decrypted.entries),
                 decryptedCount: decrypted.decryptedCount,
                 total: decrypted.entries.length,
