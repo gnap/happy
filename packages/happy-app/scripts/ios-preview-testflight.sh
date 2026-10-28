@@ -74,6 +74,28 @@ bash "$SCRIPT_DIR/patch-revenuecat-swift64.sh"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$IOS_DIR/Happypreview/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $MARKETING_VERSION" "$IOS_DIR/Happypreview/Info.plist"
 
+# Self-contained signing keychain: an unlocked keychain created from the exported
+# certificate + key, so signing never depends on the login keychain (which may be locked
+# and cannot be unlocked from a daemon-spawned session). Same setup as
+# ios-dev-testflight.sh.
+SIGN_KEYCHAIN="$HOME/Library/Keychains/happy-build.keychain-db"
+EXTRA_SIGN_ARGS=()
+ARCHIVED_UNSIGNED=0
+if [[ -f "$SIGN_KEYCHAIN" ]]; then
+  security unlock-keychain -p "" "$SIGN_KEYCHAIN" 2>/dev/null || true
+  security list-keychains -d user -s "$SIGN_KEYCHAIN" "$HOME/Library/Keychains/login.keychain-db" /Library/Keychains/System.keychain
+  # Archive unsigned and sign at export. Command-line signing settings apply to every
+  # target in the workspace, and Swift packages (RaTeX) refuse a provisioning profile —
+  # `RaTeX_RaTeX does not support provisioning profiles`. The export step re-signs the
+  # whole app (frames included) with the distribution identity and the profile.
+  EXTRA_SIGN_ARGS=(
+    CODE_SIGNING_ALLOWED=NO
+    CODE_SIGNING_REQUIRED=NO
+  )
+  ARCHIVED_UNSIGNED=1
+  echo "==> Signing keychain: $SIGN_KEYCHAIN"
+fi
+
 echo "==> Archiving Happypreview (Release) team=$DEVELOPMENT_TEAM bundle=$BUNDLE_ID version=$MARKETING_VERSION build=$BUILD_NUMBER"
 xcodebuild -workspace Happypreview.xcworkspace -scheme Happypreview \
   -configuration Release \
@@ -86,6 +108,7 @@ xcodebuild -workspace Happypreview.xcworkspace -scheme Happypreview \
   CODE_SIGN_STYLE=Automatic \
   MARKETING_VERSION="$MARKETING_VERSION" \
   CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+  ${EXTRA_SIGN_ARGS[@]+"${EXTRA_SIGN_ARGS[@]}"} \
   archive
 
 echo "==> Exporting App Store IPA"
@@ -126,6 +149,66 @@ xcodebuild -exportArchive \
 
 IPA_PATH="$EXPORT_DIR/Happypreview.ipa"
 [[ -f "$IPA_PATH" ]] || { echo "Error: IPA not found at $IPA_PATH"; exit 1; }
+
+if [[ "$ARCHIVED_UNSIGNED" == "1" ]]; then
+  # The archive carried no signature (see the signing-keychain block above), so
+  # exportArchive built the entitlement set from an empty base: it keeps what the
+  # profile grants generically but drops the capabilities the app declares itself
+  # (aps-environment, associated-domains) — silently disabling push notifications.
+  # Merge the app's entitlements file back in, re-sign with the same distribution
+  # identity, and repack the IPA.
+  echo "==> Re-applying app entitlements (unsigned archive)"
+  # exportArchive leaves only the .ipa, so unpack it, re-sign the bundle, repack.
+  WORK_DIR="$EXPORT_DIR/resigned"
+  rm -rf "$WORK_DIR"
+  mkdir -p "$WORK_DIR"
+  ( cd "$WORK_DIR" && unzip -q "$IPA_PATH" )
+
+  APP_BUNDLE="$WORK_DIR/Payload/Happypreview.app"
+  [[ -d "$APP_BUNDLE" ]] || { echo "Error: exported app not found at $APP_BUNDLE"; exit 1; }
+  DIST_IDENTITY="$(security find-identity -v -p codesigning "$SIGN_KEYCHAIN" | grep -oE '[A-F0-9]{40}' | head -1)"
+  [[ -n "$DIST_IDENTITY" ]] || { echo "Error: no distribution identity in $SIGN_KEYCHAIN"; exit 1; }
+
+  codesign -d --entitlements :- "$APP_BUNDLE" > "$WORK_DIR/entitlements-current.plist" 2>/dev/null || true
+  python3 - "$WORK_DIR/entitlements-current.plist" "$IOS_DIR/Happypreview/Happypreview.entitlements" "$WORK_DIR/entitlements-merged.plist" <<'PY'
+import plistlib, sys
+
+current_path, declared_path, out_path = sys.argv[1:4]
+
+def load(path):
+    try:
+        with open(path, 'rb') as f:
+            data = plistlib.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+merged = load(current_path)
+# The declared file wins for the capabilities it names; anything the profile already
+# put in the signature is kept.
+for key, value in load(declared_path).items():
+    merged[key] = value
+
+with open(out_path, 'wb') as f:
+    plistlib.dump(merged, f)
+PY
+
+  codesign --force --sign "$DIST_IDENTITY" \
+    --entitlements "$WORK_DIR/entitlements-merged.plist" \
+    --preserve-metadata=identifier,flags,runtime,launch-constraints,library-constraints \
+    --generate-entitlement-der \
+    "$APP_BUNDLE"
+
+  # Repack so the uploaded IPA carries the re-signed bundle.
+  rm -f "$IPA_PATH"
+  ( cd "$WORK_DIR" && zip -qry "$IPA_PATH" Payload )
+
+  if ! codesign -d --entitlements - "$APP_BUNDLE" 2>/dev/null | grep -q "aps-environment"; then
+    echo "Error: aps-environment missing after re-sign — refusing to upload"
+    exit 1
+  fi
+  echo "    aps-environment restored"
+fi
 
 echo "==> Uploading to TestFlight ($IPA_PATH)"
 if [[ -n "$ASC_ISSUER_ID" ]]; then
