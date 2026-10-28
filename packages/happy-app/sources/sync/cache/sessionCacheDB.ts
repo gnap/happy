@@ -710,9 +710,7 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
             );
             return Promise.reject(new Error('cache busy: a statement has been running too long'));
         }
-        if (Date.now() < this.cacheCoolingUntil) {
-            return Promise.reject(new Error('cache cooling down after stalled statements'));
-        }
+        const startedAt = Date.now();
         const queued = this.statements.run(async () => {
             try {
                 return await work();
@@ -738,7 +736,20 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
         let deadline: ReturnType<typeof setTimeout> | null = null;
         const capped = Promise.race([
             queued.then((value) => {
-                this.statementStalls = 0;
+                // A second or more on a statement that is not doing much is the connection
+                // stalling, which holds the JS thread with it. Counting those lets the cache cool
+                // down long before the 10s abandonment threshold would ever fire.
+                const elapsed = Date.now() - startedAt;
+                if (elapsed > 1500) {
+                    this.statementStalls += 1;
+                    if (this.statementStalls >= 2) {
+                        this.cacheCoolingUntil = Date.now() + ExpoSQLiteSessionCacheDB.CACHE_COOLDOWN_MS;
+                        this.statementStalls = 0;
+                        log.log('📦 sessionCacheDB: statements are running seconds long; cache cooling down for 5 minutes (hot window only)');
+                    }
+                } else {
+                    this.statementStalls = 0;
+                }
                 return value;
             }),
             new Promise<never>((_, reject) => {

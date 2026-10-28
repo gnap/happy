@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { useSession, useSessionMessages } from "@/sync/storage";
+import { log } from "@/log";
 import { ActivityIndicator, FlatList, NativeScrollEvent, NativeSyntheticEvent, Platform, StyleSheet, Text, View } from 'react-native';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useHeaderHeight } from '@/utils/responsive';

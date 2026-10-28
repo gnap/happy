@@ -10,14 +10,13 @@ import {
 import { getSuggestions } from '@/components/autocomplete/suggestions';
 import { ChatHeaderView } from '@/components/ChatHeaderView';
 import { ChatList } from '@/components/ChatList';
-import { Deferred } from '@/components/Deferred';
 import { EmptyMessages } from '@/components/EmptyMessages';
 import { VoiceAssistantStatusBar } from '@/components/VoiceAssistantStatusBar';
 import { useDraft } from '@/hooks/useDraft';
 import { Modal } from '@/modal';
 import { gitStatusSync } from '@/sync/gitStatusSync';
 import { sessionAbort } from '@/sync/ops';
-import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionMessages, useSessionReach, useSessionUsage, useSetting } from '@/sync/storage';
+import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionMessages, useSessionOnline, useSessionUsage, useSetting } from '@/sync/storage';
 import { useSession } from '@/sync/storage';
 import { Session } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
@@ -47,6 +46,17 @@ export const SessionView = React.memo((props: { id: string }) => {
     const router = useRouter();
     const session = useSession(sessionId);
     const isDataReady = useIsDataReady();
+    /**
+     * Whether this screen has to wait for the initial sync at all.
+     *
+     * It only matters when the session itself is unknown: the gate exists so a session screen
+     * opened before the list arrives does not flash "session deleted". When the session is already
+     * in the store — restored from cache on a reload — the conversation, its header and its
+     * messages are all there. Gating on the *list* being ready meant a spinner until the initial
+     * sync finished: measured on a device, 8.7 s of blank with 72 hydrated messages underneath,
+     * released only by the ready timeout.
+     */
+    const waitingForFirstData = !isDataReady && !session;
     const { theme } = useUnistyles();
     const safeArea = useSafeAreaInsets();
     const isLandscape = useIsLandscape();
@@ -54,8 +64,8 @@ export const SessionView = React.memo((props: { id: string }) => {
     const headerHeight = useHeaderHeight();
     const realtimeStatus = useRealtimeStatus();
     const isTablet = useIsTablet();
-    /** How this session is being reached, which the header draws from. */
-    const reach = useSessionReach(sessionId, session?.metadata?.machineId);
+    /** Whether anything is reaching this session — the only part the header draws. */
+    const isSessionOnline = useSessionOnline(sessionId, session?.metadata?.machineId);
 
     // The other half of tap-to-screen: the press log is the tap, this is the screen being on it.
     useFocusEffect(React.useCallback(() => {
@@ -73,7 +83,7 @@ export const SessionView = React.memo((props: { id: string }) => {
 
     // Compute header props based on session state
     const headerProps = useMemo(() => {
-        if (!isDataReady) {
+        if (waitingForFirstData) {
             // Loading state - show empty header
             return {
                 title: '',
@@ -100,7 +110,7 @@ export const SessionView = React.memo((props: { id: string }) => {
         // Normal state - show session info
         // The same question the status line below asks, so the header and the input bar cannot
         // disagree about whether this session is being reached.
-        const isLive = reach.online || sessionIsRestarting(session);
+        const isLive = isSessionOnline || sessionIsRestarting(session);
         return {
             title: getSessionName(session),
             subtitle: session.metadata?.path ? formatPathRelativeToHome(session.metadata.path, session.metadata?.homeDir) : undefined,
@@ -111,7 +121,7 @@ export const SessionView = React.memo((props: { id: string }) => {
             flavor: session.metadata?.flavor || null,
             tintColor: isLive ? '#000' : '#8E8E93'
         };
-    }, [session, isDataReady, sessionId, router, reach]);
+    }, [session, waitingForFirstData, sessionId, router, isSessionOnline]);
 
     return (
         <>
@@ -158,7 +168,7 @@ export const SessionView = React.memo((props: { id: string }) => {
 
             {/* Content based on state */}
             <View style={{ flex: 1, paddingTop: !(isLandscape && deviceType === 'phone' && Platform.OS !== 'web') ? safeArea.top + headerHeight + (!isTablet && realtimeStatus !== 'disconnected' ? 48 : 0) : 0 }}>
-                {!isDataReady ? (
+                {waitingForFirstData ? (
                     // Loading state
                     <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
                         <ActivityIndicator size="small" color={theme.colors.textSecondary} />
@@ -341,11 +351,9 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
 
     let content = (
         <>
-            <Deferred>
-                {messages.length > 0 && (
-                    <ChatList session={session} />
-                )}
-            </Deferred>
+            {messages.length > 0 && (
+                <ChatList session={session} />
+            )}
         </>
     );
     const placeholder = messages.length === 0 ? (

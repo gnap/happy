@@ -1,3 +1,5 @@
+import { readResponseTextCooperatively } from '@/utils/readBody';
+import { yieldTask } from '@/utils/yieldTask';
 import Constants from 'expo-constants';
 import { apiSocket } from '@/sync/apiSocket';
 import { AuthCredentials } from '@/auth/tokenStorage';
@@ -76,6 +78,7 @@ import { FeedItem } from './feedTypes';
 import { UserProfile } from './friendTypes';
 import { resolveMessageModeMeta, resolveMessageProfileEnv } from './messageMeta';
 import { loadMessageCache, saveMessageCache, clearMessageCache, clearAllMessageCaches, preloadSessionCacheDB, getCachedLastSeq } from './cache/messageCache';
+import { mergePageIntoWindow } from './messageIdentity';
 import { MAX_CACHED_MESSAGES } from './cache/limits';
 import { preloadSessionsListCache, loadSessionsListCache, saveSessionsListCache, clearSessionsListCache } from './cache/sessionsListCache';
 import { olderAfterSeq } from './cacheSegment';
@@ -272,7 +275,15 @@ class Sync {
      * holding the lock that long is slow, not stuck. Past it, no `finally` is coming — the shape a
      * request the OS cancelled without rejecting leaves behind — and the next caller resets it.
      */
-    private static readonly STUCK_MESSAGE_LOCK_MS = 60_000;
+    /**
+     * A read that has held the session's lock longer than this is reset.
+     *
+     * Measured on a device: one run held the lock 53 seconds (a page whose decrypt stalled), and
+     * every open of that session — including the hydrate that would have shown cached messages
+     * first — queued behind it, which is the "blank conversation after a reload" shape. The read
+     * is abandoned, not cancelled; a fetch that does finish still applies its result.
+     */
+    private static readonly STUCK_MESSAGE_LOCK_MS = 10_000;
     private sessionSendLocks = new Map<string, AsyncLock>();
     /** Limit concurrent message fetches to avoid network congestion (e.g. 150 sessions all requesting at once on reconnect). */
     private static readonly MAX_CONCURRENT_MESSAGE_FETCHES = 5;
@@ -623,10 +634,9 @@ class Sync {
                     this.#invalidateAllSyncs();
                     // Refresh the currently visible session's messages immediately.
                     // After background/foreground the session screen is still mounted
-                    // so onSessionVisible doesn't fire — we must trigger it explicitly.
-                    if (this.currentVisibleSessionId) {
-                        this.onSessionVisible(this.currentVisibleSessionId);
-                    }
+                    // so onSessionVisible doesn't fire — the scheduler's visible session is the
+                    // thing to wake, not the screen lifecycle (which would re-announce the focus).
+                    this.readScheduler.markStale();
                 });
             } else {
                 log.log(`📱 App state changed to: ${nextAppState}`);
@@ -877,10 +887,9 @@ class Sync {
                     this.#invalidateAllSyncs();
                     // Refresh the currently visible session's messages immediately.
                     // After sleep/wake the session screen is still mounted so
-                    // onSessionVisible doesn't fire — we must trigger it explicitly.
-                    if (this.currentVisibleSessionId) {
-                        this.onSessionVisible(this.currentVisibleSessionId);
-                    }
+                    // onSessionVisible doesn't fire — the scheduler's visible session is the
+                    // thing to wake, not the screen lifecycle (which would re-announce the focus).
+                    this.readScheduler.markStale();
                 });
                 recoverDesktopPendingWork();
                 // Full refresh after desktop wake to clean up stale cache.
@@ -1948,12 +1957,19 @@ class Sync {
             const qs = params.toString();
             log.log(`📥 fetchSessions: GET ${API_ENDPOINT}/v2/sessions?${qs}`);
             const fetchStart = performance.now();
+            // The deadline covers the body, not just the headers. `instrumentedFetch` clears its
+            // 30s timer when the response arrives, and a device log then showed the 1.1MB body
+            // still being read 85 seconds later — a request that never ends and is never retried.
+            // The signal is forwarded, so aborting here aborts the read too.
+            const bodyController = new AbortController();
+            const bodyDeadline = setTimeout(() => bodyController.abort(), 30_000);
             const response = await this.instrumentedFetch(`${API_ENDPOINT}/v2/sessions?${qs}`, {
                 headers: {
                     'Authorization': `Bearer ${this.credentials.token}`,
                     'Content-Type': 'application/json',
                     'Accept-Encoding': 'gzip, deflate',
-                }
+                },
+                signal: bodyController.signal,
             });
             const networkMs = Math.round(performance.now() - fetchStart);
 
@@ -1964,9 +1980,17 @@ class Sync {
             }
 
             const parseStart = performance.now();
-            // response.json() uses the browser's native streaming parser (faster than
-            // text()+JSON.parse, especially on JSC engines like WebKitGTK and iOS).
-            const data = await response.json() as { sessions?: unknown };
+            // Split the read from the parse: `response.json()` hides both, and a device log showed
+            // "parse 18s" for a 1.1MB list with no way to tell a slow body from a slow parser.
+            const textStart = performance.now();
+            const body = await readResponseTextCooperatively(response);
+            clearTimeout(bodyDeadline);
+            const rawText = body.text;
+            const textMs = Math.round(performance.now() - textStart);
+            const jsonStart = performance.now();
+            const data = JSON.parse(rawText) as { sessions?: unknown };
+            const jsonMs = Math.round(performance.now() - jsonStart);
+            log.log(`📥 fetchSessions body: read ${textMs}ms (${Math.round(rawText.length / 1024)}KB, ${body.streamed ? 'streamed' : 'whole'}), parse ${jsonMs}ms`);
             // Payload size comes from the header. This used to call JSON.stringify(data).length,
             // which re-serialised the entire (multi-hundred-KB) response on every fetch purely to
             // produce a log line.
@@ -2040,7 +2064,7 @@ class Sync {
                 // sessions = 17.5s of decrypt, during which a tap from the list starved for
                 // seconds behind the batch. A hop per session bounds any one wait to one
                 // session's worth of work.
-                await new Promise((resolve) => setTimeout(resolve, 0));
+                await yieldTask();
                 if (session.dataEncryptionKey) {
                     let decrypted = await decryptWithRetry(session.dataEncryptionKey, session.id);
                     if (!decrypted) {
@@ -2061,7 +2085,7 @@ class Sync {
             for (const session of sessions) {
                 // Same hop as the key loop above: metadata + agentState per session is the
                 // larger half of the batch (17.5s of 91), and it is paid on the JS thread.
-                await new Promise((resolve) => setTimeout(resolve, 0));
+                await yieldTask();
                 // Get session encryption (should always exist after initialization)
                 const sessionEncryption = this.encryption.getSessionEncryption(session.id);
                 if (!sessionEncryption) {
@@ -3509,12 +3533,16 @@ class Sync {
             return;
         }
         const existing = state.sessionMessages[sessionId]?.messages ?? [];
-        if (existing.length > 0) {
-            // Something is already on screen — a push, a read, a previous hydration. It may be
-            // newer than the cached window, and replacing it would be a regression dressed as a
-            // load. Nothing to do.
-            this.hydratedSessions.add(sessionId);
+        if (existing.length > 0 && this.hydratedSessions.has(sessionId)) {
+            // A window is already on screen and it came from this process's cache. Nothing to do.
             return;
+        }
+        if (existing.length > 0) {
+            // Messages are held, but nothing has been hydrated in this process — after a reload
+            // that is a live push that beat the cache to the store, not a window. Measured on a
+            // device: ten pushed messages arrived 170ms after a tap and the cache's sixty-message
+            // window was then refused ("already holds 10; nothing to load") for the rest of the
+            // process. The cache is read and merged into what is held.
         }
         this.hydratedSessions.delete(sessionId);
 
@@ -3523,27 +3551,45 @@ class Sync {
             if (!cached) {
                 return;
             }
-            // A live delivery may have landed while the cache was being read. The store is newer
-            // than the window in that case; leave it alone.
-            if ((storage.getState().sessionMessages[sessionId]?.messages.length ?? 0) > 0) {
+            // A live delivery may have landed while the cache was being read. That window is not
+            // newer than the cache — it is usually a few pushed messages that belong *inside* the
+            // cached one. It used to win by default, and after a reload that meant the screen kept
+            // ten pushed messages and refused the sixty-message window it had on disk. Merge by
+            // identity so neither side is dropped.
+            const heldWindow = storage.getState().sessionMessages[sessionId];
+            const held = heldWindow?.messages ?? [];
+            const merged = held.length > 0 ? mergePageIntoWindow(held, cached.messages) : null;
+            if (held.length > 0 && !merged) {
                 this.hydratedSessions.add(sessionId);
+                log.log(`💬 hydrate: ${sessionId} already held all ${held.length} cached message(s)`);
                 return;
             }
+            const messages = merged ? merged.messages : cached.messages;
+            // The edges of the union, so a merged window never claims to be smaller — or newer —
+            // than what it already held.
+            const lastSeq = held.length > 0
+                ? Math.max(cached.lastSeq, heldWindow?.newestSeq ?? 0)
+                : cached.lastSeq;
+            const oldestSeq = cached.oldestSeq > 0 && (heldWindow?.oldestSeq ?? 0) > 0
+                ? Math.min(cached.oldestSeq, heldWindow!.oldestSeq)
+                : Math.max(cached.oldestSeq, heldWindow?.oldestSeq ?? 0);
+            const hasOlderMessages = cached.hasOlderMessages || (heldWindow?.hasOlderMessages ?? false);
             storage.getState().applyHydratedCache(
                 sessionId,
-                cached.messages,
+                messages,
                 cached.reducerState,
-                cached.oldestSeq,
-                cached.hasOlderMessages,
-                cached.lastSeq,
+                oldestSeq,
+                hasOlderMessages,
+                lastSeq,
             );
-            this.sessionLastSeq.set(sessionId, cached.lastSeq);
+            this.sessionLastSeq.set(sessionId, Math.max(cached.lastSeq, this.sessionLastSeq.get(sessionId) ?? 0));
             // Marked only once the window is in the store. Marking first meant a cancelled read
             // disabled the cache for the rest of the process.
             this.hydratedSessions.add(sessionId);
             log.log(
-                `💬 hydrate: applied ${cached.messages.length} cached messages for ${sessionId}` +
-                ` in ${Date.now() - startedAt}ms (lastSeq=${cached.lastSeq}, oldestSeq=${cached.oldestSeq})`
+                `💬 hydrate: applied ${messages.length} cached messages for ${sessionId}` +
+                ` in ${Date.now() - startedAt}ms (lastSeq=${lastSeq}, oldestSeq=${oldestSeq}` +
+                `${merged ? `, +${merged.added.length} from cache` : ''})`
             );
         };
 
@@ -3815,7 +3861,7 @@ class Sync {
                     // interaction's wait to a chunk instead of the whole page (the daemon path
                     // was given the same treatment; this is the server path).
                     if ((i + 1) % 25 === 0) {
-                        await new Promise((resolve) => setTimeout(resolve, 0));
+                        await yieldTask();
                     }
                 }
 
@@ -4003,7 +4049,7 @@ class Sync {
                     const normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
                     if (normalized) normalizedMessages.push(normalized);
                     if ((i + 1) % 25 === 0) {
-                        await new Promise((resolve) => setTimeout(resolve, 0));
+                        await yieldTask();
                     }
                 }
 
@@ -4353,9 +4399,20 @@ class Sync {
             }
 
             // Fast path already applied the message and updated sessionLastSeq —
-            // no need to trigger a redundant fetchMessages via onSessionVisible.
-            if (!didFastPath) {
-                this.onSessionVisible(updateData.body.sid);
+            // nothing more to read.
+            //
+            // A push says this session changed, not that anyone is looking at it. Calling
+            // onSessionVisible here made every pushed message of every active session claim to be
+            // the screen: it moved the scheduler's poll, re-ran the voice focus announcement
+            // ("Session became focused" for conversations not on screen, several times a second),
+            // refreshed git status and the session list. On a device with two agents running that
+            // was a continuous stream of work on a thread the screen was waiting for.
+            // Only the server channel needs a read here. On a daemon channel the push itself was
+            // applied above and the daemon sends its own `log-grew` hint for a frame the socket
+            // missed — reading on every push cost a full page per message (measured: a read per
+            // 300ms per active session, each one a store write and a re-render of the list).
+            if (!didFastPath && this.preferredChannel(updateData.body.sid) === 'server') {
+                this.readScheduler.wake(updateData.body.sid, 'push');
             }
 
         } else if (updateData.body.t === 'new-session') {
@@ -4492,7 +4549,7 @@ class Sync {
                     const isNowControlledByUser = agentState?.controlledByUser;
                     if (!wasControlledByUser && isNowControlledByUser) {
                         log.log(`🔄 Control returned to mobile for session ${updateData.body.id}, re-fetching messages`);
-                        this.onSessionVisible(updateData.body.id);
+                        this.readScheduler.wake(updateData.body.id, 'control returned');
                     }
                 }
             }
@@ -4966,6 +5023,17 @@ class Sync {
          * and nothing about whether the address works.
          */
         let lastReadFailure: string | null = null;
+        // What this read already holds: the daemon answers with a whole bounded page, and
+        // entries the store already has are dropped before the decryptor sees them. Without this
+        // a poll re-decrypts and re-normalises hundreds of entries to learn about a handful.
+        const knownIdentities = new Set<string>();
+        for (const message of storage.getState().sessionMessages[sessionId]?.messages ?? []) {
+            knownIdentities.add(message.id);
+            const localId = 'localId' in message ? message.localId : null;
+            if (localId) {
+                knownIdentities.add(localId);
+            }
+        }
         const readPage = async (page: Parameters<typeof readSessionOverLan>[0]['page'], connection: LanConnection | null | undefined) => {
             const attempt = await readSessionOverLan({
                 sessionId,
@@ -4976,6 +5044,7 @@ class Sync {
                 page,
                 connection,
                 candidates,
+                isKnown: (id, localId) => knownIdentities.has(id) || (localId !== null && knownIdentities.has(localId)),
             });
             if (machineId && attempt.kind === 'unreachable' && attempt.baseUrl) {
                 storage.getState().candidateFailed(machineId, routes.includes('relay') && attempt.baseUrl.includes('/r/') ? 'relay' : 'lan', attempt.baseUrl);

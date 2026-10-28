@@ -2754,6 +2754,24 @@ export function useLanSightings(): Record<string, LanSighting> {
  * a status line, a group's "2/3 online" and the sort order cannot disagree about the same session —
  * which they did, because each of them worked it out from the raw channel state on its own.
  */
+/**
+ * Whether anything is reaching this session — the only part of the reach a list row draws.
+ *
+ * Subscribing to the whole `SessionReach` made every row re-render whenever any channel report
+ * changed `seenAt` (a timestamp that moves on each daemon/relay answer), even though a row shows
+ * only the online bit. Measured on a device: ~40 rows at ~1.1 renders/s each, continuously, with
+ * the JS thread starved for tens of seconds. A boolean selector re-renders a row only when the
+ * answer actually changes.
+ */
+export function useSessionOnline(sessionId: string, machineId: string | undefined): boolean {
+    return storage((state) => resolveSessionReach(
+        sessionId,
+        machineId,
+        channelDrivers(state, state.localSettings.channelPriority),
+        Date.now(),
+    ).online);
+}
+
 export function useSessionReach(sessionId: string, machineId: string | undefined): SessionReach {
     return storage(useShallow((state) => resolveSessionReach(
         sessionId,

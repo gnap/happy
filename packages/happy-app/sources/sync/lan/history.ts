@@ -11,6 +11,7 @@
  * content key (to unwrap), a client can read history with the server down.
  */
 
+import { yieldTask } from '@/utils/yieldTask';
 import { decodeBase64 } from '@/encryption/base64';
 import { Encryption } from '@/sync/encryption/encryption';
 import { bump } from '@/sync/metrics';
@@ -67,7 +68,20 @@ export async function decryptLanEntries(
 ): Promise<DecryptedLanEntry[]> {
     bump('entriesDecrypted', entries.length);
     const decryptor = await encryption.openEncryption(sessionKey);
-    const plaintexts = await decryptor.decrypt(entries.map((entry) => decodeBase64(entry.c, 'base64')));
+    // One call per page meant one uninterrupted native decrypt of every entry in it: measured on
+    // a device at 7.4s and 10.6s for a 150-entry page at startup, with timers and renders waiting
+    // behind it. Chunked, the same work lets the event loop run between chunks; the cost is paid
+    // either way, but the screen is no longer frozen for its duration.
+    const DECRYPT_CHUNK = 25;
+    const plaintexts: (string | null)[] = [];
+    for (let offset = 0; offset < entries.length; offset += DECRYPT_CHUNK) {
+        const chunk = entries.slice(offset, offset + DECRYPT_CHUNK);
+        const decrypted = await decryptor.decrypt(chunk.map((entry) => decodeBase64(entry.c, 'base64')));
+        plaintexts.push(...decrypted);
+        if (offset + DECRYPT_CHUNK < entries.length) {
+            await yieldTask();
+        }
+    }
 
     return entries.map((entry, index) => ({
         id: entry.id,
