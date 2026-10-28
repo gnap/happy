@@ -83,7 +83,8 @@ if [[ ! -d "$REACT_PREBUILT" ]]; then
     # "Unicode Normalization not appropriate for ASCII-8BIT".
     ( cd "$IOS_DIR" && rm -rf Pods/React-Core-prebuilt Podfile.lock && \
       LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 \
-      RCT_TESTONLY_RNCORE_TARBALL_PATH="$LOCAL_RNCORE" pod install )
+      RCT_TESTONLY_RNCORE_TARBALL_PATH="$LOCAL_RNCORE" pod install ) \
+      || echo "    recovery pod install failed; falling through to the check below"
   fi
 fi
 if [[ ! -d "$REACT_PREBUILT" ]]; then
