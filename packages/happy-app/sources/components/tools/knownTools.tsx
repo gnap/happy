@@ -1287,8 +1287,10 @@ export const knownTools = {
             return cmd ? `Watch: ${cmd.slice(0, 60)}` : 'Monitor';
         },
         icon: ICON_MONITOR,
-        // Not minimal: the card's content is the watch's remaining time, not raw JSON.
+        // Minimal: the watch's time left is drawn once, in the background-task bubble above the
+        // input, where every running task's deadline is answered — not again under the message.
         isMutable: false,
+        minimal: true,
         input: z.object({
             description: z.string().optional(),
             timeout_ms: z.number().optional(),

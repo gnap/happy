@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { mergeTask, normalizeTaskType, taskTypeOf, type BackgroundTaskForApp } from './claudeRemote';
+import { mergeTask, normalizeTaskType, taskTypeOf, toolTimeoutMs, type BackgroundTaskForApp } from './claudeRemote';
 
 const task = (patch: Partial<BackgroundTaskForApp>): BackgroundTaskForApp => ({
     id: 't1',
@@ -68,5 +68,36 @@ describe('the vocabulary a task is named in', () => {
             task({ type: 'shell', description: 'Watch the build log', command: 'tail -f build.log' }),
         );
         expect(merged).toMatchObject({ type: 'monitor', description: 'Watch the build log', command: 'tail -f build.log' });
+    });
+});
+
+describe('toolTimeoutMs', () => {
+    it('reads the timeout only where a tool declares one', () => {
+        expect(toolTimeoutMs('Monitor', { timeout_ms: 60_000 })).toBe(60_000);
+        // A persistent watch has no deadline at all.
+        expect(toolTimeoutMs('Monitor', { timeout_ms: 60_000, persistent: true })).toBeNull();
+        expect(toolTimeoutMs('Bash', { command: 'sleep 5', timeout: 5_000 })).toBe(5_000);
+        // A subagent runs until it is done; there is nothing to count down to.
+        expect(toolTimeoutMs('Agent', { prompt: 'x' })).toBeNull();
+        expect(toolTimeoutMs('Bash', { command: 'ls' })).toBeNull();
+        expect(toolTimeoutMs('Monitor', null)).toBeNull();
+    });
+});
+
+describe('mergeTask deadlines', () => {
+    it('keeps the deadline the snapshot cannot know', () => {
+        // The snapshot decides what is still running; the deadline came from the tool call, which
+        // only the incremental set saw.
+        const merged = mergeTask(
+            task({ type: 'monitor', deadlineAt: 1_700_000_000_000, startedAt: 1_699_999_000_000 }),
+            task({ type: 'monitor' }),
+        );
+        expect(merged.deadlineAt).toBe(1_700_000_000_000);
+        expect(merged.startedAt).toBe(1_699_999_000_000);
+    });
+
+    it('prefers a deadline the incoming task carries, when it has one', () => {
+        const merged = mergeTask(task({ deadlineAt: 1 }), task({ deadlineAt: 2 }));
+        expect(merged.deadlineAt).toBe(2);
     });
 });

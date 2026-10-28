@@ -5539,6 +5539,33 @@ class Sync {
     }
 
     /**
+     * The LAN addresses this App is holding a live socket at, per machine.
+     *
+     * One address per machine — the socket's own — and it is verified continuously by its
+     * heartbeat, so it cannot go quietly stale the way "something answered here once" can: when the
+     * address stops answering, the socket drops and takes this entry with it. That is the whole of
+     * what makes these worth asking for a roster where a published address is not, and why a
+     * device on another network holds none and pays nothing here.
+     */
+    private heldLanAddresses(): { machineId: string; baseUrls: string[] }[] {
+        const held = new Map<string, string[]>();
+        for (const socket of Object.values(storage.getState().daemonSockets)) {
+            if (socket.route !== 'lan' || socket.phase !== 'live' || !socket.baseUrl) {
+                continue;
+            }
+            const addresses = held.get(socket.machineId);
+            if (addresses) {
+                if (!addresses.includes(socket.baseUrl)) {
+                    addresses.push(socket.baseUrl);
+                }
+            } else {
+                held.set(socket.machineId, [socket.baseUrl]);
+            }
+        }
+        return [...held].map(([machineId, baseUrls]) => ({ machineId, baseUrls }));
+    }
+
+    /**
      * Replays what each machine says it has started and archived, from where this App left off.
      *
      * The App learns about a session here before the server knows it exists, which is the point:
@@ -5583,14 +5610,11 @@ class Sync {
         if (!machineKey) {
             return null;
         }
-        // The same decision that governs where this session's messages are read from, because a
-        // restart and a read are about the same machine over the same routes: a session pinned to
-        // one channel is restarted on it, and one the App is reading over the LAN is restarted
-        // there. "The server" is not this method's business — the caller is holding it.
-        const preferred = this.preferredChannel(sessionId);
-        if (preferred === 'server') {
-            return null;
-        }
+        // The same ordering that governs where this session's messages are read from: a session
+        // pinned to one channel is restarted on it, and one the App is reading over the LAN is
+        // restarted there. The server is one of the carriers too — it is the one that can still be
+        // asked when the session resolves to it, or when no machine route answered — so it is not
+        // skipped before any carrier is tried.
         const outcome = await this.carrySessionAction<LanRestartVerdict>(sessionId, {
             operation: 'restart',
             path: `/lan/sessions/${encodeURIComponent(sessionId)}/restart`,
@@ -5637,6 +5661,15 @@ class Sync {
             machineKeyFor: (machineId) => this.getMachineKey(machineId),
             relays: routes.relay ? Object.values(storage.getState().relayEndpoints) : [],
             browseLan: routes.lan,
+            // Where this App is already holding a machine on this network: a live LAN socket sits at
+            // an address that answered, and that address serves a roster the same way — which is what
+            // frees the list from depending on a browse finding the machine, on a network where
+            // multicast never reaches anyone. Held sockets only, deliberately: a published address
+            // nothing has answered at is a claim, and walking claims here would cost a timeout per
+            // dead one on a device that is not on this network at all — claims are what the socket
+            // layer spends its backoff proving, not what a list read pays for.
+            lanAddresses: routes.lan ? this.heldLanAddresses() : [],
+            recorder: this.healthRecorder(),
         });
         if (answers.length === 0) {
             log.log('📡 fetchSessions: server unreachable, and no daemon answered on the LAN or the relay');
