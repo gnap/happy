@@ -9,6 +9,7 @@ import { log } from '@/log';
 import { decryptLanEntries, decryptLanHistory, type DecryptedLanEntry } from './history';
 
 import type { DaemonRoute, LanSessionSummary } from './types';
+import type { HealthRecorder } from '../channels/execute';
 
 /**
  * Reads one session over the local network, producing messages in the same shape the server path
@@ -198,6 +199,18 @@ export async function listSessionsOverLan(options: {
     relays?: { machineId: string; baseUrl: string }[];
     /** Browse the local network. Off when the LAN channel is switched off. */
     browseLan?: boolean;
+    /**
+     * LAN addresses this App holds per machine, tried for the ones the browse did not find.
+     *
+     * A machine need not be discoverable to be reachable: multicast is filtered on many networks —
+     * across subnets, always — and there the addresses a machine published are how it is read at
+     * all. This is still the LAN channel, not a fallback for it, so it comes before the relay and
+     * its answers say `via: 'lan'`; and the addresses are ones something already answered at, so a
+     * stale one costs one failed attempt here and is recorded against, not a browse's full timeout.
+     */
+    lanAddresses?: { machineId: string; baseUrls: string[] }[];
+    /** Where each attempt's outcome is recorded, so the next caller starts from what this one learned. */
+    recorder?: HealthRecorder;
 }): Promise<{ machineId: string; via: DaemonRoute; baseUrl: string; sessions: LanSessionSummary[] }[]> {
     const answers: { machineId: string; via: DaemonRoute; baseUrl: string; sessions: LanSessionSummary[] }[] = [];
     const answered = new Set<string>();
@@ -223,6 +236,33 @@ export async function listSessionsOverLan(options: {
             // This daemon refused or dropped; the relay (or another machine) may still answer.
         }
     }
+    // Machines the browse did not name can still be on this network, at an address this App
+    // already holds — a machine is not made unreachable by multicast being filtered, and the
+    // socket this App holds at its published address is the same fact a browse would have stated.
+    // One address per machine is all the caller has to mean by "holds": what answered is asked, and
+    // what has gone stale since is recorded against and skipped, not retried into the next tick.
+    await Promise.all((options.lanAddresses ?? []).map(async (held) => {
+        const machineKey = options.machineKeyFor(held.machineId);
+        if (!machineKey || answered.has(held.machineId)) {
+            return;
+        }
+        for (const baseUrl of held.baseUrls) {
+            try {
+                const { token } = await getLanCredential(baseUrl, machineKey);
+                answers.push({ machineId: held.machineId, via: 'lan', baseUrl, sessions: await fetchSessions(baseUrl, token) });
+                options.recorder?.succeeded(held.machineId, 'lan', baseUrl);
+                answered.add(held.machineId);
+                return;
+            } catch (error) {
+                // Only silence counts against the address, the same rule everywhere else: a daemon
+                // that answered and refused said something about this device, not about the address.
+                if (!(error instanceof LanRequestError)) {
+                    options.recorder?.failed(held.machineId, 'lan', baseUrl);
+                }
+                // This address did not answer; the machine's next one, or the relay, may still.
+            }
+        }
+    }));
     // The relay is independent of the LAN, not a fallback for a browse that found nothing: a
     // machine that is not on this network is reached here, and one already answered above is skipped.
     await Promise.all((options.relays ?? []).map(async (relay) => {
