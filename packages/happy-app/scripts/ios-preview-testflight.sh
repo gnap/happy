@@ -64,6 +64,36 @@ fi
 cd "$IOS_DIR"
 mkdir -p "$IOS_DIR/build"
 
+# React Native decides whether to use the prebuilt React core by asking Maven whether
+# the artifact exists (see node_modules/react-native/scripts/cocoapods/rncore.rb). If
+# that check fails — flaky network — it silently falls back to building React from
+# source, which produces a static React-Core while the precompiled Expo modules
+# (ExpoPrint, …) link dynamically against @rpath/React.framework/React. The app then
+# dies at launch with "dyld: Library not loaded: @rpath/React.framework/React".
+# Builds 30 and 31 shipped exactly like that. Restore from the local tarball when we
+# have one, and refuse to build rather than emit another crasher.
+REACT_PREBUILT="$IOS_DIR/Pods/React-Core-prebuilt/React.xcframework"
+if [[ ! -d "$REACT_PREBUILT" ]]; then
+  echo "==> React prebuilt core missing (source-build fallback); restoring from local tarball"
+  LOCAL_RNCORE="$(ls "$IOS_DIR"/Pods/ReactNativeCore-artifacts/reactnative-core-*-release.tar.gz 2>/dev/null | head -1)"
+  if [[ -f "$LOCAL_RNCORE" ]]; then
+    # Drop the whole pod dir as well: with it still present CocoaPods considers the
+    # pod installed and skips re-extracting the tarball, leaving React-VFS-template.yaml
+    # missing. pod install also needs a UTF-8 locale or Ruby 4 dies with
+    # "Unicode Normalization not appropriate for ASCII-8BIT".
+    ( cd "$IOS_DIR" && rm -rf Pods/React-Core-prebuilt Podfile.lock && \
+      LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 \
+      RCT_TESTONLY_RNCORE_TARBALL_PATH="$LOCAL_RNCORE" pod install )
+  fi
+fi
+if [[ ! -d "$REACT_PREBUILT" ]]; then
+  echo "Error: React prebuilt core is missing at $REACT_PREBUILT."
+  echo "       Building now would ship an app that crashes at launch (missing React.framework)."
+  echo "       Fix the network to repo1.maven.org, or restore the tarball in"
+  echo "       ios/Pods/ReactNativeCore-artifacts/ and re-run."
+  exit 1
+fi
+
 # RevenueCat 5.55.3 doesn't compile under Swift 6.4 (Xcode 27). Lives in ios/Pods/,
 # so it must be re-applied after every pod install.
 bash "$SCRIPT_DIR/patch-revenuecat-swift64.sh"
