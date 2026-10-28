@@ -260,7 +260,10 @@ export async function restartSessionAt(
     const response = await request(`${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/restart`, {
         method: 'POST',
         token,
-        headers: { 'content-type': 'application/json', ...(proof ?? {}) },
+        // No body, so no content-type: a POST declaring `application/json` with nothing in it is
+        // rejected by the daemon's body parser before the route runs, and the restart silently
+        // never happens. Only the proof travels in the headers.
+        headers: { ...(proof ?? {}) },
         // A restart kills a process and starts another. It is not slow, but it is not a read
         // either, and the shortest timeout in this file is for questions that are one round trip.
         timeoutMs: historyTimeoutFor(baseUrl),

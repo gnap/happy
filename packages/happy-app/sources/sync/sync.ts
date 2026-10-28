@@ -5583,14 +5583,11 @@ class Sync {
         if (!machineKey) {
             return null;
         }
-        // The same decision that governs where this session's messages are read from, because a
-        // restart and a read are about the same machine over the same routes: a session pinned to
-        // one channel is restarted on it, and one the App is reading over the LAN is restarted
-        // there. "The server" is not this method's business — the caller is holding it.
-        const preferred = this.preferredChannel(sessionId);
-        if (preferred === 'server') {
-            return null;
-        }
+        // The same ordering that governs where this session's messages are read from: a session
+        // pinned to one channel is restarted on it, and one the App is reading over the LAN is
+        // restarted there. The server is one of the carriers too — it is the one that can still be
+        // asked when the session resolves to it, or when no machine route answered — so it is not
+        // skipped before any carrier is tried.
         const outcome = await this.carrySessionAction<LanRestartVerdict>(sessionId, {
             operation: 'restart',
             path: `/lan/sessions/${encodeURIComponent(sessionId)}/restart`,
