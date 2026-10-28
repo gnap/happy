@@ -7,6 +7,7 @@ export {
     normalizeTaskType,
     taskTypeOf,
     mergeTask,
+    toolTimeoutMs,
     type BackgroundTaskForApp,
     type ClaudeSessionOpts,
 } from './claudeSession';

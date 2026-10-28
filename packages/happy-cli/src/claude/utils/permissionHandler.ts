@@ -203,6 +203,15 @@ export class PermissionHandler {
             // Set up abort signal handling
             const abortHandler = () => {
                 this.pendingRequests.delete(id);
+                // The prompt is drawn from agent state, not from the pending map: without this the
+                // App keeps asking the user to confirm a request the agent has already abandoned,
+                // and their confirmation is dropped as "not found".
+                void this.session.client.updateAgentState((currentState) => {
+                    const requests = { ...(currentState.requests ?? {}) };
+                    delete requests[id];
+                    return { ...currentState, requests };
+                });
+                logger.debug(`Permission request aborted for tool call ${id}`);
                 reject(new Error('Permission request aborted'));
             };
             signal.addEventListener('abort', abortHandler, { once: true });

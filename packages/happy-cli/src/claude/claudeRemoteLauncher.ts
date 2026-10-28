@@ -68,6 +68,7 @@ import { getToolName } from "./utils/getToolName";
 import { buildClaudeTurnUsagePayload } from "./utils/claudeTurnUsage";
 import { createEnvelope } from '@slopus/happy-wire';
 import { createSessionScanner } from "./utils/sessionScanner";
+import { delay } from "@/utils/time";
 
 interface PermissionsField {
     date: number;
@@ -103,6 +104,9 @@ function formatLaunchError(error: unknown): Record<string, unknown> {
         value: String(error),
     };
 }
+
+/** How long a waiting message sleeps between checks while a permission request is open. */
+const PERMISSION_SETTLE_POLL_MS = 200;
 
 export async function claudeRemoteLauncher(session: Session): Promise<'switch' | 'exit'> {
     logger.debug('[claudeRemoteLauncher] Starting remote launcher');
@@ -680,7 +684,23 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             if (permissionHandler.hasPendingRequests()) {
                                 logger.debug('[remote] nextMessage deferring message (permission request pending)');
                                 pending = { message: msg.message, mode: msg.mode, meta: msg.meta, hash: msg.hash };
-                                return null;
+                                // Wait for the permission to settle instead of returning null: null
+                                // ends the turn, and ending the turn resets the permission handler —
+                                // which rejects the very request the user is about to confirm
+                                // ("Session reset"), aborting the tool call they were answering.
+                                // The message is held in `pending` and handed over once the request
+                                // resolves, still within this turn.
+                                while (permissionHandler.hasPendingRequests()) {
+                                    await delay(PERMISSION_SETTLE_POLL_MS);
+                                }
+                                // The input loop discards a return that races a turn end; keep the
+                                // message for the next turn rather than losing it.
+                                if (turnStopping) {
+                                    return null;
+                                }
+                                const held = pending;
+                                pending = null;
+                                return held;
                             }
                             if (session.claudeTurnActiveRef) {
                                 session.claudeTurnActiveRef.current = true;
