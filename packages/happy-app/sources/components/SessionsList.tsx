@@ -1,4 +1,5 @@
 import React from 'react';
+import { useCoalesced } from '@/hooks/useCoalesced';
 import { View, Pressable, SectionList, Platform, ActivityIndicator, RefreshControl } from 'react-native';
 import { Swipeable } from 'react-native-gesture-handler';
 import { Text } from '@/components/StyledText';
@@ -230,7 +231,9 @@ const stylesheet = StyleSheet.create((theme) => ({
 export function SessionsList() {
     const styles = stylesheet;
     const safeArea = useSafeAreaInsets();
-    const data = useVisibleSessionListViewData();
+    // The list commits at most once a second: see `useCoalesced` — a commit costs 80–140 ms and
+    // the store wrote it 2–4 times a second, so the cadence is the whole cost.
+    const data = useCoalesced(useVisibleSessionListViewData(), 1000);
     // Resolved once per render rather than per host-group item: the row renderer is a map/switch,
     // where a hook call per item would break the rules of hooks.
     const machinePresence = useMachinePresenceMap();
@@ -484,22 +487,34 @@ export function SessionsList() {
 
     // Footer removed - all sessions now shown inline
 
+    /**
+     * The list element, reused across re-renders that do not change it.
+     *
+     * This component re-renders for its other subscriptions too (machine presence, settings,
+     * pathname), and each of those renders used to reconcile the whole `SectionList` subtree —
+     * measured at 100–140 ms per commit. Returning the same element lets React skip that subtree
+     * when the data and handlers are unchanged.
+     */
+    const list = React.useMemo(() => (
+        <SectionList
+            sections={sections}
+            renderItem={renderItem}
+            renderSectionHeader={renderSectionHeader}
+            keyExtractor={keyExtractor}
+            contentContainerStyle={{ paddingBottom: safeArea.bottom + 128, maxWidth: layout.maxWidth }}
+            ListHeaderComponent={HeaderComponent}
+            stickySectionHeadersEnabled={true}
+            refreshControl={
+                <RefreshControl refreshing={isRefreshing} onRefresh={handleRefresh} />
+            }
+        />
+    ), [sections, renderItem, renderSectionHeader, keyExtractor, HeaderComponent, isRefreshing, handleRefresh, safeArea.bottom]);
+
     return (
         <View style={styles.container}>
             <View style={styles.contentContainer}>
                 <View style={{ flex: 1 }}>
-                    <SectionList
-                        sections={sections}
-                        renderItem={renderItem}
-                        renderSectionHeader={renderSectionHeader}
-                        keyExtractor={keyExtractor}
-                        contentContainerStyle={{ paddingBottom: safeArea.bottom + 128, maxWidth: layout.maxWidth }}
-                        ListHeaderComponent={HeaderComponent}
-                        stickySectionHeadersEnabled={true}
-                        refreshControl={
-                            <RefreshControl refreshing={isRefreshing} onRefresh={handleRefresh} />
-                        }
-                    />
+                    {list}
                 </View>
             </View>
         </View>

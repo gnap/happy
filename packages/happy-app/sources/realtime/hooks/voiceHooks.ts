@@ -28,6 +28,19 @@ interface SessionMetadata {
 let shownSessions = new Set<string>();
 let lastFocusSession: string | null = null;
 
+/**
+ * Whether any of this work has somewhere to go.
+ *
+ * The hooks used to format the whole context *first* and only then discover there is no voice
+ * session to send it to: `reportSession` builds a full conversation on the JS thread, and every
+ * message batch built its formatted text, on the session-list/message path, once per message.
+ * With the assistant not running that was pure work — and it ran at the same rate as incoming
+ * traffic.
+ */
+function voiceActive(): boolean {
+    return getVoiceSession() !== null && isVoiceSessionStarted();
+}
+
 function reportContextualUpdate(update: string | null | undefined) {
     if (VOICE_CONFIG.ENABLE_DEBUG_LOGGING) {
         console.log('🎤 Voice: Reporting contextual update:', update);
@@ -60,7 +73,12 @@ function reportSession(sessionId: string) {
     const session = storage.getState().sessions[sessionId];
     if (!session) return;
     const messages = storage.getState().sessionMessages[sessionId]?.messages ?? [];
+    const startedAt = Date.now();
     const contextUpdate = formatSessionFull(session, messages);
+    const ms = Date.now() - startedAt;
+    if (ms > 30) {
+        console.log(`⏱️ voice formatSessionFull ${ms}ms ${contextUpdate.length} chars (${messages.length} messages)`);
+    }
     reportContextualUpdate(contextUpdate);
 }
 
@@ -70,8 +88,8 @@ export const voiceHooks = {
      * Called when a session comes online/connects
      */
     onSessionOnline(sessionId: string, metadata?: SessionMetadata) {
-        if (VOICE_CONFIG.DISABLE_SESSION_STATUS) return;
-        
+        if (VOICE_CONFIG.DISABLE_SESSION_STATUS || !voiceActive()) return;
+
         reportSession(sessionId);
         const contextUpdate = formatSessionOnline(sessionId, metadata);
         reportContextualUpdate(contextUpdate);
@@ -81,8 +99,8 @@ export const voiceHooks = {
      * Called when a session goes offline/disconnects
      */
     onSessionOffline(sessionId: string, metadata?: SessionMetadata) {
-        if (VOICE_CONFIG.DISABLE_SESSION_STATUS) return;
-        
+        if (VOICE_CONFIG.DISABLE_SESSION_STATUS || !voiceActive()) return;
+
         reportSession(sessionId);
         const contextUpdate = formatSessionOffline(sessionId, metadata);
         reportContextualUpdate(contextUpdate);
@@ -93,7 +111,7 @@ export const voiceHooks = {
      * Called when user navigates to/views a session
      */
     onSessionFocus(sessionId: string, metadata?: SessionMetadata) {
-        if (VOICE_CONFIG.DISABLE_SESSION_FOCUS) return;
+        if (VOICE_CONFIG.DISABLE_SESSION_FOCUS || !voiceActive()) return;
         if (lastFocusSession === sessionId) return;
         lastFocusSession = sessionId;
         reportSession(sessionId);
@@ -104,8 +122,8 @@ export const voiceHooks = {
      * Called when Claude requests permission for a tool use
      */
     onPermissionRequested(sessionId: string, requestId: string, toolName: string, toolArgs: any) {
-        if (VOICE_CONFIG.DISABLE_PERMISSION_REQUESTS) return;
-        
+        if (VOICE_CONFIG.DISABLE_PERMISSION_REQUESTS || !voiceActive()) return;
+
         reportSession(sessionId);
         reportTextUpdate(formatPermissionRequest(sessionId, requestId, toolName, toolArgs));
     },
@@ -114,8 +132,8 @@ export const voiceHooks = {
      * Called when agent sends a message/response
      */
     onMessages(sessionId: string, messages: Message[]) {
-        if (VOICE_CONFIG.DISABLE_MESSAGES) return;
-        
+        if (VOICE_CONFIG.DISABLE_MESSAGES || !voiceActive()) return;
+
         reportSession(sessionId);
         reportContextualUpdate(formatNewMessages(sessionId, messages));
     },
@@ -143,8 +161,8 @@ export const voiceHooks = {
      * Called when Claude Code finishes processing (ready event)
      */
     onReady(sessionId: string) {
-        if (VOICE_CONFIG.DISABLE_READY_EVENTS) return;
-        
+        if (VOICE_CONFIG.DISABLE_READY_EVENTS || !voiceActive()) return;
+
         reportSession(sessionId);
         reportTextUpdate(formatReadyEvent(sessionId));
     },

@@ -1,9 +1,11 @@
+import { yieldTask } from '@/utils/yieldTask';
 import { normalizeRawMessage, type NormalizedMessage } from '@/sync/typesRaw';
 import { collapseDuplicateMessages } from '@/sync/messageIdentity';
 import { Encryption } from '@/sync/encryption/encryption';
 import { discoverMachines } from './discovery';
 import { fetchHistory, fetchSessions, LanRequestError } from './client';
 import { getLanCredential, invalidateLanCredential } from './credentials';
+import { log } from '@/log';
 import { decryptLanEntries, decryptLanHistory, type DecryptedLanEntry } from './history';
 
 import type { DaemonRoute, LanSessionSummary } from './types';
@@ -132,7 +134,7 @@ export async function toNormalizedMessagesChunked(entries: DecryptedLanEntry[], 
         }
         if (++sinceYield >= every) {
             sinceYield = 0;
-            await new Promise((resolve) => setTimeout(resolve, 0));
+            await yieldTask();
         }
     }
     return collapseDuplicateMessages(messages);
@@ -272,6 +274,13 @@ export async function readSessionOverLan(options: {
      */
     page: { kind: 'tail' } | { kind: 'follow'; cursor: string } | { kind: 'older'; before: string };
     /**
+     * Whether the reader already holds this entry. A daemon page is bounded but whole — it can be
+     * hundreds of entries when only a handful are new — and decrypting and normalising the rest
+     * is the cost of a read measured in seconds. The envelope carries id/localId in the clear, so
+     * known entries can be dropped before the decryptor sees them.
+     */
+    isKnown?: (id: string, localId: string | null) => boolean;
+    /**
      * Every address worth trying, best first, already filtered to those that may be tried now.
      *
      * The caller decides this, not a browse: an address the machine published is as real as one a
@@ -336,11 +345,38 @@ export async function readSessionOverLan(options: {
             if (!history) {
                 return null;
             }
-            const decrypted = await decryptLanHistory(options.encryption, history);
+            const decryptStartedAt = Date.now();
+            const allEntries = history.entries;
+            const known = options.isKnown;
+            const filtered = known
+                ? allEntries.filter((entry) => !known(entry.id, entry.localId ?? null))
+                : allEntries;
+            // A tail page is the whole bounded page — hundreds of entries — but the window a
+            // screen renders is tens. Decrypting the rest to throw it away is the seconds-long
+            // tail read; the newest slice is the part the window becomes, and older history is
+            // reachable by scrolling through the ordinary older-page path.
+            // Any page, not just a tail: a follow read against a stale cursor is answered with the
+            // whole backlog (measured: 465 entries on a session whose window holds 150), and
+            // decrypting it is the seconds-long read. The window only ever becomes the newest
+            // slice; the rest is reachable through the older-page path when scrolled to.
+            const PAGE_DECRYPT_LIMIT = 150;
+            const entries = filtered.length > PAGE_DECRYPT_LIMIT
+                ? filtered.slice(-PAGE_DECRYPT_LIMIT)
+                : filtered;
+            const decrypted = await decryptLanHistory(options.encryption, { ...history, entries });
+            const decryptMs = Date.now() - decryptStartedAt;
             return {
                 machineId: connection.machineId,
                 tag: history.tag,
-                messages: await toNormalizedMessagesChunked(decrypted.entries),
+                messages: await (async () => {
+                    const normalizeStartedAt = Date.now();
+                    const normalized = await toNormalizedMessagesChunked(decrypted.entries);
+                    log.log(
+                        `⏱️ lan read: decrypt ${decryptMs}ms normalize ${Date.now() - normalizeStartedAt}ms` +
+                        ` (${decrypted.entries.length} entries)`
+                    );
+                    return normalized;
+                })(),
                 received: received(decrypted.entries),
                 decryptedCount: decrypted.decryptedCount,
                 total: decrypted.entries.length,

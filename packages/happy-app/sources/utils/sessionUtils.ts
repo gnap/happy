@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { Session } from '@/sync/storageTypes';
-import { useSessionReach } from '@/sync/storage';
+import { useSessionOnline } from '@/sync/storage';
 import { sessionIsRestarting } from '@/utils/sessionRestart';
 import { t } from '@/text';
 
@@ -34,8 +34,7 @@ export function useSessionStatus(session: Session): SessionStatus {
     // device has, rather than worked out here from the particular channel state this file happened
     // to know about. The server's view is consulted only when nothing nearer can answer: it is a
     // report about the past, and a report about the past must not overwrite what is happening now.
-    const reach = useSessionReach(session.id, session.metadata?.machineId);
-    const isOnline = reach.online;
+    const isOnline = useSessionOnline(session.id, session.metadata?.machineId);
     const hasPermissions = (session.agentState?.requests && Object.keys(session.agentState.requests).length > 0 ? true : false);
 
     const vibingMessage = React.useMemo(() => {

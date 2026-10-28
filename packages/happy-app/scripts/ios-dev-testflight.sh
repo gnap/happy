@@ -55,16 +55,6 @@ if [[ ! -d "$IOS_DIR/Happydev.xcodeproj" ]] || [[ "${RUN_PREBUILD:-0}" == "1" ]]
   (cd "$IOS_DIR" && pod install)
 fi
 
-# Pin the SQLite engine the same way the device-build script does: the vendored copy in
-# the repo wins over whatever `yarn prebuild`/`pod install` re-materialised from the
-# package (3.50.3 on SDK 57 has a documented slow-query regression — expo/expo #40977).
-SQLITE_PIN="$APP_DIR/vendor/sqlite-3.46.1"
-if [[ -f "$SQLITE_PIN/sqlite3.c" && -f "$SQLITE_PIN/sqlite3.h" ]]; then
-  cp "$SQLITE_PIN/sqlite3.c" "$SQLITE_PIN/sqlite3.h" "$APP_DIR/node_modules/expo-sqlite/vendor/sqlite3/" 2>/dev/null || true
-  cp "$SQLITE_PIN/sqlite3.c" "$SQLITE_PIN/sqlite3.h" "$APP_DIR/node_modules/expo-sqlite/ios/" 2>/dev/null || true
-  echo "Pinned SQLite: $(grep -m1 'define SQLITE_VERSION ' "$SQLITE_PIN/sqlite3.h")"
-fi
-
 cd "$IOS_DIR"
 mkdir -p "$IOS_DIR/build"
 
