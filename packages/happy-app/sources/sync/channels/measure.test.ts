@@ -280,14 +280,29 @@ describe('what a driver offers to send to', () => {
         expect(socketOf(carried, 'relay')).toMatchObject({ kind: 'address', route: 'relay', baseUrl: RELAY });
     });
 
-    it('offers nothing on the relay while the hub is down', () => {
-        // The relay is one connection and a machine is a stream inside it. Offering an address with
-        // the hub down is what had the socket layer open a per-machine connection to the same relay.
-        const carried = { relayHubConnected: false, relayDirectory: { 'machine-1': { at: 0, sessions: [] } } };
-        expect(socketOf(carried, 'relay')).toBeNull();
-        expect(endpointsOf(carried, 'relay')).toEqual([]);
-        // And a session on that machine then falls to another channel, which is the design.
+    it('keeps the relay reachable while the hub is reconnecting, and only the socket gated by it', () => {
+        // The hub is one transport: the stream a machine's live socket rides. A machine's HTTP
+        // route through the relay does not pass through it, and the relay holding the machine is the
+        // relay's own connection to it — our socket going away says nothing about either. Gating the
+        // whole channel on it sent sessions to the server whenever this side's hub blipped.
+        const carried = {
+            relayHubConnected: false,
+            relayDirectory: { 'machine-1': { at: 0, sessions: [] } },
+            // Every machine with a key has a derived relay address; the directory says the relay
+            // is holding this one, which is what makes the route usable.
+            relayEndpoints: { 'machine-1': { baseUrl: RELAY, source: 'derived' } },
+        };
+        expect(endpointsOf(carried, 'relay')).toHaveLength(1);
         expect(channelAvailability({ drivers: channelDrivers(state(carried), ['lan', 'server', 'relay']), machineId: 'machine-1', now: 0 }).relay)
+            .toBe(true);
+        // The live socket, though, is a stream inside the hub: opening a per-machine connection to
+        // the same relay is the shape the hub replaced.
+        expect(socketOf(carried, 'relay')).toBeNull();
+
+        // A route derived from the machine key is only a route: with no answer and the relay not
+        // saying it holds the machine, the channel is not reachable.
+        const derived = { relayHubConnected: false, relayEndpoints: { 'machine-1': { baseUrl: RELAY, source: 'derived' } } };
+        expect(channelAvailability({ drivers: channelDrivers(state(derived), ['lan', 'server', 'relay']), machineId: 'machine-1', now: 0 }).relay)
             .toBe(false);
     });
 

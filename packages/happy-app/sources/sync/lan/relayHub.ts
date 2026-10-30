@@ -370,7 +370,11 @@ export class RelayHub {
                 this.streams.delete(id);
                 stream.fail(1006, 'relay hub closed');
             }
-            this.setMachines([]);
+            // The last directory stays. This socket going away is *this side's* interface — a
+            // network change, a relay restart of the hub endpoint — and says nothing about what the
+            // relay still holds; the machine's daemon is connected to the relay, not to us. Only a
+            // directory frame from a connected hub replaces it, and until then the reader keeps
+            // using what the relay last said while the HTTP route is still there to try.
             this.scheduleReconnect();
         };
         socket.onerror = () => { /* onclose follows */ };
