@@ -1657,6 +1657,23 @@ export async function startDaemon(): Promise<void> {
           // into the callback below.
           const accountPublicKey = credentials.encryption.publicKey;
           /**
+           * The account's *signing* public key — ed25519, not the curve25519 box key above.
+           *
+           * Account proofs are `crypto_sign_detached` signatures; verifying them with the box
+           * key can only ever return false, which is why this route never worked. The App now
+           * appends the signing key when it pairs a terminal; a terminal paired before that has
+           * none, and can be given one for debugging with HAPPY_ACCOUNT_SIGNING_PUBLIC_KEY
+           * (base64) — the App logs its key when it signs a proof.
+           */
+          const signKeyOverride = process.env.HAPPY_ACCOUNT_SIGNING_PUBLIC_KEY;
+          const accountSignPublicKey = credentials.encryption.signPublicKey
+            ?? (signKeyOverride ? decodeBase64(signKeyOverride) : undefined);
+          if (accountSignPublicKey) {
+            logger.debug(`[DAEMON RUN] account proof: verifying with ed25519 key ${encodeBase64(accountSignPublicKey).slice(0, 12)}…`);
+          } else {
+            logger.debug('[DAEMON RUN] account proof: no signing public key (pair again, or set HAPPY_ACCOUNT_SIGNING_PUBLIC_KEY); side-effecting LAN routes will refuse');
+          }
+          /**
          * What this daemon can say about the sessions it runs.
          *
          * One function, two consumers: the LAN API serves it to a reader that asks this machine
@@ -1772,10 +1789,13 @@ export async function startDaemon(): Promise<void> {
             accountProof: {
               verify: (message, signature) => {
                 try {
+                  if (!accountSignPublicKey) {
+                    return false;
+                  }
                   return nacl.sign.detached.verify(
                     new TextEncoder().encode(message),
                     decodeBase64(signature),
-                    accountPublicKey,
+                    accountSignPublicKey,
                   );
                 } catch {
                   // A malformed signature is a refusal, not a crash on a route anyone can reach.

@@ -967,11 +967,27 @@ class Sync {
         }
     }
 
+    /**
+     * The account's ed25519 public key, for configuring a terminal that was paired before the App
+     * started sending it. Public material only; logged in dev so it can be copied into
+     * `HAPPY_ACCOUNT_SIGNING_PUBLIC_KEY` on the daemon.
+     */
+    private logAccountSigningKey(): void {
+        if (!__DEV__ || !this.credentials?.secret) {
+            return;
+        }
+        try {
+            const keypair = sodium.crypto_sign_seed_keypair(decodeBase64(this.credentials.secret, 'base64url'));
+            log.log(`🔑 account signing public key: ${encodeBase64(keypair.publicKey)}`);
+        } catch { /* a malformed secret is reported by the auth flow */ }
+    }
+
     async create(credentials: AuthCredentials, encryption: Encryption) {
         this.credentials = credentials;
         this.encryption = encryption;
         this.anonID = encryption.anonID;
         this.serverID = parseToken(credentials.token);
+        this.logAccountSigningKey();
         await this.#init();
 
         // Await settings sync to have fresh settings
@@ -991,6 +1007,7 @@ class Sync {
         this.encryption = encryption;
         this.anonID = encryption.anonID;
         this.serverID = parseToken(credentials.token);
+        this.logAccountSigningKey();
         await this.#init();
     }
 
@@ -5375,6 +5392,15 @@ class Sync {
         const order = [...drivers].sort((a, b) => rank(a.channel) - rank(b.channel));
 
         const machineKey = this.getMachineKey(machineId);
+        // Which channels this action will actually be offered to, and why — the list's answer and
+        // this one are computed from different facts (reach vs usable addresses), and when they
+        // disagree the action silently goes somewhere the screen never said it would.
+        log.log(
+            `🔄 carry ${action.operation} ${sessionId}: preferred=${preferred}` +
+            ` order=[${order.map((d) => d.channel).join('>')}]` +
+            ` accepts=[${order.filter((d) => d.accepts(action.operation, machineId, Date.now())).map((d) => d.channel).join('>')}]` +
+            ` machineKey=${machineKey ? 'yes' : 'no'}`
+        );
         const outcome = await carryOperation<T>({
             drivers: order,
             operation: action.operation,
@@ -5412,6 +5438,7 @@ class Sync {
             },
             recorder: this.healthRecorder(),
         });
+        log.log(`🔄 carry ${action.operation} ${sessionId}: ${outcome.kind} via ${outcome.kind === 'done' || outcome.kind === 'absent' || outcome.kind === 'refused' ? outcome.channel : ''}`);
         return {
             verdict: outcome.kind === 'done' ? outcome.value : null,
             // Whether any channel took it on: one that answered and refused did not, one that was

@@ -4,6 +4,7 @@ import { CameraView } from 'expo-camera';
 import { useAuth } from '@/auth/AuthContext';
 import { decodeBase64 } from '@/encryption/base64';
 import { encryptBox } from '@/encryption/libsodium';
+import sodium from '@/encryption/libsodium.lib';
 import { authApprove } from '@/auth/authApprove';
 import { useCheckScannerPermissions } from '@/hooks/useCheckCameraPermissions';
 import { Modal } from '@/modal';
@@ -31,9 +32,18 @@ export function useConnectTerminal(options?: UseConnectTerminalOptions) {
             const tail = url.slice('happy://terminal?'.length);
             const publicKey = decodeBase64(tail, 'base64url');
             const responseV1 = encryptBox(decodeBase64(auth.credentials!.secret, 'base64url'), publicKey);
-            let responseV2Bundle = new Uint8Array(sync.encryption.contentDataKey.length + 1);
+            // [0, content box public key (32), account signing public key (32)]
+            //
+            // The terminal needs both: the box key wraps session keys (encryption), the signing
+            // key verifies account proofs (side-effecting LAN routes). They are different keys
+            // derived from the same account seed — ed25519 signatures cannot be checked with a
+            // curve25519 key, which is why account proofs never verified before.
+            // Older terminals read the first 33 bytes and ignore the rest.
+            const signKeypair = sodium.crypto_sign_seed_keypair(decodeBase64(auth.credentials!.secret, 'base64url'));
+            let responseV2Bundle = new Uint8Array(1 + 32 + 32);
             responseV2Bundle[0] = 0;
             responseV2Bundle.set(sync.encryption.contentDataKey, 1);
+            responseV2Bundle.set(signKeypair.publicKey, 33);
             const responseV2 = encryptBox(responseV2Bundle, publicKey);
             await authApprove(auth.credentials!.token, publicKey, responseV1, responseV2);
             

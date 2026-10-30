@@ -592,12 +592,14 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       return reply.code(401).send({ error: 'unauthorized' });
     }
     const { sessionId } = request.params as { sessionId: string };
-    // The account check is off for now. It worked on a direct connection and refused every request
-    // that arrived through the relay: the App had been sending its *machine-key* proof under the same
-    // header names, so a valid signature by one key was checked against the other key's public key.
-    // The fix is to give the account proof its own header namespace on the App side; until then the
-    // machine key is the only thing standing between a paired device and this action, as it was
-    // before. See `docs/channel-layer-handoff.md`.
+    // The account has to sign for it. The machine key is a transport credential every paired device
+    // holds, so without this "can connect" and "may restart a process" would be the same right.
+    // This was off while the App signed with the wrong key (ed25519 signatures checked against the
+    // curve25519 box key); the App now carries the account's signing key and the daemon verifies
+    // with it, which is what tool-content has been doing all along.
+    if (!requireAccountProof(request, { operation: 'restart', target: sessionId })) {
+      return reply.code(403).send({ error: 'account proof required' });
+    }
     if (!opts.restartSession) {
       return reply.code(404).send({ error: 'this daemon does not restart sessions' });
     }
@@ -707,11 +709,15 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     if (!requireToken(request)) {
       return reply.code(401).send({ error: 'unauthorized' });
     }
-    // The account check is off here too, for the same reason as the restart route above.
     if (!opts.onSessionControl) {
       return reply.code(404).send({ error: 'this daemon does not forward session control' });
     }
     const { sessionId } = request.params as { sessionId: string };
+    // Account-signed, for the same reason as restart: answering a permission or aborting a turn is
+    // an action inside somebody's session, not a read of it.
+    if (!requireAccountProof(request, { operation: 'control', target: sessionId })) {
+      return reply.code(403).send({ error: 'account proof required' });
+    }
     const body = request.body as { method?: unknown; params?: unknown } | null;
     const method = typeof body?.method === 'string' ? body.method : null;
     if (method === null || !SESSION_CONTROL_METHODS.has(method)) {
