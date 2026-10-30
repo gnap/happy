@@ -203,6 +203,20 @@ describe('RelayHub', () => {
         expect(seen).toEqual([1, 2]);
     });
 
+    it('keeps the last directory when this side loses the hub', () => {
+        // The directory is the relay's statement about what it holds; our socket dropping is this
+        // side's interface, and the machine is connected to the relay rather than to us. Emptying it
+        // here made every relay-backed session look unreachable for the length of a reconnect.
+        const { hub, socket } = hubWith();
+        socket.accept([{ tag: 'aaaa', sessions: [] }]);
+        expect(hub.machines().map((m) => m.tag)).toEqual(['aaaa']);
+
+        socket.close();
+
+        expect(hub.machines().map((m) => m.tag)).toEqual(['aaaa']);
+        hub.close();
+    });
+
     it('keeps its own liveness check on the one connection, and reconnects when it stops answering', () => {
         // Whether a *machine* is up is the relay's business — it holds that connection. Whether
         // this connection is still carrying anything is only knowable here, so this is the one

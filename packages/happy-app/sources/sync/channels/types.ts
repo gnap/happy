@@ -234,4 +234,4 @@ export type ChannelReason =
     | 'server-down-relay'
     | 'by-priority'
     /** The daemon route answered for this session and had nothing to serve it. */
-    | 'daemon-absent';
+
