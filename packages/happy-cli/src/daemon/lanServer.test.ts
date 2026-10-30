@@ -585,6 +585,19 @@ describe('control calls inside a running session', () => {
         ]);
     });
 
+    it('takes a permission answer past the handshake limit, because a form is kilobytes', async () => {
+        // An answer to AskUserQuestion is the questions themselves — options, previews, descriptions —
+        // echoed back whole inside the ciphertext, and the App sends it as one body. The global limit
+        // guards the unauthenticated handshake; this route is behind a token when its body is parsed,
+        // and a 413 here gets read by the caller as the machine refusing to act, which it did not.
+        await start();
+        const token = await getToken();
+
+        const params = 'X'.repeat(8192);
+        expect((await control(token, 'sess-1', { method: 'permission', params })).status).toBe(200);
+        expect(controlled).toEqual([{ sessionId: 'sess-1', method: 'permission', params }]);
+    });
+
     it('says so when no live session has that id, rather than looking like it acted', async () => {
         // The one thing the caller has to be told apart: it cannot otherwise tell "the session did
         // it" from "nobody was asked", and the way it finds out is by asking the server instead.

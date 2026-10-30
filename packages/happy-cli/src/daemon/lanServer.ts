@@ -46,6 +46,15 @@ const MAX_SESSION_ATTEMPTS_PER_WINDOW = 10;
 /** Bodies here are a nonce and a proof; anything larger is abuse. */
 const BODY_LIMIT_BYTES = 4096;
 
+/**
+ * The control route's body is a permission answer, and one of those is a form the App echoes back
+ * whole inside its ciphertext — kilobytes, not bytes. The global limit stays small because the
+ * handshake routes are unauthenticated; this route is behind a token by the time a body is parsed,
+ * so its ceiling is about size, not trust. A 413 here reads to the caller as the machine refusing
+ * the action, which is not what happened.
+ */
+const CONTROL_BODY_LIMIT_BYTES = 256 * 1024;
+
 const PROOF_CONTEXT = 'v1.proof';
 const TOKEN_CONTEXT = 'v1.token';
 
@@ -703,7 +712,7 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     return true;
   };
 
-  app.post('/lan/sessions/:sessionId/control', async (request, reply) => {
+  app.post('/lan/sessions/:sessionId/control', { bodyLimit: CONTROL_BODY_LIMIT_BYTES }, async (request, reply) => {
     if (!requireToken(request)) {
       return reply.code(401).send({ error: 'unauthorized' });
     }
