@@ -81,6 +81,15 @@ export type LanSessionSummary = {
   metadataVersion?: number;
   metadata?: string;
   /**
+   * The session key that opens `metadata` (and the message log), wrapped to the account's box
+   * public key — the same shape `/history` returns as `dataEncryptionKey`, version byte 0 first.
+   *
+   * The list needs the name before it needs messages, and a reader that has never seen this
+   * session has no key. Carrying it here is what lets the App render a full row from the roster
+   * instead of waiting for the server's session record.
+   */
+  dataEncryptionKey?: string;
+  /**
    * When this daemon began restarting the session, if it is restarting it.
    *
    * A timestamp rather than a flag, and for the same reason the daemon's published state carries

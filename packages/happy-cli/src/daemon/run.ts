@@ -1680,6 +1680,32 @@ export async function startDaemon(): Promise<void> {
          * directly, and the relay publishes it so an App can list every machine's sessions through
          * the one relay connection it holds. Both want exactly the same summary.
          */
+        /**
+         * Wrapped session keys, by CLI tag.
+         *
+         * `readSessionKey` is a disk read and `libsodiumEncryptForPublicKey` is a box; the roster
+         * is rebuilt every few seconds and published to the relay, so doing either per publish
+         * per session would be a filesystem and crypto loop. A session key never changes.
+         */
+        const wrappedKeyByTag = new Map<string, string>();
+        const wrappedSessionKey = (tag: string | undefined): string | undefined => {
+          if (!tag) return undefined;
+          const cached = wrappedKeyByTag.get(tag);
+          if (cached) return cached;
+          try {
+            const key = readSessionKey(tag);
+            if (!key) return undefined;
+            const wrapped = libsodiumEncryptForPublicKey(key, accountPublicKey);
+            const blob = new Uint8Array(wrapped.length + 1);
+            blob[0] = 0;
+            blob.set(wrapped, 1);
+            const encoded = encodeBase64(blob);
+            wrappedKeyByTag.set(tag, encoded);
+            return encoded;
+          } catch {
+            return undefined;
+          }
+        };
         const sessionSummaries = (): LanSessionSummary[] => {
           const summaries: LanSessionSummary[] = [...pidToTrackedSession.values()]
             // A session is listed as soon as the daemon knows it, not once the server acknowledges
@@ -1702,6 +1728,12 @@ export async function startDaemon(): Promise<void> {
                     metadata: lanSessionState.get(session.happySessionId)!.metadata!.value,
                   }
                 : {}),
+              // The list needs the name before it needs messages; carrying the key is what lets
+              // the App open the metadata the roster already has.
+              ...((() => {
+                const wrapped = wrappedSessionKey(session.sessionTag);
+                return wrapped ? { dataEncryptionKey: wrapped } : {};
+              })()),
               isAlive: session.exitTime
                 ? false
                 : (() => { try { process.kill(session.pid, 0); return true; } catch { return false; } })(),
