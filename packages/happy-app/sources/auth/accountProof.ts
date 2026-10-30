@@ -59,7 +59,9 @@ export async function accountProofHeaders(parts: { operation: string; target: st
         return null;
     }
     try {
-        const keypair = sodium.crypto_sign_seed_keypair(decodeBase64(credentials.secret));
+        // The stored secret is base64url (`AuthContext.login` encodes it that way); decoding it as
+        // standard base64 yields different bytes, hence a valid signature from the wrong keypair.
+        const keypair = sodium.crypto_sign_seed_keypair(decodeBase64(credentials.secret, 'base64url'));
         const at = Date.now();
         const nonce = freshNonce();
         const message = accountProofMessage({ operation: parts.operation, target: parts.target, nonce, at, bodyDigest: '' });

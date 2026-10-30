@@ -246,9 +246,15 @@ async function waitForAuthentication(keypair: tweetnacl.BoxKeyPair): Promise<Cre
                             };
                         } else {
                             if (decrypted[0] === 0) {
+                                // The App appends its account signing public key after the box
+                                // key (`[0, box(32), sign(32)]`). Older Apps send only the box
+                                // key; older CLIs read the first 32 bytes and ignore the rest, so
+                                // the extra field is backward compatible in both directions.
+                                const signPublicKey = decrypted.length >= 65 ? decrypted.slice(33, 65) : undefined;
                                 const credentials = {
                                     publicKey: decrypted.slice(1, 33),
                                     machineKey: randomBytes(32),
+                                    ...(signPublicKey ? { signPublicKey } : {}),
                                     token: token
                                 }
                                 await writeCredentialsDataKey(credentials);
@@ -257,7 +263,8 @@ async function waitForAuthentication(keypair: tweetnacl.BoxKeyPair): Promise<Cre
                                     encryption: {
                                         type: 'dataKey',
                                         publicKey: credentials.publicKey,
-                                        machineKey: credentials.machineKey
+                                        machineKey: credentials.machineKey,
+                                        ...(credentials.signPublicKey ? { signPublicKey: credentials.signPublicKey } : {})
                                     },
                                     token: token
                                 };
