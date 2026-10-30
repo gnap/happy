@@ -1,7 +1,9 @@
 import { useShallow } from 'zustand/react/shallow';
-import { storage, useMachineBadgeInputs, useSessionReach } from '@/sync/storage';
+import { storage, useMachineBadgeInputs } from '@/sync/storage';
 import type { SessionChannel } from '@/sync/lan/types';
 import type { ChannelLinkState } from '@/sync/channels/types';
+import { machineChannelIcons } from '@/sync/machinePresence';
+import { normalizeChannelPriority } from '@/sync/lan/channelOrder';
 import { sync, type ChannelReason } from '@/sync/sync';
 
 /**
@@ -15,11 +17,13 @@ import { sync, type ChannelReason } from '@/sync/sync';
  * reads over its HTTP API keep working while the push/send socket reconnects. Showing only the
  * channel let a session claim "LAN" while its messages were quietly going out over the server.
  *
- * It is bounded by whether anything is reaching the *session*, though, because the glyph is drawn
- * beside that session's status and is read as a statement about it. A machine can be on this
- * network with a live socket while a session on it is not running at all — after a reboot, every
- * session is — and the connection being up says nothing about a process that no longer exists.
- * Drawn full strength there, it put a lit channel icon next to "last seen 1 hour ago".
+ * `link` is the *channel's* statement about the machine, decided by the same rule the machine
+ * badges use (`machineChannelIcons`), and it is deliberately not bounded by whether this session is
+ * running. A channel's availability is the channel's — the relay holding the machine, the LAN
+ * having seen it — and a session that has stopped says so in its own status line. Bounding the glyph
+ * by the session made one stopped session paint its machine's channel grey, which read as "the
+ * channel is unavailable" and was the same mixing of session state and channel state the resolver
+ * no longer does.
  */
 export function useSessionChannel(sessionId: string): {
     channel: SessionChannel;
@@ -29,14 +33,18 @@ export function useSessionChannel(sessionId: string): {
 } {
     const badgeInputs = useMachineBadgeInputs();
     const machineId = storage((state) => state.sessions[sessionId]?.metadata?.machineId);
-    const reach = useSessionReach(sessionId, machineId);
+    const priority = storage(useShallow((state) => normalizeChannelPriority(state.localSettings.channelPriority)));
     return storage(useShallow((state) => {
         const { channel, reason } = sync.describeChannel(sessionId);
-        // `off` rather than null: the machine has the channel, it is simply not carrying this
-        // session. Null is for a channel with no per-machine connection to report at all.
-        const link = channel !== 'server' && machineId
-            ? (reach.online ? badgeInputs(machineId).link[channel] : 'off')
-            : null;
+        // The channel's own link for this machine, merged the way a machine badge merges it: a
+        // reported socket state wins, and an absent one falls back to whether the channel reaches
+        // the machine at all.
+        let link: ChannelLinkState | null = null;
+        if (channel !== 'server' && machineId) {
+            const inputs = badgeInputs(machineId);
+            link = machineChannelIcons(priority, inputs.reach, inputs.capability, inputs.link)
+                .find((entry) => entry.channel === channel)?.state ?? 'off';
+        }
         return { channel, reason, pinned: state.channelOverride[sessionId] !== undefined, link };
     }));
 }
