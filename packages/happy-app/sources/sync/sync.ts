@@ -3649,15 +3649,6 @@ class Sync {
 
     /** Deadlines for in-flight server message reads, so `stopBackgroundWork` can clear them. */
     private messageReadDeadlines = new Map<string, ReturnType<typeof setTimeout>>();
-    /**
-     * Sessions whose daemon route answered and could not serve them, and until when.
-     *
-     * The resolver's input, so that "which channel is this session on" has one answer: while the
-     * mark is live the session resolves to the server with `daemon-absent`; when it ages out the
-     * daemon is tried again.
-     */
-    private daemonUnavailableUntil = new Map<string, number>();
-    private static readonly DAEMON_ABSENT_RETRY_MS = 60_000;
 
     /**
      * The highest server-seq this App actually holds, per session — the server axis's watermark.
@@ -4983,6 +4974,14 @@ class Sync {
     /** Machines whose version has been asked for, so a burst of reads does not ask repeatedly. */
     private daemonVersionChecks = new Set<string>();
 
+    /**
+     * One read over whichever daemon route this session is on.
+     *
+     * Null is "this attempt produced no page", for any reason at all. Why is the daemon's own
+     * business — whether it has a log for the session, whether it answered, whether the address was
+     * reachable — and it is answered by looking at the daemon, not by teaching the App's channel
+     * design a taxonomy of daemon states. The caller's only decision is whether it got a page.
+     */
     async fetchSessionFromDaemon(sessionId: string, forceRoute?: DaemonRoute): Promise<LanSessionRead | null> {
         const accountPublicKey = this.encryption?.contentDataKey;
         if (!accountPublicKey) {
@@ -5832,11 +5831,6 @@ class Sync {
             // take either: the session is simply unreachable, and says so.
             return [enabledChannels(priority).server ? 'server' : priority[0], 'not-on-network'];
         }
-        if ((channel === 'lan' || channel === 'relay') && (this.daemonUnavailableUntil.get(sessionId) ?? 0) > Date.now()) {
-            // The daemon route for this session answered and had nothing recently — the resolver
-            // says so explicitly instead of letting each read discover it again.
-            return [enabledChannels(priority).server ? 'server' : channel, 'daemon-absent'];
-        }
         if (channel === 'lan') {
             return ['lan', 'reachable'];
         }
@@ -6063,6 +6057,11 @@ class Sync {
             this.relayHub = null;
             this.relayHubEndpoint = null;
             this.relayMachines.clear();
+            // The hub no longer clears the directory when its socket closes (a disconnect is our
+            // interface, not the relay's answer), so switching the relay off has to say so here —
+            // otherwise the last directory keeps machines looking relay-capable with no relay.
+            this.relayDirectoryRaw = [];
+            this.mapRelayDirectory();
             this.reconcileDaemonSockets();
             return;
         }
@@ -6078,6 +6077,10 @@ class Sync {
             this.relayHub.close();
             this.relayHub = null;
             this.relayMachines.clear();
+            // A different relay is a different directory: what the old one held is not a claim
+            // about this one. Same reason as the switched-off branch above.
+            this.relayDirectoryRaw = [];
+            this.mapRelayDirectory();
         }
         this.relayHubEndpoint = endpoint;
         const hub = new RelayHub(endpoint, (message) => { log.log(message); });
@@ -6739,18 +6742,10 @@ class Sync {
             storage.getState().setFetching(sessionId, true);
         }
         const read = await this.fetchSessionFromDaemon(sessionId);
-        if (read) {
-            this.daemonUnavailableUntil.delete(sessionId);
-        } else {
-            // The daemon route answered for this session and had nothing (or nothing came back
-            // at all). Recorded per session so the resolver — not the read path — decides where
-            // the next tick goes, and the daemon is tried again once this ages out.
-            this.daemonUnavailableUntil.set(sessionId, Date.now() + Sync.DAEMON_ABSENT_RETRY_MS);
-        }
         log.log(
             read
                 ? `📡 fetchMessages: on LAN — read ${read.messages.length} message(s), ${read.decryptedCount}/${read.total} decrypted`
-                : '📡 fetchMessages: on LAN — nothing to read (no daemon for this session)'
+                : '📡 fetchMessages: on LAN — no page from the daemon this tick'
         );
         // Polling is the fallback, not the mechanism. A socket that is up pushes `log-grew` the
         // moment anything is written to the log, so a tick would only re-ask a question already
