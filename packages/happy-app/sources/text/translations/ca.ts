@@ -347,6 +347,7 @@ export const ca: TranslationStructure = {
         archiveSessionConfirm: 'Segur que vols arxivar aquesta sessió?',
         restartSession: 'Reiniciar sessió',
         restartSessionSubtitle: 'Hi ha una versió més recent del CLI disponible. Reinicia per actualitzar.',
+        needsDesktop: 'Aquesta sessió necessita un inici de sessió d'escriptori en aquesta màquina. Inicia la sessió allà i torna-ho a provar.',
         restartSessionConfirm: 'La sessió es reiniciarà amb la versió més recent del CLI.',
         noMachineId: 'ID de màquina no disponible per a aquesta sessió',
         failedToRestartSession: 'Error en reiniciar la sessió',

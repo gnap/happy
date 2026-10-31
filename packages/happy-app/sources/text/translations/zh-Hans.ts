@@ -349,6 +349,7 @@ export const zhHans: TranslationStructure = {
         archiveSessionConfirm: '您确定要归档此会话吗？',
         restartSession: '重启会话',
         restartSessionSubtitle: '有新版 CLI 可用，重启以升级。',
+        needsDesktop: '该会话需要在那台机器上登录桌面后才能启动。请登录后重试。',
         restartSessionConfirm: '会话将使用新版 CLI 重新启动。',
         noMachineId: '此会话没有关联的机器 ID',
         failedToRestartSession: '重启会话失败',

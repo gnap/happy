@@ -7,7 +7,7 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Avatar } from '@/components/Avatar';
-import { useDaemonVersions, useSession, useIsDataReady, useSessionMessages, useMachine } from '@/sync/storage';
+import { useDaemonVersions, useSession, useIsDataReady, useSessionMessages, useMachine, useSessionDesktop } from '@/sync/storage';
 import { sync, type ChannelReason } from '@/sync/sync';
 import { useSessionChannel } from '@/hooks/useSessionChannel';
 import { CHANNEL_ICONS } from '@/sync/machinePresence';
@@ -175,6 +175,8 @@ function formatDangerouslySkipPermissionsMetadata(
 }
 
 function SessionInfoContent({ session }: { session: Session }) {
+    // Whether this session needs a desktop session, and whether one is available right now.
+    const desktop = useSessionDesktop(session.id);
     const { theme } = useUnistyles();
     const router = useRouter();
     const devModeEnabled = __DEV__;
@@ -311,6 +313,9 @@ function SessionInfoContent({ session }: { session: Session }) {
     const [restartingSession, doRestartSession] = useHappyAction(async () => {
         if (!session.metadata?.machineId) {
             throw new HappyError(t('sessionInfo.noMachineId'), false);
+        }
+        if (desktop?.required && !desktop.available) {
+            throw new HappyError(t('sessionInfo.needsDesktop'), false);
         }
         const result = await sessionRestart(session.id, session.metadata.machineId);
         if (!result.success) {

@@ -348,6 +348,7 @@ export const zhHant: TranslationStructure = {
         archiveSessionConfirm: '您確定要封存此工作階段嗎？',
         restartSession: '重新啟動工作階段',
         restartSessionSubtitle: '有新版本的 CLI 可用。重新啟動以升級。',
+        needsDesktop: '此工作階段需要在那台機器上登入桌面後才能啟動。請登入後重試。',
         restartSessionConfirm: '工作階段將以較新版本的 CLI 重新啟動。',
         noMachineId: '此工作階段無法取得機器 ID',
         failedToRestartSession: '重新啟動工作階段失敗',
