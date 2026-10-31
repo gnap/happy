@@ -179,6 +179,13 @@ export interface SpawnSessionOptions {
     environmentVariables?: Record<string, string>;
     /** Per-session sandbox config override (falls back to machine-global settings.json). */
     sandboxConfig?: { enabled?: boolean; sessionIsolation?: 'strict' | 'workspace' | 'custom'; workspaceRoot?: string; networkMode?: 'blocked' | 'allowed' | 'custom' };
+    /**
+     * Start the session in the user's desktop session, through Happy Sidecar.
+     *
+     * Only the sidecar can reach the login keychain; a daemon that boots before anyone logs in
+     * cannot. Such a session waits for a desktop login instead of failing elsewhere.
+     */
+    requiresDesktop?: boolean;
 }
 
 // Exported session operation functions
@@ -189,7 +196,7 @@ export interface SpawnSessionOptions {
 export async function machineSpawnNewSession(options: SpawnSessionOptions): Promise<SpawnSessionResult> {
     requireChannelFor('spawn');
 
-    const { machineId, directory, approvedNewDirectoryCreation = false, token, agent, environmentVariables, sandboxConfig } = options;
+    const { machineId, directory, approvedNewDirectoryCreation = false, token, agent, environmentVariables, sandboxConfig, requiresDesktop } = options;
 
     try {
         const result = await apiSocket.machineRPC<SpawnSessionResult, {
@@ -200,10 +207,11 @@ export async function machineSpawnNewSession(options: SpawnSessionOptions): Prom
             agent?: 'codex' | 'claude' | 'cursor' | 'cursor-acp' | 'gemini',
             environmentVariables?: Record<string, string>;
             sandboxConfig?: typeof sandboxConfig;
+            requiresDesktop?: boolean;
         }>(
             machineId,
             'spawn-happy-session',
-            { type: 'spawn-in-directory', directory, approvedNewDirectoryCreation, token, agent, environmentVariables, sandboxConfig }
+            { type: 'spawn-in-directory', directory, approvedNewDirectoryCreation, token, agent, environmentVariables, sandboxConfig, ...(requiresDesktop ? { requiresDesktop } : {}) }
         );
         return result;
     } catch (error) {
