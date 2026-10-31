@@ -45,6 +45,13 @@ kill inside the unit does not stop the daemon).
 
 ## Installing, macOS (LaunchDaemon)
 
+> **Exception: the development host.** `gnap`'s Mac deliberately keeps the daemon as a **LaunchAgent**
+> in `gui/501`, not a LaunchDaemon. It is the machine this branch is built and restarted on many times
+> a day, and an agent restarts with `launchctl kickstart -k gui/501/com.happy-cli.daemon` — or a plain
+> `kill <pid>` — with no sudo involved. Every other Mac takes the LaunchDaemon below. Running the
+> installer on the development host would move it back to the system domain; don't, unless that is
+> what is wanted.
+
 ```bash
 bash packages/happy-cli/scripts/install-macos-daemon.sh --dry-run   # show the plist it would install
 sudo bash packages/happy-cli/scripts/install-macos-daemon.sh

@@ -7,6 +7,7 @@
  */
 
 // Set IPv4 for all HTTPS before any other imports that may hit the server (auth, api, etc.)
+import { installSidecar, uninstallSidecar } from '@/daemon/sidecarInstall';
 import '@/configuration'
 
 import chalk from 'chalk'
@@ -16,6 +17,7 @@ import { readCredentials, readSettings } from './persistence'
 import { authAndSetupMachineIfNeeded } from './ui/auth'
 import { BUILD_VERSION } from './version'
 import { z } from 'zod'
+import { runSidecar } from '@/daemon/sidecarClient';
 import { startDaemon } from './daemon/run'
 import { checkIfDaemonRunningAndCleanupStaleState, isDaemonRunningCurrentlyInstalledHappyVersion, stopDaemon } from './daemon/controlClient'
 import { getLatestDaemonLog } from './ui/logger'
@@ -747,6 +749,17 @@ import { sendA2aMessage } from './daemon/sendA2aMessage'
       process.exit(0);
     } else if (daemonSubcommand === 'start-sync') {
       await startDaemon()
+      process.exit(0)
+    } else if (daemonSubcommand === 'sidecar-install') {
+      console.log(`Installed: ${installSidecar()}`)
+      process.exit(0)
+    } else if (daemonSubcommand === 'sidecar-uninstall') {
+      uninstallSidecar()
+      console.log('Happy Sidecar removed')
+      process.exit(0)
+    } else if (daemonSubcommand === 'sidecar') {
+      // The LaunchAgent's entry point: runs inside the user's desktop session, dials the daemon.
+      await runSidecar()
       process.exit(0)
     } else if (daemonSubcommand === 'stop') {
       await stopDaemon()

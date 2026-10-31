@@ -28,6 +28,7 @@ import { stripProfileManagedEnv } from '@/utils/profileEnv';
 import { fetchSessionProfileMeta, PROFILE_META_DEADLINE_MS } from './fetchSessionProfileMeta';
 import { delay } from '@/utils/time';
 import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSessionSummary } from './lanServer';
+import { SidecarHub } from './sidecarHub';
 import { RESTARTING_TTL_MS, expiredRestarting } from './restartTracker';
 import { LifecycleLog } from './lifecycleLog';
 import { replayToServer } from './lifecycleServerReplay';
@@ -315,6 +316,8 @@ export async function startDaemon(): Promise<void> {
           pid: session.pid ?? existing?.pid ?? -1,
           status: 'stopped',
           lastSeq: existing?.lastSeq ?? -1,
+          // Losing this here would turn a desktop session into a daemon one the moment it exits.
+          ...(session.requiresDesktop || existing?.requiresDesktop ? { requiresDesktop: true } : {}),
           exitReason: session.exitReason ?? existing?.exitReason,
           exitTime: session.exitTime ?? existing?.exitTime,
         };
@@ -526,6 +529,9 @@ export async function startDaemon(): Promise<void> {
           // /proc keeps it kill-routable without relying on persisted state.
           scopeUnit: scopeUnitFromProcCgroup(pid) ?? undefined,
           lastHeartbeat: Date.now(),
+          // A session restarted into the desktop keeps that mode across a daemon restart; the
+          // flag is in the persisted record, and this is where a surviving process rejoins.
+          ...(sessions[sessionId]?.requiresDesktop ? { requiresDesktop: true } : {}),
         };
         pidToTrackedSession.set(pid, trackedSession);
         logger.debug(`[DAEMON RUN] Registered session ${sessionId} (started by: ${trackedSession.startedBy})`);
@@ -572,6 +578,7 @@ export async function startDaemon(): Promise<void> {
           status: 'running',
           lastSeq: existing?.lastSeq ?? -1,
           lastHeartbeat: Date.now(),
+          ...(s.requiresDesktop || existing?.requiresDesktop ? { requiresDesktop: true } : {}),
         };
       }
       // Persist immediately so session maps survive unclean daemon kills (SIGKILL, OOM, etc.)
@@ -939,9 +946,36 @@ export async function startDaemon(): Promise<void> {
           // In scope mode the session starts inside its own transient systemd unit, so its memory
           // (and anything it spawns) is accounted to that unit rather than to the daemon's. The
           // PID is unchanged either way: systemd-run execs the command in place.
-          let happyProcess: ReturnType<typeof spawnHappyCLI>;
+          let happyProcess: ReturnType<typeof spawnHappyCLI> | null = null;
           let scopeUnit: string | undefined;
-          if (sessionScopeMode.enabled) {
+          /**
+           * A session that needs the desktop is started by Happy Sidecar, inside the user's Aqua
+           * session — the only place the login keychain exists. The daemon still owns the session:
+           * it records the pid the sidecar reports and the webhook that follows registers it like
+           * any other. There is no ChildProcess in that case, so nothing here may assume one.
+           */
+          let sidecarPid: number | undefined;
+          if (options.requiresDesktop) {
+            if (!sidecarHub?.usable) {
+              return {
+                type: 'error',
+                errorMessage: 'This session needs a desktop session (the login keychain), but no user is logged in on this machine or the sidecar is not running.',
+              };
+            }
+            const spec = getHappyCliLaunchSpec();
+            const requestId = `spawn-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+            const spawned = await sidecarHub.requestSpawn({
+              requestId,
+              sessionId: sessionId ?? directory,
+              cwd: directory,
+              argv: [spec.executable, ...spec.argsPrefix, ...args],
+            });
+            if ('error' in spawned) {
+              return { type: 'error', errorMessage: spawned.error };
+            }
+            sidecarPid = spawned.pid;
+            logger.debug(`[DAEMON RUN] Spawned session through Happy Sidecar with PID ${sidecarPid}`);
+          } else if (sessionScopeMode.enabled) {
             scopeUnit = buildSessionScopeUnitName(sessionId ?? directory);
             logger.info(`[DAEMON RUN] Spawning session in systemd scope ${scopeUnit} (slice=${sessionScopeMode.slice})`);
             happyProcess = spawnHappyCLIInSessionScope(args, {
@@ -963,22 +997,23 @@ export async function startDaemon(): Promise<void> {
           // is the only place the reason exists. Always attached (not just under DEBUG) so the
           // pipe cannot fill up and stall the child.
           let stderrTail = '';
-          happyProcess.stderr?.on('data', (data: Buffer) => {
+          happyProcess?.stderr?.on('data', (data: Buffer) => {
             stderrTail = (stderrTail + data.toString()).slice(-8192);
           });
           let settleSpawn: ((result: SpawnSessionResult) => void) | null = null;
 
           // Log output for debugging
           if (process.env.DEBUG) {
-            happyProcess.stdout?.on('data', (data) => {
+            happyProcess?.stdout?.on('data', (data) => {
               logger.debug(`[DAEMON RUN] Child stdout: ${data.toString()}`);
             });
-            happyProcess.stderr?.on('data', (data) => {
+            happyProcess?.stderr?.on('data', (data) => {
               logger.debug(`[DAEMON RUN] Child stderr: ${data.toString()}`);
             });
           }
 
-          if (!happyProcess.pid) {
+          const spawnedPid = sidecarPid ?? happyProcess?.pid;
+          if (!spawnedPid) {
             logger.debug('[DAEMON RUN] Failed to spawn process - no PID returned');
             return {
               type: 'error',
@@ -986,12 +1021,13 @@ export async function startDaemon(): Promise<void> {
             };
           }
 
-          logger.debug(`[DAEMON RUN] Spawned process with PID ${happyProcess.pid}`);
+          logger.debug(`[DAEMON RUN] Spawned process with PID ${spawnedPid}`);
 
           const trackedSession: TrackedSession = {
             startedBy: 'daemon',
-            pid: happyProcess.pid,
-            childProcess: happyProcess,
+            pid: spawnedPid,
+            ...(options.requiresDesktop ? { requiresDesktop: true } : {}),
+            ...(happyProcess ? { childProcess: happyProcess } : {}),
             directoryCreated,
             directory,
             sessionTag: resumeSessionTag,
@@ -1001,7 +1037,7 @@ export async function startDaemon(): Promise<void> {
             message: directoryCreated ? `The path '${directory}' did not exist. We created a new folder and spawned a new session there.` : undefined
           };
 
-          pidToTrackedSession.set(happyProcess.pid, trackedSession);
+          pidToTrackedSession.set(spawnedPid, trackedSession);
 
           if (scopeUnit) {
             // Not a precondition — just proof that the session really left the daemon's cgroup.
@@ -1010,20 +1046,21 @@ export async function startDaemon(): Promise<void> {
             void (async () => {
               const deadline = Date.now() + 2000;
               while (Date.now() < deadline) {
-                if (scopeUnitFromProcCgroup(happyProcess.pid!) === scopeUnit) return;
+                if (scopeUnitFromProcCgroup(spawnedPid) === scopeUnit) return;
                 await delay(100);
               }
-              logger.warn(`[DAEMON RUN] ${scopeUnit}: session PID ${happyProcess.pid} was not found in that scope after 2s`);
+              logger.warn(`[DAEMON RUN] ${scopeUnit}: session PID ${spawnedPid} was not found in that scope after 2s`);
             })();
           }
 
-          happyProcess.on('exit', (code, signal) => {
-            const s = pidToTrackedSession.get(happyProcess.pid!);
+          happyProcess?.on('exit', (code, signal) => {
+            if (!happyProcess) return;
+            const s = pidToTrackedSession.get(spawnedPid);
             const sessionId = s?.happySessionId ?? 'unknown';
             const duration = s?.spawnTime ? Math.round((Date.now() - s.spawnTime) / 1000) : null;
-            logger.debug(`[DAEMON RUN] Child PID ${happyProcess.pid} (session ${sessionId}) exited: code=${code} signal=${signal}${duration !== null ? ` after ${duration}s` : ''}`);
-            if (happyProcess.pid) {
-              onChildExited(happyProcess.pid, code, signal);
+            logger.debug(`[DAEMON RUN] Child PID ${spawnedPid} (session ${sessionId}) exited: code=${code} signal=${signal}${duration !== null ? ` after ${duration}s` : ''}`);
+            if (spawnedPid) {
+              onChildExited(spawnedPid, code, signal);
             }
             // The process is gone, so no webhook is coming; release the spawn wait now instead of
             // leaving the caller on the full timeout.
@@ -1033,21 +1070,22 @@ export async function startDaemon(): Promise<void> {
             });
           });
 
-          happyProcess.on('error', (error) => {
+          happyProcess?.on('error', (error) => {
+            if (!happyProcess) return;
             logger.debug(`[DAEMON RUN] Child process error:`, error);
-            if (happyProcess.pid) {
-              const session = pidToTrackedSession.get(happyProcess.pid);
+            if (spawnedPid) {
+              const session = pidToTrackedSession.get(spawnedPid);
               if (session && !session.exitReason) {
                 session.exitReason = `spawn error: ${error.message}`;
                 session.exitTime = Date.now();
               }
-              onChildExited(happyProcess.pid, 1, null);
+              onChildExited(spawnedPid, 1, null);
             }
             settleSpawn?.({ type: 'error', errorMessage: `Failed to start session process: ${error.message}${stderrTail.trim() ? `: ${stderrTail.trim().slice(-1000)}` : ''}` });
           });
 
           // Wait for webhook to populate session with happySessionId
-          logger.debug(`[DAEMON RUN] Waiting for session webhook for PID ${happyProcess.pid}`);
+          logger.debug(`[DAEMON RUN] Waiting for session webhook for PID ${spawnedPid}`);
 
           return new Promise<SpawnSessionResult>((resolve) => {
             let settled = false;
@@ -1056,16 +1094,16 @@ export async function startDaemon(): Promise<void> {
               if (settled) return;
               settled = true;
               if (timeout) clearTimeout(timeout);
-              if (happyProcess.pid) pidToAwaiter.delete(happyProcess.pid);
+              if (spawnedPid) pidToAwaiter.delete(spawnedPid);
               resolve(result);
             };
 
             // Set timeout for webhook
             timeout = setTimeout(() => {
-              logger.debug(`[DAEMON RUN] Session webhook timeout for PID ${happyProcess.pid}`);
+              logger.debug(`[DAEMON RUN] Session webhook timeout for PID ${spawnedPid}`);
               settle({
                 type: 'error',
-                errorMessage: `Session webhook timeout for PID ${happyProcess.pid}`
+                errorMessage: `Session webhook timeout for PID ${spawnedPid}`
               });
             }, SESSION_WEBHOOK_TIMEOUT_MS);
 
@@ -1073,7 +1111,7 @@ export async function startDaemon(): Promise<void> {
             settleSpawn = settle;
 
             // Register awaiter
-            pidToAwaiter.set(happyProcess.pid!, (completedSession) => {
+            pidToAwaiter.set(spawnedPid!, (completedSession) => {
               logger.debug(`[DAEMON RUN] Session ${completedSession.happySessionId} fully spawned with webhook`);
               settle({
                 type: 'success',
@@ -1325,6 +1363,7 @@ export async function startDaemon(): Promise<void> {
      * registering with this daemon before the LAN half has finished starting.
      */
     let lanServer: LanServerHandle | null = null;
+    let sidecarHub: SidecarHub | null = null;
     let relayClient: RelayClientHandle | null = null;
     /** Only has to make the envelope's `id` unique; the App does not key on it. */
     let lanEventCounter = 0;
@@ -1366,12 +1405,12 @@ export async function startDaemon(): Promise<void> {
      * grace they have to guess at. The grace still exists behind it, for a daemon that dies
      * mid-restart and so never gets to say it finished.
      */
-    const restartSession = async (sessionId: string, sandboxConfig?: any): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
+    const restartSession = async (sessionId: string, sandboxConfig?: any, requiresDesktop?: boolean): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
       const startedAt = Date.now();
       restartingStartedAt.set(sessionId, startedAt);
       announceRestarting(sessionId, startedAt);
       try {
-        return await performRestart(sessionId, sandboxConfig);
+        return await performRestart(sessionId, sandboxConfig, requiresDesktop);
       } finally {
         // Called off once there is an answer, whatever the answer was: the new process is up and
         // has registered, or the restart did not happen. Either way nothing is in flight.
@@ -1381,7 +1420,7 @@ export async function startDaemon(): Promise<void> {
     };
 
     // Kill existing process and spawn a new one reconnecting to the same server session
-    const performRestart = async (sessionId: string, sandboxConfig?: any): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
+    const performRestart = async (sessionId: string, sandboxConfig?: any, requiresDesktop?: boolean): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
       logger.debug(`[DAEMON RUN] Restart session: ${sessionId}`);
       const persistedState = await readDaemonState();
 
@@ -1429,6 +1468,7 @@ export async function startDaemon(): Promise<void> {
               persistedAgent === 'gemini' ||
               persistedAgent === 'acp-cursor'
             ) ? persistedAgent : 'cursor',
+            ...(persisted?.requiresDesktop ? { requiresDesktop: true } : {}),
           };
           logger.debug(`[DAEMON RUN] Restart: session ${sessionId} restored from persisted session record`);
         } else {
@@ -1493,6 +1533,13 @@ export async function startDaemon(): Promise<void> {
         resumeSessionTag: sessionTag,
         environmentVariables: recoveredProfile?.environmentVariables ?? undefined,
         sandboxConfig: perSessionSandbox,
+        // Explicit wins; otherwise the session keeps the mode it was started with. A restart is
+        // the only way to move an existing conversation between the daemon domain and the desktop.
+        ...(requiresDesktop !== undefined
+          ? { requiresDesktop }
+          : found.requiresDesktop !== undefined
+            ? { requiresDesktop: found.requiresDesktop }
+            : {}),
       });
 
       if (result.type === 'success') {
@@ -1680,6 +1727,32 @@ export async function startDaemon(): Promise<void> {
          * directly, and the relay publishes it so an App can list every machine's sessions through
          * the one relay connection it holds. Both want exactly the same summary.
          */
+        /**
+         * Wrapped session keys, by CLI tag.
+         *
+         * `readSessionKey` is a disk read and `libsodiumEncryptForPublicKey` is a box; the roster
+         * is rebuilt every few seconds and published to the relay, so doing either per publish
+         * per session would be a filesystem and crypto loop. A session key never changes.
+         */
+        const wrappedKeyByTag = new Map<string, string>();
+        const wrappedSessionKey = (tag: string | undefined): string | undefined => {
+          if (!tag) return undefined;
+          const cached = wrappedKeyByTag.get(tag);
+          if (cached) return cached;
+          try {
+            const key = readSessionKey(tag);
+            if (!key) return undefined;
+            const wrapped = libsodiumEncryptForPublicKey(key, accountPublicKey);
+            const blob = new Uint8Array(wrapped.length + 1);
+            blob[0] = 0;
+            blob.set(wrapped, 1);
+            const encoded = encodeBase64(blob);
+            wrappedKeyByTag.set(tag, encoded);
+            return encoded;
+          } catch {
+            return undefined;
+          }
+        };
         const sessionSummaries = (): LanSessionSummary[] => {
           const summaries: LanSessionSummary[] = [...pidToTrackedSession.values()]
             // A session is listed as soon as the daemon knows it, not once the server acknowledges
@@ -1696,12 +1769,26 @@ export async function startDaemon(): Promise<void> {
               startedBy: String(session.startedBy),
               // The session's own metadata, mirrored here when it last updated, and only when the
               // server has named the session — there is nothing mirrored before that.
+              // The mode lives in the durable record as well as on the tracked session: a
+              // process that survived a daemon restart is re-registered on a path that has not
+              // read the flag back, and the roster must not start claiming it is not a desktop
+              // session just because the daemon was restarted.
+              ...((session.requiresDesktop ||
+                (session.happySessionId && sessions[session.happySessionId]?.requiresDesktop))
+                ? { desktop: { required: true, available: sidecarHub?.usable ?? false } }
+                : {}),
               ...(session.happySessionId && lanSessionState.get(session.happySessionId)?.metadata
                 ? {
                     metadataVersion: lanSessionState.get(session.happySessionId)!.metadata!.version,
                     metadata: lanSessionState.get(session.happySessionId)!.metadata!.value,
                   }
                 : {}),
+              // The list needs the name before it needs messages; carrying the key is what lets
+              // the App open the metadata the roster already has.
+              ...((() => {
+                const wrapped = wrappedSessionKey(session.sessionTag);
+                return wrapped ? { dataEncryptionKey: wrapped } : {};
+              })()),
               isAlive: session.exitTime
                 ? false
                 : (() => { try { process.kill(session.pid, 0); return true; } catch { return false; } })(),
@@ -1738,6 +1825,30 @@ export async function startDaemon(): Promise<void> {
           }
           return summaries;
         };
+
+        // The sidecar control channel. Started here because this block already establishes the
+        // daemon's local identity (account key, home directory); the sidecar itself is not tied to
+        // the LAN, and this moves out of this block once the client half exists.
+        sidecarHub = new SidecarHub({
+          socketPath: join(configuration.happyHomeDir, 'sidecar.sock'),
+          expectedUid: typeof process.getuid === 'function' ? process.getuid() : -1,
+          // The client half does not exist yet: a spawn is recorded and refused, never silently
+          // dropped, so the protocol can be exercised before sessions can be started through it.
+          onSpawn: (request) => {
+            logger.debug(`[SIDECAR] spawn requested for ${request.sessionId} (client not wired yet)`);
+            sidecarHub?.send({ t: 'error', requestId: request.requestId, code: 'not-implemented', message: 'the daemon cannot start sessions through the sidecar yet' });
+          },
+          onSignal: (sessionId) => logger.debug(`[SIDECAR] signal requested for ${sessionId} (not wired yet)`),
+          onEvent: (frame) => {
+            logger.debug(`[SIDECAR] event ${frame.t}`);
+            if (frame.t === 'exit') {
+              // The sidecar was the parent; the daemon still owns the record and its cleanup.
+              onChildExited(frame.pid, frame.code, frame.signal);
+            }
+          },
+          log: (message) => logger.debug(message),
+        });
+        sidecarHub.start();
 
         const started = await startLanServer({
             secret: credentials.encryption.machineKey,
@@ -2078,6 +2189,7 @@ export async function startDaemon(): Promise<void> {
           lastHeartbeat: entry.lastHeartbeat,
           sandbox: entry.sandbox,
           scopeUnit: entry.scopeUnit,
+          ...(entry.requiresDesktop ? { requiresDesktop: true } : {}),
         });
       }
     }
@@ -2114,6 +2226,7 @@ export async function startDaemon(): Promise<void> {
         sessions[id] = {
           sessionId: id,
           directory: s.directory ?? existing?.directory ?? '',
+          ...(s.requiresDesktop || existing?.requiresDesktop ? { requiresDesktop: true } : {}),
           sessionTag: s.sessionTag ?? existing?.sessionTag ?? '',
           agent: s.agent ?? existing?.agent ?? 'cursor',
           sandbox: (s as any).sandbox ?? existing?.sandbox,
@@ -2177,6 +2290,7 @@ export async function startDaemon(): Promise<void> {
           pid: tracked.pid,
           status: 'running',
           lastHeartbeat: tracked.lastHeartbeat ?? sessions[id].lastHeartbeat,
+          ...(tracked.requiresDesktop ? { requiresDesktop: true } : {}),
         };
       }
       writeDaemonState({
@@ -2537,6 +2651,8 @@ export async function startDaemon(): Promise<void> {
       relayClient?.stop();
       await lanDiscovery?.stop().catch(() => undefined);
       await lanServer?.stop().catch(() => undefined);
+      sidecarHub?.stop();
+      sidecarHub = null;
       await cleanupDaemonState();
       await stopCaffeinate();
       await releaseDaemonLock(daemonLockHandle);
