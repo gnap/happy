@@ -309,6 +309,7 @@ export const ru: TranslationStructure = {
         archiveSessionConfirm: 'Вы уверены, что хотите архивировать эту сессию?',
         restartSession: 'Перезапустить сессию',
         restartSessionSubtitle: 'Доступна новая версия CLI. Перезапустите для обновления.',
+        needsDesktop: 'Этому сеансу требуется вход в настольную сессию на той машине. Войдите там и повторите попытку.',
         restartSessionConfirm: 'Сессия будет перезапущена с новой версией CLI.',
         noMachineId: 'ID машины недоступен для этой сессии',
         failedToRestartSession: 'Не удалось перезапустить сессию',

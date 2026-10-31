@@ -382,6 +382,7 @@ export const ja: TranslationStructure = {
         archiveSessionConfirm: 'このセッションをアーカイブしてもよろしいですか？',
         restartSession: 'セッションを再起動',
         restartSessionSubtitle: '新しいCLIバージョンが利用可能です。再起動してアップグレードしてください。',
+        needsDesktop: 'このセッションは、そのマシンでデスクトップにログインする必要があります。ログインしてから再試行してください。',
         restartSessionConfirm: 'セッションは新しいCLIバージョンで再起動されます。',
         noMachineId: 'このセッションではマシンIDが利用できません',
         failedToRestartSession: 'セッションの再起動に失敗しました',
