@@ -2264,6 +2264,19 @@ export const storage = create<StorageState>()((set, get) => {
                     withRestarts[session.happySessionId] = { ...known, restartingAt: session.restartingSince };
                 }
             }
+            // A heartbeat moving is not a change the list draws: the summaries differ every few
+            // seconds (`at`, `lastHeartbeat`), and rewriting the map for that re-ran the channel
+            // signature over every session and rebuilt the list each time. What the UI reads is
+            // the stable set below; when it is the same, the store does not change at all.
+            const stable = (list: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; restartingSince?: number; desktop?: { required: boolean; available: boolean } }>): string =>
+                Object.keys(list).sort().map((id) => {
+                    const s = list[id];
+                    return [id, s.isAlive ? 1 : 0, s.directory, s.agent, s.via,
+                        s.restartingSince ?? '', s.desktop?.required ? 1 : 0, s.desktop?.available ? 1 : 0].join('\u0000');
+                }).join('\u0001');
+            if (stable(state.daemonSessionList) === stable(next)) {
+                return state;
+            }
             return { ...state, sessions: withRestarts, daemonSessionList: next };
         }),
         setSessionChannelOverride: (sessionId: string, channel: SessionChannel | null) => set((state) => {

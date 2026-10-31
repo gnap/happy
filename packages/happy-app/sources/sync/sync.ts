@@ -1965,9 +1965,16 @@ class Sync {
         // 18-85s. Whichever answers first puts its rows on screen; the server's answer replaces
         // them with the full records when it lands. Not awaited — the fold below is the server's,
         // and a roster read must never delay it.
-        void this.fetchSessionListFromDaemons().catch((error) => {
-            log.log(`📡 fetchSessions: daemon roster alongside the server failed: ${String(error)}`);
-        });
+        const nowRoster = Date.now();
+        if (!this.rosterFetchInFlight && nowRoster - this.lastRosterFetchAt >= Sync.ROSTER_FETCH_INTERVAL_MS) {
+            this.lastRosterFetchAt = nowRoster;
+            this.rosterFetchInFlight = true;
+            void this.fetchSessionListFromDaemons()
+                .catch((error) => {
+                    log.log(`📡 fetchSessions: daemon roster alongside the server failed: ${String(error)}`);
+                })
+                .finally(() => { this.rosterFetchInFlight = false; });
+        }
 
         // Full refresh when delta base is 0 (either first fetch or reset by #refreshSessionsFull).
         const fullRefresh = this.lastSessionRefreshNonDeltaAt === 0;
@@ -3698,6 +3705,17 @@ class Sync {
      * sets 'daemon', a server answer sets 'server'.
      */
     private sessionsListAxis: 'server' | 'daemon' = 'server';
+    /**
+     * When the eager roster last ran, and whether one is running.
+     *
+     * The roster is what puts a session on screen before the server's list arrives, but it is a
+     * browse plus a request per machine: run on every list refresh it dominated the JS thread and
+     * rewrote the session store several times a minute (measured: 180 roster answers and 576
+     * channel resolutions in half an hour). One read a minute is enough to discover sessions.
+     */
+    private lastRosterFetchAt = 0;
+    private rosterFetchInFlight = false;
+    private static readonly ROSTER_FETCH_INTERVAL_MS = 60_000;
 
     /**
      * The server-axis position of a session, for guards and fetch anchors.
