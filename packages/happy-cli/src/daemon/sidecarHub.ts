@@ -166,10 +166,12 @@ export class SidecarHub {
         }
         this.client = socket;
         this.buffer = '';
-        const now = Date.now();
 
         socket.setEncoding('utf8');
-        socket.on('data', (chunk: string) => this.consume(chunk, now));
+        // `now` must be read per frame, not captured when the socket was accepted: a pong stamped
+        // with the connection time never moves `lastPongAt`, so a healthy sidecar was being
+        // declared dead every timeout and re-dialling for no reason.
+        socket.on('data', (chunk: string) => this.consume(chunk, Date.now()));
         socket.on('error', () => { /* close handles it */ });
         socket.on('close', () => {
             if (this.client === socket) {
