@@ -316,6 +316,8 @@ export async function startDaemon(): Promise<void> {
           pid: session.pid ?? existing?.pid ?? -1,
           status: 'stopped',
           lastSeq: existing?.lastSeq ?? -1,
+          // Losing this here would turn a desktop session into a daemon one the moment it exits.
+          ...(session.requiresDesktop || existing?.requiresDesktop ? { requiresDesktop: true } : {}),
           exitReason: session.exitReason ?? existing?.exitReason,
           exitTime: session.exitTime ?? existing?.exitTime,
         };
@@ -576,6 +578,7 @@ export async function startDaemon(): Promise<void> {
           status: 'running',
           lastSeq: existing?.lastSeq ?? -1,
           lastHeartbeat: Date.now(),
+          ...(s.requiresDesktop || existing?.requiresDesktop ? { requiresDesktop: true } : {}),
         };
       }
       // Persist immediately so session maps survive unclean daemon kills (SIGKILL, OOM, etc.)
@@ -2223,6 +2226,7 @@ export async function startDaemon(): Promise<void> {
         sessions[id] = {
           sessionId: id,
           directory: s.directory ?? existing?.directory ?? '',
+          ...(s.requiresDesktop || existing?.requiresDesktop ? { requiresDesktop: true } : {}),
           sessionTag: s.sessionTag ?? existing?.sessionTag ?? '',
           agent: s.agent ?? existing?.agent ?? 'cursor',
           sandbox: (s as any).sandbox ?? existing?.sandbox,
