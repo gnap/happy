@@ -527,6 +527,9 @@ export async function startDaemon(): Promise<void> {
           // /proc keeps it kill-routable without relying on persisted state.
           scopeUnit: scopeUnitFromProcCgroup(pid) ?? undefined,
           lastHeartbeat: Date.now(),
+          // A session restarted into the desktop keeps that mode across a daemon restart; the
+          // flag is in the persisted record, and this is where a surviving process rejoins.
+          ...(sessions[sessionId]?.requiresDesktop ? { requiresDesktop: true } : {}),
         };
         pidToTrackedSession.set(pid, trackedSession);
         logger.debug(`[DAEMON RUN] Registered session ${sessionId} (started by: ${trackedSession.startedBy})`);
@@ -1462,6 +1465,7 @@ export async function startDaemon(): Promise<void> {
               persistedAgent === 'gemini' ||
               persistedAgent === 'acp-cursor'
             ) ? persistedAgent : 'cursor',
+            ...(persisted?.requiresDesktop ? { requiresDesktop: true } : {}),
           };
           logger.debug(`[DAEMON RUN] Restart: session ${sessionId} restored from persisted session record`);
         } else {
@@ -2177,6 +2181,7 @@ export async function startDaemon(): Promise<void> {
           lastHeartbeat: entry.lastHeartbeat,
           sandbox: entry.sandbox,
           scopeUnit: entry.scopeUnit,
+          ...(entry.requiresDesktop ? { requiresDesktop: true } : {}),
         });
       }
     }
@@ -2276,6 +2281,7 @@ export async function startDaemon(): Promise<void> {
           pid: tracked.pid,
           status: 'running',
           lastHeartbeat: tracked.lastHeartbeat ?? sessions[id].lastHeartbeat,
+          ...(tracked.requiresDesktop ? { requiresDesktop: true } : {}),
         };
       }
       writeDaemonState({
