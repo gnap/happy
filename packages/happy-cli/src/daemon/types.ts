@@ -26,6 +26,12 @@ export interface TrackedSession {
   sessionTag?: string;
   /** Agent type used when spawning */
   agent?: 'claude' | 'codex' | 'cursor' | 'cursor-acp' | 'acp-cursor' | 'gemini';
+  /**
+   * Spawned by Happy Sidecar inside the user's desktop session, because the session needs the
+   * login keychain or another desktop-only facility. Such a session cannot start before a user
+   * logs in, and the roster says so.
+   */
+  requiresDesktop?: boolean;
   /** Timestamp of last heartbeat received from this session (Date.now()) */
   lastHeartbeat?: number;
   /** Timestamp when the session process was spawned (Date.now()) */

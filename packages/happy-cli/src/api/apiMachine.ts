@@ -112,7 +112,7 @@ type MachineRpcHandlers = {
     spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
     stopSession: (sessionId: string) => boolean;
     archiveSession: (sessionId: string) => boolean;
-    restartSession: (sessionId: string, sandboxConfig?: any) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
+    restartSession: (sessionId: string, sandboxConfig?: any, requiresDesktop?: boolean) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
     requestShutdown: () => void;
 }
 
@@ -146,14 +146,14 @@ export class ApiMachineClient {
     }: MachineRpcHandlers) {
         // Register spawn session handler
         this.rpcHandlerManager.registerHandler('spawn-happy-session', async (params: any) => {
-            const { directory, sessionId, machineId, approvedNewDirectoryCreation, agent, token, environmentVariables, sandboxConfig } = params || {};
+            const { directory, sessionId, machineId, approvedNewDirectoryCreation, agent, token, environmentVariables, sandboxConfig, requiresDesktop } = params || {};
             logger.debug(`[API MACHINE] Spawning session with params: ${JSON.stringify(params)}`);
 
             if (!directory) {
                 throw new Error('Directory is required');
             }
 
-            const result = await spawnSession({ directory, sessionId, machineId, approvedNewDirectoryCreation, agent, token, environmentVariables, sandboxConfig });
+            const result = await spawnSession({ directory, sessionId, machineId, approvedNewDirectoryCreation, agent, token, environmentVariables, sandboxConfig, ...(requiresDesktop === true ? { requiresDesktop: true } : {}) });
 
             switch (result.type) {
                 case 'success':
@@ -208,13 +208,13 @@ export class ApiMachineClient {
         // The actual restart runs asynchronously; the App will see the session come
         // back online through normal session update events.
         this.rpcHandlerManager.registerHandler('restartSession', (params: any) => {
-            const { sessionId, sandboxConfig } = params || {};
+            const { sessionId, sandboxConfig, requiresDesktop } = params || {};
             if (!sessionId) {
                 throw new Error('Session ID is required');
             }
             logger.debug(`[API MACHINE] restartSession params: sessionId=${sessionId}, sandboxConfig=${JSON.stringify(sandboxConfig)}`);
             // Fire-and-forget — don't await, don't block the RPC response
-            restartSession(sessionId, sandboxConfig).then(r => {
+            restartSession(sessionId, sandboxConfig, typeof requiresDesktop === 'boolean' ? requiresDesktop : undefined).then(r => {
                 logger.debug(`[API MACHINE] restartSession: ${sessionId} — success=${r.success}`);
             }).catch(err => {
                 logger.debug(`[API MACHINE] restartSession: ${sessionId} — error:`, err);

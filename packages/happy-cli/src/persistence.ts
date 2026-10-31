@@ -291,6 +291,8 @@ export interface PersistedSession {
   exitReason?: string;
   exitTime?: number;
   lastHeartbeat?: number;
+  /** Started through Happy Sidecar, in the user's desktop session. */
+  requiresDesktop?: boolean;
 }
 
 /**

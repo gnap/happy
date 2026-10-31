@@ -32,7 +32,7 @@ export function startDaemonControlServer({
   stopSessionByPid: (pid: number) => boolean;
   port: number;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
-  restartSession: (sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
+  restartSession: (sessionId: string, sandboxConfig?: unknown, requiresDesktop?: boolean) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
   archiveSession: (sessionId: string) => boolean;
   requestShutdown: () => void;
   onHappySessionWebhook: (sessionId: string, metadata: Metadata) => void;
@@ -271,7 +271,7 @@ export function startDaemonControlServer({
     }, async (request) => {
       const { sessionId } = request.body;
       logger.debug(`[CONTROL SERVER] Restart session request: ${sessionId}`);
-      const result = await restartSession(sessionId);
+      const result = await restartSession(sessionId, undefined, typeof (request.body as any)?.requiresDesktop === 'boolean' ? (request.body as any).requiresDesktop : undefined);
       return result;
     });
 
