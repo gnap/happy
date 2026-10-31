@@ -1766,7 +1766,12 @@ export async function startDaemon(): Promise<void> {
               startedBy: String(session.startedBy),
               // The session's own metadata, mirrored here when it last updated, and only when the
               // server has named the session — there is nothing mirrored before that.
-              ...(session.requiresDesktop
+              // The mode lives in the durable record as well as on the tracked session: a
+              // process that survived a daemon restart is re-registered on a path that has not
+              // read the flag back, and the roster must not start claiming it is not a desktop
+              // session just because the daemon was restarted.
+              ...((session.requiresDesktop ||
+                (session.happySessionId && sessions[session.happySessionId]?.requiresDesktop))
                 ? { desktop: { required: true, available: sidecarHub?.usable ?? false } }
                 : {}),
               ...(session.happySessionId && lanSessionState.get(session.happySessionId)?.metadata
