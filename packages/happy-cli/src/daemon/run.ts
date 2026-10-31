@@ -1399,12 +1399,12 @@ export async function startDaemon(): Promise<void> {
      * grace they have to guess at. The grace still exists behind it, for a daemon that dies
      * mid-restart and so never gets to say it finished.
      */
-    const restartSession = async (sessionId: string, sandboxConfig?: any): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
+    const restartSession = async (sessionId: string, sandboxConfig?: any, requiresDesktop?: boolean): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
       const startedAt = Date.now();
       restartingStartedAt.set(sessionId, startedAt);
       announceRestarting(sessionId, startedAt);
       try {
-        return await performRestart(sessionId, sandboxConfig);
+        return await performRestart(sessionId, sandboxConfig, requiresDesktop);
       } finally {
         // Called off once there is an answer, whatever the answer was: the new process is up and
         // has registered, or the restart did not happen. Either way nothing is in flight.
@@ -1414,7 +1414,7 @@ export async function startDaemon(): Promise<void> {
     };
 
     // Kill existing process and spawn a new one reconnecting to the same server session
-    const performRestart = async (sessionId: string, sandboxConfig?: any): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
+    const performRestart = async (sessionId: string, sandboxConfig?: any, requiresDesktop?: boolean): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
       logger.debug(`[DAEMON RUN] Restart session: ${sessionId}`);
       const persistedState = await readDaemonState();
 
@@ -1526,6 +1526,13 @@ export async function startDaemon(): Promise<void> {
         resumeSessionTag: sessionTag,
         environmentVariables: recoveredProfile?.environmentVariables ?? undefined,
         sandboxConfig: perSessionSandbox,
+        // Explicit wins; otherwise the session keeps the mode it was started with. A restart is
+        // the only way to move an existing conversation between the daemon domain and the desktop.
+        ...(requiresDesktop !== undefined
+          ? { requiresDesktop }
+          : found.requiresDesktop !== undefined
+            ? { requiresDesktop: found.requiresDesktop }
+            : {}),
       });
 
       if (result.type === 'success') {

@@ -112,7 +112,7 @@ type MachineRpcHandlers = {
     spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
     stopSession: (sessionId: string) => boolean;
     archiveSession: (sessionId: string) => boolean;
-    restartSession: (sessionId: string, sandboxConfig?: any) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
+    restartSession: (sessionId: string, sandboxConfig?: any, requiresDesktop?: boolean) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
     requestShutdown: () => void;
 }
 
@@ -208,13 +208,13 @@ export class ApiMachineClient {
         // The actual restart runs asynchronously; the App will see the session come
         // back online through normal session update events.
         this.rpcHandlerManager.registerHandler('restartSession', (params: any) => {
-            const { sessionId, sandboxConfig } = params || {};
+            const { sessionId, sandboxConfig, requiresDesktop } = params || {};
             if (!sessionId) {
                 throw new Error('Session ID is required');
             }
             logger.debug(`[API MACHINE] restartSession params: sessionId=${sessionId}, sandboxConfig=${JSON.stringify(sandboxConfig)}`);
             // Fire-and-forget — don't await, don't block the RPC response
-            restartSession(sessionId, sandboxConfig).then(r => {
+            restartSession(sessionId, sandboxConfig, typeof requiresDesktop === 'boolean' ? requiresDesktop : undefined).then(r => {
                 logger.debug(`[API MACHINE] restartSession: ${sessionId} — success=${r.success}`);
             }).catch(err => {
                 logger.debug(`[API MACHINE] restartSession: ${sessionId} — error:`, err);
