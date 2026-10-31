@@ -42,6 +42,14 @@ export class SidecarHub {
     private buffer = '';
     private heartbeat: ReturnType<typeof setInterval> | null = null;
     private readonly presence = new SidecarPresence();
+    /**
+     * Spawn requests waiting for the sidecar's verdict, by requestId.
+     *
+     * A spawn is only real once the sidecar reports a pid: the daemon has to record that pid before
+     * the session registers, or it supervises a session it cannot signal. So the request waits for
+     * `spawned`/`error` rather than returning on write.
+     */
+    private readonly pendingSpawns = new Map<string, { resolve: (value: { pid: number } | { error: string }) => void; timer: ReturnType<typeof setTimeout> }>();
 
     constructor(private readonly options: SidecarHubOptions) {}
 
@@ -96,6 +104,33 @@ export class SidecarHub {
         } catch {
             // best effort
         }
+    }
+
+    /**
+     * Asks the sidecar to spawn a process and waits for its pid.
+     *
+     * Returns an error rather than throwing when the sidecar is absent or does not answer in time —
+     * the caller decides what to tell the user, and every GUI operation has the same shape.
+     */
+    requestSpawn(request: SpawnRequest, timeoutMs = 10_000): Promise<{ pid: number } | { error: string }> {
+        if (!this.usable) {
+            return Promise.resolve({ error: this.presence.refusal().message });
+        }
+        if (!this.client || this.client.destroyed) {
+            return Promise.resolve({ error: 'the desktop session is not connected' });
+        }
+        return new Promise((resolve) => {
+            const timer = setTimeout(() => {
+                this.pendingSpawns.delete(request.requestId);
+                resolve({ error: 'the desktop session did not acknowledge the spawn' });
+            }, timeoutMs);
+            this.pendingSpawns.set(request.requestId, { resolve, timer });
+            if (!this.send({ t: 'spawn', ...request })) {
+                clearTimeout(timer);
+                this.pendingSpawns.delete(request.requestId);
+                resolve({ error: 'the desktop session is not connected' });
+            }
+        });
     }
 
     /** Sends a frame to the sidecar; false when there is nobody to send it to. */
@@ -199,8 +234,26 @@ export class SidecarHub {
             case 'signal':
                 this.options.onSignal(frame.sessionId, frame.signal);
                 return;
-            case 'spawned':
-            case 'error':
+            case 'spawned': {
+                const pending = this.pendingSpawns.get(frame.requestId);
+                if (pending) {
+                    clearTimeout(pending.timer);
+                    this.pendingSpawns.delete(frame.requestId);
+                    pending.resolve({ pid: frame.pid });
+                }
+                this.options.onEvent(frame);
+                return;
+            }
+            case 'error': {
+                const pending = this.pendingSpawns.get(frame.requestId);
+                if (pending) {
+                    clearTimeout(pending.timer);
+                    this.pendingSpawns.delete(frame.requestId);
+                    pending.resolve({ error: frame.message });
+                }
+                this.options.onEvent(frame);
+                return;
+            }
             case 'exit':
                 this.options.onEvent(frame);
                 return;
@@ -210,6 +263,11 @@ export class SidecarHub {
     }
 
     private drop(reason: string, now: number): void {
+        for (const [id, pending] of this.pendingSpawns) {
+            clearTimeout(pending.timer);
+            pending.resolve({ error: `the desktop session disconnected (${reason})` });
+            this.pendingSpawns.delete(id);
+        }
         this.presence.lose(reason, now);
         this.client?.destroy();
         this.client = null;
