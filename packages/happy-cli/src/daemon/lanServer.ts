@@ -90,6 +90,14 @@ export type LanSessionSummary = {
    */
   dataEncryptionKey?: string;
   /**
+   * Whether this session must run in the user's desktop session, and whether one is available.
+   *
+   * A session that needs the login keychain cannot be started from the system daemon; `available`
+   * is the sidecar's presence, so a reader can say "waiting for login" instead of showing a
+   * session that will never start.
+   */
+  desktop?: { required: boolean; available: boolean };
+  /**
    * When this daemon began restarting the session, if it is restarting it.
    *
    * A timestamp rather than a flag, and for the same reason the daemon's published state carries

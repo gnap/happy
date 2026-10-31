@@ -992,6 +992,7 @@ export async function startDaemon(): Promise<void> {
           const trackedSession: TrackedSession = {
             startedBy: 'daemon',
             pid: happyProcess.pid,
+            ...(options.requiresDesktop ? { requiresDesktop: true } : {}),
             childProcess: happyProcess,
             directoryCreated,
             directory,
@@ -1724,6 +1725,9 @@ export async function startDaemon(): Promise<void> {
               startedBy: String(session.startedBy),
               // The session's own metadata, mirrored here when it last updated, and only when the
               // server has named the session — there is nothing mirrored before that.
+              ...(session.requiresDesktop
+                ? { desktop: { required: true, available: sidecarHub?.usable ?? false } }
+                : {}),
               ...(session.happySessionId && lanSessionState.get(session.happySessionId)?.metadata
                 ? {
                     metadataVersion: lanSessionState.get(session.happySessionId)!.metadata!.version,

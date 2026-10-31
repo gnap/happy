@@ -121,6 +121,8 @@ export interface SpawnSessionOptions {
     sessionId?: string;
     approvedNewDirectoryCreation?: boolean;
     agent?: 'claude' | 'codex' | 'gemini' | 'cursor' | 'cursor-acp' | 'acp-cursor';
+    /** Start the session in the user's desktop session (Happy Sidecar), not the daemon's domain. */
+    requiresDesktop?: boolean;
     token?: string;
     environmentVariables?: {
         // Anthropic Claude API configuration
