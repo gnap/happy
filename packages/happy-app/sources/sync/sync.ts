@@ -5654,7 +5654,7 @@ class Sync {
             operation: 'restart',
             path: `/lan/sessions/${encodeURIComponent(sessionId)}/restart`,
             proof: { operation: 'restart', target: sessionId },
-            run: (baseUrl, token, proof) => restartSessionAt(baseUrl, token, sessionId, proof ?? undefined),
+            run: (baseUrl, token, proof) => restartSessionAt(baseUrl, token, sessionId, proof ?? undefined, options?.requiresDesktop),
             // The server carries the same action by asking the daemon on this App's behalf. It is a
             // channel like the others: tried when its turn comes, and skipped when it cannot.
             onServer: () => apiSocket.machineRPC<LanRestartVerdict, { sessionId: string; requiresDesktop?: boolean }>(
