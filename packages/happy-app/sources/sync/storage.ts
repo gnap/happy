@@ -230,7 +230,7 @@ interface StorageState {
      * no `metadata` — that is encrypted and only ever travels inside a message payload — so this
      * can confirm which sessions exist and which are alive, but it cannot build a session row.
      */
-    daemonSessionList: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; at: number; restartingSince?: number }>;
+    daemonSessionList: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; at: number; restartingSince?: number; desktop?: { required: boolean; available: boolean } }>;
     /**
      * How far each machine's lifecycle log has been replayed, by machine id.
      *
@@ -271,7 +271,7 @@ interface StorageState {
     /** Replace the daemons' view. Pass null to clear it (the server answered). */
     /** Records what a machine said it is running. Null forgets it, for a machine that moved. */
     applyDaemonVersion: (machineId: string, versions: { running: string; onDisk: string | null; restartRequired: boolean } | null) => void;
-    applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute; restartingSince?: number }[] | null) => void;
+    applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute; restartingSince?: number; desktop?: { required: boolean; available: boolean } }[] | null) => void;
     channelOverride: Record<string, SessionChannel>;
     /** Pass null to return the session to automatic. */
     setSessionChannelOverride: (sessionId: string, channel: SessionChannel | null) => void;
@@ -2236,7 +2236,7 @@ export const storage = create<StorageState>()((set, get) => {
                 ),
             };
         }),
-        applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute; restartingSince?: number }[] | null) => set((state) => {
+        applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute; restartingSince?: number; desktop?: { required: boolean; available: boolean } }[] | null) => set((state) => {
             if (sessions === null) {
                 if (Object.keys(state.daemonSessionList).length === 0) {
                     return state;
@@ -2244,13 +2244,14 @@ export const storage = create<StorageState>()((set, get) => {
                 return { ...state, daemonSessionList: {} };
             }
             const at = Date.now();
-            const next: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; at: number; restartingSince?: number }> = {};
+            const next: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; at: number; restartingSince?: number; desktop?: { required: boolean; available: boolean } }> = {};
             // The same fact the daemon pushes, arriving the other way: a device that reads a
             // listing instead of holding a socket has to be told, and a restarting session is
             // listed with no live process — which is why the field travels with the listing at all.
             const withRestarts = { ...state.sessions };
             for (const session of sessions) {
                 next[session.happySessionId] = {
+                    ...(session.desktop ? { desktop: session.desktop } : {}),
                     isAlive: session.isAlive,
                     directory: session.directory,
                     agent: session.agent,
@@ -2665,6 +2666,11 @@ export function useSessionMessages(sessionId: string): { messages: Message[], is
             cachedBitmap: session?.cachedBitmap ?? 0,
         };
     }));
+}
+
+/** Whether a session needs a desktop session, and whether one is available right now. */
+export function useSessionDesktop(sessionId: string): { required: boolean; available: boolean } | null {
+    return storage(useShallow((state) => state.daemonSessionList[sessionId]?.desktop ?? null));
 }
 
 export function useSessionIsFetching(sessionId: string): boolean {
