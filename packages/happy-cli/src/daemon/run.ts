@@ -940,9 +940,36 @@ export async function startDaemon(): Promise<void> {
           // In scope mode the session starts inside its own transient systemd unit, so its memory
           // (and anything it spawns) is accounted to that unit rather than to the daemon's. The
           // PID is unchanged either way: systemd-run execs the command in place.
-          let happyProcess: ReturnType<typeof spawnHappyCLI>;
+          let happyProcess: ReturnType<typeof spawnHappyCLI> | null = null;
           let scopeUnit: string | undefined;
-          if (sessionScopeMode.enabled) {
+          /**
+           * A session that needs the desktop is started by Happy Sidecar, inside the user's Aqua
+           * session — the only place the login keychain exists. The daemon still owns the session:
+           * it records the pid the sidecar reports and the webhook that follows registers it like
+           * any other. There is no ChildProcess in that case, so nothing here may assume one.
+           */
+          let sidecarPid: number | undefined;
+          if (options.requiresDesktop) {
+            if (!sidecarHub?.usable) {
+              return {
+                type: 'error',
+                errorMessage: 'This session needs a desktop session (the login keychain), but no user is logged in on this machine or the sidecar is not running.',
+              };
+            }
+            const spec = getHappyCliLaunchSpec();
+            const requestId = `spawn-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+            const spawned = await sidecarHub.requestSpawn({
+              requestId,
+              sessionId: sessionId ?? directory,
+              cwd: directory,
+              argv: [spec.executable, ...spec.argsPrefix, ...args],
+            });
+            if ('error' in spawned) {
+              return { type: 'error', errorMessage: spawned.error };
+            }
+            sidecarPid = spawned.pid;
+            logger.debug(`[DAEMON RUN] Spawned session through Happy Sidecar with PID ${sidecarPid}`);
+          } else if (sessionScopeMode.enabled) {
             scopeUnit = buildSessionScopeUnitName(sessionId ?? directory);
             logger.info(`[DAEMON RUN] Spawning session in systemd scope ${scopeUnit} (slice=${sessionScopeMode.slice})`);
             happyProcess = spawnHappyCLIInSessionScope(args, {
@@ -964,22 +991,23 @@ export async function startDaemon(): Promise<void> {
           // is the only place the reason exists. Always attached (not just under DEBUG) so the
           // pipe cannot fill up and stall the child.
           let stderrTail = '';
-          happyProcess.stderr?.on('data', (data: Buffer) => {
+          happyProcess?.stderr?.on('data', (data: Buffer) => {
             stderrTail = (stderrTail + data.toString()).slice(-8192);
           });
           let settleSpawn: ((result: SpawnSessionResult) => void) | null = null;
 
           // Log output for debugging
           if (process.env.DEBUG) {
-            happyProcess.stdout?.on('data', (data) => {
+            happyProcess?.stdout?.on('data', (data) => {
               logger.debug(`[DAEMON RUN] Child stdout: ${data.toString()}`);
             });
-            happyProcess.stderr?.on('data', (data) => {
+            happyProcess?.stderr?.on('data', (data) => {
               logger.debug(`[DAEMON RUN] Child stderr: ${data.toString()}`);
             });
           }
 
-          if (!happyProcess.pid) {
+          const spawnedPid = sidecarPid ?? happyProcess?.pid;
+          if (!spawnedPid) {
             logger.debug('[DAEMON RUN] Failed to spawn process - no PID returned');
             return {
               type: 'error',
@@ -987,13 +1015,13 @@ export async function startDaemon(): Promise<void> {
             };
           }
 
-          logger.debug(`[DAEMON RUN] Spawned process with PID ${happyProcess.pid}`);
+          logger.debug(`[DAEMON RUN] Spawned process with PID ${spawnedPid}`);
 
           const trackedSession: TrackedSession = {
             startedBy: 'daemon',
-            pid: happyProcess.pid,
+            pid: spawnedPid,
             ...(options.requiresDesktop ? { requiresDesktop: true } : {}),
-            childProcess: happyProcess,
+            ...(happyProcess ? { childProcess: happyProcess } : {}),
             directoryCreated,
             directory,
             sessionTag: resumeSessionTag,
@@ -1003,7 +1031,7 @@ export async function startDaemon(): Promise<void> {
             message: directoryCreated ? `The path '${directory}' did not exist. We created a new folder and spawned a new session there.` : undefined
           };
 
-          pidToTrackedSession.set(happyProcess.pid, trackedSession);
+          pidToTrackedSession.set(spawnedPid, trackedSession);
 
           if (scopeUnit) {
             // Not a precondition — just proof that the session really left the daemon's cgroup.
@@ -1012,20 +1040,21 @@ export async function startDaemon(): Promise<void> {
             void (async () => {
               const deadline = Date.now() + 2000;
               while (Date.now() < deadline) {
-                if (scopeUnitFromProcCgroup(happyProcess.pid!) === scopeUnit) return;
+                if (scopeUnitFromProcCgroup(spawnedPid) === scopeUnit) return;
                 await delay(100);
               }
-              logger.warn(`[DAEMON RUN] ${scopeUnit}: session PID ${happyProcess.pid} was not found in that scope after 2s`);
+              logger.warn(`[DAEMON RUN] ${scopeUnit}: session PID ${spawnedPid} was not found in that scope after 2s`);
             })();
           }
 
-          happyProcess.on('exit', (code, signal) => {
-            const s = pidToTrackedSession.get(happyProcess.pid!);
+          happyProcess?.on('exit', (code, signal) => {
+            if (!happyProcess) return;
+            const s = pidToTrackedSession.get(spawnedPid);
             const sessionId = s?.happySessionId ?? 'unknown';
             const duration = s?.spawnTime ? Math.round((Date.now() - s.spawnTime) / 1000) : null;
-            logger.debug(`[DAEMON RUN] Child PID ${happyProcess.pid} (session ${sessionId}) exited: code=${code} signal=${signal}${duration !== null ? ` after ${duration}s` : ''}`);
-            if (happyProcess.pid) {
-              onChildExited(happyProcess.pid, code, signal);
+            logger.debug(`[DAEMON RUN] Child PID ${spawnedPid} (session ${sessionId}) exited: code=${code} signal=${signal}${duration !== null ? ` after ${duration}s` : ''}`);
+            if (spawnedPid) {
+              onChildExited(spawnedPid, code, signal);
             }
             // The process is gone, so no webhook is coming; release the spawn wait now instead of
             // leaving the caller on the full timeout.
@@ -1035,21 +1064,22 @@ export async function startDaemon(): Promise<void> {
             });
           });
 
-          happyProcess.on('error', (error) => {
+          happyProcess?.on('error', (error) => {
+            if (!happyProcess) return;
             logger.debug(`[DAEMON RUN] Child process error:`, error);
-            if (happyProcess.pid) {
-              const session = pidToTrackedSession.get(happyProcess.pid);
+            if (spawnedPid) {
+              const session = pidToTrackedSession.get(spawnedPid);
               if (session && !session.exitReason) {
                 session.exitReason = `spawn error: ${error.message}`;
                 session.exitTime = Date.now();
               }
-              onChildExited(happyProcess.pid, 1, null);
+              onChildExited(spawnedPid, 1, null);
             }
             settleSpawn?.({ type: 'error', errorMessage: `Failed to start session process: ${error.message}${stderrTail.trim() ? `: ${stderrTail.trim().slice(-1000)}` : ''}` });
           });
 
           // Wait for webhook to populate session with happySessionId
-          logger.debug(`[DAEMON RUN] Waiting for session webhook for PID ${happyProcess.pid}`);
+          logger.debug(`[DAEMON RUN] Waiting for session webhook for PID ${spawnedPid}`);
 
           return new Promise<SpawnSessionResult>((resolve) => {
             let settled = false;
@@ -1058,16 +1088,16 @@ export async function startDaemon(): Promise<void> {
               if (settled) return;
               settled = true;
               if (timeout) clearTimeout(timeout);
-              if (happyProcess.pid) pidToAwaiter.delete(happyProcess.pid);
+              if (spawnedPid) pidToAwaiter.delete(spawnedPid);
               resolve(result);
             };
 
             // Set timeout for webhook
             timeout = setTimeout(() => {
-              logger.debug(`[DAEMON RUN] Session webhook timeout for PID ${happyProcess.pid}`);
+              logger.debug(`[DAEMON RUN] Session webhook timeout for PID ${spawnedPid}`);
               settle({
                 type: 'error',
-                errorMessage: `Session webhook timeout for PID ${happyProcess.pid}`
+                errorMessage: `Session webhook timeout for PID ${spawnedPid}`
               });
             }, SESSION_WEBHOOK_TIMEOUT_MS);
 
@@ -1075,7 +1105,7 @@ export async function startDaemon(): Promise<void> {
             settleSpawn = settle;
 
             // Register awaiter
-            pidToAwaiter.set(happyProcess.pid!, (completedSession) => {
+            pidToAwaiter.set(spawnedPid!, (completedSession) => {
               logger.debug(`[DAEMON RUN] Session ${completedSession.happySessionId} fully spawned with webhook`);
               settle({
                 type: 'success',
@@ -1790,7 +1820,13 @@ export async function startDaemon(): Promise<void> {
             sidecarHub?.send({ t: 'error', requestId: request.requestId, code: 'not-implemented', message: 'the daemon cannot start sessions through the sidecar yet' });
           },
           onSignal: (sessionId) => logger.debug(`[SIDECAR] signal requested for ${sessionId} (not wired yet)`),
-          onEvent: (frame) => logger.debug(`[SIDECAR] event ${frame.t}`),
+          onEvent: (frame) => {
+            logger.debug(`[SIDECAR] event ${frame.t}`);
+            if (frame.t === 'exit') {
+              // The sidecar was the parent; the daemon still owns the record and its cleanup.
+              onChildExited(frame.pid, frame.code, frame.signal);
+            }
+          },
           log: (message) => logger.debug(message),
         });
         sidecarHub.start();
