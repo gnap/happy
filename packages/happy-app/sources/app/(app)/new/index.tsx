@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, Platform, Pressable, useWindowDimensions, ScrollView, TextInput } from 'react-native';
+import { View, Text, Platform, Pressable, useWindowDimensions, ScrollView, TextInput, Switch} from 'react-native';
 import Constants from 'expo-constants';
 import { Typography } from '@/constants/Typography';
 import { useAllMachines, storage, useMachinePresenceMap, useSetting, useSettingMutable, useSessions, useLocalSetting } from '@/sync/storage';
@@ -392,6 +392,8 @@ function NewSessionWizard() {
 
     // Sandbox isolation level — session-level, defaults to off
     const [sandboxIsolation, setSandboxIsolation] = React.useState<'off' | 'strict' | 'workspace' | 'custom'>('off');
+    /** Start this session through Happy Sidecar, inside the user's desktop session. */
+    const [requiresDesktop, setRequiresDesktop] = React.useState(false);
 
     // Session details state
     const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(() => {
@@ -1058,6 +1060,7 @@ function NewSessionWizard() {
                 agent: agentType,
                 environmentVariables,
                 sandboxConfig,
+                requiresDesktop,
             });
 
             setIsCreating(false);
@@ -1199,6 +1202,12 @@ function NewSessionWizard() {
                     {/* AgentInput with inline chips - sticky at bottom */}
                     <View style={{ paddingHorizontal: screenWidth > 700 ? 16 : 8, paddingBottom: Math.max(16, safeArea.bottom) }}>
                         <View style={{ maxWidth: layout.maxWidth, width: '100%', alignSelf: 'center' }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 8, paddingBottom: 6 }}>
+                                <Text style={{ color: '#8E8E93', fontSize: 12, flex: 1, marginRight: 8 }} numberOfLines={2}>
+                                    {t('sessionInfo.needsDesktop')}
+                                </Text>
+                                <Switch value={requiresDesktop} onValueChange={setRequiresDesktop} />
+                            </View>
                             <AgentInput
                                 value={sessionPrompt}
                                 onChangeText={setSessionPrompt}
