@@ -83,6 +83,8 @@ export type LanSessionSummary = {
     metadata?: string;
     /** The session key, wrapped to the account box key — opens `metadata` without a history read. */
     dataEncryptionKey?: string;
+    /** Whether this session needs the user's desktop session, and whether one is available now. */
+    desktop?: { required: boolean; available: boolean };
     directory: string;
     agent: string;
     startedBy: string;
