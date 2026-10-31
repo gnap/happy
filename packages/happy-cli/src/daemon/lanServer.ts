@@ -194,7 +194,7 @@ export type LanServerOptions = {
    * and touches nothing else on the machine. Absent means this daemon does not offer it, and a
    * caller falls back to whatever route it has left.
    */
-  restartSession?: (sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
+  restartSession?: (sessionId: string, sandboxConfig?: unknown, requiresDesktop?: boolean) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
   /**
    * A control call the *session* acts on, forwarded to its process: abort the turn in flight, or
    * answer a permission request it is waiting on.
@@ -620,8 +620,11 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     if (!opts.restartSession) {
       return reply.code(404).send({ error: 'this daemon does not restart sessions' });
     }
-    logger.debug(`[lan] restart ${sessionId} from=${clientAddress(request)}`);
-    const result = await opts.restartSession(sessionId);
+    const requested = typeof (request.body as { requiresDesktop?: unknown } | null)?.requiresDesktop === 'boolean'
+      ? (request.body as { requiresDesktop: boolean }).requiresDesktop
+      : undefined;
+    logger.debug(`[lan] restart ${sessionId} from=${clientAddress(request)} desktop=${requested ?? 'keep'}`);
+    const result = await opts.restartSession(sessionId, undefined, requested);
     logger.debug(`[lan] restart ${sessionId} success=${result.success}${result.error ? ` error=${result.error}` : ''}`);
     return reply.send({ v: LAN_PROTOCOL_VERSION, ...result });
   });
