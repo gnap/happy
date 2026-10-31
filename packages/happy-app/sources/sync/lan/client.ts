@@ -255,15 +255,23 @@ export async function restartSessionAt(
     token: string,
     sessionId: string,
     /** The account's proof of this request, when this device can make one. */
-    proof?: Record<string, string>
+    proof?: Record<string, string>,
+    /**
+     * Move the session between the daemon's domain and the user's desktop session.
+     *
+     * Sent in the body rather than the headers because it changes what the machine should do,
+     * not who is asking. Omitted when unchanged: a restart with no mode keeps the session's own.
+     */
+    requiresDesktop?: boolean
 ): Promise<LanRestartVerdict | null> {
+    const hasBody = requiresDesktop !== undefined;
     const response = await request(`${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/restart`, {
         method: 'POST',
         token,
-        // No body, so no content-type: a POST declaring `application/json` with nothing in it is
-        // rejected by the daemon's body parser before the route runs, and the restart silently
-        // never happens. Only the proof travels in the headers.
-        headers: { ...(proof ?? {}) },
+        // A body is only sent when there is something to say: a POST declaring `application/json`
+        // with nothing in it is rejected by the daemon's body parser before the route runs.
+        headers: { ...(proof ?? {}), ...(hasBody ? { 'content-type': 'application/json' } : {}) },
+        ...(hasBody ? { body: JSON.stringify({ requiresDesktop }) } : {}),
         // A restart kills a process and starts another. It is not slow, but it is not a read
         // either, and the shortest timeout in this file is for questions that are one round trip.
         timeoutMs: historyTimeoutFor(baseUrl),
