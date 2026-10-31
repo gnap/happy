@@ -1960,6 +1960,15 @@ class Sync {
             return;
         }
 
+        // The roster first, in the background: a LAN daemon answers in milliseconds and the relay
+        // publishes its set every few seconds, while the server's list is a 1.1MB body measured at
+        // 18-85s. Whichever answers first puts its rows on screen; the server's answer replaces
+        // them with the full records when it lands. Not awaited — the fold below is the server's,
+        // and a roster read must never delay it.
+        void this.fetchSessionListFromDaemons().catch((error) => {
+            log.log(`📡 fetchSessions: daemon roster alongside the server failed: ${String(error)}`);
+        });
+
         // Full refresh when delta base is 0 (either first fetch or reset by #refreshSessionsFull).
         const fullRefresh = this.lastSessionRefreshNonDeltaAt === 0;
 
@@ -5707,8 +5716,78 @@ class Sync {
         // read it (see `serverAxisSeq`).
         this.sessionsListAxis = 'daemon';
         storage.getState().applyDaemonSessionList(sessions);
+
+        // A session this App has never seen exists the moment a daemon says so — the server's
+        // list is a report from a round trip ago. Show what the roster carries (path, agent,
+        // liveness, machine) instead of leaving the row to a 1.1MB fetch that may take a minute;
+        // the server's record replaces the placeholder by id when it arrives.
+        const known = storage.getState().sessions;
+        const now = Date.now();
+        const placeholders: any[] = [];
         for (const answer of answers) {
-            log.log(`📡 fetchSessions: server unreachable — daemon ${answer.machineId.slice(0, 8)} reports ${answer.sessions.length} session(s) via ${answer.via}`);
+            for (const summary of answer.sessions) {
+                if (!summary.happySessionId || known[summary.happySessionId]) {
+                    continue;
+                }
+                const at = summary.lastHeartbeat ?? now;
+                // The roster carries the session's own metadata ciphertext and the wrapped key
+                // that opens it. With both, the row shows the real name, project and branch now;
+                // without them (a session the server has not named yet) the path is all there is.
+                let metadata: unknown = {
+                    path: summary.directory,
+                    host: '',
+                    machineId: answer.machineId,
+                };
+                let metadataVersion = 0;
+                if (summary.metadata !== undefined && summary.metadataVersion !== undefined && summary.dataEncryptionKey) {
+                    try {
+                        const sessionId = summary.happySessionId;
+                        let sessionKey = this.lanSessionKeys.get(sessionId) ?? null;
+                        if (!sessionKey) {
+                            sessionKey = await this.encryption.decryptEncryptionKey(summary.dataEncryptionKey);
+                            if (sessionKey) {
+                                this.lanSessionKeys.set(sessionId, sessionKey);
+                            }
+                        }
+                        if (sessionKey) {
+                            await this.encryption.initializeSessions(new Map([[sessionId, sessionKey]]));
+                            const sessionEncryption = this.encryption.getSessionEncryption(sessionId);
+                            const decrypted = sessionEncryption
+                                ? await sessionEncryption.decryptMetadata(summary.metadataVersion, summary.metadata)
+                                : null;
+                            if (decrypted) {
+                                metadata = decrypted;
+                                metadataVersion = summary.metadataVersion;
+                            }
+                        }
+                    } catch {
+                        // Keep the roster fields: a key that will not open is not a row to drop.
+                    }
+                }
+                placeholders.push({
+                    id: summary.happySessionId,
+                    seq: 0,
+                    createdAt: at,
+                    updatedAt: at,
+                    active: summary.isAlive,
+                    activeAt: at,
+                    metadata,
+                    metadataVersion,
+                    agentState: null,
+                    agentStateVersion: 0,
+                    thinking: false,
+                    thinkingAt: 0,
+                    presence: summary.isAlive ? 'online' : at,
+                    ...(summary.restartingSince !== undefined ? { restartingAt: summary.restartingSince } : {}),
+                });
+            }
+        }
+        if (placeholders.length > 0) {
+            storage.getState().applySessions(placeholders);
+            log.log(`📡 fetchSessions: ${placeholders.length} session(s) shown from the daemon roster before the server list`);
+        }
+        for (const answer of answers) {
+            log.log(`📡 roster: daemon ${answer.machineId.slice(0, 8)} reports ${answer.sessions.length} session(s) via ${answer.via}`);
         }
         // The same handshake that just read this machine's sessions can tell us what it is running —
         // the one fact about a machine that the server's copy of it cannot keep current, because a
