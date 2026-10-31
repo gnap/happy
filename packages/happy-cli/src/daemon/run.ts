@@ -28,6 +28,7 @@ import { stripProfileManagedEnv } from '@/utils/profileEnv';
 import { fetchSessionProfileMeta, PROFILE_META_DEADLINE_MS } from './fetchSessionProfileMeta';
 import { delay } from '@/utils/time';
 import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSessionSummary } from './lanServer';
+import { SidecarHub } from './sidecarHub';
 import { RESTARTING_TTL_MS, expiredRestarting } from './restartTracker';
 import { LifecycleLog } from './lifecycleLog';
 import { replayToServer } from './lifecycleServerReplay';
@@ -1325,6 +1326,7 @@ export async function startDaemon(): Promise<void> {
      * registering with this daemon before the LAN half has finished starting.
      */
     let lanServer: LanServerHandle | null = null;
+    let sidecarHub: SidecarHub | null = null;
     let relayClient: RelayClientHandle | null = null;
     /** Only has to make the envelope's `id` unique; the App does not key on it. */
     let lanEventCounter = 0;
@@ -1770,6 +1772,24 @@ export async function startDaemon(): Promise<void> {
           }
           return summaries;
         };
+
+        // The sidecar control channel. Started here because this block already establishes the
+        // daemon's local identity (account key, home directory); the sidecar itself is not tied to
+        // the LAN, and this moves out of this block once the client half exists.
+        sidecarHub = new SidecarHub({
+          socketPath: join(configuration.happyHomeDir, 'sidecar.sock'),
+          expectedUid: typeof process.getuid === 'function' ? process.getuid() : -1,
+          // The client half does not exist yet: a spawn is recorded and refused, never silently
+          // dropped, so the protocol can be exercised before sessions can be started through it.
+          onSpawn: (request) => {
+            logger.debug(`[SIDECAR] spawn requested for ${request.sessionId} (client not wired yet)`);
+            sidecarHub?.send({ t: 'error', requestId: request.requestId, code: 'not-implemented', message: 'the daemon cannot start sessions through the sidecar yet' });
+          },
+          onSignal: (sessionId) => logger.debug(`[SIDECAR] signal requested for ${sessionId} (not wired yet)`),
+          onEvent: (frame) => logger.debug(`[SIDECAR] event ${frame.t}`),
+          log: (message) => logger.debug(message),
+        });
+        sidecarHub.start();
 
         const started = await startLanServer({
             secret: credentials.encryption.machineKey,
@@ -2569,6 +2589,8 @@ export async function startDaemon(): Promise<void> {
       relayClient?.stop();
       await lanDiscovery?.stop().catch(() => undefined);
       await lanServer?.stop().catch(() => undefined);
+      sidecarHub?.stop();
+      sidecarHub = null;
       await cleanupDaemonState();
       await stopCaffeinate();
       await releaseDaemonLock(daemonLockHandle);
