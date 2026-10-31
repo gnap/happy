@@ -16,7 +16,7 @@ import { useDraft } from '@/hooks/useDraft';
 import { Modal } from '@/modal';
 import { gitStatusSync } from '@/sync/gitStatusSync';
 import { sessionAbort } from '@/sync/ops';
-import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionMessages, useSessionOnline, useSessionUsage, useSetting } from '@/sync/storage';
+import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionDesktop, useSessionMessages, useSessionOnline, useSessionUsage, useSetting } from '@/sync/storage';
 import { useSession } from '@/sync/storage';
 import { Session } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
@@ -191,6 +191,8 @@ export const SessionView = React.memo((props: { id: string }) => {
 
 
 function SessionViewLoaded({ sessionId, session }: { sessionId: string, session: Session }) {
+    /** This session runs in the user's desktop session (Happy Sidecar), and whether one is up. */
+    const desktopState = useSessionDesktop(sessionId);
     const { theme } = useUnistyles();
     const router = useRouter();
     const safeArea = useSafeAreaInsets();
@@ -372,6 +374,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
 
     const input = (
         <AgentInput
+            desktopState={desktopState}
             placeholder={t('session.inputPlaceholder')}
             value={message}
             onChangeText={setMessage}
