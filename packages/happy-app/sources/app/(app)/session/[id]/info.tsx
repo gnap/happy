@@ -310,14 +310,14 @@ function SessionInfoContent({ session }: { session: Session }) {
     }, [decision]);
 
     // Use HappyAction for restart
-    const [restartingSession, doRestartSession] = useHappyAction(async () => {
+    const [restartingSession, doRestartSession] = useHappyAction(async (inDesktop?: boolean) => {
         if (!session.metadata?.machineId) {
             throw new HappyError(t('sessionInfo.noMachineId'), false);
         }
         if (desktop?.required && !desktop.available) {
             throw new HappyError(t('sessionInfo.needsDesktop'), false);
         }
-        const result = await sessionRestart(session.id, session.metadata.machineId);
+        const result = await sessionRestart(session.id, session.metadata.machineId, inDesktop ? { requiresDesktop: true } : undefined);
         if (!result.success) {
             throw new HappyError(result.error || t('sessionInfo.failedToRestartSession'), false);
         }
@@ -332,7 +332,13 @@ function SessionInfoContent({ session }: { session: Session }) {
                 {
                     text: t('sessionInfo.restartSession'),
                     style: 'destructive',
-                    onPress: doRestartSession,
+                    onPress: () => doRestartSession(),
+                },
+                {
+                    // A restart in the desktop session is how a conversation moves between the
+                    // daemon's domain and the user's Aqua session; it needs a logged-in user.
+                    text: t('sessionInfo.restartInDesktop'),
+                    onPress: () => doRestartSession(true),
                 }
             ]
         );

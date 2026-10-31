@@ -348,6 +348,7 @@ export const pt: TranslationStructure = {
         restartSession: 'Reiniciar sessão',
         restartSessionSubtitle: 'Uma versão mais recente do CLI está disponível. Reinicie para atualizar.',
         needsDesktop: 'Esta sessão precisa de um login de desktop nessa máquina. Entre lá e tente novamente.',
+        restartInDesktop: 'Reiniciar na sessão de desktop',
         restartSessionConfirm: 'A sessão será reiniciada com a versão mais recente do CLI.',
         noMachineId: 'ID da máquina não disponível para esta sessão',
         failedToRestartSession: 'Falha ao reiniciar sessão',

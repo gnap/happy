@@ -310,6 +310,7 @@ export const ru: TranslationStructure = {
         restartSession: 'Перезапустить сессию',
         restartSessionSubtitle: 'Доступна новая версия CLI. Перезапустите для обновления.',
         needsDesktop: 'Этому сеансу требуется вход в настольную сессию на той машине. Войдите там и повторите попытку.',
+        restartInDesktop: 'Перезапустить в настольной сессии',
         restartSessionConfirm: 'Сессия будет перезапущена с новой версией CLI.',
         noMachineId: 'ID машины недоступен для этой сессии',
         failedToRestartSession: 'Не удалось перезапустить сессию',
