@@ -565,9 +565,9 @@ interface SessionRestartResponse {
  * carries the same action by asking the daemon on this App's behalf. There is no chain of
  * substitutions here: a channel that cannot carry it, or that failed, is where the next one starts.
  */
-export async function sessionRestart(sessionId: string, machineId: string): Promise<SessionRestartResponse> {
+export async function sessionRestart(sessionId: string, machineId: string, options?: { requiresDesktop?: boolean }): Promise<SessionRestartResponse> {
     try {
-        const response = await sync.restartSession(sessionId, machineId);
+        const response = await sync.restartSession(sessionId, machineId, options);
         if (!response) {
             // Nothing carried it. Saying that is more use than a substitute attempt: the reasons are
             // per channel, and the caller has nowhere useful to look for them.

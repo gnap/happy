@@ -380,6 +380,7 @@ export const it: TranslationStructure = {
         restartSession: 'Riavvia sessione',
         restartSessionSubtitle: 'È disponibile una versione più recente del CLI. Riavvia per aggiornare.',
         needsDesktop: 'Questa sessione richiede un accesso al desktop su quella macchina. Accedi lì e riprova.',
+        restartInDesktop: 'Riavvia nella sessione desktop',
         restartSessionConfirm: 'La sessione verrà riavviata con la versione più recente del CLI.',
         noMachineId: 'ID macchina non disponibile per questa sessione',
         failedToRestartSession: 'Impossibile riavviare la sessione',

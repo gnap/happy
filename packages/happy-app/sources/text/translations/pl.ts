@@ -359,6 +359,7 @@ export const pl: TranslationStructure = {
         restartSession: 'Uruchom ponownie sesję',
         restartSessionSubtitle: 'Dostępna jest nowsza wersja CLI. Uruchom ponownie, aby zaktualizować.',
         needsDesktop: 'Ta sesja wymaga zalogowania do sesji pulpitu na tej maszynie. Zaloguj się tam i spróbuj ponownie.',
+        restartInDesktop: 'Uruchom ponownie w sesji pulpitu',
         restartSessionConfirm: 'Sesja zostanie uruchomiona ponownie z nowszą wersją CLI.',
         noMachineId: 'ID maszyny niedostępne dla tej sesji',
         failedToRestartSession: 'Nie udało się uruchomić ponownie sesji',

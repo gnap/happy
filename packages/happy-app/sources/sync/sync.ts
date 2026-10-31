@@ -5640,7 +5640,7 @@ class Sync {
         }
     }
 
-    async restartSession(sessionId: string, machineId: string): Promise<{ success: boolean; newSessionId?: string; error?: string } | null> {
+    async restartSession(sessionId: string, machineId: string, options?: { requiresDesktop?: boolean }): Promise<{ success: boolean; newSessionId?: string; error?: string } | null> {
         const machineKey = this.getMachineKey(machineId);
         if (!machineKey) {
             return null;
@@ -5657,8 +5657,10 @@ class Sync {
             run: (baseUrl, token, proof) => restartSessionAt(baseUrl, token, sessionId, proof ?? undefined),
             // The server carries the same action by asking the daemon on this App's behalf. It is a
             // channel like the others: tried when its turn comes, and skipped when it cannot.
-            onServer: () => apiSocket.machineRPC<LanRestartVerdict, { sessionId: string }>(
-                machineId, 'restartSession', { sessionId },
+            onServer: () => apiSocket.machineRPC<LanRestartVerdict, { sessionId: string; requiresDesktop?: boolean }>(
+                machineId, 'restartSession', options?.requiresDesktop === undefined
+                    ? { sessionId }
+                    : { sessionId, requiresDesktop: options.requiresDesktop },
             ),
         });
         if (outcome.verdict) {

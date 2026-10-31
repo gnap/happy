@@ -363,6 +363,7 @@ export const en: TranslationStructure = {
         restartSession: 'Restart Session',
         restartSessionSubtitle: 'A newer CLI version is available. Restart to upgrade.',
         needsDesktop: 'This session needs a desktop login on that machine. Log in there and try again.',
+        restartInDesktop: 'Restart in desktop session',
         restartSessionConfirm: 'The session will be restarted with the newer CLI version.',
         noMachineId: 'Machine ID not available for this session',
         failedToRestartSession: 'Failed to restart session',
