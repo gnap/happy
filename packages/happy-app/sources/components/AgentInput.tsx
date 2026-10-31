@@ -37,6 +37,8 @@ import { useRouter } from 'expo-router';
 export type SandboxIsolationLevel = 'off' | 'strict' | 'workspace' | 'custom';
 
 interface AgentInputProps {
+    /** Whether this session runs in the desktop session, and whether one is available now. */
+    desktopState?: { required: boolean; available: boolean } | null;
     value: string;
     placeholder: string;
     onChangeText: (text: string) => void;
@@ -89,6 +91,8 @@ interface AgentInputProps {
          * were never sent, when the CLI forwards them.
          */
         backgroundTasks?: ActivityTask[] | null;
+        /** Whether this session runs in the desktop session, and whether one is available now. */
+        desktopState?: { required: boolean; available: boolean } | null;
         /** Current /goal condition, when the session has one. Shown inside the activity badge. */
         goal?: { status: GoalStatus; condition: string } | null;
     };
@@ -1194,8 +1198,15 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                             alignItems: 'flex-end',
                             minWidth: 150, // Fixed minimum width to prevent layout shift
                         }}>
-                            {/* Sandbox shield + permission mode in one row */}
+                            {/* Desktop session, sandbox shield and permission mode in one row */}
                             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
+                                {props.desktopState?.required ? (
+                                    <Ionicons
+                                        name="desktop-outline"
+                                        size={13}
+                                        color={props.desktopState.available ? theme.colors.textSecondary : '#FF9500'}
+                                    />
+                                ) : null}
                                 <SandboxIndicatorButton
                                     isolation={props.sandboxIsolation ?? 'off'}
                                     onPress={props.onSandboxIsolationChange ? handleSandboxIsolationPress : undefined}

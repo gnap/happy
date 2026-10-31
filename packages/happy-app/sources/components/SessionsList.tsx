@@ -4,7 +4,7 @@ import { View, Pressable, SectionList, Platform, ActivityIndicator, RefreshContr
 import { Swipeable } from 'react-native-gesture-handler';
 import { Text } from '@/components/StyledText';
 import { usePathname } from 'expo-router';
-import { SessionListViewItem, useSessionDesktop, useSessionIsFetching, useMachinePresenceMap } from '@/sync/storage';
+import { SessionListViewItem, useSessionIsFetching, useMachinePresenceMap } from '@/sync/storage';
 import { MACHINE_PRESENCE_COLORS } from '@/sync/machinePresence';
 import { Ionicons } from '@expo/vector-icons';
 import { getSessionName, useSessionStatus, getSessionSubtitle, getSessionAvatarId, formatPathRelativeToHome } from '@/utils/sessionUtils';
@@ -530,7 +530,6 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle, 
     isSingle?: boolean;
     needsRestart?: boolean;
 }) => {
-    const desktop = useSessionDesktop(session.id);
     const styles = stylesheet;
     const sessionStatus = useSessionStatus(session);
     const sessionName = getSessionName(session);
@@ -625,14 +624,6 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle, 
 
                 {/* Status line with dot */}
                 <View style={styles.statusRow}>
-                    {desktop?.required ? (
-                        <Ionicons
-                            name="desktop-outline"
-                            size={12}
-                            color={desktop.available ? '#8E8E93' : '#FF9500'}
-                            style={{ marginRight: 4 }}
-                        />
-                    ) : null}
                     <View style={styles.statusDotContainer}>
                         <SessionStatusDot sessionId={session.id} color={sessionStatus.statusDotColor} isPulsing={sessionStatus.isPulsing} />
                     </View>
