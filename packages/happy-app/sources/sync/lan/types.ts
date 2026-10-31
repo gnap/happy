@@ -73,6 +73,16 @@ export type PublishedLanEndpoints = {
 
 export type LanSessionSummary = {
     happySessionId: string;
+    /** The CLI's own tag, set before the server issues an id. */
+    tag?: string;
+    /**
+     * The session's metadata, ciphertext and revision. Mirrored by the daemon from the session's
+     * own `update-session`, so it is the same record the server holds.
+     */
+    metadataVersion?: number;
+    metadata?: string;
+    /** The session key, wrapped to the account box key — opens `metadata` without a history read. */
+    dataEncryptionKey?: string;
     directory: string;
     agent: string;
     startedBy: string;
