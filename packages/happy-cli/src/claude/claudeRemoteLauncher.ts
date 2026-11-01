@@ -846,6 +846,16 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         logger.debug(`[remote]: context via control_request: ${usage.totalTokens} / ${usage.maxTokens} (${Math.round((usage.totalTokens / usage.maxTokens) * 100)}%)`);
                     },
                     onContextOutput: undefined,
+                    onDisplayCrons: (crons) => {
+                        // Display only: the scheduler below is driven by the authoritative Stop
+                        // snapshot. This reaches the App as soon as the tool call streams.
+                        const state: Record<string, { schedule: string; recurring: boolean; nextFireAt?: number }> = {};
+                        for (const c of crons) {
+                            const at = nextCronFire(c.schedule, Date.now());
+                            state[c.id] = { schedule: c.schedule, recurring: c.recurring, ...(at !== null ? { nextFireAt: at } : {}) };
+                        }
+                        session.client.updateAgentState(s => ({ ...s, crons: state }));
+                    },
                     onSessionCrons: (crons) => {
                         if (!session.pendingCrons) {
                             session.pendingCrons = new Map();
