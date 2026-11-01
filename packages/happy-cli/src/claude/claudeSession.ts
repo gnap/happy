@@ -245,6 +245,15 @@ export type ClaudeSessionOpts = {
     /** Called with session_crons from the Stop hook so the launcher can schedule wakeups. */
     onSessionCrons?: (crons: Array<{ id: string; schedule: string; recurring: boolean; prompt: string }>) => void,
     /**
+     * The schedules to *display*, updated as they are created and deleted.
+     *
+     * `onSessionCrons` is the scheduling callback: it is called with the authoritative list at
+     * turn end and feeds the wake-up scheduler. This one is the live view for every client, fed by
+     * the CronCreate/CronDelete tool calls in the stream the same way `task_started`/
+     * `task_notification` feed the background-task list. Nothing schedules from it.
+     */
+    onDisplayCrons?: (crons: Array<{ id: string; schedule: string; recurring: boolean; prompt: string }>) => void,
+    /**
      * Called with the background tasks still running, whenever that set changes.
      *
      * The turn deliberately cannot end while these are live — the SDK stream has to stay open to
@@ -609,6 +618,9 @@ export class ClaudeSession {
                     if (crons.length > 0) {
                         logger.debug(`[claudeRemote] Stop hook: ${crons.length} pending crons`);
                     }
+                    replaceDisplayCrons(crons.map((c: { id: string; schedule: string; recurring: boolean; prompt: string }) => ({
+                        id: c.id, schedule: c.schedule, recurring: c.recurring, prompt: c.prompt,
+                    })));
                     // Published even when empty: a list that drained (the one-shot fired) has to
                     // reach agentState as an empty list, or every client keeps drawing a job that
                     // no longer exists. The callback replaces the state, it does not merge into it.
@@ -727,6 +739,22 @@ export class ClaudeSession {
     /** What the App is shown about each live task, keyed the same way the drain logic keys ids. */
     type LiveBackgroundTask = BackgroundTaskForApp;
     const backgroundTaskSummaries = new Map<string, LiveBackgroundTask>();
+    /**
+     * Schedules to display, fed by the tool calls that create and delete them.
+     *
+     * Keyed by the tool call's id until the Stop hook reports the session's own ids; the snapshot
+     * replaces the map, so a fired one-shot and a mismatched provisional key both correct
+     * themselves at the next turn end.
+     */
+    const displayCrons = new Map<string, { id: string; schedule: string; recurring: boolean; prompt: string }>();
+    function emitDisplayCrons(): void {
+        opts.onDisplayCrons?.([...displayCrons.values()]);
+    }
+    function replaceDisplayCrons(crons: Array<{ id: string; schedule: string; recurring: boolean; prompt: string }>): void {
+        displayCrons.clear();
+        for (const cron of crons) displayCrons.set(cron.id, cron);
+        emitDisplayCrons();
+    }
     /** Which tool each `tool_use` call was, so a task can be attributed to the tool that started it. */
     const toolNamesByCallId = new Map<string, string>();
     /** When each call's task will stop on its own, where the tool said so. */
@@ -880,6 +908,20 @@ export class ClaudeSession {
                         for (const block of ac) {
                             if (block?.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string') {
                                 toolNamesByCallId.set(block.id, block.name);
+                                // Schedules appear and disappear as tool calls; the Stop hook's
+                                // session_crons replaces this provisional view at turn end.
+                                if (block.name === 'CronCreate' && typeof block.input?.cron === 'string') {
+                                    displayCrons.set(block.id, {
+                                        id: block.id,
+                                        schedule: block.input.cron,
+                                        recurring: block.input.recurring === true,
+                                        prompt: typeof block.input?.prompt === 'string' ? block.input.prompt : '',
+                                    });
+                                    emitDisplayCrons();
+                                } else if (block.name === 'CronDelete' && typeof block.input?.id === 'string') {
+                                    displayCrons.delete(block.input.id);
+                                    emitDisplayCrons();
+                                }
                                 const timeoutMs = toolTimeoutMs(block.name, block.input);
                                 if (timeoutMs !== null) {
                                     toolDeadlineByCallId.set(block.id, Date.now() + timeoutMs);
