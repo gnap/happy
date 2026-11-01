@@ -312,6 +312,7 @@ export const zhHans: TranslationStructure = {
         inputPlaceholder: '输入消息...',
         encrypting: '连接中…',
         backgroundTasks: '后台任务',
+        activityScheduled: '定时任务',
         activityAgents: '代理',
         activityMonitors: '监控',
         activityGoals: '目标',

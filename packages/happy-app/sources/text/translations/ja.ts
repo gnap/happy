@@ -345,6 +345,7 @@ export const ja: TranslationStructure = {
         inputPlaceholder: 'メッセージを入力...',
         encrypting: '接続を確立中…',
         backgroundTasks: 'バックグラウンドタスク',
+        activityScheduled: 'スケジュール',
         activityAgents: 'エージェント',
         activityMonitors: 'モニター',
         activityGoals: 'ゴール',

@@ -431,6 +431,7 @@ export const ru: TranslationStructure = {
         inputPlaceholder: 'Введите сообщение...',
         encrypting: 'установка соединения…',
         backgroundTasks: 'Фоновые задачи',
+        activityScheduled: 'Запланировано',
         activityAgents: 'Агенты',
         activityMonitors: 'Мониторы',
         activityGoals: 'Цели',
