@@ -633,6 +633,16 @@ export class ClaudeSession {
                     return { continue: crons.length > 0 };
                 }],
             }],
+            // The session is going away: its schedules are session-scoped and will never fire
+            // from here again, so the display must not outlive it. A crash skips this hook — the
+            // App side has to treat a session that is not running as having no schedules.
+            SessionEnd: [{
+                hooks: [async () => {
+                    replaceDisplayCrons([]);
+                    opts.onSessionCrons?.([]);
+                    return { continue: true };
+                }],
+            }],
         },
     };
 
