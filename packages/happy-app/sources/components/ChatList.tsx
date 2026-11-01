@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { useSession, useSessionMessages } from "@/sync/storage";
 import { log } from "@/log";
-import { ActivityIndicator, FlatList, NativeScrollEvent, NativeSyntheticEvent, Platform, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, FlatList, Keyboard, NativeScrollEvent, NativeSyntheticEvent, Platform, StyleSheet, Text, View } from 'react-native';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useHeaderHeight } from '@/utils/responsive';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -106,6 +106,17 @@ const ChatListInternal = React.memo((props: {
     // In an inverted FlatList, offset 0 = visual bottom.
     const isNearBottomRef = useRef(true);
     const prevMessagesLengthRef = useRef(props.messages.length);
+    /**
+     * Whether the keyboard is up. A new message triggers a scroll to the newest row; doing that
+     * while a third-party keyboard (or its voice input) owns the screen fights it for the gesture
+     * and can dismiss it. The list follows the conversation again once the keyboard is gone.
+     */
+    const keyboardVisible = useRef(false);
+    React.useEffect(() => {
+        const show = Keyboard.addListener('keyboardWillShow', () => { keyboardVisible.current = true; });
+        const hide = Keyboard.addListener('keyboardWillHide', () => { keyboardVisible.current = false; });
+        return () => { show.remove(); hide.remove(); };
+    }, []);
 
     const clusterOptions: ClusterOptions | undefined = useMemo(() => {
         if (!props.tasks || props.tasks.length === 0) return undefined;
@@ -184,7 +195,7 @@ const ChatListInternal = React.memo((props: {
         const prev = prevMessagesLengthRef.current;
         const curr = props.messages.length;
         prevMessagesLengthRef.current = curr;
-        if (curr > prev && isNearBottomRef.current) {
+        if (curr > prev && isNearBottomRef.current && !keyboardVisible.current) {
             flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
         }
     }, [rows]);
