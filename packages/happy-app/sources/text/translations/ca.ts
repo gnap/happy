@@ -311,6 +311,7 @@ export const ca: TranslationStructure = {
         encrypting: 'establint connexió…',
         backgroundTasks: 'Tasques en segon pla',
         activityScheduled: 'Programat',
+        activityOnce: 'una vegada',
         activityAgents: 'Agents',
         activityMonitors: 'Monitors',
         activityGoals: 'Objectius',

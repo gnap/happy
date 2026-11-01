@@ -313,6 +313,7 @@ export const zhHans: TranslationStructure = {
         encrypting: '连接中…',
         backgroundTasks: '后台任务',
         activityScheduled: '定时任务',
+        activityOnce: '一次',
         activityAgents: '代理',
         activityMonitors: '监控',
         activityGoals: '目标',

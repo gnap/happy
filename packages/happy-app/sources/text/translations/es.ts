@@ -311,6 +311,7 @@ export const es: TranslationStructure = {
         encrypting: 'estableciendo conexión…',
         backgroundTasks: 'Tareas en segundo plano',
         activityScheduled: 'Programado',
+        activityOnce: 'una vez',
         activityAgents: 'Agentes',
         activityMonitors: 'Monitores',
         activityGoals: 'Objetivos',

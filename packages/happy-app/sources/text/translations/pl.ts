@@ -322,6 +322,7 @@ export const pl: TranslationStructure = {
         encrypting: 'nawiązywanie połączenia…',
         backgroundTasks: 'Zadania w tle',
         activityScheduled: 'Zaplanowane',
+        activityOnce: 'jednorazowo',
         activityAgents: 'Agenci',
         activityMonitors: 'Monitory',
         activityGoals: 'Cele',

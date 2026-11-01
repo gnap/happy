@@ -432,6 +432,7 @@ export const ru: TranslationStructure = {
         encrypting: 'установка соединения…',
         backgroundTasks: 'Фоновые задачи',
         activityScheduled: 'Запланировано',
+        activityOnce: 'однократно',
         activityAgents: 'Агенты',
         activityMonitors: 'Мониторы',
         activityGoals: 'Цели',
