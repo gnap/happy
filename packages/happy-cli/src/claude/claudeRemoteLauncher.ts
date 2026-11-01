@@ -849,10 +849,10 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     onDisplayCrons: (crons) => {
                         // Display only: the scheduler below is driven by the authoritative Stop
                         // snapshot. This reaches the App as soon as the tool call streams.
-                        const state: Record<string, { schedule: string; recurring: boolean; nextFireAt?: number }> = {};
+                        const state: Record<string, { schedule: string; recurring: boolean; nextFireAt?: number; prompt?: string }> = {};
                         for (const c of crons) {
                             const at = nextCronFire(c.schedule, Date.now());
-                            state[c.id] = { schedule: c.schedule, recurring: c.recurring, ...(at !== null ? { nextFireAt: at } : {}) };
+                            state[c.id] = { schedule: c.schedule, recurring: c.recurring, ...(c.prompt ? { prompt: c.prompt.slice(0, 200) } : {}), ...(at !== null ? { nextFireAt: at } : {}) };
                         }
                         session.client.updateAgentState(s => ({ ...s, crons: state }));
                     },
@@ -877,10 +877,10 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         }
                         // Sync compact cron list to agentState so the App can show
                         // a badge / count in the session list without downloading full prompts.
-                        const cronState: Record<string, { schedule: string; recurring: boolean; nextFireAt?: number }> = {};
+                        const cronState: Record<string, { schedule: string; recurring: boolean; nextFireAt?: number; prompt?: string }> = {};
                         for (const c of crons) {
                             if (session.firedCronIds?.has(c.id)) continue;
-                            cronState[c.id] = { schedule: c.schedule, recurring: c.recurring, ...(nextCronFire(c.schedule, Date.now()) !== null ? { nextFireAt: nextCronFire(c.schedule, Date.now())! } : {}) };
+                            cronState[c.id] = { schedule: c.schedule, recurring: c.recurring, ...(c.prompt ? { prompt: c.prompt.slice(0, 200) } : {}), ...(nextCronFire(c.schedule, Date.now()) !== null ? { nextFireAt: nextCronFire(c.schedule, Date.now())! } : {}) };
                         }
                         session.client.updateAgentState(s => ({ ...s, crons: cronState }));
                         logger.debug(`[remote] stored ${crons.length} crons from Stop hook`);
