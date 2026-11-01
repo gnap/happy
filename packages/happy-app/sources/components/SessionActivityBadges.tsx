@@ -73,7 +73,7 @@ const taskSections = (groups: ActivityGroup[]): ActivityDetailSection[] =>
     }));
 
 /** Scheduled jobs, with a countdown to the next time each one will wake the session. */
-const cronSections = (crons: { schedule: string; recurring: boolean; nextFireAt?: number }[]): ActivityDetailSection[] => {
+const cronSections = (crons: { schedule: string; recurring: boolean; nextFireAt?: number; prompt?: string }[]): ActivityDetailSection[] => {
     const now = Date.now();
     const lines = crons.flatMap((cron) => {
         // The CLI's own answer wins: it is the party that will actually wake the session. Only
@@ -87,10 +87,10 @@ const cronSections = (crons: { schedule: string; recurring: boolean; nextFireAt?
             return [];
         }
         return [{
-            // The marker is spelled out per line, not only in the section heading: a heading is
-            // easy to miss when the list is long, and this is the one row that is a schedule.
             status: '⏱',
-            text: cron.recurring ? cron.schedule : `${cron.schedule} · ${t('session.activityOnce')}`,
+            // The schedule's own description, like every other background task: the cron
+            // expression says when, which is the countdown's job, not the row's.
+            text: cron.prompt?.trim() || cron.schedule,
             ...(at !== null ? { deadlineAt: at } : {}),
         }];
     });
@@ -143,7 +143,7 @@ export const SessionActivityBadges = React.memo(function SessionActivityBadges({
     tasks?: ActivityTask[] | null;
     goal?: ActivityGoal | null;
     /** Pending scheduled jobs: a countdown to the next one is the thing a reader wants. */
-    crons?: Record<string, { schedule: string; recurring: boolean; nextFireAt?: number }> | null;
+    crons?: Record<string, { schedule: string; recurring: boolean; nextFireAt?: number; prompt?: string }> | null;
     compact?: boolean;
     interactive?: boolean;
 }) {

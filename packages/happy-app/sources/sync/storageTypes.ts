@@ -128,6 +128,8 @@ export const AgentStateSchema = z.object({
         recurring: z.boolean(),
         /** When the CLI says this will next fire; the App only computes it for older CLIs. */
         nextFireAt: z.number().optional(),
+        /** What the schedule is for — the CronCreate tool's own description, capped by the CLI. */
+        prompt: z.string().optional(),
     })).optional(),
     /**
      * Background tasks still running, synced from CLI agentState.
