@@ -77,8 +77,8 @@ const cronSections = (crons: { schedule: string; recurring: boolean }[]): Activi
     crons.length === 0 ? [] : [{
         label: t('session.activityScheduled'),
         lines: crons.map((cron) => ({
-            status: '',
-            text: `${cron.schedule}${cron.recurring ? '' : ' · once'}`,
+            status: '⏱',
+            text: cron.recurring ? cron.schedule : `${cron.schedule} · ${t('session.activityOnce')}`,
             ...(nextFireFor(cron.schedule) !== null ? { deadlineAt: nextFireFor(cron.schedule)! } : {}),
         })),
     }];
@@ -149,7 +149,14 @@ export const SessionActivityBadges = React.memo(function SessionActivityBadges({
         clear(leaveTimer);
     }, [clear]);
 
-    const groups = groupActivityTasks(tasks);
+    // A task past the deadline its tool declared cannot still be running; a CLI that missed the
+    // completion event used to leave such entries in agentState for days, and they read as live
+    // commands. Hide them after a minute's grace rather than drawing ghosts.
+    const now = Date.now();
+    const liveTasks = (tasks ?? []).filter((task) => !(
+        task.status === 'running' && task.deadlineAt !== undefined && task.deadlineAt + 60_000 < now
+    ));
+    const groups = groupActivityTasks(liveTasks);
     const running = groups.reduce((total, group) => total + group.tasks.length, 0);
     const active = goal ?? null;
     const cronList = Object.values(crons ?? {});

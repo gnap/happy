@@ -326,6 +326,7 @@ export const en: TranslationStructure = {
         encrypting: 'handshaking…',
         backgroundTasks: 'Background tasks',
         activityScheduled: 'Scheduled',
+        activityOnce: 'once',
         activityAgents: 'Agents',
         activityMonitors: 'Monitors',
         activityGoals: 'Goals',
