@@ -608,15 +608,17 @@ export class ClaudeSession {
                     const crons = input.session_crons ?? [];
                     if (crons.length > 0) {
                         logger.debug(`[claudeRemote] Stop hook: ${crons.length} pending crons`);
-                        opts.onSessionCrons?.(crons.map((c: { id: string; schedule: string; recurring: boolean; prompt: string }) => ({
-                            id: c.id,
-                            schedule: c.schedule,
-                            recurring: c.recurring,
-                            prompt: c.prompt,
-                        })));
-                        return { continue: true };
                     }
-                    return { continue: false };
+                    // Published even when empty: a list that drained (the one-shot fired) has to
+                    // reach agentState as an empty list, or every client keeps drawing a job that
+                    // no longer exists. The callback replaces the state, it does not merge into it.
+                    opts.onSessionCrons?.(crons.map((c: { id: string; schedule: string; recurring: boolean; prompt: string }) => ({
+                        id: c.id,
+                        schedule: c.schedule,
+                        recurring: c.recurring,
+                        prompt: c.prompt,
+                    })));
+                    return { continue: crons.length > 0 };
                 }],
             }],
         },
