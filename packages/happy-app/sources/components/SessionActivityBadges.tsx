@@ -7,6 +7,7 @@ import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
 import { GOAL_STATUS_ICONS, type GoalStatus } from '@/utils/goalUtils';
 import { activityTaskText, groupActivityTasks, type ActivityGroup, type ActivityTask } from '@/utils/activityTasks';
+import { nextCronFire } from '@/utils/cron';
 import { ActivityBubble, type ActivityDetailSection } from '@/components/ActivityBubble';
 
 export type { ActivityTask } from '@/utils/activityTasks';
@@ -71,6 +72,17 @@ const taskSections = (groups: ActivityGroup[]): ActivityDetailSection[] =>
         }),
     }));
 
+/** Scheduled jobs, with a countdown to the next time each one will wake the session. */
+const cronSections = (crons: { schedule: string; recurring: boolean }[]): ActivityDetailSection[] =>
+    crons.length === 0 ? [] : [{
+        label: t('session.activityScheduled'),
+        lines: crons.map((cron) => ({
+            status: '',
+            text: `${cron.schedule}${cron.recurring ? '' : ' · once'}`,
+            ...(nextFireFor(cron.schedule) !== null ? { deadlineAt: nextFireFor(cron.schedule)! } : {}),
+        })),
+    }];
+
 const goalSections = (goal: ActivityGoal): ActivityDetailSection[] => [{
     label: t('session.activityGoals'),
     lines: [{
@@ -88,9 +100,27 @@ const HOVER_LEAVE_MS = 200;
 
 type OpenBubble = 'tasks' | 'goal' | null;
 
+/** Next fire per schedule, kept across renders: the search is minute-granular and must not run per tick. */
+const cronFireCache = new Map<string, number>();
+
+function nextFireFor(schedule: string): number | null {
+    const cached = cronFireCache.get(schedule);
+    if (cached !== undefined && cached > Date.now()) {
+        return cached;
+    }
+    const at = nextCronFire(schedule, Date.now());
+    if (at === null) {
+        cronFireCache.delete(schedule);
+        return null;
+    }
+    cronFireCache.set(schedule, at);
+    return at;
+}
+
 export const SessionActivityBadges = React.memo(function SessionActivityBadges({
     tasks,
     goal,
+    crons,
     /** Row-sized rather than input-bar-sized. */
     compact = false,
     /** Whether the badges answer a gesture and open a bubble. Off in the session list, where the row owns them. */
@@ -98,6 +128,8 @@ export const SessionActivityBadges = React.memo(function SessionActivityBadges({
 }: {
     tasks?: ActivityTask[] | null;
     goal?: ActivityGoal | null;
+    /** Pending scheduled jobs: a countdown to the next one is the thing a reader wants. */
+    crons?: Record<string, { schedule: string; recurring: boolean }> | null;
     compact?: boolean;
     interactive?: boolean;
 }) {
@@ -120,6 +152,7 @@ export const SessionActivityBadges = React.memo(function SessionActivityBadges({
     const groups = groupActivityTasks(tasks);
     const running = groups.reduce((total, group) => total + group.tasks.length, 0);
     const active = goal ?? null;
+    const cronList = Object.values(crons ?? {});
     const onWeb = Platform.OS === 'web';
 
     const enter = React.useCallback((which: Exclude<OpenBubble, null>) => {
@@ -150,7 +183,7 @@ export const SessionActivityBadges = React.memo(function SessionActivityBadges({
         setOpen((current) => (current === which ? null : which));
     }, [clear]);
 
-    if (running === 0 && !active) {
+    if (running === 0 && !active && cronList.length === 0) {
         return null;
     }
 
@@ -194,6 +227,15 @@ export const SessionActivityBadges = React.memo(function SessionActivityBadges({
                     <View style={[styles.badge, compact && styles.badgeCompact]}>{runningBadge}</View>
                 )
             ) : null}
+            {cronList.length > 0 ? (
+                interactive ? (
+                    <Pressable {...gesture('tasks')} hitSlop={6} style={styles.goal}>
+                        <Ionicons name="time-outline" size={compact ? 13 : 15} color={theme.colors.textSecondary} />
+                    </Pressable>
+                ) : (
+                    <View style={styles.goal}><Ionicons name="time-outline" size={compact ? 13 : 15} color={theme.colors.textSecondary} /></View>
+                )
+            ) : null}
             {active ? (
                 interactive ? (
                     <Pressable {...gesture('goal')} hitSlop={6} style={styles.goal}>
@@ -219,7 +261,7 @@ export const SessionActivityBadges = React.memo(function SessionActivityBadges({
                         <ActivityBubble
                             title={open === 'goal' ? t('session.activityGoals') : t('session.backgroundTasks')}
                             icon={open === 'goal' ? GOAL_STATUS_ICONS[(active as ActivityGoal).status].icon : 'sync-outline'}
-                            sections={open === 'goal' && active ? goalSections(active) : taskSections(groups)}
+                            sections={open === 'goal' && active ? goalSections(active) : [...taskSections(groups), ...cronSections(cronList)]}
                         />
                     </View>
                 </>

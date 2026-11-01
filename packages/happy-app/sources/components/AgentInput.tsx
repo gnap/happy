@@ -91,6 +91,8 @@ interface AgentInputProps {
          * were never sent, when the CLI forwards them.
          */
         backgroundTasks?: ActivityTask[] | null;
+        /** Pending scheduled jobs (Claude cron tasks), from agentState. */
+        crons?: Record<string, { schedule: string; recurring: boolean }> | null;
         /** Whether this session runs in the desktop session, and whether one is available now. */
         desktopState?: { required: boolean; available: boolean } | null;
         /** Current /goal condition, when the session has one. Shown inside the activity badge. */
@@ -1022,6 +1024,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                     <SessionActivityBadges
                                         tasks={props.connectionStatus.backgroundTasks}
                                         goal={props.connectionStatus.goal}
+                                        crons={props.connectionStatus.crons}
                                         interactive
                                     />
                                 </>

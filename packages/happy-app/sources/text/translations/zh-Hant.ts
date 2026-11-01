@@ -311,6 +311,7 @@ export const zhHant: TranslationStructure = {
         inputPlaceholder: '輸入訊息...',
         encrypting: '正在建立連線…',
         backgroundTasks: '後台任務',
+        activityScheduled: '定時任務',
         activityAgents: '代理',
         activityMonitors: '監控',
         activityGoals: '目標',

@@ -402,6 +402,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                 // Likewise the background tasks: they say why the turn is still open, which is
                 // worth saying even while encryption is still being set up.
                 const backgroundTasks = session.agentState?.backgroundTasks ?? null;
+                const crons = session.agentState?.crons ?? null;
                 const hasEncryption = sync.encryption.getSessionEncryption(sessionId);
                 // The channel is known whether or not the key is: it is how the App is reaching the
                 // session, and while a key is being fetched that is exactly what a reader wants to
@@ -417,6 +418,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                         channel,
                         goal,
                         backgroundTasks,
+                        crons,
                     };
                 }
                 return {
@@ -427,6 +429,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                     channel,
                     goal,
                     backgroundTasks,
+                    crons,
                 };
             })()}
             onSend={() => {
