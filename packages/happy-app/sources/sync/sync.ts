@@ -616,6 +616,12 @@ class Sync {
                     this.recoverFetchesAfterSuspend();
                     this.connections.probeAfterResume();
                     this.relayHub?.probeAfterResume();
+                    // Probe only covers sockets that still have a live entry. iOS can close a LAN
+                    // socket during suspension without the App seeing the close, and a connection
+                    // the manager no longer holds is never probed — the icon then sits "connecting"
+                    // while sightings keep arriving. Reconciling re-establishes whatever the store
+                    // says the App should be holding, and is idempotent for the rest.
+                    this.reconcileDaemonSockets();
                     // A message waiting for a delivery verdict was waiting for a pong that died
                     // with the suspension. Requeue it now instead of at its own timeout, so the
                     // send ladder can use whatever channel the probe actually finds.
