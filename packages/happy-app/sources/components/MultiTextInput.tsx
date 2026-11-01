@@ -41,6 +41,18 @@ interface MultiTextInputProps {
 }
 
 export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextInputProps>((props, ref) => {
+    /**
+     * The native text height, and its reset when the text is emptied from above.
+     *
+     * iOS does not recompute a multiline TextInput's intrinsic height when `value` is set to ''
+     * programmatically (a send, a draft restore): the box keeps the height it had for the text
+     * that is no longer there — measured on a device as 149pt for an empty box. Setting the
+     * height explicitly while there is text, and dropping back to the intrinsic height once it is
+     * empty, is what makes the composer shrink on send.
+     */
+    const [contentHeight, setContentHeight] = React.useState<number | undefined>(undefined);
+    /** The height an empty composer has on this device, measured rather than assumed. */
+    const [emptyHeight, setEmptyHeight] = React.useState<number | undefined>(undefined);
     const {
         value,
         onChangeText,
@@ -184,6 +196,11 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
                     width: '100%',
                     fontSize: 16,
                     maxHeight,
+                    // Always an explicit height: removing it leaves iOS on the height it laid out
+                    // for text that is already gone (measured: 203pt of content for an empty value).
+                    ...(props.value.length === 0
+                        ? (emptyHeight !== undefined ? { height: emptyHeight } : {})
+                        : (contentHeight !== undefined ? { height: contentHeight } : {})),
                     color: theme.colors.input.text,
                     textAlignVertical: 'top',
                     padding:0,
@@ -207,6 +224,15 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
                 autoComplete="off"
                 textContentType="none"
                 submitBehavior="newline"
+                onContentSizeChange={(e) => {
+                    const measured = Math.ceil(e.nativeEvent.contentSize.height);
+                    if (value.length === 0) {
+                        setEmptyHeight(measured);
+                        setContentHeight(undefined);
+                    } else {
+                        setContentHeight(Math.min(maxHeight, measured));
+                    }
+                }}
             />
         </View>
     );
