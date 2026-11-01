@@ -4391,8 +4391,14 @@ class Sync {
                     // the reducer's messageIds deduplication handles re-delivery of the same msg.
                     const currentLastSeq = this.sessionLastSeq.get(updateData.body.sid);
                     const incomingSeq = updateData.body.message.seq;
+                    // The channel is one answer, for reads *and* writes. A push from the server says
+                    // what the server's log holds; when this session is served by a daemon, the
+                    // server's copy is a second source writing the same conversation into the same
+                    // store — the duplicates measured at 1793527483300 came from exactly that: two
+                    // writers, no shared identity between a server id and the log's local id.
+                    const channelCarriesMessages = this.preferredChannel(updateData.body.sid) === 'server';
                     const isFastPath = lastMessage !== null && currentLastSeq !== undefined && incomingSeq === currentLastSeq + 1;
-                    if (isFastPath && lastMessage) {
+                    if (isFastPath && lastMessage && channelCarriesMessages) {
                         traceUpdate(() => `🔄 Sync: Applying message (fast path): ${JSON.stringify(lastMessage).substring(0, 300)}`);
                         this.enqueueMessages(updateData.body.sid, [lastMessage]);
                         this.sessionLastSeq.set(updateData.body.sid, incomingSeq);
@@ -4412,13 +4418,13 @@ class Sync {
                         // message would therefore cost a read that finds nothing, because the
                         // message was just applied — the daemon's own `log-grew` hint, sent after
                         // a burst, is what fills a frame the socket actually missed.
-                        if (lastMessage && this.preferredChannel(updateData.body.sid) === 'server') {
+                        if (lastMessage && channelCarriesMessages) {
                             this.getMessagesSync(updateData.body.sid).invalidate();
                         }
                         // Enqueue immediately so the UI updates without waiting for fetchMessages.
                         // Neither sessionLastSeq nor newestSeq is advanced here — the gap must
                         // be filled by fetchMessages before the store is considered caught up.
-                        if (lastMessage) {
+                        if (lastMessage && channelCarriesMessages) {
                             traceUpdate(() => `🔄 Sync: Applying message (lenient path, seq gap): ${JSON.stringify(lastMessage).substring(0, 300)}`);
                             this.enqueueMessages(updateData.body.sid, [lastMessage]);
                         }
