@@ -220,7 +220,11 @@ export async function fetchHistory(
     if ('before' in page && page.before) {
         params.set('before', page.before);
     }
-    const query = params.size > 0 ? `?${params.toString()}` : '';
+    // A page is read to be shown, and the reader decrypts at most this many entries anyway: asking
+    // for more is paying for bytes and parse work that the caller throws away (measured: 546
+    // entries / ~600KB per follow read for a 150-entry use).
+    params.set('limit', '150');
+    const query = `?${params.toString()}`;
     const response = await request(
         `${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/history${query}`,
         { token, timeoutMs: historyTimeoutFor(baseUrl) }

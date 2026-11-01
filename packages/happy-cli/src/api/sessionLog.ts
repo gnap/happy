@@ -325,6 +325,14 @@ export type SessionLogQuery = {
   /** Read the entries up to this boundary. Omit both to read the newest page. */
   before?: string;
   maxBytes?: number;
+  /**
+   * How many entries a page may carry, newest first for a tail read.
+   *
+   * A page was bounded only by bytes, and a session with dense small envelopes answered a follow
+   * read with ~550 entries (~600KB) while the client decrypted 150 of them — the rest were paid for
+   * on the wire and thrown away.
+   */
+  maxEntries?: number;
 };
 
 /**
@@ -350,6 +358,7 @@ export type SessionLogQuery = {
  */
 export function readSessionLogPage(query: SessionLogQuery): SessionLogPage {
   const maxBytes = query.maxBytes ?? DEFAULT_PAGE_MAX_BYTES;
+  const maxEntries = query.maxEntries !== undefined ? Math.max(1, query.maxEntries) : undefined;
   const dir = sessionLogDir(query.tag, query.site);
   const names = listSegments(dir);
   if (names.length === 0) {
@@ -363,9 +372,9 @@ export function readSessionLogPage(query: SessionLogQuery): SessionLogPage {
 
   const before = parseAnchor(query.before);
   if (before !== null || (query.since === undefined && query.before === undefined)) {
-    return readBackwards(dir, names, indices, before, maxBytes);
+    return readBackwards(dir, names, indices, before, maxBytes, maxEntries);
   }
-  return readForwards(dir, names, indices, since, reset, maxBytes);
+  return readForwards(dir, names, indices, since, reset, maxBytes, maxEntries);
 }
 
 function readForwards(
@@ -375,6 +384,7 @@ function readForwards(
   since: Anchor | null,
   reset: boolean,
   maxBytes: number,
+  maxEntries?: number,
 ): SessionLogPage {
   const firstIndex = indices[0];
   const from = reset || since === null ? firstIndex : since.segment;
@@ -403,7 +413,7 @@ function readForwards(
         continue;
       }
       const size = line.end - line.start;
-      if (entries.length > 0 && bytes + size > maxBytes) {
+      if (entries.length > 0 && (bytes + size > maxBytes || (maxEntries !== undefined && entries.length >= maxEntries))) {
         cut = true;
         break;
       }
@@ -444,6 +454,7 @@ function readBackwards(
   indices: number[],
   before: Anchor | null,
   maxBytes: number,
+  maxEntries?: number,
 ): SessionLogPage {
   const lastIndex = indices[indices.length - 1];
   // No boundary means the newest page: start at the end of the last segment.
@@ -468,7 +479,7 @@ function readBackwards(
     for (let i = lines.length - 1; i >= 0; i -= 1) {
       const line = lines[i];
       const size = line.end - line.start;
-      if (pages.length > 0 && bytes + size > maxBytes) {
+      if (pages.length > 0 && (bytes + size > maxBytes || (maxEntries !== undefined && pages.length >= maxEntries))) {
         cut = true;
         break;
       }

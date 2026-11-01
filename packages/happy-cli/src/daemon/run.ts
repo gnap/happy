@@ -1985,7 +1985,7 @@ export async function startDaemon(): Promise<void> {
               const dataEncryptionKey = new Uint8Array(wrapped.length + 1);
               dataEncryptionKey.set([0], 0); // version byte, matching api.ts
               dataEncryptionKey.set(wrapped, 1);
-              const page = readSessionLogPage({ tag, site: machineId, since: query.since, before: query.before });
+              const page = readSessionLogPage({ tag, site: machineId, since: query.since, before: query.before, maxEntries: query.maxEntries });
               return {
                 tag,
                 dataEncryptionKey: encodeBase64(dataEncryptionKey),

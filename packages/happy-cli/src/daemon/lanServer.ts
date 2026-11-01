@@ -166,7 +166,7 @@ export type LanServerOptions = {
    * the CLI owns the tag. A client that knows only the tag can still read, which is what keeps
    * a session reachable while it is waiting for the server.
    */
-  getHistory: (address: LanSessionAddress, query: { since?: string; before?: string }) => LanHistory | null;
+  getHistory: (address: LanSessionAddress, query: { since?: string; before?: string; maxEntries?: number }) => LanHistory | null;
   /**
    * The full input and result of one tool call, for a detail view that was opened.
    *
@@ -580,7 +580,11 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     }
     const { tag } = request.params as { tag: string };
     const { since, before } = request.query as { since?: string; before?: string };
-    const history = opts.getHistory({ tag }, { since, before });
+    const { limit } = request.query as { limit?: string };
+    const maxEntries = limit !== undefined
+      ? Math.min(500, Math.max(1, Number.parseInt(limit, 10) || 0)) || undefined
+      : undefined;
+    const history = opts.getHistory({ tag }, { since, before, maxEntries });
     if (!history) {
       logger.debug(`[lan] history 404 tag=${tag} since=${since ?? '-'} before=${before ?? '-'}`);
       return reply.code(404).send({ error: 'no local history for that tag' });
@@ -762,8 +766,9 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     const { sessionId } = request.params as { sessionId: string };
     // No anchor at all means "the newest page": a reader that has just opened a session wants the
     // end of the log, not the beginning.
-    const { since, before } = request.query as { since?: string; before?: string };
-    const history = opts.getHistory({ sessionId }, { since, before });
+    const { since, before, limit } = request.query as { since?: string; before?: string; limit?: string };
+    const maxEntries = limit !== undefined ? Math.min(500, Math.max(1, Number.parseInt(limit, 10) || 0)) || undefined : undefined;
+    const history = opts.getHistory({ sessionId }, { since, before, maxEntries });
     if (!history) {
       // 404 rather than an empty list: the client should retry later, not record "no history".
       logger.debug(`[lan] history 404 ${sessionId} since=${since ?? '-'} before=${before ?? '-'}`);
