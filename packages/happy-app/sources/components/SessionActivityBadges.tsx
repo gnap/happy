@@ -89,7 +89,7 @@ const cronSections = (crons: { schedule: string; recurring: boolean; nextFireAt?
         return [{
             // The marker is spelled out per line, not only in the section heading: a heading is
             // easy to miss when the list is long, and this is the one row that is a schedule.
-            status: `${t('session.activityScheduled')} ⏱`,
+            status: '⏱',
             text: cron.recurring ? cron.schedule : `${cron.schedule} · ${t('session.activityOnce')}`,
             ...(at !== null ? { deadlineAt: at } : {}),
         }];
@@ -226,7 +226,7 @@ export const SessionActivityBadges = React.memo(function SessionActivityBadges({
     const runningBadge = (
         <>
             <Ionicons name="sync-outline" size={compact ? 10 : 12} color={theme.colors.textSecondary} />
-            <Text style={styles.count}>{running}</Text>
+            {running > 0 ? <Text style={styles.count}>{running}</Text> : null}
         </>
     );
     const goalBadge = active ? (
@@ -239,22 +239,13 @@ export const SessionActivityBadges = React.memo(function SessionActivityBadges({
 
     return (
         <View style={styles.row}>
-            {running > 0 ? (
+            {(running > 0 || cronList.length > 0) ? (
                 interactive ? (
                     <Pressable {...gesture('tasks')} hitSlop={6} style={[styles.badge, compact && styles.badgeCompact]}>
                         {runningBadge}
                     </Pressable>
                 ) : (
                     <View style={[styles.badge, compact && styles.badgeCompact]}>{runningBadge}</View>
-                )
-            ) : null}
-            {cronList.length > 0 ? (
-                interactive ? (
-                    <Pressable {...gesture('tasks')} hitSlop={6} style={styles.goal}>
-                        <Ionicons name="time-outline" size={compact ? 13 : 15} color={theme.colors.textSecondary} />
-                    </Pressable>
-                ) : (
-                    <View style={styles.goal}><Ionicons name="time-outline" size={compact ? 13 : 15} color={theme.colors.textSecondary} /></View>
                 )
             ) : null}
             {active ? (
