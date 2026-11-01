@@ -880,7 +880,17 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         // keeps current. Without it a turn that reported itself finished while the
                         // SDK stream stays open for background work is indistinguishable from an
                         // idle session that has stopped answering.
-                        session.client.updateAgentState(s => ({ ...s, backgroundTasks: tasks }));
+                        //
+                        // A task past the deadline its tool declared is not running, whatever the
+                        // snapshot says: a missed completion event left two such shell entries in
+                        // this session's agentState for days, and every client drew them as live.
+                        const now = Date.now();
+                        const fresh = tasks.filter((task) => !(
+                            task.status === 'running'
+                            && typeof task.deadlineAt === 'number'
+                            && task.deadlineAt + 60_000 < now
+                        ));
+                        session.client.updateAgentState(s => ({ ...s, backgroundTasks: fresh }));
                     },
                     onBeforeStop: () => { turnStopping = true; },
                     tryConsumeInboxTurn: () => {
