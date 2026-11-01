@@ -84,4 +84,10 @@ export type ToolCallMessage = {
     meta?: MessageMeta;
 }
 
-export type Message = UserTextMessage | AgentTextMessage | ToolCallMessage | ModeSwitchMessage;
+export type Message = (UserTextMessage | AgentTextMessage | ToolCallMessage | ModeSwitchMessage) & {
+    /**
+     * The producer's identity for this message — the same value every channel carries, which is
+     * what lets the same message delivered by two of them collapse to one bubble.
+     */
+    localId?: string | null;
+};
