@@ -126,6 +126,8 @@ export const AgentStateSchema = z.object({
     crons: z.record(z.string(), z.object({
         schedule: z.string(),
         recurring: z.boolean(),
+        /** When the CLI says this will next fire; the App only computes it for older CLIs. */
+        nextFireAt: z.number().optional(),
     })).optional(),
     /**
      * Background tasks still running, synced from CLI agentState.
