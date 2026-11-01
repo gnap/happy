@@ -5,7 +5,7 @@ import { computeBitmap } from "./cacheSegment";
 import { createReducer, reducer, ReducerState } from "./reducer/reducer";
 import { bump } from './metrics';
 import { Message } from "./typesMessage";
-import { mergePageIntoWindow } from "./messageIdentity";
+import { collapseDuplicateMessages, mergePageIntoWindow } from "./messageIdentity";
 import { NormalizedMessage } from "./typesRaw";
 import type { DaemonRoute, LanSighting, RelayEndpoint, SessionChannel } from './lan/types';
 import type { RelayDirectoryEntry } from './lan/relayDirectory';
@@ -1423,11 +1423,15 @@ export const storage = create<StorageState>()((set, get) => {
             };
         }),
         applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState, oldestSeq: number, hasOlderMessages: boolean, lastSeq: number) => set((state) => {
+            // The stored window is a projection of the log, not of the wire: one message can be
+            // two entries (the queued `out` copy and the server's `in` echo) and a window merged
+            // from two sources can hold both. Collapsing here is what keeps the list showing one
+            // bubble per message, whatever write order produced the window.
+            const sorted = collapseDuplicateMessages([...messages].sort((a, b) => b.createdAt - a.createdAt));
             const messagesMap: Record<string, Message> = {};
-            for (const msg of messages) {
+            for (const msg of sorted) {
                 messagesMap[msg.id] = msg;
             }
-            const sorted = [...messages].sort((a, b) => b.createdAt - a.createdAt);
             const totalSeq = state.sessions[sessionId]?.seq ?? 0;
             const cachedBitmap = computeBitmap(oldestSeq, lastSeq, totalSeq);
 
@@ -1517,7 +1521,12 @@ export const storage = create<StorageState>()((set, get) => {
             for (const msg of reducerResult.messages) {
                 messagesMap[msg.id] = msg;
             }
-            const sorted = Object.values(messagesMap).sort((a, b) => b.createdAt - a.createdAt);
+            // One message per bubble, however many wire entries produced it (see above).
+            const sorted = collapseDuplicateMessages(Object.values(messagesMap).sort((a, b) => b.createdAt - a.createdAt));
+            const cleanedMap: Record<string, Message> = {};
+            for (const msg of sorted) {
+                cleanedMap[msg.id] = msg;
+            }
             const totalSeq = session?.seq ?? 0;
             const cachedBitmap = computeBitmap(oldestSeq, newestSeq, totalSeq);
 
@@ -1527,7 +1536,7 @@ export const storage = create<StorageState>()((set, get) => {
                     ...state.sessionMessages,
                     [sessionId]: {
                         messages: sorted,
-                        messagesMap,
+                        messagesMap: cleanedMap,
                         reducerState,
                         isLoaded: true,
                         oldestSeq,
