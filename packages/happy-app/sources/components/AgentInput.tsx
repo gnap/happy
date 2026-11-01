@@ -92,7 +92,7 @@ interface AgentInputProps {
          */
         backgroundTasks?: ActivityTask[] | null;
         /** Pending scheduled jobs (Claude cron tasks), from agentState. */
-        crons?: Record<string, { schedule: string; recurring: boolean }> | null;
+        crons?: Record<string, { schedule: string; recurring: boolean; nextFireAt?: number }> | null;
         /** Whether this session runs in the desktop session, and whether one is available now. */
         desktopState?: { required: boolean; available: boolean } | null;
         /** Current /goal condition, when the session has one. Shown inside the activity badge. */

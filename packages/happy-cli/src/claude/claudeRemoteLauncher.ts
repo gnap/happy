@@ -867,10 +867,10 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         }
                         // Sync compact cron list to agentState so the App can show
                         // a badge / count in the session list without downloading full prompts.
-                        const cronState: Record<string, { schedule: string; recurring: boolean }> = {};
+                        const cronState: Record<string, { schedule: string; recurring: boolean; nextFireAt?: number }> = {};
                         for (const c of crons) {
                             if (session.firedCronIds?.has(c.id)) continue;
-                            cronState[c.id] = { schedule: c.schedule, recurring: c.recurring };
+                            cronState[c.id] = { schedule: c.schedule, recurring: c.recurring, ...(nextCronFire(c.schedule, Date.now()) !== null ? { nextFireAt: nextCronFire(c.schedule, Date.now())! } : {}) };
                         }
                         session.client.updateAgentState(s => ({ ...s, crons: cronState }));
                         logger.debug(`[remote] stored ${crons.length} crons from Stop hook`);

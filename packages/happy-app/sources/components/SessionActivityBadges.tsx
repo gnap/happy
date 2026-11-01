@@ -73,10 +73,12 @@ const taskSections = (groups: ActivityGroup[]): ActivityDetailSection[] =>
     }));
 
 /** Scheduled jobs, with a countdown to the next time each one will wake the session. */
-const cronSections = (crons: { schedule: string; recurring: boolean }[]): ActivityDetailSection[] => {
+const cronSections = (crons: { schedule: string; recurring: boolean; nextFireAt?: number }[]): ActivityDetailSection[] => {
     const now = Date.now();
     const lines = crons.flatMap((cron) => {
-        const at = nextFireFor(cron.schedule);
+        // The CLI's own answer wins: it is the party that will actually wake the session. Only
+        // an older CLI without the field leaves the App to match the expression itself.
+        const at = cron.nextFireAt !== undefined ? cron.nextFireAt : nextFireFor(cron.schedule);
         // A one-shot whose next matching minute is far away has already fired: a cron expression
         // carries no year, so the next match becomes next year's date. Until the CLI clears it
         // from agentState (it does at the next Stop), drawing that would be a countdown to a
@@ -141,7 +143,7 @@ export const SessionActivityBadges = React.memo(function SessionActivityBadges({
     tasks?: ActivityTask[] | null;
     goal?: ActivityGoal | null;
     /** Pending scheduled jobs: a countdown to the next one is the thing a reader wants. */
-    crons?: Record<string, { schedule: string; recurring: boolean }> | null;
+    crons?: Record<string, { schedule: string; recurring: boolean; nextFireAt?: number }> | null;
     compact?: boolean;
     interactive?: boolean;
 }) {
