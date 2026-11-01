@@ -73,15 +73,27 @@ const taskSections = (groups: ActivityGroup[]): ActivityDetailSection[] =>
     }));
 
 /** Scheduled jobs, with a countdown to the next time each one will wake the session. */
-const cronSections = (crons: { schedule: string; recurring: boolean }[]): ActivityDetailSection[] =>
-    crons.length === 0 ? [] : [{
-        label: t('session.activityScheduled'),
-        lines: crons.map((cron) => ({
-            status: '⏱',
+const cronSections = (crons: { schedule: string; recurring: boolean }[]): ActivityDetailSection[] => {
+    const now = Date.now();
+    const lines = crons.flatMap((cron) => {
+        const at = nextFireFor(cron.schedule);
+        // A one-shot whose next matching minute is far away has already fired: a cron expression
+        // carries no year, so the next match becomes next year's date. Until the CLI clears it
+        // from agentState (it does at the next Stop), drawing that would be a countdown to a
+        // moment that will never happen.
+        if (!cron.recurring && (at === null || at - now > 24 * 60 * 60 * 1000)) {
+            return [];
+        }
+        return [{
+            // The marker is spelled out per line, not only in the section heading: a heading is
+            // easy to miss when the list is long, and this is the one row that is a schedule.
+            status: `${t('session.activityScheduled')} ⏱`,
             text: cron.recurring ? cron.schedule : `${cron.schedule} · ${t('session.activityOnce')}`,
-            ...(nextFireFor(cron.schedule) !== null ? { deadlineAt: nextFireFor(cron.schedule)! } : {}),
-        })),
-    }];
+            ...(at !== null ? { deadlineAt: at } : {}),
+        }];
+    });
+    return lines.length === 0 ? [] : [{ label: t('session.activityScheduled'), lines }];
+};
 
 const goalSections = (goal: ActivityGoal): ActivityDetailSection[] => [{
     label: t('session.activityGoals'),
