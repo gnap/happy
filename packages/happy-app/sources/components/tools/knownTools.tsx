@@ -1308,8 +1308,10 @@ export const knownTools = {
             return prompt.slice(0, 80) || `Cron: ${opts.tool.input?.cron || '?'}`;
         },
         icon: ICON_SCHEDULE,
-        // Not minimal: the card draws the countdown to the next fire.
+        // Minimal: the countdown to the next fire is drawn once, in the activity bubble above the
+        // input (with every other scheduled job), not again under the message.
         noStatus: true,
+        minimal: true,
         input: z.object({
             cron: z.string(),
             prompt: z.string(),
