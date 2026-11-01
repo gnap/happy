@@ -7000,7 +7000,18 @@ class Sync {
             this.lanSessionKeys.set(sessionId, read.sessionKey);
             void this.encryption.initializeSessions(new Map([[sessionId, read.sessionKey]]));
         }
-        const fresh = this.withoutStoredDuplicates(sessionId, read.messages);
+        // The producer mints the localId and every channel carries it; an echo that arrives without
+        // one is the same message sent earlier from this device, and must not become a second
+        // identity. The server path already re-attaches it — this is the same rule here.
+        const identified = read.messages.map((message) => {
+            if (message.role !== 'user' || message.localId) {
+                return message;
+            }
+            const text = message.content.type === 'text' ? message.content.text : '';
+            const claimed = this.resolveLocalIdForIncoming(sessionId, message.id, text, null);
+            return claimed ? { ...message, localId: claimed } : message;
+        });
+        const fresh = this.withoutStoredDuplicates(sessionId, identified);
         if (fresh.length === 0) {
             return 0;
         }
