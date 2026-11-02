@@ -83,6 +83,37 @@ describe('the channel links the header draws', () => {
         expect(linkOf({ relayHubConnected: false }, 'relay')).toBe('connecting');
         expect(linkOf({ relayHubConnected: true }, 'relay')).toBe('connected');
     });
+
+    it('is not turned blue by one machine\'s stream reconnecting inside a healthy hub', () => {
+        // A per-machine stream can be opening or retrying while the hub is up and every other
+        // machine is being served. The channel's link is the hub, so that stream must not paint it.
+        expect(linkOf({ daemonSockets: { 'machine-1:relay': socket('relay', 'retrying') } }, 'relay')).toBe('connected');
+        expect(linkOf({ daemonSockets: { 'machine-1:relay': socket('relay', 'opening') } }, 'relay')).toBe('connected');
+    });
+});
+
+describe('the one connection a channel needs', () => {
+    const hubOf = (over: Partial<ChannelState>, channel: ChannelDriver['channel']) =>
+        channelDrivers(state(over), ['lan', 'relay', 'server'])
+            .find((driver) => driver.channel === channel)!
+            .hubTarget?.();
+
+    it('answers for the relay with the origin its machines published', () => {
+        // The address travels with the machines; the App is not told it by a person.
+        expect(hubOf({ relayEndpoints: { 'machine-1': { baseUrl: RELAY, source: 'published' } } }, 'relay'))
+            .toBe('https://relay.example.com');
+    });
+
+    it('seeds the relay origin until a machine publishes one', () => {
+        expect(hubOf({}, 'relay')).toBe('https://47.80.241.214');
+    });
+
+    it('leaves the hub to the channels that have one', () => {
+        // The server is the App's own socket, and the LAN is opened per machine — neither has a
+        // single channel-wide connection to ask about.
+        expect(hubOf({}, 'lan')).toBeUndefined();
+        expect(hubOf({}, 'server')).toBeUndefined();
+    });
 });
 
 describe('what the drivers say about a machine', () => {

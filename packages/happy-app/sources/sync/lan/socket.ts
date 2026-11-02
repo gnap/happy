@@ -143,9 +143,13 @@ export async function openLanSocket(options: {
      * The relay is one connection for every machine, so a socket to a machine behind it is a stream
      * on that connection rather than its own TCP socket — the same protocol, a different transport.
      * Given `path` and `query`, this returns whatever carries the frames; the default is a
-     * WebSocket to `baseUrl`, which is what the LAN and the relay's per-machine path both use.
+     * WebSocket to `baseUrl`, which is what the LAN uses.
+     *
+     * Null means the transport is not available right now — a hub-backed stream with no hub up.
+     * Saying so is what keeps the caller from quietly opening a second, direct connection in its
+     * place, which would be a per-machine socket to the relay alongside the hub.
      */
-    connect?: (path: string, query: string) => SocketLike;
+    connect?: (path: string, query: string) => SocketLike | null;
 }): Promise<LanSocketHandle | null> {
     // A socket authenticates with a nonce rather than with the bearer token the read path holds,
     // and the daemon spends that nonce at the upgrade. So this is a credential of its own — it
@@ -172,9 +176,14 @@ export async function openLanSocket(options: {
     const query = `?nonce=${encodeURIComponent(nonce)}&proof=${encodeURIComponent(proof)}`;
     // A real WebSocket satisfies the transport this speaks (a cast only because the DOM type's
     // event handlers are narrower than the four lines of the surface used here).
-    const socket: SocketLike = options.connect
+    const socket: SocketLike | null = options.connect
         ? options.connect(path, query)
         : (new WebSocket(`${toWebSocketBase(options.baseUrl)}${path}${query}`) as unknown as SocketLike);
+    if (!socket) {
+        // The transport is gone, not the address: reporting it as unusable here would be this side's
+        // failure charged to an address that answered the challenge.
+        return null;
+    }
     let deliberatelyClosed = false;
 
     socket.onmessage = (event) => {

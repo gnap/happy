@@ -171,6 +171,16 @@ export type ChannelDriver = {
      */
     endpoints(machineId: string, now: number, options?: { forRead?: boolean }): ChannelEndpoint[];
     /**
+     * The one connection this channel needs before it can carry anything, or null when it has none
+     * (or is not switched on).
+     *
+     * Only the relay answers: its transport is a single hub connection, and the directory that
+     * arrives on it is what says which machines are behind it. The server is the App's own socket,
+     * and the LAN is opened per machine by the connection layer. Asking the driver is what keeps
+     * "is the relay on, and where" one channel answer instead of a rule repeated in the sync engine.
+     */
+    hubTarget?(): string | null;
+    /**
      * The endpoint a socket should be held at for this machine, or null when this channel has
      * nothing to hold one to.
      *
