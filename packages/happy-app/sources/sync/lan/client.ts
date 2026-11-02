@@ -52,7 +52,9 @@ const PROOF_CONTEXT = 'v1.proof';
 export class LanRequestError extends Error {
     constructor(
         message: string,
-        readonly status: number
+        readonly status: number,
+        /** The daemon's own words for the refusal, when it sent any: the reason a caller reports. */
+        readonly body?: string
     ) {
         super(message);
         this.name = 'LanRequestError';
@@ -87,6 +89,28 @@ async function request(
     } finally {
         clearTimeout(timer);
     }
+}
+
+/**
+ * Throws a daemon's answer as the error that carries it: the status for what kind of answer it
+ * was, and the body because the daemon says why in words this App did not write.
+ *
+ * Collapsing every non-ok into one undifferentiated `LanRequestError` is how a 413 body-limit
+ * and a 403 proof-refusal came to be reported as the same thing — and reading the body matters
+ * because it is the daemon's own explanation, not a theory this App substitutes for it.
+ */
+async function throwAnswer(response: Response, what: string): Promise<never> {
+    const text = (await response.text().catch(() => '')).trim();
+    let why = text;
+    try {
+        const parsed = JSON.parse(text) as { error?: unknown };
+        if (typeof parsed.error === 'string' && parsed.error) {
+            why = parsed.error;
+        }
+    } catch {
+        // Not JSON: the daemon's words verbatim.
+    }
+    throw new LanRequestError(what, response.status, why.slice(0, 1000) || undefined);
 }
 
 /**
@@ -130,7 +154,7 @@ async function authenticateOnce(
 ): Promise<{ token: string; expiresAt: number }> {
     const challengeResponse = await request(`${baseUrl}/lan/challenge`, { method: 'POST' });
     if (!challengeResponse.ok) {
-        throw new LanRequestError('challenge rejected', challengeResponse.status);
+        return throwAnswer(challengeResponse, 'challenge rejected');
     }
     const { nonce } = (await challengeResponse.json()) as { nonce: string };
 
@@ -141,7 +165,7 @@ async function authenticateOnce(
         body: JSON.stringify({ nonce, proof }),
     });
     if (!sessionResponse.ok) {
-        throw new LanRequestError('proof rejected', sessionResponse.status);
+        return throwAnswer(sessionResponse, 'proof rejected');
     }
     return (await sessionResponse.json()) as { token: string; expiresAt: number };
 }
@@ -149,7 +173,7 @@ async function authenticateOnce(
 export async function fetchIdentity(baseUrl: string, token: string): Promise<LanIdentity> {
     const response = await request(`${baseUrl}/lan/identity`, { token });
     if (!response.ok) {
-        throw new LanRequestError('identity request failed', response.status);
+        return throwAnswer(response, 'identity request failed');
     }
     return (await response.json()) as LanIdentity;
 }
@@ -179,7 +203,7 @@ export async function fetchToolContent(
         return null;
     }
     if (!response.ok) {
-        throw new LanRequestError('tool content request failed', response.status);
+        return throwAnswer(response, 'tool content request failed');
     }
     const body = (await response.json()) as { args?: unknown; result?: unknown };
     return { args: body.args, result: body.result };
@@ -188,7 +212,7 @@ export async function fetchToolContent(
 export async function fetchSessions(baseUrl: string, token: string): Promise<LanSessionSummary[]> {
     const response = await request(`${baseUrl}/lan/sessions`, { token });
     if (!response.ok) {
-        throw new LanRequestError('sessions request failed', response.status);
+        return throwAnswer(response, 'sessions request failed');
     }
     const body = (await response.json()) as { sessions: LanSessionSummary[] };
     return body.sessions;
@@ -233,7 +257,7 @@ export async function fetchHistory(
         return null;
     }
     if (!response.ok) {
-        throw new LanRequestError('history request failed', response.status);
+        return throwAnswer(response, 'history request failed');
     }
     return (await response.json()) as LanHistory;
 }
@@ -244,10 +268,11 @@ export type LanRestartVerdict = { success: boolean; newSessionId?: string; error
 /**
  * Asks a daemon to restart a session, on the daemon's own API.
  *
- * Returns null when this daemon cannot be asked to do it — which is the 404 of a build that
- * predates the route, and also every other refusal to answer, because they mean the same thing to
- * a caller: no verdict came from here, so it should ask someone who might give one. A daemon that
- * *did* answer says so in the body, including when the answer is no.
+ * Returns null only for the 404 of a daemon that has nothing to restart — a build that predates
+ * the route, or no session by that id — which is the one answer that belongs to another channel.
+ * Every other non-ok is thrown with the daemon's own words: a proof it rejected and a body over
+ * its limit are both answers about *this request*, and walking them to another channel is sending
+ * the same bytes to the same mistake.
  *
  * The daemon's whole reason for the route is that a session is restarted because its machine has
  * been rebuilt, and the machine's own channel is the one that is up at that moment — the server's
@@ -280,8 +305,11 @@ export async function restartSessionAt(
         // either, and the shortest timeout in this file is for questions that are one round trip.
         timeoutMs: historyTimeoutFor(baseUrl),
     });
-    if (!response.ok) {
+    if (response.status === 404) {
         return null;
+    }
+    if (!response.ok) {
+        return throwAnswer(response, 'restart request failed');
     }
     return (await response.json()) as LanRestartVerdict;
 }
@@ -291,8 +319,11 @@ export async function restartSessionAt(
  *
  * The parameters are the same ciphertext the server route carries — the session's own key opens
  * them, and neither the daemon nor the relay holds it — so this walks the same bytes down a shorter
- * path. True means the daemon has a live session by that id and handed it over; false means there is
- * nobody here to ask, and the caller should ask the server instead.
+ * path. True means the daemon has a live session by that id and handed it over; false means the
+ * daemon has no such session, which is the one answer that belongs to another channel. Everything
+ * else — a token it would not take, a proof it rejected, a body over its limit — is thrown with
+ * the daemon's own words, because "who has this session" and "no, and here is why" are different
+ * questions, and only the first is ever somebody else's to answer.
  */
 export async function sessionControlAt(
     baseUrl: string,
@@ -311,7 +342,13 @@ export async function sessionControlAt(
         // Not a read: the daemon answers as soon as the session's socket has taken it.
         timeoutMs: REQUEST_TIMEOUT_MS,
     });
-    return response.ok;
+    if (response.status === 404) {
+        return false;
+    }
+    if (!response.ok) {
+        return throwAnswer(response, 'control request failed');
+    }
+    return true;
 }
 
 /** One fact from a machine's own log of what it knows about itself. */
@@ -360,7 +397,7 @@ export async function fetchLifecycle(
 ): Promise<{ revision: number; entries: LifecycleEntry[] }> {
     const response = await request(`${baseUrl}/lan/lifecycle?since=${since}`, { token });
     if (!response.ok) {
-        throw new LanRequestError('lifecycle request failed', response.status);
+        return throwAnswer(response, 'lifecycle request failed');
     }
     const body = (await response.json()) as { revision?: unknown; entries?: unknown };
     return {

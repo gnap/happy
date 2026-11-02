@@ -18,6 +18,7 @@ function stub(answer: { status: number; body?: unknown }) {
             ok: answer.status >= 200 && answer.status < 300,
             status: answer.status,
             json: async () => answer.body ?? {},
+            text: async () => (answer.body === undefined ? '' : JSON.stringify(answer.body)),
         } as unknown as Response;
     }));
     return calls;
