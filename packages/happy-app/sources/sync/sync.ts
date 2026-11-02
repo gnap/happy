@@ -55,7 +55,7 @@ import { channelEnabled, enabledChannels } from '@/utils/enabledChannels';
 import { channelDrivers as buildChannelDrivers, relayOriginFrom } from './channels/measure';
 import { channelAvailability } from './channels/resolve';
 import { candidateInputsFor, orderedCandidates } from './channels/candidates';
-import { carryOperation, type HealthRecorder } from './channels/execute';
+import { attemptFromStatus, carryOperation, type CarryOutcome, type HealthRecorder } from './channels/execute';
 import { fetchToolContent } from './lan/client';
 import { getToolCallFullContent as getToolCallFullContentFromServer, type GetToolCallFullContentResponse } from './ops';
 import { readRoutes } from './channels/readRoute';
@@ -154,6 +154,17 @@ function traceUpdate(message: () => string): void {
  * itself instead of scheduling reads no screen asked for.
  */
 let activeSyncInstance: object | null = null;
+
+/** What became of a control call this App tried to hand to a machine's own channel. */
+export type SessionControlResult =
+    /** A channel carried it. */
+    | { kind: 'done' }
+    /** A machine answered and said no — with its words, when it sent any. */
+    | { kind: 'refused'; status?: number; body?: string }
+    /** A machine answered that the request itself cannot be served as sent. */
+    | { kind: 'rejected'; status: number; body?: string }
+    /** No channel answered, or none had the session: the server is the remaining road. */
+    | { kind: 'unavailable' };
 
 class Sync {
     private static readonly BACKGROUND_SEND_TIMEOUT_MS = 30_000;
@@ -5031,8 +5042,8 @@ class Sync {
                         return identity.versions ?? null;
                     },
                 });
-                if (carried.verdict) {
-                    const versions = carried.verdict;
+                if (carried.kind === 'done' && carried.value) {
+                    const versions = carried.value;
                     storage.getState().applyDaemonVersion(machineId, versions);
                     log.log(`📡 daemon ${machineId.slice(0, 8)} is running ${versions.running}${versions.restartRequired ? ' (restart required)' : ''}`);
                 }
@@ -5305,14 +5316,23 @@ class Sync {
                 proofAction: { operation: 'tool-content', target: `${sessionId}:${callId}` },
                 run: (baseUrl, token, proof) => fetchToolContent(baseUrl, token, sessionId, callId, proof),
             });
-            if (carried.verdict) {
+            if (carried.kind === 'done' && carried.value) {
                 return {
                     success: true,
                     // The file on disk was written from the tool's arguments, which are an object;
                     // the daemon passes the JSON through without inspecting it.
-                    args: carried.verdict.args as Record<string, unknown> | undefined,
-                    result: carried.verdict.result,
+                    args: carried.value.args as Record<string, unknown> | undefined,
+                    result: carried.value.result,
                 };
+            }
+            if (carried.kind === 'refused' && carried.reason === 'no-endpoint') {
+                // The machine answered and said no. The server's copy of this payload is the
+                // truncated one, and standing it in for the full text is what a refusal used to be
+                // silently swapped for — its own words are worth more than a lesser copy.
+                return { success: false, error: `the machine refused (${carried.status ?? 'refused'}): ${carried.body ?? 'it needs the account to authorise it'}` };
+            }
+            if (carried.kind === 'bad-request') {
+                return { success: false, error: `the machine rejected this request (${carried.status}): ${carried.body ?? 'no explanation'}` };
             }
         }
         return getToolCallFullContentFromServer(sessionId, callId);
@@ -5321,10 +5341,12 @@ class Sync {
     /**
      * Hands a control call to the session over a channel this App already has to its machine.
      *
-     * Null when there is none, or when the machine has no live session by that id — and the caller
-     * asks the server, which is where every one of these went before. The reason to prefer the
-     * machine's own channel is the same one restart has: the session is running on that machine, and
-     * the channel that is up is not always the server's.
+     * `unavailable` — no channel answered, or none had the session — is the one answer that goes
+     * on to the server, which is where every one of these went before. A machine's refusal and a
+     * rejection of the request itself do not: the server would be the same machine by another road,
+     * or a substitution for an action it declined. The reason to prefer the machine's own channel
+     * is the same one restart has: the session is running on that machine, and the channel that is
+     * up is not always the server's.
      *
      * `params` is the ciphertext `sessionRPC` would have sent. The daemon forwards it without being
      * able to read it — which is why this can be offered over a plain-HTTP channel at all.
@@ -5333,22 +5355,26 @@ class Sync {
         sessionId: string,
         method: 'abort' | 'permission',
         params: string,
-    ): Promise<'done' | 'refused' | 'unavailable'> {
+    ): Promise<SessionControlResult> {
         const outcome = await this.carrySessionAction<boolean>(sessionId, {
             operation: 'send',
             path: `/lan/sessions/${encodeURIComponent(sessionId)}/control`,
             proof: { operation: 'control', target: sessionId },
             run: (baseUrl, token, proof) => sessionControlAt(baseUrl, token, sessionId, method, params, proof).then((ok) => (ok ? true : null)),
         });
-        if (outcome.verdict === true) {
+        if (outcome.kind === 'done') {
             log.log(`🔄 ${method} ${sessionId}: handed to the session`);
+            return { kind: 'done' };
         }
-        // Three answers, because the callers act differently on them: carried, refused by a channel
-        // that answered, and no channel able to take it at all.
-        if (outcome.verdict === true) {
-            return 'done';
+        if (outcome.kind === 'bad-request') {
+            return { kind: 'rejected', status: outcome.status, body: outcome.body };
         }
-        return outcome.refused ? 'refused' : 'unavailable';
+        if (outcome.kind === 'refused' && outcome.reason === 'no-endpoint') {
+            return { kind: 'refused', status: outcome.status, body: outcome.body };
+        }
+        // Absent — no channel has this session — or silence from every one of them: the server
+        // is the remaining road, and it is a different one rather than the same request asked twice.
+        return { kind: 'unavailable' };
     }
 
     /** Whether this session's CLI publishes its working tree in metadata. */
@@ -5410,8 +5436,8 @@ class Sync {
      * took the first address on a route and never the second, so one unreachable address stood for
      * the whole channel.
      *
-     * Returns the value the action produced, or null when no daemon channel carried it — which is
-     * the caller's signal to ask the server.
+     * Returns the carry's own outcome, so a caller answers "what did the machine say" from what it
+     * actually said rather than from which bucket the answer was filed in.
      */
     private async carrySessionAction<T>(
         sessionId: string,
@@ -5423,31 +5449,39 @@ class Sync {
             run: (baseUrl: string, token: string, proof: Record<string, string> | undefined) => Promise<T | null>;
             /**
              * How the *server* channel carries this action, when the server is the channel that
-             * accepts it. Left out by callers whose action only a machine can do.
+             * accepts it. Left out by callers whose action only a machine can do — and when it is
+             * left out, the server is not offered the action at all, rather than being asked and
+             * made to answer "cannot" in a form indistinguishable from the machine saying no.
              */
             onServer?: () => Promise<T | null>;
         },
-    ): Promise<{ verdict: T | null; asked: boolean; refused: boolean }> {
+    ): Promise<CarryOutcome<T>> {
         const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
         if (!machineId) {
-            return { verdict: null, asked: false, refused: false };
+            return { kind: 'refused', reason: 'unsupported', channel: null };
         }
+        const machineKey = this.getMachineKey(machineId);
         // The same decision the session's messages are read over, so an action goes the way the
         // session is already being talked to — and the server is one of the channels here, not a
         // special case bolted on outside: which channel carries it is `accepts` and the order, and
         // a channel that fails is where the next one starts.
         const preferred = this.preferredChannel(sessionId);
         const enabled = this.daemonRoutesEnabled();
+        // Structural, so it is decided before any attempt rather than answered by one: a server
+        // with no way to carry this action, and a machine this device holds no key for, are
+        // channels that were never candidates — and inventing an answer from them is how
+        // "refused via server" once said something no machine ever said.
         const drivers = this.channelDrivers().filter(
             (driver): driver is ChannelDriver =>
-                driver.channel === 'server' || enabled[driver.channel as DaemonRoute] === true,
+                driver.channel === 'server'
+                    ? !!action.onServer
+                    : enabled[driver.channel as DaemonRoute] === true && !!machineKey,
         );
         // A real comparison: the preferred channel first, the rest in the order the device lists
         // them. `sort` needs an answer that does not depend on which side it is asked about.
         const rank = (channel: SessionChannel): number => (channel === preferred ? 0 : 1);
         const order = [...drivers].sort((a, b) => rank(a.channel) - rank(b.channel));
 
-        const machineKey = this.getMachineKey(machineId);
         // Which channels this action will actually be offered to, and why — the list's answer and
         // this one are computed from different facts (reach vs usable addresses), and when they
         // disagree the action silently goes somewhere the screen never said it would.
@@ -5463,12 +5497,8 @@ class Sync {
             machineId,
             attempt: async (endpoint) => {
                 if (endpoint.kind === 'server') {
-                    if (!action.onServer) {
-                        // A machine's business only: the server has no way to carry this one.
-                        return { kind: 'refused' };
-                    }
                     try {
-                        const value = await action.onServer();
+                        const value = await action.onServer!();
                         return value === null ? { kind: 'absent' } : { kind: 'done', value };
                     } catch (error) {
                         // Not `refused`: the RPC may well have reached the daemon and started the
@@ -5477,35 +5507,33 @@ class Sync {
                         return { kind: 'unreachable', error };
                     }
                 }
-                if (!machineKey) {
-                    return { kind: 'refused' };
-                }
-                const { token } = await getLanCredential(endpoint.baseUrl, machineKey);
-                const proof = action.proof ? await accountProofHeaders(action.proof) : null;
                 try {
+                    // The credential and the proof are inside the try for the same reason the run
+                    // is: a handshake the daemon answers is an answer, and it used to escape this
+                    // block as silence — recording a healthy address as failing for saying no.
+                    const { token } = await getLanCredential(endpoint.baseUrl, machineKey!);
+                    const proof = action.proof ? await accountProofHeaders(action.proof) : null;
                     const value = await action.run(endpoint.baseUrl, token, proof ?? undefined);
                     return value === null ? { kind: 'absent' } : { kind: 'done', value };
                 } catch (error) {
                     if (error instanceof LanRequestError) {
-                        return { kind: 'refused', status: error.status };
+                        // A daemon's answer, sorted by what it is about — a refusal of this device
+                        // or this action, or a statement about the request itself. Where each ends
+                        // the carry is the loop's business, not this closure's.
+                        return attemptFromStatus(error.status, error.body);
                     }
                     throw error;
                 }
             },
             recorder: this.healthRecorder(),
         });
-        log.log(`🔄 carry ${action.operation} ${sessionId}: ${outcome.kind} via ${outcome.kind === 'done' || outcome.kind === 'absent' || outcome.kind === 'refused' ? outcome.channel : ''}`);
-        return {
-            verdict: outcome.kind === 'done' ? outcome.value : null,
-            // Whether any channel took it on: one that answered and refused did not, one that was
-            // asked and went quiet did — and to a caller those mean different things.
-            asked: outcome.kind === 'done' || outcome.kind === 'unreachable' || outcome.kind === 'absent',
-            // A channel *answered and said no*: about this device (a proof the machine would not
-            // accept) or about the action it will not do. Asking another road is not a retry for
-            // that — it is asking the same machine again, or substituting a different action, which
-            // is how an abort that was refused came back as something else entirely.
-            refused: outcome.kind === 'refused',
-        };
+        const detail = outcome.kind === 'refused' || outcome.kind === 'bad-request'
+            ? ` status=${outcome.status ?? '-'} body=${outcome.body ?? '-'}`
+            : outcome.kind === 'unreachable' && outcome.error !== undefined
+                ? ` error=${String(outcome.error).slice(0, 200)}`
+                : '';
+        log.log(`🔄 carry ${action.operation} ${sessionId}: ${outcome.kind} via ${outcome.kind === 'done' || outcome.kind === 'absent' ? outcome.channel : outcome.kind === 'unreachable' ? outcome.channel : ''}${detail}`);
+        return outcome;
     }
 
     /**
@@ -5528,46 +5556,44 @@ class Sync {
         /** Only these channels, in this order — the caller's policy, e.g. where the session is read. */
         drivers?: readonly ChannelDriver[];
         run: (baseUrl: string, token: string, proof: Record<string, string> | undefined) => Promise<T | null>;
-    }): Promise<{ verdict: T | null; asked: boolean; refused: boolean }> {
+    }): Promise<CarryOutcome<T>> {
         const machineKey = this.getMachineKey(args.machineId);
         if (!machineKey) {
-            return { verdict: null, asked: false, refused: false };
+            return { kind: 'refused', reason: 'unsupported', channel: null };
         }
-        const drivers = args.drivers ?? this.channelDrivers();
+        // A machine's own channels only: nothing this is asked to carry has a server answer, and
+        // offering it one is how the server's structural "cannot" came to be recorded as an
+        // answer a machine gave.
+        const drivers = (args.drivers ?? this.channelDrivers()).filter((driver) => driver.channel !== 'server');
         const outcome = await carryOperation<T>({
             drivers,
             operation: args.operation,
             machineId: args.machineId,
             attempt: async (endpoint) => {
-                const baseUrl = endpointBaseUrl(endpoint);
-                if (!baseUrl) {
-                    return { kind: 'refused' };
+                if (endpoint.kind !== 'address') {
+                    // The server is filtered out above, so its nameless endpoint cannot occur.
+                    return { kind: 'unreachable' };
                 }
-                const { token } = await getLanCredential(baseUrl, machineKey);
-                const proof = args.proofAction ? await accountProofHeaders(args.proofAction) : null;
                 try {
-                    const value = await args.run(baseUrl, token, proof ?? undefined);
+                    // The credential and proof are inside the try for the same reason the run is:
+                    // a handshake the daemon answers is an answer, and it used to escape this
+                    // block as silence — recording a healthy address as failing for saying no.
+                    const { token } = await getLanCredential(endpoint.baseUrl, machineKey);
+                    const proof = args.proofAction ? await accountProofHeaders(args.proofAction) : null;
+                    const value = await args.run(endpoint.baseUrl, token, proof ?? undefined);
                     // It answered. Whether the answer is what was wanted is its verdict about the
                     // request, not something to hold against the address.
                     return value === null ? { kind: 'absent' } : { kind: 'done', value };
                 } catch (error) {
                     if (error instanceof LanRequestError) {
-                        return { kind: 'refused', status: error.status };
+                        return attemptFromStatus(error.status, error.body);
                     }
                     throw error;
                 }
             },
             recorder: this.healthRecorder(),
         });
-        return {
-            verdict: outcome.kind === 'done' ? outcome.value : null,
-            // Whether any channel took it on. A channel that answered and refused did not; one that
-            // was asked and went quiet did, and the two mean different things to a caller.
-            asked: outcome.kind === 'done' || outcome.kind === 'unreachable' || outcome.kind === 'absent',
-            // A channel answered and said no — about this device, or about the action. Asking another
-            // road is not a retry for that.
-            refused: outcome.kind === 'refused',
-        };
+        return outcome;
     }
 
     /**
@@ -5673,10 +5699,10 @@ class Sync {
                     operation: 'lifecycle',
                     run: (baseUrl, token) => fetchLifecycle(baseUrl, token, since),
                 });
-                const answer = carried.verdict;
-                if (!answer) {
+                if (carried.kind !== 'done' || !carried.value) {
                     continue;
                 }
+                const answer = carried.value;
                 if (answer.entries.length > 0) {
                     log.log(`🔄 lifecycle ${machineId.slice(0, 8)}: ${answer.entries.length} entr${answer.entries.length === 1 ? 'y' : 'ies'} (rev ${since} → ${answer.revision})`);
                 }
@@ -5694,9 +5720,8 @@ class Sync {
         }
         // The same ordering that governs where this session's messages are read from: a session
         // pinned to one channel is restarted on it, and one the App is reading over the LAN is
-        // restarted there. The server is one of the carriers too — it is the one that can still be
-        // asked when the session resolves to it, or when no machine route answered — so it is not
-        // skipped before any carrier is tried.
+        // restarted there. The server carries it too, when no machine channel answered first — an
+        // answer from the machine ends the carry and is reported, not routed around.
         const outcome = await this.carrySessionAction<LanRestartVerdict>(sessionId, {
             operation: 'restart',
             path: `/lan/sessions/${encodeURIComponent(sessionId)}/restart`,
@@ -5710,11 +5735,19 @@ class Sync {
                     : { sessionId, requiresDesktop: options.requiresDesktop },
             ),
         });
-        if (outcome.verdict) {
-            log.log(`🔄 restart ${sessionId}: ${outcome.verdict.success ? 'accepted' : outcome.verdict.error ?? 'refused'}`);
-            return outcome.verdict;
+        if (outcome.kind === 'done') {
+            log.log(`🔄 restart ${sessionId}: ${outcome.value.success ? 'accepted' : outcome.value.error ?? 'refused'}`);
+            return outcome.value;
         }
-        if (outcome.asked) {
+        if (outcome.kind === 'bad-request') {
+            log.log(`🔄 restart ${sessionId}: the machine rejected the request (${outcome.status})`);
+            return { success: false, error: `the machine rejected this request (${outcome.status}): ${outcome.body ?? 'no explanation'}` };
+        }
+        if (outcome.kind === 'refused' && outcome.reason === 'no-endpoint') {
+            log.log(`🔄 restart ${sessionId}: the machine refused (${outcome.status ?? '-'})`);
+            return { success: false, error: `the machine refused this action (${outcome.status ?? 'refused'}): ${outcome.body ?? 'it needs the account to authorise it'}` };
+        }
+        if (outcome.kind === 'unreachable' || outcome.kind === 'absent') {
             // Somebody was asked and did not answer. The restart may well be under way — a machine
             // restarting a session takes longer than a request waits — so this is not a failure and
             // must not be reported as one.

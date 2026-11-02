@@ -50,8 +50,9 @@ function freshNonce(): string {
 /**
  * The headers that authorise one request, or null when this device cannot sign.
  *
- * Null rather than a throw: a device that is not signed in has no account to speak for, and the
- * caller falls back to the server — which is where these actions went before any of this existed.
+ * Null rather than a throw, so the request still goes out — unsigned, which the machine answers
+ * with a refusal the caller reports rather than routes around. A device that cannot speak for the
+ * account has no silent way to act on one.
  */
 export async function accountProofHeaders(parts: { operation: string; target: string }): Promise<AccountProofHeaders | null> {
     const credentials = await TokenStorage.getCredentials();

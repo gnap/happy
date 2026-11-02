@@ -350,10 +350,11 @@ export async function machineUpdateMetadata(
  * are the same request down two paths.
  *
  * The distinction that matters is why the machine's channel did not carry it. "It has none" — no
- * address, no key — is what the server route is for. "It answered and refused" is not: that is the
- * machine saying no to this device, and asking the server is asking the same machine by another
- * road, or substituting a different action. Which is how an abort that the machine refused came
- * back as a killed process.
+ * channel answered, or none had the session — is what the server route is for. "It answered" is
+ * not: a refusal is the machine saying no to this device, and asking the server is asking the same
+ * machine by another road, or substituting a different action — which is how an abort that the
+ * machine refused once came back as a killed process. A rejection is about the request itself,
+ * which another road would be handed unchanged.
  */
 async function sessionControl<T>(
     sessionId: string,
@@ -364,13 +365,22 @@ async function sessionControl<T>(
     if (sessionEncryption) {
         const encrypted = await sessionEncryption.encryptRaw(params);
         const outcome = await sync.sessionControl(sessionId, method, encrypted);
-        if (outcome === 'done') {
+        if (outcome.kind === 'done') {
             return undefined as T;
         }
-        if (outcome === 'refused') {
-            // The machine answered. Nothing else carries this now: the caller is told, rather than
-            // handed whatever the next route happens to do.
-            throw new Error('The machine refused this action. It needs the account to authorise it.');
+        if (outcome.kind === 'refused') {
+            // The machine answered. Nothing else carries this now: the caller is told what it
+            // actually said, rather than a theory about why — the difference between a proof it
+            // would not take and a session it does not have is a fix this App cannot pick for it.
+            throw new Error(outcome.body
+                ? `The machine refused this action (${outcome.status ?? 'refused'}): ${outcome.body}`
+                : 'The machine refused this action. It needs the account to authorise it.');
+        }
+        if (outcome.kind === 'rejected') {
+            // The request itself: a body over a route's limit, a shape the API will not parse.
+            // Another channel would be handed the same bytes, so this is reported — not retried,
+            // not substituted.
+            throw new Error(`The machine rejected this request (${outcome.status}): ${outcome.body ?? 'no explanation'}`);
         }
     }
     return apiSocket.sessionRPC<T, unknown>(sessionId, method, params);

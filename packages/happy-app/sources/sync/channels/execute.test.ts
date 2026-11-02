@@ -171,4 +171,59 @@ describe('carryOperation', () => {
         expect(outcome.kind).toBe('done');
         expect(health.failed).toHaveBeenCalledWith('m1', 'lan', OTHER);
     });
+
+    it('ends the whole carry at a refusal: no other channel is asked, and the words travel', async () => {
+        // The machine said no about this device or this action. The next channel is the same
+        // machine by another road or a substitution for the action — which is how a refusal that
+        // "fell through" came back as something else entirely.
+        const attempt = vi.fn(async (): Promise<ChannelAttempt<string>> => ({ kind: 'refused', status: 403, body: 'account proof required' }));
+        const health = recorder();
+
+        const outcome = await carryOperation({
+            drivers: [driver('lan', [endpoint('lan', LAN)]), driver('server', [{ kind: 'server' }])],
+            operation: 'send',
+            machineId: 'm1',
+            attempt,
+            recorder: health,
+        });
+
+        expect(outcome).toEqual({ kind: 'refused', reason: 'no-endpoint', channel: 'lan', status: 403, body: 'account proof required' });
+        expect(attempt).toHaveBeenCalledTimes(1);
+        expect(health.failed).not.toHaveBeenCalled();
+        expect(health.succeeded).not.toHaveBeenCalled();
+    });
+
+    it('ends the whole carry when the request itself is the problem, with what the daemon said', async () => {
+        // A 413 is neither silence nor a refusal about this device: the same bytes down another
+        // route are the same mistake, so no channel is asked again and the daemon's words travel.
+        const attempt = vi.fn(async (): Promise<ChannelAttempt<string>> => ({ kind: 'bad-request', status: 413, body: 'Payload Too Large' }));
+        const health = recorder();
+
+        const outcome = await carryOperation({
+            drivers: [driver('lan', [endpoint('lan', LAN)]), driver('relay', [endpoint('relay', RELAY)])],
+            operation: 'send',
+            machineId: 'm1',
+            attempt,
+            recorder: health,
+        });
+
+        expect(outcome).toEqual({ kind: 'bad-request', status: 413, body: 'Payload Too Large', channel: 'lan' });
+        expect(attempt).toHaveBeenCalledTimes(1);
+        expect(health.failed).not.toHaveBeenCalled();
+        expect(health.succeeded).not.toHaveBeenCalled();
+    });
+
+    it('carries the first error alongside the addresses that did not answer', async () => {
+        // The addresses are where it went; the error is what actually happened there. Without it,
+        // a CORS-blocked request and a dead socket are the same invisible nothing.
+        const error = new TypeError('Failed to fetch');
+        const outcome = await carryOperation({
+            drivers: [driver('lan', [endpoint('lan', OTHER), endpoint('lan', LAN)])],
+            operation: 'read',
+            machineId: 'm1',
+            attempt: async () => { throw error; },
+        });
+
+        expect(outcome).toEqual({ kind: 'unreachable', channel: 'lan', tried: [OTHER, LAN], error });
+    });
 });
