@@ -304,11 +304,17 @@ function safeEqual(a: Buffer, b: Buffer): boolean {
  * obtain by proving possession of the machine key, so a wildcard grants no ambient authority. A
  * hostile page can reach the challenge route and learn that a daemon is present; it cannot mint a
  * token, and the nonce it receives is useless without the key.
+ *
+ * The proof headers are in the allow list for the same reason as the rest: an account-signed
+ * request is a browser POST carrying them, and a preflight that does not name them is a refusal
+ * the route never sees — the caller reads it as a machine that will not answer, and the action
+ * falls to a channel that cannot carry it.
  */
 const CORS_HEADERS: Record<string, string> = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET, POST, OPTIONS',
-  'access-control-allow-headers': 'authorization, content-type',
+  'access-control-allow-headers':
+    'authorization, content-type, x-happy-proof-nonce, x-happy-proof-at, x-happy-proof-signature',
   'access-control-max-age': '600',
 };
 

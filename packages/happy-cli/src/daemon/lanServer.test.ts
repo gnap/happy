@@ -542,6 +542,29 @@ describe('lanServer read-only API', () => {
             expect(res.headers.get('access-control-allow-methods')).toContain('POST');
         });
 
+        it('allows the headers an account proof is sent in', async () => {
+            // A control submit is a browser POST with the proof headers on it, and the browser asks
+            // permission for those before it sends the request at all. An allow list that omits them
+            // answers the preflight with a refusal the route never sees — the submit reads as a
+            // machine that will not answer, and falls to a channel that cannot carry it.
+            await start();
+
+            const res = await fetch(url('/lan/sessions/sess-1/control'), {
+                method: 'OPTIONS',
+                headers: {
+                    origin: 'http://localhost:8081',
+                    'access-control-request-method': 'POST',
+                    'access-control-request-headers':
+                        'authorization, content-type, x-happy-proof-nonce, x-happy-proof-at, x-happy-proof-signature',
+                },
+            });
+
+            expect(res.status).toBe(204);
+            for (const header of ['x-happy-proof-nonce', 'x-happy-proof-at', 'x-happy-proof-signature']) {
+                expect(res.headers.get('access-control-allow-headers')).toContain(header);
+            }
+        });
+
         it('allows the browser to read a real response', async () => {
             await start();
 
