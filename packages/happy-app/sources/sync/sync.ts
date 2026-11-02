@@ -48,11 +48,11 @@ import { readSessionOverLan, listSessionsOverLan, toNormalizedMessages, type Lan
 import { decryptLanEntries } from './lan/history';
 import { SessionReadScheduler } from './sessionReadScheduler';
 import { openLanSocket, type LanSocketHandle } from './lan/socket';
-import { DEFAULT_RELAY_URL, RelayHub, relayHubUrl, relayOriginOf, type HubMachine, type SocketLike } from './lan/relayHub';
+import { RelayHub, relayHubUrl, type HubMachine, type SocketLike } from './lan/relayHub';
 import type { RelayDirectoryEntry } from './lan/relayDirectory';
 import { normalizeChannelPriority, pickChannel } from './lan/channelOrder';
 import { channelEnabled, enabledChannels } from '@/utils/enabledChannels';
-import { channelDrivers as buildChannelDrivers } from './channels/measure';
+import { channelDrivers as buildChannelDrivers, relayOriginFrom } from './channels/measure';
 import { channelAvailability } from './channels/resolve';
 import { candidateInputsFor, orderedCandidates } from './channels/candidates';
 import { carryOperation, type HealthRecorder } from './channels/execute';
@@ -379,17 +379,20 @@ class Sync {
      * relay as the hub, a machine it is not holding is simply not reachable that way, and a socket
      * opened around the hub would be a second, unmanaged path to the same daemon.
      */
-    private relayStreamFor(machineId: string): ((path: string, query: string) => SocketLike) | undefined {
-        const hub = this.relayHub;
-        const tag = this.machineTags.get(machineId);
-        // Falling back to the per-machine path while the hub is down is deliberate: a relay that
-        // does not speak the hub protocol at all (an older deployment) would otherwise leave the
-        // channel unusable everywhere, and one connection per machine is still the shape that
-        // works. The hub is preferred the moment it is up, which is the normal case.
-        if (!hub || !tag || !hub.isConnected()) {
-            return undefined;
-        }
-        return (path, query) => hub.stream(tag, `${path}${query}`);
+    private relayStreamFor(machineId: string): (path: string, query: string) => SocketLike | null {
+        // The relay is one connection. A socket to a machine behind it is a stream on the hub, and
+        // there is no second way in: returning null when the hub (or this machine's tag) is not
+        // there lets the connection layer retry, instead of falling through to the default — a
+        // direct WebSocket to the per-machine relay path, which is exactly the extra connection
+        // this avoids.
+        return (path, query) => {
+            const hub = this.relayHub;
+            const tag = this.machineTags.get(machineId);
+            if (!hub || !tag) {
+                return null;
+            }
+            return hub.stream(tag, `${path}${query}`);
+        };
     }
 
     /**
@@ -421,6 +424,14 @@ class Sync {
         onReady: (target) => { this.onDaemonConnectionReady(target); },
         onDropped: (target) => { this.onDaemonConnectionDropped(target); },
         onAddressUnusable: (target, reason) => {
+            // A relay socket is a stream on the hub, so "could not open" can mean there was no
+            // transport to open it on — the hub is down, or this machine's tag is not known yet.
+            // That is this side's connection, not evidence about the address, and demoting the
+            // address for it would send the next reconcile somewhere else over our own outage.
+            if (target.route === 'relay' && (!this.relayHub || !this.relayHub.isConnected() || !this.machineTags.has(target.machineId))) {
+                log.log(`📡 relay stream for ${target.machineId.slice(0, 8)} had no hub transport: ${reason}`);
+                return;
+            }
             // A socket that will not open or stay open is evidence about the *address*, and the
             // candidate list ranks a socket's own address first. Recording it is what lets the
             // next reconcile move the socket to a sighting at the machine's new address instead
@@ -1062,7 +1073,13 @@ class Sync {
                     // the old one — until the failure is recorded and this asks again.
                     state.candidateHealth !== previous.candidateHealth ||
                     state.socketStatus !== previous.socketStatus ||
-                    state.channelOverride !== previous.channelOverride
+                    state.channelOverride !== previous.channelOverride ||
+                    // The relay's per-machine streams are wanted from the hub's directory: a machine
+                    // the relay has just started carrying needs a stream, and one the hub has lost
+                    // needs it dropped. Neither was watched here, so a stream's life depended on some
+                    // unrelated event happening to reconcile next.
+                    state.relayHubConnected !== previous.relayHubConnected ||
+                    state.relayDirectory !== previous.relayDirectory
                 ) {
                     this.reconcileDaemonSockets();
                 }
@@ -6043,7 +6060,6 @@ class Sync {
      * hub that connected before the keys did is not left with a directory it cannot read.
      */
     private mapRelayDirectory(): void {
-        this.relayMachines.clear();
         const entries: RelayDirectoryEntry[] = [];
         const unknownTags: string[] = [];
         const at = Date.now();
@@ -6064,9 +6080,6 @@ class Sync {
             } else {
                 unknownTags.push(machine.tag);
             }
-        }
-        for (const entry of entries) {
-            this.relayMachines.set(entry.machineId, { tag: entry.tag, sessions: entry.sessions });
         }
         // Where each machine says it can be reached, merged exactly as the server's copy of the same
         // claim is. This is the relay doing the job the server would otherwise do, and it matters
@@ -6098,9 +6111,6 @@ class Sync {
         }
         return null;
     }
-    /** The machines the relay is holding, by machineId, with what each published. */
-    private relayMachines = new Map<string, HubMachine>();
-
     /**
      * Fill in each machine's relay route from its machine key.
      *
@@ -6111,7 +6121,9 @@ class Sync {
      * wins where it exists, so this only fills a gap.
      */
     async deriveRelayRoutes(): Promise<void> {
-        const relayUrl = this.relayOrigin();
+        // Derived regardless of whether the channel is switched on: the routes are what the daemons
+        // published, and switching a channel on later must not need a new read to build them.
+        const relayUrl = relayOriginFrom(storage.getState().relayEndpoints);
         // The hub is the relay *connection*: it comes up whether or not this device can name a
         // machine yet, because the relay naming them is the point — and a cold start learns both
         // halves independently.
@@ -6154,47 +6166,27 @@ class Sync {
      * reachable, and a machine it is not holding is not — no probe, no sighting, no per-machine
      * address. With it down, the relay channel says so rather than being guessed at.
      */
-    /**
-     * Where the relay is.
-     *
-     * Learned, not configured: a daemon knows the relay it dials out to and publishes the route it
-     * built from it, so the App reads the address off the machines it already has. The built-in
-     * default only covers a device that has not synced with the server yet — the one case where
-     * nothing has been published and there is still a relay to be reached.
-     */
-    private relayOrigin(): string {
-        for (const endpoint of Object.values(storage.getState().relayEndpoints)) {
-            const origin = relayOriginOf(endpoint.baseUrl);
-            if (origin) {
-                return origin;
-            }
-        }
-        return DEFAULT_RELAY_URL;
-    }
-
-    /** The relay this App is using. Learned from the machines; the built-in default until then. */
-    relayAddress(): string {
-        return this.relayOrigin();
-    }
-
     private ensureRelayHub(): void {
-        const relayUrl = this.relayOrigin();
+        // Asked of the channel, not worked out here: the relay driver is in the list only while the
+        // channel is switched on, and its hub target is the same origin every other relay address is
+        // derived from. "Off in the priority" and "no hub target" are therefore one answer, not two
+        // rules that could disagree.
+        const relay = this.channelDrivers().find((driver) => driver.channel === 'relay');
+        const relayUrl = relay?.hubTarget?.() ?? null;
         const priority = this.channelPriority();
-        const wanted = enabledChannels(priority).relay;
         // Said out loud at startup, because "the relay is off in the priority" and "the relay cannot
         // be reached" look identical everywhere else — a section with nothing connected either way.
         log.log(
-            wanted
+            relayUrl
                 ? `🔁 relay hub: enabled, ${relayUrl} (priority ${priority.join('›')})`
                 : `🔁 relay hub: the relay channel is off in the priority (${priority.join('›')})`,
         );
-        if (!wanted) {
+        if (!relayUrl) {
             this.relayHubWatch?.();
             this.relayHubWatch = null;
             this.relayHub?.close();
             this.relayHub = null;
             this.relayHubEndpoint = null;
-            this.relayMachines.clear();
             // The hub no longer clears the directory when its socket closes (a disconnect is our
             // interface, not the relay's answer), so switching the relay off has to say so here —
             // otherwise the last directory keeps machines looking relay-capable with no relay.
@@ -6203,7 +6195,7 @@ class Sync {
             this.reconcileDaemonSockets();
             return;
         }
-        const endpoint = relayHubUrl(relayUrl as string);
+        const endpoint = relayHubUrl(relayUrl);
         if (this.relayHub && this.relayHubEndpoint === endpoint) {
             return;
         }
@@ -6214,7 +6206,6 @@ class Sync {
             this.relayHubWatch = null;
             this.relayHub.close();
             this.relayHub = null;
-            this.relayMachines.clear();
             // A different relay is a different directory: what the old one held is not a claim
             // about this one. Same reason as the switched-off branch above.
             this.relayDirectoryRaw = [];

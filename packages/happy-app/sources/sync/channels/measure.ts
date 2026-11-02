@@ -9,6 +9,7 @@
  */
 
 import { normalizeChannelPriority } from '@/sync/lan/channelOrder';
+import { DEFAULT_RELAY_URL, relayOriginOf } from '@/sync/lan/relayHub';
 import { candidateInputsFor, orderedCandidates, type Candidate } from './candidates';
 import { candidateKey, type CandidateHealth } from './health';
 import type { DaemonConnectionState } from '@/sync/lan/daemonConnections';
@@ -289,6 +290,24 @@ function lanDriver(state: ChannelState): ChannelDriver {
 }
 
 /**
+ * Where the relay is.
+ *
+ * Learned, not configured: a daemon knows the relay it dials out to and publishes the route it
+ * built from it, so the App reads the address off the machines it already has. The built-in
+ * default only covers a device that has not synced with the server yet — the one case where
+ * nothing has been published and there is still a relay to be reached.
+ */
+export function relayOriginFrom(endpoints: ChannelState['relayEndpoints']): string {
+    for (const endpoint of Object.values(endpoints)) {
+        const origin = endpoint?.baseUrl ? relayOriginOf(endpoint.baseUrl) : null;
+        if (origin) {
+            return origin;
+        }
+    }
+    return DEFAULT_RELAY_URL;
+}
+
+/**
  * The same machine through the hub, for when it is not on this network.
  *
  * The relay publishes each daemon's own session summary, so this knows what is on a machine without
@@ -308,7 +327,15 @@ function relayDriver(state: ChannelState): ChannelDriver {
         // The relay is its one connection to the hub, not the per-machine streams it carries: while
         // it is switched on and not yet reached, the App is trying, which is the blue.
         link: () => (state.relayHubConnected ? 'connected' : 'connecting'),
-        machineLink: (machineId) => machineLinkFor(state, machineId, 'relay'),
+        // The relay's whole transport, and the only reason its enablement is not just a filter:
+        // this connection has to exist before any machine behind it can. The driver is in the list
+        // only while the channel is switched on, so answering here is both "where" and "whether".
+        hubTarget: () => relayOriginFrom(state.relayEndpoints),
+        // No `machineLink`: the relay's link is the hub, which is one connection for every machine.
+        // A per-machine stream can be opening or retrying inside it — that is a transport detail,
+        // and surfacing it here made one machine's reconnecting stream paint the relay as
+        // "connecting" while the hub was up and the channel served every other machine. The stream
+        // is still logged (`could not open the relay connection to …`) for diagnosis.
         // Same operations as the LAN: it is the same daemon and the same API, reached the other way.
         supports: (operation) => DAEMON_OPERATIONS.has(operation),
         // The relay vouches for what it is holding, and the machine vouches for a route it
