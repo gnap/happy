@@ -15,6 +15,7 @@ import { systemPrompt } from "./utils/systemPrompt";
 import { PermissionResult } from "./sdk/types";
 import type { JsRuntime } from "./runClaude";
 import { normalizeClaudeModelForSdk } from "./utils/model";
+import { cronIdFromCreateResult } from "./utils/cronResult";
 
 /** Quiet window before a deferred stop fires, so a wrap-up turn that immediately
  *  spawns the next background task can re-claim the session. */
@@ -921,6 +922,9 @@ export class ClaudeSession {
                                 // Schedules appear and disappear as tool calls; the Stop hook's
                                 // session_crons replaces this provisional view at turn end.
                                 if (block.name === 'CronCreate' && typeof block.input?.cron === 'string') {
+                                    // Provisional: the call id is only this stream's name for the
+                                    // request. The job's own id arrives with the tool result below,
+                                    // and that is what a later CronDelete names.
                                     displayCrons.set(block.id, {
                                         id: block.id,
                                         schedule: block.input.cron,
@@ -929,6 +933,9 @@ export class ClaudeSession {
                                     });
                                     emitDisplayCrons();
                                 } else if (block.name === 'CronDelete' && typeof block.input?.id === 'string') {
+                                    // The job's id, never the call id: the entry was re-keyed when
+                                    // its create answered. Deleting by anything else leaves the
+                                    // schedule on screen after it was cancelled.
                                     displayCrons.delete(block.input.id);
                                     emitDisplayCrons();
                                 }
@@ -946,6 +953,27 @@ export class ClaudeSession {
                 }
                 logger.debugLargeJson(`[claudeRemote] Message ${message.type}`, message);
                 if (message.type === 'user') {
+                    const content = (message as any).message?.content;
+                    if (Array.isArray(content)) {
+                        for (const block of content) {
+                            if (block?.type !== 'tool_result' || typeof block.tool_use_id !== 'string') {
+                                continue;
+                            }
+                            const provisional = displayCrons.get(block.tool_use_id);
+                            if (!provisional) {
+                                continue;
+                            }
+                            // The create answered: move the entry from the call's id to the job's.
+                            // A result with no id created nothing (an error or a refusal), so the
+                            // provisional entry is removed rather than left to be cancelled later.
+                            const cronId = cronIdFromCreateResult(block.content);
+                            displayCrons.delete(block.tool_use_id);
+                            if (cronId) {
+                                displayCrons.set(cronId, { ...provisional, id: cronId });
+                            }
+                            emitDisplayCrons();
+                        }
+                    }
                     logger.debug(`[claudeRemote] USER echo origin=${JSON.stringify((message as any).origin)} cronId=${(message as any).cronId} content=${JSON.stringify((message as any).message?.content)?.slice(0, 120)}`);
                 }
 
