@@ -10,14 +10,16 @@ import { writeFileSync, mkdirSync, unlinkSync, existsSync } from 'node:fs';
 import { configuration } from '@/configuration';
 import { logger } from '@/ui/logger';
 import { projectPath } from '@/projectPath';
+import { hookRuntime } from './hookRuntime';
 
 /**
  * Generate a temporary settings file with SessionStart hook configuration
  *
  * @param port - The port where Happy server is listening
+ * @param jsRuntime - The runtime this session was told to use, or the one running Happy
  * @returns Path to the generated settings file
  */
-export function generateHookSettingsFile(port: number): string {
+export function generateHookSettingsFile(port: number, jsRuntime?: 'node' | 'bun'): string {
     const hooksDir = join(configuration.happyHomeDir, 'tmp', 'hooks');
     mkdirSync(hooksDir, { recursive: true });
 
@@ -27,7 +29,7 @@ export function generateHookSettingsFile(port: number): string {
 
     // Path to the hook forwarder script
     const forwarderScript = resolve(projectPath(), 'scripts', 'session_hook_forwarder.cjs');
-    const hookCommand = `node "${forwarderScript}" ${port}`;
+    const hookCommand = `${hookRuntime(jsRuntime)} "${forwarderScript}" ${port}`;
 
     const settings = {
         hooks: {
