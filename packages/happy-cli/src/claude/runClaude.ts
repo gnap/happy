@@ -345,7 +345,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             method: `${response.id}:${rpc.method}`,
             params: rpc.params ?? '',
         });
-    });
+    }, () => session.getPresence());
     // Cleanup socket on graceful exit
     process.on('beforeExit', () => stopSocketClient());
     process.on('exit', () => stopSocketClient());

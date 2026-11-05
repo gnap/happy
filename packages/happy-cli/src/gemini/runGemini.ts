@@ -305,10 +305,6 @@ export async function runGemini(opts: {
   session.onUserMessage(handleUserMessage);
 
   let thinking = false;
-  session.keepAlive(thinking, 'remote');
-  const keepAliveInterval = setInterval(() => {
-    session.keepAlive(thinking, 'remote');
-  }, 2000);
 
   // Track if this is the first message to include system prompt only once
   let isFirstMessage = true;
@@ -623,7 +619,7 @@ export async function runGemini(opts: {
         
         if (msg.status === 'running') {
           thinking = true;
-          session.keepAlive(thinking, 'remote');
+          session.setThinking(thinking);
           
           // Send task_started event ONCE per turn (like Codex) when agent starts working
           // Gemini may go running -> idle -> running multiple times during a turn
@@ -655,7 +651,7 @@ export async function runGemini(opts: {
           reasoningProcessor.complete();
         } else if (msg.status === 'error') {
           thinking = false;
-          session.keepAlive(thinking, 'remote');
+          session.setThinking(thinking);
           accumulatedResponse = '';
           isResponseInProgress = false;
           
@@ -1295,7 +1291,7 @@ export async function runGemini(opts: {
         taskStartedSent = false;
         
         thinking = false;
-        session.keepAlive(thinking, 'remote');
+        session.setThinking(thinking);
         
         // Use same logic as Codex - emit ready if idle (no pending operations, no queue)
         emitReadyIfIdle();
@@ -1345,7 +1341,6 @@ export async function runGemini(opts: {
       try { process.stdin.pause(); } catch { /* ignore */ }
     }
 
-    clearInterval(keepAliveInterval);
     if (inkInstance) {
       inkInstance.unmount();
     }

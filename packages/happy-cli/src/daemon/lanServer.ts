@@ -243,7 +243,7 @@ export type LanServerOptions = {
    * A reader that joins after a session changed its state would otherwise never see that change:
    * the live mirror only carries what happens while it is listening.
    */
-  getSnapshot?: () => unknown[];
+  getSnapshot?: () => Array<{ event: 'update' | 'ephemeral'; payload: unknown }>;
   /** Defaults to all interfaces. See the binding caveat in the module docs. */
   host?: string;
   /** Defaults to 0 — the OS assigns one, and mDNS advertises it. */
@@ -841,8 +841,8 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
 
     subscribers.add(socket);
     logger.debug('[lan] socket reader connected', { readers: subscribers.size });
-    for (const payload of opts.getSnapshot?.() ?? []) {
-      socket.send(JSON.stringify({ event: 'update', payload }));
+    for (const frame of opts.getSnapshot?.() ?? []) {
+      socket.send(JSON.stringify(frame));
     }
     socket.on('close', (code: number, reason: Buffer) => {
       subscribers.delete(socket);
