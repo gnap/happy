@@ -786,10 +786,6 @@ export async function runCursor(opts: {
   //
 
   let thinking = false;
-  session.keepAlive(thinking, 'remote');
-  const keepAliveInterval = setInterval(() => {
-    session.keepAlive(thinking, 'remote');
-  }, 2000);
 
 
   const sendReady = () => {
@@ -835,11 +831,11 @@ export async function runCursor(opts: {
       if (activeTurnId) {
         // Active turn: catch/finally will send turn-end; ensure thinking stops immediately.
         thinking = false;
-        session.keepAlive(thinking, 'remote');
+        session.setThinking(thinking);
       } else {
         notifySessionTurnAbortedIdle(session);
         thinking = false;
-        session.keepAlive(thinking, 'remote');
+        session.setThinking(thinking);
         await session.flush();
       }
     } catch (error) {
@@ -1130,7 +1126,7 @@ export async function runCursor(opts: {
 
       try {
         thinking = true;
-        session.keepAlive(thinking, 'remote');
+        session.setThinking(thinking);
         // Codex-style durable task_started (no UI bubble) so App turns thinking on promptly.
         notifyCursorTurnThinkingStarted(session, turnId);
 
@@ -1463,7 +1459,7 @@ export async function runCursor(opts: {
 
         // 1.5.0 App only stops timer via ephemeral activity (keepAlive), not message content; send before flush so it’s not delayed
         thinking = false;
-        session.keepAlive(thinking, 'remote');
+        session.setThinking(thinking);
 
         await session.flush();
 
@@ -1593,7 +1589,6 @@ export async function runCursor(opts: {
       try { process.stdin.pause(); } catch { /* ignore */ }
     }
 
-    clearInterval(keepAliveInterval);
     clearInterval(modelRefreshInterval);
     if (inkInstance) {
       inkInstance.unmount();

@@ -27,6 +27,8 @@ interface SessionSocketState {
     onDeliver: ((payload: { sessionId: string; localId: string; content: string }) => void) | null;
     /** A control call forwarded by the daemon for this session to act on. */
     onRpc: ((rpc: { method: string; params?: string }) => void) | null;
+    /** The current session state, read at every hello so a daemon restart gets a snapshot. */
+    getPresence: (() => { thinking: boolean; thinkingAt: number; startedAt: number } | null) | null;
 }
 
 let state: SessionSocketState = {
@@ -37,6 +39,7 @@ let state: SessionSocketState = {
     onHeartbeatFallback: null,
     onDeliver: null,
     onRpc: null,
+    getPresence: null,
 };
 
 function send(socket: Socket, msg: Record<string, unknown>): void {
@@ -65,7 +68,9 @@ function connect(helloPayload: Record<string, unknown>): Socket {
         logger.debug('[UNIX CLIENT] Connected to daemon');
         state.socket = socket;
         if (state.reconnectTimer) { clearTimeout(state.reconnectTimer); state.reconnectTimer = null; }
-        send(socket, { type: 'hello', ...helloPayload });
+        // State rides on the hello: the daemon may have just restarted with an empty mirror,
+        // and this is the only thing that would otherwise wait for the next turn transition.
+        send(socket, { type: 'hello', ...helloPayload, presence: state.getPresence?.() ?? null });
         startHeartbeat(socket);
     });
 
@@ -144,11 +149,13 @@ export function startUnixSocketClient(
     onDeliver?: (payload: { sessionId: string; localId: string; content: string }) => void,
     /** Forwarded control calls: the same handlers the server's rpc-call reaches. */
     onRpc?: (rpc: { method: string; params?: string }) => void,
+    getPresence?: () => { thinking: boolean; thinkingAt: number; startedAt: number } | null,
 ): () => void {
     state.stopped = false;
     state.onHeartbeatFallback = heartbeatFallback ?? null;
     state.onDeliver = onDeliver ?? null;
     state.onRpc = onRpc ?? null;
+    state.getPresence = getPresence ?? null;
     connect(helloPayload);
 
     return () => {

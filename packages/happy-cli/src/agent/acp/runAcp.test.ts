@@ -9,7 +9,8 @@ const mocks = vi.hoisted(() => {
     onUserMessage: vi.fn((handler: (message: any) => void) => {
       userMessageHandler = handler;
     }),
-    keepAlive: vi.fn(),
+    setThinking: vi.fn(),
+    getPresence: vi.fn(() => ({ thinking: false, thinkingAt: 0, startedAt: 0 })),
     sendSessionProtocolMessage: vi.fn(),
     sendSessionEvent: vi.fn(),
     updateMetadata: vi.fn(),

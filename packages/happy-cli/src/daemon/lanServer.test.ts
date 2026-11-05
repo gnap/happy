@@ -92,7 +92,7 @@ let restartHandler: ((sessionId: string) => Promise<{ success: boolean; newSessi
 
 let server: LanServerHandle | null = null;
 /** What a socket reader should be handed on connect; mutable so one test can set it. */
-let snapshot: unknown[] = [];
+let snapshot: Array<{ event: 'update' | 'ephemeral'; payload: unknown }> = [];
 
 async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
     server = await startLanServer({
@@ -489,7 +489,7 @@ describe('lanServer read-only API', () => {
         it('replays the current session state to a reader that connects late', async () => {
             await start();
             const envelope = { id: 'lan-1', seq: 0, body: { t: 'update-session', id: 'sess-1' }, createdAt: 1 };
-            snapshot = [envelope];
+            snapshot = [{ event: 'update', payload: envelope }];
             const { nonce } = await (await fetch(url('/lan/challenge'), { method: 'POST' })).json() as { nonce: string };
             const socket = new WebSocket(
                 `ws://127.0.0.1:${server!.port}/lan/socket?nonce=${encodeURIComponent(nonce)}&proof=${encodeURIComponent(lanProofFor(SECRET, nonce))}`,

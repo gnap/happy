@@ -212,11 +212,6 @@ export async function runCodex(opts: {
     let codexStartedSubagents = new Set<string>();
     let codexActiveSubagents = new Set<string>();
     let codexProviderSubagentToSessionSubagent = new Map<string, string>();
-    session.keepAlive(thinking, 'remote');
-    // Periodic keep-alive; store handle so we can clear on exit
-    const keepAliveInterval = setInterval(() => {
-        session.keepAlive(thinking, 'remote');
-    }, 2000);
 
     const sendReady = () => {
         session.sendSessionEvent({ type: 'ready' });
@@ -482,14 +477,14 @@ export async function runCodex(opts: {
             if (!thinking) {
                 logger.debug('thinking started');
                 thinking = true;
-                session.keepAlive(thinking, 'remote');
+                session.setThinking(thinking);
             }
         }
         if (msg.type === 'task_complete' || msg.type === 'turn_aborted') {
             if (thinking) {
                 logger.debug('thinking completed');
                 thinking = false;
-                session.keepAlive(thinking, 'remote');
+                session.setThinking(thinking);
             }
             // Reset diff processor on task end or abort
             diffProcessor.reset();
@@ -632,7 +627,7 @@ export async function runCodex(opts: {
                 reasoningProcessor.abort();
                 diffProcessor.reset();
                 thinking = false;
-                session.keepAlive(thinking, 'remote');
+                session.setThinking(thinking);
                 continue;
             }
 
@@ -722,7 +717,7 @@ export async function runCodex(opts: {
                 reasoningProcessor.abort();  // Use abort to properly finish any in-progress tool calls
                 diffProcessor.reset();
                 thinking = false;
-                session.keepAlive(thinking, 'remote');
+                session.setThinking(thinking);
                 emitReadyIfIdle({
                     pending,
                     queueSize: () => messageQueue.size(),
@@ -778,9 +773,6 @@ export async function runCodex(opts: {
             logger.debug('[codex]: stdin.pause()');
             try { process.stdin.pause(); } catch { }
         }
-        // Clear periodic keep-alive to avoid keeping event loop alive
-        logger.debug('[codex]: clearInterval(keepAlive)');
-        clearInterval(keepAliveInterval);
         if (inkInstance) {
             logger.debug('[codex]: inkInstance.unmount()');
             inkInstance.unmount();
