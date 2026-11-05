@@ -31,6 +31,32 @@ export const sessionCacheCounter = new Counter({
     registers: [register]
 });
 
+export const sessionPresenceEventsCounter = new Counter({
+    name: 'session_presence_events_total',
+    help: 'Session state snapshots received, by whether they changed anything',
+    labelNames: ['result'] as const,
+    registers: [register]
+});
+
+export const sessionPresenceEmittedCounter = new Counter({
+    name: 'session_presence_emitted_total',
+    help: 'Session activity ephemerals emitted, by the transition that caused them',
+    labelNames: ['event'] as const,
+    registers: [register]
+});
+
+export const sessionPresenceDbWritesCounter = new Counter({
+    name: 'session_presence_db_writes_total',
+    help: 'Database rows written by session presence',
+    registers: [register]
+});
+
+export const sessionPresenceStartupReconciledCounter = new Counter({
+    name: 'session_presence_startup_reconciled_total',
+    help: 'Active sessions marked inactive when the server started',
+    registers: [register]
+});
+
 export const databaseUpdatesSkippedCounter = new Counter({
     name: 'database_updates_skipped_total',
     help: 'Number of database updates skipped due to debouncing',

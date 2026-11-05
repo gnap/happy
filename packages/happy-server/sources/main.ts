@@ -5,6 +5,7 @@ import { db } from './storage/db';
 import { startTimeout } from "./app/presence/timeout";
 import { startMetricsServer } from "@/app/monitoring/metrics";
 import { activityCache } from "@/app/presence/sessionCache";
+import { reconcileSessionPresenceOnStartup } from "@/app/presence/reconcile";
 import { auth } from "./app/auth/auth";
 import { startDatabaseMetricsUpdater } from "@/app/monitoring/metrics2";
 import { initEncrypt } from "./modules/encrypt";
@@ -32,6 +33,10 @@ async function main() {
     await initGithub();
     await loadFiles();
     await auth.init();
+
+    // The previous server's `active` flags are not facts about this one. Do this before any
+    // client can connect, so a reconnect's snapshot is the first thing written.
+    await reconcileSessionPresenceOnStartup();
 
     //
     // Start

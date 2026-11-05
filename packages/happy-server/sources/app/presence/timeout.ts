@@ -3,6 +3,8 @@ import { delay } from "@/utils/delay";
 import { forever } from "@/utils/forever";
 import { shutdownSignal } from "@/utils/shutdown";
 import { buildMachineActivityEphemeral, buildSessionActivityEphemeral, eventRouter } from "@/app/events/eventRouter";
+import { activityCache } from "@/app/presence/sessionCache";
+import { sessionPresenceEmittedCounter } from "@/app/monitoring/metrics2";
 
 export function startTimeout() {
     forever('session-timeout', async () => {
@@ -17,18 +19,25 @@ export function startTimeout() {
                 }
             });
             for (const session of sessions) {
-                const updated = await db.session.updateManyAndReturn({
-                    where: { id: session.id, active: true },
-                    data: { active: false }
-                });
-                if (updated.length === 0) {
+                // A live session with a long turn has an old timestamp but an open socket: it is
+                // not stale, it is just not narrating itself every two seconds anymore.
+                if (activityCache.isSessionLive(session.id)) {
+                    continue;
+                }
+                const result = await activityCache.markSessionEnded(
+                    session.id,
+                    session.accountId,
+                    session.lastActiveAt.getTime(),
+                );
+                if (!result.changed || !result.presence) {
                     continue;
                 }
                 eventRouter.emitEphemeral({
                     userId: session.accountId,
-                    payload: buildSessionActivityEphemeral(session.id, false, updated[0].lastActiveAt.getTime(), false),
+                    payload: buildSessionActivityEphemeral(session.id, false, result.presence.activeAt, false, 0),
                     recipientFilter: { type: 'user-scoped-only' }
                 });
+                sessionPresenceEmittedCounter.inc({ event: 'timeout' });
             }
 
             // Find timed out machines
