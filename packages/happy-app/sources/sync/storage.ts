@@ -966,6 +966,25 @@ export const storage = create<StorageState>()((set, get) => {
             return Object.values(state.sessions).filter(s => resolveSessionReach(s.id, s.metadata?.machineId, drivers).online);
         },
         applySessions: (sessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[], fullRefresh?: boolean) => set((state) => {
+            // A delta that says nothing new must cost nothing: this runs for every list refresh
+            // and used to be reached every two seconds by the activity heartbeat. Compare the
+            // fields the merge below can change before touching MMKV, the list, or the store.
+            if (!fullRefresh && sessions.every((session) => {
+                const existing = state.sessions[session.id];
+                return existing !== undefined
+                    && existing.active === session.active
+                    && existing.activeAt === session.activeAt
+                    && existing.thinking === session.thinking
+                    && existing.thinkingAt === session.thinkingAt
+                    && existing.metadataVersion === session.metadataVersion
+                    && existing.agentStateVersion === session.agentStateVersion
+                    && existing.updatedAt === session.updatedAt
+                    && existing.seq === session.seq
+                    && (existing.restartingAt ?? null) === (session.restartingAt ?? null);
+            })) {
+                return state;
+            }
+
             // Drafts: only from MMKV on initial load. Permission/model: read MMKV every time so restart/refresh keeps selection (metadata first, then existing, then MMKV, then server).
             const savedDrafts = Object.keys(state.sessions).length === 0 ? sessionDrafts : {};
             const savedPermissionModes = loadSessionPermissionModes();

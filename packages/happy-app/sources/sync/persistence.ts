@@ -268,93 +268,79 @@ export function clearNewSessionDraft() {
     mmkv.delete(NEW_SESSION_DRAFT_KEY);
 }
 
-export function loadSessionPermissionModes(): Record<string, string> {
-    const modes = mmkv.getString('session-permission-modes');
-    if (modes) {
+/**
+ * Session preference maps are read on every `applySessions`. They change only from this device,
+ * so a successful parse is reused until one of the save functions invalidates it; the returned
+ * object is a shallow copy, because callers mutate it before saving.
+ */
+const sessionMapCache = new Map<string, { raw: string | null; value: Record<string, any> }>();
+
+function loadSessionMap<T>(key: string, label: string): Record<string, T> {
+    const raw = mmkv.getString(key) ?? null;
+    const cached = sessionMapCache.get(key);
+    if (cached && cached.raw === raw) {
+        return { ...cached.value };
+    }
+    let value: Record<string, any> = {};
+    if (raw) {
         try {
-            return JSON.parse(modes);
+            value = JSON.parse(raw);
         } catch (e) {
-            console.error('Failed to parse session permission modes', e);
-            return {};
+            console.error(`Failed to parse ${label}`, e);
+            value = {};
         }
     }
-    return {};
+    sessionMapCache.set(key, { raw, value });
+    return { ...value };
+}
+
+function saveSessionMap(key: string, value: Record<string, any>): void {
+    mmkv.set(key, JSON.stringify(value));
+    sessionMapCache.delete(key);
+}
+
+export function loadSessionPermissionModes(): Record<string, string> {
+    return loadSessionMap('session-permission-modes', 'session permission modes');
 }
 
 export function saveSessionPermissionModes(modes: Record<string, string>) {
-    mmkv.set('session-permission-modes', JSON.stringify(modes));
+    saveSessionMap('session-permission-modes', modes);
 }
 
 /** Session id -> model mode key. Fallback when session.metadata.currentModelCode is absent. */
 export function loadSessionModelModes(): Record<string, string> {
-    const modes = mmkv.getString('session-model-modes');
-    if (modes) {
-        try {
-            return JSON.parse(modes);
-        } catch (e) {
-            console.error('Failed to parse session model modes', e);
-            return {};
-        }
-    }
-    return {};
+    return loadSessionMap('session-model-modes', 'session model modes');
 }
 
 export function saveSessionModelModes(modes: Record<string, string>) {
-    mmkv.set('session-model-modes', JSON.stringify(modes));
+    saveSessionMap('session-model-modes', modes);
 }
 
 /** Session id -> Cursor max mode toggle. Fallback when session.metadata.currentMaxMode is absent. */
 export function loadSessionMaxModes(): Record<string, boolean> {
-    const modes = mmkv.getString('session-max-modes');
-    if (modes) {
-        try {
-            return JSON.parse(modes);
-        } catch (e) {
-            console.error('Failed to parse session max modes', e);
-            return {};
-        }
-    }
-    return {};
+    return loadSessionMap('session-max-modes', 'session max modes');
 }
 
 export function saveSessionMaxModes(modes: Record<string, boolean>) {
-    mmkv.set('session-max-modes', JSON.stringify(modes));
+    saveSessionMap('session-max-modes', modes);
 }
 
 /** Session id -> env profile id. Applied on spawn and sent with each user message (like modelMode). */
 export function loadSessionProfileIds(): Record<string, string> {
-    const raw = mmkv.getString('session-profile-ids');
-    if (raw) {
-        try {
-            return JSON.parse(raw);
-        } catch (e) {
-            console.error('Failed to parse session profile ids', e);
-            return {};
-        }
-    }
-    return {};
+    return loadSessionMap('session-profile-ids', 'session profile ids');
 }
 
 export function saveSessionProfileIds(ids: Record<string, string>) {
-    mmkv.set('session-profile-ids', JSON.stringify(ids));
+    saveSessionMap('session-profile-ids', ids);
 }
 
 /** Session id -> sandbox isolation level. Sent with each user message (like permissionMode). */
 export function loadSessionSandboxIsolations(): Record<string, string> {
-    const raw = mmkv.getString('session-sandbox-isolations');
-    if (raw) {
-        try {
-            return JSON.parse(raw);
-        } catch (e) {
-            console.error('Failed to parse session sandbox isolations', e);
-            return {};
-        }
-    }
-    return {};
+    return loadSessionMap('session-sandbox-isolations', 'session sandbox isolations');
 }
 
 export function saveSessionSandboxIsolations(isolations: Record<string, string>) {
-    mmkv.set('session-sandbox-isolations', JSON.stringify(isolations));
+    saveSessionMap('session-sandbox-isolations', isolations);
 }
 
 export function loadProfile(): Profile {
