@@ -1072,22 +1072,26 @@ function NewSessionWizard() {
                         throw new Error('Session spawning failed - no session ID returned.');
                     }
                     const sessionId = result.sessionId;
-                    clearNewSessionDraft();
+                    // The draft is cleared only once the prompt has somewhere to go: clearing it
+                    // here lost the text when the session was not ready to be sent to.
                     // The machine that spawned it knows the session before the server does: its
                     // roster is what puts the row on screen, over whichever channel answered
                     // (relay included). The server list is the richer source and still runs, but
                     // it is not the one this waits for first.
                     await sync.fetchSessionListFromDaemons().catch(() => 0);
                     await sync.refreshSessions();
-                    // Server may not have indexed the new session yet; retry so it appears in the list
-                    if (!storage.getState().sessions[sessionId]) {
-                        await new Promise((r) => setTimeout(r, 2000));
+                    // Ready means the session can be *sent to*, not merely that a roster row
+                    // exists. `sendMessage` drops a message when the session's encryption is not
+                    // initialised yet — the initial prompt used to disappear exactly there, since
+                    // the row could exist while the key was still being fetched. Ask for the
+                    // session itself (which unwraps the key over whatever channel reaches it) and
+                    // keep trying before claiming anything to the user.
+                    const ready = () => !!sync.encryption.getSessionEncryption(sessionId);
+                    for (let attempt = 0; attempt < 5 && !ready(); attempt += 1) {
+                        await new Promise((r) => setTimeout(r, 1500));
                         await sync.fetchSessionListFromDaemons().catch(() => 0);
                         await sync.refreshSessions();
-                        if (!storage.getState().sessions[sessionId]) {
-                            await new Promise((r) => setTimeout(r, 2000));
-                            await sync.refreshSessions();
-                        }
+                        await sync.fetchSessionFromDaemon(sessionId).catch(() => {});
                     }
                     storage.getState().updateSessionPermissionMode(sessionId, permissionMode.key);
                     if (modelMode) {
@@ -1099,12 +1103,16 @@ function NewSessionWizard() {
                     if (selectedProfileId) {
                         storage.getState().updateSessionProfileId(sessionId, selectedProfileId);
                     }
-                    if (sessionPrompt.trim()) {
-                        await sync.sendMessage(sessionId, sessionPrompt);
-                    }
-                    if (storage.getState().sessions[sessionId]) {
+                    const canSend = ready();
+                    if (canSend) {
+                        clearNewSessionDraft();
+                        if (sessionPrompt.trim()) {
+                            await sync.sendMessage(sessionId, sessionPrompt);
+                        }
                         Modal.alert(t('common.success'), t('newSession.sessionReadyMessage'));
                     } else {
+                        // The session exists, but nothing can be sent to it yet. Keep the draft so
+                        // the prompt is not silently lost, and say what is happening.
                         Modal.alert(t('common.success'), t('newSession.sessionCreatedPending'));
                     }
                 })
