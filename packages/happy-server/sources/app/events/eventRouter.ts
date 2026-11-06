@@ -163,7 +163,6 @@ export type EphemeralEvent = {
     active: boolean;
     activeAt: number;
     thinking?: boolean;
-    thinkingAt?: number;
 } | {
     type: 'machine-activity';
     id: string;
@@ -483,20 +482,13 @@ export function buildUpdateMachineUpdate(machineId: string, updateSeq: number, u
     };
 }
 
-export function buildSessionActivityEphemeral(
-    sessionId: string,
-    active: boolean,
-    activeAt: number,
-    thinking?: boolean,
-    thinkingAt?: number,
-): EphemeralPayload {
+export function buildSessionActivityEphemeral(sessionId: string, active: boolean, activeAt: number, thinking?: boolean): EphemeralPayload {
     return {
         type: 'activity',
         id: sessionId,
         active,
         activeAt,
-        thinking: thinking || false,
-        thinkingAt: thinking ? (thinkingAt ?? 0) : 0,
+        thinking: thinking || false
     };
 }
 

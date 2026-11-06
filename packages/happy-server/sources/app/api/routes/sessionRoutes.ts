@@ -7,8 +7,6 @@ import { log } from "@/utils/log";
 import { randomKeyNaked } from "@/utils/randomKeyNaked";
 import { allocateUserSeq } from "@/storage/seq";
 import { sessionDelete } from "@/app/session/sessionDelete";
-import { activityCache } from "@/app/presence/sessionCache";
-import { withSessionPresence } from "@/app/presence/merge";
 
 export function sessionRoutes(app: Fastify) {
 
@@ -41,17 +39,14 @@ export function sessionRoutes(app: Fastify) {
         return reply.send({
             sessions: sessions.map((v) => {
                 const sessionUpdatedAt = v.updatedAt.getTime();
-                const presence = withSessionPresence(v, activityCache.getSessionPresence(v.id));
                 return {
                     id: v.id,
                     tag: v.tag,
                     seq: v.seq,
                     createdAt: v.createdAt.getTime(),
                     updatedAt: sessionUpdatedAt,
-                    active: presence.active,
-                    activeAt: presence.activeAt,
-                    thinking: presence.thinking,
-                    thinkingAt: presence.thinkingAt,
+                    active: v.active,
+                    activeAt: v.lastActiveAt.getTime(),
                     metadata: v.metadata,
                     metadataVersion: v.metadataVersion,
                     agentState: v.agentState,
@@ -79,6 +74,7 @@ export function sessionRoutes(app: Fastify) {
             where: {
                 accountId: userId,
                 active: true,
+                lastActiveAt: { gt: new Date(Date.now() - 1000 * 60 * 15) /* 15 minutes */ }
             },
             orderBy: { lastActiveAt: 'desc' },
             take: limit,
@@ -98,24 +94,19 @@ export function sessionRoutes(app: Fastify) {
         });
 
         return reply.send({
-            sessions: sessions.map((v) => {
-                const presence = withSessionPresence(v, activityCache.getSessionPresence(v.id));
-                return {
-                    id: v.id,
-                    seq: v.seq,
-                    createdAt: v.createdAt.getTime(),
-                    updatedAt: v.updatedAt.getTime(),
-                    active: presence.active,
-                    activeAt: presence.activeAt,
-                    thinking: presence.thinking,
-                    thinkingAt: presence.thinkingAt,
-                    metadata: v.metadata,
-                    metadataVersion: v.metadataVersion,
-                    agentState: v.agentState,
-                    agentStateVersion: v.agentStateVersion,
-                    dataEncryptionKey: v.dataEncryptionKey ? Buffer.from(v.dataEncryptionKey).toString('base64') : null,
-                };
-            })
+            sessions: sessions.map((v) => ({
+                id: v.id,
+                seq: v.seq,
+                createdAt: v.createdAt.getTime(),
+                updatedAt: v.updatedAt.getTime(),
+                active: v.active,
+                activeAt: v.lastActiveAt.getTime(),
+                metadata: v.metadata,
+                metadataVersion: v.metadataVersion,
+                agentState: v.agentState,
+                agentStateVersion: v.agentStateVersion,
+                dataEncryptionKey: v.dataEncryptionKey ? Buffer.from(v.dataEncryptionKey).toString('base64') : null,
+            }))
         });
     });
 
@@ -194,24 +185,19 @@ export function sessionRoutes(app: Fastify) {
         }
 
         return reply.send({
-            sessions: resultSessions.map((v) => {
-                const presence = withSessionPresence(v, activityCache.getSessionPresence(v.id));
-                return {
-                    id: v.id,
-                    seq: v.seq,
-                    createdAt: v.createdAt.getTime(),
-                    updatedAt: v.updatedAt.getTime(),
-                    active: presence.active,
-                    activeAt: presence.activeAt,
-                    thinking: presence.thinking,
-                    thinkingAt: presence.thinkingAt,
-                    metadata: v.metadata,
-                    metadataVersion: v.metadataVersion,
-                    agentState: v.agentState,
-                    agentStateVersion: v.agentStateVersion,
-                    dataEncryptionKey: v.dataEncryptionKey ? Buffer.from(v.dataEncryptionKey).toString('base64') : null,
-                };
-            }),
+            sessions: resultSessions.map((v) => ({
+                id: v.id,
+                seq: v.seq,
+                createdAt: v.createdAt.getTime(),
+                updatedAt: v.updatedAt.getTime(),
+                active: v.active,
+                activeAt: v.lastActiveAt.getTime(),
+                metadata: v.metadata,
+                metadataVersion: v.metadataVersion,
+                agentState: v.agentState,
+                agentStateVersion: v.agentStateVersion,
+                dataEncryptionKey: v.dataEncryptionKey ? Buffer.from(v.dataEncryptionKey).toString('base64') : null,
+            })),
             nextCursor,
             hasNext
         });
@@ -240,7 +226,6 @@ export function sessionRoutes(app: Fastify) {
         });
         if (session) {
             log({ module: 'session-create', sessionId: session.id, userId, tag }, `Found existing session: ${session.id} for tag ${tag}`);
-            const presence = withSessionPresence(session, activityCache.getSessionPresence(session.id));
             return reply.send({
                 session: {
                     id: session.id,
@@ -250,10 +235,8 @@ export function sessionRoutes(app: Fastify) {
                     agentState: session.agentState,
                     agentStateVersion: session.agentStateVersion,
                     dataEncryptionKey: session.dataEncryptionKey ? Buffer.from(session.dataEncryptionKey).toString('base64') : null,
-                    active: presence.active,
-                    activeAt: presence.activeAt,
-                    thinking: presence.thinking,
-                    thinkingAt: presence.thinkingAt,
+                    active: session.active,
+                    activeAt: session.lastActiveAt.getTime(),
                     createdAt: session.createdAt.getTime(),
                     updatedAt: session.updatedAt.getTime(),
                     lastMessage: null
@@ -291,7 +274,6 @@ export function sessionRoutes(app: Fastify) {
                 recipientFilter: { type: 'user-scoped-only' }
             });
 
-            const presence = withSessionPresence(session, activityCache.getSessionPresence(session.id));
             return reply.send({
                 session: {
                     id: session.id,
@@ -301,10 +283,8 @@ export function sessionRoutes(app: Fastify) {
                     agentState: session.agentState,
                     agentStateVersion: session.agentStateVersion,
                     dataEncryptionKey: session.dataEncryptionKey ? Buffer.from(session.dataEncryptionKey).toString('base64') : null,
-                    active: presence.active,
-                    activeAt: presence.activeAt,
-                    thinking: presence.thinking,
-                    thinkingAt: presence.thinkingAt,
+                    active: session.active,
+                    activeAt: session.lastActiveAt.getTime(),
                     createdAt: session.createdAt.getTime(),
                     updatedAt: session.updatedAt.getTime(),
                     lastMessage: null

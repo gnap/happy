@@ -1,8 +1,6 @@
 import { onShutdown } from "@/utils/shutdown";
 import { Fastify } from "./types";
-import { buildMachineActivityEphemeral, buildSessionActivityEphemeral, ClientConnection, eventRouter } from "@/app/events/eventRouter";
-import { activityCache } from "@/app/presence/sessionCache";
-import { sessionPresenceEmittedCounter } from "../monitoring/metrics2";
+import { buildMachineActivityEphemeral, ClientConnection, eventRouter } from "@/app/events/eventRouter";
 import { Server, Socket } from "socket.io";
 import { log } from "@/utils/log";
 import { auth } from "@/app/auth/auth";
@@ -102,13 +100,6 @@ export function startSocket(app: Fastify) {
         eventRouter.addConnection(userId, connection);
         incrementWebSocketConnection(connection.connectionType);
 
-        // The session-scoped socket is the liveness fact for that session. The state frame says
-        // what it is doing; this says whether anyone is there at all.
-        let sessionGeneration: number | null = null;
-        if (connection.connectionType === 'session-scoped') {
-            sessionGeneration = activityCache.noteConnectionOpen(userId, connection.sessionId);
-        }
-
         // Broadcast daemon online status
         if (connection.connectionType === 'machine-scoped') {
             // Broadcast daemon online
@@ -136,19 +127,6 @@ export function startSocket(app: Fastify) {
                     userId,
                     payload: machineActivity,
                     recipientFilter: { type: 'user-scoped-only' }
-                });
-            }
-
-            // A session's socket is its liveness. Give a reconnect a short grace before saying
-            // offline: a network flap must not paint the session (and its push path) dead.
-            if (connection.connectionType === 'session-scoped' && sessionGeneration !== null) {
-                activityCache.noteConnectionClosed(userId, connection.sessionId, sessionGeneration, 15_000, presence => {
-                    eventRouter.emitEphemeral({
-                        userId,
-                        payload: buildSessionActivityEphemeral(connection.sessionId, false, presence.activeAt, false, 0),
-                        recipientFilter: { type: 'user-scoped-only' }
-                    });
-                    sessionPresenceEmittedCounter.inc({ event: 'disconnect' });
                 });
             }
         });

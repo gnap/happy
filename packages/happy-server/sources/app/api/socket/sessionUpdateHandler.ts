@@ -1,4 +1,4 @@
-import { sessionAliveEventsCounter, sessionPresenceEmittedCounter, websocketEventsCounter } from "@/app/monitoring/metrics2";
+import { sessionAliveEventsCounter, websocketEventsCounter } from "@/app/monitoring/metrics2";
 import { activityCache } from "@/app/presence/sessionCache";
 import { buildNewMessageUpdate, buildSessionActivityEphemeral, buildUpdateSessionUpdate, ClientConnection, eventRouter } from "@/app/events/eventRouter";
 import { db } from "@/storage/db";
@@ -7,76 +7,6 @@ import { AsyncLock } from "@/utils/lock";
 import { log } from "@/utils/log";
 import { randomKeyNaked } from "@/utils/randomKeyNaked";
 import { Socket } from "socket.io";
-
-type SessionSnapshot = {
-    sid: string;
-    time: number;
-    thinking?: boolean;
-    thinkingAt?: number;
-    startedAt?: number;
-};
-
-/**
- * The state snapshot a session sends for itself.
- *
- * The name is the old `session-alive`; the meaning is now "this is my current state", sent on a
- * transition or a reconnect rather than every two seconds. Absolute state makes a duplicate
- * harmless, which is what lets the old 2s fleet and this one share a handler.
- */
-export async function applySessionAlive(
-    userId: string,
-    connectionSessionId: string | null,
-    data: SessionSnapshot,
-): Promise<{ sid: string; changed: boolean; presence: NonNullable<ReturnType<typeof activityCache.getSessionPresence>> } | null> {
-    if (!data || typeof data.time !== 'number' || typeof data.sid !== 'string' || !data.sid) {
-        return null;
-    }
-    // A session-scoped socket may only speak for the session it authenticated as.
-    if (connectionSessionId !== null && data.sid !== connectionSessionId) {
-        return null;
-    }
-    const t = Math.min(data.time, Date.now());
-    if (t < Date.now() - 1000 * 60 * 10) {
-        return null;
-    }
-    const isValid = await activityCache.isSessionValid(data.sid, userId);
-    if (!isValid) {
-        return null;
-    }
-    const result = activityCache.applySessionSnapshot(data.sid, userId, {
-        time: t,
-        thinking: data.thinking === true,
-        thinkingAt: typeof data.thinkingAt === 'number' ? data.thinkingAt : undefined,
-        startedAt: typeof data.startedAt === 'number' ? data.startedAt : undefined,
-    });
-    if (!result.accepted) {
-        return null;
-    }
-    return { sid: data.sid, changed: result.changed, presence: result.presence };
-}
-
-/** The terminal transition. The database write is the cache's, so a queued alive update cannot undo it. */
-export async function applySessionEnd(
-    userId: string,
-    connectionSessionId: string | null,
-    data: { sid: string; time: number },
-): Promise<{ sid: string; changed: boolean; presence: NonNullable<ReturnType<typeof activityCache.getSessionPresence>> } | null> {
-    if (!data || typeof data.time !== 'number' || typeof data.sid !== 'string' || !data.sid) {
-        return null;
-    }
-    if (connectionSessionId !== null && data.sid !== connectionSessionId) {
-        return null;
-    }
-    const isValid = await activityCache.isSessionValid(data.sid, userId);
-    if (!isValid) {
-        return null;
-    }
-    const result = await activityCache.markSessionEnded(data.sid, userId, Date.now());
-    if (!result.presence) {
-        return null;
-    }
-    return { sid: data.sid, changed: result.changed, presence: result.presence };
-}
 
 export function sessionUpdateHandler(userId: string, socket: Socket, connection: ClientConnection) {
     socket.on('update-metadata', async (data: any, callback: (response: any) => void) => {
@@ -206,29 +136,47 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
             }
         }
     });
-    socket.on('session-alive', async (data: SessionSnapshot) => {
+    socket.on('session-alive', async (data: {
+        sid: string;
+        time: number;
+        thinking?: boolean;
+    }) => {
         try {
+            // Track metrics
             websocketEventsCounter.inc({ event_type: 'session-alive' });
             sessionAliveEventsCounter.inc();
 
-            const sessionId = connection.connectionType === 'session-scoped' ? connection.sessionId : null;
-            const result = await applySessionAlive(userId, sessionId, data);
-            if (!result || !result.changed) {
+            // Basic validation
+            if (!data || typeof data.time !== 'number' || !data.sid) {
                 return;
             }
 
+            let t = data.time;
+            if (t > Date.now()) {
+                t = Date.now();
+            }
+            if (t < Date.now() - 1000 * 60 * 10) {
+                return;
+            }
+
+            const { sid, thinking } = data;
+
+            // Check session validity using cache
+            const isValid = await activityCache.isSessionValid(sid, userId);
+            if (!isValid) {
+                return;
+            }
+
+            // Queue database update (will only update if time difference is significant)
+            activityCache.queueSessionUpdate(sid, t);
+
+            // Emit session activity update
+            const sessionActivity = buildSessionActivityEphemeral(sid, true, t, thinking || false);
             eventRouter.emitEphemeral({
                 userId,
-                payload: buildSessionActivityEphemeral(
-                    result.sid,
-                    true,
-                    result.presence.activeAt,
-                    result.presence.thinking,
-                    result.presence.thinkingAt,
-                ),
+                payload: sessionActivity,
                 recipientFilter: { type: 'user-scoped-only' }
             });
-            sessionPresenceEmittedCounter.inc({ event: 'alive' });
         } catch (error) {
             log({ module: 'websocket', level: 'error' }, `Error in session-alive: ${error}`);
         }
@@ -296,20 +244,44 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
         });
     });
 
-    socket.on('session-end', async (data: { sid: string; time: number }) => {
+    socket.on('session-end', async (data: {
+        sid: string;
+        time: number;
+    }) => {
         try {
-            const sessionId = connection.connectionType === 'session-scoped' ? connection.sessionId : null;
-            const result = await applySessionEnd(userId, sessionId, data);
-            if (!result || !result.changed) {
+            const { sid, time } = data;
+            let t = time;
+            if (typeof t !== 'number') {
+                return;
+            }
+            if (t > Date.now()) {
+                t = Date.now();
+            }
+            if (t < Date.now() - 1000 * 60 * 10) { // Ignore if time is in the past 10 minutes
                 return;
             }
 
+            // Resolve session
+            const session = await db.session.findUnique({
+                where: { id: sid, accountId: userId }
+            });
+            if (!session) {
+                return;
+            }
+
+            // Update last active at
+            await db.session.update({
+                where: { id: sid },
+                data: { lastActiveAt: new Date(t), active: false }
+            });
+
+            // Emit session activity update
+            const sessionActivity = buildSessionActivityEphemeral(sid, false, t, false);
             eventRouter.emitEphemeral({
                 userId,
-                payload: buildSessionActivityEphemeral(result.sid, false, result.presence.activeAt, false, 0),
+                payload: sessionActivity,
                 recipientFilter: { type: 'user-scoped-only' }
             });
-            sessionPresenceEmittedCounter.inc({ event: 'end' });
         } catch (error) {
             log({ module: 'websocket', level: 'error' }, `Error in session-end: ${error}`);
         }
