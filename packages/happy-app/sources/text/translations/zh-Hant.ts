@@ -295,6 +295,7 @@ export const zhHant: TranslationStructure = {
             success: 'Worktree 建立成功',
         },
         sessionReadyMessage: '工作階段已就緒，在列表中點擊即可開啟。',
+        sessionCreatedPending: '工作階段已在機器上建立，稍後會出現在清單中。',
     },
 
     sessionHistory: {

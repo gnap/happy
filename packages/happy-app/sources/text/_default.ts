@@ -293,6 +293,7 @@ export const en = {
             success: 'Worktree created successfully',
         },
         sessionReadyMessage: 'Session ready. Tap it in the list to open.',
+        sessionCreatedPending: 'The session was created on the machine; it will appear in the list shortly.',
     },
 
     sessionHistory: {

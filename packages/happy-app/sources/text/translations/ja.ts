@@ -329,6 +329,7 @@ export const ja: TranslationStructure = {
             success: 'ワークツリーが正常に作成されました',
         },
         sessionReadyMessage: 'セッションの準備ができました。リストでタップして開いてください。',
+        sessionCreatedPending: 'セッションはマシン上で作成されました。まもなく一覧に表示されます。',
     },
 
     sessionHistory: {
