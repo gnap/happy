@@ -74,18 +74,28 @@ const DEFAULT_HEARTBEAT = { intervalMs: 15_000, timeoutMs: 45_000 };
  * the LAN answers in milliseconds.
  */
 const DEFAULT_RESUME_PROBE_MS = 2_000;
+/**
+ * How long an open may stay in flight before it is treated as a failure.
+ *
+ * The socket layer bounds itself (a 10s challenge, a 5s upgrade), so this is a backstop for the
+ * things a promise cannot bound: a fetch whose native side never settles, a runtime that freezes
+ * the timers inside the attempt, a suspension in the middle of a handshake. Without it, "opening"
+ * is a state a connection can be published in and never leave — and an icon that reads a phase
+ * would stay blue for as long as the App runs.
+ */
+const DEFAULT_OPEN_TIMEOUT_MS = 20_000;
+
+/** What the socket layer calls back on, and what the manager forwards from it. */
+type DaemonSocketHandlers = {
+    onUpdate: (payload: unknown) => void;
+    onDelivered: (result: { sessionId: string; localId: string; delivered: boolean }) => void;
+    onClosed: (info: { deliberate: boolean; code?: number; reason?: string }) => void;
+    onBeat: () => void;
+};
 
 type DaemonConnectionDeps = {
     /** Opens one connection, or returns null when it could not be established. */
-    open: (
-        target: DaemonTarget,
-        handlers: {
-            onUpdate: (payload: unknown) => void;
-            onDelivered: (result: { sessionId: string; localId: string; delivered: boolean }) => void;
-            onClosed: (info: { deliberate: boolean; code?: number; reason?: string }) => void;
-            onBeat: () => void;
-        },
-    ) => Promise<LanSocketHandle | null>;
+    open: (target: DaemonTarget, handlers: DaemonSocketHandlers) => Promise<LanSocketHandle | null>;
     onUpdate: (target: DaemonTarget, payload: unknown) => void;
     onDelivered: (target: DaemonTarget, result: { sessionId: string; localId: string; delivered: boolean }) => void;
     /** A connection came up: the sessions on that machine no longer need their polling fallback. */
@@ -124,6 +134,8 @@ type DaemonConnectionDeps = {
     heartbeat?: { intervalMs: number; timeoutMs: number };
     /** How long a resume probe may take; production uses the default. */
     resumeProbeMs?: number;
+    /** How long an open may stay in flight before it is abandoned and retried. */
+    openTimeoutMs?: number;
     /**
      * Which routes this App checks liveness on itself.
      *
@@ -366,32 +378,40 @@ export class DaemonConnections {
             return;
         }
         const opened: { handle: LanSocketHandle | null } = { handle: null };
-        const task = (async () => {
-            const handle = await this.deps.open(target, {
+        let task: Promise<void>;
+        task = (async () => {
+            const result = await this.openBounded(target, {
                 onUpdate: (payload) => this.deps.onUpdate(target, payload),
                 onBeat: () => this.onBeat(id),
-                onDelivered: (result) => this.deps.onDelivered(target, result),
+                onDelivered: (delivered) => this.deps.onDelivered(target, delivered),
                 onClosed: (info) => this.onConnectionEnded(target, opened.handle, info),
             });
-            opened.handle = handle;
-            if (!handle) {
-                this.deps.log(`🔌 could not open the ${target.route} connection to ${target.machineId.slice(0, 8)}`);
+            opened.handle = result.handle;
+            if (!result.handle) {
+                this.deps.log(
+                    `🔌 could not open the ${target.route} connection to ${target.machineId.slice(0, 8)}`
+                    + (result.error ? `: ${result.error instanceof Error ? result.error.message : String(result.error)}` : ''),
+                );
                 // A failure to open is the same situation as a drop and deserves the same answer:
                 // the daemon is still wanted, so the manager retries on its own schedule. Without
                 // this, `want` being idempotent meant nothing ever tried again — the connection sat
                 // wanted and idle until some unrelated change moved the address.
-                this.deps.onAddressUnusable?.(target, 'the address did not answer');
+                this.deps.onAddressUnusable?.(target, result.error
+                    ? 'the connection attempt failed'
+                    : 'the address did not answer');
                 this.scheduleRetry(target);
                 return;
             }
             // The daemon may have been dropped or pointed elsewhere while this was opening: a socket
-            // nobody wants is closed on arrival rather than installed.
+            // nobody wants is closed on arrival rather than installed. The state it leaves behind is
+            // picked up by the `finally` below, which is what keeps a move *during* an open from
+            // ending with a daemon that is wanted and has nothing trying to reach it.
             if (this.desired.get(id)?.baseUrl !== target.baseUrl) {
-                handle.close();
+                result.handle.close();
                 return;
             }
             this.live.set(id, {
-                handle,
+                handle: result.handle,
                 target,
                 connectedAt: Date.now(),
                 awaitingBeatSince: null,
@@ -408,15 +428,76 @@ export class DaemonConnections {
             this.publish(id);
             this.deps.onReady?.(target);
             this.beatLoop(id);
-        })();
+        })().catch((error) => {
+            // Last resort. The attempt is bounded and its failures are turned into `null`, so this
+            // is a bug rather than an outcome — but it must not leave the daemon published as
+            // `opening` with nothing scheduled, which is exactly the state a reader would draw as
+            // "connecting" forever.
+            this.deps.log(`🔌 the ${target.route} connection to ${target.machineId.slice(0, 8)} failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`);
+            this.deps.onAddressUnusable?.(target, 'the connection attempt failed');
+            this.scheduleRetry(target);
+        }).finally(() => {
+            if (this.opening.get(id) !== task) {
+                return;
+            }
+            this.opening.delete(id);
+            const desired = this.desired.get(id);
+            if (desired && !this.live.has(id) && !this.retryTimers.has(id)) {
+                // The attempt ended without a retry because the daemon now wants a *different*
+                // address — the one it was pointed at when the attempt began is not the one to try.
+                // Waiting for `want` to say so again never happens: it is idempotent on the address
+                // it already wants, so nothing would ever open the new one.
+                this.start(desired);
+            }
+        });
         // Registered *before* awaiting, so an open in flight is visible as such: a second caller
         // must not start one of its own, and the published phase has to say `opening` meanwhile.
         this.opening.set(id, task);
         this.publish(id);
-        void task.finally(() => {
-            if (this.opening.get(id) === task) {
-                this.opening.delete(id);
+    }
+
+    /**
+     * The open, with a deadline and with a throw turned into an answer.
+     *
+     * Both are about the same failure: the manager publishes `opening` before it awaits, so every
+     * way an attempt can end without saying so leaves a connection that is drawn as "connecting"
+     * and is never retried. A late socket is closed rather than installed — by then this attempt is
+     * over, and a second one may own the daemon.
+     */
+    private openBounded(target: DaemonTarget, handlers: DaemonSocketHandlers): Promise<{ handle: LanSocketHandle | null; error?: unknown }> {
+        const timeoutMs = this.deps.openTimeoutMs ?? DEFAULT_OPEN_TIMEOUT_MS;
+        return new Promise((resolve) => {
+            let settled = false;
+            const finish = (result: { handle: LanSocketHandle | null; error?: unknown }) => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                clearTimeout(timer);
+                resolve(result);
+            };
+            const timer = setTimeout(() => {
+                this.deps.log(`🔌 the ${target.route} connection to ${target.machineId.slice(0, 8)} was still opening after ${Math.round(timeoutMs / 1000)}s; giving up on that attempt`);
+                finish({ handle: null });
+            }, timeoutMs);
+            (timer as unknown as { unref?: () => void }).unref?.();
+            let attempt: Promise<LanSocketHandle | null>;
+            try {
+                attempt = this.deps.open(target, handlers);
+            } catch (error) {
+                finish({ handle: null, error });
+                return;
             }
+            attempt.then(
+                (handle) => {
+                    if (settled) {
+                        handle?.close();
+                        return;
+                    }
+                    finish({ handle });
+                },
+                (error) => finish({ handle: null, error }),
+            );
         });
     }
 

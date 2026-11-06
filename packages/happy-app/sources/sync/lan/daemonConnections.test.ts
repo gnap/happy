@@ -12,8 +12,15 @@ const target = (over: Partial<DaemonTarget> = {}): DaemonTarget => ({
     ...over,
 });
 
+const fakeHandle = (baseUrl: string): LanSocketHandle => ({
+    baseUrl,
+    send: vi.fn(() => true),
+    ping: vi.fn(() => true),
+    close: vi.fn(),
+} as unknown as LanSocketHandle);
+
 /** A manager wired to a fake opener that records what it was asked for. */
-function makeManager(overrides: { resumeProbeMs?: number; heartbeat?: { intervalMs: number; timeoutMs: number } } = {}) {
+function makeManager(overrides: { resumeProbeMs?: number; openTimeoutMs?: number; heartbeat?: { intervalMs: number; timeoutMs: number } } = {}) {
     const opens: { target: DaemonTarget; handlers: any; handle: LanSocketHandle }[] = [];
     const state: [string, unknown][] = [];
     const dropped: string[] = [];
@@ -33,6 +40,7 @@ function makeManager(overrides: { resumeProbeMs?: number; heartbeat?: { interval
         retryDelayMs: () => 0,
         heartbeat: overrides.heartbeat ?? { intervalMs: 1, timeoutMs: 4 },
         resumeProbeMs: overrides.resumeProbeMs ?? 60_000,
+        openTimeoutMs: overrides.openTimeoutMs,
     });
     return { manager, opens, state, dropped, unusable };
 }
@@ -102,6 +110,81 @@ describe('DaemonConnections', () => {
         await new Promise((resolve) => setTimeout(resolve, 40));
         expect(failures.length).toBeGreaterThanOrEqual(3);
         expect(manager.current('m1', 'lan')).not.toBeNull();
+    });
+
+    it('retries a route whose open throws, instead of leaving it opening forever', async () => {
+        // `opening` is published before the attempt is awaited, so an attempt that ends by throwing
+        // used to end as the last word: no retry, no new state, and an icon that reads the phase
+        // stayed "connecting" for as long as the App ran.
+        const phases: string[] = [];
+        let attempts = 0;
+        const manager = new DaemonConnections({
+            open: async () => {
+                attempts += 1;
+                if (attempts === 1) {
+                    throw new Error('boom');
+                }
+                return fakeHandle('http://10.0.0.2:55673');
+            },
+            onUpdate: () => {},
+            onDelivered: () => {},
+            onStateChange: (_id, state) => { phases.push((state as { phase: string }).phase); },
+            log: () => {},
+            retryDelayMs: () => 1,
+        });
+        manager.want(target());
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        expect(attempts).toBeGreaterThanOrEqual(2);
+        expect(manager.current('m1', 'lan')?.baseUrl).toBe('http://10.0.0.2:55673');
+        // The last thing published is the connection that came up, not the attempt that failed.
+        expect(phases[phases.length - 1]).toBe('live');
+    });
+
+    it('abandons an open that never settles and tries again', async () => {
+        let attempts = 0;
+        const manager = new DaemonConnections({
+            open: () => {
+                attempts += 1;
+                return new Promise<LanSocketHandle | null>(() => {});
+            },
+            onUpdate: () => {},
+            onDelivered: () => {},
+            onStateChange: () => {},
+            log: () => {},
+            retryDelayMs: () => 1,
+            openTimeoutMs: 10,
+        });
+        manager.want(target());
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        expect(attempts).toBeGreaterThanOrEqual(2);
+    });
+
+    it('opens the address a route moved to while an earlier open was still in flight', async () => {
+        // Moving an address does not cancel an open already in flight, and `want` is idempotent on
+        // the address it now wants. Without the attempt's own cleanup, the old socket arrived and
+        // was closed, and the new address was never opened at all.
+        const opened: string[] = [];
+        const resolvers: ((handle: LanSocketHandle | null) => void)[] = [];
+        const manager = new DaemonConnections({
+            open: (t) => {
+                opened.push(t.baseUrl);
+                return new Promise<LanSocketHandle | null>((resolve) => resolvers.push(resolve));
+            },
+            onUpdate: () => {},
+            onDelivered: () => {},
+            onStateChange: () => {},
+            log: () => {},
+            retryDelayMs: () => 1,
+        });
+        manager.want(target());
+        manager.want(target({ baseUrl: 'http://10.0.0.9:55673' }));
+        expect(opened).toEqual(['http://10.0.0.2:55673']);
+        resolvers[0](fakeHandle('http://10.0.0.2:55673'));
+        await tick();
+        expect(opened).toEqual(['http://10.0.0.2:55673', 'http://10.0.0.9:55673']);
+        resolvers[1](fakeHandle('http://10.0.0.9:55673'));
+        await tick();
+        expect(manager.current('m1', 'lan')?.baseUrl).toBe('http://10.0.0.9:55673');
     });
 
     it('closes a connection that arrives after the route stopped being wanted', async () => {
