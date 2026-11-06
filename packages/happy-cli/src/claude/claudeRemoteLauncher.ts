@@ -108,8 +108,31 @@ function formatLaunchError(error: unknown): Record<string, unknown> {
 /** How long a waiting message sleeps between checks while a permission request is open. */
 const PERMISSION_SETTLE_POLL_MS = 200;
 
+/**
+ * Whether this process has driven the remote launcher before.
+ *
+ * The first entry is the moment a fresh process takes the session over, and the only moment this
+ * process's schedules can be asserted: it has none, because crons live in the Claude process's
+ * memory and this process has not started one yet. Whatever the server's agentState still
+ * carries was written by a process that is already gone — a SIGTERM restart kills it without
+ * its SessionEnd hook — and no turn runs until a message arrives, so nothing but this reset
+ * would clear it. Later entries are local⇄remote switches inside one process, where the Claude
+ * process may still be alive with its schedules in memory; those are the Stop hook's to report.
+ */
+let hasDrivenRemoteLauncher = false;
+
 export async function claudeRemoteLauncher(session: Session): Promise<'switch' | 'exit'> {
     logger.debug('[claudeRemoteLauncher] Starting remote launcher');
+
+    if (!hasDrivenRemoteLauncher) {
+        hasDrivenRemoteLauncher = true;
+        // The schedules on the server belong to the process that wrote them. This process's list
+        // is empty until its first CronCreate, and the difference is published now rather than
+        // at the first turn end — observed on a daemon restart: the session came back showing
+        // six crons of a process that had been SIGTERMed, keyed by tool-call ids no live list
+        // would ever contain again.
+        session.client.updateAgentState((s) => ({ ...s, crons: {} }));
+    }
 
     // Check if we have a TTY for UI rendering
     const hasTTY = process.stdout.isTTY && process.stdin.isTTY;
