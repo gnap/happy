@@ -294,6 +294,7 @@ export const ca: TranslationStructure = {
             success: 'Worktree creat amb èxit',
         },
         sessionReadyMessage: 'Sessió llesta. Toca-la a la llista per obrir-la.',
+        sessionCreatedPending: 'La sessió s’ha creat a la màquina; apareixerà a la llista aviat.',
     },
 
     sessionHistory: {

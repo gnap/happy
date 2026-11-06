@@ -345,7 +345,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             method: `${response.id}:${rpc.method}`,
             params: rpc.params ?? '',
         });
-    });
+    }, () => session.getPresence());
     // Cleanup socket on graceful exit
     process.on('beforeExit', () => stopSocketClient());
     process.on('exit', () => stopSocketClient());
@@ -450,7 +450,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     logger.debug(`[START] Hook server started on port ${hookServer.port}`);
 
     // Generate hook settings file for Claude
-    const hookSettingsPath = generateHookSettingsFile(hookServer.port);
+    const hookSettingsPath = generateHookSettingsFile(hookServer.port, options.jsRuntime);
     logger.debug(`[START] Generated hook settings file: ${hookSettingsPath}`);
 
     // Print log file path

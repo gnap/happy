@@ -60,7 +60,9 @@ export interface ClientToServerEvents {
     sid: string;
     time: number;
     thinking: boolean;
-    mode?: 'local' | 'remote';
+    thinkingAt?: number;
+    /** This CLI process's start time; a restarted process must supersede an older one. */
+    startedAt?: number;
   }) => void
   'session-end': (data: { sid: string, time: number }) => void,
   'update-metadata': (data: { sid: string, expectedVersion: number, metadata: string }, cb: (answer: {

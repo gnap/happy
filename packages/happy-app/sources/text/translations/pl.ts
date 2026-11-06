@@ -305,6 +305,7 @@ export const pl: TranslationStructure = {
             success: 'Worktree został utworzony pomyślnie',
         },
         sessionReadyMessage: 'Sesja gotowa. Dotknij jej na liście, aby otworzyć.',
+        sessionCreatedPending: 'Sesja została utworzona na maszynie; wkrótce pojawi się na liście.',
     },
 
     sessionHistory: {

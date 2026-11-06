@@ -271,6 +271,7 @@ export const ru: TranslationStructure = {
             success: 'Worktree успешно создан',
         },
         sessionReadyMessage: 'Сессия готова. Нажмите на неё в списке, чтобы открыть.',
+        sessionCreatedPending: 'Сессия создана на машине; она скоро появится в списке.',
     },
 
     sessionHistory: {

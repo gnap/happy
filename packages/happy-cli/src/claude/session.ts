@@ -46,9 +46,6 @@ export class Session {
 
     /** Callbacks to be notified when session ID is found/changed */
     private sessionFoundCallbacks: ((sessionId: string) => void)[] = [];
-    
-    /** Keep alive interval reference for cleanup */
-    private keepAliveInterval: NodeJS.Timeout;
 
     constructor(opts: {
         api: ApiClient,
@@ -86,30 +83,23 @@ export class Session {
         this.hookServerPort = opts.hookServerPort;
         this.jsRuntime = opts.jsRuntime ?? 'node';
 
-        // Start keep alive
-        this.client.keepAlive(this.thinking, this.mode);
-        this.keepAliveInterval = setInterval(() => {
-            this.client.keepAlive(this.thinking, this.mode);
-        }, 2000);
     }
-    
+
     /**
      * Cleanup resources (call when session is no longer needed)
      */
     cleanup = (): void => {
-        clearInterval(this.keepAliveInterval);
         this.sessionFoundCallbacks = [];
         logger.debug('[Session] Cleaned up resources');
     }
 
     onThinkingChange = (thinking: boolean) => {
         this.thinking = thinking;
-        this.client.keepAlive(thinking, this.mode);
+        this.client.setThinking(thinking);
     }
 
     onModeChange = (mode: 'local' | 'remote') => {
         this.mode = mode;
-        this.client.keepAlive(this.thinking, mode);
         this._onModeChange(mode);
     }
 

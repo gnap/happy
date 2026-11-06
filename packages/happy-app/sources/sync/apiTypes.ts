@@ -156,6 +156,8 @@ export const ApiEphemeralActivityUpdateSchema = z.object({
     active: z.boolean(),
     activeAt: z.number(),
     thinking: z.boolean(),
+    /** When the current turn began; 0 when idle. Absent from older servers. */
+    thinkingAt: z.number().optional(),
 });
 
 export const ApiEphemeralUsageUpdateSchema = z.object({

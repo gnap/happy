@@ -1073,10 +1073,16 @@ function NewSessionWizard() {
                     }
                     const sessionId = result.sessionId;
                     clearNewSessionDraft();
+                    // The machine that spawned it knows the session before the server does: its
+                    // roster is what puts the row on screen, over whichever channel answered
+                    // (relay included). The server list is the richer source and still runs, but
+                    // it is not the one this waits for first.
+                    await sync.fetchSessionListFromDaemons().catch(() => 0);
                     await sync.refreshSessions();
                     // Server may not have indexed the new session yet; retry so it appears in the list
                     if (!storage.getState().sessions[sessionId]) {
                         await new Promise((r) => setTimeout(r, 2000));
+                        await sync.fetchSessionListFromDaemons().catch(() => 0);
                         await sync.refreshSessions();
                         if (!storage.getState().sessions[sessionId]) {
                             await new Promise((r) => setTimeout(r, 2000));
@@ -1096,7 +1102,11 @@ function NewSessionWizard() {
                     if (sessionPrompt.trim()) {
                         await sync.sendMessage(sessionId, sessionPrompt);
                     }
-                    Modal.alert(t('common.success'), t('newSession.sessionReadyMessage'));
+                    if (storage.getState().sessions[sessionId]) {
+                        Modal.alert(t('common.success'), t('newSession.sessionReadyMessage'));
+                    } else {
+                        Modal.alert(t('common.success'), t('newSession.sessionCreatedPending'));
+                    }
                 })
                 .catch((error) => {
                     console.error('Failed to start session', error);

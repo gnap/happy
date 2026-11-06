@@ -8,7 +8,8 @@ const mocks = vi.hoisted(() => {
     sendSessionDeath: vi.fn(),
     flush: vi.fn(async () => undefined),
     close: vi.fn(async () => undefined),
-    keepAlive: vi.fn(),
+    setThinking: vi.fn(),
+    getPresence: vi.fn(() => ({ thinking: false, thinkingAt: 0, startedAt: 0 })),
     onUserMessage: vi.fn(),
     // Enough of the A2A surface for the startup path, which peeks the inbox to decide
     // whether an inbox turn is due before it reaches the (mocked) loop.

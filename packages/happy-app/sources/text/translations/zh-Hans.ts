@@ -296,6 +296,7 @@ export const zhHans: TranslationStructure = {
             success: 'Worktree 创建成功',
         },
         sessionReadyMessage: '会话已就绪，在列表中点击即可打开。',
+        sessionCreatedPending: '会话已在机器上创建，稍后会出现在列表中。',
     },
 
     sessionHistory: {

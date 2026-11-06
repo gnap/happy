@@ -326,6 +326,7 @@ export const it: TranslationStructure = {
             success: 'Worktree creata con successo',
         },
         sessionReadyMessage: 'Sessione pronta. Toccala nell\'elenco per aprirla.',
+        sessionCreatedPending: 'La sessione è stata creata sulla macchina; apparirà presto nell’elenco.',
     },
 
     sessionHistory: {

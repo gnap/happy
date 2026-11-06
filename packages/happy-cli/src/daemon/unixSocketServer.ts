@@ -11,6 +11,8 @@ export interface DaemonSocketMessage {
     pid?: number;
     sessionTag?: string;
     metadata?: Record<string, unknown>;
+    /** Current turn state at the moment of the hello, so a restarted daemon has a snapshot. */
+    presence?: { thinking: boolean; thinkingAt: number; startedAt: number } | null;
     /**
      * A server-shaped update body the session just received, forwarded so the daemon can mirror it
      * onto the LAN socket. Only the body: the daemon re-wraps it in the same `update` envelope the

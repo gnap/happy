@@ -1467,7 +1467,7 @@ describe('lazy tool results', () => {
     });
 });
 
-describe('session keepAlive', () => {
+describe('session presence', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         mockAxiosGet.mockResolvedValue(makeEmptyFetchResponse());
@@ -1483,15 +1483,48 @@ describe('session keepAlive', () => {
         });
     });
 
-    it('mirrors the heartbeat to the machine, so its LAN readers can say "thinking"', () => {
+    it('sends on a transition and mirrors it to the machine, so LAN readers see "thinking"', () => {
         const client = new ApiSessionClient('fake-token', makeSession());
 
-        client.keepAlive(true, 'remote');
+        expect(client.setThinking(true)).toBe(true);
 
         // The server hears this over its socket; the machine's own readers have no server to hear
         // it from. Same payload, one extra hop.
         expect(mockForwardToDaemon).toHaveBeenCalledWith(
             expect.objectContaining({ t: 'session-alive', thinking: true, sid: 'test-session-id' }),
         );
+        expect(client.getPresence().thinking).toBe(true);
+        expect(client.getPresence().thinkingAt).toBeGreaterThan(0);
+    });
+
+    it('sends nothing when the state did not change', () => {
+        const client = new ApiSessionClient('fake-token', makeSession());
+
+        expect(client.setThinking(false)).toBe(false);
+        expect(client.setThinking(false)).toBe(false);
+
+        // State changes are the only thing that transmits immediately.
+        expect(mockForwardToDaemon).not.toHaveBeenCalled();
+    });
+
+    it('keeps only the server liveness floor, once a minute', () => {
+        vi.useFakeTimers();
+        try {
+            new ApiSessionClient('fake-token', makeSession());
+            mockForwardToDaemon.mockClear();
+
+            vi.advanceTimersByTime(59_000);
+            expect(mockForwardToDaemon).not.toHaveBeenCalled();
+
+            vi.advanceTimersByTime(1_000);
+            // The server expires a session after ten minutes without a heartbeat; one minute is
+            // the floor it needs, not the two-second chatter the loop refactor introduced.
+            expect(mockForwardToDaemon).toHaveBeenCalledTimes(1);
+            expect(mockForwardToDaemon).toHaveBeenCalledWith(
+                expect.objectContaining({ t: 'session-alive', sid: 'test-session-id' }),
+            );
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });

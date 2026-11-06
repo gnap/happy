@@ -158,7 +158,10 @@ class OfflineSessionStub extends EventEmitter {
     }
 
     sendSessionDeath(): void {}
-    keepAlive(_thinking: boolean, _mode: 'local' | 'remote'): void {}
+    setThinking(_thinking: boolean): boolean { return false; }
+    getPresence(): { thinking: boolean; thinkingAt: number; startedAt: number } {
+        return { thinking: false, thinkingAt: 0, startedAt: 0 };
+    }
     sendUsageData(_usage: unknown, _model?: string): void {}
     sendCursorQuotaReport(_payload: unknown): void {}
     closeClaudeSessionTurn(_status?: unknown): void {}

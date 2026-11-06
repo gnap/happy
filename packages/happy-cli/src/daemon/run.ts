@@ -352,8 +352,14 @@ export async function startDaemon(): Promise<void> {
           session.exitReason = resolveExitReason(code ?? null, signal);
         }
         session.exitTime = session.exitTime ?? Date.now();
+        if (session.happySessionId) {
+          markLanSessionInactive(session.happySessionId);
+        }
         persistSessionTagBeforeRemove(session);
         pushRecentlyExited(session);
+        // Process death changes `isAlive`; the relay's next slow tick would say so anyway, but
+        // this is the one moment the truth is known.
+        relayClient?.publishDirectory();
         if (session.pendingArchive) {
           // App-initiated archive (killSession RPC): do not keep in list
           logger.debug(`[DAEMON RUN] Session ${session.happySessionId} (PID ${pid}) archived by app, removing from list`);
@@ -384,8 +390,12 @@ export async function startDaemon(): Promise<void> {
       logger.debug(`[DAEMON RUN] ${reason}: terminating PID ${pid}`);
       session.exitReason = reason;
       session.exitTime = session.exitTime ?? Date.now();
+      if (session.happySessionId) {
+        markLanSessionInactive(session.happySessionId);
+      }
       persistSessionTagBeforeRemove(session);
       pushRecentlyExited(session);
+      relayClient?.publishDirectory();
       pidToAwaiter.delete(pid);
       pidToTrackedSession.delete(pid);
 
@@ -1586,15 +1596,38 @@ export async function startDaemon(): Promise<void> {
         // App's ephemeral handler runs unchanged against either channel. It is not a server-shaped
         // update, so it must not fall through to the `update` broadcast below.
         if (sessionId && event.t === 'session-alive') {
-          const alive = event as { time?: unknown; thinking?: unknown };
+          const alive = event as { time?: unknown; thinking?: unknown; thinkingAt?: unknown };
           const at = typeof alive.time === 'number' ? alive.time : Date.now();
-          lanServer?.broadcast('ephemeral', {
-            type: 'activity',
-            id: sessionId,
+          const thinking = alive.thinking === true;
+          const known = lanSessionState.get(sessionId) ?? {};
+          const previous = known.activity;
+          // Keep the turn's start while it is still the same turn; a repeated frame must not
+          // reset it, or "thinking since" drifts with every heartbeat the old CLI still sends.
+          const thinkingAt = thinking
+            ? (typeof alive.thinkingAt === 'number'
+              ? alive.thinkingAt
+              : (previous?.thinking ? previous.thinkingAt : at))
+            : 0;
+          const activity = {
             active: true,
-            activeAt: at,
-            thinking: alive.thinking === true,
-          });
+            activeAt: Math.max(previous?.activeAt ?? 0, at),
+            thinking,
+            thinkingAt,
+          };
+          if (previous
+            && previous.active === activity.active
+            && previous.thinking === activity.thinking
+            && previous.thinkingAt === activity.thinkingAt) {
+            // State unchanged: advance the cache's timestamp without waking every LAN reader.
+            lanSessionState.set(sessionId, { ...known, activity });
+            return;
+          }
+          lanSessionState.set(sessionId, { ...known, activity });
+          lanServer?.broadcast('ephemeral', { type: 'activity', id: sessionId, ...activity });
+          return;
+        }
+        if (sessionId && event.t === 'session-end') {
+          markLanSessionInactive(sessionId);
           return;
         }
         if (sessionId && event.t === 'update-session') {
@@ -1625,9 +1658,32 @@ export async function startDaemon(): Promise<void> {
         }
       },
       onSessionHello(_sock, msg) {
-        const { sessionId, pid, sessionTag, metadata } = msg;
+        const { sessionId, pid, sessionTag, metadata, presence } = msg;
         if (!sessionId || !pid) return;
         logger.debug(`[DAEMON RUN] Socket session registered: ${sessionId} (pid=${pid})`);
+        // The daemon may have restarted with an empty mirror; the hello carries the session's
+        // current state so a LAN reader is not left with "idle" until the next turn boundary.
+        if (presence) {
+          const known = lanSessionState.get(sessionId) ?? {};
+          const previous = known.activity;
+          const thinking = presence.thinking === true;
+          const thinkingAt = thinking
+            ? (typeof presence.thinkingAt === 'number' ? presence.thinkingAt : Date.now())
+            : 0;
+          const activity = {
+            active: true,
+            activeAt: Math.max(previous?.activeAt ?? 0, Date.now()),
+            thinking,
+            thinkingAt,
+          };
+          lanSessionState.set(sessionId, { ...known, activity });
+          if (!previous
+            || previous.active !== activity.active
+            || previous.thinking !== activity.thinking
+            || previous.thinkingAt !== activity.thinkingAt) {
+            lanServer?.broadcast('ephemeral', { type: 'activity', id: sessionId, ...activity });
+          }
+        }
         // Build sessionMetadata — must match Metadata type. hostPid is required by the handler.
         const sessionMetadata: any = {
           ...(metadata ?? {}),
@@ -1662,6 +1718,8 @@ export async function startDaemon(): Promise<void> {
           // Gone: fall through and record the exit.
         }
         tracked.exitTime = Date.now();
+        markLanSessionInactive(sessionId);
+        relayClient?.publishDirectory();
         onSessionEnding(sessionId, tracked.pid, 'socket disconnected');
       },
     });
@@ -1682,7 +1740,27 @@ export async function startDaemon(): Promise<void> {
     const lanSessionState = new Map<string, {
       metadata?: { version: number; value: string };
       agentState?: { version: number; value: string | null };
+      activity?: { active: boolean; activeAt: number; thinking: boolean; thinkingAt: number };
     }>();
+
+    /**
+     * A session's process is gone: mark its LAN activity offline at once instead of waiting for
+     * the App to re-read `/lan/sessions`. Idempotent — an already-inactive session emits nothing.
+     */
+    function markLanSessionInactive(sessionId: string): void {
+      const known = lanSessionState.get(sessionId) ?? {};
+      if (known.activity && !known.activity.active) {
+        return;
+      }
+      const activity = {
+        active: false,
+        activeAt: Date.now(),
+        thinking: false,
+        thinkingAt: 0,
+      };
+      lanSessionState.set(sessionId, { ...known, activity });
+      lanServer?.broadcast('ephemeral', { type: 'activity', id: sessionId, ...activity });
+    }
     let lanDiscovery: LanDiscoveryHandle | null = null;
     let endpointPublisher: EndpointPublisherHandle | null = null;
     let relayEndpoint: LanEndpoint | null = null;
@@ -1857,28 +1935,43 @@ export async function startDaemon(): Promise<void> {
             port: configuration.lanPort,
             getSnapshot: () => {
               const live = new Set([...pidToTrackedSession.values()].map(s => s.happySessionId));
-              const frames: unknown[] = [];
+              const frames: Array<{ event: 'update' | 'ephemeral'; payload: unknown }> = [];
               for (const [id, state] of lanSessionState) {
                 if (!live.has(id)) {
                   lanSessionState.delete(id);
                   continue;
                 }
+                const { activity, ...stateOnly } = state;
                 frames.push({
-                  id: `lan-${++lanEventCounter}`,
-                  seq: 0,
-                  body: { t: 'update-session', id, ...state },
-                  createdAt: Date.now(),
+                  event: 'update',
+                  payload: {
+                    id: `lan-${++lanEventCounter}`,
+                    seq: 0,
+                    body: { t: 'update-session', id, ...stateOnly },
+                    createdAt: Date.now(),
+                  },
                 });
+                // The activity is an ephemeral on the live channel, so a late reader gets it in
+                // the same shape and the App's existing handler applies it unchanged.
+                if (activity) {
+                  frames.push({
+                    event: 'ephemeral',
+                    payload: { type: 'activity', id, ...activity },
+                  });
+                }
               }
               // A reader that connects in the middle of a restart would otherwise never hear about
               // it: the push went out before it was listening. Same fact, same shape, handed over
               // with the rest of the session state instead of waited for.
               for (const id of restartingStartedAt.keys()) {
                 frames.push({
-                  id: `lan-${++lanEventCounter}`,
-                  seq: 0,
-                  body: { t: 'update-session', id, restartingAt: restartingStartedAt.get(id) } satisfies UpdateSessionBody,
-                  createdAt: Date.now(),
+                  event: 'update',
+                  payload: {
+                    id: `lan-${++lanEventCounter}`,
+                    seq: 0,
+                    body: { t: 'update-session', id, restartingAt: restartingStartedAt.get(id) } satisfies UpdateSessionBody,
+                    createdAt: Date.now(),
+                  },
                 });
               }
               return frames;

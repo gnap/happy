@@ -2094,6 +2094,8 @@ class Sync {
                 dataEncryptionKey: string | null;
                 active: boolean;
                 activeAt: number;
+                thinking?: boolean;
+                thinkingAt?: number;
                 createdAt: number;
                 updatedAt: number;
                 lastMessage: ApiMessage | null;
@@ -2167,10 +2169,17 @@ class Sync {
                 let agentState = await sessionEncryption.decryptAgentState(session.agentStateVersion, session.agentState);
 
                 // Put it all together
+                // The deployed server has no presence field in its list response. Keep what this
+                // device already knows rather than resetting every session to idle on each fetch;
+                // a turn transition still arrives immediately over the activity frame.
+                const existingThinking = storage.getState().sessions[session.id];
                 const processedSession = {
                     ...session,
-                    thinking: false,
-                    thinkingAt: 0,
+                    thinking: session.thinking ?? existingThinking?.thinking ?? false,
+                    thinkingAt: session.thinkingAt
+                        ?? (session.thinking !== undefined
+                            ? (session.thinking ? session.activeAt : 0)
+                            : existingThinking?.thinkingAt ?? 0),
                     metadata,
                     agentState
                 };
@@ -2282,6 +2291,7 @@ class Sync {
         agentState: string | null; agentStateVersion: number;
         dataEncryptionKey: string | null;
         active: boolean; activeAt: number;
+        thinking?: boolean; thinkingAt?: number;
         createdAt: number; updatedAt: number;
     }): Promise<(Omit<Session, 'presence'> & { presence?: 'online' | number }) | null> => {
         try {
@@ -2298,11 +2308,23 @@ class Sync {
             const sessionEncryption = this.encryption.getSessionEncryption(raw.id);
             if (!sessionEncryption) {
                 // No encryption key yet — return raw session with null metadata.
-                return { ...raw, metadata: null, agentState: null, thinking: false, thinkingAt: 0 };
+                return {
+                    ...raw,
+                    metadata: null,
+                    agentState: null,
+                    thinking: raw.thinking ?? false,
+                    thinkingAt: raw.thinkingAt ?? (raw.thinking ? raw.activeAt : 0),
+                };
             }
             const metadata = await sessionEncryption.decryptMetadata(raw.metadataVersion, raw.metadata);
             const agentState = await sessionEncryption.decryptAgentState(raw.agentStateVersion, raw.agentState);
-            return { ...raw, metadata, agentState, thinking: false, thinkingAt: 0 };
+            return {
+                ...raw,
+                metadata,
+                agentState,
+                thinking: raw.thinking ?? false,
+                thinkingAt: raw.thinkingAt ?? (raw.thinking ? raw.activeAt : 0),
+            };
         } catch {
             return null;
         }
@@ -4898,7 +4920,11 @@ class Sync {
             const session = storage.getState().sessions[sessionId];
             if (session) {
                 let thinking = update.thinking ?? false;
-                let thinkingAt = update.activeAt;
+                // The transition's own time, not the heartbeat's: "thinking since" must not drift
+                // with every activity frame. Old servers omit it, so keep an existing start.
+                let thinkingAt = thinking
+                    ? (update.thinkingAt ?? (session.thinking ? session.thinkingAt : update.activeAt))
+                    : 0;
                 const turnStartAt = this.sessionTurnStartAt.get(sessionId);
                 if (
                     thinking === false
@@ -4907,6 +4933,15 @@ class Sync {
                 ) {
                     thinking = session.thinking;
                     thinkingAt = session.thinkingAt;
+                }
+                // A duplicate that survived the accumulator must not rebuild the list.
+                if (
+                    session.active === update.active
+                    && session.activeAt === update.activeAt
+                    && session.thinking === thinking
+                    && session.thinkingAt === thinkingAt
+                ) {
+                    continue;
                 }
                 sessions.push({
                     ...session,

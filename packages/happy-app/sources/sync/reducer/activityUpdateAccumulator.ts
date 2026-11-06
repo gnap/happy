@@ -1,83 +1,63 @@
 import type { ApiEphemeralActivityUpdate } from '../apiTypes';
 
+/**
+ * Passes through only state that actually changed, and batches a burst in the same tick.
+ *
+ * The server now emits an activity frame on a transition rather than every two seconds, but the
+ * old fleet still repeats itself and a duplicate can also arrive across reconnects. State here is
+ * absolute, so equality is the whole idempotence rule: active, thinking and the turn's start time.
+ * There is deliberately no timer — an idle App must not wake to re-apply an unchanged heartbeat.
+ */
 export class ActivityUpdateAccumulator {
     private pendingUpdates = new Map<string, ApiEphemeralActivityUpdate>();
-    private lastEmittedStates = new Map<string, { active: boolean; thinking: boolean; activeAt: number }>();
-    private timeoutId: ReturnType<typeof setTimeout> | null = null;
+    private lastEmittedStates = new Map<string, { active: boolean; thinking: boolean; thinkingAt: number }>();
+    private flushScheduled = false;
 
     constructor(
         private flushHandler: (updates: Map<string, ApiEphemeralActivityUpdate>) => void,
-        private debounceDelay: number = 500
+        /** Kept for call-site compatibility; there is nothing left to debounce. */
+        _debounceDelay?: number,
     ) {}
 
     addUpdate(update: ApiEphemeralActivityUpdate): void {
-        const sessionId = update.id;
-        const lastState = this.lastEmittedStates.get(sessionId);
+        const lastState = this.lastEmittedStates.get(update.id);
+        const thinkingAt = update.thinkingAt ?? 0;
+        if (lastState
+            && lastState.active === update.active
+            && lastState.thinking === update.thinking
+            && lastState.thinkingAt === thinkingAt) {
+            return;
+        }
 
-        // Check if this is a critical timestamp update (more than half of disconnect timeout old)
-        const timeSinceLastUpdate = lastState ? update.activeAt - lastState.activeAt : 0;
-        const isCriticalTimestamp = timeSinceLastUpdate > 60000; // Half of 120 second timeout
-
-        // Check if this is a significant state change that needs immediate emission
-        const isSignificantChange = !lastState || 
-            lastState.active !== update.active || 
-            lastState.thinking !== update.thinking ||
-            isCriticalTimestamp;
-
-        if (isSignificantChange) {
-            // Cancel any pending timeout
-            if (this.timeoutId) {
-                clearTimeout(this.timeoutId);
-                this.timeoutId = null;
-            }
-
-            // Add the immediate update to pending updates
-            this.pendingUpdates.set(sessionId, update);
-
-            // Flush all pending updates together (batched)
-            this.flushPendingUpdates();
-        } else {
-            // Accumulate for debounced emission (only timestamp updates)
-            this.pendingUpdates.set(sessionId, update);
-
-            // Only start a new timer if one isn't already running
-            if (!this.timeoutId) {
-                this.timeoutId = setTimeout(() => {
-                    this.flushPendingUpdates();
-                    this.timeoutId = null;
-                }, this.debounceDelay);
-            }
-            // Don't reset the timer for subsequent updates - let it fire!
+        this.pendingUpdates.set(update.id, update);
+        if (!this.flushScheduled) {
+            this.flushScheduled = true;
+            // A microtask, not a timer: frames that arrive in the same tick are applied together,
+            // and nothing is scheduled when nothing arrived.
+            void Promise.resolve().then(() => {
+                this.flushScheduled = false;
+                this.flushPendingUpdates();
+            });
         }
     }
 
     private flushPendingUpdates(): void {
-        if (this.pendingUpdates.size > 0) {
-            // Create a copy of the pending updates
-            const updatesToFlush = new Map(this.pendingUpdates);
-            
-            // Emit all updates in a single batch
-            this.flushHandler(updatesToFlush);
-            
-            // Update last emitted states for all flushed updates
-            for (const [sessionId, update] of updatesToFlush) {
-                this.lastEmittedStates.set(sessionId, {
-                    active: update.active,
-                    thinking: update.thinking,
-                    activeAt: update.activeAt
-                });
-            }
-            
-            // Clear pending updates
-            this.pendingUpdates.clear();
+        if (this.pendingUpdates.size === 0) {
+            return;
+        }
+        const updatesToFlush = new Map(this.pendingUpdates);
+        this.pendingUpdates.clear();
+        this.flushHandler(updatesToFlush);
+        for (const [sessionId, update] of updatesToFlush) {
+            this.lastEmittedStates.set(sessionId, {
+                active: update.active,
+                thinking: update.thinking,
+                thinkingAt: update.thinkingAt ?? 0,
+            });
         }
     }
 
     cancel(): void {
-        if (this.timeoutId) {
-            clearTimeout(this.timeoutId);
-            this.timeoutId = null;
-        }
         this.pendingUpdates.clear();
     }
 
@@ -87,10 +67,6 @@ export class ActivityUpdateAccumulator {
     }
 
     flush(): void {
-        if (this.timeoutId) {
-            clearTimeout(this.timeoutId);
-            this.timeoutId = null;
-        }
         this.flushPendingUpdates();
     }
 }

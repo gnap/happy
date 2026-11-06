@@ -1020,7 +1020,7 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
       const nextThinking = msg.status === 'running';
       if (thinking !== nextThinking) {
         thinking = nextThinking;
-        session.keepAlive(thinking, 'remote');
+        session.setThinking(thinking);
       }
       if (msg.status === 'idle') {
         clearPendingTurn();
@@ -1076,12 +1076,7 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     }
   };
   session.onUserMessage(userMessageHandler);
-  session.keepAlive(thinking, 'remote');
   writeSessionPidFile(session.sessionId);
-
-  const keepAliveInterval = setInterval(() => {
-    session.keepAlive(thinking, 'remote');
-  }, 2000);
 
   // Flush accumulated text chunks every 80ms so App receives batched envelopes
   // instead of one per token (avoids each token rendering as a separate bubble).
@@ -1221,7 +1216,6 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     if (reportToDaemonInterval !== null) {
       clearInterval(reportToDaemonInterval);
     }
-    clearInterval(keepAliveInterval);
     clearInterval(textFlushInterval);
     reconnectionHandle?.cancel();
     clearPendingTurn(new Error('ACP runner shutting down'));

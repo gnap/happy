@@ -280,6 +280,15 @@ type IncomingMessage = {
  */
 const LOG_GROW_MIN_INTERVAL_MS = 2_000;
 
+/**
+ * How often the server is told the session is still there.
+ *
+ * The server's online model is a heartbeat with a ten-minute timeout, so transitions are sent
+ * immediately and this is only the liveness floor. It started at 15 s; a later loop refactor made
+ * it 2 s, which is thirty times more than the contract needs and keeps the phone's radio awake.
+ */
+const SESSION_HEARTBEAT_INTERVAL_MS = 60_000;
+
 export class ApiSessionClient extends EventEmitter {
     private readonly token: string;
     /** Server-assigned session id. Distinct from `sid` below. */
@@ -307,6 +316,19 @@ export class ApiSessionClient extends EventEmitter {
     /** Full inbox rows; persisted under ~/.happy/a2a-inbox-state/, not on the server. */
     private a2aInbox: A2AInboxState;
     private socket: Socket<ServerToClientEvents, ClientToServerEvents>;
+    /**
+     * The state this session tells the server and the machine's own readers about.
+     *
+     * Absolute and deduped: `setThinking` sends only on a transition, and the socket's connect
+     * handler sends this same value as the reconnect snapshot. There is no timer; a session that
+     * is not changing is not transmitting.
+     */
+    private presence: { thinking: boolean; thinkingAt: number; startedAt: number } = {
+        thinking: false,
+        thinkingAt: 0,
+        startedAt: Date.now(),
+    };
+    private presenceHeartbeat: ReturnType<typeof setInterval> | null = null;
     private pendingMessages: UserMessage[] = [];
     private pendingMessageCallback: ((message: UserMessage) => void) | null = null;
     readonly rpcHandlerManager: RpcHandlerManager;
@@ -672,6 +694,9 @@ export class ApiSessionClient extends EventEmitter {
         this.socket.on('connect', () => {
             logger.debug('Socket connected successfully');
             this.markWsConnected();
+            // Reconnect snapshot: the server may have restarted or missed a transition while this
+            // socket was down, and absolute state is what makes that harmless.
+            this.sendPresence();
             this.tryPreferWsOutbound('socket_connect');
             this.socketConnectedResolve?.();
             this.socketConnectedResolve = undefined;
@@ -881,6 +906,11 @@ export class ApiSessionClient extends EventEmitter {
         //
 
         this.socket.connect();
+
+        // The server's liveness floor. Transitions and reconnects carry the state; this only
+        // keeps an idle session from being expired by the server's ten-minute sweep.
+        this.presenceHeartbeat = setInterval(() => this.sendPresence(), SESSION_HEARTBEAT_INTERVAL_MS);
+        this.presenceHeartbeat.unref?.();
 
         // Trigger an initial HTTP poll so we get any messages already on the server (e.g. user sent
         // from App before socket connected). Otherwise we only fetch after socket 'connect' or
@@ -2008,24 +2038,42 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     /**
-     * Send a ping message to keep the connection alive
+     * Records a turn transition. Same value in, nothing out — the 2 s fleet's repetition is what
+     * this replaces.
      */
-    keepAlive(thinking: boolean, mode: 'local' | 'remote') {
-        if (process.env.DEBUG) { // too verbose for production
-            logger.debug(`[API] Sending keep alive message: ${thinking}`);
+    setThinking(thinking: boolean): boolean {
+        if (thinking === this.presence.thinking) {
+            return false;
         }
+        this.presence.thinking = thinking;
+        this.presence.thinkingAt = thinking ? Date.now() : 0;
+        this.sendPresence();
+        return true;
+    }
+
+    /** The current state, for a daemon hello or a reconnect snapshot. */
+    getPresence(): { thinking: boolean; thinkingAt: number; startedAt: number } {
+        return { ...this.presence };
+    }
+
+    /**
+     * Sends the current state.
+     *
+     * While the server socket is down the frame is deliberately dropped instead of buffered:
+     * socket.io would replay a stale state on reconnect, and the connect handler sends the truth
+     * anyway. The daemon's mirror is kept current regardless, since it is a separate transport.
+     */
+    private sendPresence(): void {
         const payload = {
             sid: this.sessionId,
             time: Date.now(),
-            thinking,
-            mode,
+            thinking: this.presence.thinking,
+            thinkingAt: this.presence.thinkingAt,
+            startedAt: this.presence.startedAt,
         };
-        // Both directions must be reliable: volatile thinking=true is often dropped (App stuck idle),
-        // volatile thinking=false left sessions stuck "thinking" on flaky WSS.
-        this.socket.emit('session-alive', payload);
-        // The machine's own readers have no server to hear this from. Forwarding it is what lets
-        // the LAN channel say "thinking" live, instead of only inferring it from the turn
-        // boundaries written into the log.
+        if (this.socket.connected) {
+            this.socket.emit('session-alive', payload);
+        }
         forwardSessionEventToDaemon({ t: 'session-alive', ...payload });
     }
 
@@ -2033,7 +2081,11 @@ export class ApiSessionClient extends EventEmitter {
      * Send session death message
      */
     sendSessionDeath() {
-        this.socket.emit('session-end', { sid: this.sessionId, time: Date.now() });
+        const at = Date.now();
+        this.socket.emit('session-end', { sid: this.sessionId, time: at });
+        // The LAN has no server to hear this from; the daemon turns it into an offline activity
+        // frame instead of waiting for the child-exit path.
+        forwardSessionEventToDaemon({ t: 'session-end', id: this.sessionId, time: at });
     }
 
     /**
@@ -2282,6 +2334,10 @@ export class ApiSessionClient extends EventEmitter {
         this.flushA2AInboxAgentStateSync();
         this.stopFallbackPoll();
         this.stopReceiveHealthPoll();
+        if (this.presenceHeartbeat) {
+            clearInterval(this.presenceHeartbeat);
+            this.presenceHeartbeat = null;
+        }
         this.sendSync.stop();
         this.receiveSync.stop();
         this.socket.close();
