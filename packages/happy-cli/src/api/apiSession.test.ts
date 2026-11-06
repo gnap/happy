@@ -1503,7 +1503,28 @@ describe('session presence', () => {
         expect(client.setThinking(false)).toBe(false);
         expect(client.setThinking(false)).toBe(false);
 
-        // This is the whole migration: an idle session is silent, not a 2 s transmitter.
+        // State changes are the only thing that transmits immediately.
         expect(mockForwardToDaemon).not.toHaveBeenCalled();
+    });
+
+    it('keeps only the server liveness floor, once a minute', () => {
+        vi.useFakeTimers();
+        try {
+            new ApiSessionClient('fake-token', makeSession());
+            mockForwardToDaemon.mockClear();
+
+            vi.advanceTimersByTime(59_000);
+            expect(mockForwardToDaemon).not.toHaveBeenCalled();
+
+            vi.advanceTimersByTime(1_000);
+            // The server expires a session after ten minutes without a heartbeat; one minute is
+            // the floor it needs, not the two-second chatter the loop refactor introduced.
+            expect(mockForwardToDaemon).toHaveBeenCalledTimes(1);
+            expect(mockForwardToDaemon).toHaveBeenCalledWith(
+                expect.objectContaining({ t: 'session-alive', sid: 'test-session-id' }),
+            );
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });

@@ -280,6 +280,15 @@ type IncomingMessage = {
  */
 const LOG_GROW_MIN_INTERVAL_MS = 2_000;
 
+/**
+ * How often the server is told the session is still there.
+ *
+ * The server's online model is a heartbeat with a ten-minute timeout, so transitions are sent
+ * immediately and this is only the liveness floor. It started at 15 s; a later loop refactor made
+ * it 2 s, which is thirty times more than the contract needs and keeps the phone's radio awake.
+ */
+const SESSION_HEARTBEAT_INTERVAL_MS = 60_000;
+
 export class ApiSessionClient extends EventEmitter {
     private readonly token: string;
     /** Server-assigned session id. Distinct from `sid` below. */
@@ -319,6 +328,7 @@ export class ApiSessionClient extends EventEmitter {
         thinkingAt: 0,
         startedAt: Date.now(),
     };
+    private presenceHeartbeat: ReturnType<typeof setInterval> | null = null;
     private pendingMessages: UserMessage[] = [];
     private pendingMessageCallback: ((message: UserMessage) => void) | null = null;
     readonly rpcHandlerManager: RpcHandlerManager;
@@ -896,6 +906,11 @@ export class ApiSessionClient extends EventEmitter {
         //
 
         this.socket.connect();
+
+        // The server's liveness floor. Transitions and reconnects carry the state; this only
+        // keeps an idle session from being expired by the server's ten-minute sweep.
+        this.presenceHeartbeat = setInterval(() => this.sendPresence(), SESSION_HEARTBEAT_INTERVAL_MS);
+        this.presenceHeartbeat.unref?.();
 
         // Trigger an initial HTTP poll so we get any messages already on the server (e.g. user sent
         // from App before socket connected). Otherwise we only fetch after socket 'connect' or
@@ -2319,6 +2334,10 @@ export class ApiSessionClient extends EventEmitter {
         this.flushA2AInboxAgentStateSync();
         this.stopFallbackPoll();
         this.stopReceiveHealthPoll();
+        if (this.presenceHeartbeat) {
+            clearInterval(this.presenceHeartbeat);
+            this.presenceHeartbeat = null;
+        }
         this.sendSync.stop();
         this.receiveSync.stop();
         this.socket.close();

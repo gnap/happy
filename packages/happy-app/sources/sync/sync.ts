@@ -1371,10 +1371,17 @@ class Sync {
                 let agentState = await sessionEncryption.decryptAgentState(session.agentStateVersion, session.agentState);
 
                 // Put it all together
+                // The deployed server has no presence field in its list response. Keep what this
+                // device already knows rather than resetting every session to idle on each fetch;
+                // a turn transition still arrives immediately over the activity frame.
+                const existingThinking = storage.getState().sessions[session.id];
                 const processedSession = {
                     ...session,
-                    thinking: false,
-                    thinkingAt: 0,
+                    thinking: session.thinking ?? existingThinking?.thinking ?? false,
+                    thinkingAt: session.thinkingAt
+                        ?? (session.thinking !== undefined
+                            ? (session.thinking ? session.activeAt : 0)
+                            : existingThinking?.thinkingAt ?? 0),
                     metadata,
                     agentState
                 };
