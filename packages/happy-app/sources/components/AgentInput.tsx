@@ -395,6 +395,9 @@ const ContextBreakdown = React.memo(({ breakdown }: { breakdown: NonNullable<Age
     );
 });
 
+/** The last summary this logged, so the composer's channel appears once per change. */
+let lastComposerChannelLogged: string | null = null;
+
 export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, AgentInputProps>((props, ref) => {
     const styles = stylesheet;
     const { theme } = useUnistyles();
@@ -412,6 +415,16 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         : channelLink === 'connecting' ? theme.colors.status.connecting
             : channelLink === 'off' ? theme.colors.status.disconnected
                 : null;
+    // What the glyph beside the composer decided, once per change — the same question the header's
+    // icons answer, asked about the session on screen. "The icon is blue and the LAN works" is only
+    // diagnosable if the glyph says which channel it named and what that channel's link was.
+    const channelSummary = props.connectionStatus?.channel
+        ? `${props.connectionStatus.channel.kind}=${channelLink ?? 'no-link'}${props.connectionStatus.channel.pinned ? ' (pinned)' : ''}`
+        : null;
+    if (channelSummary !== null && channelSummary !== lastComposerChannelLogged) {
+        lastComposerChannelLogged = channelSummary;
+        console.log(`🔌 composer channel: ${channelSummary}`);
+    }
 
     const hasText = props.value.trim().length > 0;
 

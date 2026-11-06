@@ -21,6 +21,7 @@ import { encodeHex } from '@/encryption/hex';
 import { encodeUTF8 } from '@/encryption/text';
 import { LAN_SERVICE_TYPE, LAN_PROTOCOL_VERSION, type DiscoveredMachine } from './types';
 import { browseViaTauri } from './tauriDiscovery';
+import { toDiscoveredMachine } from './discoveredService';
 
 /**
  * Non-secret, stable fingerprint of the account — must equal `accountFingerprintOf` in
@@ -33,35 +34,6 @@ export async function accountFingerprintOf(accountPublicKey: Uint8Array): Promis
     // app's encodeHex emits uppercase. Without normalising, the two never compare equal and every
     // discovery is silently filtered out.
     return encodeHex(mac).slice(0, 16).toLowerCase();
-}
-
-/** Bonjour hostnames arrive fully qualified, e.g. `my-mac.local.`; the trailing dot breaks URLs. */
-function normalizeHost(host: string): string {
-    return host.endsWith('.') ? host.slice(0, -1) : host;
-}
-
-function toDiscoveredMachine(service: ZeroconfService): DiscoveredMachine | null {
-    const txt = service.txt ?? {};
-    const machineId = txt.machineId;
-    const host = service.host ? normalizeHost(service.host) : service.addresses?.[0];
-    const port = service.port;
-
-    // A record without identity or a resolved address is not usable; skip rather than guess.
-    if (!machineId || !host || !port) {
-        return null;
-    }
-
-    const parsedVersion = Number(txt.v);
-
-    return {
-        serviceName: service.name,
-        machineId,
-        accountFingerprint: txt.accountFingerprint ?? '',
-        protocolVersion: Number.isFinite(parsedVersion) ? parsedVersion : null,
-        host,
-        port,
-        baseUrl: `http://${host}:${port}`,
-    };
 }
 
 /** A short grace period after the first answer; production uses this. */
