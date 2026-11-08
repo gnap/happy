@@ -2225,21 +2225,24 @@ export async function startDaemon(): Promise<void> {
               if (!directory) {
                 return null;
               }
-              // The three answers the file browser needs, from the machine that holds the tree.
-              // `rg --files` is the CLI's own wrapper, so the listing is the same set of paths the
-              // session's `ripgrep` RPC would have produced — just without the server in between.
-              const [insideWorkTree, unstaged, staged, crawl] = await Promise.all([
+              // The answers the file browser needs, from the machine that holds the tree, in one
+              // round of concurrency. The file crawl prefers the system `rg`: the CLI's bundled
+              // launcher spawns node first, which costs more than the crawl itself. The launcher
+              // stays as the fallback for a machine with no ripgrep on PATH.
+              const [insideWorkTree, unstaged, staged, status, directCrawl] = await Promise.all([
                 captureCommand('git', ['rev-parse', '--is-inside-work-tree'], directory),
                 captureCommand('git', ['diff', '--numstat', '--no-renames', '--no-ext-diff'], directory),
                 captureCommand('git', ['diff', '--cached', '--numstat', '--no-renames', '--no-ext-diff'], directory),
-                runRipgrep(['--files', '--follow'], { cwd: directory })
-                  .then((result) => (result.exitCode === 0 ? result.stdout : ''))
-                  .catch(() => ''),
+                captureCommand('git', ['status', '--porcelain=v2', '--branch', '--untracked-files=all'], directory),
+                captureCommand('rg', ['--files', '--follow'], directory),
               ]);
+              const crawl = directCrawl.length > 0
+                ? directCrawl
+                : await runRipgrep(['--files', '--follow'], { cwd: directory })
+                  .then((result) => (result.exitCode === 0 ? result.stdout : ''))
+                  .catch(() => '');
               const gitRepo = insideWorkTree.trim() === 'true';
-              const gitStatus = gitRepo
-                ? await captureCommand('git', ['status', '--porcelain=v2', '--branch', '--untracked-files=all'], directory)
-                : '';
+              const gitStatus = gitRepo ? status : '';
               // The combined shape the App's parser was written against: unstaged, the marker, staged.
               const gitDiff = gitRepo ? `${unstaged}\n---STAGED---\n${staged}` : '';
               let files = crawl;
