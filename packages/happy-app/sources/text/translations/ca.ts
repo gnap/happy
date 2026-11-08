@@ -673,6 +673,7 @@ export const ca: TranslationStructure = {
         fileEmpty: 'El fitxer està buit',
         noChanges: 'No hi ha canvis a mostrar',
         download: 'Descarrega',
+        allFiles: 'Tots els fitxers',
     },
 
     settingsVoice: {

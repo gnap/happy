@@ -2254,6 +2254,24 @@ export async function startDaemon(): Promise<void> {
               }
               return { gitRepo, gitStatus, gitDiff, files, ...(filesTruncated ? { filesTruncated } : {}) };
             },
+            getSessionDiff: async ({ sessionId, path }) => {
+              const live = [...pidToTrackedSession.values()]
+                .find((session) => session.happySessionId === sessionId)?.directory;
+              const directory = live || sessions[sessionId]?.directory;
+              if (!directory) {
+                return null;
+              }
+              // The same confinement the file route applies: a diff is only offered for a path
+              // inside the session's own working tree.
+              const validation = validatePath(path, directory);
+              if (!validation.valid) {
+                logger.debug(`[lan] diff refused ${sessionId}: ${validation.error}`);
+                return null;
+              }
+              // `--` ends git's options, so a path that begins with `-` stays a path.
+              const diff = await captureCommand('git', ['diff', '--no-ext-diff', '--', path], directory);
+              return { diff };
+            },
           });
           lanServer = started;
           if (configuration.relayUrl) {

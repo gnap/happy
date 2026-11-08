@@ -233,6 +233,14 @@ export type LanServerOptions = {
    */
   getSessionListing?: (args: { sessionId: string }) => Promise<LanSessionListing | null> | LanSessionListing | null;
   /**
+   * One file's unstaged diff, for the viewer's Diff tab.
+   *
+   * The patch is the same plaintext the file is, produced by the machine that holds the tree; it
+   * used to be a `git diff` run inside the session's shell and carried over the server, which is
+   * why the tab could take a minute to appear — or never.
+   */
+  getSessionDiff?: (args: { sessionId: string; path: string }) => Promise<{ diff: string } | null> | { diff: string } | null;
+  /**
    * A user message the App sent over the LAN socket. `content` is the same ciphertext the server
    * route carries, so this stays end-to-end encrypted — the LAN is plain HTTP, which is exactly
    * why the payload must not be readable here.
@@ -966,6 +974,37 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       `bytes=${listing.files.length} truncated=${listing.filesTruncated === true} from=${clientAddress(request)}`,
     );
     return reply.send({ v: LAN_PROTOCOL_VERSION, ...listing });
+  });
+
+  /**
+   * One file's unstaged diff.
+   *
+   * A path is the only input, and it is resolved against the session's working tree before git is
+   * asked — the same confinement the file bytes get. Plaintext, so the account signs for it.
+   */
+  app.get('/lan/sessions/:sessionId/diff', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (!opts.getSessionDiff) {
+      return reply.code(404).send({ error: 'this daemon does not serve diffs' });
+    }
+    const { sessionId } = request.params as { sessionId: string };
+    const { path } = request.query as { path?: string };
+    if (!path || path.length > 4096) {
+      return reply.code(400).send({ error: 'a path is required' });
+    }
+    const target = `${sessionId}:${path}`;
+    if (!requireAccountProof(request, { operation: 'diff', target })) {
+      return reply.code(403).send({ error: 'account proof required' });
+    }
+    const answer = await opts.getSessionDiff({ sessionId, path });
+    if (!answer) {
+      logger.debug(`[lan] diff 404 ${target}`);
+      return reply.code(404).send({ error: 'no such file on this machine' });
+    }
+    logger.debug(`[lan] diff ${target} bytes=${answer.diff.length} from=${clientAddress(request)}`);
+    return reply.send({ v: LAN_PROTOCOL_VERSION, diff: answer.diff });
   });
 
   /**
