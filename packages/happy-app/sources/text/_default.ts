@@ -666,6 +666,7 @@ export const en = {
         file: 'File',
         fileEmpty: 'File is empty',
         noChanges: 'No changes to display',
+        download: 'Download',
     },
 
     settingsVoice: {

@@ -57,6 +57,7 @@ import { channelAvailability } from './channels/resolve';
 import { candidateInputsFor, orderedCandidates } from './channels/candidates';
 import { attemptFromStatus, carryOperation, type CarryOutcome, type HealthRecorder } from './channels/execute';
 import { fetchToolContent } from './lan/client';
+import { downloadSessionFileFromDaemon } from './lan/fileDownload';
 import { getToolCallFullContent as getToolCallFullContentFromServer, type GetToolCallFullContentResponse } from './ops';
 import { readRoutes } from './channels/readRoute';
 import { endpointBaseUrl, type ChannelDriver, type ChannelOperation } from './channels/types';
@@ -5371,6 +5372,76 @@ class Sync {
             }
         }
         return getToolCallFullContentFromServer(sessionId, callId);
+    }
+
+    /**
+     * A file from a session's working tree, downloaded over the machine's own channel.
+     *
+     * The same shape as the tool-content read above: the machine answers on its own channel, the
+     * account signs for the plaintext, and the server is not in the path. There is deliberately no
+     * server fallback — the `readFile` RPC that used to carry this is the slow route the App is
+     * trying to stop depending on, and a viewer that waits a minute on it is worse than one that
+     * says the machine could not be reached.
+     *
+     * `onProgress` is per address attempt: a failed LAN attempt may have reported a few kilobytes
+     * before the relay retried from zero. The caller treats it as a hint, which is what a progress
+     * bar is.
+     */
+    async downloadSessionFile(
+        sessionId: string,
+        path: string,
+        options?: { onProgress?: (written: number, total: number) => void },
+    ): Promise<{ ok: true; uri: string; size: number } | { ok: false; error: string }> {
+        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        if (!machineId) {
+            return { ok: false, error: 'This session does not say which machine it is on' };
+        }
+        if (!this.getMachineKey(machineId)) {
+            return { ok: false, error: 'This device holds no key for that machine' };
+        }
+        const carried = await this.carryAtDaemon<{ uri: string; size: number }>({
+            machineId,
+            operation: 'read',
+            // Plaintext file contents: the account signs for this, exactly as it does for a tool
+            // call's full payload.
+            proofAction: { operation: 'file', target: `${sessionId}:${path}` },
+            run: async (baseUrl, token, proof) => {
+                const result = await downloadSessionFileFromDaemon({
+                    baseUrl,
+                    token,
+                    sessionId,
+                    path,
+                    proof,
+                    onProgress: options?.onProgress,
+                });
+                return result.kind === 'done' ? { uri: result.uri, size: result.size } : null;
+            },
+        });
+        if (carried.kind === 'done') {
+            log.log(`📄 file ${sessionId} ${path}: done via ${carried.channel} (${carried.value.size} bytes)`);
+            return { ok: true, uri: carried.value.uri, size: carried.value.size };
+        }
+        log.log(`📄 file ${sessionId} ${path}: ${carried.kind}`);
+        if (carried.kind === 'absent') {
+            return { ok: false, error: 'That file is not on this machine (or its daemon is too old to serve files)' };
+        }
+        if (carried.kind === 'refused') {
+            return {
+                ok: false,
+                error: carried.reason === 'no-endpoint'
+                    ? `The machine refused the file request${carried.status ? ` (${carried.status})` : ''}`
+                    : 'No channel can carry files for this machine',
+            };
+        }
+        if (carried.kind === 'bad-request') {
+            return {
+                ok: false,
+                error: carried.status === 413
+                    ? 'That file is too large to preview'
+                    : `The machine rejected the file request (${carried.status}): ${carried.body ?? 'no explanation'}`,
+            };
+        }
+        return { ok: false, error: 'The machine did not answer over LAN or relay' };
     }
 
     /**

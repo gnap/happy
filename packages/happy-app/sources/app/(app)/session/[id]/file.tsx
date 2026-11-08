@@ -4,18 +4,64 @@ import { useLocalSearchParams } from 'expo-router';
 import { Text } from '@/components/StyledText';
 import { SimpleSyntaxHighlighter } from '@/components/SimpleSyntaxHighlighter';
 import { Typography } from '@/constants/Typography';
-import { sessionReadFile, sessionBash } from '@/sync/ops';
+import { sessionBash } from '@/sync/ops';
 import { storage } from '@/sync/storage';
+import { sync } from '@/sync/sync';
 import { Modal } from '@/modal';
 import { useUnistyles, StyleSheet } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
 import { t } from '@/text';
 import { FileIcon } from '@/components/FileIcon';
+import { Ionicons } from '@expo/vector-icons';
 
 interface FileContent {
     content: string;
     encoding: 'utf8' | 'base64';
     isBinary: boolean;
+}
+
+/** Whether the viewer can draw this file itself instead of handing it to the system. */
+function isPdfFile(path: string): boolean {
+    return path.split('.').pop()?.toLowerCase() === 'pdf';
+}
+
+/** What the share sheet should call this file; only the types this viewer knows are named. */
+function mimeTypeFor(path: string): string {
+    switch (path.split('.').pop()?.toLowerCase()) {
+        case 'pdf': return 'application/pdf';
+        case 'png': return 'image/png';
+        case 'jpg':
+        case 'jpeg': return 'image/jpeg';
+        case 'gif': return 'image/gif';
+        case 'webp': return 'image/webp';
+        case 'bmp': return 'image/bmp';
+        case 'svg': return 'image/svg+xml';
+        default: return 'application/octet-stream';
+    }
+}
+
+/** A file the machine served, handed to the system's own viewer or save dialog. */
+/** A byte count a person can read, for a download in progress. */
+function formatBytes(bytes: number): string {
+    if (!Number.isFinite(bytes) || bytes <= 0) {
+        return '0 B';
+    }
+    const units = ['B', 'KB', 'MB', 'GB'];
+    const exponent = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+    const value = bytes / 1024 ** exponent;
+    return `${value >= 10 || exponent === 0 ? Math.round(value) : value.toFixed(1)} ${units[exponent]}`;
+}
+
+async function presentFile(uri: string, fileName: string): Promise<void> {
+    const Sharing = await import('expo-sharing');
+    if (!(await Sharing.isAvailableAsync())) {
+        throw new Error('This device has no way to open the file');
+    }
+    await Sharing.shareAsync(uri, {
+        mimeType: mimeTypeFor(fileName),
+        dialogTitle: fileName,
+        UTI: isPdfFile(fileName) ? 'com.adobe.pdf' : undefined,
+    });
 }
 
 // Diff display component
@@ -88,9 +134,16 @@ export default function FileScreen() {
     const [displayMode, setDisplayMode] = React.useState<'file' | 'diff'>('diff');
     const [isLoading, setIsLoading] = React.useState(true);
     const [error, setError] = React.useState<string | null>(null);
-    const [imageBase64, setImageBase64] = React.useState<string | null>(null);
     const [svgContent, setSvgContent] = React.useState<string | null>(null);
+    /** Where the machine's copy landed on this device; the viewer draws from this file. */
+    const [localUri, setLocalUri] = React.useState<string | null>(null);
+    /** How far the download has got, when the machine sent a length to measure against. */
+    const [progress, setProgress] = React.useState<{ written: number; total: number } | null>(null);
+    const [isPreparing, setIsPreparing] = React.useState(false);
+    /** Bumped by Retry; it is the effect's reason to run again. */
+    const [reloadToken, setReloadToken] = React.useState(0);
     const { width: screenWidth } = useWindowDimensions();
+    const fileName = filePath.split('/').pop() || filePath;
 
     // Determine file language from extension
     const getFileLanguage = React.useCallback((path: string): string | null => {
@@ -172,120 +225,101 @@ export default function FileScreen() {
         return ext ? imageExtensions.includes(ext) : false;
     }, []);
 
-    // Load file content
+    // Load the file from the machine that owns it.
+    //
+    // One request for every type: the machine's own channel, which is where the bytes are and the
+    // only route that reports how much of them has arrived. The response is written to a cache
+    // file first, so the preview and the Download action share one copy.
     React.useEffect(() => {
         let isCancelled = false;
-        
+
         const loadFile = async () => {
-            try {
-                setIsLoading(true);
-                setError(null);
-                
-                // Get session metadata for git commands
-                const session = storage.getState().sessions[sessionId!];
-                const sessionPath = session?.metadata?.path;
-                
-                // For image files, load as base64 for preview
-                if (isImageFile(filePath)) {
-                    try {
-                        const response = await sessionReadFile(sessionId, filePath);
-                        if (!isCancelled && response.success && response.content) {
-                            const ext = filePath.split('.').pop()?.toLowerCase();
-                            if (ext === 'svg') {
-                                // SVG is text-based — decode base64 to UTF-8 string
-                                const binary = atob(response.content);
-                                const bytes = new Uint8Array(binary.length);
-                                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-                                setSvgContent(new TextDecoder('utf-8').decode(bytes));
-                            } else {
-                                setImageBase64(response.content);
-                            }
-                            setFileContent({
-                                content: response.content,
-                                encoding: 'base64',
-                                isBinary: true
-                            });
-                        }
-                    } catch (imgError) {
-                        console.log('Failed to load image:', imgError);
+            setIsLoading(true);
+            setError(null);
+            setProgress(null);
+            setLocalUri(null);
+            setFileContent(null);
+            setSvgContent(null);
+            setDiffContent(null);
+
+            // The diff is a second, optional answer from the session's shell. It must not hold up
+            // the file: on a slow server that wait is exactly what made this screen look hung.
+            const sessionPath = storage.getState().sessions[sessionId!]?.metadata?.path;
+            if (sessionPath && sessionId && !isBinaryFile(filePath)) {
+                void sessionBash(sessionId, {
+                    // If someone is using a custom diff tool like difftastic, the parser would
+                    // break. So instead force git to use the built in diff tool.
+                    command: `git diff --no-ext-diff "${filePath}"`,
+                    cwd: sessionPath,
+                    timeout: 5000,
+                }).then((diffResponse) => {
+                    if (!isCancelled && diffResponse.success && diffResponse.stdout.trim()) {
+                        setDiffContent(diffResponse.stdout);
                     }
-                    if (!isCancelled) setIsLoading(false);
+                }).catch((diffError) => {
+                    console.log('Could not fetch git diff:', diffError);
+                });
+            }
+
+            try {
+                const download = await sync.downloadSessionFile(sessionId!, filePath, {
+                    onProgress: (written, total) => {
+                        if (!isCancelled) {
+                            setProgress({ written, total });
+                        }
+                    },
+                });
+                if (isCancelled) {
+                    return;
+                }
+                if (!download.ok) {
+                    setError(download.error);
+                    return;
+                }
+                setLocalUri(download.uri);
+
+                const ext = filePath.split('.').pop()?.toLowerCase();
+                if (isImageFile(filePath)) {
+                    if (ext === 'svg') {
+                        // SVG is text; the webview needs the markup itself, not a file URL.
+                        const fs = await import('expo-file-system');
+                        const svg = await new fs.File(download.uri).text();
+                        if (!isCancelled) setSvgContent(svg);
+                    }
+                    if (!isCancelled) {
+                        setFileContent({ content: '', encoding: 'base64', isBinary: true });
+                    }
+                    return;
+                }
+                if (isBinaryFile(filePath)) {
+                    if (!isCancelled) {
+                        setFileContent({ content: '', encoding: 'base64', isBinary: true });
+                    }
                     return;
                 }
 
-                // Check if file is likely binary before trying to read
-                if (isBinaryFile(filePath)) {
-                    if (!isCancelled) {
-                        setFileContent({
-                            content: '',
-                            encoding: 'base64',
-                            isBinary: true
-                        });
-                        setIsLoading(false);
-                    }
+                // Text: the download is the transport, but the viewer needs the characters.
+                const fs = await import('expo-file-system');
+                const decodedContent = await new fs.File(download.uri).text();
+                if (isCancelled) {
                     return;
                 }
-                
-                // Fetch git diff for the file (if in git repo)
-                if (sessionPath && sessionId) {
-                    try {
-                        const diffResponse = await sessionBash(sessionId, {
-                            // If someone is using a custom diff tool like
-                            // difftastic, the parser would break. So instead
-                            // force git to use the built in diff tool.
-                            command: `git diff --no-ext-diff "${filePath}"`,
-                            cwd: sessionPath,
-                            timeout: 5000
-                        });
-                        
-                        if (!isCancelled && diffResponse.success && diffResponse.stdout.trim()) {
-                            setDiffContent(diffResponse.stdout);
-                        }
-                    } catch (diffError) {
-                        console.log('Could not fetch git diff:', diffError);
-                        // Continue with file loading even if diff fails
-                    }
-                }
-                
-                const response = await sessionReadFile(sessionId, filePath);
-                
+                // Check if content contains binary data (null bytes or too many non-printable chars)
+                const hasNullBytes = decodedContent.includes('\0');
+                const nonPrintableCount = decodedContent.split('').filter(char => {
+                    const code = char.charCodeAt(0);
+                    return code < 32 && code !== 9 && code !== 10 && code !== 13; // Allow tab, LF, CR
+                }).length;
+                const isBinary = hasNullBytes || (nonPrintableCount / Math.max(1, decodedContent.length) > 0.1);
+                setFileContent({
+                    content: isBinary ? '' : decodedContent,
+                    encoding: 'utf8',
+                    isBinary,
+                });
+            } catch (loadError) {
+                console.error('Failed to load file:', loadError);
                 if (!isCancelled) {
-                    if (response.success && response.content) {
-                        // Decode base64 content to UTF-8 string
-                        let decodedContent: string;
-                        try {
-                            decodedContent = atob(response.content);
-                        } catch (decodeError) {
-                            // If base64 decode fails, treat as binary
-                            setFileContent({
-                                content: '',
-                                encoding: 'base64',
-                                isBinary: true
-                            });
-                            return;
-                        }
-                        
-                        // Check if content contains binary data (null bytes or too many non-printable chars)
-                        const hasNullBytes = decodedContent.includes('\0');
-                        const nonPrintableCount = decodedContent.split('').filter(char => {
-                            const code = char.charCodeAt(0);
-                            return code < 32 && code !== 9 && code !== 10 && code !== 13; // Allow tab, LF, CR
-                        }).length;
-                        const isBinary = hasNullBytes || (nonPrintableCount / decodedContent.length > 0.1);
-                        
-                        setFileContent({
-                            content: isBinary ? '' : decodedContent,
-                            encoding: 'utf8',
-                            isBinary
-                        });
-                    } else {
-                        setError(response.error || 'Failed to read file');
-                    }
-                }
-            } catch (error) {
-                console.error('Failed to load file:', error);
-                if (!isCancelled) {
-                    setError('Failed to load file');
+                    setError(loadError instanceof Error ? loadError.message : 'Failed to load file');
                 }
             } finally {
                 if (!isCancelled) {
@@ -295,18 +329,11 @@ export default function FileScreen() {
         };
 
         loadFile();
-        
+
         return () => {
             isCancelled = true;
         };
-    }, [sessionId, filePath, isBinaryFile]);
-
-    // Show error modal if there's an error
-    React.useEffect(() => {
-        if (error) {
-            Modal.alert(t('common.error'), error);
-        }
-    }, [error]);
+    }, [sessionId, filePath, isBinaryFile, isImageFile, reloadToken]);
 
     // Set default display mode based on diff availability
     React.useEffect(() => {
@@ -317,26 +344,93 @@ export default function FileScreen() {
         }
     }, [diffContent, fileContent]);
 
-    const fileName = filePath.split('/').pop() || filePath;
+    /**
+     * Put the file on this device and open the system's own view of it.
+     *
+     * The preview above is this App drawing what it can; this is for everything it cannot draw —
+     * a DOCX, a ZIP, a PDF on a platform whose viewer is not this viewer — and for keeping a copy.
+     * The share sheet is the system's "open in" and "save to Files" in one action, so there is no
+     * second file manager to maintain and no file-type table to keep complete.
+     */
+    const handleDownload = React.useCallback(async () => {
+        if (!sessionId || !filePath || isPreparing) {
+            return;
+        }
+        try {
+            setIsPreparing(true);
+            let uri = localUri;
+            if (!uri) {
+                const download = await sync.downloadSessionFile(sessionId, filePath);
+                if (!download.ok) {
+                    throw new Error(download.error);
+                }
+                uri = download.uri;
+                setLocalUri(uri);
+            }
+            await presentFile(uri, fileName);
+        } catch (downloadError) {
+            Modal.alert(
+                t('common.error'),
+                downloadError instanceof Error ? downloadError.message : 'Failed to open file',
+            );
+        } finally {
+            setIsPreparing(false);
+        }
+    }, [sessionId, filePath, fileName, localUri, isPreparing]);
+
     const language = getFileLanguage(filePath);
 
     if (isLoading) {
+        // A length the machine reported is the difference between "working" and "has it told us
+        // anything?"; without one the spinner is the honest answer.
+        const fraction = progress && progress.total > 0
+            ? Math.min(1, progress.written / progress.total)
+            : null;
         return (
-            <View style={{ 
-                flex: 1, 
+            <View style={{
+                flex: 1,
                 backgroundColor: theme.colors.surface,
-                justifyContent: 'center', 
-                alignItems: 'center' 
+                justifyContent: 'center',
+                alignItems: 'center',
+                paddingHorizontal: 32,
             }}>
-                <ActivityIndicator size="small" color={theme.colors.textSecondary} />
-                <Text style={{ 
-                    marginTop: 16, 
-                    fontSize: 16, 
+                {fraction === null
+                    ? <ActivityIndicator size="small" color={theme.colors.textSecondary} />
+                    : (
+                        <View style={{
+                            width: '100%',
+                            maxWidth: 280,
+                            height: 4,
+                            borderRadius: 2,
+                            backgroundColor: theme.colors.input.background,
+                            overflow: 'hidden',
+                        }}>
+                            <View style={{
+                                width: `${Math.round(fraction * 100)}%`,
+                                height: '100%',
+                                borderRadius: 2,
+                                backgroundColor: theme.colors.textLink,
+                            }} />
+                        </View>
+                    )}
+                <Text style={{
+                    marginTop: 16,
+                    fontSize: 16,
                     color: theme.colors.textSecondary,
-                    ...Typography.default() 
+                    ...Typography.default()
                 }}>
                     {t('files.loadingFile', { fileName })}
                 </Text>
+                {fraction !== null && (
+                    <Text style={{
+                        marginTop: 6,
+                        fontSize: 13,
+                        color: theme.colors.textSecondary,
+                        ...Typography.default()
+                    }}>
+                        {`${formatBytes(progress!.written)} / ${formatBytes(progress!.total)}`}
+                    </Text>
+                )}
             </View>
         );
     }
@@ -367,11 +461,31 @@ export default function FileScreen() {
                 }}>
                     {error}
                 </Text>
+                <Pressable
+                    onPress={() => setReloadToken((token) => token + 1)}
+                    style={({ pressed }) => ({
+                        marginTop: 20,
+                        paddingHorizontal: 20,
+                        paddingVertical: 10,
+                        borderRadius: 10,
+                        backgroundColor: theme.colors.input.background,
+                        opacity: pressed ? 0.6 : 1,
+                    })}
+                >
+                    <Text style={{
+                        fontSize: 15,
+                        color: theme.colors.textLink,
+                        ...Typography.default('semiBold'),
+                    }}>
+                        {t('common.retry')}
+                    </Text>
+                </Pressable>
             </View>
         );
     }
 
     if (fileContent?.isBinary) {
+        let preview: React.ReactNode;
         // SVG preview
         if (svgContent) {
             const svgHtml = `<!DOCTYPE html>
@@ -379,88 +493,107 @@ export default function FileScreen() {
 <style>html,body{margin:0;padding:16px;background:${theme.colors.surface};display:flex;justify-content:center;align-items:center;}svg{max-width:100%!important;height:auto!important;}</style>
 </head><body>${svgContent}</body></html>`;
             // Web: use dangerouslySetInnerHTML directly (no WebView needed)
-            if (Platform.OS === 'web') {
-                return (
-                    <View style={{ flex: 1, backgroundColor: theme.colors.surface }}>
-                        {/* @ts-ignore */}
-                        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}
-                            dangerouslySetInnerHTML={{ __html: svgContent }} />
+            preview = Platform.OS === 'web' ? (
+                <View style={{ flex: 1, backgroundColor: theme.colors.surface }}>
+                    {/* @ts-ignore */}
+                    <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}
+                        dangerouslySetInnerHTML={{ __html: svgContent }} />
+                </View>
+            ) : (
+                <NativeFileSvgView svgHtml={svgHtml} themeBg={theme.colors.surface} />
+            );
+        } else if (isImageFile(filePath) && localUri) {
+            // Image preview, straight from the downloaded file — no base64 copy in JS memory.
+            const imageWidth = Math.min(screenWidth - 32, 600);
+            preview = (
+                <ScrollView
+                    style={{ flex: 1 }}
+                    contentContainerStyle={{
+                        justifyContent: 'center',
+                        alignItems: 'center',
+                        padding: 16,
+                    }}
+                    maximumZoomScale={3}
+                    minimumZoomScale={1}
+                >
+                    <Image
+                        source={{ uri: localUri }}
+                        style={{
+                            width: imageWidth,
+                            height: imageWidth, // aspect ratio from image metadata would be better
+                            resizeMode: 'contain',
+                        }}
+                    />
+                </ScrollView>
+            );
+        } else if (isPdfFile(filePath) && localUri) {
+            // Only WKWebView renders a PDF itself; elsewhere the Download action is the way in.
+            preview = Platform.OS === 'ios'
+                ? <NativeFilePdfView uri={localUri} themeBg={theme.colors.surface} />
+                : (
+                    <View style={styles.binaryMessage}>
+                        <Text style={{
+                            fontSize: 18,
+                            fontWeight: 'bold',
+                            color: theme.colors.textSecondary,
+                            marginBottom: 8,
+                            ...Typography.default('semiBold')
+                        }}>
+                            {t('files.binaryFile')}
+                        </Text>
+                        <Text style={{
+                            fontSize: 14,
+                            color: '#999',
+                            textAlign: 'center',
+                            marginTop: 8,
+                            ...Typography.default()
+                        }}>
+                            {fileName}
+                        </Text>
                     </View>
                 );
-            }
-            return <NativeFileSvgView svgHtml={svgHtml} themeBg={theme.colors.surface} />;
-        }
-
-        // Image preview
-        if (imageBase64) {
-            const mimeType = fileName?.split('.').pop()?.toLowerCase() === 'png' ? 'image/png'
-                : fileName?.split('.').pop()?.toLowerCase() === 'gif' ? 'image/gif'
-                : fileName?.split('.').pop()?.toLowerCase() === 'webp' ? 'image/webp'
-                : fileName?.split('.').pop()?.toLowerCase() === 'bmp' ? 'image/bmp'
-                : 'image/jpeg';
-            const imageWidth = Math.min(screenWidth - 32, 600);
-            return (
-                <View style={{
-                    flex: 1,
-                    backgroundColor: theme.colors.surface,
-                }}>
-                    <ScrollView
-                        style={{ flex: 1 }}
-                        contentContainerStyle={{
-                            justifyContent: 'center',
-                            alignItems: 'center',
-                            padding: 16,
-                        }}
-                        maximumZoomScale={3}
-                        minimumZoomScale={1}
-                    >
-                        <Image
-                            source={{ uri: `data:${mimeType};base64,${imageBase64}` }}
-                            style={{
-                                width: imageWidth,
-                                height: imageWidth, // aspect ratio from image metadata would be better
-                                resizeMode: 'contain',
-                            }}
-                        />
-                    </ScrollView>
+        } else {
+            preview = (
+                <View style={styles.binaryMessage}>
+                    <Text style={{
+                        fontSize: 18,
+                        fontWeight: 'bold',
+                        color: theme.colors.textSecondary,
+                        marginBottom: 8,
+                        ...Typography.default('semiBold')
+                    }}>
+                        {t('files.binaryFile')}
+                    </Text>
+                    <Text style={{
+                        fontSize: 16,
+                        color: theme.colors.textSecondary,
+                        textAlign: 'center',
+                        ...Typography.default()
+                    }}>
+                        {t('files.cannotDisplayBinary')}
+                    </Text>
+                    <Text style={{
+                        fontSize: 14,
+                        color: '#999',
+                        textAlign: 'center',
+                        marginTop: 8,
+                        ...Typography.default()
+                    }}>
+                        {fileName}
+                    </Text>
                 </View>
             );
         }
 
         return (
-            <View style={{
-                flex: 1,
-                backgroundColor: theme.colors.surface,
-                justifyContent: 'center',
-                alignItems: 'center',
-                padding: 20
-            }}>
-                <Text style={{
-                    fontSize: 18,
-                    fontWeight: 'bold',
-                    color: theme.colors.textSecondary,
-                    marginBottom: 8,
-                    ...Typography.default('semiBold')
-                }}>
-                    {t('files.binaryFile')}
-                </Text>
-                <Text style={{ 
-                    fontSize: 16, 
-                    color: theme.colors.textSecondary,
-                    textAlign: 'center',
-                    ...Typography.default() 
-                }}>
-                    {t('files.cannotDisplayBinary')}
-                </Text>
-                <Text style={{ 
-                    fontSize: 14, 
-                    color: '#999',
-                    textAlign: 'center',
-                    marginTop: 8,
-                    ...Typography.default() 
-                }}>
-                    {fileName}
-                </Text>
+            <View style={{ flex: 1, backgroundColor: theme.colors.surface }}>
+                <FileScreenHeader
+                    filePath={filePath}
+                    fileName={fileName}
+                    busy={isPreparing}
+                    onOpen={handleDownload}
+                />
+                {preview}
             </View>
         );
     }
@@ -578,6 +711,99 @@ export default function FileScreen() {
     );
 }
 
+/**
+ * The bar binary previews share: what the file is, and the one action that gets it off the machine.
+ *
+ * The text view already has this header and its own Diff/File toggle; the previews that fill the
+ * screen had none, so a file the App could not draw was also a file it offered no way to open.
+ */
+const FileScreenHeader = React.memo(({ filePath, fileName, busy, onOpen }: {
+    filePath: string;
+    fileName: string;
+    busy: boolean;
+    onOpen: () => void;
+}) => {
+    const { theme } = useUnistyles();
+    return (
+        <View style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            paddingHorizontal: 16,
+            paddingVertical: 10,
+            borderBottomWidth: Platform.select({ ios: 0.33, default: 1 }),
+            borderBottomColor: theme.colors.divider,
+            backgroundColor: theme.colors.surfaceHigh,
+        }}>
+            <FileIcon fileName={fileName} size={20} />
+            <Text numberOfLines={1} style={{
+                flex: 1,
+                marginLeft: 8,
+                fontSize: 13,
+                color: theme.colors.textSecondary,
+                ...Typography.mono(),
+            }}>
+                {filePath}
+            </Text>
+            <Pressable
+                onPress={onOpen}
+                disabled={busy}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel={t('files.download')}
+                style={({ pressed }) => ({
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    marginLeft: 12,
+                    paddingHorizontal: 10,
+                    paddingVertical: 6,
+                    borderRadius: 8,
+                    backgroundColor: theme.colors.input.background,
+                    opacity: busy ? 0.5 : pressed ? 0.6 : 1,
+                })}
+            >
+                {busy
+                    ? <ActivityIndicator size="small" color={theme.colors.textSecondary} />
+                    : <Ionicons name="download-outline" size={16} color={theme.colors.textLink} />}
+                <Text style={{
+                    marginLeft: 6,
+                    fontSize: 13,
+                    color: theme.colors.textLink,
+                    ...Typography.default('semiBold'),
+                }}>
+                    {t('files.download')}
+                </Text>
+            </Pressable>
+        </View>
+    );
+});
+
+/**
+ * A PDF the viewer draws itself, on the platform whose webview can.
+ *
+ * A local file, because the bytes came over the session's `readFile` RPC and never had a URL of
+ * their own. iOS renders it in place; other platforms have no equivalent, and there the header's
+ * Download hands the file to whatever the device uses instead.
+ */
+function NativeFilePdfView({ uri, themeBg }: { uri: string; themeBg: string }) {
+    const [WebViewComp, setWebViewComp] = React.useState<any>(null);
+    React.useEffect(() => { import('react-native-webview').then(m => setWebViewComp(() => m.WebView)); }, []);
+    const directory = uri.slice(0, uri.lastIndexOf('/') + 1);
+    return (
+        <View style={{ flex: 1, backgroundColor: themeBg }}>
+            {WebViewComp
+                ? <WebViewComp
+                    source={{ uri }}
+                    style={{ flex: 1, backgroundColor: themeBg }}
+                    originWhitelist={['*']}
+                    allowFileAccess={true}
+                    allowingReadAccessToURL={directory}
+                    scrollEnabled={true}
+                />
+                : <ActivityIndicator size="small" color="#999" style={{ marginTop: 24 }} />}
+        </View>
+    );
+}
+
 // Dynamic WebView wrapper (unsupported on Linux/Tauri)
 function NativeFileSvgView({ svgHtml, themeBg }: { svgHtml: string; themeBg: string }) {
     const [WebViewComp, setWebViewComp] = React.useState<any>(null);
@@ -597,5 +823,13 @@ const styles = StyleSheet.create((theme) => ({
         maxWidth: layout.maxWidth,
         alignSelf: 'center',
         width: '100%',
-    }
+    },
+    /** What a preview shows when it has nothing to draw — centred under the shared header. */
+    binaryMessage: {
+        flex: 1,
+        backgroundColor: theme.colors.surface,
+        justifyContent: 'center',
+        alignItems: 'center',
+        padding: 20,
+    },
 }));

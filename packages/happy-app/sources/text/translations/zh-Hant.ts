@@ -673,6 +673,7 @@ export const zhHant: TranslationStructure = {
         file: '檔案',
         fileEmpty: '檔案為空',
         noChanges: '沒有要顯示的更改',
+        download: '下載',
     },
 
     settingsVoice: {
