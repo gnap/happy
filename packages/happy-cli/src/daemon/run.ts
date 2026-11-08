@@ -1,5 +1,7 @@
 import fs from 'fs/promises';
 import os from 'os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import * as tmp from 'tmp';
 
 import { ApiClient } from '@/api/api';
@@ -42,6 +44,7 @@ import { BUILD_VERSION } from '../version';
 import type { ApiMachineClient } from '@/api/apiMachine';
 import { readSessionKey } from '@/api/sessionKeyPersistence';
 import { validatePath } from '@/modules/common/pathSecurity';
+import { run as runRipgrep } from '@/modules/ripgrep/index';
 import { collapseSessionLogEntries, readSessionLogPage } from '@/api/sessionLog';
 import { decodeBase64, encodeBase64, libsodiumEncryptForPublicKey } from '@/api/encryption';
 import { startLanDiscovery, type LanDiscoveryHandle } from './lanDiscovery';
@@ -79,6 +82,39 @@ const SESSION_FILE_MIME: Record<string, string> = {
   mp4: 'video/mp4',
   mov: 'video/quicktime',
 };
+
+/**
+ * The largest file list the listing route carries.
+ *
+ * A file index is a few hundred kilobytes for a large monorepo; anything past this is a tree that
+ * cannot be browsed usefully anyway, and the cap is what keeps one request from pinning the
+ * daemon's memory. Truncation lands on a line boundary, so every listed path is a whole path.
+ */
+const LISTING_MAX_FILES_BYTES = 8 * 1024 * 1024;
+/** A git command that has not answered by now is not going to make the list better. */
+const LISTING_COMMAND_TIMEOUT_MS = 15_000;
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * A command's stdout, or '' when it failed.
+ *
+ * A listing is best-effort by nature — a directory that is not a repository, a git that is not
+ * installed, a file that vanished mid-crawl — and none of those is worth failing the request over.
+ * The caller still gets the parts that worked.
+ */
+async function captureCommand(command: string, args: string[], cwd: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync(command, args, {
+      cwd,
+      timeout: LISTING_COMMAND_TIMEOUT_MS,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    return stdout;
+  } catch {
+    return '';
+  }
+}
 
 /** Cursor CLI max-mode flag for daemon-spawned sessions. Default on; opt out with HAPPY_CURSOR_INITIAL_MAX_MODE=0|false. */
 function cursorCliMaxModeArg(extraEnv: Record<string, string | undefined>): '--max-mode' | '--no-max-mode' {
@@ -2181,6 +2217,60 @@ export async function startDaemon(): Promise<void> {
               } catch {
                 return null;
               }
+            },
+            getSessionListing: async ({ sessionId }) => {
+              const live = [...pidToTrackedSession.values()]
+                .find((session) => session.happySessionId === sessionId)?.directory;
+              const directory = live || sessions[sessionId]?.directory;
+              if (!directory) {
+                return null;
+              }
+              // The answers the file browser needs, from the machine that holds the tree, in one
+              // round of concurrency. The file crawl prefers the system `rg`: the CLI's bundled
+              // launcher spawns node first, which costs more than the crawl itself. The launcher
+              // stays as the fallback for a machine with no ripgrep on PATH.
+              const [insideWorkTree, unstaged, staged, status, directCrawl] = await Promise.all([
+                captureCommand('git', ['rev-parse', '--is-inside-work-tree'], directory),
+                captureCommand('git', ['diff', '--numstat', '--no-renames', '--no-ext-diff'], directory),
+                captureCommand('git', ['diff', '--cached', '--numstat', '--no-renames', '--no-ext-diff'], directory),
+                captureCommand('git', ['status', '--porcelain=v2', '--branch', '--untracked-files=all'], directory),
+                captureCommand('rg', ['--files', '--follow'], directory),
+              ]);
+              const crawl = directCrawl.length > 0
+                ? directCrawl
+                : await runRipgrep(['--files', '--follow'], { cwd: directory })
+                  .then((result) => (result.exitCode === 0 ? result.stdout : ''))
+                  .catch(() => '');
+              const gitRepo = insideWorkTree.trim() === 'true';
+              const gitStatus = gitRepo ? status : '';
+              // The combined shape the App's parser was written against: unstaged, the marker, staged.
+              const gitDiff = gitRepo ? `${unstaged}\n---STAGED---\n${staged}` : '';
+              let files = crawl;
+              let filesTruncated = false;
+              if (files.length > LISTING_MAX_FILES_BYTES) {
+                const cut = files.lastIndexOf('\n', LISTING_MAX_FILES_BYTES);
+                files = files.slice(0, cut > 0 ? cut + 1 : LISTING_MAX_FILES_BYTES);
+                filesTruncated = true;
+              }
+              return { gitRepo, gitStatus, gitDiff, files, ...(filesTruncated ? { filesTruncated } : {}) };
+            },
+            getSessionDiff: async ({ sessionId, path }) => {
+              const live = [...pidToTrackedSession.values()]
+                .find((session) => session.happySessionId === sessionId)?.directory;
+              const directory = live || sessions[sessionId]?.directory;
+              if (!directory) {
+                return null;
+              }
+              // The same confinement the file route applies: a diff is only offered for a path
+              // inside the session's own working tree.
+              const validation = validatePath(path, directory);
+              if (!validation.valid) {
+                logger.debug(`[lan] diff refused ${sessionId}: ${validation.error}`);
+                return null;
+              }
+              // `--` ends git's options, so a path that begins with `-` stays a path.
+              const diff = await captureCommand('git', ['diff', '--no-ext-diff', '--', path], directory);
+              return { diff };
             },
           });
           lanServer = started;

@@ -56,9 +56,10 @@ import { channelDrivers as buildChannelDrivers, relayOriginFrom } from './channe
 import { channelAvailability } from './channels/resolve';
 import { candidateInputsFor, orderedCandidates } from './channels/candidates';
 import { attemptFromStatus, carryOperation, type CarryOutcome, type HealthRecorder } from './channels/execute';
-import { fetchToolContent } from './lan/client';
+import { fetchToolContent, fetchSessionListing, fetchSessionDiff, type SessionListing } from './lan/client';
 import { downloadSessionFileFromDaemon } from './lan/fileDownload';
-import { getToolCallFullContent as getToolCallFullContentFromServer, type GetToolCallFullContentResponse } from './ops';
+import { getGitStatusFiles as getGitStatusFilesViaRpc, parseGitStatusFiles, type GitStatusFiles } from './gitStatusFiles';
+import { getToolCallFullContent as getToolCallFullContentFromServer, sessionBash, type GetToolCallFullContentResponse } from './ops';
 import { readRoutes } from './channels/readRoute';
 import { endpointBaseUrl, type ChannelDriver, type ChannelOperation } from './channels/types';
 import { sendBatch, type SendResult } from './channels/ops';
@@ -311,6 +312,14 @@ class Sync {
      */
     private static readonly SUSPENDED_TRUST_MS = 45_000;
     /**
+     * How long a file listing stays usable.
+     *
+     * The file screen asks for it twice in the same breath — the git section and the file index —
+     * and both are answered by one request to the machine. This is the window in which the second
+     * caller joins the first instead of asking again.
+     */
+    private static readonly LISTING_CACHE_MS = 2_000;
+    /**
      * How long a trip through `background` has to last before its in-flight work is distrusted.
      *
      * Not the 45s above: iOS suspends the process within a few seconds of a real background, and a
@@ -471,6 +480,8 @@ class Sync {
      * no read and no wrapped key around them, so this is the only place it can come from.
      */
     private lanSessionKeys = new Map<string, Uint8Array>();
+    /** The last listing per session, so the file screen's two questions cost one request. */
+    private sessionListingCache = new Map<string, { at: number; value: SessionListing | null }>();
     /** LAN sends awaiting the session's verdict, so a lost one cannot sit "sending" forever. */
     private lanSendTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
     /**
@@ -5442,6 +5453,93 @@ class Sync {
             };
         }
         return { ok: false, error: 'The machine did not answer over LAN or relay' };
+    }
+
+    /**
+     * The file browser's listing, from the machine that holds the working tree.
+     *
+     * Git status and the project's file paths are the same question about the same directory the
+     * viewer reads from, so they travel the same way: the machine's own channel, one request.
+     * Null means the machine cannot answer — an old daemon without the route, or no reachable
+     * channel — and the caller keeps the server RPC it used before.
+     */
+    async getSessionListing(sessionId: string): Promise<SessionListing | null> {
+        const cached = this.sessionListingCache.get(sessionId);
+        if (cached && Date.now() - cached.at < Sync.LISTING_CACHE_MS) {
+            return cached.value;
+        }
+        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        let value: SessionListing | null = null;
+        if (machineId && this.getMachineKey(machineId)) {
+            const carried = await this.carryAtDaemon<SessionListing>({
+                machineId,
+                operation: 'read',
+                // File names and the branch are plaintext; the account signs for them exactly as
+                // it signs for the file bytes themselves.
+                proofAction: { operation: 'listing', target: sessionId },
+                run: (baseUrl, token, proof) => fetchSessionListing(baseUrl, token, sessionId, proof),
+            });
+            if (carried.kind === 'done') {
+                value = carried.value;
+            }
+            log.log(`📄 listing ${sessionId}: ${carried.kind}${carried.kind === 'done' ? ` via ${carried.channel}` : ''}`);
+        }
+        this.sessionListingCache.set(sessionId, { at: Date.now(), value });
+        return value;
+    }
+
+    /**
+     * The file screen's git section, preferring the machine's listing.
+     *
+     * A directory that is not a repository answers null, which the screen draws as "not under git";
+     * a machine that could not answer at all falls back to the session RPC, so a daemon from
+     * before the listing route still fills the list.
+     */
+    async getGitStatusFiles(sessionId: string): Promise<GitStatusFiles | null> {
+        const listing = await this.getSessionListing(sessionId);
+        if (listing) {
+            return listing.gitRepo ? parseGitStatusFiles(listing.gitStatus, listing.gitDiff) : null;
+        }
+        return getGitStatusFilesViaRpc(sessionId);
+    }
+
+    /**
+     * One file's unstaged diff, from the machine that holds the tree.
+     *
+     * The viewer used to ask the session's shell for this through the server — the same request
+     * that made the Diff tab slow to appear or never appear at all. The machine can run `git diff`
+     * itself, and the answer travels back the way the file and its listing now do. The session RPC
+     * remains for daemons that predate the route.
+     */
+    async getFileDiff(sessionId: string, path: string): Promise<string | null> {
+        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        if (machineId && this.getMachineKey(machineId)) {
+            const carried = await this.carryAtDaemon<{ diff: string }>({
+                machineId,
+                operation: 'read',
+                proofAction: { operation: 'diff', target: `${sessionId}:${path}` },
+                run: async (baseUrl, token, proof) => {
+                    const diff = await fetchSessionDiff(baseUrl, token, sessionId, path, proof);
+                    return diff === null ? null : { diff };
+                },
+            });
+            if (carried.kind === 'done') {
+                return carried.value.diff.trim() ? carried.value.diff : null;
+            }
+            log.log(`📄 diff ${sessionId} ${path}: ${carried.kind}`);
+        }
+        const sessionPath = storage.getState().sessions[sessionId]?.metadata?.path;
+        if (!sessionPath) {
+            return null;
+        }
+        const response = await sessionBash(sessionId, {
+            // If someone is using a custom diff tool like difftastic, the parser would break. So
+            // instead force git to use the built in diff tool.
+            command: `git diff --no-ext-diff -- "${path}"`,
+            cwd: sessionPath,
+            timeout: 5000,
+        });
+        return response.success && response.stdout.trim() ? response.stdout : null;
     }
 
     /**

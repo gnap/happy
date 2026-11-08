@@ -675,6 +675,7 @@ export const zhHans: TranslationStructure = {
         fileEmpty: '文件为空',
         noChanges: '没有要显示的更改',
         download: '下载',
+        allFiles: '所有文件',
     },
 
     settingsVoice: {

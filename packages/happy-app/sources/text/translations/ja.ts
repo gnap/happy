@@ -708,6 +708,7 @@ export const ja: TranslationStructure = {
         fileEmpty: 'ファイルは空です',
         noChanges: '表示する変更はありません',
         download: 'ダウンロード',
+        allFiles: 'すべてのファイル',
     },
 
     settingsVoice: {

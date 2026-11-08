@@ -683,6 +683,7 @@ export const ru: TranslationStructure = {
         fileEmpty: 'Файл пустой',
         noChanges: 'Нет изменений для отображения',
         download: 'Скачать',
+        allFiles: 'Все файлы',
     },
 
     settingsVoice: {

@@ -38,19 +38,31 @@ function signed(path: string, init: { token?: string; body?: unknown } = {}) {
     const at = Date.now();
     const isToolContent = path.includes('/tool-content/');
     const isFile = /\/sessions\/[^/?]+\/file(?:\?|$)/.test(path);
+    const isListing = /\/sessions\/[^/?]+\/listing(?:\?|$)/.test(path);
+    const isDiff = /\/sessions\/[^/?]+\/diff(?:\?|$)/.test(path);
     const sessionId = path.split('/sessions/')[1]?.split(/[/?]/)[0] ?? '-';
-    // A file's target is the session and the path it names, which is what the route checks; the
-    // path travels in the query string, not the URL path.
-    const filePath = isFile ? new URLSearchParams(path.split('?')[1]).get('path') ?? '' : '';
-    const operation = isFile ? 'file' : isToolContent ? 'tool-content' : path.endsWith('/restart') ? 'restart' : 'control';
-    const target = isFile
-        ? `${sessionId}:${filePath}`
+    // A file's (and a diff's) target is the session and the path it names, which is what the
+    // route checks; the path travels in the query string, not the URL path.
+    const queryPath = isFile || isDiff ? new URLSearchParams(path.split('?')[1]).get('path') ?? '' : '';
+    const operation = isFile
+        ? 'file'
+        : isDiff
+            ? 'diff'
+            : isListing
+                ? 'listing'
+                : isToolContent
+                    ? 'tool-content'
+                    : path.endsWith('/restart')
+                        ? 'restart'
+                        : 'control';
+    const target = isFile || isDiff
+        ? `${sessionId}:${queryPath}`
         : isToolContent
             ? path.split('/tool-content/')[1] ? `${sessionId}:${path.split('/tool-content/')[1]}` : '-'
             : sessionId;
     const message = accountProofMessage({ operation, target, nonce, at, bodyDigest: '' });
     return {
-        method: isToolContent || isFile ? 'GET' : 'POST',
+        method: isToolContent || isFile || isListing || isDiff ? 'GET' : 'POST',
         ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
         headers: {
             ...(init.token ? { authorization: `Bearer ${init.token}` } : {}),
@@ -96,6 +108,10 @@ let lifecycleEntries: { rev: number; op: string; tag: string }[] = [];
 let toolContentHandler: ((args: { sessionId: string; callId: string }) => Promise<{ args?: unknown; result?: unknown } | null>) | undefined;
 /** The file this machine can serve; unset by default, like a daemon from before the route. */
 let sessionFileHandler: ((args: { sessionId: string; path: string }) => Promise<{ bytes: Buffer; name: string; mime: string } | { error: 'too-large'; size: number } | null>) | undefined;
+/** The listing this machine can produce; unset by default, like a daemon from before the route. */
+let sessionListingHandler: ((args: { sessionId: string }) => Promise<{ gitRepo: boolean; gitStatus: string; gitDiff: string; files: string; filesTruncated?: boolean } | null>) | undefined;
+/** One file's diff; unset by default, like a daemon from before the route. */
+let sessionDiffHandler: ((args: { sessionId: string; path: string }) => Promise<{ diff: string } | null>) | undefined;
 /** Left unset by default, which is how a daemon that predates the route behaves. */
 let restartHandler: ((sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>) | undefined;
 
@@ -122,6 +138,8 @@ async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
         ...(restartHandler ? { restartSession: restartHandler } : {}),
         ...(toolContentHandler ? { getToolContent: toolContentHandler } : {}),
         ...(sessionFileHandler ? { getSessionFile: sessionFileHandler } : {}),
+        ...(sessionListingHandler ? { getSessionListing: sessionListingHandler } : {}),
+        ...(sessionDiffHandler ? { getSessionDiff: sessionDiffHandler } : {}),
         lifecycle: {
             revision: () => lifecycleEntries.length,
             entriesSince: (since: number) => lifecycleEntries.filter((entry) => entry.rev > since),
@@ -183,6 +201,8 @@ afterEach(async () => {
     restartHandler = undefined;
     toolContentHandler = undefined;
     sessionFileHandler = undefined;
+    sessionListingHandler = undefined;
+    sessionDiffHandler = undefined;
     proofNonces = new Set();
 });
 
@@ -821,6 +841,108 @@ describe('lanServer file route', () => {
         await start();
         const token = await getToken();
         const noPath = '/lan/sessions/sess-1/file';
+
+        const res = await fetch(url(noPath), signed(noPath, { token }) as RequestInit);
+
+        expect(res.status).toBe(400);
+    });
+});
+
+describe('lanServer session listing', () => {
+    const LISTING = {
+        gitRepo: true,
+        gitStatus: '# branch.oid abc\0# branch.head main\0',
+        gitDiff: '1\t2\tsrc/a.ts\n---STAGED---\n',
+        files: 'src/a.ts\nsrc/b.ts\nREADME.md\n',
+    };
+    const listingUrl = '/lan/sessions/sess-1/listing';
+
+    beforeEach(() => {
+        sessionListingHandler = async ({ sessionId }) => (sessionId === 'sess-1' ? LISTING : null);
+    });
+
+    it('serves the listing to the account', async () => {
+        await start();
+        const token = await getToken();
+
+        const res = await fetch(url(listingUrl), signed(listingUrl, { token }) as RequestInit);
+
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject(LISTING);
+    });
+
+    it('refuses the plaintext listing without the account proof', async () => {
+        await start();
+        const token = await getToken();
+
+        const res = await fetch(url(listingUrl), authorized(token));
+
+        expect(res.status).toBe(403);
+    });
+
+    it('answers 404 for a session this machine does not know', async () => {
+        await start();
+        const token = await getToken();
+        const other = '/lan/sessions/sess-2/listing';
+
+        const res = await fetch(url(other), signed(other, { token }) as RequestInit);
+
+        expect(res.status).toBe(404);
+    });
+
+    it('answers 404 when the daemon predates the route', async () => {
+        sessionListingHandler = undefined;
+        await start();
+        const token = await getToken();
+
+        const res = await fetch(url(listingUrl), signed(listingUrl, { token }) as RequestInit);
+
+        expect(res.status).toBe(404);
+    });
+});
+
+describe('lanServer session diff', () => {
+    const DIFF = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n';
+    const diffUrl = '/lan/sessions/sess-1/diff?path=' + encodeURIComponent('src/a.ts');
+
+    beforeEach(() => {
+        sessionDiffHandler = async ({ sessionId, path }) =>
+            sessionId === 'sess-1' && path === 'src/a.ts' ? { diff: DIFF } : null;
+    });
+
+    it('serves the patch to the account', async () => {
+        await start();
+        const token = await getToken();
+
+        const res = await fetch(url(diffUrl), signed(diffUrl, { token }) as RequestInit);
+
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ diff: DIFF });
+    });
+
+    it('refuses the plaintext patch without the account proof', async () => {
+        await start();
+        const token = await getToken();
+
+        const res = await fetch(url(diffUrl), authorized(token));
+
+        expect(res.status).toBe(403);
+    });
+
+    it('answers 404 for a file this machine cannot diff', async () => {
+        await start();
+        const token = await getToken();
+        const missing = '/lan/sessions/sess-1/diff?path=' + encodeURIComponent('src/none.ts');
+
+        const res = await fetch(url(missing), signed(missing, { token }) as RequestInit);
+
+        expect(res.status).toBe(404);
+    });
+
+    it('requires a path', async () => {
+        await start();
+        const token = await getToken();
+        const noPath = '/lan/sessions/sess-1/diff';
 
         const res = await fetch(url(noPath), signed(noPath, { token }) as RequestInit);
 

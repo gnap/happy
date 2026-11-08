@@ -4,8 +4,6 @@ import { useLocalSearchParams } from 'expo-router';
 import { Text } from '@/components/StyledText';
 import { SimpleSyntaxHighlighter } from '@/components/SimpleSyntaxHighlighter';
 import { Typography } from '@/constants/Typography';
-import { sessionBash } from '@/sync/ops';
-import { storage } from '@/sync/storage';
 import { sync } from '@/sync/sync';
 import { Modal } from '@/modal';
 import { useUnistyles, StyleSheet } from 'react-native-unistyles';
@@ -242,19 +240,13 @@ export default function FileScreen() {
             setSvgContent(null);
             setDiffContent(null);
 
-            // The diff is a second, optional answer from the session's shell. It must not hold up
-            // the file: on a slow server that wait is exactly what made this screen look hung.
-            const sessionPath = storage.getState().sessions[sessionId!]?.metadata?.path;
-            if (sessionPath && sessionId && !isBinaryFile(filePath)) {
-                void sessionBash(sessionId, {
-                    // If someone is using a custom diff tool like difftastic, the parser would
-                    // break. So instead force git to use the built in diff tool.
-                    command: `git diff --no-ext-diff "${filePath}"`,
-                    cwd: sessionPath,
-                    timeout: 5000,
-                }).then((diffResponse) => {
-                    if (!isCancelled && diffResponse.success && diffResponse.stdout.trim()) {
-                        setDiffContent(diffResponse.stdout);
+            // The diff is an optional second answer from the machine that holds the tree. It must
+            // not hold up the file — and it no longer travels through the session's shell and the
+            // server, which is what made the Diff tab slow to appear or never appear.
+            if (sessionId && !isBinaryFile(filePath)) {
+                void sync.getFileDiff(sessionId, filePath).then((diff) => {
+                    if (!isCancelled && diff) {
+                        setDiffContent(diff);
                     }
                 }).catch((diffError) => {
                     console.log('Could not fetch git diff:', diffError);

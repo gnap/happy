@@ -158,6 +158,30 @@ export type LanSessionFile =
   /** Larger than this API carries in one response. The App can still open it over the server route. */
   | { error: 'too-large'; size: number };
 
+/**
+ * What the file browser needs about a session's working tree, in one answer.
+ *
+ * The App used to ask the session process over the server for these: two `git` commands and one
+ * `rg --files` run in the session's own shell, then a round trip through the slowest link in the
+ * system. The same commands run here, on the machine that holds the tree, and travel back over the
+ * machine's own channel — the difference between a list that appears and one that spins.
+ */
+export type LanSessionListing = {
+  /** Whether the directory is inside a git work tree; false means the status strings are empty. */
+  gitRepo: boolean;
+  /** `git status --porcelain=v2 --branch --untracked-files=all` stdout. */
+  gitStatus: string;
+  /**
+   * `git diff --numstat …`, then `---STAGED---`, then the staged diff — byte-for-byte the shape
+   * the App's parser was written against.
+   */
+  gitDiff: string;
+  /** `rg --files --follow` stdout: one path per line, relative to the working tree. */
+  files: string;
+  /** True when the listing hit the size cap and `files` ends at a line boundary early. */
+  filesTruncated?: boolean;
+};
+
 export type LanServerOptions = {
   /** The machine key: a 32-byte symmetric secret shared with the App via the machine record. */
   secret: Uint8Array;
@@ -200,6 +224,22 @@ export type LanServerOptions = {
    * another channel, where the server still holds the session process.
    */
   getSessionFile?: (args: { sessionId: string; path: string }) => Promise<LanSessionFile | null> | LanSessionFile | null;
+  /**
+   * The listing behind the App's file browser: git status and the project's file paths.
+   *
+   * Plaintext, like `getSessionFile` beside it, so it asks for the same account proof. Null means
+   * this machine does not know the session — the caller keeps its server fallback for daemons from
+   * before this route existed.
+   */
+  getSessionListing?: (args: { sessionId: string }) => Promise<LanSessionListing | null> | LanSessionListing | null;
+  /**
+   * One file's unstaged diff, for the viewer's Diff tab.
+   *
+   * The patch is the same plaintext the file is, produced by the machine that holds the tree; it
+   * used to be a `git diff` run inside the session's shell and carried over the server, which is
+   * why the tab could take a minute to appear — or never.
+   */
+  getSessionDiff?: (args: { sessionId: string; path: string }) => Promise<{ diff: string } | null> | { diff: string } | null;
   /**
    * A user message the App sent over the LAN socket. `content` is the same ciphertext the server
    * route carries, so this stays end-to-end encrypted — the LAN is plain HTTP, which is exactly
@@ -901,6 +941,70 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       // the URL directly should show the file rather than offer to save it.
       .header('content-disposition', `inline; filename="${file.name.replace(/["\\\r\n]/g, '_')}"`)
       .send(file.bytes);
+  });
+
+  /**
+   * The file browser's listing: git status and every path in the working tree.
+   *
+   * The App's list screen asked the session process for these through the server — two `git`
+   * commands and an `rg --files` crawl — and waited on the slowest link for information this
+   * machine can produce in a tenth of a second. One request, answered by the machine itself.
+   *
+   * The payload is plaintext (file names, branch, changed paths), so it asks for the account's
+   * proof exactly as the file bytes beside it do.
+   */
+  app.get('/lan/sessions/:sessionId/listing', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (!opts.getSessionListing) {
+      return reply.code(404).send({ error: 'this daemon does not list session files' });
+    }
+    const { sessionId } = request.params as { sessionId: string };
+    if (!requireAccountProof(request, { operation: 'listing', target: sessionId })) {
+      return reply.code(403).send({ error: 'account proof required' });
+    }
+    const listing = await opts.getSessionListing({ sessionId });
+    if (!listing) {
+      logger.debug(`[lan] listing 404 ${sessionId}`);
+      return reply.code(404).send({ error: 'no working tree for that session on this machine' });
+    }
+    logger.debug(
+      `[lan] listing ${sessionId} repo=${listing.gitRepo} files=${listing.files.split('\n').length} ` +
+      `bytes=${listing.files.length} truncated=${listing.filesTruncated === true} from=${clientAddress(request)}`,
+    );
+    return reply.send({ v: LAN_PROTOCOL_VERSION, ...listing });
+  });
+
+  /**
+   * One file's unstaged diff.
+   *
+   * A path is the only input, and it is resolved against the session's working tree before git is
+   * asked — the same confinement the file bytes get. Plaintext, so the account signs for it.
+   */
+  app.get('/lan/sessions/:sessionId/diff', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (!opts.getSessionDiff) {
+      return reply.code(404).send({ error: 'this daemon does not serve diffs' });
+    }
+    const { sessionId } = request.params as { sessionId: string };
+    const { path } = request.query as { path?: string };
+    if (!path || path.length > 4096) {
+      return reply.code(400).send({ error: 'a path is required' });
+    }
+    const target = `${sessionId}:${path}`;
+    if (!requireAccountProof(request, { operation: 'diff', target })) {
+      return reply.code(403).send({ error: 'account proof required' });
+    }
+    const answer = await opts.getSessionDiff({ sessionId, path });
+    if (!answer) {
+      logger.debug(`[lan] diff 404 ${target}`);
+      return reply.code(404).send({ error: 'no such file on this machine' });
+    }
+    logger.debug(`[lan] diff ${target} bytes=${answer.diff.length} from=${clientAddress(request)}`);
+    return reply.send({ v: LAN_PROTOCOL_VERSION, diff: answer.diff });
   });
 
   /**

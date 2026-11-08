@@ -683,6 +683,7 @@ export const pl: TranslationStructure = {
         fileEmpty: 'Plik jest pusty',
         noChanges: 'Brak zmian do wyświetlenia',
         download: 'Pobierz',
+        allFiles: 'Wszystkie pliki',
     },
 
     settingsVoice: {

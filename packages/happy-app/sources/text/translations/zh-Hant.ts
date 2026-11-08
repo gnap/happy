@@ -674,6 +674,7 @@ export const zhHant: TranslationStructure = {
         fileEmpty: '檔案為空',
         noChanges: '沒有要顯示的更改',
         download: '下載',
+        allFiles: '所有檔案',
     },
 
     settingsVoice: {

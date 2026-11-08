@@ -8,8 +8,9 @@ import { Text } from '@/components/StyledText';
 import { Item } from '@/components/Item';
 import { ItemList } from '@/components/ItemList';
 import { Typography } from '@/constants/Typography';
-import { getGitStatusFiles, GitFileStatus, GitStatusFiles } from '@/sync/gitStatusFiles';
+import { GitFileStatus, GitStatusFiles } from '@/sync/gitStatusFiles';
 import { searchFiles, FileItem } from '@/sync/suggestionFile';
+import { sync } from '@/sync/sync';
 import { useSessionGitStatus, useSessionProjectGitStatus } from '@/sync/storage';
 import { useUnistyles, StyleSheet } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
@@ -34,7 +35,7 @@ export default function FilesScreen() {
     const loadGitStatusFiles = React.useCallback(async () => {
         try {
             setIsLoading(true);
-            const result = await getGitStatusFiles(sessionId);
+            const result = await sync.getGitStatusFiles(sessionId);
             setGitStatusFiles(result);
         } catch (error) {
             console.error('Failed to load git status files:', error);
@@ -56,34 +57,40 @@ export default function FilesScreen() {
         }, [loadGitStatusFiles])
     );
 
-    // Handle search and file loading
+    /**
+     * The file index, fetched whatever the git state is.
+     *
+     * This is the browser; the changes above it are a view of the same tree, not a replacement
+     * for it. The index used to load only when the repository was clean, so one modified file
+     * hid every other file in the project — the "where did my files go" state.
+     */
     React.useEffect(() => {
-        const loadFiles = async () => {
-            if (!sessionId) return;
-            
+        if (!sessionId || isLoading) {
+            return;
+        }
+        let cancelled = false;
+        (async () => {
             try {
                 setIsSearching(true);
                 const results = await searchFiles(sessionId, searchQuery, { limit: 100 });
-                setSearchResults(results);
+                if (!cancelled) {
+                    setSearchResults(results);
+                }
             } catch (error) {
                 console.error('Failed to search files:', error);
-                setSearchResults([]);
+                if (!cancelled) {
+                    setSearchResults([]);
+                }
             } finally {
-                setIsSearching(false);
+                if (!cancelled) {
+                    setIsSearching(false);
+                }
             }
+        })();
+        return () => {
+            cancelled = true;
         };
-
-        // Load files when searching or when repo is clean
-        const shouldShowAllFiles = searchQuery || 
-            (gitStatusFiles?.totalStaged === 0 && gitStatusFiles?.totalUnstaged === 0);
-        
-        if (shouldShowAllFiles && !isLoading) {
-            loadFiles();
-        } else if (!searchQuery) {
-            setSearchResults([]);
-            setIsSearching(false);
-        }
-    }, [searchQuery, gitStatusFiles, sessionId, isLoading]);
+    }, [searchQuery, sessionId, isLoading]);
 
     const handleFilePress = React.useCallback((file: GitFileStatus | FileItem) => {
         // Navigate to file viewer with the file path (base64 encoded for special characters)
@@ -229,138 +236,34 @@ export default function FilesScreen() {
                     }}>
                         <ActivityIndicator size="small" color={theme.colors.textSecondary} />
                     </View>
-                ) : !gitStatusFiles ? (
-                    <View style={{ 
-                        flex: 1, 
-                        justifyContent: 'center', 
-                        alignItems: 'center',
-                        paddingTop: 40,
-                        paddingHorizontal: 20
-                    }}>
-                        <Octicons name="git-branch" size={48} color={theme.colors.textSecondary} />
-                        <Text style={{
-                            fontSize: 16,
-                            color: theme.colors.textSecondary,
-                            textAlign: 'center',
-                            marginTop: 16,
-                            ...Typography.default()
-                        }}>
-                            {t('files.notRepo')}
-                        </Text>
-                        <Text style={{
-                            fontSize: 14,
-                            color: theme.colors.textSecondary,
-                            textAlign: 'center',
-                            marginTop: 8,
-                            ...Typography.default()
-                        }}>
-                            {t('files.notUnderGit')}
-                        </Text>
-                    </View>
-                ) : searchQuery || (gitStatusFiles.totalStaged === 0 && gitStatusFiles.totalUnstaged === 0) ? (
-                    // Show search results or all files when clean repo
-                    isSearching ? (
-                        <View style={{ 
-                            flex: 1, 
-                            justifyContent: 'center', 
-                            alignItems: 'center',
-                            paddingTop: 40
-                        }}>
-                            <ActivityIndicator size="small" color={theme.colors.textSecondary} />
-                            <Text style={{
-                                fontSize: 16,
-                                color: theme.colors.textSecondary,
-                                textAlign: 'center',
-                                marginTop: 16,
-                                ...Typography.default()
-                            }}>
-                                {t('files.searching')}
-                            </Text>
-                        </View>
-                    ) : searchResults.length === 0 ? (
-                        <View style={{ 
-                            flex: 1, 
-                            justifyContent: 'center', 
-                            alignItems: 'center',
-                            paddingTop: 40,
-                            paddingHorizontal: 20
-                        }}>
-                            <Octicons name={searchQuery ? "search" : "file-directory"} size={48} color={theme.colors.textSecondary} />
-                            <Text style={{
-                                fontSize: 16,
-                                color: theme.colors.textSecondary,
-                                textAlign: 'center',
-                                marginTop: 16,
-                                ...Typography.default()
-                            }}>
-                                {searchQuery ? t('files.noFilesFound') : t('files.noFilesInProject')}
-                            </Text>
-                            {searchQuery && (
-                                <Text style={{
-                                    fontSize: 14,
-                                    color: theme.colors.textSecondary,
-                                    textAlign: 'center',
-                                    marginTop: 8,
-                                    ...Typography.default()
-                                }}>
-                                    {t('files.tryDifferentTerm')}
-                                </Text>
-                            )}
-                        </View>
-                    ) : (
-                        // Show search results or all files
-                        <>
-                            {searchQuery && (
-                                <View style={{
-                                    backgroundColor: theme.colors.surfaceHigh,
-                                    paddingHorizontal: 16,
-                                    paddingVertical: 12,
-                                    borderBottomWidth: Platform.select({ ios: 0.33, default: 1 }),
-                                    borderBottomColor: theme.colors.divider
-                                }}>
-                                    <Text style={{
-                                        fontSize: 14,
-                                        fontWeight: '600',
-                                        color: theme.colors.textLink,
-                                        ...Typography.default()
-                                    }}>
-                                        {t('files.searchResults', { count: searchResults.length })}
-                                    </Text>
-                                </View>
-                            )}
-                            {searchResults.map((file, index) => (
-                                <Item
-                                    key={`file-${file.fullPath}-${index}`}
-                                    title={file.fileName}
-                                    subtitle={file.filePath || t('files.projectRoot')}
-                                    icon={renderFileIconForSearch(file)}
-                                    onPress={() => handleFilePress(file)}
-                                    showDivider={index < searchResults.length - 1}
-                                />
-                            ))}
-                        </>
-                    )
                 ) : (
                     <>
-                        {/* Staged Changes Section */}
-                        {gitStatusFiles.stagedFiles.length > 0 && (
-                            <>
-                                <View style={{
-                                    backgroundColor: theme.colors.surfaceHigh,
-                                    paddingHorizontal: 16,
-                                    paddingVertical: 12,
-                                    borderBottomWidth: Platform.select({ ios: 0.33, default: 1 }),
-                                    borderBottomColor: theme.colors.divider
+                        {/* Not a repository is a fact about git, not about the files: the browser
+                            below still lists the working tree. */}
+                        {!gitStatusFiles && (
+                            <View style={{
+                                paddingHorizontal: 16,
+                                paddingVertical: 12,
+                                borderBottomWidth: Platform.select({ ios: 0.33, default: 1 }),
+                                borderBottomColor: theme.colors.divider
+                            }}>
+                                <Text style={{
+                                    fontSize: 13,
+                                    color: theme.colors.textSecondary,
+                                    ...Typography.default()
                                 }}>
-                                    <Text style={{
-                                        fontSize: 14,
-                                        fontWeight: '600',
-                                        color: theme.colors.success,
-                                        ...Typography.default()
-                                    }}>
-                                        {t('files.stagedChanges', { count: gitStatusFiles.stagedFiles.length })}
-                                    </Text>
-                                </View>
+                                    {t('files.notUnderGit')}
+                                </Text>
+                            </View>
+                        )}
+
+                        {/* Changes first, but never instead of the tree. */}
+                        {!searchQuery && gitStatusFiles && gitStatusFiles.stagedFiles.length > 0 && (
+                            <>
+                                <SectionLabel
+                                    color={theme.colors.success}
+                                    text={t('files.stagedChanges', { count: gitStatusFiles.stagedFiles.length })}
+                                />
                                 {gitStatusFiles.stagedFiles.map((file, index) => (
                                     <Item
                                         key={`staged-${file.fullPath}-${index}`}
@@ -369,31 +272,18 @@ export default function FilesScreen() {
                                         icon={renderFileIcon(file)}
                                         rightElement={renderStatusIcon(file)}
                                         onPress={() => handleFilePress(file)}
-                                        showDivider={index < gitStatusFiles.stagedFiles.length - 1 || gitStatusFiles.unstagedFiles.length > 0}
+                                        showDivider={index < gitStatusFiles.stagedFiles.length - 1}
                                     />
                                 ))}
                             </>
                         )}
 
-                        {/* Unstaged Changes Section */}
-                        {gitStatusFiles.unstagedFiles.length > 0 && (
+                        {!searchQuery && gitStatusFiles && gitStatusFiles.unstagedFiles.length > 0 && (
                             <>
-                                <View style={{
-                                    backgroundColor: theme.colors.surfaceHigh,
-                                    paddingHorizontal: 16,
-                                    paddingVertical: 12,
-                                    borderBottomWidth: Platform.select({ ios: 0.33, default: 1 }),
-                                    borderBottomColor: theme.colors.divider
-                                }}>
-                                    <Text style={{
-                                        fontSize: 14,
-                                        fontWeight: '600',
-                                        color: theme.colors.warning,
-                                        ...Typography.default()
-                                    }}>
-                                        {t('files.unstagedChanges', { count: gitStatusFiles.unstagedFiles.length })}
-                                    </Text>
-                                </View>
+                                <SectionLabel
+                                    color={theme.colors.warning}
+                                    text={t('files.unstagedChanges', { count: gitStatusFiles.unstagedFiles.length })}
+                                />
                                 {gitStatusFiles.unstagedFiles.map((file, index) => (
                                     <Item
                                         key={`unstaged-${file.fullPath}-${index}`}
@@ -407,12 +297,104 @@ export default function FilesScreen() {
                                 ))}
                             </>
                         )}
+
+                        {isSearching ? (
+                            <View style={{ 
+                                flex: 1, 
+                                justifyContent: 'center', 
+                                alignItems: 'center',
+                                paddingTop: 40
+                            }}>
+                                <ActivityIndicator size="small" color={theme.colors.textSecondary} />
+                                <Text style={{
+                                    fontSize: 16,
+                                    color: theme.colors.textSecondary,
+                                    textAlign: 'center',
+                                    marginTop: 16,
+                                    ...Typography.default()
+                                }}>
+                                    {t('files.searching')}
+                                </Text>
+                            </View>
+                        ) : searchResults.length === 0 ? (
+                            <View style={{ 
+                                flex: 1, 
+                                justifyContent: 'center', 
+                                alignItems: 'center',
+                                paddingTop: 40,
+                                paddingHorizontal: 20
+                            }}>
+                                <Octicons name={searchQuery ? "search" : "file-directory"} size={48} color={theme.colors.textSecondary} />
+                                <Text style={{
+                                    fontSize: 16,
+                                    color: theme.colors.textSecondary,
+                                    textAlign: 'center',
+                                    marginTop: 16,
+                                    ...Typography.default()
+                                }}>
+                                    {searchQuery ? t('files.noFilesFound') : t('files.noFilesInProject')}
+                                </Text>
+                                {searchQuery && (
+                                    <Text style={{
+                                        fontSize: 14,
+                                        color: theme.colors.textSecondary,
+                                        textAlign: 'center',
+                                        marginTop: 8,
+                                        ...Typography.default()
+                                    }}>
+                                        {t('files.tryDifferentTerm')}
+                                    </Text>
+                                )}
+                            </View>
+                        ) : (
+                            <>
+                                <SectionLabel
+                                    color={searchQuery ? theme.colors.textLink : theme.colors.textSecondary}
+                                    text={searchQuery
+                                        ? t('files.searchResults', { count: searchResults.length })
+                                        : t('files.allFiles')}
+                                />
+                                {searchResults.map((file, index) => (
+                                    <Item
+                                        key={`file-${file.fullPath}-${index}`}
+                                        title={file.fileName}
+                                        subtitle={file.filePath || t('files.projectRoot')}
+                                        icon={renderFileIconForSearch(file)}
+                                        onPress={() => handleFilePress(file)}
+                                        showDivider={index < searchResults.length - 1}
+                                    />
+                                ))}
+                            </>
+                        )}
                     </>
                 )}
             </ItemList>
         </View>
     );
 }
+
+/** One section heading in the file list: changes, search results, or the tree itself. */
+const SectionLabel = React.memo(({ text, color }: { text: string; color: string }) => {
+    const { theme } = useUnistyles();
+    return (
+        <View style={{
+            backgroundColor: theme.colors.surfaceHigh,
+            paddingHorizontal: 16,
+            paddingVertical: 12,
+            borderBottomWidth: Platform.select({ ios: 0.33, default: 1 }),
+            borderBottomColor: theme.colors.divider,
+        }}>
+            <Text style={{
+                fontSize: 14,
+                fontWeight: '600',
+                color,
+                ...Typography.default(),
+            }}>
+                {text}
+            </Text>
+        </View>
+    );
+});
 
 const styles = StyleSheet.create((theme) => ({
     container: {
