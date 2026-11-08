@@ -61,7 +61,7 @@ export async function getGitStatusFiles(sessionId: string): Promise<GitStatusFil
         const statusOutput = statusResult.stdout;
         const diffOutput = diffStatResult.success ? diffStatResult.stdout : '';
 
-        return parseGitStatusFilesV2(statusOutput, diffOutput);
+        return parseGitStatusFiles(statusOutput, diffOutput);
 
     } catch (error) {
         console.error('Error fetching git status files for session', sessionId, ':', error);
@@ -70,9 +70,12 @@ export async function getGitStatusFiles(sessionId: string): Promise<GitStatusFil
 }
 
 /**
- * Parse git status v2 and diff outputs into structured file data
+ * Parse git status v2 and diff outputs into structured file data.
+ *
+ * Exported because the same strings now arrive two ways — from the session's shell over the
+ * server, and from the machine's own listing route — and both must produce the same list.
  */
-function parseGitStatusFilesV2(
+export function parseGitStatusFiles(
     statusOutput: string,
     combinedDiffOutput: string
 ): GitStatusFiles {

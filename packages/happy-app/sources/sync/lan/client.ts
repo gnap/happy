@@ -209,6 +209,49 @@ export async function fetchToolContent(
     return { args: body.args, result: body.result };
 }
 
+/** The file browser's listing, as the machine that holds the tree answers it. */
+export type SessionListing = {
+    gitRepo: boolean;
+    gitStatus: string;
+    gitDiff: string;
+    files: string;
+    filesTruncated?: boolean;
+};
+
+/**
+ * The listing behind the file browser.
+ *
+ * Two `git` commands and an `rg --files` crawl, run by the machine holding the working tree — the
+ * same work the App used to ask the session process for through the server. A 404 means this
+ * daemon predates the route (or does not know the session), which is the caller's signal to keep
+ * its old path.
+ */
+export async function fetchSessionListing(
+    baseUrl: string,
+    token: string,
+    sessionId: string,
+    proof?: Record<string, string>,
+): Promise<SessionListing | null> {
+    const response = await request(
+        `${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/listing`,
+        { token, headers: proof },
+    );
+    if (response.status === 404) {
+        return null;
+    }
+    if (!response.ok) {
+        return throwAnswer(response, 'listing request failed');
+    }
+    const body = (await response.json()) as Partial<SessionListing>;
+    return {
+        gitRepo: body.gitRepo === true,
+        gitStatus: typeof body.gitStatus === 'string' ? body.gitStatus : '',
+        gitDiff: typeof body.gitDiff === 'string' ? body.gitDiff : '',
+        files: typeof body.files === 'string' ? body.files : '',
+        ...(body.filesTruncated === true ? { filesTruncated: true } : {}),
+    };
+}
+
 export async function fetchSessions(baseUrl: string, token: string): Promise<LanSessionSummary[]> {
     const response = await request(`${baseUrl}/lan/sessions`, { token });
     if (!response.ok) {

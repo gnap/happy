@@ -5,6 +5,7 @@
 
 import Fuse from 'fuse.js';
 import { sessionRipgrep } from './ops';
+import { sync } from './sync';
 import { AsyncLock } from '@/utils/lock';
 
 export interface FileItem {
@@ -87,21 +88,29 @@ class FileSearchCache {
 
             console.log(`FileSearchCache: Refreshing file cache for session ${sessionId}...`);
 
-            // Use ripgrep to get all files in the project
-            const response = await sessionRipgrep(
-                sessionId,
-                ['--files', '--follow'],
-                undefined
-            );
-
-            if (!response.success || !response.stdout) {
-                console.error('FileSearchCache: Failed to fetch files', response.error);
-                console.log(response);
-                return;
+            // The machine that holds the working tree answers this itself now, over LAN or the
+            // relay. The session RPC is the old route, kept for daemons from before the listing
+            // endpoint existed — and it is the one that made this screen spin.
+            let output: string | null = null;
+            const listing = await sync.getSessionListing(sessionId);
+            if (listing) {
+                output = listing.files;
+            } else {
+                const response = await sessionRipgrep(
+                    sessionId,
+                    ['--files', '--follow'],
+                    undefined
+                );
+                if (!response.success || !response.stdout) {
+                    console.error('FileSearchCache: Failed to fetch files', response.error);
+                    console.log(response);
+                    return;
+                }
+                output = response.stdout;
             }
 
             // Parse the output into file items
-            const filePaths = response.stdout
+            const filePaths = output
                 .split('\n')
                 .filter(path => path.trim().length > 0);
 
