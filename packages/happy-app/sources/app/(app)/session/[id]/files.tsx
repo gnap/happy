@@ -8,8 +8,9 @@ import { Text } from '@/components/StyledText';
 import { Item } from '@/components/Item';
 import { ItemList } from '@/components/ItemList';
 import { Typography } from '@/constants/Typography';
-import { getGitStatusFiles, GitFileStatus, GitStatusFiles } from '@/sync/gitStatusFiles';
+import { GitFileStatus, GitStatusFiles } from '@/sync/gitStatusFiles';
 import { searchFiles, FileItem } from '@/sync/suggestionFile';
+import { sync } from '@/sync/sync';
 import { useSessionGitStatus, useSessionProjectGitStatus } from '@/sync/storage';
 import { useUnistyles, StyleSheet } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
@@ -34,7 +35,7 @@ export default function FilesScreen() {
     const loadGitStatusFiles = React.useCallback(async () => {
         try {
             setIsLoading(true);
-            const result = await getGitStatusFiles(sessionId);
+            const result = await sync.getGitStatusFiles(sessionId);
             setGitStatusFiles(result);
         } catch (error) {
             console.error('Failed to load git status files:', error);

@@ -38,11 +38,20 @@ function signed(path: string, init: { token?: string; body?: unknown } = {}) {
     const at = Date.now();
     const isToolContent = path.includes('/tool-content/');
     const isFile = /\/sessions\/[^/?]+\/file(?:\?|$)/.test(path);
+    const isListing = /\/sessions\/[^/?]+\/listing(?:\?|$)/.test(path);
     const sessionId = path.split('/sessions/')[1]?.split(/[/?]/)[0] ?? '-';
     // A file's target is the session and the path it names, which is what the route checks; the
     // path travels in the query string, not the URL path.
     const filePath = isFile ? new URLSearchParams(path.split('?')[1]).get('path') ?? '' : '';
-    const operation = isFile ? 'file' : isToolContent ? 'tool-content' : path.endsWith('/restart') ? 'restart' : 'control';
+    const operation = isFile
+        ? 'file'
+        : isListing
+            ? 'listing'
+            : isToolContent
+                ? 'tool-content'
+                : path.endsWith('/restart')
+                    ? 'restart'
+                    : 'control';
     const target = isFile
         ? `${sessionId}:${filePath}`
         : isToolContent
@@ -50,7 +59,7 @@ function signed(path: string, init: { token?: string; body?: unknown } = {}) {
             : sessionId;
     const message = accountProofMessage({ operation, target, nonce, at, bodyDigest: '' });
     return {
-        method: isToolContent || isFile ? 'GET' : 'POST',
+        method: isToolContent || isFile || isListing ? 'GET' : 'POST',
         ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
         headers: {
             ...(init.token ? { authorization: `Bearer ${init.token}` } : {}),
@@ -96,6 +105,8 @@ let lifecycleEntries: { rev: number; op: string; tag: string }[] = [];
 let toolContentHandler: ((args: { sessionId: string; callId: string }) => Promise<{ args?: unknown; result?: unknown } | null>) | undefined;
 /** The file this machine can serve; unset by default, like a daemon from before the route. */
 let sessionFileHandler: ((args: { sessionId: string; path: string }) => Promise<{ bytes: Buffer; name: string; mime: string } | { error: 'too-large'; size: number } | null>) | undefined;
+/** The listing this machine can produce; unset by default, like a daemon from before the route. */
+let sessionListingHandler: ((args: { sessionId: string }) => Promise<{ gitRepo: boolean; gitStatus: string; gitDiff: string; files: string; filesTruncated?: boolean } | null>) | undefined;
 /** Left unset by default, which is how a daemon that predates the route behaves. */
 let restartHandler: ((sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>) | undefined;
 
@@ -122,6 +133,7 @@ async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
         ...(restartHandler ? { restartSession: restartHandler } : {}),
         ...(toolContentHandler ? { getToolContent: toolContentHandler } : {}),
         ...(sessionFileHandler ? { getSessionFile: sessionFileHandler } : {}),
+        ...(sessionListingHandler ? { getSessionListing: sessionListingHandler } : {}),
         lifecycle: {
             revision: () => lifecycleEntries.length,
             entriesSince: (since: number) => lifecycleEntries.filter((entry) => entry.rev > since),
@@ -183,6 +195,7 @@ afterEach(async () => {
     restartHandler = undefined;
     toolContentHandler = undefined;
     sessionFileHandler = undefined;
+    sessionListingHandler = undefined;
     proofNonces = new Set();
 });
 
@@ -825,5 +838,58 @@ describe('lanServer file route', () => {
         const res = await fetch(url(noPath), signed(noPath, { token }) as RequestInit);
 
         expect(res.status).toBe(400);
+    });
+});
+
+describe('lanServer session listing', () => {
+    const LISTING = {
+        gitRepo: true,
+        gitStatus: '# branch.oid abc\0# branch.head main\0',
+        gitDiff: '1\t2\tsrc/a.ts\n---STAGED---\n',
+        files: 'src/a.ts\nsrc/b.ts\nREADME.md\n',
+    };
+    const listingUrl = '/lan/sessions/sess-1/listing';
+
+    beforeEach(() => {
+        sessionListingHandler = async ({ sessionId }) => (sessionId === 'sess-1' ? LISTING : null);
+    });
+
+    it('serves the listing to the account', async () => {
+        await start();
+        const token = await getToken();
+
+        const res = await fetch(url(listingUrl), signed(listingUrl, { token }) as RequestInit);
+
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject(LISTING);
+    });
+
+    it('refuses the plaintext listing without the account proof', async () => {
+        await start();
+        const token = await getToken();
+
+        const res = await fetch(url(listingUrl), authorized(token));
+
+        expect(res.status).toBe(403);
+    });
+
+    it('answers 404 for a session this machine does not know', async () => {
+        await start();
+        const token = await getToken();
+        const other = '/lan/sessions/sess-2/listing';
+
+        const res = await fetch(url(other), signed(other, { token }) as RequestInit);
+
+        expect(res.status).toBe(404);
+    });
+
+    it('answers 404 when the daemon predates the route', async () => {
+        sessionListingHandler = undefined;
+        await start();
+        const token = await getToken();
+
+        const res = await fetch(url(listingUrl), signed(listingUrl, { token }) as RequestInit);
+
+        expect(res.status).toBe(404);
     });
 });
