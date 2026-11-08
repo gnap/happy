@@ -252,6 +252,33 @@ export async function fetchSessionListing(
     };
 }
 
+/**
+ * One file's unstaged diff, from the machine that holds the tree.
+ *
+ * Null for 404, which is the daemon saying it predates the route or does not know the session;
+ * the viewer then keeps its session-RPC fallback.
+ */
+export async function fetchSessionDiff(
+    baseUrl: string,
+    token: string,
+    sessionId: string,
+    path: string,
+    proof?: Record<string, string>,
+): Promise<string | null> {
+    const response = await request(
+        `${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/diff?path=${encodeURIComponent(path)}`,
+        { token, headers: proof },
+    );
+    if (response.status === 404) {
+        return null;
+    }
+    if (!response.ok) {
+        return throwAnswer(response, 'diff request failed');
+    }
+    const body = (await response.json()) as { diff?: unknown };
+    return typeof body.diff === 'string' ? body.diff : '';
+}
+
 export async function fetchSessions(baseUrl: string, token: string): Promise<LanSessionSummary[]> {
     const response = await request(`${baseUrl}/lan/sessions`, { token });
     if (!response.ok) {

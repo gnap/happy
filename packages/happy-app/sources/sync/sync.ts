@@ -56,10 +56,10 @@ import { channelDrivers as buildChannelDrivers, relayOriginFrom } from './channe
 import { channelAvailability } from './channels/resolve';
 import { candidateInputsFor, orderedCandidates } from './channels/candidates';
 import { attemptFromStatus, carryOperation, type CarryOutcome, type HealthRecorder } from './channels/execute';
-import { fetchToolContent, fetchSessionListing, type SessionListing } from './lan/client';
+import { fetchToolContent, fetchSessionListing, fetchSessionDiff, type SessionListing } from './lan/client';
 import { downloadSessionFileFromDaemon } from './lan/fileDownload';
 import { getGitStatusFiles as getGitStatusFilesViaRpc, parseGitStatusFiles, type GitStatusFiles } from './gitStatusFiles';
-import { getToolCallFullContent as getToolCallFullContentFromServer, type GetToolCallFullContentResponse } from './ops';
+import { getToolCallFullContent as getToolCallFullContentFromServer, sessionBash, type GetToolCallFullContentResponse } from './ops';
 import { readRoutes } from './channels/readRoute';
 import { endpointBaseUrl, type ChannelDriver, type ChannelOperation } from './channels/types';
 import { sendBatch, type SendResult } from './channels/ops';
@@ -5501,6 +5501,45 @@ class Sync {
             return listing.gitRepo ? parseGitStatusFiles(listing.gitStatus, listing.gitDiff) : null;
         }
         return getGitStatusFilesViaRpc(sessionId);
+    }
+
+    /**
+     * One file's unstaged diff, from the machine that holds the tree.
+     *
+     * The viewer used to ask the session's shell for this through the server — the same request
+     * that made the Diff tab slow to appear or never appear at all. The machine can run `git diff`
+     * itself, and the answer travels back the way the file and its listing now do. The session RPC
+     * remains for daemons that predate the route.
+     */
+    async getFileDiff(sessionId: string, path: string): Promise<string | null> {
+        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        if (machineId && this.getMachineKey(machineId)) {
+            const carried = await this.carryAtDaemon<{ diff: string }>({
+                machineId,
+                operation: 'read',
+                proofAction: { operation: 'diff', target: `${sessionId}:${path}` },
+                run: async (baseUrl, token, proof) => {
+                    const diff = await fetchSessionDiff(baseUrl, token, sessionId, path, proof);
+                    return diff === null ? null : { diff };
+                },
+            });
+            if (carried.kind === 'done') {
+                return carried.value.diff.trim() ? carried.value.diff : null;
+            }
+            log.log(`📄 diff ${sessionId} ${path}: ${carried.kind}`);
+        }
+        const sessionPath = storage.getState().sessions[sessionId]?.metadata?.path;
+        if (!sessionPath) {
+            return null;
+        }
+        const response = await sessionBash(sessionId, {
+            // If someone is using a custom diff tool like difftastic, the parser would break. So
+            // instead force git to use the built in diff tool.
+            command: `git diff --no-ext-diff -- "${path}"`,
+            cwd: sessionPath,
+            timeout: 5000,
+        });
+        return response.success && response.stdout.trim() ? response.stdout : null;
     }
 
     /**

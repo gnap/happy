@@ -688,6 +688,7 @@ export const en: TranslationStructure = {
         fileEmpty: 'File is empty',
         noChanges: 'No changes to display',
         download: 'Download',
+        allFiles: 'All files',
     },
 
     settingsVoice: {
