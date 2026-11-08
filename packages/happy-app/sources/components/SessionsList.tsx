@@ -1,9 +1,11 @@
 import React from 'react';
-import { View, Pressable, SectionList, Platform, ActivityIndicator } from 'react-native';
+import { useCoalesced } from '@/hooks/useCoalesced';
+import { View, Pressable, SectionList, Platform, ActivityIndicator, RefreshControl } from 'react-native';
 import { Swipeable } from 'react-native-gesture-handler';
 import { Text } from '@/components/StyledText';
 import { usePathname } from 'expo-router';
-import { SessionListViewItem, useSessionIsFetching } from '@/sync/storage';
+import { SessionListViewItem, useSessionIsFetching, useMachinePresenceMap } from '@/sync/storage';
+import { MACHINE_PRESENCE_COLORS } from '@/sync/machinePresence';
 import { Ionicons } from '@expo/vector-icons';
 import { getSessionName, useSessionStatus, getSessionSubtitle, getSessionAvatarId, formatPathRelativeToHome } from '@/utils/sessionUtils';
 import { Avatar } from './Avatar';
@@ -15,6 +17,7 @@ import { useVisibleSessionListViewData } from '@/hooks/useVisibleSessionListView
 import { Typography } from '@/constants/Typography';
 import { Session } from '@/sync/storageTypes';
 import { StatusDot } from './StatusDot';
+import { SessionStatusDot } from './SessionStatusDot';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useIsTablet } from '@/utils/responsive';
 import { requestReview } from '@/utils/requestReview';
@@ -27,6 +30,7 @@ import { Item } from './Item';
 import { ItemGroup } from './ItemGroup';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { sessionDelete } from '@/sync/ops';
+import { sync } from '@/sync/sync';
 import { HappyError } from '@/utils/errors';
 import { Modal } from '@/modal';
 import { SessionRowStatusIndicators } from './SessionRowStatusIndicators';
@@ -94,6 +98,10 @@ const stylesheet = StyleSheet.create((theme) => ({
         color: theme.colors.textSecondary,
         marginLeft: 6,
         ...Typography.default(),
+    },
+    /** Gap between the machine presence dot and the host label, inside the centered header row. */
+    hostGroupDot: {
+        marginRight: 4,
     },
     sessionItem: {
         height: 88,
@@ -223,7 +231,12 @@ const stylesheet = StyleSheet.create((theme) => ({
 export function SessionsList() {
     const styles = stylesheet;
     const safeArea = useSafeAreaInsets();
-    const data = useVisibleSessionListViewData();
+    // The list commits at most once a second: see `useCoalesced` — a commit costs 80–140 ms and
+    // the store wrote it 2–4 times a second, so the cadence is the whole cost.
+    const data = useCoalesced(useVisibleSessionListViewData(), 1000);
+    // Resolved once per render rather than per host-group item: the row renderer is a map/switch,
+    // where a hook call per item would break the rules of hooks.
+    const machinePresence = useMachinePresenceMap();
     const pathname = usePathname();
     const isTablet = useIsTablet();
     const navigateToSession = useNavigateToSession();
@@ -246,6 +259,16 @@ export function SessionsList() {
     const [collapsedProjects, setCollapsedProjects] = React.useState<Set<string>>(new Set());
     // Track which host groups have offline sessions hidden (key: "projectPath|host")
     const [hiddenOfflineHosts, setHiddenOfflineHosts] = React.useState<Set<string>>(new Set());
+    const [isRefreshing, setIsRefreshing] = React.useState(false);
+
+    const handleRefresh = React.useCallback(async () => {
+        setIsRefreshing(true);
+        try {
+            await sync.refreshSessions();
+        } finally {
+            setIsRefreshing(false);
+        }
+    }, []);
 
     // Filter out items inside collapsed project groups and hidden offline sessions
     const visibleData = React.useMemo(() => {
@@ -270,7 +293,7 @@ export function SessionsList() {
                 continue;
             }
             if (skipUntilNextProject) continue;
-            if (item.type === 'session' && hideOffline && currentHost && !item.session.active) continue;
+            if (item.type === 'session' && hideOffline && currentHost && !item.online) continue;
             result.push(item);
         }
         return result;
@@ -402,6 +425,9 @@ export function SessionsList() {
                 const hostKey = item.projectPath + '|' + item.host;
                 const isHidingOffline = hiddenOfflineHosts.has(hostKey);
                 const hasOffline = item.totalCount > item.onlineCount;
+                // Unknown machineId (sessions whose metadata predates it, or a mixed group) falls
+                // back to `offline` rather than guessing.
+                const presence = (item.machineId ? machinePresence[item.machineId] : undefined) ?? 'offline';
                 return (
                     <Pressable
                         onPress={hasOffline ? () => setHiddenOfflineHosts(prev => {
@@ -415,8 +441,12 @@ export function SessionsList() {
                             { opacity: hasOffline && pressed ? 0.7 : 1 },
                         ]}
                     >
+                        <StatusDot
+                            color={MACHINE_PRESENCE_COLORS[presence]}
+                            style={styles.hostGroupDot}
+                        />
                         <Text style={styles.hostGroupText} numberOfLines={1}>
-                            {item.host || 'Unknown'}{' · '}{item.onlineCount}/{item.totalCount} online{hasOffline ? (isHidingOffline ? ' ▸' : ' ▾') : ''}
+                            {item.host || 'Unknown'}{' · '}{item.onlineCount}/{item.totalCount} online{presence === 'lan' ? ` · ${t('status.lan')}` : presence === 'relay' ? ` · ${t('sessionInfo.channelRelay')}` : ''}{hasOffline ? (isHidingOffline ? ' ▸' : ' ▾') : ''}
                         </Text>
                     </Pressable>
                 );
@@ -457,19 +487,34 @@ export function SessionsList() {
 
     // Footer removed - all sessions now shown inline
 
+    /**
+     * The list element, reused across re-renders that do not change it.
+     *
+     * This component re-renders for its other subscriptions too (machine presence, settings,
+     * pathname), and each of those renders used to reconcile the whole `SectionList` subtree —
+     * measured at 100–140 ms per commit. Returning the same element lets React skip that subtree
+     * when the data and handlers are unchanged.
+     */
+    const list = React.useMemo(() => (
+        <SectionList
+            sections={sections}
+            renderItem={renderItem}
+            renderSectionHeader={renderSectionHeader}
+            keyExtractor={keyExtractor}
+            contentContainerStyle={{ paddingBottom: safeArea.bottom + 128, maxWidth: layout.maxWidth }}
+            ListHeaderComponent={HeaderComponent}
+            stickySectionHeadersEnabled={true}
+            refreshControl={
+                <RefreshControl refreshing={isRefreshing} onRefresh={handleRefresh} />
+            }
+        />
+    ), [sections, renderItem, renderSectionHeader, keyExtractor, HeaderComponent, isRefreshing, handleRefresh, safeArea.bottom]);
+
     return (
         <View style={styles.container}>
             <View style={styles.contentContainer}>
                 <View style={{ flex: 1 }}>
-                    <SectionList
-                        sections={sections}
-                        renderItem={renderItem}
-                        renderSectionHeader={renderSectionHeader}
-                        keyExtractor={keyExtractor}
-                        contentContainerStyle={{ paddingBottom: safeArea.bottom + 128, maxWidth: layout.maxWidth }}
-                        ListHeaderComponent={HeaderComponent}
-                        stickySectionHeadersEnabled={true}
-                    />
+                    {list}
                 </View>
             </View>
         </View>
@@ -545,7 +590,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle, 
             }}
         >
             <View style={styles.avatarContainer}>
-                <Avatar id={avatarId} size={avatarSize} monochrome={!sessionStatus.isConnected} flavor={session.metadata?.flavor} />
+                <Avatar id={avatarId} size={avatarSize} monochrome={!sessionStatus.isLive} flavor={session.metadata?.flavor} />
                 {session.draft && (
                     <View style={styles.draftIconContainer}>
                         <Ionicons
@@ -561,7 +606,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle, 
                 <View style={styles.sessionTitleRow}>
                     <Text style={[
                         styles.sessionTitle,
-                        sessionStatus.isConnected ? styles.sessionTitleConnected : styles.sessionTitleDisconnected,
+                        sessionStatus.isLive ? styles.sessionTitleConnected : styles.sessionTitleDisconnected,
                         isWorktree && { fontSize: 13 }
                     ]} numberOfLines={1}>
                         {sessionName}
@@ -580,7 +625,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle, 
                 {/* Status line with dot */}
                 <View style={styles.statusRow}>
                     <View style={styles.statusDotContainer}>
-                        <StatusDot color={sessionStatus.statusDotColor} isPulsing={sessionStatus.isPulsing} />
+                        <SessionStatusDot sessionId={session.id} color={sessionStatus.statusDotColor} isPulsing={sessionStatus.isPulsing} />
                     </View>
                     <Text style={[
                         styles.statusText,

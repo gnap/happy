@@ -51,6 +51,34 @@ describe('shared wire message schemas', () => {
     expect(parsed.success).toBe(true);
   });
 
+  it('carries what a machine may say about a session, and drops the rest', () => {
+    // The two halves of the same contract: the field a daemon authors has to survive parsing —
+    // this is the gate that would otherwise drop it — and a field nobody declared still must not
+    // ride along, or the schema stops being the contract between the two sides.
+    const parsed = ApiUpdateSessionStateSchema.safeParse({
+      t: 'update-session',
+      id: 'session-1',
+      restartingAt: 1700000000000,
+      somethingElse: 'nope',
+    });
+
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data).toEqual({
+      t: 'update-session',
+      id: 'session-1',
+      restartingAt: 1700000000000,
+    });
+  });
+
+  it('accepts a null restartingAt, which is how a restart is called off', () => {
+    // Not the same as omitting it: absent means "this update says nothing about restarting", while
+    // null means "it is not restarting any more" — the clear a reader waits for.
+    const parsed = ApiUpdateSessionStateSchema.safeParse({ t: 'update-session', id: 'session-1', restartingAt: null });
+
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data.restartingAt).toBeNull();
+  });
+
   it('parses update-machine with optional activity fields', () => {
     const parsed = ApiUpdateMachineStateSchema.safeParse({
       t: 'update-machine',

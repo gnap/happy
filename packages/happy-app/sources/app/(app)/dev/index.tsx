@@ -1,13 +1,17 @@
+import { channelEnabled } from '@/utils/enabledChannels';
 import * as React from 'react';
 import { ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
+import { ChannelBlock } from './lan';
 import { ItemList } from '@/components/ItemList';
 import { useRouter } from 'expo-router';
 import Constants from 'expo-constants';
 import * as Application from 'expo-application';
-import { useLocalSettingMutable, useSocketStatus } from '@/sync/storage';
+import { metrics, ratesSince, type MetricRates } from '@/sync/metrics';
+import type { DaemonConnectionState } from '@/sync/lan/daemonConnections';
+import { useDaemonSockets, useLanSightings, useLocalSettingMutable, useRelayDirectory, useRelayHubConnected, useRelayUnknownTags, useSocketStatus } from '@/sync/storage';
 import { Modal } from '@/modal';
 import { sync } from '@/sync/sync';
 import { getServerUrl, setServerUrl, validateServerUrl } from '@/sync/serverConfig';
@@ -15,11 +19,152 @@ import { Switch } from '@/components/Switch';
 import { useUnistyles } from 'react-native-unistyles';
 import { setLastViewedVersion, getLatestVersion } from '@/changelog';
 
+/** One decimal for small rates, none for large: enough to tell "idle" from "working". */
+function formatRate(rate: number | undefined): string {
+    if (rate === undefined) return '·';
+    return rate >= 10 ? String(Math.round(rate)) : rate.toFixed(1);
+}
+
+/**
+ * The channel's state for whatever session is open, sampled like the rest.
+ *
+ * The point is to answer "why is this conversation missing messages" without guessing: whether the
+ * window covers the session, where the reader has read to, and where pushes have carried it.
+ */
+function useChannelDiagnostics(): ReturnType<typeof sync.channelDiagnostics> {
+    const [state, setState] = React.useState<ReturnType<typeof sync.channelDiagnostics>>(null);
+    React.useEffect(() => {
+        const sample = () => setState(sync.channelDiagnostics(sync.currentVisibleSessionId));
+        sample();
+        const timer = setInterval(sample, 1_000);
+        return () => clearInterval(timer);
+    }, []);
+    return state;
+}
+
+/**
+ * The fetch pool, sampled with the same beat as the counters. Fetches that never release are what
+ * stop a session refreshing after a suspension, and they are invisible from the outside: this is
+ * what makes them show up as a number rather than as "the app is being weird".
+ */
+function useFetchPoolStats(): { inFlight: number; queued: number; oldestMs: number } | null {
+    const [stats, setStats] = React.useState<{ inFlight: number; queued: number; oldestMs: number } | null>(null);
+    React.useEffect(() => {
+        const sample = () => setStats(sync.fetchSlotStats());
+        sample();
+        const timer = setInterval(sample, 1_000);
+        return () => clearInterval(timer);
+    }, []);
+    return stats;
+}
+
+/**
+ * Samples the sync counters once a second and reports per-second rates.
+ *
+ * Rates rather than totals: a total says how long the App has been running, a rate says what it is
+ * doing now — which is the question a device that gets warm raises.
+ */
+function useMetricRates(): MetricRates | null {
+    const [rates, setRates] = React.useState<MetricRates | null>(null);
+    React.useEffect(() => {
+        let previous = { ...metrics };
+        let at = Date.now();
+        const timer = setInterval(() => {
+            const now = Date.now();
+            setRates(ratesSince(previous, metrics, now - at));
+            previous = { ...metrics };
+            at = now;
+        }, 1_000);
+        return () => clearInterval(timer);
+    }, []);
+    return rates;
+}
+
+/** How long ago, for a timestamp that may be missing. */
+function formatTimeAgo(timestamp: number | null | undefined): string {
+    if (!timestamp) {
+        return '';
+    }
+    const seconds = Math.floor((Date.now() - timestamp) / 1000);
+    if (seconds < 10) return 'Just now';
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return days < 7 ? `${days}d ago` : new Date(timestamp).toLocaleDateString();
+}
+
+/** The same indicator for every channel's connection state, so the rows can be compared. */
+const PhaseIndicator = React.memo(function PhaseIndicator({ phase }: { phase: DaemonConnectionState['phase'] }) {
+    const { theme } = useUnistyles();
+    switch (phase) {
+        case 'live':
+            return <Ionicons name="checkmark-circle" size={22} color="#34C759" />;
+        case 'opening':
+            return <ActivityIndicator size="small" color={theme.colors.textSecondary} />;
+        case 'retrying':
+            return <Ionicons name="close-circle" size={22} color="#FF9500" />;
+        default:
+            return <Ionicons name="ellipse-outline" size={22} color="#8E8E93" />;
+    }
+});
+
+/** What a set of connections amounts to, for a row that speaks for the whole route. */
+function aggregatePhase(connections: DaemonConnectionState[]): DaemonConnectionState['phase'] {
+    if (connections.some((state) => state.phase === 'live')) return 'live';
+    if (connections.some((state) => state.phase === 'opening')) return 'opening';
+    if (connections.some((state) => state.phase === 'retrying')) return 'retrying';
+    return 'idle';
+}
+
+/** What a connection is doing, in words short enough for a row. */
+function describePhase(state: DaemonConnectionState): string {
+    switch (state.phase) {
+        case 'live':
+            return `up ${formatTimeAgo(state.connectedAt)}`;
+        case 'retrying':
+            return `dropped ${state.attempt ?? 0}×`;
+        default:
+            return state.phase;
+    }
+}
+
+/** The relay itself: one connection, and what it is holding. */
+/** A tag the relay holds that no key on this device matches. */
+const RelayUnknownRow = React.memo(function RelayUnknownRow({ tag }: { tag: string }) {
+    return (
+        <Item
+            title={`Relay · ${tag.slice(0, 8)}`}
+            subtitle="Held by the relay, but this device has no key for it"
+            detail="no key"
+            rightElement={<Ionicons name="help-circle" size={22} color="#FF9500" />}
+            showChevron={false}
+        />
+    );
+});
+
 export default function DevScreen() {
     const router = useRouter();
     const [debugMode, setDebugMode] = useLocalSettingMutable('debugMode');
     const [verboseLogging, setVerboseLogging] = React.useState(false);
+    // The one LAN socket this device is holding, for the transport line under the LAN block.
+    const lanSocket = Object.entries(useDaemonSockets()).find(([key, socket]) => key.endsWith(':lan') && socket.phase === 'live')?.[1];
     const socketStatus = useSocketStatus();
+    const daemonSockets = useDaemonSockets();
+    const lanSightingCount = Object.keys(useLanSightings()).length;
+    const lanConnections = Object.values(daemonSockets).filter((state) => state.route === 'lan');
+    const lanConnectedCount = lanConnections.filter((state) => state.phase === 'live').length;
+    const lanPhase = aggregatePhase(lanConnections);
+    const [channelPriority] = useLocalSettingMutable('channelPriority');
+    const rates = useMetricRates();
+    const fetchPool = useFetchPoolStats();
+    const diagnostics = useChannelDiagnostics();
+    const relayDirectory = useRelayDirectory();
+    const relayUnknownTags = useRelayUnknownTags();
+    const relayHubConnected = useRelayHubConnected();
+    const relayEnabled = channelEnabled(channelPriority, 'relay');
     const anonymousId = sync.encryption!.anonID;
     const { theme } = useUnistyles();
 
@@ -58,26 +203,6 @@ export default function DevScreen() {
         }
     };
 
-    // Helper function to format time ago
-    const formatTimeAgo = (timestamp: number | null): string => {
-        if (!timestamp) return '';
-
-        const now = Date.now();
-        const diff = now - timestamp;
-        const seconds = Math.floor(diff / 1000);
-        const minutes = Math.floor(seconds / 60);
-        const hours = Math.floor(minutes / 60);
-        const days = Math.floor(hours / 24);
-
-        if (seconds < 10) return 'Just now';
-        if (seconds < 60) return `${seconds}s ago`;
-        if (minutes < 60) return `${minutes}m ago`;
-        if (hours < 24) return `${hours}h ago`;
-        if (days < 7) return `${days}d ago`;
-
-        return new Date(timestamp).toLocaleDateString();
-    };
-
     // Helper function to get socket status subtitle
     const getSocketStatusSubtitle = (): string => {
         const { status, lastConnectedAt, lastDisconnectedAt } = socketStatus;
@@ -108,6 +233,9 @@ export default function DevScreen() {
                 return <Ionicons name="help-circle" size={22} color="#8E8E93" />;
         }
     };
+
+    const relayMachineCount = Object.keys(relayDirectory).length + relayUnknownTags.length;
+    const relaySessionCount = Object.values(relayDirectory).reduce((total, entry) => total + entry.sessions.length, 0);
 
     return (
         <ItemList>
@@ -335,21 +463,96 @@ export default function DevScreen() {
                 />
             </ItemGroup>
 
-            {/* Network */}
-            <ItemGroup title="Network">
+            {/* Load: what the sync engine is doing right now, which is what a warm device is
+                usually asking about. Counters, not a profiler — small enough to leave on. */}
+            <ItemGroup title="Load">
                 <Item
-                    title="API Endpoint"
-                    detail={getServerUrl()}
-                    onPress={handleEditServerUrl}
-                    detailStyle={{ flex: 1, textAlign: 'right', minWidth: '70%' }}
-                />
-                <Item
-                    title="Socket.IO Status"
-                    subtitle={getSocketStatusSubtitle()}
-                    detail={socketStatus.status}
-                    rightElement={<SocketStatusIndicator />}
+                    title="Store writes"
+                    subtitle={`${formatRate(rates?.storeWrites)} writes/s · ${formatRate(rates?.messagesApplied)} messages/s applied`}
                     showChevron={false}
                 />
+                <Item
+                    title="Daemon channel"
+                    subtitle={`${formatRate(rates?.socketFrames)} socket frames/s · ${formatRate(rates?.entriesDecrypted)} entries/s decrypted`}
+                    showChevron={false}
+                />
+                <Item
+                    title="Message cache"
+                    subtitle={rates
+                        ? `${formatRate(rates.cacheSaves)} saves/s · ${(rates.cacheBytes / 1024).toFixed(1)} KB/s of state serialised`
+                        : 'sampling…'}
+                    showChevron={false}
+                />
+                <Item
+                    title="Open session channel"
+                    subtitle={diagnostics
+                        ? `${diagnostics.channel} · window ${diagnostics.window} · ${diagnostics.hasOlder ? 'older available' : 'complete'}`
+                        : 'No session is open'}
+                    detail={diagnostics
+                        ? `head ${diagnostics.logHead ?? '—'} · read ${diagnostics.readTo ?? '—'} · pushed ${diagnostics.pushedTo ?? '—'}`
+                        : undefined}
+                    showChevron={false}
+                />
+                <Item
+                    title="Fetch pool"
+                    subtitle={fetchPool
+                        ? `${fetchPool.inFlight}/5 in flight · ${fetchPool.queued} queued${fetchPool.oldestMs > 5_000 ? ` · oldest held ${(fetchPool.oldestMs / 1000).toFixed(0)}s` : ''}`
+                        : 'sampling…'}
+                    showChevron={false}
+                />
+            </ItemGroup>
+
+            {/* Network */}
+            <ItemGroup
+                title="Network"
+                footer="Reachability and use are different things: a daemon can be advertising while no session is using it — the socket only opens for a session whose machine is on this network and whose CLI declared it can serve one. So an idle socket is not a broken one."
+            >
+                <Item
+                    title="Channel Priority"
+                    subtitle="The order every decision is made in — a channel is on when it is in the list"
+                    detail={channelPriority.map((c) => c === 'lan' ? 'LAN' : c === 'relay' ? 'Relay' : 'Server').join(' › ')}
+                    icon={<Ionicons name="git-branch-outline" size={28} color="#007AFF" />}
+                    onPress={() => router.push('/dev/channels')}
+                />
+                <ChannelBlock
+                    channel="lan"
+                    liveness={
+                        <Item
+                            title="LAN Socket"
+                            subtitle={lanSocket
+                                ? `${lanSocket.baseUrl} · up ${formatTimeAgo(lanSocket.connectedAt)}`
+                                : 'No daemon on this network is serving an open channel'}
+                            detail={lanSocket ? 'live' : 'off'}
+                            rightElement={lanSocket
+                                ? <Ionicons name="checkmark-circle" size={22} color="#34C759" />
+                                : <Ionicons name="close-circle" size={22} color="#8E8E93" />}
+                            showChevron={false}
+                        />
+                    }
+                />
+                <ChannelBlock channel="relay" />
+                <ChannelBlock
+                    channel="server"
+                    liveness={
+                        <Item
+                            title="Server Socket"
+                            subtitle={getSocketStatusSubtitle()}
+                            detail={socketStatus.status}
+                            rightElement={<SocketStatusIndicator />}
+                            showChevron={false}
+                        />
+                    }
+                >
+                    <Item
+                        title="API Endpoint"
+                        subtitle="The server this device talks to"
+                        detail={getServerUrl()}
+                        onPress={handleEditServerUrl}
+                    />
+                </ChannelBlock>
+                {relayUnknownTags.map((tag) => (
+                    <RelayUnknownRow key={tag} tag={tag} />
+                ))}
             </ItemGroup>
         </ItemList>
     );

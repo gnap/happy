@@ -1,9 +1,11 @@
 import * as React from 'react';
-import { View, Platform, Text } from 'react-native';
-import { WebView } from 'react-native-webview';
+import { View, Platform, Text, useWindowDimensions, Pressable } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
+import { storeTempText } from '@/sync/persistence';
+import { useRouter } from 'expo-router';
+import { mermaidScriptTag } from './mermaid-source';
 
 // Style for Web platform
 const webStyle: any = {
@@ -18,15 +20,19 @@ export const MermaidRenderer = React.memo((props: {
     content: string;
 }) => {
     const { theme } = useUnistyles();
-    const [dimensions, setDimensions] = React.useState({ width: 0, height: 200 });
+    const { width: screenWidth } = useWindowDimensions();
+    const router = useRouter();
+    const [webViewHeight, setWebViewHeight] = React.useState(400);
     const [svgContent, setSvgContent] = React.useState<string | null>(null);
 
-    const onLayout = React.useCallback((event: any) => {
-        const { width } = event.nativeEvent.layout;
-        setDimensions(prev => ({ ...prev, width }));
-    }, []);
+    const containerWidth = screenWidth > 0 ? Math.floor(screenWidth) - 32 : 300;
 
-    // Web platform uses direct SVG rendering for better performance and native DOM integration
+    const handlePress = React.useCallback(() => {
+        const textId = storeTempText(props.content);
+        router.push(`/svg-viewer?textId=${textId}&type=mermaid`);
+    }, [props.content, router]);
+
+    // Web platform uses direct SVG rendering
     if (Platform.OS === 'web') {
         const [hasError, setHasError] = React.useState(false);
 
@@ -103,69 +109,63 @@ export const MermaidRenderer = React.memo((props: {
         );
     }
 
-    // For iOS/Android, use WebView
+    // iOS/Android: WebView with CDN mermaid
+    // Use require() with try-catch — dynamic import() fails silently on iOS
+    let WebViewComp: any = null;
+    if (Platform.OS !== 'web') {
+        try { WebViewComp = require('react-native-webview').WebView; } catch { /* unsupported */ }
+    }
+
     const html = `
         <!DOCTYPE html>
         <html>
         <head>
             <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+            ${mermaidScriptTag()}
             <style>
-                body {
-                    margin: 0;
-                    padding: 16px;
-                    background-color: ${theme.colors.surfaceHighest};
-                }
-                #mermaid-container {
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
-                    width: 100%;
-                }
-                .mermaid {
-                    text-align: center;
-                    width: 100%;
-                }
-                .mermaid svg {
-                    max-width: 100%;
-                    height: auto;
-                }
+                body { margin: 0; padding: 16px; background-color: ${theme.colors.surfaceHighest}; }
+                #mermaid-container { display: flex; justify-content: center; align-items: center; width: 100%; }
+                .mermaid { text-align: center; width: 100%; }
+                .mermaid svg { max-width: 100%; height: auto; }
             </style>
         </head>
         <body>
-            <div id="mermaid-container" class="mermaid">
-                ${props.content}
-            </div>
+            <div id="mermaid-container" class="mermaid">${props.content}</div>
             <script>
-                mermaid.initialize({
-                    startOnLoad: true,
-                    theme: 'dark'
-                });
+                mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+                setTimeout(function() {
+                    var h = Math.max(document.body.scrollHeight, document.body.offsetHeight);
+                    window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'dimensions', height: h }));
+                }, 300);
             </script>
         </body>
         </html>
     `;
 
+    if (!WebViewComp) {
+        return <View style={[style.container, { height: 100 }]} />;
+    }
+
     return (
-        <View style={style.container} onLayout={onLayout}>
-            <View style={[style.innerContainer, { height: dimensions.height }]}>
-                <WebView
+        <Pressable onPress={handlePress}>
+            <View style={style.container}>
+                <WebViewComp
                     source={{ html }}
-                    style={{ flex: 1 }}
+                    style={{ width: containerWidth, height: webViewHeight, borderRadius: 8 }}
                     scrollEnabled={false}
-                    onMessage={(event) => {
-                        const data = JSON.parse(event.nativeEvent.data);
-                        if (data.type === 'dimensions') {
-                            setDimensions(prev => ({
-                                ...prev,
-                                height: Math.max(prev.height, data.height)
-                            }));
-                        }
+                    onMessage={(event: any) => {
+                        try {
+                            const data = JSON.parse(event.nativeEvent.data);
+                            if (data.type === 'dimensions') setWebViewHeight(prev => Math.max(prev, data.height));
+                        } catch { /* ignore */ }
                     }}
                 />
+                <View style={style.tapHint}>
+                    <Text style={style.tapHintText}>Tap to view full diagram</Text>
+                </View>
             </View>
-        </View>
+        </Pressable>
     );
 });
 
@@ -173,11 +173,6 @@ const style = StyleSheet.create((theme) => ({
     container: {
         marginVertical: 8,
         width: '100%',
-    },
-    innerContainer: {
-        width: '100%',
-        backgroundColor: theme.colors.surfaceHighest,
-        borderRadius: 8,
     },
     loadingContainer: {
         justifyContent: 'center',
@@ -214,5 +209,14 @@ const style = StyleSheet.create((theme) => ({
         color: theme.colors.text,
         fontSize: 14,
         lineHeight: 20,
+    },
+    tapHint: {
+        alignItems: 'center',
+        paddingVertical: 4,
+    },
+    tapHintText: {
+        fontSize: 11,
+        color: theme.colors.textSecondary,
+        ...Typography.default(),
     },
 }));

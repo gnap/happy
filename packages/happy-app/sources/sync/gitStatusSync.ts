@@ -135,6 +135,14 @@ export class GitStatusSync {
             });
 
             if (!statusResult.success) {
+                // The same situation as the `rev-parse` check above — this repo cannot be read right
+                // now — so it is answered the same way. Returning without clearing left the previous
+                // status in place, which is a badge describing a working tree that may since have
+                // changed, and it outlives the condition that produced it.
+                storage.getState().applyGitStatus(sessionId, null);
+                if (session.metadata?.machineId) {
+                    projectManager.updateProjectGitStatus(createProjectKey(session.metadata.machineId, cwd), null);
+                }
                 console.error('Failed to get git status:', statusResult.error);
                 return;
             }

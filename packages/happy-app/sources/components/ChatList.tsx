@@ -1,18 +1,48 @@
 import * as React from 'react';
 import { useSession, useSessionMessages } from "@/sync/storage";
-import { ActivityIndicator, FlatList, NativeScrollEvent, NativeSyntheticEvent, Platform, View } from 'react-native';
+import { log } from "@/log";
+import { ActivityIndicator, FlatList, Keyboard, NativeScrollEvent, NativeSyntheticEvent, Platform, StyleSheet, Text, View } from 'react-native';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useHeaderHeight } from '@/utils/responsive';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MessageView } from './MessageView';
 import { TaskListView } from './TaskListView';
-import { computeMessageClusters, ClusterOptions } from './clusterTimeline';
+import { computeMessageClusters, ClusterOptions, type TaskClusterMessage } from './clusterTimeline';
 import { Metadata, Session } from '@/sync/storageTypes';
 import { layout } from './layout';
 import { ChatFooter } from './ChatFooter';
 import { Message } from '@/sync/typesMessage';
 import { sync } from '@/sync/sync';
 import { useUnistyles } from 'react-native-unistyles';
+import { dividerKindFor, formatClock, formatDividerDate, type DividerKind } from '@/sync/messageDividers';
+import { t } from '@/text';
+
+/**
+ * One row of the list: the thing to draw, and the divider that belongs to it. A row's divider is
+ * drawn above it, except for the newest message — whose time belongs *below* it, at the end of the
+ * content, where it reads as the end of the conversation rather than as a heading for the message
+ * that happens to be last.
+ */
+type ChatRow = { node: Message | TaskClusterMessage; divider: DividerKind; dividerBelow: boolean };
+
+/**
+ * A time divider above a group of messages, the way a chat app marks "when" without repeating a
+ * clock on every bubble. Sits inside the row it belongs to, which on an inverted list is the row
+ * above the message it labels.
+ */
+const TimeDivider = React.memo(({ kind, at }: { kind: DividerKind; at: number }) => {
+    const { theme } = useUnistyles();
+    const label = kind === 'yesterday'
+        ? `${t('time.yesterday')} ${formatClock(at)}`
+        : kind === 'date'
+            ? `${formatDividerDate(at, Date.now())} ${formatClock(at)}`
+            : formatClock(at);
+    return (
+        <View style={styles.dividerRow}>
+            <Text style={[styles.dividerText, { color: theme.colors.textSecondary, backgroundColor: theme.colors.surfaceHigh }]}>{label}</Text>
+        </View>
+    );
+});
 
 export const ChatList = React.memo((props: { session: Session }) => {
     const { messages, hasOlderMessages, isLoadingOlder, isFetching } = useSessionMessages(props.session.id);
@@ -71,11 +101,22 @@ const ChatListInternal = React.memo((props: {
     isFetching: boolean,
     tasks: Session['tasks'],
 }) => {
-    const flatListRef = useRef<FlatList>(null);
+    const flatListRef = useRef<FlatList<ChatRow>>(null);
     // Track whether the user is near the visual bottom (newest messages).
     // In an inverted FlatList, offset 0 = visual bottom.
     const isNearBottomRef = useRef(true);
     const prevMessagesLengthRef = useRef(props.messages.length);
+    /**
+     * Whether the keyboard is up. A new message triggers a scroll to the newest row; doing that
+     * while a third-party keyboard (or its voice input) owns the screen fights it for the gesture
+     * and can dismiss it. The list follows the conversation again once the keyboard is gone.
+     */
+    const keyboardVisible = useRef(false);
+    React.useEffect(() => {
+        const show = Keyboard.addListener('keyboardWillShow', () => { keyboardVisible.current = true; });
+        const hide = Keyboard.addListener('keyboardWillHide', () => { keyboardVisible.current = false; });
+        return () => { show.remove(); hide.remove(); };
+    }, []);
 
     const clusterOptions: ClusterOptions | undefined = useMemo(() => {
         if (!props.tasks || props.tasks.length === 0) return undefined;
@@ -86,25 +127,51 @@ const ChatListInternal = React.memo((props: {
         return m.size > 0 ? { taskContentMap: m } : undefined;
     }, [props.tasks]);
 
-    const messagesWithTasks = useMemo(
-        () => computeMessageClusters(props.messages, clusterOptions),
-        [props.messages, clusterOptions],
-    );
+    // Each row carries the divider that belongs above it. The list renders newest first and is
+    // inverted, so the row *below* a message in the data is the older one — which is the neighbour
+    // the divider is decided against.
+    const rows = useMemo<ChatRow[]>(() => {
+        const clustered = computeMessageClusters(props.messages, clusterOptions);
+        const now = Date.now();
+        return clustered.map((node, index) => {
+            // Both ends of the loaded window always carry a divider, for the same reason in opposite
+            // directions: the top is where the conversation continues past what this device holds,
+            // and the bottom is the time of the latest thing said — the first thing a reader looks
+            // for, and exactly what the pace rule hides while a conversation is moving.
+            const newest = index === 0;
+            const older = newest || index + 1 >= clustered.length
+                ? null
+                : clustered[index + 1].createdAt;
+            return { node, divider: dividerKindFor(node.createdAt, older, now), dividerBelow: newest };
+        });
+    }, [props.messages, clusterOptions]);
 
-    const keyExtractor = useCallback((item: any) => item.id, []);
-    const renderItem = useCallback(({ item }: { item: any }) => {
+    const keyExtractor = useCallback((row: ChatRow) => row.node.id, []);
+    const renderItem = useCallback(({ item: row }: { item: ChatRow }) => {
+        const item = row.node;
+        const divider = row.divider !== 'none' ? <TimeDivider kind={row.divider} at={item.createdAt} /> : null;
         if (item.kind === 'task-cluster') {
             return (
-                <View style={{ flexDirection: 'row', justifyContent: 'center' }}>
-                    <View style={{ flexDirection: 'column', flexGrow: 1, flexBasis: 0, maxWidth: layout.maxWidth }}>
-                        <View style={{ marginHorizontal: 8, marginBottom: 12 }}>
-                            <TaskListView tasks={item.tasks} />
+                <>
+                    {!row.dividerBelow && divider}
+                    <View style={{ flexDirection: 'row', justifyContent: 'center' }}>
+                        <View style={{ flexDirection: 'column', flexGrow: 1, flexBasis: 0, maxWidth: layout.maxWidth }}>
+                            <View style={{ marginHorizontal: 8, marginBottom: 12 }}>
+                                <TaskListView tasks={item.tasks} />
+                            </View>
                         </View>
                     </View>
-                </View>
+                {row.dividerBelow && divider}
+                </>
             );
         }
-        return <MessageView message={item} metadata={props.metadata} sessionId={props.sessionId} />;
+        return (
+            <>
+                {!row.dividerBelow && divider}
+                <MessageView message={item} metadata={props.metadata} sessionId={props.sessionId} />
+                {row.dividerBelow && divider}
+            </>
+        );
     }, [props.metadata, props.sessionId]);
 
     const handleEndReached = useCallback(() => {
@@ -113,6 +180,12 @@ const ChatListInternal = React.memo((props: {
         }
     }, [props.hasOlderMessages, props.isLoadingOlder, props.sessionId]);
 
+    /**
+     * How long the time stays out after the pull settles.
+     *
+     * Long enough to read a clock, short enough that it is gone by the time the reader is reading
+     * the conversation again — the label is a peek, not a resident.
+     */
     const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
         isNearBottomRef.current = event.nativeEvent.contentOffset.y < 80;
     }, []);
@@ -122,10 +195,10 @@ const ChatListInternal = React.memo((props: {
         const prev = prevMessagesLengthRef.current;
         const curr = props.messages.length;
         prevMessagesLengthRef.current = curr;
-        if (curr > prev && isNearBottomRef.current) {
+        if (curr > prev && isNearBottomRef.current && !keyboardVisible.current) {
             flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
         }
-    }, [messagesWithTasks]);
+    }, [rows]);
 
     // In an inverted FlatList:
     //   ListHeaderComponent → visual bottom (below newest message, above input)
@@ -146,15 +219,19 @@ const ChatListInternal = React.memo((props: {
     ), [props.isLoadingOlder]);
 
     return (
-        <FlatList
+        <FlatList<ChatRow>
             ref={flatListRef}
-            data={messagesWithTasks}
+            data={rows}
             inverted={true}
             keyExtractor={keyExtractor}
-            maintainVisibleContentPosition={{
-                minIndexForVisible: 0,
-                autoscrollToTopThreshold: 10,
-            }}
+            // No maintainVisibleContentPosition here, deliberately. On an inverted list it defeats
+            // windowing: it made the list mount far more cells than `windowSize` allows, and
+            // opening a session spent ~1.3s building that extra window. An inverted list already
+            // stays anchored at the newest message, and the effect below re-pins it explicitly,
+            // so it was buying nothing.
+            //
+            // Measured on device when opening a ~2000 message session — cells actually mounted
+            // fell from ~60 to 24 and the fill burst from ~1277ms to ~270ms.
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'none'}
             renderItem={renderItem}
@@ -164,6 +241,30 @@ const ChatListInternal = React.memo((props: {
             scrollEventThrottle={100}
             ListHeaderComponent={listHeader}
             ListFooterComponent={listFooter}
+            // A busy session is thousands of messages and nothing here had ever been tuned, so
+            // FlatList's defaults applied: 10 to start, 10 per batch, and a 21-viewport window —
+            // neither the mount nor the per-batch reconcile proportional to what is on screen.
+            // These bound it to roughly the visible area. (The cells themselves turned out to be
+            // cheap to render — markdown parse and syntax tokenize measure ~0ms — so the cost was
+            // the window's size, not any one cell.)
+            initialNumToRender={8}
+            maxToRenderPerBatch={8}
+            updateCellsBatchingPeriod={50}
+            windowSize={7}
         />
     )
+});
+
+const styles = StyleSheet.create({
+    dividerRow: {
+        alignItems: 'center',
+        paddingVertical: 10,
+    },
+    dividerText: {
+        fontSize: 12,
+        paddingHorizontal: 8,
+        paddingVertical: 2,
+        borderRadius: 10,
+        overflow: 'hidden',
+    },
 });

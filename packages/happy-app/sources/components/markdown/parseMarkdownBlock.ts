@@ -94,11 +94,36 @@ export function parseMarkdownBlock(markdown: string) {
             }
             const contentString = content.join('\n');
 
-            // Detect mermaid diagram language and route to appropriate block type
+            // Detect special languages for dedicated renderers
             if (language === 'mermaid') {
                 blocks.push({ type: 'mermaid', content: contentString });
+            } else if (language === 'svg') {
+                blocks.push({ type: 'svg', content: contentString });
             } else {
                 blocks.push({ type: 'code-block', language, content: contentString });
+            }
+            continue;
+        }
+
+        // Math block ($$ ... $$)
+        if (trimmed.startsWith('$$') && !trimmed.startsWith('$$$')) {
+            const singleLine = trimmed.match(/^\$\$(.+?)\$\$$/);
+            if (singleLine) {
+                blocks.push({ type: 'math', content: singleLine[1].trim() });
+                continue;
+            }
+            // Multi-line math block
+            const content: string[] = [];
+            while (index < lines.length) {
+                if (lines[index].trim() === '$$') {
+                    index++;
+                    break;
+                }
+                content.push(lines[index]);
+                index++;
+            }
+            if (content.length > 0) {
+                blocks.push({ type: 'math', content: content.join('\n').trim() });
             }
             continue;
         }

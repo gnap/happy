@@ -13,7 +13,7 @@
 import { ReducerState, createReducer } from '../reducer/reducer';
 import { TracerState, createTracer } from '../reducer/reducerTracer';
 import type { NormalizedMessage } from '../typesRaw';
-import type { ToolCall } from '../typesMessage';
+import type { MessageFile, ToolCall } from '../typesMessage';
 import type { MessageMeta } from '../typesMessageMeta';
 import type { AgentEvent } from '../typesRaw';
 
@@ -27,11 +27,18 @@ export interface PersistedReducerMessage {
     localId?: string | null;
     createdAt: number;
     role: 'user' | 'agent';
+    /**
+     * The server's seq. Persisted because the state is now what the window keeps: the display
+     * messages are materialised from it, and their seq is what dedup and paging compare.
+     */
+    seq?: number;
     text: string | null;
     isThinking?: boolean;
     event: AgentEvent | null;
     tool: ToolCall | null;
     meta?: MessageMeta;
+    /** Attachments on a user message — the display projection reads them from the state. */
+    files?: MessageFile[];
 }
 
 interface PersistedStoredPermission {
@@ -94,7 +101,18 @@ export interface PersistedReducerState {
     };
 }
 
-export const SERIALIZER_SCHEMA_VERSION = 1;
+/**
+ * The persisted shape's version.
+ *
+ * 3 is the shape whose reducer messages carry `seq` and `files`, because the hot window now keeps
+ * the state and derives the messages from it rather than storing both. A state of any other
+ * version is ignored and the reducer starts fresh — the message rows are unaffected, so the only
+ * loss is cross-request continuity for a tool call that was running across the upgrade.
+ *
+ * (2 is skipped on purpose: an earlier build on this device wrote that number with a different
+ * message shape, and accepting it as this one would restore fields it never had.)
+ */
+export const SERIALIZER_SCHEMA_VERSION = 3;
 
 // ---------------------------------------------------------------------------
 // Serialization
@@ -126,6 +144,36 @@ export function serializeReducerState(state: ReducerState): PersistedReducerStat
         latestTodos: state.latestTodos,
         latestTasks: state.latestTasks,
         latestUsage: state.latestUsage,
+    };
+}
+
+/**
+ * The state that belongs to the messages a load would actually hand back.
+ *
+ * What is persisted is read on every open, as one string across the bridge — and it grew with the
+ * session rather than with the window: three megabytes for a session whose window is sixty messages,
+ * measured at 1.8s of the 1.9s an open cost. The entries for messages outside that window cannot be
+ * used by anything that reads this back, because they describe messages that will not be there.
+ *
+ * So it is trimmed by message id, which is what these maps are keyed or valued on. The maps whose
+ * keys mean something else (`permissions`, `sidechains`, `taskTools`) are small and are kept whole.
+ */
+export function trimReducerState(state: ReducerState, keepIds: Set<string>): ReducerState {
+    const byValue = <K>(entries: Iterable<[K, string]>) => new Map([...entries].filter(([, messageId]) => keepIds.has(messageId)));
+    const byKey = <V>(entries: Iterable<[string, V]>) => new Map([...entries].filter(([id]) => keepIds.has(id)));
+    return {
+        ...state,
+        messages: byKey(state.messages),
+        messageIds: byKey(state.messageIds),
+        localIds: byKey(state.localIds),
+        toolIdToMessageId: byValue(state.toolIdToMessageId),
+        sidechainToolIdToMessageId: byValue(state.sidechainToolIdToMessageId),
+        tracerState: {
+            ...state.tracerState,
+            toolCallToMessageId: byValue(state.tracerState.toolCallToMessageId),
+            orphanMessages: byKey(state.tracerState.orphanMessages),
+            processedIds: new Set([...state.tracerState.processedIds].filter((id) => keepIds.has(id))),
+        },
     };
 }
 

@@ -8,10 +8,11 @@ import { Ionicons } from '@expo/vector-icons';
 import { getSessionName, useSessionStatus, getSessionAvatarId, formatPathRelativeToHome } from '@/utils/sessionUtils';
 import { Avatar } from './Avatar';
 import { Typography } from '@/constants/Typography';
-import { StatusDot } from './StatusDot';
-import { useAllMachines, useSetting } from '@/sync/storage';
+import { SessionStatusDot } from './SessionStatusDot';
+import { MachinePresenceBadge } from './MachinePresenceBadge';
+import { useAllMachines, useSetting, useMachinesMap, useMachinePresenceMap, useLanSightings, useRelayDirectory, useRelayEndpoints, useMachineBadgeInputs } from '@/sync/storage';
+import { MACHINE_PRESENCE_COLORS } from '@/sync/machinePresence';
 import { StyleSheet } from 'react-native-unistyles';
-import { isMachineOnline } from '@/utils/machineUtils';
 import { machineSpawnNewSession, sessionKill } from '@/sync/ops';
 import { storage } from '@/sync/storage';
 import { Modal } from '@/modal';
@@ -23,6 +24,7 @@ import { useIsTablet } from '@/utils/responsive';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { HappyError } from '@/utils/errors';
 import { SessionRowStatusIndicators } from './SessionRowStatusIndicators';
+import { sessionNeedsRestart, useDaemonVersions } from '@/sync/storage';
 
 const stylesheet = StyleSheet.create((theme, runtime) => ({
     container: {
@@ -54,6 +56,12 @@ const stylesheet = StyleSheet.create((theme, runtime) => ({
         alignItems: 'center',
         flex: 1,
         marginRight: 8,
+    },
+    /** Git status (or machine name) with the reachability badge alongside it. */
+    sectionHeaderRight: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
     },
     sectionHeaderPath: {
         ...Typography.default('regular'),
@@ -202,14 +210,18 @@ interface ActiveSessionsGroupProps {
 
 export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessionsGroupProps) {
     const styles = stylesheet;
-    const machines = useAllMachines();
-    const machinesMap = React.useMemo(() => {
-        const map: Record<string, Machine> = {};
-        machines.forEach(machine => {
-            map[machine.id] = machine;
-        });
-        return map;
-    }, [machines]);
+    // Unfiltered on purpose: `useAllMachines` drops server-inactive machines, but a machine that
+    // is currently server-inactive may still be sitting on the LAN — and it still needs its real
+    // name in the group header rather than a bare machineId.
+    const machinesMap = useMachinesMap();
+    const machinePresence = useMachinePresenceMap();
+    const lanSightings = useLanSightings();
+    const relayDirectory = useRelayDirectory();
+    const relayEndpoints = useRelayEndpoints();
+    /** The same baseline the other list uses, so the mark means one thing in both. */
+    const daemonVersions = useDaemonVersions();
+    /** What a machine's glyphs should show, from the channels — one source for every badge. */
+    const badgeInputs = useMachineBadgeInputs();
 
     // Group sessions by project, then associate with machine
     const projectGroups = React.useMemo(() => {
@@ -285,6 +297,11 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
                 const machineName = projectGroup.machines.size === 1
                     ? firstMachine?.machineName
                     : `${projectGroup.machines.size} machines`;
+                // Presence is per machine, so only badge the header when the project maps to
+                // exactly one; with several the header would have to pick one arbitrarily.
+                const singleMachineId = projectGroup.machines.size === 1
+                    ? Array.from(projectGroup.machines.keys())[0]
+                    : undefined;
 
                 return (
                     <View key={projectPath}>
@@ -295,18 +312,32 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
                                     {projectGroup.displayPath}
                                 </Text>
                             </View>
-                            {/* Show git status instead of machine name */}
-                            {(() => {
-                                // Get the first session from any machine in this project
-                                const firstSession = Array.from(projectGroup.machines.values())[0]?.sessions[0];
-                                return firstSession ? (
-                                    <ProjectGitStatus sessionId={firstSession.id} />
-                                ) : (
-                                    <Text style={styles.sectionHeaderMachine} numberOfLines={1}>
-                                        {machineName}
-                                    </Text>
-                                );
-                            })()}
+                            {/* Right side: git status (or machine name) plus how the machine is
+                                reachable. The badge sits outside that either/or so it stays
+                                visible even when git status takes the slot. */}
+                            <View style={styles.sectionHeaderRight}>
+                                {(() => {
+                                    // Get the first session from any machine in this project
+                                    const firstSession = Array.from(projectGroup.machines.values())[0]?.sessions[0];
+                                    return firstSession ? (
+                                        <ProjectGitStatus sessionId={firstSession.id} />
+                                    ) : (
+                                        <Text style={styles.sectionHeaderMachine} numberOfLines={1}>
+                                            {machineName}
+                                        </Text>
+                                    );
+                                })()}
+                                {singleMachineId ? (
+                                    <MachinePresenceBadge
+                                        machineId={singleMachineId}
+                                        // Asked of the channels, not assembled here: this badge and
+                                        // the settings row built their inputs separately and
+                                        // disagreed about which machines had earned a relay glyph,
+                                        // and neither counted a socket this App was holding.
+                                        {...badgeInputs(singleMachineId)}
+                                    />
+                                ) : null}
+                            </View>
                         </View>
 
                         {/* Card with just the sessions */}
@@ -318,6 +349,7 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
                                     <View key={`${projectPath}-${machineId}`}>
                                         {machineGroup.sessions.map((session, index) => (
                                             <CompactSessionRow
+                                                needsRestart={sessionNeedsRestart(session, machinesMap, daemonVersions)}
                                                 key={session.id}
                                                 session={session}
                                                 selected={selectedSessionId === session.id}
@@ -336,7 +368,7 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
 }
 
 // Compact session row component with status line
-const CompactSessionRow = React.memo(({ session, selected, showBorder }: { session: Session; selected?: boolean; showBorder?: boolean }) => {
+const CompactSessionRow = React.memo(({ session, selected, showBorder, needsRestart }: { session: Session; selected?: boolean; showBorder?: boolean; needsRestart?: boolean }) => {
     const styles = stylesheet;
     const sessionStatus = useSessionStatus(session);
     const sessionName = getSessionName(session);
@@ -391,7 +423,7 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
             }}
         >
             <View style={styles.avatarContainer}>
-                <Avatar id={avatarId} size={48} monochrome={!sessionStatus.isConnected} flavor={session.metadata?.flavor} />
+                <Avatar id={avatarId} size={48} monochrome={!sessionStatus.isLive} flavor={session.metadata?.flavor} />
             </View>
             <View style={styles.sessionContent}>
                 {/* Title line */}
@@ -399,7 +431,7 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
                     <Text
                         style={[
                             styles.sessionTitle,
-                            sessionStatus.isConnected ? styles.sessionTitleConnected : styles.sessionTitleDisconnected
+                            sessionStatus.isLive ? styles.sessionTitleConnected : styles.sessionTitleDisconnected
                         ]}
                         numberOfLines={2}
                     >
@@ -411,7 +443,7 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
                 <View style={styles.statusRow}>
                     <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                         <View style={styles.statusDotContainer}>
-                            <StatusDot color={sessionStatus.statusDotColor} isPulsing={sessionStatus.isPulsing} />
+                            <SessionStatusDot sessionId={session.id} color={sessionStatus.statusDotColor} isPulsing={sessionStatus.isPulsing} />
                         </View>
                         <Text style={[
                             styles.statusText,
@@ -436,7 +468,7 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
 
                         {/* No longer showing git status per item - it's in the header */}
 
-                        <SessionRowStatusIndicators session={session} />
+                        <SessionRowStatusIndicators session={session} needsRestart={needsRestart} />
                     </View>
                 </View>
             </View>

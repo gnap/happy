@@ -21,6 +21,9 @@ export type MarkdownBlock = {
     type: 'mermaid',
     content: string
 } | {
+    type: 'svg',
+    content: string
+} | {
     type: 'horizontal-rule'
 } | {
     type: 'options',
@@ -29,10 +32,13 @@ export type MarkdownBlock = {
     type: 'table',
     headers: string[],
     rows: string[][]
+} | {
+    type: 'math',
+    content: string
 }
 
 export type MarkdownSpan = {
-    styles: ('italic' | 'bold' | 'semibold' | 'code')[],
+    styles: ('italic' | 'bold' | 'semibold' | 'code' | 'math')[],
     text: string,
     url: string | null
 }

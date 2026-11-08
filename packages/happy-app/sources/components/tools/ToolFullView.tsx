@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Text, View, ScrollView, Platform, useWindowDimensions } from 'react-native';
+import { Text, View, ScrollView, Platform, useWindowDimensions, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { ToolCall, Message } from '@/sync/typesMessage';
 import { CodeView } from '../CodeView';
@@ -9,6 +9,7 @@ import { layout } from '../layout';
 import { useLocalSetting } from '@/sync/storage';
 import { StyleSheet } from 'react-native-unistyles';
 import { t } from '@/text';
+import { useLazyToolInput } from './views/useLazyToolInput';
 
 interface ToolFullViewProps {
     tool: ToolCall;
@@ -31,67 +32,7 @@ export function ToolFullView({ tool, metadata, messages = [], sessionId, message
                 {SpecializedFullView ? (
                     <SpecializedFullView tool={tool} metadata={metadata || null} messages={messages} sessionId={sessionId} messageId={messageId} />
                 ) : (
-                    <>
-                    {/* Generic fallback for tools without specialized views */}
-                    {/* Tool Description */}
-                    {tool.description && (
-                        <View style={styles.section}>
-                            <View style={styles.sectionHeader}>
-                                <Ionicons name="information-circle" size={20} color="#5856D6" />
-                                <Text style={styles.sectionTitle}>{t('tools.fullView.description')}</Text>
-                            </View>
-                            <Text style={styles.description}>{tool.description}</Text>
-                        </View>
-                    )}
-                    {/* Input Parameters */}
-                    {tool.input && (
-                        <View style={styles.section}>
-                            <View style={styles.sectionHeader}>
-                                <Ionicons name="log-in" size={20} color="#5856D6" />
-                                <Text style={styles.sectionTitle}>{t('tools.fullView.inputParams')}</Text>
-                            </View>
-                            <CodeView code={JSON.stringify(tool.input, null, 2)} />
-                        </View>
-                    )}
-
-                    {/* Result/Output */}
-                    {tool.state === 'completed' && tool.result && (
-                        <View style={styles.section}>
-                            <View style={styles.sectionHeader}>
-                                <Ionicons name="log-out" size={20} color="#34C759" />
-                                <Text style={styles.sectionTitle}>{t('tools.fullView.output')}</Text>
-                            </View>
-                            <CodeView
-                                code={typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2)}
-                            />
-                        </View>
-                    )}
-
-                    {/* Error Details */}
-                    {tool.state === 'error' && tool.result && (
-                        <View style={styles.section}>
-                            <View style={styles.sectionHeader}>
-                                <Ionicons name="close-circle" size={20} color="#FF3B30" />
-                                <Text style={styles.sectionTitle}>{t('tools.fullView.error')}</Text>
-                            </View>
-                            <View style={styles.errorContainer}>
-                                <Text style={styles.errorText}>{String(tool.result)}</Text>
-                            </View>
-                        </View>
-                    )}
-
-                    {/* No Output Message */}
-                    {tool.state === 'completed' && !tool.result && (
-                        <View style={styles.section}>
-                            <View style={styles.emptyOutputContainer}>
-                                <Ionicons name="checkmark-circle-outline" size={48} color="#34C759" />
-                                <Text style={styles.emptyOutputText}>{t('tools.fullView.completed')}</Text>
-                                <Text style={styles.emptyOutputSubtext}>{t('tools.fullView.noOutput')}</Text>
-                            </View>
-                        </View>
-                    )}
-
-                </>
+                    <GenericToolBody tool={tool} sessionId={sessionId} messageId={messageId} />
                 )}
                 
                 {/* Raw JSON View (Dev Mode Only) */}
@@ -122,7 +63,89 @@ export function ToolFullView({ tool, metadata, messages = [], sessionId, message
     );
 }
 
+
+/**
+ * The shape of a tool card whose detail view has no specialised component.
+ *
+ * It is also where "the transcript previews, the detail view loads" is enforced for those tools: a
+ * result the CLI truncated carries a lazy marker, and opening this view is the moment to fetch the
+ * rest. A specialised view does the same on its own; this one covers everything that does not have
+ * one — a file read's contents, an unfamiliar tool's output.
+ */
+function GenericToolBody(props: { tool: ToolCall; sessionId?: string; messageId?: string }) {
+    const { loading } = useLazyToolInput(props.tool, props.sessionId, props.messageId);
+    const { tool } = props;
+    return (
+        <>
+            {loading && (
+                <ActivityIndicator size="small" style={styles.lazyLoading} />
+            )}
+            {/* Tool Description */}
+            {tool.description && (
+                <View style={styles.section}>
+                    <View style={styles.sectionHeader}>
+                        <Ionicons name="information-circle" size={20} color="#5856D6" />
+                        <Text style={styles.sectionTitle}>{t('tools.fullView.description')}</Text>
+                    </View>
+                    <Text style={styles.description}>{tool.description}</Text>
+                </View>
+            )}
+            {/* Input Parameters */}
+            {tool.input && (
+                <View style={styles.section}>
+                    <View style={styles.sectionHeader}>
+                        <Ionicons name="log-in" size={20} color="#5856D6" />
+                        <Text style={styles.sectionTitle}>{t('tools.fullView.inputParams')}</Text>
+                    </View>
+                    <CodeView code={JSON.stringify(tool.input, null, 2)} />
+                </View>
+            )}
+
+            {/* Result/Output */}
+            {tool.state === 'completed' && tool.result && (
+                <View style={styles.section}>
+                    <View style={styles.sectionHeader}>
+                        <Ionicons name="log-out" size={20} color="#34C759" />
+                        <Text style={styles.sectionTitle}>{t('tools.fullView.output')}</Text>
+                    </View>
+                    <CodeView
+                        code={typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2)}
+                    />
+                </View>
+            )}
+
+            {/* Error Details */}
+            {tool.state === 'error' && tool.result && (
+                <View style={styles.section}>
+                    <View style={styles.sectionHeader}>
+                        <Ionicons name="close-circle" size={20} color="#FF3B30" />
+                        <Text style={styles.sectionTitle}>{t('tools.fullView.error')}</Text>
+                    </View>
+                    <View style={styles.errorContainer}>
+                        <Text style={styles.errorText}>{String(tool.result)}</Text>
+                    </View>
+                </View>
+            )}
+
+            {/* No Output Message */}
+            {tool.state === 'completed' && !tool.result && (
+                <View style={styles.section}>
+                    <View style={styles.emptyOutputContainer}>
+                        <Ionicons name="checkmark-circle-outline" size={48} color="#34C759" />
+                        <Text style={styles.emptyOutputText}>{t('tools.fullView.completed')}</Text>
+                        <Text style={styles.emptyOutputSubtext}>{t('tools.fullView.noOutput')}</Text>
+                    </View>
+                </View>
+            )}
+        </>
+    );
+}
+
 const styles = StyleSheet.create((theme) => ({
+    lazyLoading: {
+        marginVertical: 8,
+        alignSelf: 'flex-start',
+    },
     container: {
         flex: 1,
         backgroundColor: theme.colors.surface,

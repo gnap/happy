@@ -14,12 +14,18 @@ import { Option } from './markdown/MarkdownView';
 import { useSetting, useOutboxEntry, storage } from "@/sync/storage";
 import { Ionicons } from '@expo/vector-icons';
 
-export const MessageView = (props: {
+/**
+ * Memoized because the chat list hands every cell a fresh `messages` array on each incoming
+ * batch (see `applyMessages`), while the message objects inside it keep their identity. Without
+ * this, one new message re-rendered the whole mounted window — measured at 60-250ms per batch,
+ * spiking near a second on a busy session.
+ */
+export const MessageView = React.memo(function MessageView(props: {
   message: Message;
   metadata: Metadata | null;
   sessionId: string;
   getMessageById?: (id: string) => Message | null;
-}) => {
+}) {
   if (props.message.kind === 'tool-call') {
     const name = (props.message as any).tool?.name;
     if (name === 'TaskCreate' || name === 'TaskUpdate' || name === 'TaskGet' || name === 'TaskList') {
@@ -38,7 +44,7 @@ export const MessageView = (props: {
       </View>
     </View>
   );
-};
+});
 
 // RenderBlock function that dispatches to the correct component based on message kind
 function RenderBlock(props: {
@@ -315,7 +321,14 @@ const styles = StyleSheet.create((theme) => ({
     marginHorizontal: 16,
     marginBottom: 12,
     borderRadius: 16,
-    alignSelf: 'flex-start',
+    // The full width of the feed, not the width of the widest thing inside.
+    //
+    // It was `flex-start`, which shrink-wraps: text still looked full width because a long
+    // paragraph measures at the available width, but anything that sizes to its content — a
+    // table, most visibly — came out as wide as its cells, and every `width: '100%'` inside it
+    // resolved against that content width. That is why a table was much narrower than the body
+    // text beside it, and why its cells wrapped in a sliver.
+    alignSelf: 'stretch',
   },
   agentEventContainer: {
     marginHorizontal: 8,

@@ -25,8 +25,8 @@ interface ToolViewProps {
     messageId?: string;
 }
 
-export const ToolView = React.memo<ToolViewProps>((props) => {
-    const { tool, onPress, sessionId, messageId } = props;
+export const ToolView = ((props: ToolViewProps) => {
+    const { tool, onPress, sessionId, messageId, compact } = props;
     const router = useRouter();
     const { theme } = useUnistyles();
 
@@ -209,6 +209,29 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
                 // Try to use a specific tool view component first
                 const SpecificToolView = getToolViewComponent(tool.name);
                 if (SpecificToolView) {
+                    const hasChildren = (props.messages && props.messages.length > 0);
+                    // Suppress the content area when there are no children tool calls
+                    // to display, unless the tool has an error to show.  Workflow/Agent
+                    // cards without sub-agents would otherwise render an empty padded
+                    // <View style={styles.content}> (visible as a white bar below the header).
+                    // The header spinner, elapsed timer, and status icon are sufficient;
+                    // full results are available in the detail page on press.
+                    //
+                    // AskUserQuestion always shows its interactive form — it has no
+                    // children but its content IS the user-facing question UI. ListAgents is the
+                    // same shape of thing: its answer is the content, and a card that hid it would
+                    // make the reader open the message page to learn nothing happened.
+                    // The scheduling and watch cards are the same shape: their content is the
+                    // answer (a countdown), not a list of child calls. A card that hid it would
+                    // leave the reader with a title and no idea when anything happens.
+                    const drawsOwnContent = tool.name === 'AskUserQuestion'
+                        || tool.name === 'ListAgents'
+                        || tool.name === 'ScheduleWakeup'
+                        || tool.name === 'CronCreate'
+                        || tool.name === 'Monitor';
+                    if (!hasChildren && !drawsOwnContent && tool.state !== 'error') {
+                        return null;
+                    }
                     return (
                         <View style={styles.content}>
                             <SpecificToolView tool={tool} metadata={props.metadata} messages={props.messages ?? []} sessionId={sessionId} compact />

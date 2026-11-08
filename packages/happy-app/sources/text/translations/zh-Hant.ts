@@ -80,9 +80,11 @@ export const zhHant: TranslationStructure = {
         error: '錯誤',
         auth_error: '請重新登入',
         online: '線上',
+        lan: 'LAN',
         offline: '離線',
         lastSeen: ({ time }: { time: string }) => `最後活躍時間 ${time}`,
         permissionRequired: '需要權限',
+        restarting: '重啟中…',
         activeNow: '目前活躍',
         unknown: '未知',
         creating: '建立中…',
@@ -92,6 +94,7 @@ export const zhHant: TranslationStructure = {
         justNow: '剛剛',
         minutesAgo: ({ count }: { count: number }) => `${count} 分鐘前`,
         hoursAgo: ({ count }: { count: number }) => `${count} 小時前`,
+        yesterday: '昨天',
     },
 
     connect: {
@@ -217,6 +220,7 @@ export const zhHant: TranslationStructure = {
         networkError: '發生網路錯誤',
         serverError: '發生伺服器錯誤',
         unknownError: '發生未知錯誤',
+        channelCannotServeAction: '這個操作要走伺服器，而你在通道設定裡把它關掉了',
         connectionTimeout: '連線逾時',
         authenticationFailed: '驗證失敗',
         permissionDenied: '權限被拒絕',
@@ -291,6 +295,7 @@ export const zhHant: TranslationStructure = {
             success: 'Worktree 建立成功',
         },
         sessionReadyMessage: '工作階段已就緒，在列表中點擊即可開啟。',
+        sessionCreatedPending: '工作階段已在機器上建立，稍後會出現在清單中。',
     },
 
     sessionHistory: {
@@ -306,6 +311,14 @@ export const zhHant: TranslationStructure = {
     session: {
         inputPlaceholder: '輸入訊息...',
         encrypting: '正在建立連線…',
+        backgroundTasks: '後台任務',
+        activityScheduled: '定時任務',
+        activityOnce: '一次',
+        activityAgents: '代理',
+        activityMonitors: '監控',
+        activityGoals: '目標',
+        activityShell: '後台命令',
+        activityWorkflows: '工作流程',
     },
 
     commandPalette: {
@@ -338,6 +351,8 @@ export const zhHant: TranslationStructure = {
         archiveSessionConfirm: '您確定要封存此工作階段嗎？',
         restartSession: '重新啟動工作階段',
         restartSessionSubtitle: '有新版本的 CLI 可用。重新啟動以升級。',
+        needsDesktop: '此工作階段需要在那台機器上登入桌面後才能啟動。請登入後重試。',
+        restartInDesktop: '在桌面工作階段中重新啟動',
         restartSessionConfirm: '工作階段將以較新版本的 CLI 重新啟動。',
         noMachineId: '此工作階段無法取得機器 ID',
         failedToRestartSession: '重新啟動工作階段失敗',
@@ -359,6 +374,17 @@ export const zhHant: TranslationStructure = {
         failedToKillSession: '終止工作階段失敗',
         failedToArchiveSession: '封存工作階段失敗',
         connectionStatus: '連線狀態',
+        channelAuto: '自動',
+        channelServer: '公網伺服器',
+        channelRelay: '公網中繼',
+        channelWhyServerDownRelay: '伺服器無法連線，改用公網中繼',
+        channelWhyByPriority: '依通道優先順序設定選擇',
+        channelPinned: '手動指定',
+        channelWhyReachable: '工作階段已宣告支援區域網路，且機器在目前網路中',
+        channelWhyNotDeclared: '工作階段版本較舊，不支援區域網路，請重新啟動',
+        channelWhyNotOnNetwork: '目前網路中未發現該機器',
+        channelWhyNoKey: '此裝置上沒有該機器的金鑰',
+        channelWhyUnknown: '正在等待工作階段資訊',
         created: '建立時間',
         lastUpdated: '最後更新',
         sequence: '序列',
@@ -408,6 +434,20 @@ export const zhHant: TranslationStructure = {
             scanQrCode: '掃描 QR Code',
             openCamera: '開啟相機',
         },
+    },
+
+    sandbox: {
+        isolationTitle: 'Sandbox Isolation',
+        isolation: {
+            off: 'Off',
+            strict: 'Strict',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
+        isolationOffDesc: 'No sandbox restrictions',
+        isolationStrictDesc: 'Full filesystem and network isolation',
+        isolationWorkspaceDesc: 'Sandbox limited to workspace directory',
+        isolationCustomDesc: 'Custom sandbox rules',
     },
 
     agentInput: {
@@ -489,6 +529,13 @@ export const zhHant: TranslationStructure = {
             fileLabel: '檔案',
             folderLabel: '資料夾',
         },
+        sandbox: {
+            isolationTitle: 'Sandbox Isolation',
+            off: 'Off',
+            strict: 'Strict (project only)',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
         noMachinesAvailable: '無裝置',
     },
 
@@ -509,6 +556,15 @@ export const zhHant: TranslationStructure = {
     },
 
     tools: {
+
+
+        countdown: {
+
+            in: ({ time }: { time: string }) => `${time}後`,
+
+            due: '即將到點',
+
+        },
         fullView: {
             description: '描述',
             inputParams: '輸入參數',
@@ -555,6 +611,19 @@ export const zhHant: TranslationStructure = {
             question: '問題',
             agent: 'Agent',
             skill: 'Skill',
+            sendMessage: '傳送訊息',
+            listAgents: '代理',
+            taskDetails: '任務',
+            enterWorktree: '進入 Worktree',
+            exitWorktree: '離開 Worktree',
+            notification: '通知',
+            designSync: '設計同步',
+        },
+        sendMessage: {
+            to: ({ name }: { name: string }) => `傳給 ${name}`,
+            sending: '傳送中',
+            sent: '已傳送',
+            failed: '失敗',
         },
         askUserQuestion: {
             submit: '提交答案',
@@ -604,6 +673,7 @@ export const zhHant: TranslationStructure = {
         file: '檔案',
         fileEmpty: '檔案為空',
         noChanges: '沒有要顯示的更改',
+        download: '下載',
     },
 
     settingsVoice: {
@@ -778,6 +848,7 @@ export const zhHant: TranslationStructure = {
         lastKnownHttpPort: '最後已知 HTTP 連接埠',
         startedAt: '啟動時間',
         cliVersion: 'CLI 版本',
+        restartRequired: '需要重啟',
         daemonStateVersion: '守護程序狀態版本',
         activeSessions: ({ count }: { count: number }) => `活躍工作階段 (${count})`,
         machineGroup: '裝置',

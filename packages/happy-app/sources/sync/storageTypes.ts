@@ -51,6 +51,7 @@ export const MetadataSchema = z.object({
     hostPid: z.number().optional(), // Process ID of the session
     flavor: z.string().nullish(), // Session flavor/variant identifier
     sandbox: z.any().nullish(), // Sandbox config metadata from CLI (or null when disabled)
+    currentSandboxIsolation: z.string().optional(), // Current sandbox isolation level written by CLI ('off' | 'strict' | 'workspace' | 'custom')
     dangerouslySkipPermissions: z.boolean().nullish(), // Claude --dangerously-skip-permissions mode (or null when unknown)
     profileId: z.string().nullish(), // Active environment profile ID, synced from CLI
 	    contextUsage: z.object({
@@ -68,7 +69,33 @@ export const MetadataSchema = z.object({
 	        }).optional(),
 	        fetchedAt: z.number().optional(),
 	    }).optional(),
+	    /**
+	     * The session's working tree, computed by the CLI when a tool may have written to it.
+	     *
+	     * Present on sessions whose CLI is new enough to publish it; absent means the App still
+	     * falls back to asking the machine for `git status` over the socket.
+	     */
+	    gitStatus: z.object({
+	        branch: z.string().nullable(),
+	        isDirty: z.boolean(),
+	        modifiedCount: z.number(),
+	        untrackedCount: z.number(),
+	        stagedCount: z.number(),
+	        lastUpdatedAt: z.number(),
+	        stagedLinesAdded: z.number(),
+	        stagedLinesRemoved: z.number(),
+	        unstagedLinesAdded: z.number(),
+	        unstagedLinesRemoved: z.number(),
+	        linesAdded: z.number(),
+	        linesRemoved: z.number(),
+	        linesChanged: z.number(),
+	        upstreamBranch: z.string().nullable().optional(),
+	        aheadCount: z.number().optional(),
+	        behindCount: z.number().optional(),
+	        stashCount: z.number().optional(),
+	    }).optional(),
 }).passthrough();
+
 
 export type Metadata = z.infer<typeof MetadataSchema>;
 
@@ -99,7 +126,57 @@ export const AgentStateSchema = z.object({
     crons: z.record(z.string(), z.object({
         schedule: z.string(),
         recurring: z.boolean(),
+        /** When the CLI says this will next fire; the App only computes it for older CLIs. */
+        nextFireAt: z.number().optional(),
+        /** What the schedule is for — the CronCreate tool's own description, capped by the CLI. */
+        prompt: z.string().optional(),
     })).optional(),
+    /**
+     * Background tasks still running, synced from CLI agentState.
+     *
+     * The CLI keeps the turn open while these are live — the SDK stream has to stay open to service
+     * them — so a turn that reported itself finished while the session goes quiet is explained by
+     * this rather than being indistinguishable from a session that stopped answering.
+     */
+    backgroundTasks: z.array(z.object({
+        id: z.string(),
+        type: z.string(),
+        status: z.string(),
+        /** Claude Code's own name for the task: usually a title, sometimes the command. */
+        description: z.string(),
+        /** The type-specific detail the CLI forwards alongside — the command for a shell task. */
+        command: z.string().optional(),
+        agentType: z.string().optional(),
+        server: z.string().optional(),
+        tool: z.string().optional(),
+        name: z.string().optional(),
+        /** When the task stops on its own, when its tool said so (monitor / background command). */
+        deadlineAt: z.number().optional(),
+        /** When the task was first seen running. */
+        startedAt: z.number().optional(),
+    })).optional(),
+    /**
+     * Declared by a CLI that can serve this session over the LAN socket — it keeps the message log
+     * the LAN reads from and can take a message delivered back over it.
+     *
+     * Absent means a session started from an older build, which cannot do either: preferring the
+     * LAN for one would show an empty session and swallow sends. Declared rather than inferred from
+     * a version, because a client must know before it picks a channel and cannot ask over the LAN
+     * without already being on it.
+     */
+    lanSocket: z.boolean().optional(),
+    /**
+     * Latest /goal condition status, mirrored from the CLI's goal_status attachments.
+     * `pending` while the goal is armed and undecided; `met` / `failed` once judged.
+     * Nullish when the session has no goal.
+     */
+    activeGoal: z.object({
+        condition: z.string(),
+        status: z.enum(['pending', 'met', 'failed']),
+        reason: z.string().optional(),
+        iterations: z.number().optional(),
+        updatedAt: z.number(),
+    }).nullish(),
 });
 
 export type AgentState = z.infer<typeof AgentStateSchema>;
@@ -119,6 +196,15 @@ export interface Session {
     thinking: boolean,
     thinkingAt: number,
     presence: "online" | number, // "online" when active, timestamp when last seen
+    /**
+     * When the machine began restarting this session, or null once it is not.
+     *
+     * The session's own state, pushed as a session state change and kept here rather than in a
+     * store of its own: it is one more thing about a session, and a reader asking "is this one
+     * being restarted" should have to look in one place, not two. Absent means "nothing has said",
+     * which reads the same as null.
+     */
+    restartingAt?: number | null,
     todos?: Array<{
         content: string;
         status: 'pending' | 'in_progress' | 'completed';
@@ -136,6 +222,7 @@ export interface Session {
     maxMode?: boolean | null; // Local Cursor max mode override, not synced to server
     thinkingLevel?: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null; // Local Claude thinking effort level
     profileId?: string | null; // Local env profile id (spawn + per-message override), not synced to server
+    sandboxIsolation?: string | null; // Local sandbox isolation level ('off' | 'strict' | 'workspace' | 'custom'), sent with message, synced via metadata
     // IMPORTANT: latestUsage is extracted from reducerState.latestUsage after message processing.
     // We store it directly on Session to ensure it's available immediately on load.
     // Do NOT store reducerState itself on Session - it's mutable and should only exist in SessionMessages.

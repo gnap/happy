@@ -1,4 +1,24 @@
 /**
+ * Refuse an action this App cannot carry out on any channel it has switched on, saying why.
+ *
+ * Every machine action *except* a restart goes through the server: the daemon's own API reads a
+ * session, takes a message for one and restarts its process, and refuses to start sessions or run
+ * anything inside them (a test on the CLI side pins that boundary). So a machine this device is
+ * reaching perfectly well over the LAN is still not spawnable when the server channel is switched
+ * off — and that used to surface as whatever the thrown socket error happened to say, which reads
+ * as the App being broken rather than as a setting.
+ *
+ * Asked before the attempt, so the answer is about the channels rather than about a failure.
+ */
+function requireChannelFor(operation: ChannelOperation): void {
+    const state = storage.getState();
+    const drivers = channelDrivers(state, state.localSettings.channelPriority);
+    if (!operationSupported(drivers, operation)) {
+        throw new HappyError(t('errors.channelCannotServeAction'), false);
+    }
+}
+
+/**
  * Session operations for remote procedure calls
  * Provides strictly typed functions for all session-related RPC operations
  */
@@ -7,6 +27,11 @@ import { apiSocket } from './apiSocket';
 import { sync } from './sync';
 import { storage } from './storage';
 import type { MachineMetadata } from './storageTypes';
+import { channelDrivers } from './channels/measure';
+import { operationSupported } from './channels/resolve';
+import type { ChannelOperation } from './channels/types';
+import { HappyError } from '@/utils/errors';
+import { t } from '@/text';
 
 // Strict type definitions for all operations
 
@@ -152,6 +177,15 @@ export interface SpawnSessionOptions {
     // - API_TIMEOUT_MS, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
     // - Custom variables (DEEPSEEK_*, Z_AI_*, etc.)
     environmentVariables?: Record<string, string>;
+    /** Per-session sandbox config override (falls back to machine-global settings.json). */
+    sandboxConfig?: { enabled?: boolean; sessionIsolation?: 'strict' | 'workspace' | 'custom'; workspaceRoot?: string; networkMode?: 'blocked' | 'allowed' | 'custom' };
+    /**
+     * Start the session in the user's desktop session, through Happy Sidecar.
+     *
+     * Only the sidecar can reach the login keychain; a daemon that boots before anyone logs in
+     * cannot. Such a session waits for a desktop login instead of failing elsewhere.
+     */
+    requiresDesktop?: boolean;
 }
 
 // Exported session operation functions
@@ -160,8 +194,9 @@ export interface SpawnSessionOptions {
  * Spawn a new remote session on a specific machine
  */
 export async function machineSpawnNewSession(options: SpawnSessionOptions): Promise<SpawnSessionResult> {
+    requireChannelFor('spawn');
 
-    const { machineId, directory, approvedNewDirectoryCreation = false, token, agent, environmentVariables } = options;
+    const { machineId, directory, approvedNewDirectoryCreation = false, token, agent, environmentVariables, sandboxConfig, requiresDesktop } = options;
 
     try {
         const result = await apiSocket.machineRPC<SpawnSessionResult, {
@@ -171,10 +206,12 @@ export async function machineSpawnNewSession(options: SpawnSessionOptions): Prom
             token?: string,
             agent?: 'codex' | 'claude' | 'cursor' | 'cursor-acp' | 'gemini',
             environmentVariables?: Record<string, string>;
+            sandboxConfig?: typeof sandboxConfig;
+            requiresDesktop?: boolean;
         }>(
             machineId,
             'spawn-happy-session',
-            { type: 'spawn-in-directory', directory, approvedNewDirectoryCreation, token, agent, environmentVariables }
+            { type: 'spawn-in-directory', directory, approvedNewDirectoryCreation, token, agent, environmentVariables, sandboxConfig, ...(requiresDesktop ? { requiresDesktop } : {}) }
         );
         return result;
     } catch (error) {
@@ -190,6 +227,7 @@ export async function machineSpawnNewSession(options: SpawnSessionOptions): Prom
  * Stop the daemon on a specific machine
  */
 export async function machineStopDaemon(machineId: string): Promise<{ message: string }> {
+    requireChannelFor('stop');
     const result = await apiSocket.machineRPC<{ message: string }, {}>(
         machineId,
         'stop-daemon',
@@ -304,8 +342,52 @@ export async function machineUpdateMetadata(
 /**
  * Abort the current session operation
  */
+/**
+ * Hands a control call to the machine's own channel, and to the server only when it has none.
+ *
+ * The parameters are encrypted once, here, and then travel either way: the daemon cannot read them
+ * and does not need to — it forwards them to the session, whose key opens them. So the two routes
+ * are the same request down two paths.
+ *
+ * The distinction that matters is why the machine's channel did not carry it. "It has none" — no
+ * channel answered, or none had the session — is what the server route is for. "It answered" is
+ * not: a refusal is the machine saying no to this device, and asking the server is asking the same
+ * machine by another road, or substituting a different action — which is how an abort that the
+ * machine refused once came back as a killed process. A rejection is about the request itself,
+ * which another road would be handed unchanged.
+ */
+async function sessionControl<T>(
+    sessionId: string,
+    method: 'abort' | 'permission',
+    params: unknown,
+): Promise<T> {
+    const sessionEncryption = sync.encryption?.getSessionEncryption(sessionId);
+    if (sessionEncryption) {
+        const encrypted = await sessionEncryption.encryptRaw(params);
+        const outcome = await sync.sessionControl(sessionId, method, encrypted);
+        if (outcome.kind === 'done') {
+            return undefined as T;
+        }
+        if (outcome.kind === 'refused') {
+            // The machine answered. Nothing else carries this now: the caller is told what it
+            // actually said, rather than a theory about why — the difference between a proof it
+            // would not take and a session it does not have is a fix this App cannot pick for it.
+            throw new Error(outcome.body
+                ? `The machine refused this action (${outcome.status ?? 'refused'}): ${outcome.body}`
+                : 'The machine refused this action. It needs the account to authorise it.');
+        }
+        if (outcome.kind === 'rejected') {
+            // The request itself: a body over a route's limit, a shape the API will not parse.
+            // Another channel would be handed the same bytes, so this is reported — not retried,
+            // not substituted.
+            throw new Error(`The machine rejected this request (${outcome.status}): ${outcome.body ?? 'no explanation'}`);
+        }
+    }
+    return apiSocket.sessionRPC<T, unknown>(sessionId, method, params);
+}
+
 export async function sessionAbort(sessionId: string): Promise<void> {
-    await apiSocket.sessionRPC(sessionId, 'abort', {
+    await sessionControl(sessionId, 'abort', {
         reason: `The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.`
     });
 }
@@ -315,7 +397,7 @@ export async function sessionAbort(sessionId: string): Promise<void> {
  */
 export async function sessionAllow(sessionId: string, id: string, mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan', allowedTools?: string[], decision?: 'approved' | 'approved_for_session', updatedInput?: Record<string, unknown>): Promise<void> {
     const request: SessionPermissionRequest = { id, approved: true, mode, allowTools: allowedTools, decision, updatedInput };
-    await apiSocket.sessionRPC(sessionId, 'permission', request);
+    await sessionControl(sessionId, 'permission', request);
 }
 
 /**
@@ -323,7 +405,7 @@ export async function sessionAllow(sessionId: string, id: string, mode?: 'defaul
  */
 export async function sessionDeny(sessionId: string, id: string, mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan', allowedTools?: string[], decision?: 'denied' | 'abort'): Promise<void> {
     const request: SessionPermissionRequest = { id, approved: false, mode, allowTools: allowedTools, decision };
-    await apiSocket.sessionRPC(sessionId, 'permission', request);
+    await sessionControl(sessionId, 'permission', request);
 }
 
 /**
@@ -485,16 +567,29 @@ interface SessionRestartResponse {
 }
 
 /**
- * Restart a session via daemon RPC, reconnecting to the same server session
- * with the newer CLI version.  Returns the new session ID on success.
+ * Restart a session, reconnecting to the same server session with the newer CLI version.
+ *
+ * Which channel carries it is the engine's answer, not this function's. The machine's own channel is
+ * preferred — restarting exists to pick up a build that is on disk, so the machine is the party that
+ * has to be told, and its channel is the one that is up then — and the server is *a channel* that
+ * carries the same action by asking the daemon on this App's behalf. There is no chain of
+ * substitutions here: a channel that cannot carry it, or that failed, is where the next one starts.
  */
-export async function sessionRestart(sessionId: string, machineId: string): Promise<SessionRestartResponse> {
+export async function sessionRestart(sessionId: string, machineId: string, options?: { requiresDesktop?: boolean }): Promise<SessionRestartResponse> {
     try {
-        const response = await apiSocket.machineRPC<SessionRestartResponse, { sessionId: string }>(
-            machineId,
-            'restartSession',
-            { sessionId }
-        );
+        const response = await sync.restartSession(sessionId, machineId, options);
+        if (!response) {
+            // Nothing carried it. Saying that is more use than a substitute attempt: the reasons are
+            // per channel, and the caller has nowhere useful to look for them.
+            return { success: false, error: 'No channel could restart this session' };
+        }
+        if (response.success) {
+            // The new process reports its build when it gets around to it, which is minutes later —
+            // and until it does, a session that has just been restarted still reads as stale. The
+            // machine is right there and the read is cheap, so ask it now: the answer is the whole
+            // reason the restart was performed.
+            void sync.fetchSessionFromDaemon(sessionId).catch(() => { /* reported by the read itself */ });
+        }
         return response;
     } catch (error) {
         return {
@@ -506,6 +601,7 @@ export async function sessionRestart(sessionId: string, machineId: string): Prom
 
 export async function sessionKill(sessionId: string, machineId: string): Promise<SessionKillResponse> {
     try {
+        requireChannelFor('stop');
         const response = await apiSocket.machineRPC<SessionKillResponse, { sessionId: string }>(
             machineId,
             'killSession',
@@ -525,7 +621,7 @@ interface GetToolCallFullContentRequest {
     callId: string;
 }
 
-interface GetToolCallFullContentResponse {
+export interface GetToolCallFullContentResponse {
     success: boolean;
     args?: Record<string, unknown>;
     result?: unknown;
@@ -577,16 +673,23 @@ export async function sessionDelete(sessionId: string): Promise<{ success: boole
             return { success: true };
         }
 
+        // For other server errors, still clean up locally — the user explicitly asked
+        // to delete and the session may already be gone. Only block on 403 (forbidden).
+        if (response.status !== 403) {
+            storage.getState().deleteSession(sessionId);
+            return { success: true };
+        }
+
         const error = await response.text();
         return {
             success: false,
             message: error || 'Failed to delete session'
         };
-    } catch (error) {
-        return {
-            success: false,
-            message: error instanceof Error ? error.message : 'Unknown error'
-        };
+    } catch (_error) {
+        // Network error — server unreachable. Clean up locally anyway since the
+        // session is likely already gone from the server (deleted from another device).
+        storage.getState().deleteSession(sessionId);
+        return { success: true };
     }
 }
 

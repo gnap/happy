@@ -557,7 +557,7 @@ export function NewSessionWizard({ onComplete, onCancel, initialPrompt = '' }: N
     });
 
     // Built-in profiles
-    const builtInProfiles: AIBackendProfile[] = useMemo(() => [
+    const builtInProfiles = useMemo(() => [
         {
             id: 'anthropic',
             name: 'Anthropic (Default)',
@@ -668,10 +668,12 @@ export function NewSessionWizard({ onComplete, onCancel, initialPrompt = '' }: N
         },
     ], []);
 
-    // Combined profiles
+    // Combined profiles: only show built-in profiles that haven't been deleted
+    const profileIds = useMemo(() => new Set(profiles.map(p => p.id)), [profiles]);
     const allProfiles = useMemo(() => {
-        return [...builtInProfiles, ...profiles];
-    }, [profiles, builtInProfiles]);
+        const activeBuiltIns = builtInProfiles.filter(bp => profileIds.has(bp.id));
+        return [...activeBuiltIns, ...profiles];
+    }, [profiles, builtInProfiles, profileIds]);
 
     const [selectedMachineId, setSelectedMachineId] = useState<string>(() => {
         if (machines.length > 0) {
@@ -1162,7 +1164,7 @@ export function NewSessionWizard({ onComplete, onCancel, initialPrompt = '' }: N
                         </Text>
 
                         <ItemGroup title="Built-in Profiles">
-                            {builtInProfiles.map((profile) => (
+                            {builtInProfiles.filter(bp => profileIds.has(bp.id)).map((profile) => (
                                 <ProfileSelectionItem
                                     key={profile.id}
                                     profile={profile}
@@ -1632,6 +1634,7 @@ export function NewSessionWizard({ onComplete, onCancel, initialPrompt = '' }: N
                                 { value: 'adaptiveUsage', label: 'Adaptive Usage', description: 'Automatically choose model', icon: 'analytics-outline' },
                                 { value: 'sonnet', label: 'Sonnet', description: 'Fast and efficient', icon: 'speedometer-outline' },
                                 { value: 'opus', label: 'Opus', description: 'Most capable model', icon: 'diamond-outline' },
+                                { value: 'fable', label: 'Fable', description: 'Next-gen superfast model', icon: 'flash-outline' },
                             ] as const : [
                                 { value: 'gpt-5-codex-high', label: 'GPT-5 Codex High', description: 'Best for complex coding', icon: 'diamond-outline' },
                                 { value: 'gpt-5-codex-medium', label: 'GPT-5 Codex Medium', description: 'Balanced coding assistance', icon: 'cube-outline' },

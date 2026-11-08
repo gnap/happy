@@ -1,19 +1,21 @@
 const variant = process.env.APP_ENV || 'development';
 const name = {
     development: "Happy (dev)",
+    "dev-testflight": "Happy (dev)",
     preview: "Happy (preview)",
     production: "Happy"
 }[variant];
 const bundleId = {
     development: "com.slopus.happy.dev.personal",
-    preview: "com.slopus.happy.preview.personal",
+    "dev-testflight": "com.slopus.happy.dev.testflight",
+    preview: "com.slopus.happy.preview.testflight",
     production: "com.ex3ndr.happy"
 }[variant];
 
 export default {
     expo: {
         name,
-        slug: "happy",
+        slug: "happy-enhanced",
         version: "1.6.2",
         runtimeVersion: "20",
         orientation: "default",
@@ -28,13 +30,24 @@ export default {
         ios: {
             supportsTablet: true,
             bundleIdentifier: bundleId,
+            // Build number (CFBundleVersion). Prebuild writes this literally; for
+            // direct xcodebuild runs the script passes CURRENT_PROJECT_VERSION instead.
+            buildNumber: process.env.IOS_BUILD_NUMBER || '3',
             config: {
                 usesNonExemptEncryption: false
             },
             infoPlist: {
                 NSMicrophoneUsageDescription: "Allow $(PRODUCT_NAME) to access your microphone for voice conversations with AI.",
                 NSLocalNetworkUsageDescription: "Allow $(PRODUCT_NAME) to find and connect to local devices on your network.",
-                NSBonjourServices: ["_http._tcp", "_https._tcp"]
+                // _happy._tcp is the service the CLI daemon advertises (see docs/p2p-roadmap.md §10).
+                NSBonjourServices: ["_http._tcp", "_https._tcp", "_happy._tcp"],
+                // The LAN API is deliberately plain HTTP; ATS blocks cleartext to a LAN address
+                // unless local networking is exempted. Declared explicitly rather than relying on
+                // the generated default, which is not part of this config.
+                NSAppTransportSecurity: {
+                    NSAllowsArbitraryLoads: false,
+                    NSAllowsLocalNetworking: true
+                }
             },
             associatedDomains: variant === 'production' ? ["applinks:app.happy.engineering"] : []
         },
@@ -79,20 +92,30 @@ export default {
         plugins: [
             require("./plugins/withEinkCompatibility.js"),
             require("./plugins/withPersonalTeamEntitlements.js"),
+            require("./plugins/withSceneLifecycle.js"),
             [
                 "expo-router",
                 {
                     root: "./sources/app"
                 }
             ],
-            "expo-updates",
             "expo-asset",
             "expo-localization",
             "expo-mail-composer",
             "expo-secure-store",
             "expo-web-browser",
+            "react-native-enriched-markdown",
             "react-native-vision-camera",
             "@more-tech/react-native-libsodium",
+            [
+                // The plugin only prepends a leading underscore, so the protocol suffix has to be
+                // spelled out here — passing "happy" would yield "_happy" and NSBonjourServices
+                // entries must be of the form _type._tcp for the browse to match.
+                "expo-zeroconf",
+                {
+                    serviceTypes: ["_happy._tcp"]
+                }
+            ],
             "react-native-audio-api",
             "@livekit/react-native-expo-plugin",
             "@config-plugins/react-native-webrtc",
@@ -153,7 +176,7 @@ export default {
             ]
         ],
         updates: {
-            url: "https://u.expo.dev/4558dd3d-cd5a-47cd-bad9-e591a241cc06",
+            url: "https://u.expo.dev/a8b38014-43de-48eb-9985-0b02a84b9c06",
             requestHeaders: {
                 "expo-channel-name": "production"
             }
@@ -168,7 +191,7 @@ export default {
             // New App (dev/preview): only render session protocol; drop output/codex/cursor to avoid duplicate text/tools
             enableSessionProtocolSend: variant !== 'production',
             eas: {
-                projectId: "4558dd3d-cd5a-47cd-bad9-e591a241cc06"
+                projectId: "a8b38014-43de-48eb-9985-0b02a84b9c06"
             },
             app: {
                 postHogKey: process.env.EXPO_PUBLIC_POSTHOG_API_KEY,
@@ -177,6 +200,6 @@ export default {
                 revenueCatStripeKey: process.env.EXPO_PUBLIC_REVENUE_CAT_STRIPE
             }
         },
-        owner: "bulkacorp"
+        owner: "gnapans-team"
     }
 };

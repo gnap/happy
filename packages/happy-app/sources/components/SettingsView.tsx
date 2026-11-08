@@ -17,8 +17,10 @@ import { isUsingCustomServer } from '@/sync/serverConfig';
 import { trackPaywallButtonClicked, trackWhatsNewClicked } from '@/track';
 import { Modal } from '@/modal';
 import { useMultiClick } from '@/hooks/useMultiClick';
-import { useAllMachines } from '@/sync/storage';
-import { isMachineOnline } from '@/utils/machineUtils';
+import { useAllMachines, useMachinesMap, useMachinePresenceMap, useLanSightings, useRelayDirectory, useRelayEndpoints, useMachineBadgeInputs } from '@/sync/storage';
+import { MachinePresenceBadge } from '@/components/MachinePresenceBadge';
+import { MACHINE_PRESENCE_COLORS } from '@/sync/machinePresence';
+import { machineIsReachable } from '@/utils/machineUtils';
 import { useUnistyles } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
 import { useHappyAction } from '@/hooks/useHappyAction';
@@ -29,6 +31,11 @@ import { getDisplayName, getAvatarUrl, getBio } from '@/sync/profile';
 import { Avatar } from '@/components/Avatar';
 import { t } from '@/text';
 
+/** What the machine list is sorted by: the name it shows, or the id when it has none. */
+function machineSortName(machine: { id: string; metadata?: { host?: string | null } | null }): string {
+    return (machine.metadata?.host || machine.id).toLowerCase();
+}
+
 export const SettingsView = React.memo(function SettingsView() {
     const { theme } = useUnistyles();
     const router = useRouter();
@@ -38,7 +45,40 @@ export const SettingsView = React.memo(function SettingsView() {
     const isPro = __DEV__ || useEntitlement('pro');
     const experiments = useSetting('experiments');
     const isCustomServer = isUsingCustomServer();
-    const allMachines = useAllMachines();
+    // Unfiltered: `useAllMachines` hides every machine the server reports inactive, which would
+    // hide exactly the hosts worth looking at here — an offline machine is still worth listing
+    // (it may be reachable on the LAN), and hiding it also hides the reason it is interesting.
+    const machinesById = useMachinesMap();
+    /**
+     * Online first, and within that, by name.
+     *
+     * The reachable machines are the ones being looked for, so they belong at the top — but the
+     * *order inside each group* has to be one nobody has to re-read. This used to be "most recently
+     * active", which reshuffled the list every time a machine merely reported in, and a list that
+     * reorders under the finger is one where the wrong machine gets tapped.
+     *
+     * So a machine's row moves when its state changes — which is information, and rare — and never
+     * because something somewhere else did something.
+     */
+    /** What a machine's glyphs should show, from the channels — the same source the session list uses. */
+    const badgeInputs = useMachineBadgeInputs();
+    /** How each machine is being reached, which is also what the sort below orders them by. */
+    const machinePresence = useMachinePresenceMap();
+    const allMachines = React.useMemo(
+        () => Object.values(machinesById).sort((a, b) => {
+            // Online-first, where online means anything is reaching it — the server's own flag is
+            // the spawn question, and a machine on the LAN sorted below an unreachable one.
+            const online = (machineIsReachable(machinePresence[b.id] ?? 'offline') ? 1 : 0)
+                - (machineIsReachable(machinePresence[a.id] ?? 'offline') ? 1 : 0);
+            if (online !== 0) return online;
+            const byName = machineSortName(a).localeCompare(machineSortName(b));
+            return byName !== 0 ? byName : a.id.localeCompare(b.id);
+        }),
+        [machinesById, machinePresence]
+    );
+    const lanSightings = useLanSightings();
+    const relayDirectory = useRelayDirectory();
+    const relayEndpoints = useRelayEndpoints();
     const profile = useProfile();
     const displayName = getDisplayName(profile);
     const avatarUrl = getAvatarUrl(profile);
@@ -259,7 +299,16 @@ export const SettingsView = React.memo(function SettingsView() {
             {allMachines.length > 0 && (
                 <ItemGroup title={t('settings.machines')}>
                     {[...allMachines].map((machine) => {
-                        const isOnline = isMachineOnline(machine);
+                        // Which channel this device would actually use, named. One word cannot say
+                        // "on our network" and "reachable some other way" at once, and the whole
+                        // question here is whether a machine is on *this* network — so the row says
+                        // which channel it is on, and the colour is that channel's own.
+                        const presence = machinePresence[machine.id] ?? 'offline';
+                        const isOnline = presence !== 'offline' && presence !== 'server';
+                        const statusLabel = presence === 'lan' ? t('status.lan')
+                            : presence === 'relay' ? t('sessionInfo.channelRelay')
+                                : presence === 'server' ? t('sessionInfo.channelServer')
+                                    : t('status.offline');
                         const host = machine.metadata?.host || 'Unknown';
                         const displayName = machine.metadata?.displayName;
                         const platform = machine.metadata?.platform || '';
@@ -275,7 +324,7 @@ export const SettingsView = React.memo(function SettingsView() {
                         if (platform) {
                             subtitle = subtitle ? `${subtitle} • ${platform}` : platform;
                         }
-                        subtitle = subtitle ? `${subtitle} • ${isOnline ? t('status.online') : t('status.offline')}` : (isOnline ? t('status.online') : t('status.offline'));
+                        subtitle = subtitle ? `${subtitle} • ${statusLabel}` : statusLabel;
 
                         return (
                             <Item
@@ -287,6 +336,12 @@ export const SettingsView = React.memo(function SettingsView() {
                                         name="desktop-outline"
                                         size={29}
                                         color={isOnline ? theme.colors.status.connected : theme.colors.status.disconnected}
+                                    />
+                                }
+                                rightElement={
+                                    <MachinePresenceBadge
+                                        machineId={machine.id}
+                                        {...badgeInputs(machine.id)}
                                     />
                                 }
                                 onPress={() => router.push(`/machine/${machine.id}`)}

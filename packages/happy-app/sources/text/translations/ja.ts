@@ -114,9 +114,11 @@ export const ja: TranslationStructure = {
         error: 'エラー',
         auth_error: '再度サインインしてください',
         online: 'オンライン',
+        lan: 'LAN',
         offline: 'オフライン',
         lastSeen: ({ time }: { time: string }) => `最終アクセス: ${time}`,
         permissionRequired: '権限が必要です',
+        restarting: '再起動中…',
         activeNow: 'アクティブ',
         unknown: '不明',
         creating: '作成中…',
@@ -126,6 +128,7 @@ export const ja: TranslationStructure = {
         justNow: 'たった今',
         minutesAgo: ({ count }: { count: number }) => `${count}分前`,
         hoursAgo: ({ count }: { count: number }) => `${count}時間前`,
+        yesterday: '昨日',
     },
 
     connect: {
@@ -251,6 +254,7 @@ export const ja: TranslationStructure = {
         networkError: 'ネットワークエラーが発生しました',
         serverError: 'サーバーエラーが発生しました',
         unknownError: '不明なエラーが発生しました',
+        channelCannotServeAction: 'この操作はサーバー経由ですが、チャンネル設定でオフになっています',
         connectionTimeout: '接続がタイムアウトしました',
         authenticationFailed: '認証に失敗しました',
         permissionDenied: '権限がありません',
@@ -325,6 +329,7 @@ export const ja: TranslationStructure = {
             success: 'ワークツリーが正常に作成されました',
         },
         sessionReadyMessage: 'セッションの準備ができました。リストでタップして開いてください。',
+        sessionCreatedPending: 'セッションはマシン上で作成されました。まもなく一覧に表示されます。',
     },
 
     sessionHistory: {
@@ -340,6 +345,14 @@ export const ja: TranslationStructure = {
     session: {
         inputPlaceholder: 'メッセージを入力...',
         encrypting: '接続を確立中…',
+        backgroundTasks: 'バックグラウンドタスク',
+        activityScheduled: 'スケジュール',
+        activityOnce: '1回',
+        activityAgents: 'エージェント',
+        activityMonitors: 'モニター',
+        activityGoals: 'ゴール',
+        activityShell: 'バックグラウンドコマンド',
+        activityWorkflows: 'ワークフロー',
     },
 
     commandPalette: {
@@ -372,6 +385,8 @@ export const ja: TranslationStructure = {
         archiveSessionConfirm: 'このセッションをアーカイブしてもよろしいですか？',
         restartSession: 'セッションを再起動',
         restartSessionSubtitle: '新しいCLIバージョンが利用可能です。再起動してアップグレードしてください。',
+        needsDesktop: 'このセッションは、そのマシンでデスクトップにログインする必要があります。ログインしてから再試行してください。',
+        restartInDesktop: 'デスクトップセッションで再起動',
         restartSessionConfirm: 'セッションは新しいCLIバージョンで再起動されます。',
         noMachineId: 'このセッションではマシンIDが利用できません',
         failedToRestartSession: 'セッションの再起動に失敗しました',
@@ -393,6 +408,17 @@ export const ja: TranslationStructure = {
         failedToKillSession: 'セッションの終了に失敗しました',
         failedToArchiveSession: 'セッションのアーカイブに失敗しました',
         connectionStatus: '接続状態',
+        channelAuto: '自動',
+        channelServer: 'サーバー',
+        channelRelay: 'リレー',
+        channelWhyServerDownRelay: 'サーバーに接続できないため、公開リレーを使用中',
+        channelWhyByPriority: 'チャンネル優先度の設定により選択',
+        channelPinned: '手動で固定',
+        channelWhyReachable: 'セッションがLAN対応を宣言し、マシンがこのネットワーク上にあります',
+        channelWhyNotDeclared: 'セッションがLAN未対応の古い版です。再起動してください',
+        channelWhyNotOnNetwork: 'このネットワークでマシンが見つかりません',
+        channelWhyNoKey: 'このデバイスにこのマシンの鍵がありません',
+        channelWhyUnknown: 'セッション情報を待っています',
         created: '作成日時',
         lastUpdated: '最終更新',
         sequence: 'シーケンス',
@@ -442,6 +468,20 @@ export const ja: TranslationStructure = {
             scanQrCode: 'QRコードをスキャン',
             openCamera: 'カメラを開く',
         },
+    },
+
+    sandbox: {
+        isolationTitle: 'Sandbox Isolation',
+        isolation: {
+            off: 'Off',
+            strict: 'Strict',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
+        isolationOffDesc: 'No sandbox restrictions',
+        isolationStrictDesc: 'Full filesystem and network isolation',
+        isolationWorkspaceDesc: 'Sandbox limited to workspace directory',
+        isolationCustomDesc: 'Custom sandbox rules',
     },
 
     agentInput: {
@@ -523,6 +563,13 @@ export const ja: TranslationStructure = {
             fileLabel: 'ファイル',
             folderLabel: 'フォルダ',
         },
+        sandbox: {
+            isolationTitle: 'Sandbox Isolation',
+            off: 'Off',
+            strict: 'Strict (project only)',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
         noMachinesAvailable: 'マシンなし',
     },
 
@@ -543,6 +590,15 @@ export const ja: TranslationStructure = {
     },
 
     tools: {
+
+
+        countdown: {
+
+            in: ({ time }: { time: string }) => `${time}後`,
+
+            due: 'まもなく',
+
+        },
         fullView: {
             description: '説明',
             inputParams: '入力パラメータ',
@@ -596,6 +652,19 @@ export const ja: TranslationStructure = {
             question: '質問',
             agent: 'エージェント',
             skill: 'Skill',
+            sendMessage: 'メッセージを送信',
+            listAgents: 'エージェント',
+            taskDetails: 'タスク',
+            enterWorktree: 'ワークツリーに入る',
+            exitWorktree: 'ワークツリーから出る',
+            notification: '通知',
+            designSync: 'デザイン同期',
+        },
+        sendMessage: {
+            to: ({ name }: { name: string }) => `${name}へ`,
+            sending: '送信中',
+            sent: '送信済み',
+            failed: '失敗',
         },
         desc: {
             terminalCmd: ({ cmd }: { cmd: string }) => `ターミナル(cmd: ${cmd})`,
@@ -638,6 +707,7 @@ export const ja: TranslationStructure = {
         file: 'ファイル',
         fileEmpty: 'ファイルは空です',
         noChanges: '表示する変更はありません',
+        download: 'ダウンロード',
     },
 
     settingsVoice: {
@@ -812,6 +882,7 @@ export const ja: TranslationStructure = {
         lastKnownHttpPort: '最後に確認されたHTTPポート',
         startedAt: '開始時刻',
         cliVersion: 'CLIバージョン',
+        restartRequired: '再起動が必要',
         daemonStateVersion: 'デーモン状態バージョン',
         activeSessions: ({ count }: { count: number }) => `アクティブセッション (${count})`,
         machineGroup: 'マシン',

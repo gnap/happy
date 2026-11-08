@@ -5,6 +5,7 @@ export const MessageMetaSchema = z.object({
     sentFrom: z.string().optional(), // Source identifier
     origin: z.enum(['app', 'a2a']).optional(), // Where the message came from
     permissionMode: z.string().optional(), // Permission mode key for this message
+    sandboxIsolation: z.string().optional(), // Sandbox isolation level ('off' | 'strict' | 'workspace' | 'custom')
     model: z.string().nullable().optional(), // Model name for this message (null = reset)
     maxMode: z.boolean().optional(), // Cursor max mode for this message
     profileId: z.string().nullable().optional(), // Env profile id (null = clear). CLI tracks this to detect changes.

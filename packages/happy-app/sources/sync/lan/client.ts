@@ -1,0 +1,407 @@
+/**
+ * Client for the CLI daemon's read-only LAN API.
+ *
+ * Authentication is a challenge-response over the *machine key* — the 32-byte symmetric secret
+ * the CLI generated at auth time and wrapped into the machine record. The App already unwraps
+ * that record to decrypt `daemonState`, so the key is on hand and no new key distribution is
+ * needed. The key never travels: the client proves possession and receives a short-lived
+ * bearer token (90s, enforced server-side) instead.
+ *
+ * The transport is deliberately plain HTTP, which is why the App declares
+ * `NSAllowsLocalNetworking` in app.config.js. A token is therefore sniffable on the LAN; the
+ * short TTL is the mitigation, and the API is read-only.
+ *
+ * All functions take the base URL explicitly rather than reading any global, so the whole
+ * module can be exercised against an ephemeral port.
+ */
+
+import { hmac_sha256 } from '@/encryption/hmac_sha256';
+import { encodeUTF8 } from '@/encryption/text';
+import { encodeBase64 } from '@/encryption/base64';
+import type { LanHistory, LanIdentity, LanSessionSummary } from './types';
+
+/** A challenge is worthless once the daemon's nonce expires; don't hang on a wedged host. */
+const REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * What a *read* through the public relay is allowed, where a read crosses three hops — this device
+ * to the relay, the relay's own socket to the daemon, the daemon's server — and the daemon may be
+ * on a connection that is slow, saturated, or being re-established after a network change.
+ *
+ * Only reads, and longer than the LAN's own budget rather than shorter: the hops are added, not
+ * replaced. The handshake keeps its ten seconds, because a nonce is worthless once the daemon's
+ * window on it has passed and waiting longer would mint a token out of a dead challenge.
+ */
+const RELAY_HISTORY_TIMEOUT_MS = 60_000;
+
+/** A relayed route is identifiable by its path: `/r/<tag>/…` is only ever served that way. */
+const historyTimeoutFor = (url: string): number =>
+    url.includes('/r/') ? RELAY_HISTORY_TIMEOUT_MS : HISTORY_TIMEOUT_MS;
+/**
+ * Reading history is not like the other calls: the response is a page of a session's log, measured
+ * in megabytes when the reader is catching up, and it may travel over the relay to a phone on
+ * cellular. Ten seconds is enough for the LAN and not for that, and a request that times out is
+ * the worst possible failure — the reader threw away a page it had already paid to transfer and
+ * asks for the same one again. Failing fast is not worth that.
+ */
+const HISTORY_TIMEOUT_MS = 45_000;
+
+/** The proof context string — must match `PROOF_CONTEXT` in the CLI's lanServer.ts. */
+const PROOF_CONTEXT = 'v1.proof';
+
+export class LanRequestError extends Error {
+    constructor(
+        message: string,
+        readonly status: number,
+        /** The daemon's own words for the refusal, when it sent any: the reason a caller reports. */
+        readonly body?: string
+    ) {
+        super(message);
+        this.name = 'LanRequestError';
+    }
+}
+
+/**
+ * The proof a LAN client returns for a challenge nonce. Must equal `lanProofFor` in
+ * `packages/happy-cli/src/daemon/lanServer.ts` byte for byte.
+ */
+export async function lanProofFor(machineKey: Uint8Array, nonce: string): Promise<string> {
+    const mac = await hmac_sha256(machineKey, encodeUTF8(`${PROOF_CONTEXT}.${nonce}`));
+    return encodeBase64(mac, 'base64url');
+}
+
+async function request(
+    url: string,
+    init: RequestInit & { token?: string; timeoutMs?: number } = {}
+): Promise<Response> {
+    const { token, timeoutMs, ...rest } = init;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs ?? REQUEST_TIMEOUT_MS);
+    try {
+        return await fetch(url, {
+            ...rest,
+            signal: controller.signal,
+            headers: {
+                ...(rest.headers ?? {}),
+                ...(token ? { authorization: `Bearer ${token}` } : {}),
+            },
+        });
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/**
+ * Throws a daemon's answer as the error that carries it: the status for what kind of answer it
+ * was, and the body because the daemon says why in words this App did not write.
+ *
+ * Collapsing every non-ok into one undifferentiated `LanRequestError` is how a 413 body-limit
+ * and a 403 proof-refusal came to be reported as the same thing — and reading the body matters
+ * because it is the daemon's own explanation, not a theory this App substitutes for it.
+ */
+async function throwAnswer(response: Response, what: string): Promise<never> {
+    const text = (await response.text().catch(() => '')).trim();
+    let why = text;
+    try {
+        const parsed = JSON.parse(text) as { error?: unknown };
+        if (typeof parsed.error === 'string' && parsed.error) {
+            why = parsed.error;
+        }
+    } catch {
+        // Not JSON: the daemon's words verbatim.
+    }
+    throw new LanRequestError(what, response.status, why.slice(0, 1000) || undefined);
+}
+
+/**
+ * The handshakes in flight, by daemon. Several paths ask at once — a read, the socket that read
+ * opens, and the retry after either fails — and each one used to run its own challenge and token
+ * exchange: four challenges and two exchanges inside a second, against a daemon that rate-limits
+ * exactly that. One handshake is enough for all of them, and they are asking for the same thing.
+ *
+ * Callers that need a token to *keep* rather than one to use now go through `./credentials`, which
+ * caches on top of this; the coalescing here is what makes that cache's misses cheap.
+ */
+const handshakes = new Map<string, Promise<{ token: string; expiresAt: number }>>();
+
+/**
+ * Exchanges the machine key for a bearer token via the challenge-response pair.
+ * Throws when the daemon is unreachable or rejects the proof.
+ */
+export async function authenticate(
+    baseUrl: string,
+    machineKey: Uint8Array
+): Promise<{ token: string; expiresAt: number }> {
+    const inFlight = handshakes.get(baseUrl);
+    if (inFlight) {
+        return inFlight;
+    }
+    const started = authenticateOnce(baseUrl, machineKey);
+    handshakes.set(baseUrl, started);
+    try {
+        return await started;
+    } finally {
+        // Cleared either way: a failed handshake must not be handed to everyone who asks next.
+        if (handshakes.get(baseUrl) === started) {
+            handshakes.delete(baseUrl);
+        }
+    }
+}
+
+async function authenticateOnce(
+    baseUrl: string,
+    machineKey: Uint8Array
+): Promise<{ token: string; expiresAt: number }> {
+    const challengeResponse = await request(`${baseUrl}/lan/challenge`, { method: 'POST' });
+    if (!challengeResponse.ok) {
+        return throwAnswer(challengeResponse, 'challenge rejected');
+    }
+    const { nonce } = (await challengeResponse.json()) as { nonce: string };
+
+    const proof = await lanProofFor(machineKey, nonce);
+    const sessionResponse = await request(`${baseUrl}/lan/session`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ nonce, proof }),
+    });
+    if (!sessionResponse.ok) {
+        return throwAnswer(sessionResponse, 'proof rejected');
+    }
+    return (await sessionResponse.json()) as { token: string; expiresAt: number };
+}
+
+export async function fetchIdentity(baseUrl: string, token: string): Promise<LanIdentity> {
+    const response = await request(`${baseUrl}/lan/identity`, { token });
+    if (!response.ok) {
+        return throwAnswer(response, 'identity request failed');
+    }
+    return (await response.json()) as LanIdentity;
+}
+
+/**
+ * One tool call's full input and result, from the machine's own copy.
+ *
+ * The message stream carries a truncated payload; this is the detail view asking for the rest. It
+ * is plaintext on the daemon's disk, so the request carries the account's proof as well as the
+ * token — the machine key alone is not enough for this one.
+ *
+ * Returns null for 404, the daemon's way of saying this machine has no such call — a caller then
+ * asks the server, which may still have the session process.
+ */
+export async function fetchToolContent(
+    baseUrl: string,
+    token: string,
+    sessionId: string,
+    callId: string,
+    proof?: Record<string, string>,
+): Promise<{ args?: unknown; result?: unknown } | null> {
+    const response = await request(
+        `${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/tool-content/${encodeURIComponent(callId)}`,
+        { token, headers: proof },
+    );
+    if (response.status === 404) {
+        return null;
+    }
+    if (!response.ok) {
+        return throwAnswer(response, 'tool content request failed');
+    }
+    const body = (await response.json()) as { args?: unknown; result?: unknown };
+    return { args: body.args, result: body.result };
+}
+
+export async function fetchSessions(baseUrl: string, token: string): Promise<LanSessionSummary[]> {
+    const response = await request(`${baseUrl}/lan/sessions`, { token });
+    if (!response.ok) {
+        return throwAnswer(response, 'sessions request failed');
+    }
+    const body = (await response.json()) as { sessions: LanSessionSummary[] };
+    return body.sessions;
+}
+
+/**
+ * Fetches one page of a session's local history.
+ *
+ * `since` reads forward from a boundary — what following a session uses; `before` reads back from
+ * one, which is scrolling towards older messages; neither reads the newest page, which is what a
+ * reader that has just opened a session wants. A reader that starts from where it left off instead
+ * has to carry every entry written while it was away before it can show anything recent, and on a
+ * long session that never finishes.
+ *
+ * Returns null for 404, which the daemon uses for "this machine has no local history for that
+ * session yet" — a retryable condition, deliberately distinct from the 401 an unauthorised
+ * caller gets. Other failures throw.
+ */
+export async function fetchHistory(
+    baseUrl: string,
+    token: string,
+    sessionId: string,
+    page: { since: string } | { before: string } | Record<string, never> = {}
+): Promise<LanHistory | null> {
+    const params = new URLSearchParams();
+    if ('since' in page && page.since) {
+        params.set('since', page.since);
+    }
+    if ('before' in page && page.before) {
+        params.set('before', page.before);
+    }
+    // A page is read to be shown, and the reader decrypts at most this many entries anyway: asking
+    // for more is paying for bytes and parse work that the caller throws away (measured: 546
+    // entries / ~600KB per follow read for a 150-entry use).
+    params.set('limit', '150');
+    const query = `?${params.toString()}`;
+    const response = await request(
+        `${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/history${query}`,
+        { token, timeoutMs: historyTimeoutFor(baseUrl) }
+    );
+    if (response.status === 404) {
+        return null;
+    }
+    if (!response.ok) {
+        return throwAnswer(response, 'history request failed');
+    }
+    return (await response.json()) as LanHistory;
+}
+
+/** What a daemon says about a restart it was asked to perform. */
+export type LanRestartVerdict = { success: boolean; newSessionId?: string; error?: string };
+
+/**
+ * Asks a daemon to restart a session, on the daemon's own API.
+ *
+ * Returns null only for the 404 of a daemon that has nothing to restart — a build that predates
+ * the route, or no session by that id — which is the one answer that belongs to another channel.
+ * Every other non-ok is thrown with the daemon's own words: a proof it rejected and a body over
+ * its limit are both answers about *this request*, and walking them to another channel is sending
+ * the same bytes to the same mistake.
+ *
+ * The daemon's whole reason for the route is that a session is restarted because its machine has
+ * been rebuilt, and the machine's own channel is the one that is up at that moment — the server's
+ * is not necessarily, which is how a restart came to fail with "socket disconnected" while the
+ * machine sat there answering reads on the LAN.
+ */
+export async function restartSessionAt(
+    baseUrl: string,
+    token: string,
+    sessionId: string,
+    /** The account's proof of this request, when this device can make one. */
+    proof?: Record<string, string>,
+    /**
+     * Move the session between the daemon's domain and the user's desktop session.
+     *
+     * Sent in the body rather than the headers because it changes what the machine should do,
+     * not who is asking. Omitted when unchanged: a restart with no mode keeps the session's own.
+     */
+    requiresDesktop?: boolean
+): Promise<LanRestartVerdict | null> {
+    const hasBody = requiresDesktop !== undefined;
+    const response = await request(`${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/restart`, {
+        method: 'POST',
+        token,
+        // A body is only sent when there is something to say: a POST declaring `application/json`
+        // with nothing in it is rejected by the daemon's body parser before the route runs.
+        headers: { ...(proof ?? {}), ...(hasBody ? { 'content-type': 'application/json' } : {}) },
+        ...(hasBody ? { body: JSON.stringify({ requiresDesktop }) } : {}),
+        // A restart kills a process and starts another. It is not slow, but it is not a read
+        // either, and the shortest timeout in this file is for questions that are one round trip.
+        timeoutMs: historyTimeoutFor(baseUrl),
+    });
+    if (response.status === 404) {
+        return null;
+    }
+    if (!response.ok) {
+        return throwAnswer(response, 'restart request failed');
+    }
+    return (await response.json()) as LanRestartVerdict;
+}
+
+/**
+ * Asks a daemon to forward a control call to one of its sessions.
+ *
+ * The parameters are the same ciphertext the server route carries — the session's own key opens
+ * them, and neither the daemon nor the relay holds it — so this walks the same bytes down a shorter
+ * path. True means the daemon has a live session by that id and handed it over; false means the
+ * daemon has no such session, which is the one answer that belongs to another channel. Everything
+ * else — a token it would not take, a proof it rejected, a body over its limit — is thrown with
+ * the daemon's own words, because "who has this session" and "no, and here is why" are different
+ * questions, and only the first is ever somebody else's to answer.
+ */
+export async function sessionControlAt(
+    baseUrl: string,
+    token: string,
+    sessionId: string,
+    method: 'abort' | 'permission',
+    params: string,
+    /** The account's proof of this request, when this device can make one. */
+    proof?: Record<string, string>
+): Promise<boolean> {
+    const response = await request(`${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/control`, {
+        method: 'POST',
+        token,
+        headers: { 'content-type': 'application/json', ...(proof ?? {}) },
+        body: JSON.stringify({ method, params }),
+        // Not a read: the daemon answers as soon as the session's socket has taken it.
+        timeoutMs: REQUEST_TIMEOUT_MS,
+    });
+    if (response.status === 404) {
+        return false;
+    }
+    if (!response.ok) {
+        return throwAnswer(response, 'control request failed');
+    }
+    return true;
+}
+
+/** One fact from a machine's own log of what it knows about itself. */
+export type LifecycleEntry =
+    | {
+        /** Position in that machine's log. The cursor a reader sends back is the last one it applied. */
+        rev: number;
+        at: number;
+        op: 'created' | 'deleted';
+        /** The CLI's own name for the session, which exists before the server has issued an id. */
+        tag: string;
+        /** The server's id, once that machine knows it. */
+        sessionId?: string;
+        directory?: string;
+        agent?: string;
+    }
+    | {
+        rev: number;
+        at: number;
+        op: 'reachable';
+        /**
+         * Where that machine could be reached, in the shape it publishes.
+         *
+         * The same statement the server's copy of the blob carries, arriving over whichever channel
+         * is up — which is the point: a machine's LAN address has to be learnable when the server,
+         * the usual carrier of it, is the thing that is missing.
+         */
+        endpoints: unknown[];
+    };
+
+/**
+ * What a machine has started and archived, from a reader's cursor.
+ *
+ * A different question from `/lan/sessions`, and asked separately on purpose: that is a *snapshot*
+ * of what exists now, this is an ordered list of facts. A reader that wants to know what changed
+ * asks here, and one that wants to know what there is asks there — and neither may be used to
+ * answer the other's question.
+ *
+ * `revision` comes back with every answer so a reader can hold it as its next cursor, which is what
+ * makes replaying again an empty operation rather than a second application of the same facts.
+ */
+export async function fetchLifecycle(
+    baseUrl: string,
+    token: string,
+    since: number
+): Promise<{ revision: number; entries: LifecycleEntry[] }> {
+    const response = await request(`${baseUrl}/lan/lifecycle?since=${since}`, { token });
+    if (!response.ok) {
+        return throwAnswer(response, 'lifecycle request failed');
+    }
+    const body = (await response.json()) as { revision?: unknown; entries?: unknown };
+    return {
+        revision: typeof body.revision === 'number' ? body.revision : since,
+        entries: Array.isArray(body.entries) ? body.entries as LifecycleEntry[] : [],
+    };
+}

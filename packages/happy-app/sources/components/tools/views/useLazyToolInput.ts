@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useLocalSetting, storage } from '@/sync/storage';
-import { getToolCallFullContent } from '@/sync/ops';
 import { sync } from '@/sync/sync';
 import { ToolCall } from '@/sync/typesMessage';
 import { hasLazyResultMarker } from './toolResult';
@@ -45,7 +44,9 @@ export function useLazyToolInput(tool: ToolCall, sessionId?: string, messageId?:
         setLoading(true);
         setError(null);
         try {
-            const rpcResult = await getToolCallFullContent(sessionId!, callId!);
+            // The machine's own copy first (LAN or relay), then the server: the detail view must open
+            // when the server is the channel that is missing.
+            const rpcResult = await sync.getToolCallFullContent(sessionId!, callId!);
             if (rpcResult.success && (rpcResult.args || rpcResult.result !== undefined)) {
                 if (messageId) {
                     let didUpdate = false;

@@ -7,12 +7,12 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:8081",
     "beforeDevCommand": "EXPO_PUBLIC_ENABLE_SESSION_PROTOCOL_SEND=1 yarn start",
-    "beforeBuildCommand": "EXPO_PUBLIC_ENABLE_SESSION_PROTOCOL_SEND=1 yarn expo export --platform web --output-dir dist --clear && node scripts/patch-web-dist.js"
+    "beforeBuildCommand": "export APP_ENV=production && export EXPO_PUBLIC_ENABLE_SESSION_PROTOCOL_SEND=1 && yarn expo export --platform web --output-dir dist --clear && node scripts/patch-web-dist.js"
   },
   "app": {
     "windows": [
       {
-        "title": "Happy (dev)",
+        "title": "Happy",
         "width": 800,
         "height": 600,
         "resizable": true,

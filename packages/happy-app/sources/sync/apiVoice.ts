@@ -1,5 +1,6 @@
 import { AuthCredentials } from '@/auth/tokenStorage';
 import { getServerUrl } from './serverConfig';
+import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
 import { config } from '@/config';
 import { storage } from './storage';
 
@@ -26,7 +27,7 @@ export async function fetchVoiceToken(
         throw new Error('Agent ID not configured');
     }
 
-    const response = await fetch(`${serverUrl}/v1/voice/token`, {
+    const response = await fetchWithTimeout(`${serverUrl}/v1/voice/token`, {
         method: 'POST',
         headers: {
             'Authorization': `Bearer ${credentials.token}`,

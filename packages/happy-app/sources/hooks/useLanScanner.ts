@@ -1,0 +1,205 @@
+import * as React from 'react';
+import { AppState, Platform, type AppStateStatus } from 'react-native';
+import * as Network from 'expo-network';
+import { sync } from '@/sync/sync';
+import { channelEnabled } from '@/utils/enabledChannels';
+import { storage } from '@/sync/storage';
+import { discoverMachines, accountFingerprintOf } from '@/sync/lan/discovery';
+
+/**
+ * Periodically browses the LAN for Happy daemons and records what it finds.
+ *
+ * This is what gives the app a reachability signal that does not come from the Happy server: a
+ * machine the server reports as inactive can still be sitting on the same Wi-Fi. Results land in
+ * `storage.lanSightings` and are joined with server machine state in `useMachinePresenceMap`.
+ *
+ * Mount once, high in the authenticated app — this owns a repeating mDNS browse, so running it
+ * from a screen would restart the cadence on every navigation.
+ *
+ * Cadence is deliberately modest: each browse occupies the multicast socket for roughly its
+ * timeout, and on a phone that 4s is most of what the radio does while a session sits open — so it
+ * runs once a minute rather than twice, halving the duty cycle. What makes the longer gap safe is
+ * that a sighting is not the only evidence of reachability: an open socket to a machine counts on
+ * its own (see `channels/resolve`), so a scan that is late or missed cannot move a working session
+ * off the LAN. The `lanSightings` TTL still bounds how long a departed machine is shown as seen.
+ *
+ * Scanning is suspended unless the app is foregrounded: iOS will not deliver multicast to a
+ * backgrounded app, and waking to scan would just burn battery for an empty result.
+ */
+const SCAN_INTERVAL_MS = 60_000;
+const SCAN_TIMEOUT_MS = 4_000;
+/**
+ * One follow-up browse, soon after a scan that was triggered by waking up or by the network
+ * changing.
+ *
+ * A browse fired the instant the app becomes active can come back empty: the radio has just
+ * rejoined, or mDNS has not seen the multicast group yet. Accepting that as "nothing is here"
+ * leaves the session on the server until the next minute's tick — which is exactly the case this
+ * scan exists for. One retry is enough; the ordinary cadence covers everything after it.
+ */
+const FIRST_SCAN_RETRY_MS = 5_000;
+
+export function useLanScanner(): void {
+    React.useEffect(() => {
+        let cancelled = false;
+        let timer: ReturnType<typeof setInterval> | null = null;
+        let appState: AppStateStatus = AppState.currentState;
+        // Logged only on change: one line per transition, not one per 30s tick. Starts as null so
+        // the very first scan always logs — including the "found nothing" case, which is the one
+        // most worth seeing (a sentinel of '' would compare equal to an empty result and stay silent).
+        let lastLoggedIds: string | null = null;
+        let warnedNotSignedIn = false;
+        let warnedUnavailable = false;
+
+        const scanOnce = async (): Promise<boolean> => {
+            // `sync.encryption` is only set once the user is signed in and the master secret has
+            // been derived; the account public key is the input the discovery filter needs.
+            const accountPublicKey = sync.encryption?.contentDataKey;
+            // Switched off in the channel priority setting: do not browse at all.
+            if (!channelEnabled(storage.getState().localSettings.channelPriority, 'lan')) {
+                return false;
+            }
+            if (!accountPublicKey || cancelled) {
+                // Before sign-in there is no account key, so the scan cannot be filtered to this
+                // account. Say so once instead of looking like a scanner that finds nothing.
+                if (!accountPublicKey && !warnedNotSignedIn) {
+                    warnedNotSignedIn = true;
+                    console.log('📡 LAN scanner: waiting for sign-in (no account key yet)');
+                }
+                return false;
+            }
+            try {
+                if (lastLoggedIds === null) {
+                    // One-time: the fingerprint this device filters by. Compare against the
+                    // daemon's advertised TXT `accountFingerprint` when discoveries are rejected.
+                    console.log(`📡 LAN scanner: this account's fingerprint is ${await accountFingerprintOf(accountPublicKey)}`);
+                }
+                let rawCount = 0;
+                // How long the browse actually took, so a fixed-timeout scan — the shape this
+                // replaced, where a daemon answering in 50ms still cost the whole timeout — is
+                // visible in the log rather than inferred.
+                const scanStartedAt = Date.now();
+                const found = await discoverMachines({
+                    accountPublicKey,
+                    timeoutMs: SCAN_TIMEOUT_MS,
+                    onRawCount: (count) => { rawCount = count; },
+                    onUnavailable: () => {
+                        if (!warnedUnavailable) {
+                            warnedUnavailable = true;
+                            console.log('📡 LAN scanner: zeroconf unavailable — not scanning');
+                        }
+                    },
+                });
+                if (cancelled) {
+                    return false;
+                }
+                // Keyed on the raw count too, so "the browse stopped seeing anything" is visible
+                // even while the account-filtered result stays empty.
+                const key = `${rawCount}|${found.map((m) => m.machineId).sort().join(',')}`;
+                if (key !== lastLoggedIds) {
+                    lastLoggedIds = key;
+                    const detail = found.map((m) => `${m.machineId.slice(0, 8)}@${m.host}:${m.port}`).join(', ');
+                    console.log(
+                        `📡 LAN scan: ${rawCount} advertised, ${found.length} for this account` +
+                        ` in ${Date.now() - scanStartedAt}ms` +
+                        (detail ? ` — ${detail}` : '')
+                    );
+                }
+                const at = Date.now();
+                storage.getState().applyLanSightings(
+                    found.map((machine) => ({
+                        machineId: machine.machineId,
+                        host: machine.host,
+                        port: machine.port,
+                        baseUrl: machine.baseUrl,
+                        at,
+                    }))
+                );
+                return found.length > 0;
+            } catch {
+                // A failed browse is routine (radio state, permissions, no daemons). The TTL keeps
+                // the previous sightings alive; the next tick retries.
+                return false;
+            }
+        };
+
+        let retryTimer: ReturnType<typeof setTimeout> | null = null;
+        const clearRetry = () => {
+            if (retryTimer !== null) {
+                clearTimeout(retryTimer);
+                retryTimer = null;
+            }
+        };
+        /** A browse for an occasion, with one follow-up if it finds nothing and one is expected soon. */
+        const scanNow = () => {
+            void scanOnce().then((found) => {
+                if (found || cancelled || appState !== 'active' || retryTimer !== null) {
+                    return;
+                }
+                retryTimer = setTimeout(() => {
+                    retryTimer = null;
+                    if (!cancelled && appState === 'active') {
+                        void scanOnce();
+                    }
+                }, FIRST_SCAN_RETRY_MS);
+            });
+        };
+
+        const start = () => {
+            if (timer !== null) {
+                return;
+            }
+            scanNow();
+            timer = setInterval(() => { void scanOnce(); }, SCAN_INTERVAL_MS);
+        };
+
+        const stop = () => {
+            if (timer !== null) {
+                clearInterval(timer);
+                timer = null;
+            }
+            clearRetry();
+        };
+
+        if (appState === 'active') {
+            start();
+        }
+
+        const subscription = AppState.addEventListener('change', (next) => {
+            appState = next;
+            if (next === 'active') {
+                start();
+            } else {
+                stop();
+            }
+        });
+
+        // A browse is the only thing that finds an address, and a network change invalidates every
+        // address this App has — including the ones the sockets were opened to. Waiting up to a
+        // minute for the next tick is the difference between a session that moves to the LAN and
+        // one that sits on the server. Nothing is browsed while the device has no network: there is
+        // no multicast to hear.
+        const networkSubscription = Platform.OS === 'web'
+            ? null
+            : Network.addNetworkStateListener(({ isConnected }) => {
+                if (isConnected === false) {
+                    stop();
+                    return;
+                }
+                if (appState === 'active') {
+                    // `start` browses now when it is not already running; stopping first is what
+                    // makes a network change take the fresh scan and its retry rather than wait
+                    // for the ordinary interval.
+                    stop();
+                    start();
+                }
+            });
+
+        return () => {
+            cancelled = true;
+            stop();
+            subscription.remove();
+            networkSubscription?.remove();
+        };
+    }, []);
+}

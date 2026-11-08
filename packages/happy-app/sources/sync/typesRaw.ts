@@ -74,6 +74,15 @@ const agentEventSchema = z.discriminatedUnion('type', [z.object({
     endsAt: z.number(),
 }), z.object({
     type: z.literal('ready'),
+}), z.object({
+    type: z.literal('permission-result'),
+    call: z.string(),
+    status: z.enum(['approved', 'denied', 'canceled']),
+    decision: z.enum(['approved', 'approved_for_session', 'denied', 'abort']).optional(),
+    mode: z.string().optional(),
+    allowedTools: z.array(z.string()).optional(),
+    reason: z.string().optional(),
+    updatedInput: z.unknown().optional(),
 })]);
 export type AgentEvent = z.infer<typeof agentEventSchema>;
 
@@ -173,6 +182,36 @@ const sessionStopEventSchema = z.object({
     t: z.literal('stop'),
 });
 
+/** Permission result event — embeds permission decisions into the replayable message stream. */
+const sessionPermissionResultEventSchema = z.object({
+    t: z.literal('permission-result'),
+    call: z.string(),
+    status: z.enum(['approved', 'denied', 'canceled']),
+    decision: z.enum(['approved', 'approved_for_session', 'denied', 'abort']).optional(),
+    mode: z.string().optional(),
+    allowedTools: z.array(z.string()).optional(),
+    reason: z.string().optional(),
+    updatedInput: z.unknown().optional(),
+});
+
+/**
+ * /goal condition status — emitted when a goal is armed (sentinel) and again when it
+ * resolves. Mirrors `sessionGoalStatusEventSchema` in @slopus/happy-wire. The app reads
+ * the current status from `agentState.activeGoal`; this schema exists so the envelope
+ * still validates instead of tripping the VALIDATION ERROR path in normalizeRawMessage.
+ */
+const sessionGoalStatusEventSchema = z.object({
+    t: z.literal('goal-status'),
+    condition: z.string(),
+    met: z.boolean(),
+    sentinel: z.boolean().optional(),
+    failed: z.boolean().optional(),
+    reason: z.string().optional(),
+    iterations: z.number().int().nonnegative().optional(),
+    durationMs: z.number().int().nonnegative().optional(),
+    tokens: z.number().int().nonnegative().optional(),
+});
+
 const sessionEventSchema = z.discriminatedUnion('t', [
     sessionTextEventSchema,
     sessionServiceMessageEventSchema,
@@ -183,6 +222,8 @@ const sessionEventSchema = z.discriminatedUnion('t', [
     sessionStartEventSchema,
     sessionTurnEndEventSchema,
     sessionStopEventSchema,
+    sessionPermissionResultEventSchema,
+    sessionGoalStatusEventSchema,
 ]);
 
 const sessionEnvelopeSchema = z.object({
@@ -207,6 +248,13 @@ const sessionEnvelopeSchema = z.object({
         ctx.addIssue({
             code: z.ZodIssueCode.custom,
             message: `${envelope.ev.t} events must use role "agent"`,
+            path: ['role'],
+        });
+    }
+    if (envelope.ev.t === 'goal-status' && envelope.role !== 'agent') {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'goal-status events must use role "agent"',
             path: ['role'],
         });
     }
@@ -904,6 +952,27 @@ function normalizeSessionEnvelope(
                 parentUUID
             }],
             meta
+        } satisfies NormalizedMessage;
+    }
+
+    if (envelope.ev.t === 'permission-result') {
+        return {
+            id: messageId,
+            localId,
+            createdAt: messageCreatedAt,
+            role: 'event',
+            isSidechain,
+            content: {
+                type: 'permission-result',
+                call: envelope.ev.call,
+                status: envelope.ev.status,
+                decision: envelope.ev.decision,
+                mode: envelope.ev.mode,
+                allowedTools: envelope.ev.allowedTools,
+                reason: envelope.ev.reason,
+                updatedInput: envelope.ev.updatedInput,
+            },
+            meta,
         } satisfies NormalizedMessage;
     }
 

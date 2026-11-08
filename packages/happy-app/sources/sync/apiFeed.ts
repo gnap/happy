@@ -1,6 +1,7 @@
 import { AuthCredentials } from '@/auth/tokenStorage';
 import { backoff } from '@/utils/time';
 import { getServerUrl } from './serverConfig';
+import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
 import { FeedResponse, FeedResponseSchema, FeedItem } from './feedTypes';
 import { log } from '@/log';
 
@@ -26,7 +27,7 @@ export async function fetchFeed(
         const url = `${API_ENDPOINT}/v1/feed${params.toString() ? `?${params}` : ''}`;
         log.log(`📰 Fetching feed: ${url}`);
         
-        const response = await fetch(url, {
+        const response = await fetchWithTimeout(url, {
             method: 'GET',
             headers: {
                 'Authorization': `Bearer ${credentials.token}`

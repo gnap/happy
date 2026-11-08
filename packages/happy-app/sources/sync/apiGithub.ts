@@ -1,6 +1,7 @@
 import { AuthCredentials } from '@/auth/tokenStorage';
 import { backoff } from '@/utils/time';
 import { getServerUrl } from './serverConfig';
+import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
 
 export interface GitHubOAuthParams {
     url: string;
@@ -27,7 +28,7 @@ export async function getGitHubOAuthParams(credentials: AuthCredentials): Promis
     const API_ENDPOINT = getServerUrl();
     
     return await backoff(async () => {
-        const response = await fetch(`${API_ENDPOINT}/v1/connect/github/params`, {
+        const response = await fetchWithTimeout(`${API_ENDPOINT}/v1/connect/github/params`, {
             method: 'GET',
             headers: {
                 'Authorization': `Bearer ${credentials.token}`,
@@ -55,7 +56,7 @@ export async function getAccountProfile(credentials: AuthCredentials): Promise<A
     const API_ENDPOINT = getServerUrl();
     
     return await backoff(async () => {
-        const response = await fetch(`${API_ENDPOINT}/v1/account/profile`, {
+        const response = await fetchWithTimeout(`${API_ENDPOINT}/v1/account/profile`, {
             method: 'GET',
             headers: {
                 'Authorization': `Bearer ${credentials.token}`,
@@ -79,7 +80,7 @@ export async function disconnectGitHub(credentials: AuthCredentials): Promise<vo
     const API_ENDPOINT = getServerUrl();
     
     return await backoff(async () => {
-        const response = await fetch(`${API_ENDPOINT}/v1/connect/github`, {
+        const response = await fetchWithTimeout(`${API_ENDPOINT}/v1/connect/github`, {
             method: 'DELETE',
             headers: {
                 'Authorization': `Bearer ${credentials.token}`

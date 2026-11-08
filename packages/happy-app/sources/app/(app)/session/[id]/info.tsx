@@ -7,9 +7,12 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Avatar } from '@/components/Avatar';
-import { useSession, useIsDataReady, useSessionMessages, useMachine } from '@/sync/storage';
-import { sync } from '@/sync/sync';
+import { useDaemonVersions, useSession, useIsDataReady, useSessionMessages, useMachine, useSessionDesktop } from '@/sync/storage';
+import { sync, type ChannelReason } from '@/sync/sync';
+import { useSessionChannel } from '@/hooks/useSessionChannel';
+import { CHANNEL_ICONS } from '@/sync/machinePresence';
 import { getSessionName, useSessionStatus, formatOSPlatform, formatPathRelativeToHome, getSessionAvatarId } from '@/utils/sessionUtils';
+import { sessionIsRestarting } from '@/utils/sessionRestart';
 import * as Clipboard from 'expo-clipboard';
 import { Modal } from '@/modal';
 import { sessionKill, sessionDelete, sessionRestart } from '@/sync/ops';
@@ -22,7 +25,20 @@ import { Session } from '@/sync/storageTypes';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { HappyError } from '@/utils/errors';
 import { getCachedLastSeq, subscribeToCachedLastSeq } from '@/sync/cache/messageCache';
+import type { SessionChannel } from '@/sync/lan/types';
 import { getBitmapSegments } from '@/sync/cacheSegment';
+
+function channelReasonText(reason: ChannelReason): string {
+    switch (reason) {
+        case 'reachable': return t('sessionInfo.channelWhyReachable');
+        case 'not-declared': return t('sessionInfo.channelWhyNotDeclared');
+        case 'not-on-network': return t('sessionInfo.channelWhyNotOnNetwork');
+        case 'no-machine-key': return t('sessionInfo.channelWhyNoKey');
+        case 'by-priority': return t('sessionInfo.channelWhyByPriority');
+        case 'server-down-relay': return t('sessionInfo.channelWhyServerDownRelay');
+        default: return t('sessionInfo.channelWhyUnknown');
+    }
+}
 
 // Animated status dot component
 function StatusDot({ color, isPulsing, size = 8 }: { color: string; isPulsing?: boolean; size?: number }) {
@@ -159,12 +175,37 @@ function formatDangerouslySkipPermissionsMetadata(
 }
 
 function SessionInfoContent({ session }: { session: Session }) {
+    // Whether this session needs a desktop session, and whether one is available right now.
+    const desktop = useSessionDesktop(session.id);
     const { theme } = useUnistyles();
     const router = useRouter();
     const devModeEnabled = __DEV__;
     const sessionName = getSessionName(session);
     const sessionStatus = useSessionStatus(session);
-    const { cachedBitmap } = useSessionMessages(session.id);
+    /**
+     * Whether restarting this session would actually change its build.
+     *
+     * The baseline is the machine's own report — the build it has on disk, or the one it is running
+     * when it has not said — asked for over the channel in use, so the answer comes from the same
+     * place the rest of the App's picture of that machine comes from.
+     */
+    const daemonVersions = useDaemonVersions();
+    const channel = useSessionChannel(session.id);
+    const channelSubtitle = channel.pinned
+        ? t('sessionInfo.channelPinned')
+        : `${t('sessionInfo.channelAuto')} · ${channelReasonText(channel.reason)}`;
+    const handleChooseChannel = useCallback(() => {
+        const current = channel.pinned ? channel.channel : null;
+        const mark = (value: SessionChannel | null, label: string) => (current === value ? `✓ ${label}` : label);
+        Modal.alert(t('sessionInfo.connectionStatus'), undefined, [
+            { text: mark(null, t('sessionInfo.channelAuto')), onPress: () => sync.setSessionChannel(session.id, null) },
+            { text: mark('lan', t('status.lan')), onPress: () => sync.setSessionChannel(session.id, 'lan') },
+            { text: mark('relay', t('sessionInfo.channelRelay')), onPress: () => sync.setSessionChannel(session.id, 'relay') },
+            { text: mark('server', t('sessionInfo.channelServer')), onPress: () => sync.setSessionChannel(session.id, 'server') },
+            { text: t('common.cancel'), style: 'cancel' },
+        ]);
+    }, [channel.pinned, channel.channel, session.id]);
+    const { cachedBitmap, oldestSeq, newestSeq } = useSessionMessages(session.id);
     
     // Check if CLI version is outdated
     const isCliOutdated = session.metadata?.version && !isVersionSupported(session.metadata.version, MINIMUM_CLI_VERSION);
@@ -217,23 +258,68 @@ function SessionInfoContent({ session }: { session: Session }) {
 
     // Check if the session was spanwed by an older CLI than the machine currently runs.
     const machine = useMachine(session.metadata?.machineId ?? '');
-    const sessionNeedsRestart = isSessionRestartRecommended(
-        session.metadata?.version,
-        machine?.metadata?.happyCliVersion,
-    );
+    /**
+     * What the machine says it is running, which is the baseline the session is judged against.
+     *
+     * Asked for over the channel in use, and failing that read from the machine's own record — the
+     * daemon writes that field, so it is a report rather than the server's opinion of one. What it
+     * used to be judged against was `machine.metadata.happyCliVersion`, the server's copy, and a
+     * copy that is missing or stale makes the rule answer "no restart needed" for a session that is
+     * older than everything around it.
+     */
+    const machineVersions = session.metadata?.machineId ? daemonVersions[session.metadata.machineId] : undefined;
+    // The build on disk first, because that is what a restart produces: the daemon spawns the next
+    // session from the file, not from the process it happens to be running. Then the daemon's own
+    // build, then the two record fields, oldest source last.
+    const daemonBuild = machineVersions?.onDisk
+        ?? machineVersions?.running
+        ?? machine?.daemonState?.startedWithCliVersion
+        ?? machine?.metadata?.happyCliVersion;
+    const sessionNeedsRestart = isSessionRestartRecommended(session.metadata?.version, daemonBuild)
+        && !sessionIsRestarting(session);
+    /**
+     * What the connection row says, and how it is tinted.
+     *
+     * Three words, because there are three facts: connected, stopped, and the one this App has no
+     * other way to express — a restart it asked for and is waiting on. Tinting it with the status
+     * colour rather than the green/grey pair keeps that row and the status line above it from
+     * disagreeing about what is happening.
+     */
+    const connectionWord = sessionStatus.state === 'restarting'
+        ? t('status.restarting')
+        : sessionStatus.isConnected ? t('status.online') : t('status.offline');
+    // The channel glyph answers about the channel's own link, which is not the same as whether the
+    // session is reachable: the LAN can serve reads while its push/send socket is reconnecting, and
+    // that is the state a green glyph used to hide.
+    const channelLinkTint = channel.link === 'connected' ? '#34C759'
+        : channel.link === 'connecting' ? theme.colors.status.connecting
+            : channel.link === 'off' ? '#8E8E93'
+                : null;
+    const connectionTint = channelLinkTint ?? (sessionStatus.state === 'restarting'
+        ? sessionStatus.statusColor
+        : sessionStatus.isConnected ? "#34C759" : "#8E8E93");
+    // What the decision was made of, once per session: an answer nobody can check is how this
+    // question became a mystery in the first place.
+    const loggedDecision = React.useRef<string | null>(null);
+    const decision = `session ${session.id} version=${session.metadata?.version ?? '-'} machine=${session.metadata?.machineId?.slice(0, 8) ?? '-'} onDisk=${machineVersions?.onDisk ?? '-'} running=${machineVersions?.running ?? '-'} record=${machine?.daemonState?.startedWithCliVersion ?? '-'} server=${machine?.metadata?.happyCliVersion ?? '-'} needsRestart=${sessionNeedsRestart}`;
+    React.useEffect(() => {
+        if (loggedDecision.current !== decision) {
+            loggedDecision.current = decision;
+            console.log(`🔄 restart decision: ${decision}`);
+        }
+    }, [decision]);
 
-    // Use HappyAction for restart — it handles errors automatically
-    const [restartingSession, performRestart] = useHappyAction(async () => {
+    // Use HappyAction for restart
+    const [restartingSession, doRestartSession] = useHappyAction(async (inDesktop?: boolean) => {
         if (!session.metadata?.machineId) {
             throw new HappyError(t('sessionInfo.noMachineId'), false);
         }
-        const result = await sessionRestart(session.id, session.metadata.machineId);
+        if (desktop?.required && !desktop.available) {
+            throw new HappyError(t('sessionInfo.needsDesktop'), false);
+        }
+        const result = await sessionRestart(session.id, session.metadata.machineId, inDesktop ? { requiresDesktop: true } : undefined);
         if (!result.success) {
             throw new HappyError(result.error || t('sessionInfo.failedToRestartSession'), false);
-        }
-        // Navigate to the new session
-        if (result.newSessionId) {
-            router.replace(`/(app)/session/${result.newSessionId}`);
         }
     });
 
@@ -246,11 +332,17 @@ function SessionInfoContent({ session }: { session: Session }) {
                 {
                     text: t('sessionInfo.restartSession'),
                     style: 'destructive',
-                    onPress: performRestart
+                    onPress: () => doRestartSession(),
+                },
+                {
+                    // A restart in the desktop session is how a conversation moves between the
+                    // daemon's domain and the user's Aqua session; it needs a logged-in user.
+                    text: t('sessionInfo.restartInDesktop'),
+                    onPress: () => doRestartSession(true),
                 }
             ]
         );
-    }, [performRestart]);
+    }, [doRestartSession]);
 
     // Use HappyAction for deletion - it handles errors automatically
     const [deletingSession, performDelete] = useHappyAction(async () => {
@@ -325,7 +417,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                 {/* Session Header */}
                 <View style={{ maxWidth: layout.maxWidth, alignSelf: 'center', width: '100%' }}>
                     <View style={{ alignItems: 'center', paddingVertical: 24, backgroundColor: theme.colors.surface, marginBottom: 8, borderRadius: 12, marginHorizontal: 16, marginTop: 16 }}>
-                        <Avatar id={getSessionAvatarId(session)} size={80} monochrome={!sessionStatus.isConnected} flavor={session.metadata?.flavor} />
+                        <Avatar id={getSessionAvatarId(session)} size={80} monochrome={!sessionStatus.isLive} flavor={session.metadata?.flavor} />
                         <Text style={{
                             fontSize: 20,
                             fontWeight: '600',
@@ -396,9 +488,11 @@ function SessionInfoContent({ session }: { session: Session }) {
                     )}
                     <Item
                         title={t('sessionInfo.connectionStatus')}
-                        detail={sessionStatus.isConnected ? t('status.online') : t('status.offline')}
-                        icon={<Ionicons name="pulse-outline" size={29} color={sessionStatus.isConnected ? "#34C759" : "#8E8E93"} />}
-                        showChevron={false}
+                        detail={`${connectionWord} · ${channel.channel === 'lan' ? t('status.lan') : channel.channel === 'relay' ? t('sessionInfo.channelRelay') : t('sessionInfo.channelServer')}${channel.link === 'connecting' ? ` · ${t('status.connecting')}` : channel.link === 'off' ? ` · ${t('status.disconnected')}` : ''}`}
+                        subtitle={channelSubtitle}
+                        subtitleLines={0}
+                        icon={<Ionicons name={CHANNEL_ICONS[channel.channel]} size={29} color={connectionTint} />}
+                        onPress={handleChooseChannel}
                     />
                     <Item
                         title={t('sessionInfo.created')}
@@ -416,15 +510,24 @@ function SessionInfoContent({ session }: { session: Session }) {
                         <Item
                             title={t('sessionInfo.sequence')}
                             subtitle={t('sessionInfo.sequenceSubtitle')}
-                            detail={cachedLastSeq != null && cachedLastSeq !== session.seq ? `${cachedLastSeq}/${session.seq}` : session.seq.toString()}
+                            // The server's counter when there is one, and what this device has actually
+                            // loaded when there is not: a session the server cannot describe (the server
+                            // channel is off) would otherwise read as a permanent 0.
+                            detail={session.seq > 0
+                                ? (cachedLastSeq != null && cachedLastSeq !== session.seq ? `${cachedLastSeq}/${session.seq}` : session.seq.toString())
+                                : (newestSeq > 0 ? `loaded ${oldestSeq}–${newestSeq}` : '—')}
                             icon={<Ionicons name="git-commit-outline" size={29} color="#007AFF" />}
                             showChevron={false}
                             showDivider={false}
                         />
-                        <CacheProgressBar
-                            totalSeq={session.seq}
-                            cachedBitmap={cachedBitmap}
-                        />
+                        {/* The bar is drawn from the server's counter, so it has nothing to say when
+                            there is not one. */}
+                        {session.seq > 0 && (
+                            <CacheProgressBar
+                                totalSeq={session.seq}
+                                cachedBitmap={cachedBitmap}
+                            />
+                        )}
                     </View>
                 </ItemGroup>
 
@@ -438,14 +541,26 @@ function SessionInfoContent({ session }: { session: Session }) {
                             onPress={() => router.push(`/machine/${session.metadata?.machineId}`)}
                         />
                     )}
-                    {sessionStatus.isConnected && (
-                        <Item
-                            title={t('sessionInfo.restartSession')}
-                            subtitle={t('sessionInfo.restartSessionSubtitle')}
-                            icon={<Ionicons name="sync-circle-outline" size={29} color="#FF9500" />}
-                            onPress={handleRestartSession}
-                        />
-                    )}
+                    {/* Restart is always available; what is not always true is that a newer build is
+                        waiting. That claim is only made when the session's build differs from the one the
+                        machine says it has, read from the machine itself over whichever channel is in
+                        use — the same baseline the machine page shows. A label that is always on says
+                        nothing, which is how a session running the current build came to be told it
+                        needed updating and why nobody could tell what the rule was. */}
+                    <Item
+                        title={t('sessionInfo.restartSession')}
+                        subtitle={(() => {
+                            // The value the row is actually handed, next to the decision itself: the two
+                            // disagreeing is a rendering question, and agreeing is a question about the
+                            // decision — which is the difference between looking at the wrong place and
+                            // looking at the wrong rule.
+                            const subtitle = sessionNeedsRestart ? t('sessionInfo.restartSessionSubtitle') : undefined;
+                            console.log(`🔄 restart row: needsRestart=${sessionNeedsRestart} subtitle=${subtitle ? 'set' : 'none'}`);
+                            return subtitle;
+                        })()}
+                        icon={<Ionicons name="sync-circle-outline" size={29} color="#FF9500" />}
+                        onPress={handleRestartSession}
+                    />
                     {sessionStatus.isConnected && (
                         <Item
                             title={t('sessionInfo.archiveSession')}

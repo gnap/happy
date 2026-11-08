@@ -90,9 +90,11 @@ export const pl: TranslationStructure = {
         error: 'błąd',
         auth_error: 'zaloguj się ponownie',
         online: 'online',
+        lan: 'LAN',
         offline: 'offline',
         lastSeen: ({ time }: { time: string }) => `ostatnio widziano ${time}`,
         permissionRequired: 'wymagane uprawnienie',
+        restarting: 'Restartowanie…',
         activeNow: 'Aktywny teraz',
         unknown: 'nieznane',
         creating: 'Tworzenie…',
@@ -102,6 +104,7 @@ export const pl: TranslationStructure = {
         justNow: 'teraz',
         minutesAgo: ({ count }: { count: number }) => `${count} ${plural({ count, one: 'minuta', few: 'minuty', many: 'minut' })} temu`,
         hoursAgo: ({ count }: { count: number }) => `${count} ${plural({ count, one: 'godzina', few: 'godziny', many: 'godzin' })} temu`,
+        yesterday: 'wczoraj',
     },
 
     connect: {
@@ -227,6 +230,7 @@ export const pl: TranslationStructure = {
         networkError: 'Wystąpił błąd sieci',
         serverError: 'Wystąpił błąd serwera',
         unknownError: 'Wystąpił nieznany błąd',
+        channelCannotServeAction: 'Ta czynność idzie przez serwer, który jest wyłączony w ustawieniach kanałów',
         connectionTimeout: 'Przekroczono czas oczekiwania na połączenie',
         authenticationFailed: 'Uwierzytelnienie nie powiodło się',
         permissionDenied: 'Brak uprawnień',
@@ -301,6 +305,7 @@ export const pl: TranslationStructure = {
             success: 'Worktree został utworzony pomyślnie',
         },
         sessionReadyMessage: 'Sesja gotowa. Dotknij jej na liście, aby otworzyć.',
+        sessionCreatedPending: 'Sesja została utworzona na maszynie; wkrótce pojawi się na liście.',
     },
 
     sessionHistory: {
@@ -316,6 +321,14 @@ export const pl: TranslationStructure = {
     session: {
         inputPlaceholder: 'Wpisz wiadomość...',
         encrypting: 'nawiązywanie połączenia…',
+        backgroundTasks: 'Zadania w tle',
+        activityScheduled: 'Zaplanowane',
+        activityOnce: 'jednorazowo',
+        activityAgents: 'Agenci',
+        activityMonitors: 'Monitory',
+        activityGoals: 'Cele',
+        activityShell: 'Polecenia w tle',
+        activityWorkflows: 'Przepływy pracy',
     },
 
     commandPalette: {
@@ -348,6 +361,8 @@ export const pl: TranslationStructure = {
         archiveSessionConfirm: 'Czy na pewno chcesz zarchiwizować tę sesję?',
         restartSession: 'Uruchom ponownie sesję',
         restartSessionSubtitle: 'Dostępna jest nowsza wersja CLI. Uruchom ponownie, aby zaktualizować.',
+        needsDesktop: 'Ta sesja wymaga zalogowania do sesji pulpitu na tej maszynie. Zaloguj się tam i spróbuj ponownie.',
+        restartInDesktop: 'Uruchom ponownie w sesji pulpitu',
         restartSessionConfirm: 'Sesja zostanie uruchomiona ponownie z nowszą wersją CLI.',
         noMachineId: 'ID maszyny niedostępne dla tej sesji',
         failedToRestartSession: 'Nie udało się uruchomić ponownie sesji',
@@ -369,6 +384,17 @@ export const pl: TranslationStructure = {
         failedToKillSession: 'Nie udało się zakończyć sesji',
         failedToArchiveSession: 'Nie udało się zarchiwizować sesji',
         connectionStatus: 'Status połączenia',
+        channelAuto: 'Automatycznie',
+        channelServer: 'Serwer',
+        channelRelay: 'Przekaźnik',
+        channelWhyServerDownRelay: 'Serwer niedostępny, używany jest publiczny przekaźnik',
+        channelWhyByPriority: 'Wybrano według priorytetu kanałów',
+        channelPinned: 'Przypięto ręcznie',
+        channelWhyReachable: 'Sesja obsługuje LAN, a maszyna jest w tej sieci',
+        channelWhyNotDeclared: 'Sesja nie obsługuje LAN, uruchom ją ponownie',
+        channelWhyNotOnNetwork: 'Maszyny nie widać w tej sieci',
+        channelWhyNoKey: 'Brak klucza tej maszyny na tym urządzeniu',
+        channelWhyUnknown: 'Oczekiwanie na dane sesji',
         created: 'Utworzono',
         lastUpdated: 'Ostatnia aktualizacja',
         sequence: 'Sekwencja',
@@ -417,6 +443,20 @@ export const pl: TranslationStructure = {
             scanQrCode: 'Zeskanuj kod QR',
             openCamera: 'Otwórz kamerę',
         },
+    },
+
+    sandbox: {
+        isolationTitle: 'Sandbox Isolation',
+        isolation: {
+            off: 'Off',
+            strict: 'Strict',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
+        isolationOffDesc: 'No sandbox restrictions',
+        isolationStrictDesc: 'Full filesystem and network isolation',
+        isolationWorkspaceDesc: 'Sandbox limited to workspace directory',
+        isolationCustomDesc: 'Custom sandbox rules',
     },
 
     agentInput: {
@@ -498,6 +538,13 @@ export const pl: TranslationStructure = {
             fileLabel: 'PLIK',
             folderLabel: 'FOLDER',
         },
+        sandbox: {
+            isolationTitle: 'Sandbox Isolation',
+            off: 'Off',
+            strict: 'Strict (project only)',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
         noMachinesAvailable: 'Brak maszyn',
     },
 
@@ -518,6 +565,15 @@ export const pl: TranslationStructure = {
     },
 
     tools: {
+
+
+        countdown: {
+
+            in: ({ time }: { time: string }) => `za ${time}`,
+
+            due: 'już teraz',
+
+        },
         fullView: {
             description: 'Opis',
             inputParams: 'Parametry wejściowe',
@@ -564,6 +620,19 @@ export const pl: TranslationStructure = {
             question: 'Pytanie',
             agent: 'Agent',
             skill: 'Skill',
+            sendMessage: 'Wyślij wiadomość',
+            listAgents: 'Agenci',
+            taskDetails: 'Zadanie',
+            enterWorktree: 'Wejdź do worktree',
+            exitWorktree: 'Wyjdź z worktree',
+            notification: 'Powiadomienie',
+            designSync: 'Synchronizacja designu',
+        },
+        sendMessage: {
+            to: ({ name }: { name: string }) => `Do ${name}`,
+            sending: 'wysyłanie',
+            sent: 'wysłano',
+            failed: 'błąd',
         },
         desc: {
             terminalCmd: ({ cmd }: { cmd: string }) => `Terminal(cmd: ${cmd})`,
@@ -613,6 +682,7 @@ export const pl: TranslationStructure = {
         file: 'Plik',
         fileEmpty: 'Plik jest pusty',
         noChanges: 'Brak zmian do wyświetlenia',
+        download: 'Pobierz',
     },
 
     settingsVoice: {
@@ -787,6 +857,7 @@ export const pl: TranslationStructure = {
         lastKnownHttpPort: 'Ostatni znany port HTTP',
         startedAt: 'Uruchomiony o',
         cliVersion: 'Wersja CLI',
+        restartRequired: 'Wymagany restart',
         daemonStateVersion: 'Wersja stanu daemon',
         activeSessions: ({ count }: { count: number }) => `Aktywne sesje (${count})`,
         machineGroup: 'Maszyna',

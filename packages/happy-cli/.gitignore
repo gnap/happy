@@ -47,3 +47,6 @@ happy-coder-*.tgz
 
 # npm auth token (never commit)
 .npmrc
+
+# Auto-generated build version
+src/version.ts

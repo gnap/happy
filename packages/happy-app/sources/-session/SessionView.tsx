@@ -1,5 +1,5 @@
 import { AgentContentView } from '@/components/AgentContentView';
-import { AgentInput } from '@/components/AgentInput';
+import { AgentInput, type SandboxIsolationLevel } from '@/components/AgentInput';
 import {
     getAvailableModels,
     getAvailablePermissionModes,
@@ -10,16 +10,13 @@ import {
 import { getSuggestions } from '@/components/autocomplete/suggestions';
 import { ChatHeaderView } from '@/components/ChatHeaderView';
 import { ChatList } from '@/components/ChatList';
-import { Deferred } from '@/components/Deferred';
 import { EmptyMessages } from '@/components/EmptyMessages';
 import { VoiceAssistantStatusBar } from '@/components/VoiceAssistantStatusBar';
 import { useDraft } from '@/hooks/useDraft';
 import { Modal } from '@/modal';
-import { voiceHooks } from '@/realtime/hooks/voiceHooks';
-import { startRealtimeSession, stopRealtimeSession } from '@/realtime/RealtimeSession';
 import { gitStatusSync } from '@/sync/gitStatusSync';
 import { sessionAbort } from '@/sync/ops';
-import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionMessages, useSessionUsage, useSetting } from '@/sync/storage';
+import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionDesktop, useSessionMessages, useSessionOnline, useSessionUsage, useSetting } from '@/sync/storage';
 import { useSession } from '@/sync/storage';
 import { Session } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
@@ -28,16 +25,20 @@ import { useImagePicker, PickedImage } from '@/hooks/useImagePicker';
 import { tracking, trackMessageSent } from '@/track';
 import { isRunningOnMac } from '@/utils/platform';
 import { useDeviceType, useHeaderHeight, useIsLandscape, useIsTablet } from '@/utils/responsive';
+import { useSessionChannel } from '@/hooks/useSessionChannel';
 import { formatPathRelativeToHome, getSessionAvatarId, getSessionName, useSessionStatus } from '@/utils/sessionUtils';
+import { getActiveGoal } from '@/utils/goalUtils';
 import { isVersionSupported, MINIMUM_CLI_VERSION } from '@/utils/versionUtils';
 import { Ionicons } from '@expo/vector-icons';
-import { useFocusEffect } from '@react-navigation/native';
-import { useRouter } from 'expo-router';
+import { useEffect } from 'react';
+import { useRouter, useFocusEffect } from 'expo-router';
 import * as React from 'react';
 import { useMemo } from 'react';
 import { ActivityIndicator, Platform, Pressable, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useUnistyles } from 'react-native-unistyles';
+import { sessionIsRestarting } from '@/utils/sessionRestart';
+import { log } from '@/log';
 import type { ModelMode, PermissionMode } from '@/components/PermissionModeSelector';
 
 export const SessionView = React.memo((props: { id: string }) => {
@@ -45,6 +46,17 @@ export const SessionView = React.memo((props: { id: string }) => {
     const router = useRouter();
     const session = useSession(sessionId);
     const isDataReady = useIsDataReady();
+    /**
+     * Whether this screen has to wait for the initial sync at all.
+     *
+     * It only matters when the session itself is unknown: the gate exists so a session screen
+     * opened before the list arrives does not flash "session deleted". When the session is already
+     * in the store — restored from cache on a reload — the conversation, its header and its
+     * messages are all there. Gating on the *list* being ready meant a spinner until the initial
+     * sync finished: measured on a device, 8.7 s of blank with 72 hydrated messages underneath,
+     * released only by the ready timeout.
+     */
+    const waitingForFirstData = !isDataReady && !session;
     const { theme } = useUnistyles();
     const safeArea = useSafeAreaInsets();
     const isLandscape = useIsLandscape();
@@ -52,17 +64,33 @@ export const SessionView = React.memo((props: { id: string }) => {
     const headerHeight = useHeaderHeight();
     const realtimeStatus = useRealtimeStatus();
     const isTablet = useIsTablet();
+    /** Whether anything is reaching this session — the only part the header draws. */
+    const isSessionOnline = useSessionOnline(sessionId, session?.metadata?.machineId);
+
+    // The other half of tap-to-screen: the press log is the tap, this is the screen being on it.
+    useFocusEffect(React.useCallback(() => {
+        log.log(`🖥️ session screen focused: ${sessionId}`);
+    }, [sessionId]));
+
+    // One line on the screen's first render. Between the press and the focus log there are two
+    // different costs — navigation and rendering this screen — and a single "opening is slow"
+    // number cannot tell them apart.
+    const firstRender = React.useRef(false);
+    if (!firstRender.current) {
+        firstRender.current = true;
+        log.log(`🖥️ session view first render: ${sessionId}`);
+    }
 
     // Compute header props based on session state
     const headerProps = useMemo(() => {
-        if (!isDataReady) {
+        if (waitingForFirstData) {
             // Loading state - show empty header
             return {
                 title: '',
                 subtitle: undefined,
                 avatarId: undefined,
                 onAvatarPress: undefined,
-                isConnected: false,
+                isLive: false,
                 flavor: null
             };
         }
@@ -74,24 +102,26 @@ export const SessionView = React.memo((props: { id: string }) => {
                 subtitle: undefined,
                 avatarId: undefined,
                 onAvatarPress: undefined,
-                isConnected: false,
+                isLive: false,
                 flavor: null
             };
         }
 
         // Normal state - show session info
-        const isConnected = session.presence === 'online';
+        // The same question the status line below asks, so the header and the input bar cannot
+        // disagree about whether this session is being reached.
+        const isLive = isSessionOnline || sessionIsRestarting(session);
         return {
             title: getSessionName(session),
             subtitle: session.metadata?.path ? formatPathRelativeToHome(session.metadata.path, session.metadata?.homeDir) : undefined,
             rightSubtitle: session.metadata?.contextUsage?.model || session.metadata?.sessionModel || undefined,
             avatarId: getSessionAvatarId(session),
             onAvatarPress: () => router.push(`/session/${sessionId}/info`),
-            isConnected: isConnected,
+            isLive,
             flavor: session.metadata?.flavor || null,
-            tintColor: isConnected ? '#000' : '#8E8E93'
+            tintColor: isLive ? '#000' : '#8E8E93'
         };
-    }, [session, isDataReady, sessionId, router]);
+    }, [session, waitingForFirstData, sessionId, router, isSessionOnline]);
 
     return (
         <>
@@ -138,7 +168,7 @@ export const SessionView = React.memo((props: { id: string }) => {
 
             {/* Content based on state */}
             <View style={{ flex: 1, paddingTop: !(isLandscape && deviceType === 'phone' && Platform.OS !== 'web') ? safeArea.top + headerHeight + (!isTablet && realtimeStatus !== 'disconnected' ? 48 : 0) : 0 }}>
-                {!isDataReady ? (
+                {waitingForFirstData ? (
                     // Loading state
                     <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
                         <ActivityIndicator size="small" color={theme.colors.textSecondary} />
@@ -161,6 +191,10 @@ export const SessionView = React.memo((props: { id: string }) => {
 
 
 function SessionViewLoaded({ sessionId, session }: { sessionId: string, session: Session }) {
+    /** This session runs in the user's desktop session (Happy Sidecar), and whether one is up. */
+    const desktopState = useSessionDesktop(sessionId);
+    /** Whether anything is reaching the session: a dead process has no schedules to show. */
+    const sessionOnline = useSessionOnline(sessionId, session.metadata?.machineId);
     const { theme } = useUnistyles();
     const router = useRouter();
     const safeArea = useSafeAreaInsets();
@@ -170,7 +204,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const [attachments, setAttachments] = React.useState<PickedImage[]>([]);
     const { pickImage } = useImagePicker();
     const realtimeStatus = useRealtimeStatus();
-    const { messages, isLoaded } = useSessionMessages(sessionId);
+    const { messages, isLoaded, isFetching } = useSessionMessages(sessionId);
     const acknowledgedCliVersions = useLocalSetting('acknowledgedCliVersions');
 
     // Check if CLI version is outdated and not already acknowledged
@@ -223,6 +257,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     }, [session.thinkingLevel, session.metadata?.currentEffort]);
 
     const sessionStatus = useSessionStatus(session);
+    const sessionChannel = useSessionChannel(sessionId);
     const sessionUsage = useSessionUsage(sessionId);
     const maxContextSize = React.useMemo(() => {
         const fromUsage = sessionUsage?.contextWindowTokens ?? session.latestUsage?.contextWindowTokens;
@@ -279,6 +314,14 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         sync.applySettings({ lastUsedProfile: profileId });
     }, [sessionId]);
 
+    // `session.sandboxIsolation` is persisted as a plain string; the values only ever come
+    // from the picker in AgentInput, so narrow to its union here rather than widening the
+    // stored type.
+    const sandboxIsolation = (session.sandboxIsolation ?? 'off') as SandboxIsolationLevel;
+    const updateSandboxIsolation = React.useCallback((isolation: SandboxIsolationLevel) => {
+        storage.getState().updateSessionSandboxIsolation(sessionId, isolation);
+    }, [sessionId]);
+
     const agentTypeForProfile = React.useMemo((): 'claude' | 'codex' | 'cursor' | 'cursor-acp' | 'gemini' | undefined => {
         if (flavor === 'codex') return 'codex';
         if (flavor === 'gemini') return 'gemini';
@@ -298,36 +341,6 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     }), []);
 
 
-    // Handle microphone button press - memoized to prevent button flashing
-    const handleMicrophonePress = React.useCallback(async () => {
-        if (realtimeStatus === 'connecting') {
-            return; // Prevent actions during transitions
-        }
-        if (realtimeStatus === 'disconnected' || realtimeStatus === 'error') {
-            try {
-                const initialPrompt = voiceHooks.onVoiceStarted(sessionId);
-                await startRealtimeSession(sessionId, initialPrompt);
-                tracking?.capture('voice_session_started', { sessionId });
-            } catch (error) {
-                console.error('Failed to start realtime session:', error);
-                Modal.alert(t('common.error'), t('errors.voiceSessionFailed'));
-                tracking?.capture('voice_session_error', { error: error instanceof Error ? error.message : 'Unknown error' });
-            }
-        } else if (realtimeStatus === 'connected') {
-            await stopRealtimeSession();
-            tracking?.capture('voice_session_stopped');
-
-            // Notify voice assistant about voice session stop
-            voiceHooks.onVoiceStopped();
-        }
-    }, [realtimeStatus, sessionId]);
-
-    // Memoize mic button state to prevent flashing during chat transitions
-    const micButtonState = useMemo(() => ({
-        onMicPress: handleMicrophonePress,
-        isMicActive: realtimeStatus === 'connected' || realtimeStatus === 'connecting'
-    }), [handleMicrophonePress, realtimeStatus]);
-
     // Trigger session visibility when this screen is focused.
     useFocusEffect(
         React.useCallback(() => {
@@ -342,16 +355,18 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
 
     let content = (
         <>
-            <Deferred>
-                {messages.length > 0 && (
-                    <ChatList session={session} />
-                )}
-            </Deferred>
+            {messages.length > 0 && (
+                <ChatList session={session} />
+            )}
         </>
     );
     const placeholder = messages.length === 0 ? (
         <>
-            {isLoaded && session.seq <= 0 ? (
+            {/* `session.seq` is the *server's* count of what a session has said, and it is 0 for a
+                session the server cannot describe — which is every session when the server channel is
+                switched off. Reading that as "this session has nothing" showed the empty state over a
+                load that was still running, so a read in flight now wins over it. */}
+            {isLoaded && !isFetching && session.seq <= 0 ? (
                 <EmptyMessages session={session} />
             ) : (
                 <ActivityIndicator size="small" color={theme.colors.textSecondary} />
@@ -361,6 +376,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
 
     const input = (
         <AgentInput
+            desktopState={desktopState}
             placeholder={t('session.inputPlaceholder')}
             value={message}
             onChangeText={setMessage}
@@ -378,16 +394,35 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             agentType={agentTypeForProfile}
             profileId={sessionProfileId}
             onProfileChange={updateProfileId}
+            sandboxIsolation={sandboxIsolation}
+            onSandboxIsolationChange={updateSandboxIsolation}
             metadata={session.metadata}
             isSendDisabled={!sync.encryption.getSessionEncryption(sessionId)}
             connectionStatus={(() => {
+                // /goal status is independent of the connection, so it rides along in both branches.
+                const goal = getActiveGoal(session);
+                // Likewise the background tasks: they say why the turn is still open, which is
+                // worth saying even while encryption is still being set up.
+                const backgroundTasks = session.agentState?.backgroundTasks ?? null;
+                // Session-scoped: a session nothing reaches cannot fire them, and a crashed
+                // process never ran its SessionEnd hook to clear the list.
+                const crons = sessionOnline ? (session.agentState?.crons ?? null) : null;
                 const hasEncryption = sync.encryption.getSessionEncryption(sessionId);
+                // The channel is known whether or not the key is: it is how the App is reaching the
+                // session, and while a key is being fetched that is exactly what a reader wants to
+                // see — a page that says only "handshaking" cannot be told apart from one whose
+                // channel is dead, which is the state this text is most often mistaken for.
+                const channel = { kind: sessionChannel.channel, pinned: sessionChannel.pinned, link: sessionChannel.link };
                 if (!hasEncryption) {
                     return {
                         text: t('session.encrypting'),
                         color: theme.colors.warning,
                         dotColor: theme.colors.warning,
                         isPulsing: true,
+                        channel,
+                        goal,
+                        backgroundTasks,
+                        crons,
                     };
                 }
                 return {
@@ -395,6 +430,10 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                     color: sessionStatus.statusColor,
                     dotColor: sessionStatus.statusDotColor,
                     isPulsing: sessionStatus.isPulsing,
+                    channel,
+                    goal,
+                    backgroundTasks,
+                    crons,
                 };
             })()}
             onSend={() => {
@@ -413,8 +452,6 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                     trackMessageSent();
                 }
             }}
-            onMicPress={micButtonState.onMicPress}
-            isMicActive={micButtonState.isMicActive}
             onAttach={async () => {
                 const img = await pickImage();
                 if (img) setAttachments(prev => [...prev, img]);

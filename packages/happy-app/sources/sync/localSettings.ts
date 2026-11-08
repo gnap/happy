@@ -18,6 +18,7 @@ export const LocalSettingsSchema = z.object({
     // Model preference is device-local: server sync must not overwrite the user's per-device choice
     lastUsedModelMode: z.string().nullable().describe('Last selected model mode for new sessions (device-local, not synced)'),
     lastUsedMaxMode: z.boolean().describe('Last Cursor max mode toggle for new sessions (device-local, not synced)'),
+    channelPriority: z.array(z.enum(['lan', 'relay', 'server'])).describe('Enabled session channels in preference order (device-local debug setting)'),
 });
 
 //
@@ -43,6 +44,7 @@ export const localSettingsDefaults: LocalSettings = {
     lazyLoadToolContent: true,
     lastUsedModelMode: null,
     lastUsedMaxMode: false,
+    channelPriority: ['lan', 'server', 'relay'],
 };
 Object.freeze(localSettingsDefaults);
 

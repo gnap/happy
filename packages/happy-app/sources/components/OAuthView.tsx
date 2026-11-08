@@ -8,7 +8,6 @@ import Animated, {
     withTiming,
 } from 'react-native-reanimated';
 import { runOnJS } from 'react-native-worklets';
-import WebView from 'react-native-webview';
 import { t } from '@/text';
 import { Modal } from '@/modal';
 
@@ -310,15 +309,20 @@ export const OAuthViewRender = React.memo((props: {
         );
     }
 
+    // Dynamic WebView import (unsupported on Linux/Tauri)
+    const [WebViewComp, setWebViewComp] = React.useState<any>(null);
+    React.useEffect(() => { import('react-native-webview').then(m => setWebViewComp(() => m.default)); }, []);
+    if (!WebViewComp) return null;
+
     return (
         <>
-            <WebView
+            <WebViewComp
                 source={{ uri: props.parameters.url }}
                 style={[styles.webview, { backgroundColor: props.backgroundColor }]}
                 originWhitelist={['*']}
                 limitsNavigationsToAppBoundDomains={false}
                 onNavigationStateChange={handleNavigationStateChange}
-                onShouldStartLoadWithRequest={(request) => {
+                onShouldStartLoadWithRequest={(request: any) => {
                     const callbackData = parseCallbackUrl(request.url);
                     if (callbackData.code || callbackData.error) {
                         handleNavigationStateChange({ url: request.url });

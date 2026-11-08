@@ -1,9 +1,9 @@
+import { ChannelIcons } from '@/components/ChannelIcons';
 import * as React from 'react';
 import { Header } from './navigation/Header';
 import { useSocketStatus } from '@/sync/storage';
 import { Platform, Pressable, Text, View } from 'react-native';
 import { Typography } from '@/constants/Typography';
-import { StatusDot } from './StatusDot';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useSegments } from 'expo-router';
 import { getServerInfo } from '@/sync/serverConfig';
@@ -224,12 +224,7 @@ function HeaderTitleWithSubtitle({ subtitle }: { subtitle?: string }) {
             )}
             {showConnectionStatus && (
                 <View style={styles.statusContainer}>
-                    <StatusDot
-                        color={connectionStatus.color}
-                        isPulsing={connectionStatus.isPulsing}
-                        size={6}
-                        style={styles.statusDot}
-                    />
+                    <ChannelIcons />
                     <Text style={[
                         styles.statusText,
                         { color: connectionStatus.textColor }

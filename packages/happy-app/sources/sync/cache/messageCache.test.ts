@@ -7,6 +7,7 @@ import {
     clearAllMessageCaches,
 } from './messageCache';
 import { MemorySessionCacheDB, overrideSessionCacheDB, resetSessionCacheDB } from './sessionCacheDB';
+import { overrideHotWindowStore, saveHotWindow, type HotWindowStore } from './hotWindow';
 import { createReducer } from '../reducer/reducer';
 import { serializeReducerStateToJson, SERIALIZER_SCHEMA_VERSION } from './reducerStateSerializer';
 import type { Session } from '../storageTypes';
@@ -55,6 +56,14 @@ function makeMessages(count: number): Message[] {
     }));
 }
 
+class HotStore implements HotWindowStore {
+    private values = new Map<string, string>();
+    getString(key: string): string | undefined { return this.values.get(key); }
+    set(key: string, value: string): void { this.values.set(key, value); }
+    delete(key: string): void { this.values.delete(key); }
+    getAllKeys(): string[] { return [...this.values.keys()]; }
+}
+
 // ---------------------------------------------------------------------------
 // isCacheEnabled
 // ---------------------------------------------------------------------------
@@ -64,8 +73,9 @@ describe('isCacheEnabled', () => {
         expect(isCacheEnabled(makeSession('cursor'))).toBe(true);
     });
 
-    it('returns false for claude sessions', () => {
-        expect(isCacheEnabled(makeSession('claude'))).toBe(false);
+    it('returns true for claude and acp-cursor sessions', () => {
+        expect(isCacheEnabled(makeSession('claude'))).toBe(true);
+        expect(isCacheEnabled(makeSession('acp-cursor'))).toBe(true);
     });
 
     it('returns false for codex sessions', () => {
@@ -74,6 +84,15 @@ describe('isCacheEnabled', () => {
 
     it('returns false for gemini sessions', () => {
         expect(isCacheEnabled(makeSession('gemini'))).toBe(false);
+    });
+
+    it('caches a session a daemon is serving, whatever the server has said about it', () => {
+        // With the server channel off, a session learned from the daemon's own list has no metadata
+        // and so no flavor — and refusing to cache it is how a conversation opened blank with a
+        // perfectly good local log behind it.
+        expect(isCacheEnabled(makeSession(undefined), true)).toBe(true);
+        expect(isCacheEnabled(null, true)).toBe(true);
+        expect(isCacheEnabled(makeSession(undefined), false)).toBe(false);
     });
 
     it('returns false for sessions with no metadata', () => {
@@ -111,6 +130,98 @@ describe('loadMessageCache', () => {
 
     afterEach(() => {
         resetSessionCacheDB();
+        overrideHotWindowStore(null);
+    });
+
+    it('answers from the hot window without waiting on the database', async () => {
+        const session = { ...makeSession('cursor'), id: 'sess-hot' };
+        overrideHotWindowStore(new HotStore());
+        // The window keeps the reducer state; the messages are materialised from it, so the state
+        // has to be the one that describes them.
+        const state = createReducer();
+        state.messages.set('m0', { id: 'm0', realID: null, createdAt: 1000, role: 'user', text: 'Message 0', event: null, tool: null });
+        state.messages.set('m1', { id: 'm1', realID: null, createdAt: 1001, role: 'user', text: 'Message 1', event: null, tool: null });
+        saveHotWindow(session.id, {
+            reducerStateJson: serializeReducerStateToJson(state),
+            messages: null,
+            messageCount: 2,
+            lastSeq: 9,
+            oldestSeq: 1,
+            hasOlderMessages: false,
+        });
+        // A database read at this point is a failure: the hot path exists precisely so that a tap
+        // does not wait for SQLite — or for the JS thread to get to its callback.
+        const failing = new MemorySessionCacheDB();
+        failing.getSessionCache = async () => { throw new Error('database must not be read'); };
+        failing.getSessionMessages = async () => { throw new Error('database must not be read'); };
+        overrideSessionCacheDB(failing);
+
+        const result = await loadMessageCache(session);
+
+        expect(result).not.toBeNull();
+        // Newest first: the order the window has always stored, and the store sorts on apply.
+        expect(result!.messages.map((message) => message.id)).toEqual(['m1', 'm0']);
+        expect(result!.lastSeq).toBe(9);
+        expect(result!.oldestSeq).toBe(1);
+    });
+
+    it('reads the rows when the hot state no longer covers its window', async () => {
+        const session = { ...makeSession('cursor'), id: 'sess-stale' };
+        overrideHotWindowStore(new HotStore());
+        // Saving with a state that holds none of the window's messages is exactly the mismatch a
+        // changed shape or a partial write leaves behind. A shorter window is not what it means.
+        await saveMessageCache(session, makeMessages(2), createReducer(), 9);
+
+        const result = await loadMessageCache(session);
+
+        expect(result).not.toBeNull();
+        expect(result!.messages.map((message) => message.id)).toEqual(['m0', 'm1']);
+    });
+
+    it('materialises a tool call from the state the window kept', async () => {
+        const session = makeSession('cursor');
+        overrideHotWindowStore(new HotStore());
+        const state = createReducer();
+        state.messages.set('t1', {
+            id: 't1', realID: 'r1', createdAt: 2000, role: 'agent', text: null, event: null,
+            tool: {
+                name: 'Bash', state: 'completed', input: { command: 'ls' },
+                createdAt: 2000, startedAt: 2000, completedAt: 2001,
+                description: null, result: 'ok',
+            },
+        });
+        const toolMessage: Message = {
+            kind: 'tool-call', id: 't1', localId: null, createdAt: 2000,
+            tool: state.messages.get('t1')!.tool!, children: [],
+        };
+
+        await saveMessageCache(session, [toolMessage], state, 5);
+        const loaded = await loadMessageCache(session);
+
+        // The window stored the state and nothing else; the tool call a screen draws is its
+        // projection, and it has to survive the round trip with its input and result.
+        expect(loaded?.messages).toHaveLength(1);
+        expect(loaded!.messages[0]).toMatchObject({ kind: 'tool-call', id: 't1' });
+        const tool = (loaded!.messages[0] as Extract<Message, { kind: 'tool-call' }>).tool;
+        expect(tool.name).toBe('Bash');
+        expect(tool.result).toBe('ok');
+    });
+
+    it('keeps the messages when the state is too large to store', async () => {
+        const session = makeSession('cursor');
+        overrideHotWindowStore(new HotStore());
+        const state = createReducer();
+        // Trimmed to the window, but still past the size the cache is willing to deserialise on
+        // open. The messages become the window; the state is the copy that is let go.
+        state.messages.set('m0', {
+            id: 'm0', realID: null, createdAt: 1000, role: 'agent',
+            text: 'x'.repeat(300_000), event: null, tool: null,
+        });
+        await saveMessageCache(session, makeMessages(1), state, 5);
+
+        const result = await loadMessageCache(session);
+
+        expect(result?.messages.map((message) => message.id)).toEqual(['m0']);
     });
 
     it('returns null for non-cursor sessions', async () => {
@@ -139,9 +250,9 @@ describe('loadMessageCache', () => {
         expect(result!.reducerState.lastThinkingMessageId).toBe('think1');
     });
 
-    it('clears and returns null when schemaVersion is mismatched', async () => {
+    it('keeps the messages but restarts the reducer when schemaVersion is mismatched', async () => {
         const session = makeSession('cursor');
-        // Manually plant a row with wrong schemaVersion
+        // Manually plant a row written by an older serializer.
         await db.saveSessionCache(
             {
                 sessionId: session.id,
@@ -156,10 +267,47 @@ describe('loadMessageCache', () => {
         );
 
         const result = await loadMessageCache(session);
-        expect(result).toBeNull();
 
-        // The stale row should have been cleaned up
-        expect(await db.getSessionCache(session.id)).toBeNull();
+        // The version describes the reducer state, not the messages. Discarding the row would
+        // blank the screen and refetch everything — for every session at once, since the version
+        // is global — which is the cold-start jank the cache exists to prevent.
+        expect(result).not.toBeNull();
+        expect(result!.messages).toHaveLength(2);
+        expect(result!.lastSeq).toBe(10);
+        // The reducer starts fresh rather than from the unreadable state.
+        expect(result!.reducerState).toEqual(createReducer());
+        // And the row is kept, not deleted.
+        expect(await db.getSessionCache(session.id)).not.toBeNull();
+    });
+
+    it('hands back one message when a row was stored per wire direction, and repairs the rows', async () => {
+        // What a page of wire entries used to be saved as: the queued copy under its local id,
+        // and the server's echo under the server id — the same message, twice.
+        const session = { ...makeSession('cursor'), id: 'sess-duplicated' };
+        const queued: Message = { kind: 'user-text', id: 'local-1', localId: 'local-1', createdAt: 1000, text: 'hello' };
+        const echoed: Message = { kind: 'user-text', id: 'server-1', localId: 'local-1', createdAt: 1000, text: 'hello' };
+        const other: Message = { kind: 'user-text', id: 'local-2', localId: 'local-2', createdAt: 2000, text: 'later' };
+        await db.saveSessionCache(
+            {
+                sessionId: session.id,
+                lastSeq: 10,
+                oldestSeq: 0,
+                hasOlderMessages: false,
+                schemaVersion: SERIALIZER_SCHEMA_VERSION,
+                cachedAt: Date.now(),
+                reducerStateJson: serializeReducerStateToJson(createReducer()),
+            },
+            [queued, echoed, other],
+        );
+
+        const result = await loadMessageCache(session);
+
+        expect(result).not.toBeNull();
+        expect(result!.messages.map((message) => message.id)).toEqual(['server-1', 'local-2']);
+        // The redundant row is gone from disk as well, so it cannot return on the next open. The
+        // repair runs after the window so an open never waits on it.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect((await db.getSessionMessages(session.id)).map((message) => message.id)).toEqual(['server-1', 'local-2']);
     });
 
     it('falls back to empty reducerState when reducerStateJson is invalid', async () => {
@@ -197,7 +345,7 @@ describe('saveMessageCache', () => {
     });
 
     it('is a no-op for non-cursor sessions', async () => {
-        const session = makeSession('claude');
+        const session = makeSession('codex');
         await saveMessageCache(session, makeMessages(5), createReducer(), 10);
         expect(await db.getSessionCache(session.id)).toBeNull();
     });
@@ -306,19 +454,26 @@ describe('load → save → load round-trip', () => {
         resetSessionCacheDB();
     });
 
-    it('preserves ReducerState Maps across save/load', async () => {
+    it('preserves the ReducerState Maps of the messages it saves', async () => {
         const session = makeSession('cursor');
         const reducerState = createReducer();
-        reducerState.toolIdToMessageId.set('toolA', 'msgA');
+        // `m1` is one of the two messages saved, so its entries survive; `msgA` is not, and the
+        // entry goes with it — a state entry for a message the window does not hold describes
+        // nothing the load can use, and it is what made the stored state as long as the session.
+        reducerState.toolIdToMessageId.set('toolA', 'm1');
+        reducerState.toolIdToMessageId.set('toolB', 'msgA');
         reducerState.lastThinkingMessageId = 'thinkX';
+        reducerState.tracerState.processedIds.add('m1');
         reducerState.tracerState.processedIds.add('processed1');
 
         await saveMessageCache(session, makeMessages(2), reducerState, 99);
         const loaded = await loadMessageCache(session);
 
-        expect(loaded?.reducerState.toolIdToMessageId.get('toolA')).toBe('msgA');
+        expect(loaded?.reducerState.toolIdToMessageId.get('toolA')).toBe('m1');
+        expect(loaded?.reducerState.toolIdToMessageId.has('toolB')).toBe(false);
         expect(loaded?.reducerState.lastThinkingMessageId).toBe('thinkX');
-        expect(loaded?.reducerState.tracerState.processedIds.has('processed1')).toBe(true);
+        expect(loaded?.reducerState.tracerState.processedIds.has('m1')).toBe(true);
+        expect(loaded?.reducerState.tracerState.processedIds.has('processed1')).toBe(false);
         expect(loaded?.lastSeq).toBe(99);
         expect(loaded?.messages).toHaveLength(2);
     });
@@ -346,7 +501,9 @@ describe('load → save → load round-trip', () => {
         });
         reducerState.toolIdToMessageId.set('r1', 'm1');
 
-        await saveMessageCache(session, [], reducerState, 10);
+        // The window it is saved with, because that is what the state is kept against: `m1` is in
+        // it, so its running tool survives the round trip.
+        await saveMessageCache(session, makeMessages(2), reducerState, 10);
         const loaded = await loadMessageCache(session);
 
         const tool = loaded?.reducerState.messages.get('m1')?.tool;

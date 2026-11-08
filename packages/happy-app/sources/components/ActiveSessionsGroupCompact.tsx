@@ -8,10 +8,9 @@ import { Ionicons } from '@expo/vector-icons';
 import { getSessionName, useSessionStatus, getSessionAvatarId, formatPathRelativeToHome } from '@/utils/sessionUtils';
 import { Avatar } from './Avatar';
 import { Typography } from '@/constants/Typography';
-import { StatusDot } from './StatusDot';
+import { SessionStatusDot } from './SessionStatusDot';
 import { useAllMachines, useSetting } from '@/sync/storage';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { isMachineOnline } from '@/utils/machineUtils';
 import { machineSpawnNewSession, sessionKill } from '@/sync/ops';
 import { resolveAbsolutePath } from '@/utils/pathUtils';
 import { storage } from '@/sync/storage';
@@ -361,10 +360,7 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
                         if (sessionStatus.state === 'permission_required' || sessionStatus.state === 'thinking') {
                             return (
                                 <View style={[styles.statusDotContainer, { marginRight: 8 }]}>
-                                    <StatusDot 
-                                        color={sessionStatus.statusDotColor} 
-                                        isPulsing={sessionStatus.isPulsing} 
-                                    />
+                                    <SessionStatusDot sessionId={session.id} color={sessionStatus.statusDotColor} isPulsing={sessionStatus.isPulsing} />
                                 </View>
                             );
                         }
@@ -373,10 +369,7 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
                         if (sessionStatus.state === 'waiting') {
                             return (
                                 <View style={[styles.statusDotContainer, { marginRight: 8 }]}>
-                                    <StatusDot 
-                                        color={theme.colors.textSecondary} 
-                                        isPulsing={false} 
-                                    />
+                                    <SessionStatusDot sessionId={session.id} color={theme.colors.textSecondary} isPulsing={false} />
                                 </View>
                             );
                         }
@@ -387,7 +380,7 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
                     <Text
                         style={[
                             styles.sessionTitle,
-                            sessionStatus.isConnected ? styles.sessionTitleConnected : styles.sessionTitleDisconnected
+                            sessionStatus.isLive ? styles.sessionTitleConnected : styles.sessionTitleDisconnected
                         ]}
                         numberOfLines={2}
                     >

@@ -1,7 +1,20 @@
 import type { MarkdownSpan } from "./parseMarkdown";
 
-// Updated pattern to handle nested markdown and asterisks
-const pattern = /(\*\*(.*?)(?:\*\*|$))|(\*(.*?)(?:\*|$))|(\[([^\]]+)\](?:\(([^)]+)\))?)|(`(.*?)(?:`|$))/g;
+// Pattern: $$...$$ (1-2), $...$ (3-4), **bold** (5-6), *italic* (7-8), [link](url) (9-11), `code` (12-13)
+// Inline math $...$ accepts 1+ non-$ chars (single-char like $x$ now works)
+/**
+ * Markdown spans, one pattern, tried left to right.
+ *
+ * The asterisks are where this used to go wrong. `*italic*` accepted *any* star as its closer and
+ * could end at the end of the line, so a list marker — `* an item with **bold** in it` — opened an
+ * italic that swallowed one of the bold's two stars, and the bold came out as plain text. Bold's
+ * closer was optional in the same way, so an unclosed `**` made the rest of the line bold.
+ *
+ * Both now require their own delimiters and nothing else's: `**` closes bold, a star that is not the
+ * first of a pair closes italic (`(?!\*)`), and neither may contain a star. Text with an unmatched
+ * delimiter stays plain, which is what it is.
+ */
+const pattern = /(\$\$([^$]+)\$\$)|(\$([^$\s]?[^$]*?[^$\s]?)\$)|(\*\*((?:[^*]|\*(?!\*))+?)\*\*)|(\*(?!\*)((?:\*\*|[^*])+?)\*(?!\*))|(\[([^\]]+)\](?:\(([^)]+)\))?)|(`(.*?)(?:`|$))/g;
 
 export function parseMarkdownSpans(markdown: string, header: boolean) {
     const spans: MarkdownSpan[] = [];
@@ -16,30 +29,36 @@ export function parseMarkdownSpans(markdown: string, header: boolean) {
         }
 
         if (match[1]) {
+            // Display math: $$...$$
+            spans.push({ styles: ['math'], text: match[2], url: null });
+        } else if (match[3]) {
+            // Inline math: $...$
+            spans.push({ styles: ['math'], text: match[4], url: null });
+        } else if (match[5]) {
             // Bold
             if (header) {
-                spans.push({ styles: [], text: match[2], url: null });
+                spans.push({ styles: [], text: match[6], url: null });
             } else {
-                spans.push({ styles: ['bold'], text: match[2], url: null });
+                spans.push({ styles: ['bold'], text: match[6], url: null });
             }
-        } else if (match[3]) {
+        } else if (match[7]) {
             // Italic
             if (header) {
-                spans.push({ styles: [], text: match[4], url: null });
+                spans.push({ styles: [], text: match[8], url: null });
             } else {
-                spans.push({ styles: ['italic'], text: match[4], url: null });
+                spans.push({ styles: ['italic'], text: match[8], url: null });
             }
-        } else if (match[5]) {
+        } else if (match[9]) {
             // Link - handle incomplete links (no URL part)
-            if (match[7]) {
-                spans.push({ styles: [], text: match[6], url: match[7] });
+            if (match[11]) {
+                spans.push({ styles: [], text: match[10], url: match[11] });
             } else {
                 // If no URL part, treat as plain text with brackets
-                spans.push({ styles: [], text: `[${match[6]}]`, url: null });
+                spans.push({ styles: [], text: `[${match[10]}]`, url: null });
             }
-        } else if (match[8]) {
+        } else if (match[12]) {
             // Inline code
-            spans.push({ styles: ['code'], text: match[9], url: null });
+            spans.push({ styles: ['code'], text: match[13], url: null });
         }
 
         lastIndex = pattern.lastIndex;

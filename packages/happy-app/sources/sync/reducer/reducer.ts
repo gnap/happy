@@ -143,6 +143,7 @@ type StoredPermission = {
     mode?: string;
     allowedTools?: string[];
     decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort';
+    updatedInput?: unknown;
 };
 
 export type ReducerState = {
@@ -358,6 +359,47 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             // Don't continue - let the event be processed normally to create a message
         }
 
+        // Process permission-result events — update tool message permission fields
+        // directly from the replayable message stream, no visible message created.
+        if (msg.role === 'event' && msg.content.type === 'permission-result') {
+            state.messageIds.set(msg.id, msg.id);
+            const permEv = msg.content;
+            const messageId = state.toolIdToMessageId.get(permEv.call);
+            if (messageId) {
+                const message = state.messages.get(messageId);
+                if (message?.tool) {
+                    if (!message.tool.permission) {
+                        message.tool.permission = { id: permEv.call, status: 'pending' };
+                    }
+                    message.tool.permission.status = permEv.status;
+                    if (permEv.decision) message.tool.permission.decision = permEv.decision;
+                    if (permEv.mode) message.tool.permission.mode = permEv.mode;
+                    if (permEv.allowedTools) message.tool.permission.allowedTools = permEv.allowedTools;
+                    if (permEv.reason) message.tool.permission.reason = permEv.reason;
+                    // Store the answer (updatedInput) as the tool result for replayability.
+                    // For AskUserQuestion, this carries the user's selected options.
+                    if (permEv.updatedInput) {
+                        message.tool.result = permEv.updatedInput;
+                    }
+                    changed.add(messageId);
+                }
+            } else {
+                // Tool message not yet arrived — store permission for Phase 2.
+                state.permissions.set(permEv.call, {
+                    tool: '',
+                    arguments: null,
+                    createdAt: msg.createdAt,
+                    status: permEv.status,
+                    decision: permEv.decision,
+                    mode: permEv.mode,
+                    allowedTools: permEv.allowedTools,
+                    reason: permEv.reason,
+                    updatedInput: permEv.updatedInput,
+                } satisfies StoredPermission);
+            }
+            continue;
+        }
+
         // Try to parse message as event
         const event = parseMessageAsEvent(msg);
         if (event) {
@@ -493,6 +535,14 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                 if (messageId) {
                     const message = state.messages.get(messageId);
                     if (message?.tool) {
+                        // Apply updatedInput from completedRequests even when other
+                        // skip conditions would otherwise drop it. For AskUserQuestion
+                        // this is the structured answer ({ questions, answers }).
+                        if (completed.updatedInput) {
+                            message.tool.result = completed.updatedInput;
+                            changed.add(messageId);
+                        }
+
                         // Skip if tool has already started actual execution with approval
                         if (message.tool.startedAt && message.tool.permission?.status === 'approved') {
                             continue;
@@ -554,6 +604,9 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                                 if (message.tool.state !== 'completed' && message.tool.state !== 'error') {
                                     message.tool.state = 'completed';
                                     message.tool.completedAt = completed.completedAt || Date.now();
+                                    if (completed.updatedInput) {
+                                        message.tool.result = completed.updatedInput;
+                                    }
                                     hasChanged = true;
                                 }
                             } else if (message.tool.state !== 'completed' && message.tool.state !== 'error' && message.tool.state !== 'running') {
@@ -602,7 +655,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             createdAt: completed.createdAt || Date.now(),
                             completedAt: completed.completedAt || undefined,
                             status: completed.status,
-                            reason: completed.reason || undefined
+                            reason: completed.reason || undefined,
+                            updatedInput: completed.updatedInput,
                         });
                         continue;
                     }
@@ -622,9 +676,11 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         startedAt: null,
                         completedAt: completed.completedAt || Date.now(),
                         description: null,
-                        result: completed.status === 'approved'
-                            ? 'Approved'
-                            : (completed.reason ? { error: completed.reason } : undefined),
+                        result: completed.updatedInput
+                            ? completed.updatedInput
+                            : completed.status === 'approved'
+                                ? 'Approved'
+                                : (completed.reason ? { error: completed.reason } : undefined),
                         permission: {
                             id: permId,
                             status: completed.status,
@@ -657,7 +713,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         reason: completed.reason || undefined,
                         mode: completed.mode || undefined,
                         allowedTools: completed.allowedTools || undefined,
-                        decision: completed.decision || undefined
+                        decision: completed.decision || undefined,
+                        updatedInput: completed.updatedInput,
                     });
 
                     changed.add(mid);
@@ -902,6 +959,10 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                                     toolCall.result = { error: permission.reason };
                                 }
                             }
+                            // Apply permission's updatedInput as tool result (e.g. AskUserQuestion answers).
+                            if (permission.updatedInput) {
+                                toolCall.result = permission.updatedInput;
+                            }
                         }
 
                         let mid = allocateId();
@@ -923,9 +984,24 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         const bufferedResult = state.bufferedResults.get(c.id);
                         if (bufferedResult) {
                             state.bufferedResults.delete(c.id);
-                            toolCall.state = bufferedResult.is_error ? 'error' : 'completed';
+                            // Check isIntermediate before marking completed — Workflow/Agent/Monitor
+                            // emit intermediate results (async_launched, task_started, task_progress)
+                            // before the final task_notification.
+                            let bufContent: unknown = bufferedResult.content;
+                            if (typeof bufContent === 'string') {
+                                try { bufContent = JSON.parse(bufContent); } catch {}
+                            }
+                            const bufIsIntermediate = bufContent && typeof bufContent === 'object'
+                                && !Array.isArray(bufContent)
+                                && ((bufContent as any).status === 'async_launched'
+                                    || (bufContent as any).status === 'remote_launched'
+                                    || (bufContent as any).task_started !== undefined
+                                    || (bufContent as any).task_progress !== undefined);
+                            if (!bufIsIntermediate) {
+                                toolCall.state = bufferedResult.is_error ? 'error' : 'completed';
+                                toolCall.completedAt = bufferedResult.createdAt;
+                            }
                             toolCall.result = bufferedResult.content;
-                            toolCall.completedAt = bufferedResult.createdAt;
                         }
 
                         // Track TodoWrite tool inputs
@@ -977,10 +1053,38 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         continue;
                     }
 
-                    // Update tool state and result
-                    message.tool.state = c.is_error ? 'error' : 'completed';
-                    message.tool.result = c.content;
-                    message.tool.completedAt = msg.createdAt;
+                    // Workflow, Agent, Monitor emit multiple tool-call-end events:
+                    // (1) async_launched — task was queued
+                    // (2) task_started/task_progress — intermediate progress
+                    // (3) task_notification — final result.
+                    // Keep state = 'running' after (1) and (2) so the final result isn't skipped.
+                    //
+                    // The first tool-call-end may carry a JSON-stringified result
+                    // (e.g. '{"status":"async_launched","task_id":"1"}'), not a parsed
+                    // object. Extract the effective content before checking isIntermediate.
+                    let effectiveContent: unknown = c.content;
+                    if (typeof effectiveContent === 'string') {
+                        try { effectiveContent = JSON.parse(effectiveContent); } catch {}
+                    }
+                    const isIntermediate = effectiveContent && typeof effectiveContent === 'object'
+                        && !Array.isArray(effectiveContent)
+                        && ((effectiveContent as any).status === 'async_launched'
+                            || (effectiveContent as any).status === 'remote_launched'
+                            || (effectiveContent as any).task_started !== undefined
+                            || (effectiveContent as any).task_progress !== undefined);
+
+                    if (!isIntermediate) {
+                        message.tool.state = c.is_error ? 'error' : 'completed';
+                        message.tool.completedAt = msg.createdAt;
+                    }
+
+                    // For AskUserQuestion, the SDK's tool_result is a text summary string
+                    // ("Your questions have been answered..."), not structured answers.
+                    // Keep the structured result from permission-result / completedRequests
+                    // if already set (it contains { questions, answers }).
+                    if (message.tool.name !== 'AskUserQuestion' || !message.tool.result) {
+                        message.tool.result = c.content;
+                    }
 
                     // TodoWrite result carries the authoritative list (including completed); session list counts from this
                     if (message.tool.name === 'TodoWrite' && !c.is_error && c.content?.newTodos && Array.isArray(c.content.newTodos)) {
@@ -1222,9 +1326,21 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     const bufferedResult = state.sidechainBufferedResults.get(c.id);
                     if (bufferedResult) {
                         state.sidechainBufferedResults.delete(c.id);
-                        toolCall.state = bufferedResult.is_error ? 'error' : 'completed';
+                        let bufContent: unknown = bufferedResult.content;
+                        if (typeof bufContent === 'string') {
+                            try { bufContent = JSON.parse(bufContent); } catch {}
+                        }
+                        const bufIsIntermediate = bufContent && typeof bufContent === 'object'
+                            && !Array.isArray(bufContent)
+                            && ((bufContent as any).status === 'async_launched'
+                                || (bufContent as any).status === 'remote_launched'
+                                || (bufContent as any).task_started !== undefined
+                                || (bufContent as any).task_progress !== undefined);
+                        if (!bufIsIntermediate) {
+                            toolCall.state = bufferedResult.is_error ? 'error' : 'completed';
+                            toolCall.completedAt = bufferedResult.createdAt;
+                        }
                         toolCall.result = bufferedResult.content;
-                        toolCall.completedAt = bufferedResult.createdAt;
                         if (bufferedResult.permissions) {
                             const perms = bufferedResult.permissions as any;
                             toolCall.permission = {
@@ -1512,6 +1628,28 @@ function processContextUsageData(state: ReducerState, cu: {
     }
 }
 
+
+/**
+ * The display messages a reducer state stands for.
+ *
+ * The state is the copy the cache keeps: it is what the next ingest needs, and every message a
+ * screen draws is already a projection of it. The window used to write that projection *as well*,
+ * so each message was stored twice — 671KB for a 60-message Claude window, 312KB of it the second
+ * copy. Materialising on load is that copy removed.
+ *
+ * Newest first, the order the window used to be written in. The store sorts by time on apply, so
+ * this only has to be stable.
+ */
+export function materializeReducerMessages(state: ReducerState): Message[] {
+    const messages: Message[] = [];
+    for (const reducerMessage of state.messages.values()) {
+        const message = convertReducerMessageToMessage(reducerMessage, state);
+        if (message) {
+            messages.push(message);
+        }
+    }
+    return messages.sort((a, b) => b.createdAt - a.createdAt);
+}
 
 function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: ReducerState): Message | null {
     if (reducerMsg.role === 'user' && reducerMsg.text !== null) {

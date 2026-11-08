@@ -67,10 +67,22 @@ config.server.rewriteRequestUrl = (url) => {
   return typeof expoRewrite === "function" ? expoRewrite(decoded) : decoded;
 };
 
-// Exclude Rust/Tauri build artifacts from module resolution.
-// For dev mode, use CARGO_TARGET_DIR=/tmp/... to keep Rust build output
-// outside the project tree entirely, preventing FallbackWatcher crashes.
-config.resolver.blockList = [/src-tauri[/\\]target[/\\].*/];
+// Keep Rust/Tauri build artifacts out of Metro's file map. This is not only about module
+// resolution: Metro hands `blockList` to metro-file-map as its `ignorePattern`
+// (metro/src/node-haste/DependencyGraph/createFileMap.js), which is what the crawler and the
+// watcher filter on. So a cargo build writing tens of thousands of files into src-tauri/target
+// does not churn the watcher — no CARGO_TARGET_DIR redirect needed, and the build output stays
+// in the worktree like every other variant.
+// Appended, not assigned. `getDefaultConfig` already excludes `.expo/types` — a *generated*
+// declaration file, rewritten whenever the route tree changes, which any branch operation does —
+// expressly to stop it causing refreshes. Assigning here replaced that entire default list with
+// this one pattern, so a merge or checkout rewrote router.d.ts, Metro saw a watched file change,
+// and the app refreshed with no source edit behind it. `ios/Pods` and `android/app/build` were
+// dropped the same way.
+config.resolver.blockList = [
+    ...config.resolver.blockList,
+    /src-tauri[/\\]target[/\\].*/,
+];
 
 
 // Add support for .wasm files (required by Skia for all platforms)

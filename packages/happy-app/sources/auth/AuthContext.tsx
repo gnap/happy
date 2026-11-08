@@ -3,7 +3,7 @@ import { TokenStorage, AuthCredentials } from '@/auth/tokenStorage';
 import { syncCreate } from '@/sync/sync';
 import { clearAllMessageCaches } from '@/sync/cache/messageCache';
 import { clearSessionsListCache } from '@/sync/cache/sessionsListCache';
-import * as Updates from 'expo-updates';
+let Updates: any = { reloadAsync: async () => {} };
 import { clearPersistence } from '@/sync/persistence';
 import { Platform } from 'react-native';
 import { trackLogout } from '@/track';

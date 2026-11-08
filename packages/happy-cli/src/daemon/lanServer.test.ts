@@ -37,13 +37,20 @@ function signed(path: string, init: { token?: string; body?: unknown } = {}) {
     const nonce = `nonce-${++proofCounter}`;
     const at = Date.now();
     const isToolContent = path.includes('/tool-content/');
-    const operation = isToolContent ? 'tool-content' : path.endsWith('/restart') ? 'restart' : 'control';
-    const target = isToolContent
-        ? path.split('/tool-content/')[1] ? `${path.split('/sessions/')[1]?.split('/')[0] ?? '-'}:${path.split('/tool-content/')[1]}` : '-'
-        : path.split('/sessions/')[1]?.split('/')[0] ?? '-';
+    const isFile = /\/sessions\/[^/?]+\/file(?:\?|$)/.test(path);
+    const sessionId = path.split('/sessions/')[1]?.split(/[/?]/)[0] ?? '-';
+    // A file's target is the session and the path it names, which is what the route checks; the
+    // path travels in the query string, not the URL path.
+    const filePath = isFile ? new URLSearchParams(path.split('?')[1]).get('path') ?? '' : '';
+    const operation = isFile ? 'file' : isToolContent ? 'tool-content' : path.endsWith('/restart') ? 'restart' : 'control';
+    const target = isFile
+        ? `${sessionId}:${filePath}`
+        : isToolContent
+            ? path.split('/tool-content/')[1] ? `${sessionId}:${path.split('/tool-content/')[1]}` : '-'
+            : sessionId;
     const message = accountProofMessage({ operation, target, nonce, at, bodyDigest: '' });
     return {
-        method: isToolContent ? 'GET' : 'POST',
+        method: isToolContent || isFile ? 'GET' : 'POST',
         ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
         headers: {
             ...(init.token ? { authorization: `Bearer ${init.token}` } : {}),
@@ -87,6 +94,8 @@ let liveSessions: Set<string> = new Set(['sess-1']);
 let lifecycleEntries: { rev: number; op: string; tag: string }[] = [];
 /** The full tool payload this machine can read; unset by default, like a daemon from before the route. */
 let toolContentHandler: ((args: { sessionId: string; callId: string }) => Promise<{ args?: unknown; result?: unknown } | null>) | undefined;
+/** The file this machine can serve; unset by default, like a daemon from before the route. */
+let sessionFileHandler: ((args: { sessionId: string; path: string }) => Promise<{ bytes: Buffer; name: string; mime: string } | { error: 'too-large'; size: number } | null>) | undefined;
 /** Left unset by default, which is how a daemon that predates the route behaves. */
 let restartHandler: ((sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>) | undefined;
 
@@ -112,6 +121,7 @@ async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
         // route existed, and the 404 it answers is what sends a caller to the server instead.
         ...(restartHandler ? { restartSession: restartHandler } : {}),
         ...(toolContentHandler ? { getToolContent: toolContentHandler } : {}),
+        ...(sessionFileHandler ? { getSessionFile: sessionFileHandler } : {}),
         lifecycle: {
             revision: () => lifecycleEntries.length,
             entriesSince: (since: number) => lifecycleEntries.filter((entry) => entry.rev > since),
@@ -172,6 +182,7 @@ afterEach(async () => {
     lifecycleEntries = [];
     restartHandler = undefined;
     toolContentHandler = undefined;
+    sessionFileHandler = undefined;
     proofNonces = new Set();
 });
 
@@ -748,5 +759,71 @@ describe('lanServer tool content', () => {
         const res = await fetch(url(path), signed(path, { token }) as RequestInit);
 
         expect(res.status).toBe(404);
+    });
+});
+
+describe('lanServer file route', () => {
+    const FILE = {
+        bytes: Buffer.from('%PDF-1.3\nfile body'),
+        name: 'report.pdf',
+        mime: 'application/pdf',
+    };
+    const fileUrl = '/lan/sessions/sess-1/file?path=' + encodeURIComponent('docs/report.pdf');
+
+    beforeEach(() => {
+        sessionFileHandler = async ({ sessionId, path }) =>
+            sessionId === 'sess-1' && path === 'docs/report.pdf' ? FILE : null;
+    });
+
+    it('serves bytes to the account, with the length a download reports progress against', async () => {
+        await start();
+        const token = await getToken();
+
+        const res = await fetch(url(fileUrl), signed(fileUrl, { token }) as RequestInit);
+
+        expect(res.status).toBe(200);
+        expect(res.headers.get('content-type')).toBe('application/pdf');
+        expect(Number(res.headers.get('content-length'))).toBe(FILE.bytes.length);
+        expect(Buffer.from(await res.arrayBuffer())).toEqual(FILE.bytes);
+    });
+
+    it('refuses the plaintext without the account proof', async () => {
+        await start();
+        const token = await getToken();
+
+        const res = await fetch(url(fileUrl), authorized(token));
+
+        expect(res.status).toBe(403);
+    });
+
+    it('answers 404 for a file this machine does not have', async () => {
+        await start();
+        const token = await getToken();
+        const missing = '/lan/sessions/sess-1/file?path=' + encodeURIComponent('docs/other.pdf');
+
+        const res = await fetch(url(missing), signed(missing, { token }) as RequestInit);
+
+        expect(res.status).toBe(404);
+    });
+
+    it('answers 413 with the size when the file is too large to carry', async () => {
+        sessionFileHandler = async () => ({ error: 'too-large', size: 200_000_000 });
+        await start();
+        const token = await getToken();
+
+        const res = await fetch(url(fileUrl), signed(fileUrl, { token }) as RequestInit);
+
+        expect(res.status).toBe(413);
+        expect(await res.json()).toMatchObject({ size: 200_000_000 });
+    });
+
+    it('requires a path', async () => {
+        await start();
+        const token = await getToken();
+        const noPath = '/lan/sessions/sess-1/file';
+
+        const res = await fetch(url(noPath), signed(noPath, { token }) as RequestInit);
+
+        expect(res.status).toBe(400);
     });
 });

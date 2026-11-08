@@ -6,7 +6,9 @@
  * file exports the same interface using IndexedDB (or in-memory as fallback).
  */
 
+import { mergeForCache, newestMessages } from './messageMerge';
 import type { Message } from '../typesMessage';
+import { collapseDuplicateMessages } from '../messageIdentity';
 import { log } from '@/log';
 
 // ---------------------------------------------------------------------------
@@ -42,6 +44,8 @@ export interface ISessionCacheDB {
     initialize(): Promise<void>;
     getSessionCache(sessionId: string): Promise<CachedSessionRow | null>;
     getSessionMessages(sessionId: string): Promise<Message[]>;
+    /** Drops rows that are the same message under a second delivery id. Returns rows removed. */
+    dedupeSessionMessages(sessionId: string): Promise<number>;
     saveSessionCache(row: CachedSessionRow, messages: Message[]): Promise<void>;
     clearSessionCache(sessionId: string): Promise<void>;
     clearAllCaches(): Promise<void>;
@@ -67,6 +71,13 @@ export class MemorySessionCacheDB implements ISessionCacheDB {
 
     async getSessionMessages(sessionId: string): Promise<Message[]> {
         return this.messages.get(sessionId) ?? [];
+    }
+
+    async dedupeSessionMessages(sessionId: string): Promise<number> {
+        const held = this.messages.get(sessionId) ?? [];
+        const kept = collapseDuplicateMessages(held);
+        this.messages.set(sessionId, kept);
+        return held.length - kept.length;
     }
 
     async saveSessionCache(row: CachedSessionRow, messages: Message[]): Promise<void> {
@@ -196,7 +207,7 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
         });
     }
 
-    async getSessionMessages(sessionId: string): Promise<Message[]> {
+    async getSessionMessages(sessionId: string, limit?: number): Promise<Message[]> {
         await this.initialize();
         return new Promise((resolve, reject) => {
             const req = this.getStore().messages.get(sessionId);
@@ -214,9 +225,46 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
                         // skip malformed
                     }
                 }
-                resolve(messages);
+                // Oldest first and capped. The stored array is in the store's newest-first order, and
+                // returning it as it was made hydration's `slice(-limit)` take the oldest messages
+                // instead of the newest — which then got written back over the record.
+                resolve(newestMessages(messages, limit));
             };
             req.onerror = () => reject(req.error);
+        });
+    }
+
+    async dedupeSessionMessages(sessionId: string): Promise<number> {
+        await this.initialize();
+        return new Promise((resolve, reject) => {
+            const { messages } = this.getStore('readwrite');
+            const read = messages.get(sessionId);
+            read.onsuccess = () => {
+                const entry = read.result as { sessionId: string; messages: string[] } | undefined;
+                if (!entry?.messages?.length) {
+                    resolve(0);
+                    return;
+                }
+                const parsed: Message[] = [];
+                for (const json of entry.messages) {
+                    try {
+                        parsed.push(JSON.parse(json) as Message);
+                    } catch {
+                        // skip malformed
+                    }
+                }
+                const kept = collapseDuplicateMessages(parsed);
+                const dropped = parsed.length - kept.length;
+                if (dropped === 0) {
+                    resolve(0);
+                    return;
+                }
+                messages.put({ sessionId, messages: kept.map((message) => JSON.stringify(message)) });
+                const tx = messages.transaction;
+                tx.oncomplete = () => resolve(dropped);
+                tx.onerror = () => reject(tx.error);
+            };
+            read.onerror = () => reject(read.error);
         });
     }
 
@@ -233,8 +281,24 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
                 cachedAt: row.cachedAt,
                 reducerState: row.reducerStateJson,
             });
-            const messageBlobs = messages.map((m) => JSON.stringify(m));
-            messagesStore.put({ sessionId: row.sessionId, messages: messageBlobs });
+            // Merged with what the record already holds, not written over it: the window is what is
+            // on screen, and it can be narrower than what was cached — an open on a narrow window, a
+            // tail read after a long absence. Replacing deleted the rest, which is how cached
+            // messages disappeared on this backend while the SQLite one kept them.
+            const existing = messagesStore.get(row.sessionId);
+            existing.onsuccess = () => {
+                const held = (existing.result as { messages?: string[] } | undefined)?.messages ?? [];
+                const decoded: Message[] = [];
+                for (const json of held) {
+                    try {
+                        decoded.push(JSON.parse(json) as Message);
+                    } catch {
+                        // skip malformed
+                    }
+                }
+                const merged = mergeForCache(decoded, messages).map((m) => JSON.stringify(m));
+                messagesStore.put({ sessionId: row.sessionId, messages: merged });
+            };
             const tx = cache.transaction;
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
@@ -259,9 +323,16 @@ export class IndexedDBSessionCacheDB implements ISessionCacheDB {
             const tx = this.db!.transaction([STORE_SESSIONS_LIST], 'readonly');
             const req = tx.objectStore(STORE_SESSIONS_LIST).get(1);
             req.onsuccess = () => {
-                const row = req.result as { id: number; sessionsJson: string; cachedAt: number } | undefined;
+                // See the note on the other IndexedDB reader: the keys are saved with the list and
+                // have to come back with it, or a cold start has no way to a session key but the
+                // server.
+                const row = req.result as CachedSessionListRow | undefined;
                 if (!row) { resolve(null); return; }
-                resolve({ sessionsJson: row.sessionsJson, cachedAt: row.cachedAt });
+                resolve({
+                    sessionsJson: row.sessionsJson,
+                    cachedAt: row.cachedAt,
+                    encryptionKeysJson: row.encryptionKeysJson,
+                });
             };
             req.onerror = () => reject(req.error);
         });

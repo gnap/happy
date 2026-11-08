@@ -3,9 +3,53 @@ import { Settings, settingsDefaults, settingsParse, SettingsSchema } from './set
 import { LocalSettings, localSettingsDefaults, localSettingsParse } from './localSettings';
 import { Purchases, purchasesDefaults, purchasesParse } from './purchases';
 import { Profile, profileDefaults, profileParse } from './profile';
+import type { RelayEndpoint } from './lan/types';
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 
-const mmkv = new MMKV();
+/**
+ * Settings and per-session preferences, written so that a full disk cannot take a screen down.
+ *
+ * On web `react-native-mmkv` is `localStorage`: one budget shared with the hot caches, and a write
+ * past it throws `QuotaExceededError` *synchronously*. These writes happen inside store actions,
+ * which means React meets the throw while a screen is rendering and the nearest error boundary
+ * takes the screen — measured in the desktop webview, where `saveSessionProfileIds` was the last
+ * hundred bytes over. Persisting is best-effort by nature: the state in memory is already right,
+ * and the value already on disk is a usable older one.
+ */
+const storage = new MMKV();
+const mmkv: Pick<MMKV, 'getString' | 'set' | 'delete' | 'clearAll'> = {
+    getString: (key) => {
+        try {
+            return storage.getString(key);
+        } catch {
+            return undefined;
+        }
+    },
+    set: (key, value) => {
+        try {
+            storage.set(key, value);
+        } catch (error) {
+            // Once per key is enough to explain the silence; a full store would otherwise log on
+            // every keystroke that triggers a save.
+            console.error(`persistence: could not write ${key}`, String(error));
+        }
+    },
+    delete: (key) => {
+        try {
+            storage.delete(key);
+        } catch {
+            // A delete that fails changes nothing that was readable.
+        }
+    },
+    clearAll: () => {
+        try {
+            storage.clearAll();
+        } catch {
+            // Same: a failed clear leaves what was there.
+        }
+    },
+};
+
 const NEW_SESSION_DRAFT_KEY = 'new-session-draft-v1';
 
 export type NewSessionAgentType = 'claude' | 'codex' | 'cursor' | 'cursor-acp' | 'gemini';
@@ -125,6 +169,59 @@ export function saveSessionDrafts(drafts: Record<string, string>) {
     mmkv.set('session-drafts', JSON.stringify(drafts));
 }
 
+/**
+ * Where a session's loaded window sits in its daemon log: `cursor` is the boundary above the newest
+ * message held, `floor` the one below the oldest, and `hasOlder` whether the log continues beneath
+ * it. An anchor is a position in one machine's file, so it is kept with the machine that issued it.
+ *
+ * A daemon read can land anywhere in a log, so a window is only meaningful together with these:
+ * without them a restart cannot tell whether a fresh page abuts what it already holds, and joining
+ * two ranges that are not adjacent is what a silent hole looks like.
+ */
+export type PersistedLanWindow = {
+    machineId: string;
+    cursor: string;
+    floor: string;
+    hasOlder: boolean;
+};
+
+export function loadLanWindows(): Record<string, PersistedLanWindow> {
+    const raw = mmkv.getString('lan-windows');
+    if (raw) {
+        try {
+            return JSON.parse(raw);
+        } catch (e) {
+            console.error('Failed to parse LAN windows', e);
+        }
+    }
+    return {};
+}
+
+export function saveLanWindows(windows: Record<string, PersistedLanWindow>) {
+    mmkv.set('lan-windows', JSON.stringify(windows));
+}
+
+/**
+ * Relay routes outlive the process on purpose: they are learned from the server, and the case they
+ * exist for is the server being down at the next cold start, when nothing could re-learn them.
+ */
+export function loadRelayEndpoints(): Record<string, RelayEndpoint> {
+    const raw = mmkv.getString('relay-endpoints');
+    if (raw) {
+        try {
+            return JSON.parse(raw);
+        } catch (e) {
+            console.error('Failed to parse relay endpoints', e);
+        }
+    }
+    return {};
+}
+
+export function saveRelayEndpoints(endpoints: Record<string, RelayEndpoint>) {
+    mmkv.set('relay-endpoints', JSON.stringify(endpoints));
+}
+
+
 export function loadNewSessionDraft(): NewSessionDraft | null {
     const raw = mmkv.getString(NEW_SESSION_DRAFT_KEY);
     if (!raw) {
@@ -171,75 +268,79 @@ export function clearNewSessionDraft() {
     mmkv.delete(NEW_SESSION_DRAFT_KEY);
 }
 
-export function loadSessionPermissionModes(): Record<string, string> {
-    const modes = mmkv.getString('session-permission-modes');
-    if (modes) {
+/**
+ * Session preference maps are read on every `applySessions`. They change only from this device,
+ * so a successful parse is reused until one of the save functions invalidates it; the returned
+ * object is a shallow copy, because callers mutate it before saving.
+ */
+const sessionMapCache = new Map<string, { raw: string | null; value: Record<string, any> }>();
+
+function loadSessionMap<T>(key: string, label: string): Record<string, T> {
+    const raw = mmkv.getString(key) ?? null;
+    const cached = sessionMapCache.get(key);
+    if (cached && cached.raw === raw) {
+        return { ...cached.value };
+    }
+    let value: Record<string, any> = {};
+    if (raw) {
         try {
-            return JSON.parse(modes);
+            value = JSON.parse(raw);
         } catch (e) {
-            console.error('Failed to parse session permission modes', e);
-            return {};
+            console.error(`Failed to parse ${label}`, e);
+            value = {};
         }
     }
-    return {};
+    sessionMapCache.set(key, { raw, value });
+    return { ...value };
+}
+
+function saveSessionMap(key: string, value: Record<string, any>): void {
+    mmkv.set(key, JSON.stringify(value));
+    sessionMapCache.delete(key);
+}
+
+export function loadSessionPermissionModes(): Record<string, string> {
+    return loadSessionMap('session-permission-modes', 'session permission modes');
 }
 
 export function saveSessionPermissionModes(modes: Record<string, string>) {
-    mmkv.set('session-permission-modes', JSON.stringify(modes));
+    saveSessionMap('session-permission-modes', modes);
 }
 
 /** Session id -> model mode key. Fallback when session.metadata.currentModelCode is absent. */
 export function loadSessionModelModes(): Record<string, string> {
-    const modes = mmkv.getString('session-model-modes');
-    if (modes) {
-        try {
-            return JSON.parse(modes);
-        } catch (e) {
-            console.error('Failed to parse session model modes', e);
-            return {};
-        }
-    }
-    return {};
+    return loadSessionMap('session-model-modes', 'session model modes');
 }
 
 export function saveSessionModelModes(modes: Record<string, string>) {
-    mmkv.set('session-model-modes', JSON.stringify(modes));
+    saveSessionMap('session-model-modes', modes);
 }
 
 /** Session id -> Cursor max mode toggle. Fallback when session.metadata.currentMaxMode is absent. */
 export function loadSessionMaxModes(): Record<string, boolean> {
-    const modes = mmkv.getString('session-max-modes');
-    if (modes) {
-        try {
-            return JSON.parse(modes);
-        } catch (e) {
-            console.error('Failed to parse session max modes', e);
-            return {};
-        }
-    }
-    return {};
+    return loadSessionMap('session-max-modes', 'session max modes');
 }
 
 export function saveSessionMaxModes(modes: Record<string, boolean>) {
-    mmkv.set('session-max-modes', JSON.stringify(modes));
+    saveSessionMap('session-max-modes', modes);
 }
 
 /** Session id -> env profile id. Applied on spawn and sent with each user message (like modelMode). */
 export function loadSessionProfileIds(): Record<string, string> {
-    const raw = mmkv.getString('session-profile-ids');
-    if (raw) {
-        try {
-            return JSON.parse(raw);
-        } catch (e) {
-            console.error('Failed to parse session profile ids', e);
-            return {};
-        }
-    }
-    return {};
+    return loadSessionMap('session-profile-ids', 'session profile ids');
 }
 
 export function saveSessionProfileIds(ids: Record<string, string>) {
-    mmkv.set('session-profile-ids', JSON.stringify(ids));
+    saveSessionMap('session-profile-ids', ids);
+}
+
+/** Session id -> sandbox isolation level. Sent with each user message (like permissionMode). */
+export function loadSessionSandboxIsolations(): Record<string, string> {
+    return loadSessionMap('session-sandbox-isolations', 'session sandbox isolations');
+}
+
+export function saveSessionSandboxIsolations(isolations: Record<string, string>) {
+    saveSessionMap('session-sandbox-isolations', isolations);
 }
 
 export function loadProfile(): Profile {
@@ -275,6 +376,27 @@ export function retrieveTempText(id: string): string | null {
         return content;
     }
     return null;
+}
+
+/**
+ * Machine data keys as the server hands them out: wrapped for this account, so what sits here is
+ * no more sensitive than what the server already holds. Kept so the LAN channel can authenticate
+ * at launch instead of waiting on the machines request, which is the slowest thing it could wait on.
+ */
+export function loadWrappedMachineKeys(): Record<string, string> {
+    const raw = mmkv.getString('wrapped-machine-keys');
+    if (!raw) {
+        return {};
+    }
+    try {
+        return JSON.parse(raw) as Record<string, string>;
+    } catch {
+        return {};
+    }
+}
+
+export function saveWrappedMachineKeys(keys: Record<string, string>) {
+    mmkv.set('wrapped-machine-keys', JSON.stringify(keys));
 }
 
 export function clearPersistence() {

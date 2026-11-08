@@ -20,7 +20,7 @@ import { cleanupDaemonState, checkIfDaemonRunningAndCleanupStaleState } from './
 import { startDaemonControlServer } from './controlServer';
 import { startUnixSocketServer } from './unixSocketServer';
 import { readFileSync, writeFileSync } from 'fs';
-import { dirname, join } from 'path';
+import { basename, dirname, extname, join, resolve } from 'path';
 import { projectPath } from '@/projectPath';
 import { getTmuxUtilities, isTmuxAvailable, parseTmuxSessionIdentifier, formatTmuxSessionIdentifier } from '@/utils/tmux';
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
@@ -41,6 +41,7 @@ import { mergeSessionRoster } from './sessionRoster';
 import { BUILD_VERSION } from '../version';
 import type { ApiMachineClient } from '@/api/apiMachine';
 import { readSessionKey } from '@/api/sessionKeyPersistence';
+import { validatePath } from '@/modules/common/pathSecurity';
 import { collapseSessionLogEntries, readSessionLogPage } from '@/api/sessionLog';
 import { decodeBase64, encodeBase64, libsodiumEncryptForPublicKey } from '@/api/encryption';
 import { startLanDiscovery, type LanDiscoveryHandle } from './lanDiscovery';
@@ -50,6 +51,34 @@ import { buildSessionScopeUnitName, resolveSessionScopeMode, scopeUnitFromProcCg
 
 /** Time to wait for a spawned session to report via /session-started webhook before failing the spawn (Cursor cold start can exceed 30s). */
 const SESSION_WEBHOOK_TIMEOUT_MS = 60_000;
+
+/**
+ * The largest file the LAN file route carries in one response.
+ *
+ * The route reads the file into memory and writes one body; a viewer is not going to render
+ * anything near this, and a bound is what keeps one request from pinning the daemon's heap. It is
+ * also well above the ~750 KB a base64 RPC payload can carry, so anything the old path could open
+ * still can.
+ */
+const MAX_SESSION_FILE_BYTES = 64 * 1024 * 1024;
+
+/** What a file's extension says it is, for the viewer and the browser that may open the URL. */
+const SESSION_FILE_MIME: Record<string, string> = {
+  pdf: 'application/pdf',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  svg: 'image/svg+xml',
+  txt: 'text/plain; charset=utf-8',
+  md: 'text/markdown; charset=utf-8',
+  json: 'application/json',
+  csv: 'text/csv; charset=utf-8',
+  zip: 'application/zip',
+  mp4: 'video/mp4',
+  mov: 'video/quicktime',
+};
 
 /** Cursor CLI max-mode flag for daemon-spawned sessions. Default on; opt out with HAPPY_CURSOR_INITIAL_MAX_MODE=0|false. */
 function cursorCliMaxModeArg(extraEnv: Record<string, string | undefined>): '--max-mode' | '--no-max-mode' {
@@ -2114,6 +2143,44 @@ export async function startDaemon(): Promise<void> {
               const args = await readJson(join(base, `${callId}.json`));
               const result = await readJson(join(base, `${callId}_result.json`));
               return args === undefined && result === undefined ? null : { args, result };
+            },
+            getSessionFile: async ({ sessionId, path }) => {
+              // The directory the daemon pinned at spawn, for the same reason as tool content: a
+              // session this machine never ran has no working tree here, and the 404 sends the
+              // caller to the server, which still has the session process.
+              const live = [...pidToTrackedSession.values()]
+                .find((session) => session.happySessionId === sessionId)?.directory;
+              const directory = live || sessions[sessionId]?.directory;
+              if (!directory) {
+                return null;
+              }
+              // A relative path is relative to the session's working tree; an absolute one is
+              // allowed only when it is inside it. This is the same check the session's own
+              // `readFile` RPC makes, which is the point: the LAN route must not offer more.
+              const validation = validatePath(path, directory);
+              if (!validation.valid) {
+                logger.debug(`[lan] file refused ${sessionId}: ${validation.error}`);
+                return null;
+              }
+              const absolute = resolve(directory, path);
+              try {
+                const info = await fs.stat(absolute);
+                if (!info.isFile()) {
+                  return null;
+                }
+                if (info.size > MAX_SESSION_FILE_BYTES) {
+                  return { error: 'too-large', size: info.size };
+                }
+                const bytes = await fs.readFile(absolute);
+                const extension = extname(absolute).slice(1).toLowerCase();
+                return {
+                  bytes,
+                  name: basename(absolute),
+                  mime: SESSION_FILE_MIME[extension] ?? 'application/octet-stream',
+                };
+              } catch {
+                return null;
+              }
             },
           });
           lanServer = started;

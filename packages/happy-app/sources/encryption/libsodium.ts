@@ -1,6 +1,11 @@
 import { getRandomBytes } from 'expo-crypto';
 import sodium from '@/encryption/libsodium.lib';
 
+/** Re-initialize sodium after Linux sleep/wake (WASM memory may be detached). Idempotent. */
+export function reinitSodium() {
+    try { sodium.ready; } catch { /* ready is always a resolved promise after first init */ }
+}
+
 export function getPublicKeyForBox(secretKey: Uint8Array): Uint8Array {
     return sodium.crypto_box_seed_keypair(secretKey).publicKey;
 }

@@ -1,3 +1,5 @@
+mod mdns;
+
 #[tauri::command]
 fn debug_log(msg: String) {
     eprintln!("[HAPPY-DEBUG] {}", msg);
@@ -44,16 +46,17 @@ pub fn run() {
 
   let mut builder = tauri::Builder::default();
 
-  #[cfg(debug_assertions)]
-  {
-    builder = builder.plugin(tauri_plugin_pilot::init());
-  }
+  builder = builder.plugin(tauri_plugin_pilot::init());
 
   builder
     .plugin(tauri_plugin_http::init())
     .plugin(tauri_plugin_websocket::init())
     .plugin(tauri_plugin_connector::init())
-    .invoke_handler(tauri::generate_handler![debug_log, open_external_url])
+    .invoke_handler(tauri::generate_handler![
+      debug_log,
+      open_external_url,
+      mdns::mdns_browse
+    ])
     .setup(|app| {
       if cfg!(debug_assertions) {
         app.handle().plugin(

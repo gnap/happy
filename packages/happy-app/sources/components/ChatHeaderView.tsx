@@ -2,7 +2,7 @@ import * as React from 'react';
 import { View, Text, StyleSheet, Platform, Pressable } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { useNavigation } from '@react-navigation/native';
+import { useRouter } from 'expo-router';
 import { Avatar } from '@/components/Avatar';
 import { Typography } from '@/constants/Typography';
 import { useHeaderHeight, useHasSidebar } from '@/utils/responsive';
@@ -19,7 +19,13 @@ interface ChatHeaderViewProps {
     avatarId?: string;
     backgroundColor?: string;
     tintColor?: string;
-    isConnected?: boolean;
+    /**
+     * Whether to draw the session as one that is here.
+     *
+     * Not quite "connected": a restart this App asked for has no connection yet and is not an
+     * ended session either, and the avatar going monochrome is how "ended" reads.
+     */
+    isLive?: boolean;
     flavor?: string | null;
 }
 
@@ -30,11 +36,11 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
     onBackPress,
     onAvatarPress,
     avatarId,
-    isConnected = true,
+    isLive = true,
     flavor,
 }) => {
     const { theme } = useUnistyles();
-    const navigation = useNavigation();
+    const router = useRouter();
     const insets = useSafeAreaInsets();
     const headerHeight = useHeaderHeight();
     const hasSidebar = useHasSidebar();
@@ -44,7 +50,7 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
         if (onBackPress) {
             onBackPress();
         } else {
-            navigation.goBack();
+            router.back();
         }
     };
 
@@ -135,7 +141,7 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
                         <Avatar
                             id={avatarId}
                             size={32}
-                            monochrome={!isConnected}
+                            monochrome={!isLive}
                             flavor={flavor}
                         />
                     </Pressable>

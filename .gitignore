@@ -68,3 +68,6 @@ progress*.txt
 .happy/
 .memory/
 /node_modules
+# Local Xcode artifacts: provisioning profile backups, exported simulator runtimes
+.profile-backup/
+.xcode-platforms/

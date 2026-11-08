@@ -79,9 +79,11 @@ export const ca: TranslationStructure = {
         error: 'error',
         auth_error: 'error d\'autenticació',
         online: 'en línia',
+        lan: 'LAN',
         offline: 'fora de línia',
         lastSeen: ({ time }: { time: string }) => `vist per última vegada ${time}`,
         permissionRequired: 'permís requerit',
+        restarting: 'Reiniciant…',
         activeNow: 'Actiu ara',
         unknown: 'desconegut',
         creating: 'Creant…',
@@ -91,6 +93,7 @@ export const ca: TranslationStructure = {
         justNow: 'ara mateix',
         minutesAgo: ({ count }: { count: number }) => `fa ${count} minut${count !== 1 ? 's' : ''}`,
         hoursAgo: ({ count }: { count: number }) => `fa ${count} hora${count !== 1 ? 'es' : ''}`,
+        yesterday: 'ahir',
     },
 
     connect: {
@@ -216,6 +219,7 @@ export const ca: TranslationStructure = {
         networkError: 'Error de connexió',
         serverError: 'Error del servidor',
         unknownError: 'Error desconegut',
+        channelCannotServeAction: 'Aquesta acció passa pel servidor, que està desactivat a la configuració de canals',
         connectionTimeout: 'S\'ha esgotat el temps de connexió',
         authenticationFailed: 'L\'autenticació ha fallat',
         permissionDenied: 'Permís denegat',
@@ -290,6 +294,7 @@ export const ca: TranslationStructure = {
             success: 'Worktree creat amb èxit',
         },
         sessionReadyMessage: 'Sessió llesta. Toca-la a la llista per obrir-la.',
+        sessionCreatedPending: 'La sessió s’ha creat a la màquina; apareixerà a la llista aviat.',
     },
 
     sessionHistory: {
@@ -305,6 +310,14 @@ export const ca: TranslationStructure = {
     session: {
         inputPlaceholder: 'Escriu un missatge...',
         encrypting: 'establint connexió…',
+        backgroundTasks: 'Tasques en segon pla',
+        activityScheduled: 'Programat',
+        activityOnce: 'una vegada',
+        activityAgents: 'Agents',
+        activityMonitors: 'Monitors',
+        activityGoals: 'Objectius',
+        activityShell: 'Comandes en segon pla',
+        activityWorkflows: 'Fluxos de treball',
     },
 
     commandPalette: {
@@ -337,6 +350,8 @@ export const ca: TranslationStructure = {
         archiveSessionConfirm: 'Segur que vols arxivar aquesta sessió?',
         restartSession: 'Reiniciar sessió',
         restartSessionSubtitle: 'Hi ha una versió més recent del CLI disponible. Reinicia per actualitzar.',
+        needsDesktop: 'Aquesta sessió necessita un inici de sessió d’escriptori en aquesta màquina. Inicia la sessió allà i torna-ho a provar.',
+        restartInDesktop: 'Reinicia en la sessió d’escriptori',
         restartSessionConfirm: 'La sessió es reiniciarà amb la versió més recent del CLI.',
         noMachineId: 'ID de màquina no disponible per a aquesta sessió',
         failedToRestartSession: 'Error en reiniciar la sessió',
@@ -358,6 +373,17 @@ export const ca: TranslationStructure = {
         failedToKillSession: 'Ha fallat finalitzar la sessió',
         failedToArchiveSession: 'Ha fallat arxivar la sessió',
         connectionStatus: 'Estat de la connexió',
+        channelAuto: 'Automàtic',
+        channelServer: 'Servidor',
+        channelRelay: 'Relé',
+        channelWhyServerDownRelay: 'Servidor inaccessible, fent servir el relé públic',
+        channelWhyByPriority: 'Triat per la prioritat de canals',
+        channelPinned: 'Fixat manualment',
+        channelWhyReachable: 'La sessió admet LAN i la màquina és en aquesta xarxa',
+        channelWhyNotDeclared: 'La sessió no admet LAN, reinicia-la',
+        channelWhyNotOnNetwork: 'La màquina no es veu en aquesta xarxa',
+        channelWhyNoKey: "No hi ha clau d'aquesta màquina en aquest dispositiu",
+        channelWhyUnknown: 'Esperant les dades de la sessió',
         created: 'Creat',
         lastUpdated: 'Última actualització',
         sequence: 'Seqüència',
@@ -407,6 +433,20 @@ export const ca: TranslationStructure = {
             scanQrCode: 'Escaneja el codi QR',
             openCamera: 'Obre la càmera',
         },
+    },
+
+    sandbox: {
+        isolationTitle: 'Sandbox Isolation',
+        isolation: {
+            off: 'Off',
+            strict: 'Strict',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
+        isolationOffDesc: 'No sandbox restrictions',
+        isolationStrictDesc: 'Full filesystem and network isolation',
+        isolationWorkspaceDesc: 'Sandbox limited to workspace directory',
+        isolationCustomDesc: 'Custom sandbox rules',
     },
 
     agentInput: {
@@ -488,6 +528,13 @@ export const ca: TranslationStructure = {
             fileLabel: 'FITXER',
             folderLabel: 'CARPETA',
         },
+        sandbox: {
+            isolationTitle: 'Sandbox Isolation',
+            off: 'Off',
+            strict: 'Strict (project only)',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
         noMachinesAvailable: 'Sense màquines',
     },
 
@@ -508,6 +555,15 @@ export const ca: TranslationStructure = {
     },
 
     tools: {
+
+
+        countdown: {
+
+            in: ({ time }: { time: string }) => `en ${time}`,
+
+            due: 'ara',
+
+        },
         fullView: {
             description: 'Descripció',
             inputParams: 'Paràmetres d\'entrada',
@@ -554,6 +610,19 @@ export const ca: TranslationStructure = {
             question: 'Pregunta',
             agent: 'Agent',
             skill: 'Skill',
+            sendMessage: 'Enviar missatge',
+            listAgents: 'Agents',
+            taskDetails: 'Tasca',
+            enterWorktree: 'Entra al worktree',
+            exitWorktree: 'Surt del worktree',
+            notification: 'Notificació',
+            designSync: 'Sincronització de disseny',
+        },
+        sendMessage: {
+            to: ({ name }: { name: string }) => `Per a ${name}`,
+            sending: 'enviant',
+            sent: 'enviat',
+            failed: 'error',
         },
         desc: {
             terminalCmd: ({ cmd }: { cmd: string }) => `Terminal(cmd: ${cmd})`,
@@ -603,6 +672,7 @@ export const ca: TranslationStructure = {
         file: 'Fitxer',
         fileEmpty: 'El fitxer està buit',
         noChanges: 'No hi ha canvis a mostrar',
+        download: 'Descarrega',
     },
 
     settingsVoice: {
@@ -777,6 +847,7 @@ export const ca: TranslationStructure = {
         lastKnownHttpPort: 'Últim port HTTP conegut',
         startedAt: 'Iniciat a',
         cliVersion: 'Versió del CLI',
+        restartRequired: 'Cal reiniciar',
         daemonStateVersion: 'Versió de l\'estat del dimoni',
         activeSessions: ({ count }: { count: number }) => `Sessions actives (${count})`,
         machineGroup: 'Màquina',

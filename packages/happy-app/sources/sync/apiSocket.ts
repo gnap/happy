@@ -3,6 +3,7 @@ import { io } from 'socket.io-client';
 import { TokenStorage } from '@/auth/tokenStorage';
 import { Encryption } from './encryption/encryption';
 import { isRunningInTauri } from '@/utils/platform';
+import { log } from '@/log';
 
 type IoFn = typeof io;
 
@@ -19,8 +20,38 @@ const RECONNECT_RANDOMIZATION_FACTOR = 0.5;
 /** HTTP request timeout for sync RPCs */
 const REQUEST_TIMEOUT_MS = 30_000;
 
+/**
+ * How long a backgrounded connection may be kept before it must be treated as dead.
+ *
+ * Matches the server's own `pingTimeout` (45000 — happy-server/sources/app/api/socket.ts), after
+ * which the server closes a connection that has not exchanged a heartbeat. Past that point
+ * `socket.connected` on this side is stale: the socket is already gone but JS never processed the
+ * close, so the app would keep reporting a healthy connection that cannot carry anything.
+ */
+const SUSPENDED_CONNECTION_TRUST_MS = 45_000;
+
 /** Network error codes that warrant retry (same idea as CLI NETWORK_ERROR_CODES) */
 const RETRYABLE_ERROR_HINTS = ['ECONNREFUSED', 'ETIMEDOUT', 'ECONNRESET', 'ENETUNREACH', 'timeout', 'Network'];
+
+/**
+ * engine.io hides the useful part of a transport failure on `error.description`
+ * (the underlying Event / XHR status), so `error.message` alone is usually just
+ * "websocket error" and tells us nothing about why the socket cannot open.
+ */
+function describeSocketError(error: unknown): string {
+    if (!error || typeof error !== 'object') return String(error);
+    const err = error as Error & { description?: unknown; context?: unknown; type?: string };
+    const parts = [err.message || String(error)];
+    if (err.type) parts.push(`type=${err.type}`);
+    const description = err.description;
+    if (typeof description === 'number' || typeof description === 'string') {
+        parts.push(`description=${description}`);
+    } else if (description && typeof description === 'object') {
+        const desc = description as { type?: string; code?: number; message?: string };
+        parts.push(`description=${desc.type ?? desc.message ?? ''}${desc.code !== undefined ? `(${desc.code})` : ''}`);
+    }
+    return parts.join(' ');
+}
 
 function shouldUseTauriHttp(path: string, method: string): boolean {
     // Tauri plugin-http drops POST /messages responses on Linux, causing permanent
@@ -64,12 +95,29 @@ class ApiSocket {
     private reconnectedListeners: Set<() => void> = new Set();
     private statusListeners: Set<(status: ConnectionStatus) => void> = new Set();
     private authErrorListeners: Set<() => void> = new Set();
+    private _hasNetworkListeners = false;
     private currentStatus: ConnectionStatus = 'disconnected';
     private lastError: Error | null = null;
     /** When true, do not reconnect (e.g. after 401) */
     private reconnectionDisabled = false;
+    /**
+     * When true, the server channel is switched off in the channel priority setting, so this
+     * client must not hold a connection to happy-server at all: no socket, no reconnect, and
+     * nothing to fall back to. Kept apart from `reconnectionDisabled` because that one is a
+     * reaction to the server (a 401) and is cleared by any reconnect, while this is a standing
+     * instruction from the user that only the setting clears.
+     */
+    private serverDisabled = false;
     /** Guards against multiple parallel async loaders racing inside connect(). */
     private connectInFlight = false;
+    /** When the app last went to the background, or null while it is in the foreground. */
+    private suspendedAt: number | null = null;
+    /** Armed on background: tears the socket down if the app stays away past the trust window. */
+    private suspendedResetTimer: ReturnType<typeof setTimeout> | null = null;
+    /** Timestamp of the last message/event received on the socket. Used for health checks. */
+    private lastMessageReceivedAt = 0;
+    /** The transport currently in use (websocket / polling). For detecting downgrades. */
+    private lastTransportType: string | null = null;
 
     //
     // Initialization
@@ -85,8 +133,40 @@ class ApiSocket {
     // Connection Management
     //
 
+    /** Follows the channel priority setting: false means this App does not use happy-server. */
+    setServerEnabled(enabled: boolean) {
+        this.serverDisabled = !enabled;
+        if (enabled) {
+            this.connect();
+        } else {
+            this.disconnect();
+        }
+    }
+
     connect() {
         if (!this.config) return;
+        if (this.serverDisabled) return;
+
+        // Listen for browser online/offline events to recover from sleep/wake
+        // where socket.io may not detect network restoration on Linux.
+        if (typeof window !== 'undefined' && typeof window.addEventListener === 'function' && !this._hasNetworkListeners) {
+            this._hasNetworkListeners = true;
+            window.addEventListener('online', () => {
+                if (!this.socket?.connected) {
+                    this.socket?.disconnect();
+                    this.socket = null;
+                    this.connect();
+                }
+            });
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'visible' && !this.socket?.connected) {
+                    this.socket?.disconnect();
+                    this.socket = null;
+                    this.connect();
+                }
+            });
+        }
+
         if (this.socket) {
             // Already have a socket; only force reconnect if we had disabled reconnection (e.g. after token refresh)
             if (this.reconnectionDisabled) {
@@ -120,10 +200,11 @@ class ApiSocket {
     async #doConnect(): Promise<void> {
         if (!this.config) return;
 
-        // While we awaited, the world may have moved on. Bail out if so.
+        // While we awaited, the world may have moved on.
         if (!this.config) return;
         if (this.socket) return;
-        if (this.currentStatus !== 'connecting') return;
+        // Allow any non-stable state — status may have been flipped by lifecycle events.
+        if (this.currentStatus === 'disconnected' && this.reconnectionDisabled) return;
 
         const config = this.config;
         this.socket = io(config.endpoint, {
@@ -132,19 +213,33 @@ class ApiSocket {
                 token: config.token,
                 clientType: 'user-scoped' as const
             },
-            transports: ['websocket'],
+            // WebSocket preferred but fall back to polling for weak/recovering networks (iOS suspend,
+            // cellular) and for webviews whose native WebSocket wedges while plain HTTP still works.
+            // engine.io only walks past transports[0] when tryAllTransports is set — without it the
+            // 'polling' entry is inert and a WebSocket that cannot open never recovers.
+            transports: ['websocket', 'polling'],
+            tryAllTransports: true,
             reconnection: !this.reconnectionDisabled,
             reconnectionDelay: RECONNECT_DELAY_MIN,
             reconnectionDelayMax: RECONNECT_DELAY_MAX,
             reconnectionAttempts: Infinity,
             randomizationFactor: RECONNECT_RANDOMIZATION_FACTOR,
+            // A connection attempt that never completes has to be torn down. socket.io's own
+            // default is 20s; naming it keeps that true if the default ever moves. The polling
+            // fallback had no bound at all: a long-poll request that hangs is another socket held
+            // for as long as the server keeps it open, and an unreachable server plus an infinite
+            // reconnect loop is how that becomes thousands of them.
+            timeout: 20_000,
+            requestTimeout: 30_000,
         });
 
         this.setupEventHandlers();
     }
 
     disconnect() {
+        this.clearSuspendedReset();
         this.reconnectionDisabled = false;
+        this.connectInFlight = false;
         if (this.socket) {
             this.socket.removeAllListeners();
             this.socket.disconnect();
@@ -176,6 +271,15 @@ class ApiSocket {
 
     getLastError = (): Error | null => this.lastError;
     isAuthFailure = (): boolean => this.currentStatus === 'auth_error';
+
+    /**
+     * Whether the socket is connected right now. Distinct from `isConnectionHealthy()`,
+     * which is a rolling-uptime heuristic — callers deciding whether to take the
+     * WebSocket send path need the current state, not the recent history.
+     */
+    get isConnected(): boolean {
+        return this.currentStatus === 'connected';
+    }
 
     //
     // Message Handling
@@ -333,44 +437,109 @@ class ApiSocket {
      * socket.io's reconnection timers don't keep running in the background.
      * If we're mid-connect, leave the in-flight attempt alone.
      */
-    pauseReconnection() {
-        if (this.currentStatus === 'error' || this.currentStatus === 'disconnected') {
+    /**
+     * @param options.osSuspend Pass true only when the OS may suspend JS entirely — i.e. the app
+     *   going to the background on iOS/Android. There the client stops sending heartbeats, so past
+     *   the server's `pingTimeout` the socket is certainly closed while `connected` still reads
+     *   true, and a delayed reset is the only honest answer.
+     *
+     *   Leave it false for desktop blur/hidden and for network loss: those leave the process
+     *   running, socket.io's server-driven ping/pong keeps the connection alive, and
+     *   `socket.connected` stays trustworthy — the probe in resumeReconnection is the better tool
+     *   there, and forcing a reset would tear down a connection that is genuinely usable.
+     */
+    pauseReconnection(options?: { osSuspend?: boolean }) {
+        this.suspendedAt = options?.osSuspend ? Date.now() : null;
+        // Tear down on any non-connected state — a stale connecting/error socket
+        // will not recover after iOS suspend. resumeReconnection() creates a fresh one.
+        if (this.currentStatus !== 'connected') {
             this.disconnect();
+            return;
+        }
+        this.clearSuspendedReset();
+        if (!options?.osSuspend) {
+            return;
+        }
+        // Connected, but the OS is about to suspend us: keep the socket for now so a brief trip to
+        // the background resumes on it, but arm the delayed reset. On platforms whose timers keep
+        // running it fires in the background; resumeReconnection() re-checks the deadline to cover
+        // the suspended case where the timer could not fire.
+        this.suspendedResetTimer = setTimeout(() => {
+            this.suspendedResetTimer = null;
+            this.disconnect();
+        }, SUSPENDED_CONNECTION_TRUST_MS);
+    }
+
+    /** Cancels a pending background reset. Safe to call when none is armed. */
+    private clearSuspendedReset() {
+        if (this.suspendedResetTimer !== null) {
+            clearTimeout(this.suspendedResetTimer);
+            this.suspendedResetTimer = null;
         }
     }
 
     /**
-     * Called when the app comes back to foreground.
-     * - If connected: sends an application-level ping to verify the connection
-     *   is still alive (silent TCP drops during iOS suspend are common). Forces
-     *   a reconnect if no pong arrives within 5 seconds.
-     * - If not connected (and not already in progress): creates a fresh socket
-     *   immediately, resetting socket.io's exponential backoff from scratch.
-     * - If connecting: leaves the in-progress attempt alone.
+     * Called when the app comes back to foreground, or network becomes reachable,
+     * or network interface switches (WiFi ↔ Cellular).
+     *
+     * Probes the existing connection with an application-level ping first.
+     * If the probe succeeds the connection is reused. If it fails a fresh
+     * connection is created. The probe timeout is short (1.5s) because it's
+     * just a small ping/pong round-trip — if it takes longer the connection
+     * is almost certainly dead (silent TCP drop after iOS suspend, etc.).
      */
     async resumeReconnection(): Promise<boolean> {
+        if (this.serverDisabled) {
+            return false;
+        }
+        const suspendedFor = this.suspendedAt === null ? null : Date.now() - this.suspendedAt;
+        this.suspendedAt = null;
+        this.clearSuspendedReset();
+
+        // A background gap past the server's heartbeat timeout means the socket is already gone and
+        // `socket.connected` simply has not caught up. Reset first so the branch below starts from
+        // a truthful state, rather than spending a full probe timeout to reach the same conclusion
+        // while reporting a dead connection as healthy in the meantime.
+        if (suspendedFor !== null && suspendedFor >= SUSPENDED_CONNECTION_TRUST_MS) {
+            log.log(`🔌 socket reset after ${Math.round(suspendedFor / 1000)}s in background`);
+            this.disconnect();
+        }
+
         if (this.currentStatus === 'connected' && this.socket?.connected) {
             return await this.probeConnection();
-        } else if (this.currentStatus !== 'connecting') {
-            // Ensure clean state, then connect immediately (new socket = backoff reset).
-            if (this.socket) {
-                this.socket.removeAllListeners();
-                this.socket.disconnect();
-                this.socket = null;
-            }
-            this.reconnectionDisabled = false;
-            this.connect();
         }
-        // 'connecting': in-progress attempt, leave it alone.
+        // For any other state (disconnected, connecting, error):
+        // tear down the old socket and start fresh. A stale 'connecting' state
+        // from before sleep will never complete — burn it down.
+        if (this.socket) {
+            this.socket.removeAllListeners();
+            this.socket.disconnect();
+            this.socket = null;
+        }
+        this.reconnectionDisabled = false;
+        this.connect();
         return false;
+    }
+
+    /**
+     * Returns true if the connection appears healthy: socket reports connected
+     * AND a message has been received within the last windowMs. A silent TCP
+     * drop (common after iOS suspend) leaves `socket.connected === true` but
+     * no data flows — the last-message check catches that.
+     */
+    isConnectionHealthy(windowMs: number = 30000): boolean {
+        if (!this.socket?.connected) return false;
+        if (this.lastMessageReceivedAt === 0) return true; // Just connected, give it time
+        return (Date.now() - this.lastMessageReceivedAt) < windowMs;
     }
 
     /**
      * Emits an application-level ping and waits for the server ACK.
      * If no response within timeoutMs the connection is treated as stale and
-     * a fresh reconnect is forced.
+     * a fresh reconnect is forced. The timeout is short because the probe is
+     * just a ping/pong — a live connection responds in < 200ms.
      */
-    private probeConnection(timeoutMs = 5000): Promise<boolean> {
+    private probeConnection(timeoutMs = 1500): Promise<boolean> {
         const socket = this.socket;
         if (!socket) return Promise.resolve(false);
         let settled = false;
@@ -388,8 +557,12 @@ class ApiSocket {
 
             timer = setTimeout(() => {
                 finish(false);
-                this.disconnect();
-                this.connect();
+                // Only reconnect if the probe was the one that detected staleness —
+                // guard against socket already being replaced by another call path.
+                if (this.socket === socket) {
+                    this.disconnect();
+                    this.connect();
+                }
             }, timeoutMs);
 
             try {
@@ -398,15 +571,46 @@ class ApiSocket {
                 });
             } catch {
                 finish(false);
-                this.disconnect();
-                this.connect();
+                if (this.socket === socket) {
+                    this.disconnect();
+                    this.connect();
+                }
             }
         });
+    }
+
+    /**
+     * Periodic health check called from sync.ts's refresh interval.
+     * Detects silent TCP drops (socket.connected === true but no data flowing)
+     * and forces a reconnect. This catches the case where the app stays in
+     * foreground but the OS silently drops the connection (e.g., iOS long idle).
+     *
+     * Only acts when the socket appears connected but no message has been
+     * received in the last 45 seconds. On mobile this triggers a fresh connect;
+     * on desktop it probes first.
+     */
+    checkHealthAndReconnect() {
+        if (this.currentStatus !== 'connected') return;
+        if (!this.socket?.connected) return;
+        if (this.lastMessageReceivedAt === 0) return; // Just connected
+
+        const silentMs = Date.now() - this.lastMessageReceivedAt;
+        if (silentMs < 45000) return; // Still within healthy window
+
+        // Socket appears connected but no data for 45+ seconds — likely a silent TCP drop.
+        // Reconnect to restore data flow.
+        console.warn(`[apiSocket] Silent connection detected (${Math.round(silentMs / 1000)}s without messages), forcing reconnect`);
+        this.disconnect();
+        this.connect();
     }
 
     //
     // Private Methods
     //
+
+    private currentTransportName(): string | null {
+        return (this.socket?.io as any)?.engine?.transport?.name ?? this.lastTransportType;
+    }
 
     private updateStatus(status: ConnectionStatus, error?: Error) {
         if (error) this.lastError = error;
@@ -445,40 +649,60 @@ class ApiSocket {
         // Connection events
         this.socket.on('connect', () => {
             this.lastError = null;
+            this.lastMessageReceivedAt = Date.now(); // Treat connect as activity
+            log.log(`🔌 socket connected via ${this.currentTransportName() ?? 'unknown'}`);
             this.updateStatus('connected');
             if (!this.socket?.recovered) {
                 this.reconnectedListeners.forEach(listener => listener());
             }
         });
 
+        // Track transport upgrades/downgrades for diagnostics
+        this.socket.io.engine.on('upgrade', (transport: any) => {
+            this.lastTransportType = transport?.name ?? 'unknown';
+        });
+        // Capture initial transport type (transport may not be created yet at setup time)
+        try {
+            const initialTransport = (this.socket.io as any)?.engine?.transport;
+            if (initialTransport?.name) {
+                this.lastTransportType = initialTransport.name;
+            }
+        } catch {
+            // Transport not yet initialised — will be captured by 'upgrade' event
+        }
+
         // While status stays on the last `connect_error`, socket.io may still be retrying in the
         // background — surface that so the UI isn't stuck looking "idle" on error.
         const manager = this.socket.io;
-        manager.on('reconnect_attempt', () => {
+        manager.on('reconnect_attempt', (attempt: number) => {
+            log.log(`🔌 socket reconnect attempt #${attempt}`);
             this.updateStatus('connecting');
         });
         manager.on('reconnect_error', (err: Error) => {
+            log.log(`🔌 socket reconnect error: ${describeSocketError(err)}`);
             if (!this.isAuthError(err)) {
                 this.updateStatus('error', err);
             }
         });
         manager.on('reconnect_failed', () => {
-            if (this.reconnectionDisabled || !this.config) {
-                return;
+            // With Infinity attempts this should never fire, but if it does,
+            // stay in error state — don't loop. A manual resume or foreground
+            // event will trigger a fresh connect().
+            if (!this.reconnectionDisabled && this.config) {
+                const err = new Error('Socket reconnection failed');
+                this.updateStatus('error', err);
             }
-            const err = new Error('Socket reconnection failed after max attempts');
-            this.updateStatus('error', err);
-            this.disconnect();
-            this.connect();
         });
 
         this.socket.on('disconnect', (reason) => {
+            log.log(`🔌 socket disconnected: ${reason}`);
             // io server disconnect = server closed the connection (e.g. auth); socket.io may still retry
             if (this.reconnectionDisabled) return;
             this.updateStatus('disconnected');
         });
 
         this.socket.on('connect_error', (error: Error & { code?: string; status?: number }) => {
+            log.log(`🔌 socket connect_error on ${this.currentTransportName() ?? 'unknown'}: ${describeSocketError(error)}`);
             if (this.isAuthError(error)) {
                 this.stopReconnectionAndNotifyAuthError(error);
                 return;
@@ -496,6 +720,8 @@ class ApiSocket {
 
         // Message handling
         this.socket.onAny((event, data) => {
+            // Track last message receipt for health checks
+            this.lastMessageReceivedAt = Date.now();
             // console.log(`📥 SyncSocket: Received event '${event}':`, JSON.stringify(data).substring(0, 200));
             const handler = this.messageHandlers.get(event);
             if (handler) {

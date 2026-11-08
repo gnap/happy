@@ -1,7 +1,7 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { AppState, AppStateStatus } from 'react-native';
 import { storage } from '@/sync/storage';
-import { useIsFocused } from '@react-navigation/native';
+// SDK 57: useIsFocused not available via @react-navigation in expo-router context
 
 interface UseDraftOptions {
     autoSaveInterval?: number; // in milliseconds, default 2000
@@ -16,7 +16,7 @@ export function useDraft(
     const { autoSaveInterval = 2000 } = options;
     const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const lastSavedValue = useRef<string>('');
-    const isFocused = useIsFocused();
+    const isFocused = true; // SDK 57: always treat as focused
 
     // Save draft to storage
     const saveDraft = useCallback((draft: string) => {

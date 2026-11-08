@@ -1,0 +1,706 @@
+import type { LanSocketHandle } from './socket';
+import type { DaemonRoute } from './types';
+
+/**
+ * One App, many daemons.
+ *
+ * A machine runs one daemon, and that daemon serves several sessions. The App wants to talk to
+ * every machine it can reach — the same way it talks to the server, which is a hub that knows
+ * machines and sessions. So the unit of connection is a *daemon*: identified by its machine, and
+ * reachable over one route at a time (found on the local network, or through the relay). A route is
+ * a transport, not a thing to connect to, and holding one socket per route — which is what this
+ * used to do — meant the App could only ever talk to one of its machines per transport, replacing
+ * the connection every time a different machine's session was read.
+ *
+ * Everything else says what it wants (per machine and route) and this makes it true: exactly one
+ * connection per daemon, opened once, replaced only when the address moves, reconnected on its own
+ * schedule after a drop, and never handed to a caller that is writing a session belonging to a
+ * different machine.
+ */
+export type DaemonTarget = {
+    route: DaemonRoute;
+    baseUrl: string;
+    machineId: string;
+    machineKey: Uint8Array;
+};
+
+/** The identity of a connection: one daemon, over one route. */
+export const daemonId = (machineId: string, route: DaemonRoute): string => `${machineId}:${route}`;
+
+export type DaemonConnectionState = {
+    /** Which daemon and transport this state is about. Keyed separately, repeated for grouping. */
+    machineId: string;
+    route: DaemonRoute;
+    /**
+     * What this connection is doing right now, so a reader can tell "nothing wanted" from "wanted
+     * and not working" — a distinction the socket's existence alone cannot express, and the one
+     * that matters when a channel is silently carrying nothing.
+     */
+    phase: 'live' | 'opening' | 'retrying' | 'idle';
+    baseUrl?: string;
+    /** When the live socket came up. */
+    connectedAt?: number;
+    /** For `retrying`: how many consecutive drops, and when the next attempt is due. */
+    attempt?: number;
+    retryAt?: number;
+};
+
+type LiveConnection = {
+    handle: LanSocketHandle;
+    target: DaemonTarget;
+    connectedAt: number;
+    /** When the outstanding heartbeat was sent, or null while the daemon has answered the last one. */
+    awaitingBeatSince: number | null;
+    beatTimer: ReturnType<typeof setTimeout> | null;
+    /**
+     * Set while a resume probe is in flight.
+     *
+     * A socket that survived an App suspension is not evidence that anything is still on the other
+     * end: iOS kills the process's network activity while it is suspended, and the socket keeps
+     * reading as open. Until the daemon answers a probe sent *after* the resume, this connection is
+     * not written on — a write into it succeeds locally and disappears.
+     */
+    suspect: boolean;
+    /** The short deadline for that probe. */
+    probeTimer: ReturnType<typeof setTimeout> | null;
+};
+
+const DEFAULT_HEARTBEAT = { intervalMs: 15_000, timeoutMs: 45_000 };
+/**
+ * How long a daemon has to answer the probe sent on resume.
+ *
+ * One RTT, not the heartbeat's 45 seconds: the point of probing at resume is to find a dead socket
+ * now, so the session can read again and the outbox can fall back to the server. A live daemon on
+ * the LAN answers in milliseconds.
+ */
+const DEFAULT_RESUME_PROBE_MS = 2_000;
+/**
+ * How long an open may stay in flight before it is treated as a failure.
+ *
+ * The socket layer bounds itself (a 10s challenge, a 5s upgrade), so this is a backstop for the
+ * things a promise cannot bound: a fetch whose native side never settles, a runtime that freezes
+ * the timers inside the attempt, a suspension in the middle of a handshake. Without it, "opening"
+ * is a state a connection can be published in and never leave — and an icon that reads a phase
+ * would stay blue for as long as the App runs.
+ */
+const DEFAULT_OPEN_TIMEOUT_MS = 20_000;
+
+/** What the socket layer calls back on, and what the manager forwards from it. */
+type DaemonSocketHandlers = {
+    onUpdate: (payload: unknown) => void;
+    onDelivered: (result: { sessionId: string; localId: string; delivered: boolean }) => void;
+    onClosed: (info: { deliberate: boolean; code?: number; reason?: string }) => void;
+    onBeat: () => void;
+};
+
+type DaemonConnectionDeps = {
+    /** Opens one connection, or returns null when it could not be established. */
+    open: (target: DaemonTarget, handlers: DaemonSocketHandlers) => Promise<LanSocketHandle | null>;
+    onUpdate: (target: DaemonTarget, payload: unknown) => void;
+    onDelivered: (target: DaemonTarget, result: { sessionId: string; localId: string; delivered: boolean }) => void;
+    /** A connection came up: the sessions on that machine no longer need their polling fallback. */
+    onReady?: (target: DaemonTarget) => void;
+    /** A connection went away without this App asking: whatever it was carrying has lost its push. */
+    onDropped?: (target: DaemonTarget) => void;
+    /**
+     * An address that did not work: it refused the socket, dropped one, or stopped answering.
+     *
+     * This is the socket layer's only way to say anything about an *address*, and it exists because
+     * nothing else could: the candidate list ranks a socket's address first, so an address that
+     * moved (a machine whose DHCP lease changed after a reboot) kept being chosen for the socket
+     * forever while reads — which record their own failures — quietly moved to the new one. The
+     * machine looked reachable in the list and "connecting" in the header at the same time.
+     */
+    onAddressUnusable?: (target: DaemonTarget, reason: string) => void;
+    /**
+     * A connection turned out not to answer heartbeats, and is being kept anyway.
+     *
+     * A daemon whose CLI predates the heartbeat cannot answer one, and treating that as a dead
+     * socket tears a working connection down every timeout — forever, since the answer will never
+     * come. What is lost by keeping it is only the proof that the peer is alive *now*: reads still
+     * work, and the caller is told to keep its polling fallback instead of stopping it.
+     */
+    onHeartbeatUnsupported?: (target: DaemonTarget) => void;
+    /** Published for the rest of the App: what is connected, per daemon. */
+    onStateChange: (id: string, state: DaemonConnectionState) => void;
+    log: (message: string) => void;
+    /** Backstop for a connection that keeps dropping; production uses the default. */
+    retryDelayMs?: (attempt: number) => number;
+    /**
+     * How often to ask a connection to prove it is alive, and how long an answer may take. A socket
+     * killed silently — iOS suspending the App is the usual way — still reads as open from this
+     * side, so without this the channel would simply stop delivering and nothing would notice.
+     */
+    heartbeat?: { intervalMs: number; timeoutMs: number };
+    /** How long a resume probe may take; production uses the default. */
+    resumeProbeMs?: number;
+    /** How long an open may stay in flight before it is abandoned and retried. */
+    openTimeoutMs?: number;
+    /**
+     * Which routes this App checks liveness on itself.
+     *
+     * Liveness belongs to whoever can see the peer. Over the relay this App sees a stream, not the
+     * daemon: the relay holds that connection, so it is the one that knows when a machine goes —
+     * it says so in the directory and it closes the stream — and a heartbeat through the relay is
+     * this App re-deriving a fact the hub already has. It also gets it wrong for any daemon that
+     * cannot answer, which reads as a channel dropping every 45 seconds forever.
+     *
+     * The LAN has no such middleman: there a socket can die without either end being told, so this
+     * side is the only thing that can notice.
+     */
+    heartbeatRoutes?: DaemonRoute[];
+};
+
+/**
+ * Holds one live connection per daemon, and is the only thing that opens or closes one.
+ *
+ * Callers state what they want (`want`, `unwant`, `wantOnly`) and never touch a socket. That is
+ * what makes the failures this replaces impossible: two readers cannot race into opening two
+ * sockets (an open in flight is remembered), a network change cannot tear down a connection that
+ * is still working (it only changes what is wanted), reading one machine cannot close another
+ * machine's connection, and nothing sends on a socket that is being replaced (`current` is the only
+ * way to get one, and it is the live one or nothing).
+ *
+ * A connection that drops is that daemon's problem, not the caller's: the manager reconnects, with
+ * a backoff, for as long as it is wanted. A socket that was closed on purpose reports itself as
+ * such and is not reconnected here.
+ */
+export class DaemonConnections {
+    /** Keyed by `daemonId(machineId, route)` throughout: one entry per daemon, per transport. */
+    private desired = new Map<string, DaemonTarget>();
+    private live = new Map<string, LiveConnection>();
+    private opening = new Map<string, Promise<void>>();
+    /** Consecutive drops, for the reconnect backoff; cleared when a connection holds. */
+    private drops = new Map<string, number>();
+    private retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    /** When the pending retry is due, so a reader can say "in 4s" rather than just "retrying". */
+    private retryAt = new Map<string, number>();
+    /**
+     * Connections whose daemon never answers a heartbeat, learned from the first timeout.
+     *
+     * Remembered per daemon, not per connection: a daemon that cannot answer will not learn to, so
+     * a reconnect must not start the same 45-second cycle again.
+     */
+    private noHeartbeat = new Set<string>();
+
+    constructor(private readonly deps: DaemonConnectionDeps) {}
+
+    /** Ask for one connection per listed daemon, dropping every daemon not listed. */
+    wantOnly(targets: DaemonTarget[]): void {
+        const keep = new Set(targets.map((target) => daemonId(target.machineId, target.route)));
+        for (const id of [...this.desired.keys()]) {
+            if (!keep.has(id)) {
+                this.unwant(id, 'no longer wanted');
+            }
+        }
+        for (const target of targets) {
+            this.want(target);
+        }
+    }
+
+    /** Ask for one connection to this daemon over this route. Idempotent. */
+    want(target: DaemonTarget): void {
+        const id = daemonId(target.machineId, target.route);
+        const current = this.desired.get(id);
+        if (current?.baseUrl === target.baseUrl) {
+            return;
+        }
+        if (current) {
+            // Same daemon, different address (it moved, or the route answered at a new one): the old
+            // socket is for an address this App no longer believes in.
+            this.close(id, `moving to a different address (${current.baseUrl} → ${target.baseUrl})`);
+        }
+        this.desired.set(id, target);
+        this.start(target);
+    }
+
+    /** Stop wanting this daemon over this route; its connection is closed if there is one. */
+    unwant(id: string, reason: string): void {
+        this.desired.delete(id);
+        this.close(id, reason);
+    }
+
+    /**
+     * The connection to write on. A send has to come through here rather than remembering a handle:
+     * the one it remembered may have been replaced since, and writing into a socket whose peer is
+     * gone is a message accepted locally that never arrives.
+     */
+    current(machineId: string, route: DaemonRoute): { handle: LanSocketHandle; baseUrl: string; machineId: string } | null {
+        const live = this.live.get(daemonId(machineId, route));
+        return live ? { handle: live.handle, baseUrl: live.target.baseUrl, machineId: live.target.machineId } : null;
+    }
+
+    /**
+     * The connection to *write* on: `current`, minus the ones that have gone quiet.
+     *
+     * A socket whose peer vanished — the App was suspended, the network moved under it, the proxy
+     * dropped it — is still open as far as this side is concerned, and a write into it succeeds
+     * locally and goes nowhere. That is the shape of a lost message: the App is told it sent, the
+     * session never hears it, and nothing anywhere records a failure. A heartbeat that has gone
+     * unanswered for a whole cycle is the only warning available before the timeout ends the
+     * connection outright, so it is what sending waits for: below it the message goes to the other
+     * channel, or back to the queue, rather than into a socket that is only pretending.
+     *
+     * Deliberately weaker than closing the connection: a late pong must not cost a reconnect, and
+     * the beat loop is what decides that the socket is really gone.
+     */
+    trusted(machineId: string, route: DaemonRoute): { handle: LanSocketHandle; baseUrl: string; machineId: string } | null {
+        const live = this.live.get(daemonId(machineId, route));
+        if (!live) {
+            return null;
+        }
+        // A socket that has not answered the probe sent after the App came back is a guess, not a
+        // channel. Sending on it is what turns "message stuck" into "message lost": the write is
+        // accepted here and nobody ever reads it.
+        if (live.suspect) {
+            return null;
+        }
+        const { intervalMs } = this.deps.heartbeat ?? DEFAULT_HEARTBEAT;
+        if (live.awaitingBeatSince !== null && Date.now() - live.awaitingBeatSince >= intervalMs) {
+            return null;
+        }
+        return { handle: live.handle, baseUrl: live.target.baseUrl, machineId: live.target.machineId };
+    }
+
+    /**
+     * Re-proves every live socket after the App comes back from a suspension.
+     *
+     * Nothing else in this manager is told about AppState, and the periodic heartbeat is too slow
+     * to be the answer: iOS suspends the process within seconds, freezing the 15s beat timer, and
+     * a socket killed while suspended still reads as open here. Without this, the first honest
+     * answer is up to a whole beat plus its 45s timeout away — a minute in which pushes are gone,
+     * reads are invalidated into nothing and messages are written into a socket whose peer is not
+     * there. Marking the connection suspect is half the fix: until the probe is answered, `trusted`
+     * refuses it, so a send falls back to the server or stays queued instead of disappearing.
+     */
+    probeAfterResume(): void {
+        const probeMs = this.deps.resumeProbeMs ?? DEFAULT_RESUME_PROBE_MS;
+        for (const [id, live] of [...this.live]) {
+            if (live.probeTimer !== null) {
+                clearTimeout(live.probeTimer);
+                live.probeTimer = null;
+            }
+            // A heartbeat was already in flight when the App was suspended. Its pong died with the
+            // suspension, so this is a connection known to be unproven — reconnect now rather than
+            // wait the heartbeat's full timeout for an answer that cannot arrive.
+            if (live.awaitingBeatSince !== null) {
+                this.endConnection(live.target, 'the heartbeat sent before the suspension was never answered');
+                continue;
+            }
+            live.suspect = true;
+            if (!live.handle.ping()) {
+                this.endConnection(live.target, 'the socket would not take a resume probe');
+                continue;
+            }
+            const sentAt = Date.now();
+            live.awaitingBeatSince = sentAt;
+            live.probeTimer = setTimeout(() => {
+                const entry = this.live.get(id);
+                if (!entry || entry.handle !== live.handle) {
+                    return;
+                }
+                entry.probeTimer = null;
+                // Still the same beat: nothing came back. A later beat cannot count as the answer.
+                if (entry.awaitingBeatSince === sentAt) {
+                    this.endConnection(entry.target, 'the resume probe was not answered');
+                }
+            }, probeMs);
+            (live.probeTimer as unknown as { unref?: () => void }).unref?.();
+        }
+    }
+
+    has(machineId: string, route: DaemonRoute): boolean {
+        return this.live.has(daemonId(machineId, route));
+    }
+
+    /** The machines this App currently holds a live connection to over one route. */
+    liveMachineIds(route: DaemonRoute): string[] {
+        const machines: string[] = [];
+        for (const live of this.live.values()) {
+            if (live.target.route === route) {
+                machines.push(live.target.machineId);
+            }
+        }
+        return machines;
+    }
+
+    get connectedCount(): number {
+        return this.live.size;
+    }
+
+    /** Nothing is wanted and nothing is connected — for teardown, and for tests. */
+    closeAll(reason: string): void {
+        for (const id of [...this.desired.keys()]) {
+            this.unwant(id, reason);
+        }
+    }
+
+    private close(id: string, reason: string): void {
+        const retry = this.retryTimers.get(id);
+        if (retry) {
+            clearTimeout(retry);
+            this.retryTimers.delete(id);
+        }
+        this.retryAt.delete(id);
+        this.drops.delete(id);
+        const live = this.live.get(id);
+        if (!live) {
+            // Nothing to close: the state is whatever this daemon's wanting says it is.
+            if (!this.desired.has(id)) {
+                this.publish(id);
+            }
+            return;
+        }
+        if (live.beatTimer) {
+            clearTimeout(live.beatTimer);
+        }
+        if (live.probeTimer) {
+            clearTimeout(live.probeTimer);
+        }
+        this.live.delete(id);
+        this.deps.log(`🔌 closing the ${live.target.route} connection to ${live.target.machineId.slice(0, 8)} (${live.target.baseUrl}): ${reason}`);
+        live.handle.close();
+        // Published only when this daemon is now wanted by nobody. A close on a connection that is
+        // still wanted is a step in something else — `want` replacing the address, or `endConnection`
+        // about to start the next attempt — and announcing `retrying` here would name a state the
+        // caller is already moving past.
+        if (!this.desired.has(id)) {
+            this.publish(id);
+        }
+    }
+
+    private start(target: DaemonTarget): void {
+        const id = daemonId(target.machineId, target.route);
+        // An open already in flight *is* this daemon's open. Without this, every caller that arrives
+        // while it is in flight opens a connection of its own: one is recorded, the rest leak, and
+        // the daemon keeps them as readers that never go away.
+        if (this.opening.has(id) || this.live.has(id)) {
+            return;
+        }
+        const opened: { handle: LanSocketHandle | null } = { handle: null };
+        let task: Promise<void>;
+        task = (async () => {
+            const result = await this.openBounded(target, {
+                onUpdate: (payload) => this.deps.onUpdate(target, payload),
+                onBeat: () => this.onBeat(id),
+                onDelivered: (delivered) => this.deps.onDelivered(target, delivered),
+                onClosed: (info) => this.onConnectionEnded(target, opened.handle, info),
+            });
+            opened.handle = result.handle;
+            if (!result.handle) {
+                this.deps.log(
+                    `🔌 could not open the ${target.route} connection to ${target.machineId.slice(0, 8)}`
+                    + (result.error ? `: ${result.error instanceof Error ? result.error.message : String(result.error)}` : ''),
+                );
+                // A failure to open is the same situation as a drop and deserves the same answer:
+                // the daemon is still wanted, so the manager retries on its own schedule. Without
+                // this, `want` being idempotent meant nothing ever tried again — the connection sat
+                // wanted and idle until some unrelated change moved the address.
+                this.deps.onAddressUnusable?.(target, result.error
+                    ? 'the connection attempt failed'
+                    : 'the address did not answer');
+                this.scheduleRetry(target);
+                return;
+            }
+            // The daemon may have been dropped or pointed elsewhere while this was opening: a socket
+            // nobody wants is closed on arrival rather than installed. The state it leaves behind is
+            // picked up by the `finally` below, which is what keeps a move *during* an open from
+            // ending with a daemon that is wanted and has nothing trying to reach it.
+            if (this.desired.get(id)?.baseUrl !== target.baseUrl) {
+                result.handle.close();
+                return;
+            }
+            this.live.set(id, {
+                handle: result.handle,
+                target,
+                connectedAt: Date.now(),
+                awaitingBeatSince: null,
+                beatTimer: null,
+                suspect: false,
+                probeTimer: null,
+            });
+            this.drops.delete(id);
+            this.retryAt.delete(id);
+            // One probe per connection: a daemon that has since been updated answers, and one that
+            // has not is written off again after a single timeout rather than never being asked.
+            this.noHeartbeat.delete(id);
+            this.deps.log(`🔌 ${target.route} connection live to ${target.machineId.slice(0, 8)} at ${target.baseUrl}`);
+            this.publish(id);
+            this.deps.onReady?.(target);
+            this.beatLoop(id);
+        })().catch((error) => {
+            // Last resort. The attempt is bounded and its failures are turned into `null`, so this
+            // is a bug rather than an outcome — but it must not leave the daemon published as
+            // `opening` with nothing scheduled, which is exactly the state a reader would draw as
+            // "connecting" forever.
+            this.deps.log(`🔌 the ${target.route} connection to ${target.machineId.slice(0, 8)} failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`);
+            this.deps.onAddressUnusable?.(target, 'the connection attempt failed');
+            this.scheduleRetry(target);
+        }).finally(() => {
+            if (this.opening.get(id) !== task) {
+                return;
+            }
+            this.opening.delete(id);
+            const desired = this.desired.get(id);
+            if (desired && !this.live.has(id) && !this.retryTimers.has(id)) {
+                // The attempt ended without a retry because the daemon now wants a *different*
+                // address — the one it was pointed at when the attempt began is not the one to try.
+                // Waiting for `want` to say so again never happens: it is idempotent on the address
+                // it already wants, so nothing would ever open the new one.
+                this.start(desired);
+            }
+        });
+        // Registered *before* awaiting, so an open in flight is visible as such: a second caller
+        // must not start one of its own, and the published phase has to say `opening` meanwhile.
+        this.opening.set(id, task);
+        this.publish(id);
+    }
+
+    /**
+     * The open, with a deadline and with a throw turned into an answer.
+     *
+     * Both are about the same failure: the manager publishes `opening` before it awaits, so every
+     * way an attempt can end without saying so leaves a connection that is drawn as "connecting"
+     * and is never retried. A late socket is closed rather than installed — by then this attempt is
+     * over, and a second one may own the daemon.
+     */
+    private openBounded(target: DaemonTarget, handlers: DaemonSocketHandlers): Promise<{ handle: LanSocketHandle | null; error?: unknown }> {
+        const timeoutMs = this.deps.openTimeoutMs ?? DEFAULT_OPEN_TIMEOUT_MS;
+        return new Promise((resolve) => {
+            let settled = false;
+            const finish = (result: { handle: LanSocketHandle | null; error?: unknown }) => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                clearTimeout(timer);
+                resolve(result);
+            };
+            const timer = setTimeout(() => {
+                this.deps.log(`🔌 the ${target.route} connection to ${target.machineId.slice(0, 8)} was still opening after ${Math.round(timeoutMs / 1000)}s; giving up on that attempt`);
+                finish({ handle: null });
+            }, timeoutMs);
+            (timer as unknown as { unref?: () => void }).unref?.();
+            let attempt: Promise<LanSocketHandle | null>;
+            try {
+                attempt = this.deps.open(target, handlers);
+            } catch (error) {
+                finish({ handle: null, error });
+                return;
+            }
+            attempt.then(
+                (handle) => {
+                    if (settled) {
+                        handle?.close();
+                        return;
+                    }
+                    finish({ handle });
+                },
+                (error) => finish({ handle: null, error }),
+            );
+        });
+    }
+
+    /** The daemon answered: the connection was alive when the heartbeat was sent. */
+    private onBeat(id: string): void {
+        const live = this.live.get(id);
+        if (live) {
+            live.awaitingBeatSince = null;
+            // A pong to the resume probe is what makes the socket trustworthy again. A pong to an
+            // earlier, pre-suspension beat cannot get here — it died with the suspension — so any
+            // answer that arrives now is proof of the peer after the App returned.
+            live.suspect = false;
+            if (live.probeTimer !== null) {
+                clearTimeout(live.probeTimer);
+                live.probeTimer = null;
+            }
+        }
+    }
+
+    /**
+     * Ask, on a timer, whether the connection is still there.
+     *
+     * An unanswered heartbeat ends the connection and lets the ordinary reconnect path take over.
+     * That is the only way a silently dead socket is ever noticed: it is open as far as this side
+     * can tell, so nothing else would report it, and the sessions behind it would just go quiet.
+     */
+    private beatLoop(id: string): void {
+        const live = this.live.get(id);
+        if (!live) {
+            return;
+        }
+        if (!(this.deps.heartbeatRoutes ?? ['lan']).includes(live.target.route)) {
+            // Nothing to check from here: the transport in between is the one that knows.
+            return;
+        }
+        const { intervalMs, timeoutMs } = this.deps.heartbeat ?? DEFAULT_HEARTBEAT;
+        const timer = setTimeout(() => {
+            const entry = this.live.get(id);
+            if (!entry || entry.handle !== live.handle) {
+                return;
+            }
+            entry.beatTimer = null;
+            if (entry.awaitingBeatSince !== null && Date.now() - entry.awaitingBeatSince >= timeoutMs) {
+                // Learned once. From here this daemon is never asked again and never dropped for not
+                // answering — which is what stops a working connection from being torn down and
+                // rebuilt every 45 seconds for as long as the App runs.
+                this.noHeartbeat.add(id);
+                entry.awaitingBeatSince = null;
+                this.deps.log(
+                    `🔌 ${entry.target.route} connection to ${entry.target.machineId.slice(0, 8)} does not answer heartbeats; keeping it and leaving the polling fallback on`,
+                );
+                this.deps.onHeartbeatUnsupported?.(entry.target);
+                this.beatLoop(id);
+                return;
+            }
+            // A daemon known not to answer is not asked: an unanswered ping is only meaningful
+            // against one that can.
+            if (entry.awaitingBeatSince === null && !this.noHeartbeat.has(id)) {
+                if (!entry.handle.ping()) {
+                    this.endConnection(entry.target, 'the socket would not take a heartbeat');
+                    return;
+                }
+                entry.awaitingBeatSince = Date.now();
+            }
+            this.beatLoop(id);
+        }, intervalMs);
+        (timer as unknown as { unref?: () => void }).unref?.();
+        live.beatTimer = timer;
+    }
+
+    /**
+     * End a connection this App decided to end, and reconnect if the daemon is still wanted. Kept
+     * apart from the peer-drop path because the socket has to be closed *deliberately* here: it is
+     * still open, and telling it to close is how it stops being a channel.
+     */
+    private endConnection(target: DaemonTarget, reason: string): void {
+        const id = daemonId(target.machineId, target.route);
+        const live = this.live.get(id);
+        if (!live || live.target.baseUrl !== target.baseUrl) {
+            return;
+        }
+        this.live.delete(id);
+        if (live.beatTimer) {
+            clearTimeout(live.beatTimer);
+        }
+        if (live.probeTimer) {
+            clearTimeout(live.probeTimer);
+        }
+        this.deps.log(`🔌 closing the ${target.route} connection to ${target.machineId.slice(0, 8)} (${target.baseUrl}): ${reason}`);
+        this.deps.onAddressUnusable?.(target, reason);
+        this.deps.onDropped?.(target);
+        live.handle.close();
+        if (this.desired.get(id)?.baseUrl === target.baseUrl) {
+            this.start({ ...target });
+        } else {
+            this.publish(id);
+        }
+    }
+
+    /**
+     * A connection ended without this App asking. Reconnecting is this manager's job, not a
+     * caller's: the daemon is still wanted, and whoever writes on it should find a connection there
+     * rather than have to notice it went away.
+     */
+    private onConnectionEnded(target: DaemonTarget, handle: LanSocketHandle | null, info: { deliberate: boolean; code?: number; reason?: string }): void {
+        if (info.deliberate) {
+            return; // closed by this App, which said why when it did
+        }
+        const id = daemonId(target.machineId, target.route);
+        const live = this.live.get(id);
+        if (!live || (handle && live.handle !== handle)) {
+            return; // a drop from a connection that has already been replaced
+        }
+        this.live.delete(id);
+        this.deps.log(`🔌 ${target.route} connection to ${target.machineId.slice(0, 8)} dropped: code=${info.code ?? 'none'} reason=${info.reason || 'none'}`);
+        this.deps.onAddressUnusable?.(target, `the socket dropped (${info.code ?? 'no code'} ${info.reason || 'no reason'})`);
+        this.deps.onDropped?.(target);
+        if (this.desired.get(id)?.baseUrl !== target.baseUrl) {
+            this.publish(id);
+            return; // nobody wants it any more
+        }
+        this.scheduleRetry(target);
+    }
+
+    /**
+     * Try this daemon again after a backoff, on the same escalating schedule a drop uses.
+     *
+     * Shared by the two ways a connection ends up wanted and not working — the socket dropped, or
+     * the open never produced one — because from the manager's side they are the same fact: nothing
+     * is carrying this daemon right now, and something has to try again.
+     */
+    private scheduleRetry(target: DaemonTarget): void {
+        const id = daemonId(target.machineId, target.route);
+        const drops = (this.drops.get(id) ?? 0) + 1;
+        this.drops.set(id, drops);
+        const delay = this.deps.retryDelayMs ? this.deps.retryDelayMs(drops) : Math.min(30_000, 1_000 * 2 ** (drops - 1));
+        this.retryAt.set(id, Date.now() + delay);
+        this.publish(id);
+        const timer = setTimeout(() => {
+            this.retryTimers.delete(id);
+            this.retryAt.delete(id);
+            if (this.desired.get(id)?.baseUrl === target.baseUrl) {
+                this.start({ ...target });
+            }
+        }, delay);
+        (timer as unknown as { unref?: () => void }).unref?.();
+        this.retryTimers.set(id, timer);
+    }
+
+    /**
+     * Says what a connection is doing, from the manager's own bookkeeping rather than from whoever
+     * made the last call. A connection with a live socket is `live`; one wanted with an open in
+     * flight is `opening`; one wanted with neither is waiting on a backoff (`retrying`, and until
+     * when); one nobody wants is `idle`.
+     *
+     * Published on every transition because the states this makes visible are the ones that used to
+     * be indistinguishable from a quiet channel — a machine stuck retrying, and a machine the App
+     * believes it is talking to while nothing is arriving.
+     */
+    private publish(id: string): void {
+        const live = this.live.get(id);
+        if (live) {
+            this.deps.onStateChange(id, {
+                machineId: live.target.machineId,
+                route: live.target.route,
+                phase: 'live',
+                baseUrl: live.target.baseUrl,
+                connectedAt: live.connectedAt,
+            });
+            return;
+        }
+        const desired = this.desired.get(id);
+        if (!desired) {
+            this.deps.onStateChange(id, { ...splitDaemonId(id), phase: 'idle' });
+            return;
+        }
+        if (this.opening.has(id)) {
+            this.deps.onStateChange(id, {
+                machineId: desired.machineId,
+                route: desired.route,
+                phase: 'opening',
+                baseUrl: desired.baseUrl,
+            });
+            return;
+        }
+        this.deps.onStateChange(id, {
+            machineId: desired.machineId,
+            route: desired.route,
+            phase: 'retrying',
+            baseUrl: desired.baseUrl,
+            attempt: this.drops.get(id) ?? 0,
+            retryAt: this.retryAt.get(id),
+        });
+    }
+}
+
+/**
+ * Splits an id back into the machine and route it names.
+ *
+ * Only needed when nothing is wanted for it any more and the target is gone, so the published state
+ * can still say *which* daemon went idle rather than leaving the reader to parse the key.
+ */
+function splitDaemonId(id: string): { machineId: string; route: DaemonRoute } {
+    const at = id.lastIndexOf(':');
+    return { machineId: id.slice(0, at), route: id.slice(at + 1) as DaemonRoute };
+}

@@ -1,8 +1,8 @@
 import React from 'react';
-import { View, Text, Platform, Pressable, useWindowDimensions, ScrollView, TextInput } from 'react-native';
+import { View, Text, Platform, Pressable, useWindowDimensions, ScrollView, TextInput, Switch} from 'react-native';
 import Constants from 'expo-constants';
 import { Typography } from '@/constants/Typography';
-import { useAllMachines, storage, useSetting, useSettingMutable, useSessions, useLocalSetting } from '@/sync/storage';
+import { useAllMachines, storage, useMachinePresenceMap, useSetting, useSettingMutable, useSessions, useLocalSetting } from '@/sync/storage';
 import { Ionicons, Octicons } from '@expo/vector-icons';
 import { ItemGroup } from '@/components/ItemGroup';
 import { Item } from '@/components/Item';
@@ -37,13 +37,14 @@ import { useEnvironmentVariables, resolveEnvVarSubstitution, extractEnvVarRefere
 import { formatPathRelativeToHome } from '@/utils/sessionUtils';
 import { resolveAbsolutePath } from '@/utils/pathUtils';
 import { MultiTextInput } from '@/components/MultiTextInput';
-import { isMachineOnline } from '@/utils/machineUtils';
+import { machineIsReachable } from '@/utils/machineUtils';
 import { StatusDot } from '@/components/StatusDot';
 import { SearchableListSelector, SelectorConfig } from '@/components/SearchableListSelector';
 import { clearNewSessionDraft, loadNewSessionDraft, saveNewSessionDraft } from '@/sync/persistence';
 
 // Simple temporary state for passing selections back from picker screens
-let onMachineSelected: (machineId: string) => void = () => { };
+export let onMachineSelected: (machineId: string) => void = () => { };
+export let onPathSelected: (path: string) => void = () => { };
 let onProfileSaved: (profile: AIBackendProfile) => void = () => { };
 
 export const callbacks = {
@@ -303,11 +304,16 @@ function NewSessionWizard() {
     const [favoriteMachines, setFavoriteMachines] = useSettingMutable('favoriteMachines');
     const [dismissedCLIWarnings, setDismissedCLIWarnings] = useSettingMutable('dismissedCLIWarnings');
 
-    // Combined profiles (built-in + custom)
+    // Track which profiles exist (built-in profiles not in here have been deleted)
+    const profileIds = React.useMemo(() => new Set(profiles.map(p => p.id)), [profiles]);
+
+    // Combined profiles: only include built-in profiles that haven't been deleted
     const allProfiles = React.useMemo(() => {
-        const builtInProfiles = DEFAULT_PROFILES.map(bp => getBuiltInProfile(bp.id)!);
+        const builtInProfiles = DEFAULT_PROFILES
+            .map(bp => getBuiltInProfile(bp.id)!)
+            .filter(bp => profileIds.has(bp.id));
         return [...builtInProfiles, ...profiles];
-    }, [profiles]);
+    }, [profiles, profileIds]);
 
     const profileMap = useProfileMap(allProfiles);
     const machines = useAllMachines();
@@ -383,6 +389,11 @@ function NewSessionWizard() {
         ]);
     });
     const [maxMode, setMaxMode] = React.useState(() => lastUsedMaxMode);
+
+    // Sandbox isolation level — session-level, defaults to off
+    const [sandboxIsolation, setSandboxIsolation] = React.useState<'off' | 'strict' | 'workspace' | 'custom'>('off');
+    /** Start this session through Happy Sidecar, inside the user's desktop session. */
+    const [requiresDesktop, setRequiresDesktop] = React.useState(false);
 
     // Session details state
     const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(() => {
@@ -908,6 +919,16 @@ function NewSessionWizard() {
     }, [recentMachinePaths]);
 
     React.useEffect(() => {
+        let handler = (path: string) => {
+            setSelectedPath(path.trim());
+        };
+        onPathSelected = handler;
+        return () => {
+            onPathSelected = () => { };
+        };
+    }, []);
+
+    React.useEffect(() => {
         let handler = (savedProfile: AIBackendProfile) => {
             // Handle saved profile from profile-edit screen
 
@@ -1025,13 +1046,21 @@ function NewSessionWizard() {
                 };
             }
 
+            // Build sandbox config from isolation level
+            const sandboxConfig = sandboxIsolation !== 'off' ? {
+                enabled: true,
+                sessionIsolation: sandboxIsolation as 'strict' | 'workspace' | 'custom',
+            } : undefined;
+
             // Fire spawn in background; navigate back to list immediately so user is not blocked
             const spawnPromise = machineSpawnNewSession({
                 machineId: selectedMachineId,
                 directory: actualPath,
                 approvedNewDirectoryCreation: true,
                 agent: agentType,
-                environmentVariables
+                environmentVariables,
+                sandboxConfig,
+                requiresDesktop,
             });
 
             setIsCreating(false);
@@ -1043,16 +1072,26 @@ function NewSessionWizard() {
                         throw new Error('Session spawning failed - no session ID returned.');
                     }
                     const sessionId = result.sessionId;
-                    clearNewSessionDraft();
+                    // The draft is cleared only once the prompt has somewhere to go: clearing it
+                    // here lost the text when the session was not ready to be sent to.
+                    // The machine that spawned it knows the session before the server does: its
+                    // roster is what puts the row on screen, over whichever channel answered
+                    // (relay included). The server list is the richer source and still runs, but
+                    // it is not the one this waits for first.
+                    await sync.fetchSessionListFromDaemons().catch(() => 0);
                     await sync.refreshSessions();
-                    // Server may not have indexed the new session yet; retry so it appears in the list
-                    if (!storage.getState().sessions[sessionId]) {
-                        await new Promise((r) => setTimeout(r, 2000));
+                    // Ready means the session can be *sent to*, not merely that a roster row
+                    // exists. `sendMessage` drops a message when the session's encryption is not
+                    // initialised yet — the initial prompt used to disappear exactly there, since
+                    // the row could exist while the key was still being fetched. Ask for the
+                    // session itself (which unwraps the key over whatever channel reaches it) and
+                    // keep trying before claiming anything to the user.
+                    const ready = () => !!sync.encryption.getSessionEncryption(sessionId);
+                    for (let attempt = 0; attempt < 5 && !ready(); attempt += 1) {
+                        await new Promise((r) => setTimeout(r, 1500));
+                        await sync.fetchSessionListFromDaemons().catch(() => 0);
                         await sync.refreshSessions();
-                        if (!storage.getState().sessions[sessionId]) {
-                            await new Promise((r) => setTimeout(r, 2000));
-                            await sync.refreshSessions();
-                        }
+                        await sync.fetchSessionFromDaemon(sessionId).catch(() => {});
                     }
                     storage.getState().updateSessionPermissionMode(sessionId, permissionMode.key);
                     if (modelMode) {
@@ -1064,10 +1103,18 @@ function NewSessionWizard() {
                     if (selectedProfileId) {
                         storage.getState().updateSessionProfileId(sessionId, selectedProfileId);
                     }
-                    if (sessionPrompt.trim()) {
-                        await sync.sendMessage(sessionId, sessionPrompt);
+                    const canSend = ready();
+                    if (canSend) {
+                        clearNewSessionDraft();
+                        if (sessionPrompt.trim()) {
+                            await sync.sendMessage(sessionId, sessionPrompt);
+                        }
+                        Modal.alert(t('common.success'), t('newSession.sessionReadyMessage'));
+                    } else {
+                        // The session exists, but nothing can be sent to it yet. Keep the draft so
+                        // the prompt is not silently lost, and say what is happening.
+                        Modal.alert(t('common.success'), t('newSession.sessionCreatedPending'));
                     }
-                    Modal.alert(t('common.success'), t('newSession.sessionReadyMessage'));
                 })
                 .catch((error) => {
                     console.error('Failed to start session', error);
@@ -1094,14 +1141,15 @@ function NewSessionWizard() {
             Modal.alert(t('common.error'), errorMessage);
             setIsCreating(false);
         }
-    }, [selectedMachineId, selectedPath, sessionPrompt, sessionType, experimentsEnabled, agentType, selectedProfileId, permissionMode, modelMode, maxMode, recentMachinePaths, profileMap, router]);
+    }, [selectedMachineId, selectedPath, sessionPrompt, sessionType, experimentsEnabled, agentType, selectedProfileId, permissionMode, modelMode, maxMode, sandboxIsolation, recentMachinePaths, profileMap, router]);
 
     const screenWidth = useWindowDimensions().width;
 
     // Machine online status for AgentInput (DRY - reused in info box too)
+    const machinePresence = useMachinePresenceMap();
     const connectionStatus = React.useMemo(() => {
         if (!selectedMachine) return undefined;
-        const isOnline = isMachineOnline(selectedMachine);
+        const isOnline = machineIsReachable(machinePresence[selectedMachine.id] ?? 'offline');
 
         // Include CLI status only when in wizard AND detection completed
         const includeCLI = selectedMachineId && cliAvailability.timestamp > 0;
@@ -1118,7 +1166,7 @@ function NewSessionWizard() {
                 ...(experimentsEnabled && { gemini: cliAvailability.gemini }),
             } : undefined,
         };
-    }, [selectedMachine, selectedMachineId, cliAvailability, experimentsEnabled, theme]);
+    }, [selectedMachine, selectedMachineId, cliAvailability, experimentsEnabled, theme, machinePresence]);
 
     // Persist the current wizard state so it survives remounts and screen navigation
     // Uses debouncing to avoid excessive writes
@@ -1172,6 +1220,12 @@ function NewSessionWizard() {
                     {/* AgentInput with inline chips - sticky at bottom */}
                     <View style={{ paddingHorizontal: screenWidth > 700 ? 16 : 8, paddingBottom: Math.max(16, safeArea.bottom) }}>
                         <View style={{ maxWidth: layout.maxWidth, width: '100%', alignSelf: 'center' }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 8, paddingBottom: 6 }}>
+                                <Text style={{ color: '#8E8E93', fontSize: 12, flex: 1, marginRight: 8 }} numberOfLines={2}>
+                                    {t('sessionInfo.needsDesktop')}
+                                </Text>
+                                <Switch value={requiresDesktop} onValueChange={setRequiresDesktop} />
+                            </View>
                             <AgentInput
                                 value={sessionPrompt}
                                 onChangeText={setSessionPrompt}
@@ -1198,6 +1252,8 @@ function NewSessionWizard() {
                                 onPathClick={handlePathClick}
                                 profileId={selectedProfileId}
                                 onProfileChange={selectProfile}
+                                sandboxIsolation={sandboxIsolation}
+                                onSandboxIsolationChange={setSandboxIsolation}
                             />
                         </View>
                     </View>
@@ -1594,8 +1650,10 @@ function NewSessionWizard() {
                                 </View>
                             )}
 
-                            {/* Custom profiles - show first */}
-                            {profiles.map((profile) => {
+                            {/* Custom profiles - show first (exclude built-in templates) */}
+                            {profiles
+                                .filter(p => !DEFAULT_PROFILES.some(bp => bp.id === p.id))
+                                .map((profile) => {
                                 const availability = isProfileAvailable(profile);
 
                                 return (
@@ -1657,8 +1715,10 @@ function NewSessionWizard() {
                                 );
                             })}
 
-                            {/* Built-in profiles - show after custom */}
-                            {DEFAULT_PROFILES.map((profileDisplay) => {
+                            {/* Built-in profiles - show after custom (only those not deleted) */}
+                            {DEFAULT_PROFILES
+                                .filter(bp => profileIds.has(bp.id))
+                                .map((profileDisplay) => {
                                 const profile = getBuiltInProfile(profileDisplay.id);
                                 if (!profile) return null;
 
@@ -1776,7 +1836,7 @@ function NewSessionWizard() {
                                         />
                                     ),
                                     getItemStatus: (machine) => {
-                                        const offline = !isMachineOnline(machine);
+                                        const offline = !machineIsReachable(machinePresence[machine.id] ?? 'offline');
                                         return {
                                             text: offline ? 'offline' : 'online',
                                             color: offline ? theme.colors.status.disconnected : theme.colors.status.connected,
@@ -2033,6 +2093,8 @@ function NewSessionWizard() {
                             onPathClick={handleAgentInputPathClick}
                             profileId={selectedProfileId}
                             onProfileChange={selectProfile}
+                            sandboxIsolation={sandboxIsolation}
+                            onSandboxIsolationChange={setSandboxIsolation}
                         />
                     </View>
                 </View>

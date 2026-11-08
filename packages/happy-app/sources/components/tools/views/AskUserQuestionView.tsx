@@ -167,14 +167,20 @@ const styles = StyleSheet.create((theme) => ({
 
 export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId }) => {
     const { theme } = useUnistyles();
-    const [selections, setSelections] = React.useState<Map<number, Set<number>>>(() => {
-        // Restore selections from persisted tool.result when reloading from cache.
-        // The SDK's AskUserQuestionOutput contains { answers: { question: "label" } }.
-        if (tool.state === 'completed') {
+    const [selections, setSelections] = React.useState<Map<number, Set<number>>>(() => new Map());
+    const [isSubmitting, setIsSubmitting] = React.useState(false);
+    const [isSubmitted, setIsSubmitted] = React.useState(false);
+
+    // Parse input
+    const input = tool.input as AskUserQuestionInput | undefined;
+    const questions = input?.questions;
+
+    // When tool.result arrives after mount (e.g. from synced message stream),
+    // restore selections so the submitted view shows the answer.
+    React.useEffect(() => {
+        if (tool.state === 'completed' || tool.state === 'error') {
             const result = tool.result as Record<string, unknown> | undefined;
             const answers = result?.answers as Record<string, string> | undefined;
-            const input = tool.input as AskUserQuestionInput | undefined;
-            const questions = input?.questions;
             if (answers && questions) {
                 const map = new Map<number, Set<number>>();
                 questions.forEach((q, qIndex) => {
@@ -189,28 +195,28 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
                         if (indices.size > 0) map.set(qIndex, indices);
                     }
                 });
-                return map;
+                if (map.size > 0) setSelections(map);
             }
         }
-        return new Map();
-    });
-    const [isSubmitting, setIsSubmitting] = React.useState(false);
-    const [isSubmitted, setIsSubmitted] = React.useState(false);
-
-    // Parse input
-    const input = tool.input as AskUserQuestionInput | undefined;
-    const questions = input?.questions;
+    }, [tool.result, tool.state, questions]);
 
     if (!questions || !Array.isArray(questions) || questions.length === 0) {
         return null;
     }
 
-    const isRunning = tool.state === 'running';
-    const canInteract = isRunning && !isSubmitted;
+    // Allow interaction if:
+    // 1. No actual answers in the result yet (result may be a legacy string
+    //    like "Approved" from the old permission flow — that's NOT an answer).
+    // 2. It wasn't already submitted locally
+    // 3. Either has a permission id (CLI flow) or the tool is still running
+    //    (Cursor / agent-state flow where permission may not be set).
+    const hasAnswers = tool.result && typeof tool.result === 'object' && !!(tool.result as any).answers;
+    const canInteract = !isSubmitted && !hasAnswers && (!!tool.permission?.id || tool.state === 'running');
 
     // Diagnostic: log when form is non-interactive
     if (!canInteract && !isSubmitted) {
-        console.warn(`[AskUserQuestion] form non-interactive: tool.state=${tool.state}, permission.status=${tool.permission?.status}, isSubmitted=${isSubmitted}`);
+        const resultType = typeof tool.result;
+        console.warn(`[AskUserQuestion] form non-interactive: tool.state=${tool.state}, perm.id=${tool.permission?.id}, perm.status=${tool.permission?.status}, isSubmitted=${isSubmitted}, hasAnswers=${hasAnswers}, resultType=${resultType}`);
     }
 
     // Check if all questions have at least one selection
@@ -286,13 +292,16 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
             }
         } catch (error) {
             console.error('Failed to submit answer:', error);
+            // Allow retry on failure
+            setIsSubmitted(false);
         } finally {
             setIsSubmitting(false);
         }
     }, [sessionId, questions, selections, allQuestionsAnswered, isSubmitting, tool.permission?.id]);
 
-    // Show submitted state
-    if (isSubmitted || tool.state === 'completed') {
+    // Show submitted state only when there are actual answers
+    // (hasAnswers is defined above in the canInteract block)
+    if (isSubmitted || (tool.state === 'completed' && hasAnswers)) {
         return (
             <ToolSectionView>
                 <View style={styles.submittedContainer}>

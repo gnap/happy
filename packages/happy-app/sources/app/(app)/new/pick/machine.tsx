@@ -1,15 +1,16 @@
 import React from 'react';
 import { View, Text } from 'react-native';
 import { Stack, useRouter, useLocalSearchParams } from 'expo-router';
-import { CommonActions, useNavigation } from '@react-navigation/native';
 import { Typography } from '@/constants/Typography';
-import { useAllMachines, useSessions } from '@/sync/storage';
+import { useAllMachines, useMachinePresenceMap, useSessions } from '@/sync/storage';
 import { Ionicons } from '@expo/vector-icons';
-import { isMachineOnline } from '@/utils/machineUtils';
+import { machineIsReachable } from '@/utils/machineUtils';
+import type { MachinePresence } from '@/sync/machinePresence';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 import { ItemList } from '@/components/ItemList';
 import { SearchableListSelector } from '@/components/SearchableListSelector';
+import { onMachineSelected } from '../index';
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -34,27 +35,16 @@ export default function MachinePickerScreen() {
     const { theme } = useUnistyles();
     const styles = stylesheet;
     const router = useRouter();
-    const navigation = useNavigation();
     const params = useLocalSearchParams<{ selectedId?: string }>();
     const machines = useAllMachines();
+    /** How each of them is being reached, from the channels — the row's status, not the server's flag. */
+    const presence = useMachinePresenceMap();
     const sessions = useSessions();
 
     const selectedMachine = machines.find(m => m.id === params.selectedId) || null;
 
     const handleSelectMachine = (machine: typeof machines[0]) => {
-        // Support both callback pattern (feature branch wizard) and navigation params (main)
-        const machineId = machine.id;
-
-        // Navigation params approach from main for backward compatibility
-        const state = navigation.getState();
-        const previousRoute = state?.routes?.[state.index - 1];
-        if (state && state.index > 0 && previousRoute) {
-            navigation.dispatch({
-                ...CommonActions.setParams({ machineId }),
-                source: previousRoute.key,
-            } as never);
-        }
-
+        onMachineSelected(machine.id);
         router.back();
     };
 
@@ -134,7 +124,7 @@ export default function MachinePickerScreen() {
                             />
                         ),
                         getItemStatus: (machine) => {
-                            const offline = !isMachineOnline(machine);
+                            const offline = !machineIsReachable(presence[machine.id] ?? 'offline');
                             return {
                                 text: offline ? 'offline' : 'online',
                                 color: offline ? theme.colors.status.disconnected : theme.colors.status.connected,

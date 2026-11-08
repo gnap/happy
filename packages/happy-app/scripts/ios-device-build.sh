@@ -29,6 +29,28 @@ if [[ "$RUN_PREBUILD" == "1" ]]; then
   echo ""
 fi
 
+# `yarn install` above re-materialises node_modules, which wipes two things that live inside
+# it or are derived from it. Re-establish both before building:
+#   1. expo-sqlite's podspec copies vendor/sqlite3/{sqlite3.c,sqlite3.h} into its ios/ dir at
+#      pod install time; without them SQLiteModule.swift fails with
+#      "cannot find 'exsqlite3session_enable' in scope". Copy them back directly — this is
+#      exactly what the podspec's vendor_sqlite_src! does, and it avoids a pod re-resolve.
+#   2. The RevenueCat Swift 6.4 patch is applied inside ios/Pods/ (see the script).
+if [[ -d "$IOS_DIR" ]]; then
+  SQLITE_VENDOR="$APP_DIR/node_modules/expo-sqlite/vendor/sqlite3"
+  SQLITE_IOS="$APP_DIR/node_modules/expo-sqlite/ios"
+  if [[ -d "$SQLITE_VENDOR" ]]; then
+    cp "$SQLITE_VENDOR/sqlite3.c" "$SQLITE_VENDOR/sqlite3.h" "$SQLITE_IOS/"
+  fi
+  # Only re-resolve when the pod project is stale; a needless `pod install` re-resolves
+  # everything and has been observed failing transiently on `ReactNativeDependencies`.
+  if [[ ! -d "$IOS_DIR/Pods" ]]; then
+    (cd "$IOS_DIR" && LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 pod install)
+  fi
+  bash "$SCRIPT_DIR/patch-revenuecat-swift64.sh"
+  echo ""
+fi
+
 cd "$IOS_DIR"
 
 # Use device UDID or name as first arg. Example: ./ios-device-build.sh 00008140-001E55691160801C

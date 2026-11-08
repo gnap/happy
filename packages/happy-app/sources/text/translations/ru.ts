@@ -196,6 +196,7 @@ export const ru: TranslationStructure = {
         networkError: 'Произошла ошибка сети',
         serverError: 'Произошла ошибка сервера',
         unknownError: 'Произошла неизвестная ошибка',
+        channelCannotServeAction: 'Это действие идёт через сервер, а он отключён в настройках каналов',
         connectionTimeout: 'Время соединения истекло',
         authenticationFailed: 'Ошибка авторизации',
         permissionDenied: 'Доступ запрещен',
@@ -270,6 +271,7 @@ export const ru: TranslationStructure = {
             success: 'Worktree успешно создан',
         },
         sessionReadyMessage: 'Сессия готова. Нажмите на неё в списке, чтобы открыть.',
+        sessionCreatedPending: 'Сессия создана на машине; она скоро появится в списке.',
     },
 
     sessionHistory: {
@@ -308,6 +310,8 @@ export const ru: TranslationStructure = {
         archiveSessionConfirm: 'Вы уверены, что хотите архивировать эту сессию?',
         restartSession: 'Перезапустить сессию',
         restartSessionSubtitle: 'Доступна новая версия CLI. Перезапустите для обновления.',
+        needsDesktop: 'Этому сеансу требуется вход в настольную сессию на той машине. Войдите там и повторите попытку.',
+        restartInDesktop: 'Перезапустить в настольной сессии',
         restartSessionConfirm: 'Сессия будет перезапущена с новой версией CLI.',
         noMachineId: 'ID машины недоступен для этой сессии',
         failedToRestartSession: 'Не удалось перезапустить сессию',
@@ -329,6 +333,17 @@ export const ru: TranslationStructure = {
         failedToKillSession: 'Не удалось завершить сессию',
         failedToArchiveSession: 'Не удалось архивировать сессию',
         connectionStatus: 'Статус подключения',
+        channelAuto: 'Автоматически',
+        channelServer: 'Сервер',
+        channelRelay: 'Ретранслятор',
+        channelWhyServerDownRelay: 'Сервер недоступен, используется публичный ретранслятор',
+        channelWhyByPriority: 'Выбрано по приоритету каналов',
+        channelPinned: 'Закреплено вручную',
+        channelWhyReachable: 'Сессия поддерживает LAN, машина в этой сети',
+        channelWhyNotDeclared: 'Сессия запущена без поддержки LAN, перезапустите её',
+        channelWhyNotOnNetwork: 'Машина не найдена в этой сети',
+        channelWhyNoKey: 'На этом устройстве нет ключа для машины',
+        channelWhyUnknown: 'Ожидание данных сессии',
         created: 'Создано',
         lastUpdated: 'Последнее обновление',
         sequence: 'Последовательность',
@@ -396,9 +411,11 @@ export const ru: TranslationStructure = {
         error: 'ошибка',
         auth_error: 'войдите снова',
         online: 'online',
+        lan: 'LAN',
         offline: 'offline',
         lastSeen: ({ time }: { time: string }) => `в сети ${time}`,
         permissionRequired: 'требуется разрешение',
+        restarting: 'Перезапуск…',
         activeNow: 'Активен сейчас',
         unknown: 'неизвестно',
         creating: 'Создание…',
@@ -408,15 +425,38 @@ export const ru: TranslationStructure = {
         justNow: 'только что',
         minutesAgo: ({ count }: { count: number }) => `${count} ${plural({ count, one: 'минуту', few: 'минуты', many: 'минут' })} назад`,
         hoursAgo: ({ count }: { count: number }) => `${count} ${plural({ count, one: 'час', few: 'часа', many: 'часов' })} назад`,
+        yesterday: 'вчера',
     },
 
     session: {
         inputPlaceholder: 'Введите сообщение...',
         encrypting: 'установка соединения…',
+        backgroundTasks: 'Фоновые задачи',
+        activityScheduled: 'Запланировано',
+        activityOnce: 'однократно',
+        activityAgents: 'Агенты',
+        activityMonitors: 'Мониторы',
+        activityGoals: 'Цели',
+        activityShell: 'Фоновые команды',
+        activityWorkflows: 'Рабочие процессы',
     },
 
     commandPalette: {
         placeholder: 'Введите команду или поиск...',
+    },
+
+    sandbox: {
+        isolationTitle: 'Sandbox Isolation',
+        isolation: {
+            off: 'Off',
+            strict: 'Strict',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
+        isolationOffDesc: 'No sandbox restrictions',
+        isolationStrictDesc: 'Full filesystem and network isolation',
+        isolationWorkspaceDesc: 'Sandbox limited to workspace directory',
+        isolationCustomDesc: 'Custom sandbox rules',
     },
 
     agentInput: {
@@ -498,6 +538,13 @@ export const ru: TranslationStructure = {
             fileLabel: 'ФАЙЛ',
             folderLabel: 'ПАПКА',
         },
+        sandbox: {
+            isolationTitle: 'Sandbox Isolation',
+            off: 'Off',
+            strict: 'Strict (project only)',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
         noMachinesAvailable: 'Нет машин',
     },
 
@@ -518,6 +565,15 @@ export const ru: TranslationStructure = {
     },
 
     tools: {
+
+
+        countdown: {
+
+            in: ({ time }: { time: string }) => `через ${time}`,
+
+            due: 'уже пора',
+
+        },
         fullView: {
             description: 'Описание',
             inputParams: 'Входные параметры',
@@ -564,6 +620,19 @@ export const ru: TranslationStructure = {
             question: 'Вопрос',
             agent: 'Агент',
             skill: 'Skill',
+            sendMessage: 'Отправить сообщение',
+            listAgents: 'Агенты',
+            taskDetails: 'Задача',
+            enterWorktree: 'Войти в worktree',
+            exitWorktree: 'Выйти из worktree',
+            notification: 'Уведомление',
+            designSync: 'Синхронизация дизайна',
+        },
+        sendMessage: {
+            to: ({ name }: { name: string }) => `Кому ${name}`,
+            sending: 'отправка',
+            sent: 'отправлено',
+            failed: 'ошибка',
         },
         desc: {
             terminalCmd: ({ cmd }: { cmd: string }) => `Терминал(команда: ${cmd})`,
@@ -613,6 +682,7 @@ export const ru: TranslationStructure = {
         file: 'Файл',
         fileEmpty: 'Файл пустой',
         noChanges: 'Нет изменений для отображения',
+        download: 'Скачать',
     },
 
     settingsVoice: {
@@ -775,6 +845,7 @@ export const ru: TranslationStructure = {
         lastKnownHttpPort: 'Последний известный HTTP порт',
         startedAt: 'Запущен в',
         cliVersion: 'Версия CLI',
+        restartRequired: 'Требуется перезапуск',
         daemonStateVersion: 'Версия состояния daemon',
         activeSessions: ({ count }: { count: number }) => `Активные сессии (${count})`,
         machineGroup: 'Машина',

@@ -150,11 +150,6 @@
     "typescript": "5.9.3",
     "vitest": "^3.2.4"
   },
-  "resolutions": {
-    "whatwg-url": "14.2.0",
-    "parse-path": "7.0.3",
-    "@types/parse-path": "7.0.3"
-  },
   "publishConfig": {
     "registry": "https://registry.npmjs.org"
   },

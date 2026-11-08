@@ -1,12 +1,23 @@
 import * as React from 'react';
 import { Session } from '@/sync/storageTypes';
+import { useSessionOnline } from '@/sync/storage';
+import { sessionIsRestarting } from '@/utils/sessionRestart';
 import { t } from '@/text';
 
-export type SessionState = 'disconnected' | 'thinking' | 'waiting' | 'permission_required';
+export type SessionState = 'disconnected' | 'restarting' | 'thinking' | 'waiting' | 'permission_required';
 
 export interface SessionStatus {
     state: SessionState;
     isConnected: boolean;
+    /**
+     * Whether this session should be drawn as one that is alive.
+     *
+     * Not the same question as `isConnected`, which is about a connection and is false during a
+     * restart because there is none. This one is about the *appearance*: dimming a session and
+     * greying its avatar is how a stopped session reads, and a restart in flight must not read
+     * that way — the reader has just asked for it and is waiting for it to come back.
+     */
+    isLive: boolean;
     statusText: string;
     shouldShowStatus: boolean;
     statusColor: string;
@@ -19,17 +30,47 @@ export interface SessionStatus {
  * Uses centralized session state from storage.ts
  */
 export function useSessionStatus(session: Session): SessionStatus {
-    const isOnline = session.presence === "online";
+    // Whether anything is reaching it, and over which channel — asked once, of every channel this
+    // device has, rather than worked out here from the particular channel state this file happened
+    // to know about. The server's view is consulted only when nothing nearer can answer: it is a
+    // report about the past, and a report about the past must not overwrite what is happening now.
+    const isOnline = useSessionOnline(session.id, session.metadata?.machineId);
     const hasPermissions = (session.agentState?.requests && Object.keys(session.agentState.requests).length > 0 ? true : false);
 
     const vibingMessage = React.useMemo(() => {
         return vibingMessages[Math.floor(Math.random() * vibingMessages.length)].toLowerCase() + '…';
     }, [isOnline, hasPermissions, session.thinking]);
 
+    /**
+     * A restart in flight, which the machine announces as a change to this session's state and
+     * calls off when the new process is up.
+     *
+     * Asked before anything else, and deliberately not only for a session that looks offline: a
+     * restart does not stop the App reaching the session — the socket it holds is the machine's,
+     * and stays up across the swap — so "is anything reaching it" stays true the whole way through
+     * and this would never be reached. Nothing else can see the swap, which is why the machine says
+     * it, and why it is believed rather than inferred.
+     */
+    if (sessionIsRestarting(session)) {
+        return {
+            state: 'restarting',
+            isConnected: isOnline,
+            isLive: true,
+            statusText: t('status.restarting'),
+            shouldShowStatus: true,
+            // The same blue as a session that is working: a restart is something happening, and
+            // the grey that means "stopped" is the one thing it must not be mistaken for.
+            statusColor: '#007AFF',
+            statusDotColor: '#007AFF',
+            isPulsing: true
+        };
+    }
+
     if (!isOnline) {
         return {
             state: 'disconnected',
             isConnected: false,
+            isLive: false,
             statusText: t('status.lastSeen', { time: formatLastSeen(session.activeAt, false) }),
             shouldShowStatus: true,
             statusColor: '#999',
@@ -42,6 +83,7 @@ export function useSessionStatus(session: Session): SessionStatus {
         return {
             state: 'permission_required',
             isConnected: true,
+            isLive: true,
             statusText: t('status.permissionRequired'),
             shouldShowStatus: true,
             statusColor: '#FF9500',
@@ -54,6 +96,7 @@ export function useSessionStatus(session: Session): SessionStatus {
         return {
             state: 'thinking',
             isConnected: true,
+            isLive: true,
             statusText: vibingMessage,
             shouldShowStatus: true,
             statusColor: '#007AFF',
@@ -65,6 +108,7 @@ export function useSessionStatus(session: Session): SessionStatus {
     return {
         state: 'waiting',
         isConnected: true,
+        isLive: true,
         statusText: t('status.online'),
         shouldShowStatus: false,
         statusColor: '#34C759',
@@ -151,21 +195,6 @@ export function getSessionSubtitle(session: Session): string {
     return t('status.unknown');
 }
 
-/**
- * Checks if a session is currently online based on the active flag.
- * A session is considered online if the active flag is true.
- */
-export function isSessionOnline(session: Session): boolean {
-    return session.active;
-}
-
-/**
- * Checks if a session should be shown in the active sessions group.
- * Uses the active flag directly.
- */
-export function isSessionActive(session: Session): boolean {
-    return session.active;
-}
 
 /**
  * Formats OS platform string into a more readable format

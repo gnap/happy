@@ -81,9 +81,11 @@ export const zhHans: TranslationStructure = {
         error: '错误',
         auth_error: '请重新登录',
         online: '在线',
+        lan: 'LAN',
         offline: '离线',
         lastSeen: ({ time }: { time: string }) => `最后活跃时间 ${time}`,
         permissionRequired: '需要权限',
+        restarting: '重启中…',
         activeNow: '当前活跃',
         unknown: '未知',
         creating: '创建中…',
@@ -93,6 +95,7 @@ export const zhHans: TranslationStructure = {
         justNow: '刚刚',
         minutesAgo: ({ count }: { count: number }) => `${count} 分钟前`,
         hoursAgo: ({ count }: { count: number }) => `${count} 小时前`,
+        yesterday: '昨天',
     },
 
     connect: {
@@ -218,6 +221,7 @@ export const zhHans: TranslationStructure = {
         networkError: '发生网络错误',
         serverError: '发生服务器错误',
         unknownError: '发生未知错误',
+        channelCannotServeAction: '这个操作要走服务器，而你在通道设置里把它关掉了',
         connectionTimeout: '连接超时',
         authenticationFailed: '认证失败',
         permissionDenied: '权限被拒绝',
@@ -292,6 +296,7 @@ export const zhHans: TranslationStructure = {
             success: 'Worktree 创建成功',
         },
         sessionReadyMessage: '会话已就绪，在列表中点击即可打开。',
+        sessionCreatedPending: '会话已在机器上创建，稍后会出现在列表中。',
     },
 
     sessionHistory: {
@@ -307,6 +312,14 @@ export const zhHans: TranslationStructure = {
     session: {
         inputPlaceholder: '输入消息...',
         encrypting: '连接中…',
+        backgroundTasks: '后台任务',
+        activityScheduled: '定时任务',
+        activityOnce: '一次',
+        activityAgents: '代理',
+        activityMonitors: '监控',
+        activityGoals: '目标',
+        activityShell: '后台命令',
+        activityWorkflows: '工作流',
     },
 
     commandPalette: {
@@ -339,6 +352,8 @@ export const zhHans: TranslationStructure = {
         archiveSessionConfirm: '您确定要归档此会话吗？',
         restartSession: '重启会话',
         restartSessionSubtitle: '有新版 CLI 可用，重启以升级。',
+        needsDesktop: '该会话需要在那台机器上登录桌面后才能启动。请登录后重试。',
+        restartInDesktop: '在桌面会话中重启',
         restartSessionConfirm: '会话将使用新版 CLI 重新启动。',
         noMachineId: '此会话没有关联的机器 ID',
         failedToRestartSession: '重启会话失败',
@@ -360,6 +375,17 @@ export const zhHans: TranslationStructure = {
         failedToKillSession: '终止会话失败',
         failedToArchiveSession: '归档会话失败',
         connectionStatus: '连接状态',
+        channelAuto: '自动',
+        channelServer: '公网服务器',
+        channelRelay: '公网中继',
+        channelWhyServerDownRelay: '服务器不可达，改用公网中继',
+        channelWhyByPriority: '按通道优先级设置选择',
+        channelPinned: '手动指定',
+        channelWhyReachable: '会话已声明支持局域网，且机器在当前网络中',
+        channelWhyNotDeclared: '会话版本较旧，不支持局域网，请重启',
+        channelWhyNotOnNetwork: '当前网络中未发现该机器',
+        channelWhyNoKey: '此设备上没有该机器的密钥',
+        channelWhyUnknown: '正在等待会话信息',
         created: '创建时间',
         lastUpdated: '最后更新',
         sequence: '序列',
@@ -409,6 +435,20 @@ export const zhHans: TranslationStructure = {
             scanQrCode: '扫描二维码',
             openCamera: '打开相机',
         },
+    },
+
+    sandbox: {
+        isolationTitle: 'Sandbox Isolation',
+        isolation: {
+            off: 'Off',
+            strict: 'Strict',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
+        isolationOffDesc: 'No sandbox restrictions',
+        isolationStrictDesc: 'Full filesystem and network isolation',
+        isolationWorkspaceDesc: 'Sandbox limited to workspace directory',
+        isolationCustomDesc: 'Custom sandbox rules',
     },
 
     agentInput: {
@@ -490,6 +530,13 @@ export const zhHans: TranslationStructure = {
             fileLabel: '文件',
             folderLabel: '文件夹',
         },
+        sandbox: {
+            isolationTitle: 'Sandbox Isolation',
+            off: 'Off',
+            strict: 'Strict (project only)',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
         noMachinesAvailable: '无设备',
     },
 
@@ -510,6 +557,15 @@ export const zhHans: TranslationStructure = {
     },
 
     tools: {
+
+
+        countdown: {
+
+            in: ({ time }: { time: string }) => `${time}后`,
+
+            due: '即将到点',
+
+        },
         fullView: {
             description: '描述',
             inputParams: '输入参数',
@@ -556,6 +612,19 @@ export const zhHans: TranslationStructure = {
             question: '问题',
             agent: 'Agent',
             skill: 'Skill',
+            sendMessage: '发送消息',
+            listAgents: '代理',
+            taskDetails: '任务',
+            enterWorktree: '进入 Worktree',
+            exitWorktree: '退出 Worktree',
+            notification: '通知',
+            designSync: '设计同步',
+        },
+        sendMessage: {
+            to: ({ name }: { name: string }) => `发给 ${name}`,
+            sending: '发送中',
+            sent: '已发送',
+            failed: '失败',
         },
         desc: {
             terminalCmd: ({ cmd }: { cmd: string }) => `终端(命令: ${cmd})`,
@@ -605,6 +674,7 @@ export const zhHans: TranslationStructure = {
         file: '文件',
         fileEmpty: '文件为空',
         noChanges: '没有要显示的更改',
+        download: '下载',
     },
 
     settingsVoice: {
@@ -779,6 +849,7 @@ export const zhHans: TranslationStructure = {
         lastKnownHttpPort: '最后已知 HTTP 端口',
         startedAt: '启动时间',
         cliVersion: 'CLI 版本',
+        restartRequired: '需要重启',
         daemonStateVersion: '守护进程状态版本',
         activeSessions: ({ count }: { count: number }) => `活跃会话 (${count})`,
         machineGroup: '设备',

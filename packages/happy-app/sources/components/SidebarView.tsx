@@ -1,3 +1,4 @@
+import { ChannelIcons } from '@/components/ChannelIcons';
 import { useSocketStatus, useFriendRequests, useSettings } from '@/sync/storage';
 import * as React from 'react';
 import { Text, View, Pressable, useWindowDimensions } from 'react-native';
@@ -5,7 +6,6 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useHeaderHeight } from '@/utils/responsive';
 import { Typography } from '@/constants/Typography';
-import { StatusDot } from './StatusDot';
 import { VoiceAssistantStatusBar } from './VoiceAssistantStatusBar';
 import { useRealtimeStatus } from '@/sync/storage';
 import { MainView } from './MainView';
@@ -206,12 +206,7 @@ export const SidebarView = React.memo(() => {
             <Text style={styles.titleText}>{t('sidebar.sessionsTitle')}</Text>
             {connectionStatus.text && (
                 <View style={styles.statusContainer}>
-                    <StatusDot
-                        color={connectionStatus.color}
-                        isPulsing={connectionStatus.isPulsing}
-                        size={6}
-                        style={styles.statusDot}
-                    />
+                    <ChannelIcons />
                     <Text style={[styles.statusText, { color: connectionStatus.textColor }]}>
                         {connectionStatus.text}
                     </Text>

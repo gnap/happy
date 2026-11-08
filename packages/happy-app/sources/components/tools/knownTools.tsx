@@ -5,6 +5,11 @@ import * as z from 'zod';
 import { Ionicons, Octicons } from '@expo/vector-icons';
 import React from 'react';
 import { t } from '@/text';
+import {
+    sendMessageOutcome,
+    sendMessageRecipient,
+    sendMessageTitle,
+} from '@/components/tools/messageTools';
 
 // Icon factory functions
 const ICON_TASK = (size: number = 24, color: string = '#000') => <Octicons name="rocket" size={size} color={color} />;
@@ -31,6 +36,14 @@ function modelSlugToDisplay(slug: string): string {
 }
 
 const ICON_SKILL = (size: number = 24, color: string = '#000') => <Ionicons name="flash-outline" size={size} color={color} />;
+const ICON_SEND = (size: number = 24, color: string = '#000') => <Ionicons name="paper-plane-outline" size={size} color={color} />;
+/** The same glyph the activity badge uses for agents, so the two read as the same subject. */
+const ICON_AGENTS = (size: number = 24, color: string = '#000') => <Ionicons name="people-outline" size={size} color={color} />;
+const ICON_TASK_DETAIL = (size: number = 24, color: string = '#000') => <Ionicons name="list-outline" size={size} color={color} />;
+const ICON_WORKTREE = (size: number = 24, color: string = '#000') => <Ionicons name="git-branch-outline" size={size} color={color} />;
+const ICON_LEAVE = (size: number = 24, color: string = '#000') => <Ionicons name="exit-outline" size={size} color={color} />;
+const ICON_NOTIFY = (size: number = 24, color: string = '#000') => <Ionicons name="notifications-outline" size={size} color={color} />;
+const ICON_DESIGN = (size: number = 24, color: string = '#000') => <Ionicons name="color-palette-outline" size={size} color={color} />;
     const ICON_SCHEDULE = (size: number = 24, color: string = '#000') => <Ionicons name="time-outline" size={size} color={color} />;
     const ICON_MONITOR = (size: number = 24, color: string = '#000') => <Ionicons name="pulse-outline" size={size} color={color} />;
 
@@ -1131,6 +1144,26 @@ export const knownTools = {
             return null;
         }
     },
+    'Workflow': {
+        title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const input = opts.tool.input as Record<string, unknown> | undefined;
+            const name = input?.title ?? input?.name;
+            if (name && typeof name === 'string' && name.trim()) return `Workflow: ${name}`;
+            if (opts.tool.description && opts.tool.description.trim()) return opts.tool.description;
+            return 'Workflow';
+        },
+        icon: ICON_TASK,
+    },
+    'workflow': {
+        title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const input = opts.tool.input as Record<string, unknown> | undefined;
+            const name = input?.title ?? input?.name;
+            if (name && typeof name === 'string' && name.trim()) return `Workflow: ${name}`;
+            if (opts.tool.description && opts.tool.description.trim()) return opts.tool.description;
+            return 'Workflow';
+        },
+        icon: ICON_TASK,
+    },
     'Skill': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
             const skill = (opts.tool.input as any)?.skill;
@@ -1143,6 +1176,110 @@ export const knownTools = {
             return args || null;
         },
     },
+    /**
+     * A message to another of the user's sessions.
+     *
+     * Named with `display`, the one line Claude Code gives the message to say what it is about;
+     * the recipient is the subtitle, because "who is this for" is the other half of reading the card
+     * at a glance. The card says how the send ended in a word — a message that never arrived looks
+     * exactly like one that did, otherwise, and the transcript is where that has to be visible.
+     */
+    'SendMessage': {
+        title: (opts: { metadata: Metadata | null, tool: ToolCall }) => sendMessageTitle(opts.tool) ?? t('tools.names.sendMessage'),
+        extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const to = sendMessageRecipient(opts.tool);
+            return to ? t('tools.sendMessage.to', { name: to }) : null;
+        },
+        extractStatus: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const outcome = sendMessageOutcome(opts.tool.state);
+            return t(outcome === 'sent' ? 'tools.sendMessage.sent' : outcome === 'failed' ? 'tools.sendMessage.failed' : 'tools.sendMessage.sending');
+        },
+        icon: ICON_SEND,
+        isMutable: false,
+        noStatus: true,
+        // Not minimal: a send that failed has to be able to show *why* under its card.
+        minimal: false,
+        input: z.object({
+            to: z.string().optional(),
+            summary: z.string().optional(),
+            message: z.string().optional(),
+            display: z.string().optional(),
+        }).partial().passthrough(),
+    },
+    'ListAgents': {
+        title: t('tools.names.listAgents'),
+        icon: ICON_AGENTS,
+        isMutable: false,
+        noStatus: true,
+        // Not minimal: the answer to "which agents are there" *is* the result, so it is shown.
+        minimal: false,
+        input: z.object({}).partial().passthrough(),
+    },
+    'TaskGet': {
+        title: t('tools.names.taskDetails'),
+        extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const taskId = opts.tool.input?.taskId;
+            return typeof taskId === 'string' && taskId ? taskId : null;
+        },
+        icon: ICON_TASK_DETAIL,
+        isMutable: false,
+        noStatus: true,
+        minimal: true,
+        input: z.object({ taskId: z.string().optional() }).partial().passthrough(),
+    },
+    'EnterWorktree': {
+        title: t('tools.names.enterWorktree'),
+        extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const value = opts.tool.input?.name ?? opts.tool.input?.path;
+            return typeof value === 'string' && value ? value : null;
+        },
+        icon: ICON_WORKTREE,
+        isMutable: false,
+        noStatus: true,
+        minimal: true,
+        input: z.object({ name: z.string().optional(), path: z.string().optional() }).partial().passthrough(),
+    },
+    'ExitWorktree': {
+        title: t('tools.names.exitWorktree'),
+        // Whether the worktree is kept or thrown away is the whole question of this call.
+        extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const action = opts.tool.input?.action;
+            return typeof action === 'string' && action ? action : null;
+        },
+        icon: ICON_LEAVE,
+        isMutable: false,
+        noStatus: true,
+        minimal: true,
+        input: z.object({ action: z.string().optional() }).partial().passthrough(),
+    },
+    'PushNotification': {
+        title: t('tools.names.notification'),
+        extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const message = opts.tool.input?.message;
+            if (typeof message !== 'string') {
+                return null;
+            }
+            const firstLine = message.split('\n')[0].trim();
+            return firstLine.length > 0 ? firstLine : null;
+        },
+        icon: ICON_NOTIFY,
+        isMutable: false,
+        noStatus: true,
+        minimal: true,
+        input: z.object({ message: z.string().optional(), status: z.string().optional() }).partial().passthrough(),
+    },
+    'DesignSync': {
+        title: t('tools.names.designSync'),
+        extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const method = opts.tool.input?.method;
+            return typeof method === 'string' && method ? method : null;
+        },
+        icon: ICON_DESIGN,
+        isMutable: false,
+        noStatus: true,
+        minimal: true,
+        input: z.object({ method: z.string().optional() }).partial().passthrough(),
+    },
     'Monitor': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
             if (opts.tool.description) return opts.tool.description;
@@ -1150,8 +1287,10 @@ export const knownTools = {
             return cmd ? `Watch: ${cmd.slice(0, 60)}` : 'Monitor';
         },
         icon: ICON_MONITOR,
-        minimal: true,
+        // Minimal: the watch's time left is drawn once, in the background-task bubble above the
+        // input, where every running task's deadline is answered — not again under the message.
         isMutable: false,
+        minimal: true,
         input: z.object({
             description: z.string().optional(),
             timeout_ms: z.number().optional(),
@@ -1169,8 +1308,10 @@ export const knownTools = {
             return prompt.slice(0, 80) || `Cron: ${opts.tool.input?.cron || '?'}`;
         },
         icon: ICON_SCHEDULE,
-        minimal: true,
+        // Minimal: the countdown to the next fire is drawn once, in the activity bubble above the
+        // input (with every other scheduled job), not again under the message.
         noStatus: true,
+        minimal: true,
         input: z.object({
             cron: z.string(),
             prompt: z.string(),
@@ -1183,6 +1324,19 @@ export const knownTools = {
             return recurring ? 'recurring schedule' : 'one-shot schedule';
         },
     },
+    'ToolSearch': {
+        title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            const query = typeof opts.tool.input?.query === 'string' ? opts.tool.input.query : '';
+            return query ? `Search tools: ${query}` : 'Tool Search';
+        },
+        icon: (size: number = 24, color: string = '#000') => <Ionicons name="search-outline" size={size} color={color} />,
+        minimal: true,
+        noStatus: true,
+        input: z.object({
+            query: z.string().optional(),
+            max_results: z.number().optional(),
+        }).partial().passthrough(),
+    },
     'TaskOutput': { title: 'Task Output', icon: ICON_TERMINAL, minimal: true, noStatus: true, input: z.object({ task_id: z.string() }).partial().passthrough() },
     'TaskStop':   { title: 'Stop Task',   icon: ICON_TERMINAL, minimal: true, noStatus: true, input: z.object({ task_id: z.string() }).partial().passthrough() },
     'TaskList':  { title: 'Task List',   icon: ICON_TODO,    minimal: true, noStatus: true, input: z.object({}).partial().passthrough() },
@@ -1194,7 +1348,7 @@ export const knownTools = {
             return reason ? `Wakeup: ${reason}` : 'Scheduled Wakeup';
         },
         icon: ICON_SCHEDULE,
-        minimal: true,
+        // Not minimal: the card draws the countdown to the wake.
         noStatus: true,
         input: z.object({
             delaySeconds: z.number(),

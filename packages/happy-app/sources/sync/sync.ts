@@ -1,25 +1,33 @@
+import { readResponseTextCooperatively } from '@/utils/readBody';
+import { yieldTask } from '@/utils/yieldTask';
 import Constants from 'expo-constants';
 import { apiSocket } from '@/sync/apiSocket';
 import { AuthCredentials } from '@/auth/tokenStorage';
 import { Encryption } from '@/sync/encryption/encryption';
 import { decodeBase64, encodeBase64 } from '@/encryption/base64';
+import { reinitSodium } from '@/encryption/libsodium';
 import { storage } from './storage';
 import { ApiEphemeralUpdateSchema, ApiMessage, ApiUpdateContainerSchema } from './apiTypes';
 import type { ApiEphemeralActivityUpdate } from './apiTypes';
 import { Session, Machine } from './storageTypes';
+import type { GitStatus, Metadata } from './storageTypes';
 import { InvalidateSync } from '@/utils/sync';
 import { ActivityUpdateAccumulator } from './reducer/activityUpdateAccumulator';
 import { randomUUID } from 'expo-crypto';
+import * as Crypto from 'expo-crypto';
+import { hmac_sha256 } from '@/encryption/hmac_sha256';
+import sodium from '@/encryption/libsodium.lib';
+import { relayBaseUrlFor, relayTagFor } from './lan/relayTag';
 import * as Notifications from 'expo-notifications';
 import * as Network from 'expo-network';
 import { registerPushToken } from './apiPush';
-import { Platform, AppState, type AppStateStatus } from 'react-native';
+import { Platform, AppState, InteractionManager, type AppStateStatus } from 'react-native';
 import { isRunningOnMac, isRunningInTauri } from '@/utils/platform';
 import { NormalizedMessage, normalizeRawMessage, RawRecord } from './typesRaw';
 import type { MessageMeta } from './typesMessageMeta';
 import { applySettings, Settings, settingsDefaults, settingsParse, SUPPORTED_SCHEMA_VERSION } from './settings';
 import { Profile, profileParse } from './profile';
-import { loadPendingSettings, savePendingSettings } from './persistence';
+import { loadPendingSettings, savePendingSettings, loadWrappedMachineKeys, saveWrappedMachineKeys, loadLanWindows, saveLanWindows, type PersistedLanWindow } from './persistence';
 import { initializeTracking, tracking } from '@/track';
 import { parseToken } from '@/utils/parseToken';
 import { RevenueCat, LogLevel, PaywallResult } from './revenueCat';
@@ -33,6 +41,34 @@ import { AsyncLock } from '@/utils/lock';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
+import { fetchIdentity, fetchLifecycle, LanRequestError, restartSessionAt, sessionControlAt, type LanRestartVerdict, type LifecycleEntry } from './lan/client';
+import { accountProofHeaders } from '@/auth/accountProof';
+import { getLanCredential } from './lan/credentials';
+import { readSessionOverLan, listSessionsOverLan, toNormalizedMessages, type LanConnection, type LanSessionRead } from './lan/sessionChannel';
+import { decryptLanEntries } from './lan/history';
+import { SessionReadScheduler } from './sessionReadScheduler';
+import { openLanSocket, type LanSocketHandle } from './lan/socket';
+import { RelayHub, relayHubUrl, type HubMachine, type SocketLike } from './lan/relayHub';
+import type { RelayDirectoryEntry } from './lan/relayDirectory';
+import { normalizeChannelPriority, pickChannel } from './lan/channelOrder';
+import { channelEnabled, enabledChannels } from '@/utils/enabledChannels';
+import { channelDrivers as buildChannelDrivers, relayOriginFrom } from './channels/measure';
+import { channelAvailability } from './channels/resolve';
+import { candidateInputsFor, orderedCandidates } from './channels/candidates';
+import { attemptFromStatus, carryOperation, type CarryOutcome, type HealthRecorder } from './channels/execute';
+import { fetchToolContent } from './lan/client';
+import { downloadSessionFileFromDaemon } from './lan/fileDownload';
+import { getToolCallFullContent as getToolCallFullContentFromServer, type GetToolCallFullContentResponse } from './ops';
+import { readRoutes } from './channels/readRoute';
+import { endpointBaseUrl, type ChannelDriver, type ChannelOperation } from './channels/types';
+import { sendBatch, type SendResult } from './channels/ops';
+import type { ChannelReason } from './channels/types';
+import { FetchSlots } from './fetchSlots';
+import { DaemonConnections, type DaemonTarget } from './lan/daemonConnections';
+import { judgeDaemonPage, pageMovedTheLog, planDaemonRead } from './lan/windowPlan';
+import type { DaemonRoute, LanSessionLogEntry, SessionChannel } from './lan/types';
+import { parseLanEndpoints, parseRelayEndpoint } from './lan/relay';
+import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
 import { systemPrompt } from './prompt/systemPrompt';
 import { fetchArtifact, fetchArtifacts, createArtifact, updateArtifact } from './apiArtifacts';
 import { DecryptedArtifact, Artifact, ArtifactCreateRequest, ArtifactUpdateRequest } from './artifactTypes';
@@ -43,6 +79,8 @@ import { FeedItem } from './feedTypes';
 import { UserProfile } from './friendTypes';
 import { resolveMessageModeMeta, resolveMessageProfileEnv } from './messageMeta';
 import { loadMessageCache, saveMessageCache, clearMessageCache, clearAllMessageCaches, preloadSessionCacheDB, getCachedLastSeq } from './cache/messageCache';
+import { mergePageIntoWindow } from './messageIdentity';
+import { MAX_CACHED_MESSAGES } from './cache/limits';
 import { preloadSessionsListCache, loadSessionsListCache, saveSessionsListCache, clearSessionsListCache } from './cache/sessionsListCache';
 import { olderAfterSeq } from './cacheSegment';
 import { overrideSessionCacheDB, IndexedDBSessionCacheDB } from './cache/sessionCacheDB';
@@ -56,20 +94,78 @@ type V3GetSessionMessagesResponse = {
     hasMore: boolean;
 };
 
-type V3PostSessionMessagesResponse = {
-    messages: Array<{
-        id: string;
-        seq: number;
-        localId: string | null;
-        createdAt: number;
-        updatedAt: number;
-    }>;
-};
 
 type OutboxMessage = {
     localId: string;
     content: string;
 };
+
+/** Why a session is on the channel it is on; the UI turns these into words. */
+/**
+ * What the last daemon read of a session established: the connection it used, the anchor that
+ * follows the log forward, and the one that walks back from the window it loaded. Runtime state
+ * only — a restart reads the newest page and establishes all three again.
+ */
+type LanLink = {
+    machineId: string;
+    /** Boundary above the newest message held: follow the log forward from here. */
+    cursor: string;
+    /** Boundary below the oldest message held: read further back from here. */
+    older: string;
+    hasOlder: boolean;
+    connection: LanConnection;
+};
+
+/**
+ * A message's seq when it has one. Log entries written before the server acknowledged them carry
+ * no seq, so the window's edges are best-effort on this channel — the anchors, not these, are what
+ * daemon paging actually uses.
+ */
+const minSeqOf = (messages: { seq?: number }[]): number => {
+    const seqs = messages.map((m) => m.seq).filter((seq): seq is number => seq !== undefined);
+    return seqs.length > 0 ? Math.min(...seqs) : 0;
+};
+
+const maxSeqOf = (messages: { seq?: number }[]): number => {
+    const seqs = messages.map((m) => m.seq).filter((seq): seq is number => seq !== undefined);
+    return seqs.length > 0 ? Math.max(...seqs) : 0;
+};
+
+export type { ChannelReason } from './channels/types';
+
+/**
+ * Frame-level tracing for the update pipeline, off unless the dev page turns debug mode on.
+ *
+ * These fire per frame and per message; a busy session produces thousands a minute, and each line
+ * also walks the logger's listener list — a re-render for whatever log view is open. Takes a thunk
+ * so the payload is never serialised when tracing is off, which is the whole cost of the call.
+ */
+function traceUpdate(message: () => string): void {
+    if (storage.getState().localSettings.debugMode) {
+        log.log(message());
+    }
+}
+
+/**
+ * The evaluation of this module that currently owns the App.
+ *
+ * A hot reload constructs a new Sync while the previous one's objects are still reachable from
+ * timers and listeners. Stopping the previous one at evaluation time covers the normal case; this
+ * is the backstop for an instance that was missed — a stale scheduler tick checks it and stops
+ * itself instead of scheduling reads no screen asked for.
+ */
+let activeSyncInstance: object | null = null;
+
+/** What became of a control call this App tried to hand to a machine's own channel. */
+export type SessionControlResult =
+    /** A channel carried it. */
+    | { kind: 'done' }
+    /** A machine answered and said no — with its words, when it sent any. */
+    | { kind: 'refused'; status?: number; body?: string }
+    /** A machine answered that the request itself cannot be served as sent. */
+    | { kind: 'rejected'; status: number; body?: string }
+    /** No channel answered, or none had the session: the server is the remaining road. */
+    | { kind: 'unavailable' };
 
 class Sync {
     private static readonly BACKGROUND_SEND_TIMEOUT_MS = 30_000;
@@ -80,6 +176,15 @@ class Sync {
     private static readonly SESSION_REFRESH_INTERVAL_MS = 300_000; // 5 min
     /** Interval between full (non-delta) session list refreshes to clean up stale cache. */
     private static readonly FULL_REFRESH_INTERVAL_MS = 600_000; // 10 min
+    /**
+     * How often machines the server channel is carrying are asked what build they run.
+     *
+     * Deliberately far apart. This is the one question the App cannot be told the answer to — a
+     * rebuild on disk is invisible until someone asks — and the answer changes only when a person
+     * changes it, so the cost of being late is a restart mark that appears a few minutes later,
+     * against a poll that would otherwise be permanent.
+     */
+    private static readonly MACHINE_VERSION_SWEEP_MS = 10 * 60_000;
     /** Ignore stale ephemeral thinking=false shortly after turn-start (debounced session-alive). */
     private static readonly TURN_START_EPHEMERAL_GRACE_MS = 8_000;
 
@@ -147,6 +252,7 @@ class Sync {
         try { return new URL(url).pathname.replace(/\/[a-zA-Z0-9_-]{20,}/g, '/:id'); } catch { return url; }
     }
     // ---- End fetch instrumentation ----
+    encryption!: Encryption;
     serverID!: string;
     anonID!: string;
     private credentials!: AuthCredentials;
@@ -170,14 +276,225 @@ class Sync {
     private sessionQueueProcessing = new Set<string>();
     private _loggedMissingSessionForSid = new Set<string>();
     private sessionMessageLocks = new Map<string, AsyncLock>();
+    /** Sessions whose persisted window has been consulted (and applied) in this process. */
+    private hydratedSessions = new Set<string>();
+    /** In-flight hydrations, so two opens of one session read the cache once. */
+    private hydratingSessions = new Map<string, Promise<void>>();
+    /**
+     * How long a message lock may be held before it is treated as abandoned.
+     *
+     * Longer than the read path's own cap (a LAN page is bounded at 45s): a fetch legitimately
+     * holding the lock that long is slow, not stuck. Past it, no `finally` is coming — the shape a
+     * request the OS cancelled without rejecting leaves behind — and the next caller resets it.
+     */
+    /**
+     * A read that has held the session's lock longer than this is reset.
+     *
+     * Measured on a device: one run held the lock 53 seconds (a page whose decrypt stalled), and
+     * every open of that session — including the hydrate that would have shown cached messages
+     * first — queued behind it, which is the "blank conversation after a reload" shape. The read
+     * is abandoned, not cancelled; a fetch that does finish still applies its result.
+     */
+    private static readonly STUCK_MESSAGE_LOCK_MS = 10_000;
     private sessionSendLocks = new Map<string, AsyncLock>();
     /** Limit concurrent message fetches to avoid network congestion (e.g. 150 sessions all requesting at once on reconnect). */
     private static readonly MAX_CONCURRENT_MESSAGE_FETCHES = 5;
-    private messageFetchRunning = 0;
-    private messageFetchQueue: (() => void)[] = [];
+    /**
+     * Past every timeout on the read path (a LAN read is capped at 45s), so a slot still held after
+     * this is a fetch that will never release it — a suspended request whose abort was lost.
+     */
+    private static readonly MESSAGE_FETCH_LEASE_MS = 90_000;
+    /**
+     * How long a background trip has to last before what was in flight is treated as void. Matches
+     * the socket's own trust window: past it, iOS has certainly suspended the JS thread, and a
+     * fetch that was mid-request will not be resumed by anything this App can wait for.
+     */
+    private static readonly SUSPENDED_TRUST_MS = 45_000;
+    /**
+     * How long a trip through `background` has to last before its in-flight work is distrusted.
+     *
+     * Not the 45s above: iOS suspends the process within a few seconds of a real background, and a
+     * fetch that was mid-request then may never settle. Waiting 45s to forget it is what leaves a
+     * session's lock held and every later read queued behind a request that will never answer.
+     * The floor exists because a pull-down of Control Center reports `inactive` and can bounce back
+     * within a second; that is not a suspension and its sockets are still good.
+     */
+    private static readonly BACKGROUND_RECOVERY_MIN_MS = 5_000;
+    private messageFetchSlots = new FetchSlots(Sync.MAX_CONCURRENT_MESSAGE_FETCHES, Sync.MESSAGE_FETCH_LEASE_MS);
+    private messageFetchQueue: ((token: number) => void)[] = [];
     private sessionDataKeys = new Map<string, Uint8Array>(); // Store session data encryption keys internally
     private machineDataKeys = new Map<string, Uint8Array>(); // Store machine data encryption keys internally
     private artifactDataKeys = new Map<string, Uint8Array>(); // Store artifact data encryption keys internally
+    /**
+     * How often the visible session's fallback poll runs.
+     *
+     * One tick per two seconds, for one session: cheap, because the cursor means only newly
+     * written entries come back. It used to be one such timer per session, which turned a server
+     * outage into a fetch storm.
+     */
+    private static readonly LAN_POLL_INTERVAL_MS = 2_000;
+
+    /**
+     * How long the server socket must have been down before its return refreshes everything.
+     *
+     * A flap of a few seconds missed nothing a visible session's catch-up does not cover; a gap of
+     * half a minute may have missed list and side-data events, so the refetch is worth its cost.
+     */
+    private static readonly RECONNECT_REFRESH_MS = 30_000;
+
+    /**
+     * The one thing that decides which session is read, and the single fallback poll for the one
+     * on screen. Transports report changes; they do not own timers of their own.
+     */
+    private readScheduler = new SessionReadScheduler({
+        read: (sessionId) => {
+            if (activeSyncInstance === this) {
+                this.getMessagesSync(sessionId).invalidate();
+            }
+        },
+        shouldPoll: (sessionId) => activeSyncInstance === this && this.visibleNeedsPolling(sessionId),
+        isActive: () => activeSyncInstance === this,
+        intervalMs: Sync.LAN_POLL_INTERVAL_MS,
+        log: (message) => { log.log(message); },
+    });
+    /**
+     * Per-session LAN state: where to resume reading, and the connection that position came from.
+     * Both are kept with the machine that issued them — a cursor addresses a position in one
+     * machine's log, and a token only authenticates against that machine.
+     */
+    private daemonLinks = new Map<string, LanLink>();
+    /** The same anchors as `daemonLinks`, kept across restarts so a window can be trusted. */
+    private lanWindows = loadLanWindows();
+    /**
+     * The connection each machine was last reached over, keyed by machine rather than by session.
+     *
+     * A connection is a property of the machine — one address, one token, good for every session
+     * it serves — but the per-session link above is keyed by session, so a session that had never
+     * been read before had no connection of its own and paid a full mDNS browse to find one. A
+     * browse is not returned early; it collects until its timeout elapses, so that was a flat 4s
+     * per previously-unread session, on a channel polled every two seconds.
+     */
+    private lanMachineConnections = new Map<string, LanConnection>();
+    /** Pending coalesced cache writes, one per session. */
+    private cacheSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    /**
+     * The live daemon socket per route, when one is open. The two routes are independent: a LAN
+     * socket and a relay socket can be up at once, each carrying the sessions that resolve to its
+     * route. Keyed by baseUrl within a route because the daemon's socket is machine-wide: one
+     * connection carries every session on that machine, and the App demultiplexes on `body.sid`
+     * exactly as it does for the server channel.
+     */
+    /**
+     * How to reach one machine's daemon over the relay, or nothing when the hub cannot carry it.
+     *
+     * Returning nothing is deliberate rather than falling back to a per-machine socket: with the
+     * relay as the hub, a machine it is not holding is simply not reachable that way, and a socket
+     * opened around the hub would be a second, unmanaged path to the same daemon.
+     */
+    private relayStreamFor(machineId: string): (path: string, query: string) => SocketLike | null {
+        // The relay is one connection. A socket to a machine behind it is a stream on the hub, and
+        // there is no second way in: returning null when the hub (or this machine's tag) is not
+        // there lets the connection layer retry, instead of falling through to the default — a
+        // direct WebSocket to the per-machine relay path, which is exactly the extra connection
+        // this avoids.
+        return (path, query) => {
+            const hub = this.relayHub;
+            const tag = this.machineTags.get(machineId);
+            if (!hub || !tag) {
+                return null;
+            }
+            return hub.stream(tag, `${path}${query}`);
+        };
+    }
+
+    /**
+     * The one connection per daemon route, and the only thing in the App that opens or closes one.
+     * Everything here says what it wants; the manager makes that true (see `daemonConnections`).
+     */
+    private connections = new DaemonConnections({
+        open: (target, handlers) => openLanSocket({
+            baseUrl: target.baseUrl,
+            machineKey: target.machineKey,
+            // A machine behind the relay is reached on the hub's one connection, as a stream the
+            // relay routes to that machine. The protocol is identical — same upgrade path, same
+            // frames — because the transport is the only thing that differs.
+            connect: target.route === 'relay' ? this.relayStreamFor(target.machineId) : undefined,
+            // The daemon forwards the session's own keepAlive now, so the LAN channel can say
+            // "thinking" the way the server channel always has. Only while the server is not
+            // delivering it: with both up, every heartbeat would land twice, and each application
+            // rebuilds the session list — the channel exists for the case where the first is gone.
+            onEphemeral: (payload) => {
+                if (storage.getState().socketStatus === 'connected') {
+                    return;
+                }
+                this.handleEphemeralUpdate(payload);
+            },
+            ...handlers,
+        }),
+        onUpdate: (target, payload) => { this.onDaemonUpdate(target.route, payload); },
+        onDelivered: (_target, result) => { this.onLanDelivered(result); },
+        onReady: (target) => { this.onDaemonConnectionReady(target); },
+        onDropped: (target) => { this.onDaemonConnectionDropped(target); },
+        onAddressUnusable: (target, reason) => {
+            // A relay socket is a stream on the hub, so "could not open" can mean there was no
+            // transport to open it on — the hub is down, or this machine's tag is not known yet.
+            // That is this side's connection, not evidence about the address, and demoting the
+            // address for it would send the next reconcile somewhere else over our own outage.
+            if (target.route === 'relay' && (!this.relayHub || !this.relayHub.isConnected() || !this.machineTags.has(target.machineId))) {
+                log.log(`📡 relay stream for ${target.machineId.slice(0, 8)} had no hub transport: ${reason}`);
+                return;
+            }
+            // A socket that will not open or stay open is evidence about the *address*, and the
+            // candidate list ranks a socket's own address first. Recording it is what lets the
+            // next reconcile move the socket to a sighting at the machine's new address instead
+            // of retrying the old one for as long as the App runs.
+            log.log(`📡 ${target.route} address did not work for ${target.machineId.slice(0, 8)} (${target.baseUrl}): ${reason}`);
+            storage.getState().candidateFailed(target.machineId, target.route, target.baseUrl);
+        },
+        onHeartbeatUnsupported: (target) => { this.onDaemonHeartbeatUnsupported(target); },
+        onStateChange: (id, state) => {
+            storage.getState().setDaemonSocketStatus(id, state);
+            // A connection that has just come live is the moment the App is talking to that machine
+            // anyway — the cheapest possible time to ask what it is running, and the moment its
+            // answer is most likely to have changed.
+            if (state.phase === 'live') {
+                const machineId = id.split(':')[0];
+                void this.refreshDaemonVersions([machineId]);
+            }
+        },
+        // Only the LAN: over the relay the hub is the one that can see a daemon go, and it says so.
+        heartbeatRoutes: ['lan'],
+        log: (message) => { log.log(message); },
+    });
+    /**
+     * The session key each LAN read unwrapped, by session. The live socket is handed entries with
+     * no read and no wrapped key around them, so this is the only place it can come from.
+     */
+    private lanSessionKeys = new Map<string, Uint8Array>();
+    /** LAN sends awaiting the session's verdict, so a lost one cannot sit "sending" forever. */
+    private lanSendTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+    /**
+     * When this App last asked a machine to start a session that had no process.
+     *
+     * One window, not one attempt forever: a session that exits again has to be wakeable, and two
+     * flushes inside the window must not start it twice. Nothing else has to be running for a wake
+     * — the daemon serves it, and after a reboot the daemon is the only thing up.
+     */
+    private lastSessionWakeAt = new Map<string, number>();
+    /** How many times a single outgoing message has been answered with "no process". One retry. */
+    private deliveryWakeAttempts = new Map<string, number>();
+    private static readonly SESSION_WAKE_WINDOW_MS = 20_000;
+
+    /** How long a LAN send waits for the session's verdict before it is treated as lost. */
+    private static readonly LAN_DELIVERY_TIMEOUT_MS = 15_000;
+    /**
+     * The second look, after the verdict's window has passed: long enough for one read to come back
+     * with the session's own record that it took the message in.
+     */
+    private static readonly LAN_DELIVERY_PROOF_MS = 30_000;
+    /** Accumulated base64 dataEncryptionKey values from all fetchSessions responses.
+     *  Merged across delta fetches so the cache always has the full key set. */
+    private sessionEncryptionKeySources = new Map<string, string>();
     private settingsSync: InvalidateSync;
     private profileSync: InvalidateSync;
     private purchasesSync: InvalidateSync;
@@ -191,13 +508,26 @@ class Sync {
     private activityAccumulator: ActivityUpdateAccumulator;
     private pendingSettings: Partial<Settings> = loadPendingSettings();
     private appState: AppStateStatus = AppState.currentState;
+    /** When the App went to the background, so a resume can tell a hop from a suspension. */
+    private backgroundedAt: number | null = null;
+    /**
+     * Whether the last non-active transition was a real `background`, not the transient `inactive`
+     * iOS reports for a notification shade or an app-switch animation. Only the former suspends
+     * the process, and only the former invalidates a socket.
+     */
+    private wentToBackground = false;
     private appStateSubscription: ReturnType<typeof AppState.addEventListener> | null = null;
     private networkStateSubscription: ReturnType<typeof Network.addNetworkStateListener> | null = null;
-    private currentVisibleSessionId: string | null = null;
+    /** Undoes the server-socket reconnect subscription, for a superseded evaluation. */
+    private reconnectedCleanup: (() => void) | null = null;
+    currentVisibleSessionId: string | null = null;
     private lastDesktopSessionRefreshAt = 0;
     private lastSessionRefreshAt = 0;
     /** Timestamp of the last successful session fetch; used as delta base. */
     private lastSessionRefreshNonDeltaAt = 0;
+    /** When true, the next fetchSessions must NOT overwrite lastSessionRefreshNonDeltaAt
+     *  with Date.now() — the pending full refresh still needs to run on the double-invalidation cycle. */
+    private _forceFullRefreshPending = false;
     private lastFullRefreshAt = 0;
     /** Per-session cooldown for single-session fetches (15s). */
     private sessionRefreshCooldowns = new Map<string, number>();
@@ -209,6 +539,16 @@ class Sync {
     private lastNetworkConnected: boolean | null = null;
     /** Last known network type; used to detect interface switches (e.g. WiFi → Cellular). */
     private lastNetworkType: Network.NetworkStateType | null = null;
+    /**
+     * The device's own address last time we looked.
+     *
+     * The one fact that changes when a phone moves between two WiFi networks: `isConnected` stays
+     * true and `type` stays WIFI, so the network listener below has no transition to report. Every
+     * LAN address this App holds was derived against the old network, which is why a resume that
+     * finds a different address has to be treated as a network move even though the OS never said
+     * one happened.
+     */
+    private lastDeviceIp: string | null = null;
     private backgroundSendTimeout: ReturnType<typeof setTimeout> | null = null;
     private backgroundSendNotificationId: string | null = null;
     private backgroundSendStartedAt: number | null = null;
@@ -221,13 +561,27 @@ class Sync {
     private lastRecalculationTime = 0;
 
     constructor() {
+        // This evaluation owns the background work from here; any earlier instance's scheduler
+        // will notice and stop itself.
+        activeSyncInstance = this;
         // On web (browser + Tauri/Linux), expo-sqlite is unavailable – use IndexedDB for persistent cache
         // so desktop/Linux doesn't refetch on every launch (same behaviour as iOS SQLite cache).
         if (Platform.OS === 'web') {
             overrideSessionCacheDB(new IndexedDBSessionCacheDB());
         }
 
-        this.sessionsSync = new InvalidateSync(this.fetchSessions);
+        // Every session-list fetch defers behind the interaction already under way — event-driven
+        // ones (a reconnect, a push) included, not just the periodic timer. A full fetch is a
+        // ~1MB response whose parse and decrypt are JS-thread work, and a reconnect tends to
+        // happen exactly when a person has just come back and is tapping into a conversation:
+        // without this the tap waited behind the whole cycle. What the screen shows meanwhile is
+        // the cached list, which is what a session list is for.
+        this.sessionsSync = new InvalidateSync(async () => {
+            await new Promise<void>((resolve) => {
+                InteractionManager.runAfterInteractions(() => resolve());
+            });
+            await this.fetchSessions();
+        });
         this.settingsSync = new InvalidateSync(this.syncSettings);
         this.profileSync = new InvalidateSync(this.fetchProfile);
         this.purchasesSync = new InvalidateSync(this.syncPurchases);
@@ -265,15 +619,72 @@ class Sync {
                     this.failPendingOutboxMessages('Message failed to send in background after 30s. Please retry.');
                 }
                 log.log('📱 App became active');
-                // Reconnect or probe the socket before invalidating syncs so
-                // the data fetches have a live connection to use.
-                apiSocket.resumeReconnection();
-                this.#invalidateAllSyncs();
+                // Ask where this device is now. A trip through `background` is the usual place a
+                // network change hides: the listener was suspended, and a move between two WiFi
+                // networks never produced a transition for it to report anyway.
+                void this.detectNetworkMove();
+                // In-flight fetches cannot be trusted across a real suspension, and the timers that
+                // would have retried them are about to restart against locks they still hold.
+                const suspendedFor = this.backgroundedAt === null ? 0 : Date.now() - this.backgroundedAt;
+                const resumedFromBackground = this.wentToBackground;
+                this.backgroundedAt = null;
+                this.wentToBackground = false;
+                // A real trip through `background` suspends JS even when it is short, and it takes
+                // the machine sockets with it. They read as open here — iOS kills the socket, not
+                // the variable — so each one has to prove itself before anything is written on it.
+                // The server socket is handled below; the daemon's LAN/relay sockets were not
+                // handled at all, which is the minute-wide gap in which pushes stop, sends go into
+                // a dead socket and the delivery timers have nothing to wait for.
+                if (resumedFromBackground && suspendedFor >= Sync.BACKGROUND_RECOVERY_MIN_MS) {
+                    this.recoverFetchesAfterSuspend();
+                    this.connections.probeAfterResume();
+                    this.relayHub?.probeAfterResume();
+                    // Probe only covers sockets that still have a live entry. iOS can close a LAN
+                    // socket during suspension without the App seeing the close, and a connection
+                    // the manager no longer holds is never probed — the icon then sits "connecting"
+                    // while sightings keep arriving. Reconciling re-establishes whatever the store
+                    // says the App should be holding, and is idempotent for the rest.
+                    this.reconcileDaemonSockets();
+                    // A message waiting for a delivery verdict was waiting for a pong that died
+                    // with the suspension. Requeue it now instead of at its own timeout, so the
+                    // send ladder can use whatever channel the probe actually finds.
+                    this.recoverPendingOutbox();
+                }
+                // A long suspension is long enough for a machine to have moved, and this device to
+                // have moved with it. Nothing that failed before it is worth believing now.
+                if (suspendedFor >= Sync.SUSPENDED_TRUST_MS) {
+                    storage.getState().rearmCandidateHealth();
+                }
+                // Probe the socket first — a live connection responds in < 200ms.
+                // If probe fails (1.5s timeout) a fresh connect is triggered.
+                // Only invalidate syncs after the probe settles so data fetches
+                // don't race against a dead socket.
+                void apiSocket.resumeReconnection().then(() => {
+                    this.#invalidateAllSyncs();
+                    // Refresh the currently visible session's messages immediately.
+                    // After background/foreground the session screen is still mounted
+                    // so onSessionVisible doesn't fire — the scheduler's visible session is the
+                    // thing to wake, not the screen lifecycle (which would re-announce the focus).
+                    this.readScheduler.markStale();
+                });
             } else {
                 log.log(`📱 App state changed to: ${nextAppState}`);
+                // `inactive` is an overlay (Control Center, an app-switch animation) and can come
+                // back in a second; only `background` is a suspension, and only its sockets are
+                // suspect on the way back.
+                if (nextAppState === 'background') {
+                    this.wentToBackground = true;
+                }
+                // A coalesced cache write may be waiting on a timer that suspension will not run.
+                // This is the last reliable moment before the App can be killed, so write now.
+                this.backgroundedAt = Date.now();
+                this.flushPendingCacheSaves();
                 // Stop reconnection timers while suspended to avoid waking the
-                // JS thread unnecessarily. A live connected socket is preserved.
-                apiSocket.pauseReconnection();
+                // JS thread unnecessarily. A live connected socket is preserved so a short trip
+                // to the background can resume on it — but `osSuspend` also arms a delayed reset,
+                // because past the server's heartbeat timeout this socket is certainly closed
+                // while `connected` still reads true.
+                apiSocket.pauseReconnection({ osSuspend: true });
                 this.maybeStartBackgroundSendWatchdog();
             }
         });
@@ -297,15 +708,18 @@ class Sync {
                 if (connected && !prevConnected) {
                     log.log('🌐 Network became reachable, triggering reconnect');
                     apiSocket.resumeReconnection();
+                    this.onNetworkChanged('regained');
                 } else if (!connected && prevConnected) {
                     log.log('🌐 Network lost, pausing reconnection');
                     apiSocket.pauseReconnection();
+                    this.onNetworkChanged('lost');
                 } else if (connected && type !== prevType) {
                     // Network interface switched (e.g. WiFi → Cellular) while staying
                     // connected. The underlying TCP connection may have been silently
                     // dropped; probe immediately to confirm liveness.
                     log.log(`🌐 Network interface changed (${prevType} → ${type}), probing connection`);
                     apiSocket.resumeReconnection();
+                    this.onNetworkChanged('switched');
                 }
             });
         }
@@ -321,29 +735,84 @@ class Sync {
         // Cooldown in fetchSessions prevents this from running back-to-back
         // with event-driven invalidations.
         // Skips refresh when the user has been idle for > 10 minutes (desktop).
+        /**
+         * The last time the machines reached through the server were asked what they run.
+         *
+         * The daemon's own channels notify: a connection coming live is the moment the App is
+         * talking to that machine anyway, and that is when it asks. The server channel has no such
+         * moment — it cannot tell the App that a machine was rebuilt and restarted, because to the
+         * server a machine that changed looks exactly like one that has been sitting still. So on
+         * the server channel the question is asked on a timer instead, and the timer is long: a
+         * build changes when a person changes it, not on any schedule worth polling for.
+         */
+        let lastMachineVersionSweep = Date.now();
+
         this.sessionsRefreshInterval = setInterval(() => {
-            const idleMs = Date.now() - this.lastUserActivityAt;
-            if (idleMs > 600_000) {
-                log.log(`🕐 Skipping periodic session refresh — idle for ${Math.round(idleMs / 1000)}s`);
-                return;
-            }
-            this.sessionsSync.invalidate();
+            // Check socket health first — a silent TCP drop (socket.connected === true
+            // but no data flowing) won't self-recover without a nudge.
+            apiSocket.checkHealthAndReconnect();
+
+            // The refresh waits for the UI to be idle. It is never urgent, and running it while a
+            // screen is being opened was measured on a device as an extra 200-260ms before the
+            // session's first render — the navigation was queued behind a list fetch.
+            InteractionManager.runAfterInteractions(() => {
+                // Only while the server channel is carrying the App at all — that is the channel
+                // with nothing to notify with. A machine on a live LAN or relay socket has already
+                // been asked, by that socket coming live, and asking it again on a timer would be
+                // the poll this is trying not to be.
+                if (Date.now() - lastMachineVersionSweep > Sync.MACHINE_VERSION_SWEEP_MS
+                    && storage.getState().socketStatus === 'connected') {
+                    lastMachineVersionSweep = Date.now();
+                    void this.refreshDaemonVersions(this.machinesWithoutLiveSocket());
+                }
+
+                const idleMs = Date.now() - this.lastUserActivityAt;
+                if (idleMs > 600_000) {
+                    log.log(`🕐 Skipping periodic session refresh — idle for ${Math.round(idleMs / 1000)}s`);
+                    return;
+                }
+                // Every FULL_REFRESH_INTERVAL, do a full fetch to purge stale sessions
+                // that were deleted/archived on the server and won't appear in deltas.
+                if (Date.now() - this.lastFullRefreshAt >= Sync.FULL_REFRESH_INTERVAL_MS) {
+                    this.#refreshSessionsFull();
+                    return; // refreshSessionsFull already invalidates
+                }
+                this.sessionsSync.invalidate();
+            });
         }, Sync.SESSION_REFRESH_INTERVAL_MS);
     }
 
     /** Invalidate all data syncs (called on app resume / window becoming visible). */
     #invalidateAllSyncs() {
-        this.purchasesSync.invalidate();
-        this.profileSync.invalidate();
-        this.machinesSync.invalidate();
-        this.pushTokenSync.invalidate();
+        // The list and the presence behind it first: they are what the screens being resumed draw.
+        // Everything else updates state that is already on screen, and must not take the JS thread
+        // at the same instant a session hydrates — measured on a device, a hydration that took
+        // 50ms on a quiet thread took six seconds beside feed/artifacts/friends/machines landing
+        // together. Spacing them out costs a second of freshness nobody is waiting on.
         this.sessionsSync.invalidate();
-        this.nativeUpdateSync.invalidate();
-        log.log('🖥️ Invalidating artifacts sync');
-        this.artifactsSync.invalidate();
-        this.friendsSync.invalidate();
-        this.friendRequestsSync.invalidate();
-        this.feedSync.invalidate();
+        this.machinesSync.invalidate();
+        this.#invalidateBackgroundSyncs();
+    }
+
+    /** Syncs whose answers update a screen that is already rendered, spaced out behind an open. */
+    #invalidateBackgroundSyncs(delayMs: number = 800) {
+        const background = [
+            this.profileSync,
+            this.purchasesSync,
+            this.pushTokenSync,
+            this.nativeUpdateSync,
+            this.artifactsSync,
+            this.friendsSync,
+            this.friendRequestsSync,
+            this.feedSync,
+        ];
+        background.forEach((sync, index) => {
+            // After the current interaction (a tap, a navigation animation), not in the middle of
+            // it: these are updates to a screen that is already drawn.
+            InteractionManager.runAfterInteractions(() => {
+                setTimeout(() => sync.invalidate(), delayMs + index * 250);
+            });
+        });
     }
 
     /**
@@ -351,14 +820,18 @@ class Sync {
      * Delta fetches never remove sessions that were deleted or archived on another
      * device — a periodic full fetch is needed to purge them from local cache.
      */
-    #refreshSessionsFull() {
+    #refreshSessionsFull(force = false) {
         const now = Date.now();
-        if (now - this.lastFullRefreshAt < Sync.FULL_REFRESH_INTERVAL_MS) {
+        if (!force && now - this.lastFullRefreshAt < Sync.FULL_REFRESH_INTERVAL_MS) {
             return;
         }
         this.lastFullRefreshAt = now;
         log.log('🔄 Full sessions refresh — resetting delta base for cache cleanup');
         this.lastSessionRefreshNonDeltaAt = 0;
+        this._forceFullRefreshPending = true; // prevent fetchSessions from overwriting with Date.now()
+        if (force) {
+            this.lastSessionRefreshAt = 0; // bypass fetch cooldown for user-triggered refresh
+        }
         this.sessionsSync.invalidate();
     }
 
@@ -398,9 +871,9 @@ class Sync {
      *   hidden  → pauseReconnection  (window minimised or tab hidden)
      *   visible → resumeReconnection + full sync invalidation
      *
-     * Tauri WINDOW_FOCUS fires when the OS window regains focus without a
-     * visibility change (window was visible but behind another app). We only
-     * probe the socket here — no full invalidation needed.
+     * Tauri WINDOW_FOCUS/WINDOW_BLUR fire when the OS window gains or loses focus
+     * without a visibility change (window was visible but behind another app). On
+     * focus we only probe the socket — no full invalidation needed.
      */
     async #setupDesktopLifecycle() {
         const recoverDesktopPendingWork = () => {
@@ -408,20 +881,46 @@ class Sync {
             this.recoverPendingOutbox();
         };
 
+        // In Tauri a DOM blur arrives immediately after the OS window regains focus,
+        // so pausing straight away tears down the socket that the focus handler's
+        // resumeReconnection just created and the connection never leaves 'connecting'.
+        // Defer the pause so a focus arriving within the grace window cancels it.
+        const BLUR_PAUSE_GRACE_MS = 5_000;
+        let blurPauseTimer: ReturnType<typeof setTimeout> | null = null;
+
+        const cancelPendingBlurPause = () => {
+            if (blurPauseTimer !== null) {
+                clearTimeout(blurPauseTimer);
+                blurPauseTimer = null;
+            }
+        };
+
         const onDesktopBlur = () => {
-            log.log('🖥️ Desktop blurred — pausing socket');
-            apiSocket.pauseReconnection();
+            cancelPendingBlurPause();
+            blurPauseTimer = setTimeout(() => {
+                blurPauseTimer = null;
+                log.log('🖥️ Desktop blurred — pausing socket');
+                apiSocket.pauseReconnection();
+            }, BLUR_PAUSE_GRACE_MS);
         };
 
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
                 log.log('🖥️ Window hidden — pausing reconnection');
-                onDesktopBlur();
+                cancelPendingBlurPause();
+                apiSocket.pauseReconnection();
             } else {
                 log.log('🖥️ Window visible — resuming and invalidating syncs');
-                void apiSocket.resumeReconnection();
+                cancelPendingBlurPause();
+                void apiSocket.resumeReconnection().then(() => {
+                    this.#invalidateAllSyncs();
+                    // Refresh the currently visible session's messages immediately.
+                    // After sleep/wake the session screen is still mounted so
+                    // onSessionVisible doesn't fire — the scheduler's visible session is the
+                    // thing to wake, not the screen lifecycle (which would re-announce the focus).
+                    this.readScheduler.markStale();
+                });
                 recoverDesktopPendingWork();
-                this.#invalidateAllSyncs();
                 // Full refresh after desktop wake to clean up stale cache.
                 const FULL_REFRESH_DESKTOP_WAKE_DELAY_MS = 3_000;
                 setTimeout(() => this.#refreshSessionsFull(), FULL_REFRESH_DESKTOP_WAKE_DELAY_MS);
@@ -431,11 +930,16 @@ class Sync {
         window.addEventListener('focus', () => {
             if (!isRunningInTauri()) {
                 log.log('🖥️ Window focused — resuming socket and recovering pending sends');
+                cancelPendingBlurPause();
                 void apiSocket.resumeReconnection();
                 recoverDesktopPendingWork();
             }
         });
-        window.addEventListener('blur', onDesktopBlur);
+        window.addEventListener('blur', () => {
+            // In Tauri the DOM blur doesn't track the OS window; WINDOW_BLUR does.
+            if (isRunningInTauri()) return;
+            onDesktopBlur();
+        });
 
         // Track user activity for idle detection on desktop.
         // Skips periodic session refreshes when the user hasn't interacted
@@ -457,7 +961,8 @@ class Sync {
             }
             onlineDebounce = setTimeout(() => {
                 onlineDebounce = null;
-                log.log('🌐 Window: network online — resuming socket');
+                log.log('🌐 Window: network online — reinit sodium + resume socket');
+                reinitSodium();
                 apiSocket.resumeReconnection();
             }, 300);
         });
@@ -473,9 +978,11 @@ class Sync {
         if (isRunningInTauri()) {
             const { getCurrentWindow } = await import('@tauri-apps/api/window');
             const { TauriEvent } = await import('@tauri-apps/api/event');
-            getCurrentWindow().listen(TauriEvent.WINDOW_FOCUS, () => {
+            const appWindow = getCurrentWindow();
+            appWindow.listen(TauriEvent.WINDOW_FOCUS, () => {
                 if (!document.hidden) {
                     log.log('🖥️ Window focused (Tauri) — probing connection');
+                    cancelPendingBlurPause();
                     void apiSocket.resumeReconnection().then((connected) => {
                         if (connected) {
                             this.#refreshSessionsAfterDesktopProbe();
@@ -485,7 +992,23 @@ class Sync {
                     recoverDesktopPendingWork();
                 }
             });
+            appWindow.listen(TauriEvent.WINDOW_BLUR, onDesktopBlur);
         }
+    }
+
+    /**
+     * The account's ed25519 public key, for configuring a terminal that was paired before the App
+     * started sending it. Public material only; logged in dev so it can be copied into
+     * `HAPPY_ACCOUNT_SIGNING_PUBLIC_KEY` on the daemon.
+     */
+    private logAccountSigningKey(): void {
+        if (!__DEV__ || !this.credentials?.secret) {
+            return;
+        }
+        try {
+            const keypair = sodium.crypto_sign_seed_keypair(decodeBase64(this.credentials.secret, 'base64url'));
+            log.log(`🔑 account signing public key: ${encodeBase64(keypair.publicKey)}`);
+        } catch { /* a malformed secret is reported by the auth flow */ }
     }
 
     async create(credentials: AuthCredentials, encryption: Encryption) {
@@ -493,6 +1016,7 @@ class Sync {
         this.encryption = encryption;
         this.anonID = encryption.anonID;
         this.serverID = parseToken(credentials.token);
+        this.logAccountSigningKey();
         await this.#init();
 
         // Await settings sync to have fresh settings
@@ -512,7 +1036,17 @@ class Sync {
         this.encryption = encryption;
         this.anonID = encryption.anonID;
         this.serverID = parseToken(credentials.token);
+        this.logAccountSigningKey();
         await this.#init();
+    }
+
+    /**
+     * The machine key for a machine whose record has been decrypted, or null if it has not been
+     * fetched yet. It is the 32-byte secret wrapped in the machine's `dataEncryptionKey`; the
+     * App needs it both to decrypt `daemonState` and to answer the LAN API's challenge.
+     */
+    getMachineKey(machineId: string): Uint8Array | null {
+        return this.machineDataKeys.get(machineId) ?? null;
     }
 
     async #init() {
@@ -523,6 +1057,66 @@ class Sync {
 
         // Subscribe to updates
         this.subscribeToUpdates();
+
+        // Machine keys from the last run, so the LAN can authenticate before the machines request
+        // returns. A key that no longer unwraps (another account, rotated) is simply skipped.
+        for (const [machineId, wrapped] of Object.entries(loadWrappedMachineKeys())) {
+            const key = await this.encryption.decryptEncryptionKey(wrapped);
+            if (key && !this.machineDataKeys.has(machineId)) {
+                this.machineDataKeys.set(machineId, key);
+            }
+        }
+        void this.deriveRelayRoutes();
+
+        // A machine on this network gets its live channel as soon as it is seen. Waiting for a
+        // session to ask for the LAN was circular: the declaration that makes a session prefer it
+        // arrives over the very socket this would open, and until then only the slow server list
+        // could say so.
+        if (!this.daemonSocketWatch) {
+            this.daemonSocketWatch = storage.subscribe((state, previous) => {
+                if (
+                    state.lanSightings !== previous.lanSightings ||
+                    // A published address is where a socket can be opened for a machine no browse
+                    // ever finds, so it is as much a reason to reconcile as a sighting is — and
+                    // without it here, a machine that publishes its address gets no socket at all.
+                    state.lanEndpoints !== previous.lanEndpoints ||
+                    // Health is what ranks one address over another for a socket. A machine whose
+                    // address moved is reachable at the new one while the socket keeps retrying
+                    // the old one — until the failure is recorded and this asks again.
+                    state.candidateHealth !== previous.candidateHealth ||
+                    state.socketStatus !== previous.socketStatus ||
+                    state.channelOverride !== previous.channelOverride ||
+                    // The relay's per-machine streams are wanted from the hub's directory: a machine
+                    // the relay has just started carrying needs a stream, and one the hub has lost
+                    // needs it dropped. Neither was watched here, so a stream's life depended on some
+                    // unrelated event happening to reconcile next.
+                    state.relayHubConnected !== previous.relayHubConnected ||
+                    state.relayDirectory !== previous.relayDirectory
+                ) {
+                    this.reconcileDaemonSockets();
+                }
+                if (state.localSettings.channelPriority !== previous.localSettings.channelPriority) {
+                    // The relay being switched on or off is the hub's lifetime, not just a filter.
+                    this.ensureRelayHub();
+                    // A new order changes where every session reads from, so re-resolve them now
+                    // instead of at each one's next scheduled fetch.
+                    const serverWas = channelEnabled(previous.localSettings.channelPriority, 'server');
+                    const serverNow = channelEnabled(state.localSettings.channelPriority, 'server');
+                    if (serverWas !== serverNow) {
+                        // Switching the server off has to drop the connection, not just stop
+                        // choosing it: until the socket is gone the App is still talking to
+                        // happy-server, which is the thing the setting is there to stop.
+                        apiSocket.setServerEnabled(serverNow);
+                    }
+                    this.reconcileDaemonSockets();
+                    // A new channel order changes where the open conversation is read from; the
+                    // hidden ones read on open. Invalidating every message sync here made one
+                    // setting change into a read of every session at once.
+                    this.readScheduler.markStale();
+                }
+            });
+            this.reconcileDaemonSockets();
+        }
 
         // Sync initial PostHog opt-out state with stored settings
         if (tracking) {
@@ -535,66 +1129,62 @@ class Sync {
         }
 
         // Load cached session list before network fetch so UI shows instantly.
+        // Split into two phases:
+        //   1. Apply cached sessions (already decrypted JSON) + mark ready
+        //   2. Restore encryption keys in background (needed for NEW WS messages)
+        // This avoids showing an empty-state placeholder while libsodium decrypts.
+        let cachedEncryptionKeys: Record<string, string> | undefined;
         try {
             const cached = await loadSessionsListCache();
             if (cached && cached.sessions.length > 0) {
                 log.log(`📦 sessionsListCache: applying ${cached.sessions.length} cached sessions (cachedAt=${cached.cachedAt})`);
                 this.applySessions(cached.sessions);
-                // Use the cache timestamp as the base for delta fetches.
                 if (!this.lastSessionRefreshNonDeltaAt) {
                     this.lastSessionRefreshNonDeltaAt = cached.cachedAt;
                 }
-                // Restore encryption keys from cache if available.
-                const keyCount = Object.keys(cached.encryptionKeys).length;
-                if (keyCount > 0) {
-                    const keyMap = new Map<string, Uint8Array | null>();
-                    for (const [sid, encKey] of Object.entries(cached.encryptionKeys)) {
-                        const decrypted = await this.encryption.decryptEncryptionKey(encKey);
-                        keyMap.set(sid, decrypted);
-                    }
-                    await this.encryption.initializeSessions(keyMap);
-                    log.log(`📦 sessionsListCache: restored ${keyCount} encryption keys from cache`);
-                }
-                // Restore encryption keys from cache — dataEncryptionKey is immutable
-                // per session so we can decrypt immediately without waiting for fetchSessions.
-                const ek = cached.encryptionKeys;
-                if (ek && Object.keys(ek).length > 0) {
-                    const sessionKeys = new Map<string, Uint8Array | null>();
-                    for (const [sid, encryptedKey] of Object.entries(ek)) {
-                        const decrypted = await this.encryption.decryptEncryptionKey(encryptedKey);
-                        if (decrypted) {
-                            sessionKeys.set(sid, decrypted);
-                        }
-                    }
-                    if (sessionKeys.size > 0) {
-                        await this.encryption.initializeSessions(sessionKeys);
-                        log.log(`📦 sessionsListCache: restored ${sessionKeys.size} encryption keys from cache`);
-                    }
-                }
+                cachedEncryptionKeys = cached.encryptionKeys;
             }
         } catch (e) {
             log.log(`📦 sessionsListCache: error applying cached list: ${e}`);
         }
-        // Mark data ready now regardless of cache hit — cached sessions are already
-        // applied above, and if there's no cache the UI shows an empty list while the
-        // network fetch runs in the background. Avoids a white screen waiting for the
-        // 20s ready timeout on cold starts.
+        // Show cached data NOW — do NOT wait for encryption key decryption.
+        // The sessions in the cache are already decrypted (metadata, agentState),
+        // so the UI can render immediately. Encryption key restoration runs in
+        // the background below and handles future WebSocket-delivered messages.
         storage.getState().applyReady();
 
+        // Phase 2: Restore encryption keys in background.
+        // Cached sessions are already visible (applyReady was called above).
+        // The encryption keys are needed for NEW WebSocket messages; if a message
+        // arrives before restoration completes, handleUpdate calls
+        // fetchSessions(true) to recover — a brief recovery on first launch is
+        // preferable to a visible delay every cold start.
+        if (cachedEncryptionKeys && Object.keys(cachedEncryptionKeys).length > 0) {
+            void (async () => {
+                const keyMap = new Map<string, Uint8Array | null>();
+                for (const [sid, encKey] of Object.entries(cachedEncryptionKeys!)) {
+                    try {
+                        const decrypted = await this.encryption.decryptEncryptionKey(encKey);
+                        if (decrypted) {
+                            keyMap.set(sid, decrypted);
+                            this.sessionEncryptionKeySources.set(sid, encKey);
+                        }
+                    } catch { /* skip corrupt keys */ }
+                }
+                if (keyMap.size > 0) {
+                    await this.encryption.initializeSessions(keyMap);
+                    log.log(`📦 sessionsListCache: restored ${keyMap.size} encryption keys from cache (background)`);
+                }
+            })();
+        }
+
         // Invalidate sync
-        log.log('🔄 #init: Invalidating all syncs');
-        this.sessionsSync.invalidate();
+        log.log('🔄 #init: Invalidating syncs');
+        // The same split as a resume: the list, its machines and its settings now; the rest as
+        // state updates after the first screen and the first session open have had the thread.
+        this.#invalidateAllSyncs();
         this.settingsSync.invalidate();
-        this.profileSync.invalidate();
-        this.purchasesSync.invalidate();
-        this.machinesSync.invalidate();
-        this.pushTokenSync.invalidate();
-        this.nativeUpdateSync.invalidate();
-        this.friendsSync.invalidate();
-        this.friendRequestsSync.invalidate();
-        this.artifactsSync.invalidate();
-        this.feedSync.invalidate();
-        log.log('🔄 #init: All syncs invalidated, including artifacts');
+        log.log('🔄 #init: Essential syncs invalidated, the rest staggered');
 
         // Wait for both sessions and machines to load, then mark as ready.
         // Use a timeout so we still call applyReady() if fetch keeps failing (e.g. network/401);
@@ -628,11 +1218,23 @@ class Sync {
 
 
     onSessionVisible = (sessionId: string) => {
+        if (activeSyncInstance !== this) {
+            return;
+        }
         this.currentVisibleSessionId = sessionId;
+        // The scheduler owns the fallback poll and the read order from here; setting the visible
+        // session also wakes it once for the first read.
+        this.readScheduler.setVisible(sessionId);
+        // Start the cached window now, before the sync invalidation is scheduled: the tap's first
+        // frame must not be a function of the network, a fetch slot or another fetch's lock.
+        void this.hydrateSession(sessionId);
         this.getMessagesSync(sessionId).invalidate();
 
-        // Also invalidate git status sync for this session
-        gitStatusSync.getSync(sessionId).invalidate();
+        // Only for a session whose CLI does not publish its working tree: those still have to be
+        // asked over the socket, and that is the round trip this is replacing.
+        if (!this.gitStatusPublished(sessionId)) {
+            gitStatusSync.getSync(sessionId).invalidate();
+        }
 
         // Rate-limited single-session refresh: when the user opens a cached
         // session, invalidate the sessions list sync so the delta fetch picks
@@ -658,8 +1260,14 @@ class Sync {
     }
 
     onSessionHidden = (sessionId: string) => {
+        if (activeSyncInstance !== this) {
+            return;
+        }
         if (this.currentVisibleSessionId === sessionId) {
             this.currentVisibleSessionId = null;
+            // The one fallback timer follows the screen. A hidden session refreshes when it is
+            // opened again, not on a timer of its own.
+            this.readScheduler.setVisible(null);
         }
     }
 
@@ -667,15 +1275,98 @@ class Sync {
      * Persist the current in-memory state for a session to SQLite.
      * Called after resolving lazy tool content so the full content is saved to cache.
      */
-    saveSessionCache = async (sessionId: string): Promise<void> => {
+    /**
+     * How long a burst of changes is allowed to coalesce before it is written.
+     *
+     * Long enough that a turn's worth of messages costs one write rather than one per message,
+     * short enough that a force-quit shortly after reading loses little. Backgrounding flushes
+     * immediately, which is the case a timer alone would lose.
+     */
+    private static readonly CACHE_SAVE_DEBOUNCE_MS = 1_500;
+
+    /**
+     * Schedules a cache write for a session, coalescing a burst into one.
+     *
+     * Persisting used to happen only after a *successful* server fetch, so a fetch that failed —
+     * routine on a slow network, and the normal state of affairs during an outage — left whatever
+     * had arrived meanwhile in memory alone. Killing the App then lost it, which is exactly the
+     * "restart and it has to fetch everything again" jank. Tying the write to the store changing,
+     * rather than to one channel's request succeeding, is what keeps the data and what keeps the
+     * cache indifferent to which channel delivered it.
+     */
+    private scheduleCacheSave(sessionId: string): void {
+        if (this.cacheSaveTimers.has(sessionId)) {
+            return;
+        }
+        const timer = setTimeout(() => {
+            this.cacheSaveTimers.delete(sessionId);
+            void this.saveSessionCache(sessionId);
+        }, Sync.CACHE_SAVE_DEBOUNCE_MS);
+        // Node/web only; keeps the timer from holding the process open in tests.
+        (timer as unknown as { unref?: () => void }).unref?.();
+        this.cacheSaveTimers.set(sessionId, timer);
+    }
+
+    /** Writes every pending save now, for the paths where a timer would not survive. */
+    private flushPendingCacheSaves(): void {
+        const pending = Array.from(this.cacheSaveTimers.keys());
+        for (const sessionId of pending) {
+            const timer = this.cacheSaveTimers.get(sessionId);
+            if (timer) {
+                clearTimeout(timer);
+                this.cacheSaveTimers.delete(sessionId);
+            }
+        }
+        for (const sessionId of pending) {
+            void this.saveSessionCache(sessionId);
+        }
+    }
+
+    saveSessionCache = async (
+        sessionId: string,
+        /**
+         * What the caller just learned about the cache window. Omitted means "persist whatever the
+         * store holds", which is right for a channel that only appends. A paged server fetch
+         * knows better — `applyMessages` does not write `oldestSeq`/`hasOlderMessages`, so the
+         * store can lag behind what the fetch actually established — and passes its own numbers.
+         */
+        watermark?: { lastSeq: number; oldestSeq: number; hasOlderMessages: boolean },
+        /** Set for a daemon-channel write: where the window it just saved sits in the log. */
+        window?: PersistedLanWindow,
+    ): Promise<void> => {
+        // This write supersedes any queued one: it is either the same state or a more precise
+        // statement of it (a paged fetch knows the window better than the store does), so leaving
+        // the timer armed would only write again a second later.
+        const queued = this.cacheSaveTimers.get(sessionId);
+        if (queued) {
+            clearTimeout(queued);
+            this.cacheSaveTimers.delete(sessionId);
+        }
+
         const state = storage.getState();
         const session = state.sessions[sessionId];
         const sessionMsgs = state.sessionMessages[sessionId];
         if (!session || !sessionMsgs) return;
-        const lastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
-        const oldestSeq = sessionMsgs.oldestSeq;
-        const hasOlderMessages = sessionMsgs.hasOlderMessages ?? false;
-        await saveMessageCache(session, sessionMsgs.messages, sessionMsgs.reducerState, lastSeq, oldestSeq, hasOlderMessages);
+        const lastSeq = watermark?.lastSeq ?? this.sessionLastSeq.get(sessionId) ?? 0;
+        const oldestSeq = watermark?.oldestSeq ?? sessionMsgs.oldestSeq;
+        const hasOlderMessages = watermark?.hasOlderMessages ?? sessionMsgs.hasOlderMessages ?? false;
+        // A session on a daemon channel is one the CLI keeps a log for, whatever the server has
+        // managed to tell us about it.
+        const servedByDaemon = this.preferredChannel(sessionId) !== 'server';
+        // The store may hold a whole session in memory; the cache keeps the newest window and lets
+        // the channel page the rest back if it is needed. `messages` is sorted newest-first.
+        const cachedMessages = sessionMsgs.messages.length > MAX_CACHED_MESSAGES
+            ? sessionMsgs.messages.slice(0, MAX_CACHED_MESSAGES)
+            : sessionMsgs.messages;
+        const saved = await saveMessageCache(session, cachedMessages, sessionMsgs.reducerState, lastSeq, oldestSeq, hasOlderMessages, servedByDaemon);
+        // The window's anchors are written only once the messages they describe are on disk, and
+        // never before. A crash between the two then leaves anchors *older* than the window they
+        // belong to, which costs a re-read that dedup absorbs — the other order would leave them
+        // newer, and a restart would skip everything between them and what it holds.
+        if (saved && window) {
+            this.lanWindows[sessionId] = window;
+            saveLanWindows(this.lanWindows);
+        }
     }
 
     /**
@@ -688,11 +1379,22 @@ class Sync {
         // Clear the persisted cache
         await clearMessageCache(sessionId);
 
+        // The window's anchors describe the cache that was just dropped, so they go with it. Kept,
+        // they would claim a window the App no longer holds and skip everything between.
+        delete this.lanWindows[sessionId];
+        this.daemonLinks.delete(sessionId);
+        saveLanWindows(this.lanWindows);
+
         // Reset in-memory seq so the next fetch starts from 0
         this.sessionLastSeq.delete(sessionId);
+        this.serverNewestSeq.delete(sessionId);
+        this.serverSessionSeq.delete(sessionId);
 
         // Clear the in-memory Zustand messages so the UI shows a loading state
         storage.getState().deleteSessionMessages(sessionId);
+        // The hydration markers belong to the window that was just dropped.
+        this.hydratedSessions.delete(sessionId);
+        this.hydratingSessions.delete(sessionId);
 
         // Trigger a fresh full fetch
         this.onSessionVisible(sessionId);
@@ -955,7 +1657,7 @@ class Sync {
             return;
         }
 
-        const { permissionMode, model, maxMode, effort } = resolveMessageModeMeta(session);
+        const { permissionMode, model, maxMode, effort, sandboxIsolation } = resolveMessageModeMeta(session);
         const settings = storage.getState().settings;
         const environmentVariables = resolveMessageProfileEnv(session, settings.profiles ?? []);
 
@@ -1022,6 +1724,7 @@ class Sync {
                 appendSystemPrompt: systemPrompt,
                 ...(maxMode !== undefined ? { maxMode } : {}),
                 ...(effort !== undefined ? { effort } : {}),
+                ...(sandboxIsolation !== undefined ? { sandboxIsolation } : {}),
                 profileId: session.profileId ?? null,
                 ...(environmentVariables ? { environmentVariables } : {}),
                 ...(displayText && { displayText }), // Add displayText if provided
@@ -1259,19 +1962,57 @@ class Sync {
     // Private
     //
 
-    private fetchSessions = async () => {
+    private fetchSessions = async (force = false) => {
         if (!this.credentials) {
             log.log('📥 fetchSessions: no credentials, skipping');
             return;
         }
 
         // Rate-limit: don't fetch more than once per cooldown period.
+        // 'force' bypasses the cooldown — used by recovery paths (e.g. handleUpdate
+        // when encryption keys are missing for a session whose messages are arriving
+        // via WebSocket). Without this, a message arriving within the 30s cooldown
+        // window would be silently dropped with no path to recovery.
         const now = Date.now();
-        if (now - this.lastSessionRefreshAt < Sync.SESSION_REFRESH_COOLDOWN_MS) {
+        if (!force && !this._forceFullRefreshPending && now - this.lastSessionRefreshAt < Sync.SESSION_REFRESH_COOLDOWN_MS) {
             log.log(`⏱️ fetchSessions: skipped — cooldown (${now - this.lastSessionRefreshAt}ms since last)`);
             return;
         }
         this.lastSessionRefreshAt = now;
+
+        // With the server channel switched off this App does not talk to happy-server, so the list
+        // is asked of the daemons that can be reached instead. Without this the request below would
+        // still go out and fail, which is the connection the setting exists to stop — the fallback
+        // in the catch would reach the same place, but only after trying.
+        if (!channelEnabled(this.channelPriority(), 'server')) {
+            // In the background, not awaited: the list the App is showing is the cached one, and a
+            // daemon list — which begins with an mDNS browse — is an update to that state, not a
+            // prerequisite for rendering it. Awaiting it here made a local-first screen wait on
+            // network I/O whose answer only adds rows.
+            void this.fetchSessionListFromDaemons().catch((error) => {
+                log.log(`📡 fetchSessions: daemon session list failed: ${String(error)}`);
+            });
+            return;
+        }
+
+        // The roster first, in the background: a LAN daemon answers in milliseconds and the relay
+        // publishes its set every few seconds, while the server's list is a 1.1MB body measured at
+        // 18-85s. Whichever answers first puts its rows on screen; the server's answer replaces
+        // them with the full records when it lands. Not awaited — the fold below is the server's,
+        // and a roster read must never delay it.
+        const nowRoster = Date.now();
+        if (!this.rosterFetchInFlight && nowRoster - this.lastRosterFetchAt >= Sync.ROSTER_FETCH_INTERVAL_MS) {
+            this.lastRosterFetchAt = nowRoster;
+            this.rosterFetchInFlight = true;
+            void this.fetchSessionListFromDaemons()
+                .catch((error) => {
+                    log.log(`📡 fetchSessions: daemon roster alongside the server failed: ${String(error)}`);
+                })
+                .finally(() => { this.rosterFetchInFlight = false; });
+        }
+
+        // Full refresh when delta base is 0 (either first fetch or reset by #refreshSessionsFull).
+        const fullRefresh = this.lastSessionRefreshNonDeltaAt === 0;
 
         try {
             const t0 = performance.now();
@@ -1284,12 +2025,19 @@ class Sync {
             const qs = params.toString();
             log.log(`📥 fetchSessions: GET ${API_ENDPOINT}/v2/sessions?${qs}`);
             const fetchStart = performance.now();
+            // The deadline covers the body, not just the headers. `instrumentedFetch` clears its
+            // 30s timer when the response arrives, and a device log then showed the 1.1MB body
+            // still being read 85 seconds later — a request that never ends and is never retried.
+            // The signal is forwarded, so aborting here aborts the read too.
+            const bodyController = new AbortController();
+            const bodyDeadline = setTimeout(() => bodyController.abort(), 30_000);
             const response = await this.instrumentedFetch(`${API_ENDPOINT}/v2/sessions?${qs}`, {
                 headers: {
                     'Authorization': `Bearer ${this.credentials.token}`,
                     'Content-Type': 'application/json',
                     'Accept-Encoding': 'gzip, deflate',
-                }
+                },
+                signal: bodyController.signal,
             });
             const networkMs = Math.round(performance.now() - fetchStart);
 
@@ -1300,12 +2048,37 @@ class Sync {
             }
 
             const parseStart = performance.now();
-            // response.json() uses the browser's native streaming parser (faster than
-            // text()+JSON.parse, especially on JSC engines like WebKitGTK and iOS).
-            const data = await response.json() as { sessions?: unknown };
-            const respSizeKb = Math.round(JSON.stringify(data).length / 1024);
+            // Split the read from the parse: `response.json()` hides both, and a device log showed
+            // "parse 18s" for a 1.1MB list with no way to tell a slow body from a slow parser.
+            const textStart = performance.now();
+            const body = await readResponseTextCooperatively(response);
+            clearTimeout(bodyDeadline);
+            const rawText = body.text;
+            const textMs = Math.round(performance.now() - textStart);
+            const jsonStart = performance.now();
+            const data = JSON.parse(rawText) as { sessions?: unknown };
+            const jsonMs = Math.round(performance.now() - jsonStart);
+            log.log(`📥 fetchSessions body: read ${textMs}ms (${Math.round(rawText.length / 1024)}KB, ${body.streamed ? 'streamed' : 'whole'}), parse ${jsonMs}ms`);
+            // Payload size comes from the header. This used to call JSON.stringify(data).length,
+            // which re-serialised the entire (multi-hundred-KB) response on every fetch purely to
+            // produce a log line.
+            //
+            // The header is not always there — the server answers chunked, so this logged 0KB and
+            // the largest cost in the app was invisible. Summing the encrypted field lengths is
+            // O(sessions) over strings already in memory, and gives a real number without
+            // re-serialising anything.
             const contentLength = response.headers.get('content-length');
-            const xferKb = contentLength ? Math.round(parseInt(contentLength) / 1024) : respSizeKb;
+            const respSizeKb = contentLength ? Math.round(parseInt(contentLength) / 1024) : 0;
+            const ciphertextKb = Math.round(
+                ((data.sessions as Array<{ metadata?: string | null; agentState?: string | null; dataEncryptionKey?: string | null; lastMessage?: { content?: { c?: string } } | null }> | undefined) ?? [])
+                    .reduce((total, s) =>
+                        total
+                        + (s.metadata?.length ?? 0)
+                        + (s.agentState?.length ?? 0)
+                        + (s.dataEncryptionKey?.length ?? 0)
+                        + (s.lastMessage?.content?.c?.length ?? 0), 0) / 1024,
+            );
+            const xferKb = respSizeKb || ciphertextKb;
             const parseMs = Math.round(performance.now() - parseStart);
             const rawSessions = data.sessions;
             if (!Array.isArray(rawSessions)) {
@@ -1322,25 +2095,48 @@ class Sync {
                 dataEncryptionKey: string | null;
                 active: boolean;
                 activeAt: number;
+                thinking?: boolean;
+                thinkingAt?: number;
                 createdAt: number;
                 updatedAt: number;
                 lastMessage: ApiMessage | null;
             }>;
 
             // --- Cache: collect encryption keys for persistence ---
-            const cachedKeys: Record<string, string> = {};
+            // Merge new keys into the accumulated map so delta fetches don't overwrite
+            // keys for sessions that weren't in the current response.
             for (const session of sessions) {
                 if (session.dataEncryptionKey) {
-                    cachedKeys[session.id] = session.dataEncryptionKey;
+                    this.sessionEncryptionKeySources.set(session.id, session.dataEncryptionKey);
                 }
             }
 
             // Initialize all session encryptions first
             const keyDecryptStart = performance.now();
             const sessionKeys = new Map<string, Uint8Array | null>();
+            // Retry decryption up to 3 times with backoff — libsodium WASM can be
+            // unstable after Linux sleep/wake, causing transient crypto_box_open_easy failures.
+            const decryptWithRetry = async (encryptedKey: string, sessionId: string, maxRetries = 3): Promise<Uint8Array | null> => {
+                for (let attempt = 0; attempt < maxRetries; attempt++) {
+                    const decrypted = await this.encryption.decryptEncryptionKey(encryptedKey);
+                    if (decrypted) return decrypted;
+                    if (attempt < maxRetries - 1) {
+                        console.warn(`[encryption] Decrypt retry ${attempt + 1}/${maxRetries} for session ${sessionId}`);
+                        await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+                    }
+                }
+                return null;
+            };
             for (const session of sessions) {
+                // One event-loop hop per session. A burst of these decrypts is otherwise a long
+                // unbroken stay on the JS thread, and it starts exactly when the user comes back
+                // to the App (a reconnect is what asked for the list). Measured on a device: 91
+                // sessions = 17.5s of decrypt, during which a tap from the list starved for
+                // seconds behind the batch. A hop per session bounds any one wait to one
+                // session's worth of work.
+                await yieldTask();
                 if (session.dataEncryptionKey) {
-                    let decrypted = await this.encryption.decryptEncryptionKey(session.dataEncryptionKey);
+                    let decrypted = await decryptWithRetry(session.dataEncryptionKey, session.id);
                     if (!decrypted) {
                         console.error(`Failed to decrypt data encryption key for session ${session.id}`);
                         continue;
@@ -1357,6 +2153,9 @@ class Sync {
             const metadataDecryptStart = performance.now();
             let decryptedSessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[] = [];
             for (const session of sessions) {
+                // Same hop as the key loop above: metadata + agentState per session is the
+                // larger half of the batch (17.5s of 91), and it is paid on the JS thread.
+                await yieldTask();
                 // Get session encryption (should always exist after initialization)
                 const sessionEncryption = this.encryption.getSessionEncryption(session.id);
                 if (!sessionEncryption) {
@@ -1388,11 +2187,20 @@ class Sync {
                 decryptedSessions.push(processedSession);
             }
 
-            // Apply to storage
+            // Apply to storage — full refresh replaces stale cache, delta merges.
             const applyStart = performance.now();
-            this.applySessions(decryptedSessions);
-            // Record timestamp for next delta fetch. Moves forward every successful fetch
-            // so subsequent deltas only request sessions changed since THIS fetch.
+            this.applySessions(decryptedSessions, fullRefresh);
+            this.applyPublishedGitStatus(decryptedSessions);
+            // The server answered, so the LAN's view of the list is no longer the fallback.
+            storage.getState().applyDaemonSessionList(null);
+            // Record timestamp for next delta fetch.
+            // During forceFullRefresh, only the actual full fetch (fullRefresh=true)
+            // should clear the flag — the stale in-flight fetch must not overwrite
+            // the delta base or the flag.
+            if (this._forceFullRefreshPending) {
+                if (!fullRefresh) return; // stale fetch: don't overwrite anything
+                this._forceFullRefreshPending = false; // real full refresh succeeded
+            }
             this.lastSessionRefreshNonDeltaAt = Date.now();
             const applyMs = Math.round(performance.now() - applyStart);
             const metadataDecryptMs = Math.round(performance.now() - metadataDecryptStart);
@@ -1400,44 +2208,44 @@ class Sync {
             const decryptTotalMs = keyDecryptMs + metadataDecryptMs;
             console.warn(
                 `⏱️ fetchSessions: ${totalMs}ms total | ` +
-                `network ${networkMs}ms | parse ${parseMs}ms (${respSizeKb}KB uncompressed${xferKb !== respSizeKb ? `, ${xferKb}KB on wire` : ''}) | ` +
+                `network ${networkMs}ms | parse ${parseMs}ms (${respSizeKb}KB${xferKb !== respSizeKb ? `, ${xferKb}KB on wire` : ''}) | ` +
                 `decrypt ${decryptTotalMs}ms (keys ${keyDecryptMs}ms + meta ${metadataDecryptMs}ms) | ` +
                 `apply ${applyMs}ms | ${decryptedSessions.length} sessions (delta)`
             );
             // Save full merged state (cached + delta), not just the delta results.
             const fullState = storage.getState().sessions;
             const allValues = Object.values(fullState).map(({ presence, ...s }) => s);
-            // Gather encryption keys from the API response so they can be cached
-            // and used on next cold start without waiting for the network fetch.
-            const encryptionKeys: Record<string, string> = {};
-            for (const s of sessions) {
-                if (s.dataEncryptionKey) {
-                    encryptionKeys[s.id] = s.dataEncryptionKey;
-                }
+            // Use the accumulated key map (merged across all fetches since startup)
+            // rather than only the current response's keys. Delta fetches return a
+            // subset — without merging, they'd overwrite the full key set in cache.
+            const accumulatedKeys: Record<string, string> = {};
+            for (const [sid, key] of this.sessionEncryptionKeySources) {
+                accumulatedKeys[sid] = key;
             }
-            void saveSessionsListCache(allValues, cachedKeys);
+            void saveSessionsListCache(allValues, accumulatedKeys);
             this._loggedMissingSessionForSid.clear();
 
-            // Only eagerly catch up messages for active sessions (agent is running).
-            // Inactive/offline sessions are loaded lazily when the user opens them.
+            // Eagerly catch up messages for the currently visible session only. A daemon socket
+            // pushes `log-grew` for every session on its machine, so a background agent's messages
+            // arrive without a fetch; and a session the user is not looking at hydrates from the
+            // hot window when opened. Invalidating every "active" session here was the fetch storm
+            // that delayed the one session the user was actually opening — on a daemon channel the
+            // active flag is stale (every online session reads active), so it matched six or more.
             void (async () => {
+                const visibleId = this.currentVisibleSessionId;
+                if (!visibleId) return;
                 for (const session of decryptedSessions) {
-                    if (session.metadata?.flavor !== 'cursor' && session.metadata?.flavor !== 'acp-cursor' && session.metadata?.flavor !== 'claude') continue;
-                    if (!session.active) continue; // skip offline sessions
+                    if (session.id !== visibleId) continue;
                     try {
                         const cached = await getCachedLastSeq(session.id);
                         if (cached != null && cached < session.seq) {
-                            // Skip if WebSocket recently delivered messages — the WS path
-                            // already handles gap resolution via enqueueMessages, so an
-                            // additional HTTP fetch at this point would be redundant.
+                            const gapSize = session.seq - cached;
                             const lastWsAt = this.sessionLastWsMessageAt.get(session.id) ?? 0;
                             const wsGap = Date.now() - lastWsAt;
-                            if (wsGap < 5000) {
-                                log.log(`📥 fetchSessions: skipping redundant message fetch for ${session.id} (WS delivered ${wsGap}ms ago, cached=${cached} < seq=${session.seq})`);
+                            if (gapSize < 100 && wsGap < 5000) {
+                                log.log(`📥 fetchSessions: skipping redundant message fetch for ${session.id} (gap=${gapSize}, WS delivered ${wsGap}ms ago, cached=${cached} < seq=${session.seq})`);
                                 continue;
                             }
-                            // Skip if encryption keys are not available — can never fetch
-                            // (e.g. session archived/deleted on another device).
                             if (!this.encryption.getSessionEncryption(session.id)) {
                                 log.log(`📥 fetchSessions: skipping message sync for ${session.id} — encryption not ready`);
                                 continue;
@@ -1452,8 +2260,29 @@ class Sync {
             })();
         } catch (err) {
             log.log(`📥 fetchSessions failed: ${err instanceof Error ? err.message : String(err)}`);
-            // Apply empty list so UI shows empty state instead of endless spinner
-            this.applySessions([]);
+            // Deliberately leave the store untouched. This used to call applySessions([]) "so the
+            // UI shows an empty state instead of an endless spinner" — but on a full refresh
+            // applySessions replaces the whole map, so any transient failure wiped every session
+            // the user had. That is exactly what iOS does to an in-flight request when the app
+            // backgrounds, and a full refresh of a large account is slow enough (~1MB / 15s for
+            // 104 sessions) that backgrounding mid-fetch reliably emptied the list while the
+            // separate, smaller fetchMachines kept the machine list populated.
+            //
+            // Ask the LAN what it knows before giving up. The session list itself is untouched
+            // (the app's own copy survives, and `sessionsListCache` covers a cold start), but the
+            // daemon can say which sessions exist and are alive right now — including one this app
+            // has never seen, which is exactly the case a cached list cannot cover.
+            // Fire and forget, for the same reason as the server-disabled branch above: this is a
+            // state update fed by the LAN, and the screen already has the cached list. Awaiting it
+            // put a 4-second mDNS browse behind every failed server fetch, which read as the list
+            // itself being slow.
+            void this.fetchSessionListFromDaemons().catch((lanError) => {
+                log.log(`📡 fetchSessions: LAN list failed: ${String(lanError)}`);
+            });
+            // No spinner risk: sessionListViewData is initialised to [] on applyReady, so an
+            // empty store already renders the empty state. _forceFullRefreshPending is also only
+            // cleared inside the try, so a failed attempt stays pending and the next invalidation
+            // retries the full refresh.
         }
     }
 
@@ -1463,6 +2292,7 @@ class Sync {
         agentState: string | null; agentStateVersion: number;
         dataEncryptionKey: string | null;
         active: boolean; activeAt: number;
+        thinking?: boolean; thinkingAt?: number;
         createdAt: number; updatedAt: number;
     }): Promise<(Omit<Session, 'presence'> & { presence?: 'online' | number }) | null> => {
         try {
@@ -1472,16 +2302,30 @@ class Sync {
                     const keyMap = new Map<string, Uint8Array | null>();
                     keyMap.set(raw.id, key);
                     await this.encryption.initializeSessions(keyMap);
+                    // Accumulate so the next cache save includes this key.
+                    this.sessionEncryptionKeySources.set(raw.id, raw.dataEncryptionKey);
                 }
             }
             const sessionEncryption = this.encryption.getSessionEncryption(raw.id);
             if (!sessionEncryption) {
                 // No encryption key yet — return raw session with null metadata.
-                return { ...raw, metadata: null, agentState: null, thinking: false, thinkingAt: 0 };
+                return {
+                    ...raw,
+                    metadata: null,
+                    agentState: null,
+                    thinking: raw.thinking ?? false,
+                    thinkingAt: raw.thinkingAt ?? (raw.thinking ? raw.activeAt : 0),
+                };
             }
             const metadata = await sessionEncryption.decryptMetadata(raw.metadataVersion, raw.metadata);
             const agentState = await sessionEncryption.decryptAgentState(raw.agentStateVersion, raw.agentState);
-            return { ...raw, metadata, agentState, thinking: false, thinkingAt: 0 };
+            return {
+                ...raw,
+                metadata,
+                agentState,
+                thinking: raw.thinking ?? false,
+                thinkingAt: raw.thinkingAt ?? (raw.thinking ? raw.activeAt : 0),
+            };
         } catch {
             return null;
         }
@@ -1492,6 +2336,8 @@ class Sync {
     }
 
     public refreshSessions = async () => {
+        // User-triggered refresh → force full fetch to purge stale sessions
+        this.#refreshSessionsFull(true);
         return this.sessionsSync.invalidateAndAwait();
     }
 
@@ -1787,7 +2633,7 @@ class Sync {
 
         const API_ENDPOINT = getServerUrl();
         log.log(`🖥️ fetchMachines: GET ${API_ENDPOINT}/v1/machines`);
-        const response = await fetch(`${API_ENDPOINT}/v1/machines`, {
+        const response = await fetchWithTimeout(`${API_ENDPOINT}/v1/machines`, {
             headers: {
                 'Authorization': `Bearer ${this.credentials.token}`,
                 'Content-Type': 'application/json'
@@ -1819,6 +2665,7 @@ class Sync {
 
         // First, collect and decrypt encryption keys for all machines
         const machineKeysMap = new Map<string, Uint8Array | null>();
+        const wrappedKeys: Record<string, string> = {};
         for (const machine of machines) {
             if (machine.dataEncryptionKey) {
                 const decryptedKey = await this.encryption.decryptEncryptionKey(machine.dataEncryptionKey);
@@ -1828,10 +2675,15 @@ class Sync {
                 }
                 machineKeysMap.set(machine.id, decryptedKey);
                 this.machineDataKeys.set(machine.id, decryptedKey);
+                wrappedKeys[machine.id] = machine.dataEncryptionKey;
             } else {
                 machineKeysMap.set(machine.id, null);
             }
         }
+
+        saveWrappedMachineKeys({ ...loadWrappedMachineKeys(), ...wrappedKeys });
+        // A key that arrives after the sighting is what makes the machine usable; nothing else re-checks.
+        this.reconcileDaemonSockets();
 
         // Initialize machine encryptions
         await this.encryption.initializeMachines(machineKeysMap);
@@ -1888,6 +2740,10 @@ class Sync {
             }
         }
 
+        for (const machine of decryptedMachines) {
+            storage.getState().applyRelayEndpoint(machine.id, parseRelayEndpoint(machine.id, machine.daemonState));
+            storage.getState().applyLanEndpoint(machine.id, parseLanEndpoints(machine.id, machine.daemonState));
+        }
         // Replace entire machine state with fetched machines
         storage.getState().applyMachines(decryptedMachines, true);
         log.log(`🖥️ fetchMachines completed - processed ${decryptedMachines.length} machines`);
@@ -2010,7 +2866,7 @@ class Sync {
             while (retryCount < maxRetries) {
                 let version = storage.getState().settingsVersion;
                 let settings = applySettings(storage.getState().settings, this.pendingSettings);
-                const response = await fetch(`${API_ENDPOINT}/v1/account/settings`, {
+                const response = await fetchWithTimeout(`${API_ENDPOINT}/v1/account/settings`, {
                     method: 'POST',
                     body: JSON.stringify({
                         settings: await this.encryption.encryptRaw(settings),
@@ -2071,7 +2927,7 @@ class Sync {
         }
 
         // Run request
-        const response = await fetch(`${API_ENDPOINT}/v1/account/settings`, {
+        const response = await fetchWithTimeout(`${API_ENDPOINT}/v1/account/settings`, {
             headers: {
                 'Authorization': `Bearer ${this.credentials.token}`,
                 'Content-Type': 'application/json'
@@ -2116,7 +2972,7 @@ class Sync {
         if (!this.credentials) return;
 
         const API_ENDPOINT = getServerUrl();
-        const response = await fetch(`${API_ENDPOINT}/v1/account/profile`, {
+        const response = await fetchWithTimeout(`${API_ENDPOINT}/v1/account/profile`, {
             headers: {
                 'Authorization': `Bearer ${this.credentials.token}`,
                 'Content-Type': 'application/json'
@@ -2164,7 +3020,7 @@ class Sync {
             const version = Constants.expoConfig?.version!;
             const appId = (Platform.OS === 'ios' ? Constants.expoConfig?.ios?.bundleIdentifier! : Constants.expoConfig?.android?.package!);
 
-            const response = await fetch(`${serverUrl}/v1/version`, {
+            const response = await fetchWithTimeout(`${serverUrl}/v1/version`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -2258,76 +3114,99 @@ class Sync {
             return;
         }
 
+        /**
+         * Entries leave the queue when they *settle*, not when they are written.
+         *
+         * A write is not an outcome. On the daemon channels it proves only that this side handed
+         * bytes to a socket — a socket whose peer may already be gone, in which case the write
+         * succeeds, the session never sees the message, and the entry used to be dropped from the
+         * queue here on the strength of that write alone. The user's next message then went
+         * through fine, which is what made this look like "the first message is always lost".
+         * Keeping it queued means a later flush — the delivery timer below, a fresh connection, or
+         * simply the next message — can send it again, and the session dedups repeats on `localId`,
+         * so sending it twice costs nothing.
+         */
+        const outstanding = pending.filter((msg) => storage.getState().outbox[msg.localId]?.status === 'sending');
+        if (outstanding.length !== pending.length) {
+            pending.length = 0;
+            pending.push(...outstanding);
+        }
+        if (pending.length === 0) {
+            this.pendingOutbox.delete(sessionId);
+            return;
+        }
         const batch = pending.slice();
 
-        // Prefer WebSocket send — same path as CLI. No HTTP round-trip, no
-        // Tauri HTTP plugin issues. Server echoes back via new-message WS
-        // event, which handleUpdate already fast-acks.
-        if (apiSocket.isConnected) {
-            try {
+        // A session the machine itself reports as not running cannot take a message, and writing
+        // one anyway is what times out: the socket accepts it, no process is there to read it.
+        // Starting the process is the daemon's own call, so it works when this is the only session
+        // and it is down — which is the state a reboot leaves every session in.
+        if (this.sessionReportedDown(sessionId)) {
+            const wake = await this.wakeSession(sessionId);
+            if (wake === 'failed') {
                 for (const msg of batch) {
-                    apiSocket.send('message', {
-                        sid: sessionId,
-                        message: msg.content,
-                        localId: msg.localId,
-                    });
+                    storage.getState().failOutboxEntries(
+                        [msg.localId],
+                        'The session is not running, and this machine could not start it.',
+                    );
                 }
                 pending.splice(0, batch.length);
-                for (const msg of batch) {
-                    storage.getState().markOutboxMessageAcked(msg.localId);
+                if (pending.length === 0) {
+                    this.pendingOutbox.delete(sessionId);
                 }
-                // WS send has no seq ack — pull receive cursor forward via HTTP.
-                this.getMessagesSync(sessionId).invalidate();
                 return;
-            } catch (_err) {
-                // WS send failed — fall through to HTTP POST below.
             }
         }
 
+        // The walk itself lives in `channels/ops.ts`, where its order and what each rung's answer
+        // means are pinned down by tests rather than by reading this method. What stays here is the
+        // queue: what leaving it means, and what each outcome settles.
         const controller = new AbortController();
         this.sendAbortControllers.set(sessionId, controller);
+        let result: SendResult;
         try {
-            const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages`, {
-                method: 'POST',
-                body: JSON.stringify({
-                    messages: batch.map((message) => ({
-                        localId: message.localId,
-                        content: message.content
-                    }))
-                }),
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                signal: controller.signal
+            result = await sendBatch({
+                daemon: this.daemonSendTarget(sessionId)?.handle ?? null,
+                server: apiSocket,
+                sessionId,
+                batch,
+                signal: controller.signal,
             });
-            if (!response.ok) {
-                throw new Error(`Failed to send messages for ${sessionId}: ${response.status}`);
-            }
-
-            const data = await response.json() as V3PostSessionMessagesResponse;
-            pending.splice(0, batch.length);
-
-            // Server confirmed – mark as acked (green check). The echo
-            // (fast-ack or text-matched session-protocol echo) will remove it.
-            for (const msg of batch) {
-                storage.getState().markOutboxMessageAcked(msg.localId);
-            }
-
-            if (Array.isArray(data.messages) && data.messages.length > 0) {
-                const currentLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
-                let maxSeq = currentLastSeq;
-                for (const message of data.messages) {
-                    if (message.seq > maxSeq) {
-                        maxSeq = message.seq;
-                    }
-                }
-                this.sessionLastSeq.set(sessionId, maxSeq);
-            }
-        } catch (error) {
-            this.maybeStartBackgroundSendWatchdog();
-            throw error;
         } finally {
             this.sendAbortControllers.delete(sessionId);
+        }
+
+        if (result.kind === 'unconfirmed') {
+            // A write over the machine's own channel is not a delivery. There the server echoes the
+            // message back so a fast-ack is a claim it will honour; here nothing confirms the write
+            // but the session itself, and treating the write as the delivery is exactly what hides
+            // a dropped message. Each entry waits for that verdict, and fails if it never arrives.
+            for (const msg of batch) {
+                this.awaitLanDelivery(msg.localId);
+            }
+            return;
+        }
+        if (result.kind === 'failed') {
+            this.maybeStartBackgroundSendWatchdog();
+            throw result.error;
+        }
+
+        pending.splice(0, batch.length);
+        // Server confirmed – mark as acked (green check). The echo (fast-ack or text-matched
+        // session-protocol echo) will remove it.
+        for (const msg of batch) {
+            storage.getState().markOutboxMessageAcked(msg.localId);
+        }
+        if (result.over === 'socket') {
+            // WS send has no seq ack — pull receive cursor forward via HTTP.
+            this.getMessagesSync(sessionId).invalidate();
+        } else if (result.advanceTo !== undefined) {
+            // The one path that says where the session now stands: the server answered with the seqs
+            // it assigned, so the receive cursor moves with it rather than being pulled.
+            const currentLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
+            if (result.advanceTo > currentLastSeq) {
+                this.sessionLastSeq.set(sessionId, result.advanceTo);
+            }
         }
 
         if (pending.length === 0) {
@@ -2342,24 +3221,249 @@ class Sync {
         }
     }
 
-    private acquireMessageFetchSlot = (): Promise<void> => {
-        if (this.messageFetchRunning < Sync.MAX_CONCURRENT_MESSAGE_FETCHES) {
-            this.messageFetchRunning++;
-            return Promise.resolve();
+    /**
+     * How long a waiter for a fetch slot waits before looking again.
+     *
+     * The pool reclaims an expired lease on its own, but only when someone asks it for a slot — and
+     * the queue of waiters was pumped *only* by a release. So a holder that never released (a fetch
+     * suspended mid-request on iOS, or one waiting on a wedged SQLite call, whose `finally` never
+     * ran) left every waiter behind it parked for the life of the process, even though its own slot
+     * had long since been reclaimed: opening a session printed "acquiring lock" and then nothing.
+     * A waiter that looks again on its own is what makes the lease worth having.
+     */
+    private static readonly FETCH_SLOT_RETRY_MS = 2_000;
+
+    /** The one timer that keeps looking while waiters exist, so waiting is not tied to a release. */
+    private fetchSlotTimer: ReturnType<typeof setTimeout> | null = null;
+
+    private acquireMessageFetchSlot = (): Promise<number> => {
+        const token = this.messageFetchSlots.tryAcquire(Date.now());
+        if (token !== null) {
+            return Promise.resolve(token);
         }
-        return new Promise<void>((resolve) => {
+        return new Promise<number>((resolve) => {
             this.messageFetchQueue.push(resolve);
+            this.armMessageFetchPump();
         });
     };
 
-    private releaseMessageFetchSlot = (): void => {
-        if (this.messageFetchQueue.length > 0) {
+    private releaseMessageFetchSlot = (token: number): void => {
+        // False means the lease was reclaimed while this fetch was still running: the slot already
+        // belongs to someone else, and freeing it again would let one more fetch through than the
+        // limit allows.
+        if (!this.messageFetchSlots.release(token)) {
+            return;
+        }
+        this.pumpMessageFetchQueue();
+    };
+
+    /** Keeps one timer alive for as long as anyone is waiting, and no longer. */
+    private armMessageFetchPump = (): void => {
+        if (this.fetchSlotTimer !== null || this.messageFetchQueue.length === 0) {
+            return;
+        }
+        this.fetchSlotTimer = setTimeout(() => {
+            this.fetchSlotTimer = null;
+            this.pumpMessageFetchQueue();
+            this.armMessageFetchPump();
+        }, Sync.FETCH_SLOT_RETRY_MS);
+        (this.fetchSlotTimer as unknown as { unref?: () => void }).unref?.();
+    };
+
+    private pumpMessageFetchQueue = (): void => {
+        while (this.messageFetchQueue.length > 0) {
+            const token = this.messageFetchSlots.tryAcquire(Date.now());
+            if (token === null) {
+                return;
+            }
             const next = this.messageFetchQueue.shift();
-            if (next) next();
-        } else {
-            this.messageFetchRunning--;
+            if (!next) {
+                this.messageFetchSlots.release(token);
+                return;
+            }
+            next(token);
         }
     };
+
+    /**
+     * The daemon channel's reaction to the network moving under it.
+     *
+     * The server channel hears about a network change twice over — socket.io's transport fails on
+     * its own, and this listener probes — but a daemon socket is a plain WebSocket to an address
+     * that belongs to the network we were on. On WiFi → cellular that address is not reachable and
+     * the socket is not told; worse, a session whose socket still looks alive has neither a push
+     * (the socket is dead) nor a poll (polling stops while a socket is up), so it simply goes
+     * quiet. What is stale is everything about *how* to reach a machine: the address, the token
+     * bound to the connection, the socket, and the sightings that described the old network.
+     */
+    /**
+     * Treats a changed device address as the network move it is.
+     *
+     * `expo-network` reports connectivity and interface type, not which network: a phone that
+     * joins another WiFi is still connected, still `WIFI`, and the listener stays silent. Its own
+     * address is the difference, and it is the fact every LAN candidate was evaluated against —
+     * so a change here re-arms what the last network taught us, exactly as a reported switch does.
+     */
+    private async detectNetworkMove(): Promise<void> {
+        if (Platform.OS === 'web') {
+            return;
+        }
+        let ip: string;
+        try {
+            ip = await Network.getIpAddressAsync();
+        } catch {
+            return; // no address to compare is not evidence of a move
+        }
+        if (!ip || ip === '0.0.0.0') {
+            return;
+        }
+        const previous = this.lastDeviceIp;
+        this.lastDeviceIp = ip;
+        if (previous !== null && previous !== ip) {
+            log.log(`🌐 Device address changed (${previous} → ${ip}); treating it as a network move`);
+            this.onNetworkChanged('switched');
+        }
+    }
+
+    private onNetworkChanged(reason: 'lost' | 'regained' | 'switched'): void {
+        // Only what is *known* about reaching a machine is discarded — the cached address and the
+        // token bound to it, and the sightings, which describe the network we were on. The sockets
+        // are deliberately left alone: a socket that the change actually broke will say so through
+        // its own close event, which is the same path that already clears it and reconnects, and a
+        // socket it did not break is still the channel. Tearing them down here made every network
+        // hiccup close and reopen the connection, and `expo-network` reports those hiccups often
+        // enough for that to be the bulk of the socket churn.
+        this.lanMachineConnections.clear();
+        // And what each address has done, for the same reason: an address that did not answer on the
+        // last network is not evidence about this one. This is one of the few things that re-arms a
+        // demoted address, and it is why a device that moves networks recovers without waiting out a
+        // backoff.
+        storage.getState().rearmCandidateHealth();
+        if (reason !== 'regained') {
+            // A device that never lost connectivity may have moved networks without a gap — but a
+            // return to connectivity is the same network it left.
+            storage.getState().clearLanSightings();
+        }
+        // Rate-limited: the listener is chatty, and invalidating every session on each report is a
+        // storm of reads for information that has not changed twice.
+        const now = Date.now();
+        if (now - this.lastNetworkChangeHandledAt < Sync.NETWORK_CHANGE_COOLDOWN_MS) {
+            return;
+        }
+        this.lastNetworkChangeHandledAt = now;
+        this.reconcileDaemonSockets();
+        // A network change invalidating every session causes a fetch storm that delays the
+        // session the user is actually looking at. Use the scheduler instead.
+        this.readScheduler.markStale();
+    }
+
+    /** A network report is a hint, not an event: several arrive for one change. */
+    private static readonly NETWORK_CHANGE_COOLDOWN_MS = 10_000;
+    private lastNetworkChangeHandledAt = 0;
+
+    /**
+     * What the channel currently holds for a session, for the Dev Tools page.
+     *
+     * A conversation that is missing messages cannot be diagnosed from the outside: "delivered but
+     * not opened", "the window never covered it" and "the reader believes it is up to date" all look
+     * the same from a log of reads. These are the numbers that tell them apart.
+     */
+    channelDiagnostics(sessionId: string | null): {
+        channel: string;
+        window: string;
+        hasOlder: boolean;
+        readTo: string | null;
+        pushedTo: string | null;
+        logHead: string | null;
+        lastRead: string;
+    } | null {
+        if (!sessionId) {
+            return null;
+        }
+        const state = storage.getState();
+        const messages = state.sessionMessages[sessionId];
+        const link = this.daemonLinks.get(sessionId);
+        const lastRead = state.sessionMessages[sessionId]?.isFetching ? 'in flight' : 'idle';
+        return {
+            channel: this.preferredChannel(sessionId),
+            window: messages ? `${messages.oldestSeq}–${messages.newestSeq} (${messages.messages.length} messages)` : 'none',
+            hasOlder: messages?.hasOlderMessages ?? false,
+            readTo: link?.cursor ?? null,
+            pushedTo: this.pushedPositions.get(sessionId) ?? null,
+            logHead: this.lastHintHeads.get(sessionId) ?? null,
+            lastRead,
+        };
+    }
+
+    /** The fetch pool as the Dev Tools page reads it: a stuck pool is otherwise invisible. */
+    fetchSlotStats(): { inFlight: number; queued: number; oldestMs: number } {
+        return {
+            inFlight: this.messageFetchSlots.inFlight,
+            queued: this.messageFetchQueue.length,
+            oldestMs: this.messageFetchSlots.oldestHeldFor(Date.now()),
+        };
+    }
+
+    /**
+     * Stops what a superseded module evaluation left running.
+     *
+     * Metro replaces this module on a hot reload without tearing down the old instance's timers or
+     * listeners. The two then share the store and the socket: the old one kept a two-second poll
+     * alive for a session no longer on screen (observed as `read scheduled … (visible)` for a
+     * session the user had already left) and both reacted to every push. One evaluation owns the
+     * background work; the next stops it before taking over.
+     */
+    stopBackgroundWork(): void {
+        this.readScheduler.stop();
+        if (this.sessionsRefreshInterval !== null) {
+            clearInterval(this.sessionsRefreshInterval);
+            this.sessionsRefreshInterval = null;
+        }
+        for (const timer of this.cacheSaveTimers.values()) {
+            clearTimeout(timer);
+        }
+        this.cacheSaveTimers.clear();
+        for (const timer of this.logGrewReadTimers.values()) {
+            clearTimeout(timer);
+        }
+        this.logGrewReadTimers.clear();
+        for (const timer of this.messageReadDeadlines.values()) {
+            clearTimeout(timer);
+        }
+        this.messageReadDeadlines.clear();
+        for (const timer of this.pushedEntryTimers.values()) {
+            clearTimeout(timer);
+        }
+        this.pushedEntryTimers.clear();
+        this.pushedEntryBatches.clear();
+        this.reconnectedCleanup?.();
+        this.reconnectedCleanup = null;
+        this.appStateSubscription?.remove();
+        this.appStateSubscription = null;
+        this.networkStateSubscription?.remove();
+        this.networkStateSubscription = null;
+        for (const sync of this.messagesSync.values()) {
+            sync.stop();
+        }
+        this.messagesSync.clear();
+        for (const sync of this.sendSync.values()) {
+            sync.stop();
+        }
+        this.sendSync.clear();
+    }
+
+    recoverFetchesAfterSuspend(): void {
+        const waiting = this.messageFetchQueue.length;
+        this.messageFetchSlots.reset();
+        this.pumpMessageFetchQueue();
+        // A hydration suspended mid-read will never settle either; drop it so the next open reads
+        // again instead of awaiting a promise from the previous JS execution.
+        this.hydratingSessions.clear();
+        for (const lock of this.sessionMessageLocks.values()) {
+            lock.reset();
+        }
+        log.log(`📱 Cleared fetch state after a suspension (${waiting} queued, ${this.sessionMessageLocks.size} session locks)`);
+    }
 
     /**
      * Retry a previously failed outbox message identified by its localId.
@@ -2372,6 +3476,22 @@ class Sync {
         // Pass existingLocalId so sendMessage resets the outbox entry to 'sending'
         // and skips creating a second optimistic bubble.
         await this.sendMessage(entry.sessionId, entry.text, entry.displayText, localId);
+    }
+
+    /**
+     * Returns true if a fetchMessages error is a transient network/HTTP failure
+     * worth retrying via InvalidateSync's backoff. Logical errors (decryption,
+     * normalization, malformed data) return false — retrying them would spin
+     * forever with no chance of success.
+     */
+    private isRetryableMessageFetchError(err: unknown): boolean {
+        if (!(err instanceof Error)) return false;
+        const msg = err.message.toLowerCase();
+        // HTTP status errors (5xx/4xx) — server may be transiently unavailable.
+        if (/failed to fetch messages/.test(msg)) return true;
+        // Network-level failures and timeouts.
+        if (/network|fetch failed|timeout|econnrefused|econnreset|etimedout|enotfound|abort/i.test(msg)) return true;
+        return false;
     }
 
     /**
@@ -2480,34 +3600,239 @@ class Sync {
      * newest 100 messages on cold start instead of paginating the full history.
      * Incremental updates (after a cache hit) still fetch from lastSeq forward.
      */
+    /**
+     * Applies the persisted window to the store, before anything takes the message lock.
+     *
+     * This used to run *inside* that lock, so a tap waited for whatever fetch was already in
+     * flight for the same session — usually the one that hung and is the reason the lock is stuck.
+     * Reading local state has no business waiting for network work, and the screen's first frame is
+     * exactly this read; the lock now protects only the network half.
+     *
+     * It is also retried when a session is marked hydrated but holds nothing: the old code marked
+     * before the read, so a cancelled read (backgrounding, a reload) left the session permanently
+     * skipped — the "opens empty every time" shape.
+     */
+    private hydrateSession = async (sessionId: string): Promise<void> => {
+        const inFlight = this.hydratingSessions.get(sessionId);
+        if (inFlight) {
+            return inFlight;
+        }
+        const state = storage.getState();
+        const session = state.sessions[sessionId];
+        if (!session) {
+            return;
+        }
+        const existing = state.sessionMessages[sessionId]?.messages ?? [];
+        if (existing.length > 0 && this.hydratedSessions.has(sessionId)) {
+            // A window is already on screen and it came from this process's cache. Nothing to do.
+            return;
+        }
+        if (existing.length > 0) {
+            // Messages are held, but nothing has been hydrated in this process — after a reload
+            // that is a live push that beat the cache to the store, not a window. Measured on a
+            // device: ten pushed messages arrived 170ms after a tap and the cache's sixty-message
+            // window was then refused ("already holds 10; nothing to load") for the rest of the
+            // process. The cache is read and merged into what is held.
+        }
+        this.hydratedSessions.delete(sessionId);
+
+        type Loaded = Awaited<ReturnType<typeof loadMessageCache>>;
+        const apply = (cached: Loaded, startedAt: number): void => {
+            if (!cached) {
+                return;
+            }
+            // A live delivery may have landed while the cache was being read. That window is not
+            // newer than the cache — it is usually a few pushed messages that belong *inside* the
+            // cached one. It used to win by default, and after a reload that meant the screen kept
+            // ten pushed messages and refused the sixty-message window it had on disk. Merge by
+            // identity so neither side is dropped.
+            const heldWindow = storage.getState().sessionMessages[sessionId];
+            const held = heldWindow?.messages ?? [];
+            const merged = held.length > 0 ? mergePageIntoWindow(held, cached.messages) : null;
+            if (held.length > 0 && !merged) {
+                this.hydratedSessions.add(sessionId);
+                log.log(`💬 hydrate: ${sessionId} already held all ${held.length} cached message(s)`);
+                return;
+            }
+            const messages = merged ? merged.messages : cached.messages;
+            // The edges of the union, so a merged window never claims to be smaller — or newer —
+            // than what it already held.
+            const lastSeq = held.length > 0
+                ? Math.max(cached.lastSeq, heldWindow?.newestSeq ?? 0)
+                : cached.lastSeq;
+            const oldestSeq = cached.oldestSeq > 0 && (heldWindow?.oldestSeq ?? 0) > 0
+                ? Math.min(cached.oldestSeq, heldWindow!.oldestSeq)
+                : Math.max(cached.oldestSeq, heldWindow?.oldestSeq ?? 0);
+            const hasOlderMessages = cached.hasOlderMessages || (heldWindow?.hasOlderMessages ?? false);
+            storage.getState().applyHydratedCache(
+                sessionId,
+                messages,
+                cached.reducerState,
+                oldestSeq,
+                hasOlderMessages,
+                lastSeq,
+            );
+            this.sessionLastSeq.set(sessionId, Math.max(cached.lastSeq, this.sessionLastSeq.get(sessionId) ?? 0));
+            // Marked only once the window is in the store. Marking first meant a cancelled read
+            // disabled the cache for the rest of the process.
+            this.hydratedSessions.add(sessionId);
+            log.log(
+                `💬 hydrate: applied ${messages.length} cached messages for ${sessionId}` +
+                ` in ${Date.now() - startedAt}ms (lastSeq=${lastSeq}, oldestSeq=${oldestSeq}` +
+                `${merged ? `, +${merged.added.length} from cache` : ''})`
+            );
+        };
+
+        const run = (async () => {
+            const startedAt = Date.now();
+            try {
+                const pending = loadMessageCache(session, this.preferredChannel(sessionId) !== 'server');
+                // The hot window resolves before the first await, so this deadline only ever bites
+                // the SQLite fallback — and on a device that fallback was measured at 19–31s while
+                // the cache connection was contended. Waiting that long is what an empty screen is;
+                // the channel can fill the session, and the read is left running so its result is
+                // still applied if it lands while the store is empty.
+                const outcome = await Promise.race([
+                    pending,
+                    new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 2_000)),
+                ]);
+                if (outcome === 'timeout') {
+                    log.log(`💬 hydrate: cache read for ${sessionId} still running after 2s; the channel will fill it`);
+                    void pending
+                        .then((cached) => { apply(cached, startedAt); })
+                        .catch(() => { /* the channel is already carrying this session */ });
+                    return;
+                }
+                if (!outcome) {
+                    log.log(`💬 hydrate: no cache for ${sessionId} (will read from the channel)`);
+                    return;
+                }
+                apply(outcome, startedAt);
+            } catch (error) {
+                log.log(`💬 hydrate: failed for ${sessionId}: ${String(error)}`);
+            } finally {
+                this.hydratingSessions.delete(sessionId);
+            }
+        })();
+        this.hydratingSessions.set(sessionId, run);
+        return run;
+    };
+
+    /**
+     * The deadline for a message read that fell through to the server.
+     *
+     * A disconnected socket is the server saying it is not answering, so an HTTP read to it is not
+     * going to fare better — and that read holds this session's only read lock, which means every
+     * tick behind it waits too. Measured on a device during a daemon restart with the server down:
+     * one request sat on its thirty-second deadline and the session showed nothing new the whole
+     * time. A short deadline lets the next tick try the channel that is actually up.
+     */
+    private serverReadOptions(): RequestInit | undefined {
+        if (apiSocket.isConnected) {
+            return undefined;
+        }
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5_000);
+        (timer as unknown as { unref?: () => void }).unref?.();
+        return { signal: controller.signal };
+    }
+
+    /** Deadlines for in-flight server message reads, so `stopBackgroundWork` can clear them. */
+    private messageReadDeadlines = new Map<string, ReturnType<typeof setTimeout>>();
+
+    /**
+     * The highest server-seq this App actually holds, per session — the server axis's watermark.
+     *
+     * Written only where server bytes were applied (this path and its fetch result); a daemon
+     * read advancing its own counter must not move it, which is the whole point of the field:
+     * the store's `newestSeq` cannot say this, because both channels write it.
+     */
+    private serverNewestSeq = new Map<string, number>();
+    /**
+     * The last seq the server itself reported for a session, learned from a server-served list.
+     *
+     * `session.seq` in the store cannot be trusted for the axis: when the server cannot answer,
+     * the session list is served by a daemon, whose per-session counter is a different numbering.
+     * This map remembers the server's number past such a fallback, so the up-to-date guard keeps
+     * comparing like with like even while the list itself is daemon-numbered.
+     */
+    private serverSessionSeq = new Map<string, number>();
+    /**
+     * Which axis the session list in the store is currently numbered on. A daemon-served list
+     * sets 'daemon', a server answer sets 'server'.
+     */
+    private sessionsListAxis: 'server' | 'daemon' = 'server';
+    /**
+     * When the eager roster last ran, and whether one is running.
+     *
+     * The roster is what puts a session on screen before the server's list arrives, but it is a
+     * browse plus a request per machine: run on every list refresh it dominated the JS thread and
+     * rewrote the session store several times a minute (measured: 180 roster answers and 576
+     * channel resolutions in half an hour). One read a minute is enough to discover sessions.
+     */
+    private lastRosterFetchAt = 0;
+    private rosterFetchInFlight = false;
+    private static readonly ROSTER_FETCH_INTERVAL_MS = 60_000;
+
+    /**
+     * The server-axis position of a session, for guards and fetch anchors.
+     *
+     * When the list came from the server, its `seq` is exactly that and is always the freshest
+     * such number this App has. When the list came from a daemon, the store's `seq` is on the
+     * daemon's axis and comparing against it would be meaningless in both directions — the last
+     * number the server itself reported is used instead, and zero (never seen) means "no basis
+     * to skip a fetch", which is the only safe answer.
+     */
+    private serverAxisSeq(sessionId: string, storeSeq: number): number {
+        if (this.sessionsListAxis === 'server') {
+            return storeSeq;
+        }
+        return this.serverSessionSeq.get(sessionId) ?? 0;
+    }
+
     private fetchMessages = async (sessionId: string) => {
+        // The cached window first, outside the lock: this is the tap's first frame.
+        await this.hydrateSession(sessionId);
         log.log(`💬 fetchMessages starting for session ${sessionId} - acquiring lock`);
         const lock = this.getSessionMessageLock(sessionId);
+        const held = lock.heldFor(Date.now());
+        if (held > Sync.STUCK_MESSAGE_LOCK_MS) {
+            log.log(`💬 fetchMessages: resetting a message lock held ${Math.round(held / 1000)}s for ${sessionId}`);
+            lock.reset();
+        }
+        const lockRequestedAt = Date.now();
         await lock.inLock(async () => {
-            await this.acquireMessageFetchSlot();
+            const waited = Date.now() - lockRequestedAt;
+            if (waited > 500) {
+                log.log(`💬 fetchMessages: waited ${waited}ms for the message lock (${sessionId})`);
+            }
+            const slot = await this.acquireMessageFetchSlot();
             log.log(`💬 fetchMessages: got lock for ${sessionId}`);
             try {
-                // --- Cache: cold-start hydration (Cursor sessions only) ---
-                // Load cache first — even if encryption isn't ready yet, cached
-                // messages provide instant display while the network fetch waits.
-                const session = storage.getState().sessions[sessionId];
-                const existingSessionMessages = storage.getState().sessionMessages[sessionId];
-                if (!existingSessionMessages?.isLoaded) {
-                    const cached = await loadMessageCache(session);
-                    if (cached) {
-                        storage.getState().applyHydratedCache(
-                            sessionId,
-                            cached.messages,
-                            cached.reducerState,
-                            cached.oldestSeq,
-                            cached.hasOlderMessages,
-                            cached.lastSeq,
-                        );
-                        this.sessionLastSeq.set(sessionId, cached.lastSeq);
-                        log.log(`💬 fetchMessages: hydrated from cache for ${sessionId} (lastSeq=${cached.lastSeq}, oldestSeq=${cached.oldestSeq}, ${cached.messages.length} messages)`);
-                    } else {
-                        log.log(`💬 fetchMessages: no cache for ${sessionId} (will fetch from server)`);
+                // A channel is chosen per session, and everything after this point is the same
+                // whichever one it was: the read's bytes go through `ingestChannelRead`.
+                //
+                // The daemon's channel is read on the daemon — but only while the daemon can serve
+                // the session. A machine that is not running it answers nothing for it: the session
+                // belongs to a process that lives elsewhere, or died, or has no log on that machine
+                // at all. Polling there forever leaves the conversation at whatever the cache holds,
+                // which is what a session that "will not load" is — and the server is the other
+                // channel that session may be on, so a tick the daemon could not serve falls through
+                // to it rather than returning with nothing.
+                //
+                // A pin is the one exception: it exists to make the daemon path testable, so it must
+                // mean the daemon and nothing else.
+                if (this.preferredChannel(sessionId) !== 'server') {
+                    const served = await this.fetchMessagesViaDaemon(sessionId);
+                    // No silent fallback inside a read: the channel is the resolver's answer,
+                    // and a read that disagrees with it is how one session ended up with two
+                    // current channels (logged as `relay (by-priority)` and `asking the server`
+                    // in the same breath). A failure is reported back to the resolver — the next
+                    // tick resolves to the server explicitly, with the reason on record.
+                    if (!served) {
+                        log.log(`📡 fetchMessages: daemon could not serve ${sessionId}; the resolver will place it`);
                     }
+                    return;
                 }
 
                 const encryption = this.encryption.getSessionEncryption(sessionId);
@@ -2518,11 +3843,19 @@ class Sync {
 
                 const cachedLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
                 const currentSession = storage.getState().sessions[sessionId];
-                const sessionSeq = currentSession?.seq ?? 0;
+                // The server's own numbering, and nothing else. The store's newestSeq mixes axes —
+                // daemon reads and the daemon's session list both carry the daemon's counter —
+                // so comparing it against the server's said "already up to date" about messages
+                // this App had never seen (measured: local 3260 vs server 3082 on one session),
+                // and anchoring a fetch from it asked the server for a position past its end,
+                // which it answered with nothing. The server-axis watermark below is written
+                // only by this path, so the comparison is at last apples to apples.
+                const sessionSeq = this.serverAxisSeq(sessionId, currentSession?.seq ?? 0);
+                const storedNewestSeq = this.serverNewestSeq.get(sessionId) ?? 0;
 
                 // Already up-to-date: skip the API call and loading indicator entirely.
-                if (cachedLastSeq > 0 && cachedLastSeq >= sessionSeq) {
-                    log.log(`💬 fetchMessages: already up-to-date for ${sessionId} (lastSeq=${cachedLastSeq} >= seq=${sessionSeq}), skipping fetch`);
+                if (storedNewestSeq > 0 && storedNewestSeq >= sessionSeq && sessionSeq > 0) {
+                    log.log(`💬 fetchMessages: already up-to-date for ${sessionId} (serverNewestSeq=${storedNewestSeq} >= serverSeq=${sessionSeq}), skipping fetch`);
                     return;
                 }
 
@@ -2537,20 +3870,52 @@ class Sync {
                 }
 
                 // Always anchor to the latest 100 messages from session.seq.
-                // If cachedLastSeq is recent (gap < 100), afterSeq = cachedLastSeq (incremental).
-                // If cachedLastSeq is stale (gap > 100), afterSeq = sessionSeq - 100 (jump to latest).
-                // This ensures the user always sees the newest messages first, even with a stale cache.
+                // If storedNewestSeq is recent (gap < 100), afterSeq = storedNewestSeq (incremental).
+                // If storedNewestSeq is stale (gap > 100), afterSeq = sessionSeq - 100 (jump to latest).
+                // Using the store's newestSeq (not sessionLastSeq) ensures a missed-message gap
+                // is re-fetched from the last message actually in the list, not from a seq that
+                // was only ever seen over the wire.
                 const latestAnchor = Math.max(0, sessionSeq - 100);
-                const afterSeq = cachedLastSeq > 0
-                    ? Math.max(cachedLastSeq, latestAnchor)
+                const afterSeq = storedNewestSeq > 0
+                    ? Math.max(storedNewestSeq, latestAnchor)
                     : latestAnchor;
 
-                log.log(`💬 fetchMessages: requesting after_seq=${afterSeq} for ${sessionId} (cachedLastSeq=${cachedLastSeq})`);
-                const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
-                if (!response.ok) {
-                    throw new Error(`Failed to fetch messages for ${sessionId}: ${response.status}`);
+                log.log(`💬 fetchMessages: requesting after_seq=${afterSeq} for ${sessionId} (storedNewestSeq=${storedNewestSeq}, sessionSeq=${sessionSeq})`);
+                // The deadline covers the body as well as the request. The socket's own abort
+                // stops a request that never answered, but a response that arrived and then
+                // stalled mid-body is past it: nothing rejects the `json()` read, and a read that
+                // neither completes nor fails holds this session's lock, fetch slot and sync for
+                // as long as it sits there. Measured on a device against a sick server: one read
+                // wedged a session for minutes with every later invalidate swallowed behind it.
+                const read = (async () => {
+                    const response = await apiSocket.request(
+                        `/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`,
+                        this.serverReadOptions(),
+                    );
+                    if (!response.ok) {
+                        throw new Error(`Failed to fetch messages for ${sessionId}: ${response.status}`);
+                    }
+                    return await response.json() as V3GetSessionMessagesResponse;
+                })();
+                read.catch(() => { /* the race below may already have moved on */ });
+                let data: V3GetSessionMessagesResponse;
+                try {
+                    data = await Promise.race([
+                        read,
+                        new Promise<never>((_, reject) => {
+                            this.messageReadDeadlines.set(
+                                sessionId,
+                                setTimeout(() => reject(new Error('server read stalled past its deadline')), 35_000),
+                            );
+                        }),
+                    ]);
+                } finally {
+                    const timer = this.messageReadDeadlines.get(sessionId);
+                    if (timer) {
+                        clearTimeout(timer);
+                        this.messageReadDeadlines.delete(sessionId);
+                    }
                 }
-                const data = await response.json() as V3GetSessionMessagesResponse;
                 const messages = Array.isArray(data.messages) ? data.messages : [];
 
                 let maxSeq = afterSeq;
@@ -2572,7 +3937,10 @@ class Sync {
                     // Session envelopes carry their own server-assigned localId (different from
                     // the original user message localId), so resolve by text for ALL user messages.
                     if (normalized.role === 'user') {
-                        const claimedLocalId = this.resolveLocalIdForIncoming(sessionId, normalized.id, normalized.content.text, decrypted.localId);
+                        // A user message can be plain text or a block list (file attachments), and
+                        // only the former carries `text` — read it through the discriminant.
+                        const previewText = normalized.content.type === 'text' ? normalized.content.text : '';
+                        const claimedLocalId = this.resolveLocalIdForIncoming(sessionId, normalized.id, previewText, decrypted.localId);
                         if (claimedLocalId) {
                             normalized = { ...normalized, localId: claimedLocalId };
                         }
@@ -2580,11 +3948,20 @@ class Sync {
                     normalizedMessages.push(normalized);
 
                     this.applySessionThinkingFromRawContent(sessionId, decrypted.content);
+                    // A page can be a hundred entries and each one is a JSON parse plus the
+                    // reducer's normalization — all on the JS thread. One hop per 25 bounds any
+                    // interaction's wait to a chunk instead of the whole page (the daemon path
+                    // was given the same treatment; this is the server path).
+                    if ((i + 1) % 25 === 0) {
+                        await yieldTask();
+                    }
                 }
 
-                if (normalizedMessages.length > 0) {
-                    this.applyMessages(sessionId, normalizedMessages);
-                }
+                this.ingestChannelRead(sessionId, { messages: normalizedMessages });
+
+                // The server answered, so this session is back on the primary channel — stop the
+                // polling an outage started.
+                this.stopDaemonPolling(sessionId);
 
                 this.sessionLastSeq.set(sessionId, maxSeq);
 
@@ -2631,29 +4008,74 @@ class Sync {
 
                 // Update the high-water mark for the progress bar.
                 storage.getState().setNewestSeq(sessionId, maxSeq);
+                // The server axis moved: both the watermark of what is held and the last
+                // position the server itself reported for this session. The latter is what the
+                // up-to-date guard compares against while the session list is daemon-numbered.
+                this.serverNewestSeq.set(sessionId, Math.max(this.serverNewestSeq.get(sessionId) ?? 0, maxSeq));
+                this.serverSessionSeq.set(sessionId, Math.max(this.serverSessionSeq.get(sessionId) ?? 0, maxSeq));
 
-                // --- Cache: persist after successful fetch ---
-                const updatedSession = storage.getState().sessions[sessionId];
-                const sessionMsgs = storage.getState().sessionMessages[sessionId];
-                if (updatedSession && sessionMsgs) {
-                    void saveMessageCache(
-                        updatedSession,
-                        sessionMsgs.messages,
-                        sessionMsgs.reducerState,
-                        maxSeq,
-                        oldestSeq,
-                        hasOlderMessages,
-                    );
-                }
+                // --- Cache: persist once the page has settled ---
+                // With the window this fetch established, not the store's — `applyMessages` does not
+                // write `oldestSeq`/`hasOlderMessages`, so the store can still lag what the page
+                // actually proved until `applyOlderMessages` above has run.
+                void this.saveSessionCache(sessionId, {
+                    lastSeq: maxSeq,
+                    oldestSeq,
+                    hasOlderMessages,
+                });
             } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
                 log.log(`💬 fetchMessages failed for session ${sessionId}: ${msg}`);
                 if (err instanceof Error && err.stack) {
                     log.log(`💬 fetchMessages stack: ${err.stack}`);
                 }
+                // Re-throw network/HTTP errors so InvalidateSync's backoff retries
+                // automatically. This is the self-heal path: when the network comes
+                // back (or the server recovers), the message sync retries on its own.
+                // Logical errors (decrypt/normalize) are swallowed — retrying them
+                // would spin forever without any chance of success.
+                // A session committed to the server must not fall back, so a pin to `server`
+                // actually proves something when it is used to test that the LAN stays out of the
+                // way. Note this is the *pin*, not the preference: a session the preference puts
+                // on the server should still reach for the LAN when the server fails, which is
+                // how a machine that has just come onto the network gets picked up.
+                const routes = this.daemonRoutesEnabled();
+                if (this.isRetryableMessageFetchError(err) && storage.getState().channelOverride[sessionId] !== 'server' && (routes.lan || routes.relay)) {
+                    // The server is unreachable. Before handing this over to the retry backoff,
+                    // try the other channel: the daemon that owns this session keeps its own log
+                    // of everything the session process saw, and it may be sitting on this very
+                    // network. This is the channel switch, and it is driven by the failure itself
+                    // rather than by a status flag — so it covers every reason the server can be
+                    // unreachable, not just the ones a status enum happens to model.
+                    try {
+                        const read = await this.fetchSessionFromDaemon(sessionId);
+                        if (read) {
+                            log.log(`📡 fetchMessages: server unreachable — read ${read.messages.length} message(s) over the LAN for ${sessionId}`);
+                            // The LAN only serves snapshots, so without this the session would
+                            // freeze at the moment of the switch. Keep reading until the server
+                            // answers again (stopped in the success path below).
+                            this.startDaemonPolling(sessionId);
+                        }
+                    } catch (lanError) {
+                        // The LAN is best-effort. A failure here must not mask the original error.
+                        //
+                        // Which endpoint was tried, because "Load failed" is what a webview says for
+                        // every transport-level refusal — no CORS headers on the far side, an address
+                        // on a network this device is not on, a port that is closed — and the three
+                        // have nothing in common but the message. The route is what tells them apart.
+                        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+                        const relay = machineId ? storage.getState().relayEndpoints[machineId]?.baseUrl : undefined;
+                        const lan = machineId ? this.lanMachineConnections.get(machineId)?.baseUrl : undefined;
+                        log.log(`📡 fetchMessages: fallback failed for ${sessionId} (machine ${machineId ?? '?'}, relay ${relay ?? '-'}, lan ${lan ?? '-'}, via ${this.preferredChannel(sessionId)}): ${String(lanError)}`);
+                    }
+                    // Still re-throw: the LAN log only covers what that process has seen since it
+                    // started, so it supplements the server rather than replacing it, and the
+                    // backoff keeps trying for the fuller channel.
+                    throw err;
+                }
             } finally {
                 storage.getState().applyMessagesLoaded(sessionId);
-                this.releaseMessageFetchSlot();
+                this.releaseMessageFetchSlot(slot);
             }
         });
     }
@@ -2666,11 +4088,19 @@ class Sync {
         const stateNow = storage.getState().sessionMessages[sessionId];
         if (!stateNow?.hasOlderMessages || stateNow.isLoadingOlder) return;
 
+        // A session on a daemon channel scrolls back through the daemon's log, not the server's.
+        // Same window, same prepend, different transport — the window fields and the UI gate are
+        // shared, so only the page request differs.
+        if (this.preferredChannel(sessionId) !== 'server') {
+            await this.fetchOlderViaDaemon(sessionId);
+            return;
+        }
+
         storage.getState().setLoadingOlder(sessionId, true);
 
         const lock = this.getSessionMessageLock(sessionId);
         await lock.inLock(async () => {
-            await this.acquireMessageFetchSlot();
+            const slot = await this.acquireMessageFetchSlot();
             try {
                 const encryption = this.encryption.getSessionEncryption(sessionId);
                 if (!encryption) throw new Error(`Session encryption not ready for ${sessionId}`);
@@ -2705,10 +4135,14 @@ class Sync {
 
                 const decryptedMessages = await encryption.decryptMessages(olderApiMessages);
                 const normalizedMessages: NormalizedMessage[] = [];
-                for (const decrypted of decryptedMessages) {
+                for (let i = 0; i < decryptedMessages.length; i++) {
+                    const decrypted = decryptedMessages[i];
                     if (!decrypted) continue;
                     const normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
                     if (normalized) normalizedMessages.push(normalized);
+                    if ((i + 1) % 25 === 0) {
+                        await yieldTask();
+                    }
                 }
 
                 const newHasOlderMessages = newOldestSeq > 1;
@@ -2717,25 +4151,90 @@ class Sync {
 
                 storage.getState().applyOlderMessages(sessionId, normalizedMessages, newOldestSeq, newHasOlderMessages);
 
-                // Persist updated cache
-                const updatedSession = storage.getState().sessions[sessionId];
-                const sessionMsgs = storage.getState().sessionMessages[sessionId];
-                if (updatedSession && sessionMsgs) {
-                    const lastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
-                    void saveMessageCache(
-                        updatedSession,
-                        sessionMsgs.messages,
-                        sessionMsgs.reducerState,
-                        lastSeq,
-                        newOldestSeq,
-                        newHasOlderMessages,
-                    );
-                }
+                // Persist updated cache, with the window this page established.
+                void this.saveSessionCache(sessionId, {
+                    lastSeq: this.sessionLastSeq.get(sessionId) ?? 0,
+                    oldestSeq: newOldestSeq,
+                    hasOlderMessages: newHasOlderMessages,
+                });
             } catch (err) {
                 log.log(`💬 fetchOlderMessages failed for ${sessionId}: ${err}`);
+            } finally {
+                // In `finally`, because a path that returns early — a window that no longer wants
+                // older messages — used to leave the flag set, and the spinner above the history
+                // then turned for the life of the session with nothing loading.
+                storage.getState().setLoadingOlder(sessionId, false);
+                this.releaseMessageFetchSlot(slot);
+            }
+        });
+    }
+
+    /**
+     * Scrolls back one page through the daemon's log.
+     *
+     * The anchor comes from the read that established the window — every daemon page carries both
+     * of its edges — so this needs no seq arithmetic: the log is addressed by position, and the
+     * position of the page before this one is what the last read already handed back. A session
+     * whose window came from the cache and has never been read in this process has no anchor yet,
+     * so the first scroll reads the newest page to establish one before walking back from it.
+     */
+    private async fetchOlderViaDaemon(sessionId: string): Promise<void> {
+        storage.getState().setLoadingOlder(sessionId, true);
+        const lock = this.getSessionMessageLock(sessionId);
+        await lock.inLock(async () => {
+            const slot = await this.acquireMessageFetchSlot();
+            try {
+                if (!this.daemonLinks.has(sessionId)) {
+                    await this.fetchSessionFromDaemon(sessionId);
+                }
+                const link = this.daemonLinks.get(sessionId);
+                const machineKey = link ? this.getMachineKey(link.machineId) : null;
+                if (!link || !link.hasOlder || !machineKey) {
+                    storage.getState().setLoadingOlder(sessionId, false);
+                    return;
+                }
+                // Paging back stays on the route the window was read over — that is the address
+                // this session is known to answer at — and the candidate list puts it first.
+                const attempt = await readSessionOverLan({
+                    sessionId,
+                    machineId: link.machineId,
+                    accountPublicKey: this.encryption.contentDataKey,
+                    machineKey,
+                    encryption: this.encryption,
+                    page: { kind: 'older', before: link.older },
+                    connection: link.connection,
+                    candidates: this.readCandidates(link.machineId, [link.connection.route]),
+                });
+                const read = attempt.kind === 'read' ? attempt.read : null;
+                // The same accounting the forward read does. Paging back is how a machine gets read
+                // again after a quiet spell, and it used to be the one path that learned nothing
+                // from what it found — so an address that failed here was not held against it, and
+                // one that answered was not credited.
+                if (attempt.kind === 'unreachable' && attempt.baseUrl) {
+                    storage.getState().candidateFailed(link.machineId, link.connection.route, attempt.baseUrl);
+                } else if (attempt.kind === 'read') {
+                    storage.getState().candidateSucceeded(link.machineId, attempt.read.connection.route, attempt.read.connection.baseUrl);
+                }
+                if (!read) {
+                    storage.getState().setLoadingOlder(sessionId, false);
+                    return;
+                }
+                this.daemonLinks.set(sessionId, { ...link, older: read.older, hasOlder: read.hasOlder });
+                const oldestSeq = read.messages.length > 0
+                    ? minSeqOf(read.messages)
+                    : storage.getState().sessionMessages[sessionId]?.oldestSeq ?? 0;
+                storage.getState().applyOlderMessages(sessionId, read.messages, oldestSeq, read.hasOlder);
+                void this.saveSessionCache(
+                    sessionId,
+                    { lastSeq: this.sessionLastSeq.get(sessionId) ?? 0, oldestSeq, hasOlderMessages: read.hasOlder },
+                    { machineId: link.machineId, cursor: link.cursor, floor: read.older, hasOlder: read.hasOlder },
+                );
+                log.log(`📡 fetchOlderViaDaemon: ${read.messages.length} older read for ${sessionId} (hasOlder=${read.hasOlder})`);
+            } catch (error) {
+                log.log(`📡 fetchOlderViaDaemon failed for ${sessionId}: ${String(error)}`);
                 storage.getState().setLoadingOlder(sessionId, false);
             } finally {
-                this.releaseMessageFetchSlot();
+                this.releaseMessageFetchSlot(slot);
             }
         });
     }
@@ -2784,47 +4283,50 @@ class Sync {
         apiSocket.onMessage('ephemeral', this.handleEphemeralUpdate.bind(this));
 
         // Subscribe to connection state changes
-        apiSocket.onReconnected(() => {
+        this.reconnectedCleanup = apiSocket.onReconnected(() => {
             log.log('🔌 Socket reconnected');
+            // Only a gap long enough to have missed events is worth refetching everything. The
+            // server socket can flap every few seconds (observed on a device), and invalidating
+            // the session list, the machine list and four side syncs on each flap kept the JS
+            // thread busy exactly when a conversation was being opened — the navigation waited
+            // behind work that the next event or the periodic refresh would have done anyway.
+            const downFor = Date.now() - (storage.getState().socketLastDisconnectedAt ?? 0);
+            // The list is always re-read, however short the outage. A `new-session` push that
+            // arrived while the socket was down is gone for good, and the periodic refresh that
+            // would eventually cover it runs every five minutes and is skipped entirely when the
+            // person has been idle — which is exactly the "a session I created in another client
+            // does not appear here" shape. One delta request behind a 30s cooldown is the cheap
+            // half of this handler; the side syncs below are the expensive half and keep the gap
+            // threshold.
             this.lastDesktopSessionRefreshAt = Date.now();
             this.sessionsSync.invalidate();
-            this.machinesSync.invalidate();
-            log.log('🔌 Socket reconnected: Invalidating artifacts sync');
-            this.artifactsSync.invalidate();
-            this.friendsSync.invalidate();
-            this.friendRequestsSync.invalidate();
-            this.feedSync.invalidate();
-            // Invalidate message sync for all sessions: active first so they get the concurrency slots
-            try {
-                const state = storage.getState();
-                const activeIds = new Set(state.getActiveSessions().map(s => s.id));
-                const sessionsData = state.sessionsData;
-                let active: string[] = [];
-                let inactive: string[] = [];
-                if (Array.isArray(sessionsData)) {
-                    for (const item of sessionsData) {
-                        if (typeof item !== 'string' && item?.id) {
-                            if (activeIds.has(item.id)) active.push(item.id);
-                            else inactive.push(item.id);
-                        }
-                    }
-                } else {
-                    // Fallback when sessionsData not yet populated (e.g. before first fetchSessions)
-                    const sessions = Object.values(state.sessions);
-                    for (const s of sessions) {
-                        if (activeIds.has(s.id)) active.push(s.id);
-                        else inactive.push(s.id);
-                    }
+            if (downFor >= Sync.RECONNECT_REFRESH_MS) {
+                this.machinesSync.invalidate();
+                this.artifactsSync.invalidate();
+                this.friendsSync.invalidate();
+                this.friendRequestsSync.invalidate();
+                this.feedSync.invalidate();
+            }
+            // Refresh the session the user is looking at, and only that one.
+            //
+            // This used to fan out over every session the store reports as *active*, which in this
+            // fork never means "the agent is running" — `active` is set from the session online
+            // flag, so with a daemon on the LAN keeping every session online it matched all of
+            // them. On a cold start that was 38 sessions each hydrating from SQLite at once, and
+            // because expo-sqlite serialises everything down one connection, a single-row read was
+            // measured at ~1.3s purely from queueing behind the rest. The session the user was
+            // actually opening was at the back of that queue, which is the blank conversation
+            // after the navigation animation.
+            //
+            // Scoping it down loses nothing. A session that is not loaded yet hydrates from cache
+            // when it is opened (`onSessionVisible`), and one that is already loaded receives
+            // anything new over the socket — `new-message` updates are applied whether or not the
+            // session is on screen.
+            if (this.currentVisibleSessionId) {
+                this.getMessagesSync(this.currentVisibleSessionId).invalidate();
+                if (!this.gitStatusPublished(this.currentVisibleSessionId)) {
+                    gitStatusSync.invalidate(this.currentVisibleSessionId);
                 }
-                // On reconnect, only eagerly refresh active sessions.
-                // Inactive/offline sessions load both messages and git status lazily on open.
-                for (const sessionId of active) {
-                    this.getMessagesSync(sessionId).invalidate();
-                    gitStatusSync.invalidate(sessionId);
-                }
-                // inactive: skip entirely — onSessionVisible handles both on open.
-            } catch (e) {
-                log.log(`🔄 reconnect: error invalidating message syncs: ${String(e)}`);
             }
             for (const sync of this.sendSync.values()) {
                 sync.invalidate();
@@ -2834,7 +4336,7 @@ class Sync {
     }
 
     private handleUpdate = async (update: unknown) => {
-        console.log('🔄 Sync: handleUpdate called with:', JSON.stringify(update).substring(0, 300));
+        traceUpdate(() => `🔄 Sync: handleUpdate called with: ${JSON.stringify(update).substring(0, 300)}`);
         const validatedUpdate = ApiUpdateContainerSchema.safeParse(update);
         if (!validatedUpdate.success) {
             console.log('❌ Sync: Invalid update received:', validatedUpdate.error);
@@ -2842,19 +4344,23 @@ class Sync {
             return;
         }
         const updateData = validatedUpdate.data;
-        console.log(`🔄 Sync: Validated update type: ${updateData.body.t}`);
+        traceUpdate(() => `🔄 Sync: Validated update type: ${updateData.body.t}`);
 
         if (updateData.body.t === 'new-message') {
 
             // Get encryption
             const encryption = this.encryption.getSessionEncryption(updateData.body.sid);
             if (!encryption) {
-                // Session not in local store yet (e.g. list not fetched); recover by refetching. Log at most once per sid to avoid flood.
+                // Session encryption not yet initialized (e.g. cache hasn't restored keys,
+                // or a previous fetchSessions cooldown-blocked the recovery). Force-refetch
+                // now to decrypt the dataEncryptionKey from the server response. Without
+                // 'force' the cooldown would silently drop the recovery and leave the app
+                // permanently unable to decrypt messages for this session.
                 if (!this._loggedMissingSessionForSid.has(updateData.body.sid)) {
                     this._loggedMissingSessionForSid.add(updateData.body.sid);
                     log.log(`Session ${updateData.body.sid} not found (refetching sessions)`);
                 }
-                this.fetchSessions();
+                this.fetchSessions(true);
                 return;
             }
 
@@ -2898,7 +4404,9 @@ class Sync {
                                 this.claimedServerMessageIds.set(lastMessage.id, echoedId);
                             }
                         } else if (lastMessage && lastMessage.role === 'user') {
-                            const claimedLocalId = this.resolveLocalIdForIncoming(sid, lastMessage.id, lastMessage.content.text, decrypted.localId);
+                            // See the block-list note above: only the plain-text variant has `text`.
+                            const previewText = lastMessage.content.type === 'text' ? lastMessage.content.text : '';
+                            const claimedLocalId = this.resolveLocalIdForIncoming(sid, lastMessage.id, previewText, decrypted.localId);
                             if (claimedLocalId) {
                                 lastMessage = { ...lastMessage, localId: claimedLocalId };
                             }
@@ -2920,8 +4428,10 @@ class Sync {
                             seq: updateData.body.message.seq,
                         }]);
                     } else {
-                        // Fetch sessions again if we don't have this session
-                        this.fetchSessions();
+                        // Fetch sessions again if we don't have this session.
+                        // Force-bypass cooldown: the message was already decrypted but the
+                        // session is missing from storage — waiting 30s is unacceptable.
+                        this.fetchSessions(true);
                     }
 
                     // Fast-path: apply message directly when seq is strictly consecutive.
@@ -2932,29 +4442,48 @@ class Sync {
                     // the reducer's messageIds deduplication handles re-delivery of the same msg.
                     const currentLastSeq = this.sessionLastSeq.get(updateData.body.sid);
                     const incomingSeq = updateData.body.message.seq;
+                    // The channel is one answer, for reads *and* writes. A push from the server says
+                    // what the server's log holds; when this session is served by a daemon, the
+                    // server's copy is a second source writing the same conversation into the same
+                    // store — the duplicates measured at 1793527483300 came from exactly that: two
+                    // writers, no shared identity between a server id and the log's local id.
+                    const channelCarriesMessages = this.preferredChannel(updateData.body.sid) === 'server';
                     const isFastPath = lastMessage !== null && currentLastSeq !== undefined && incomingSeq === currentLastSeq + 1;
-                    if (isFastPath && lastMessage) {
-                        console.log('🔄 Sync: Applying message (fast path):', JSON.stringify(lastMessage));
+                    if (isFastPath && lastMessage && channelCarriesMessages) {
+                        traceUpdate(() => `🔄 Sync: Applying message (fast path): ${JSON.stringify(lastMessage).substring(0, 300)}`);
                         this.enqueueMessages(updateData.body.sid, [lastMessage]);
                         this.sessionLastSeq.set(updateData.body.sid, incomingSeq);
+                        // Advance the store's newestSeq so fetchMessages' up-to-date check
+                        // reflects messages actually applied (not just seen on the wire).
+                        storage.getState().setNewestSeq(updateData.body.sid, incomingSeq);
                         didFastPath = true;
                     } else {
                         // Seq gap → trigger fetch to fill missing messages.
                         // Skip invalidate when the message normalized to null — the gap is
                         // caused by a null-normalized message (e.g. session-protocol user msg),
                         // not by actual missing data, so no fetch is needed.
-                        if (lastMessage) {
+                        //
+                        // And skip it on a daemon channel, where this fetch is not the cheap no-op
+                        // it is on the server: that path checks "am I already up to date" before
+                        // asking, while the daemon branch reads before it can know. Every pushed
+                        // message would therefore cost a read that finds nothing, because the
+                        // message was just applied — the daemon's own `log-grew` hint, sent after
+                        // a burst, is what fills a frame the socket actually missed.
+                        if (lastMessage && channelCarriesMessages) {
                             this.getMessagesSync(updateData.body.sid).invalidate();
                         }
                         // Enqueue immediately so the UI updates without waiting for fetchMessages.
-                        // sessionLastSeq is NOT updated here; fetchMessages will set it correctly.
-                        if (lastMessage) {
-                            console.log('🔄 Sync: Applying message (lenient path, seq gap):', JSON.stringify(lastMessage));
+                        // Neither sessionLastSeq nor newestSeq is advanced here — the gap must
+                        // be filled by fetchMessages before the store is considered caught up.
+                        if (lastMessage && channelCarriesMessages) {
+                            traceUpdate(() => `🔄 Sync: Applying message (lenient path, seq gap): ${JSON.stringify(lastMessage).substring(0, 300)}`);
                             this.enqueueMessages(updateData.body.sid, [lastMessage]);
                         }
                     }
-                    // Refresh git status only when turn is done (ready), not on every mutable tool result
-                    if (shouldClearThinking) {
+                    // Refresh git status only when turn is done (ready), not on every mutable tool
+                    // result — and not at all for a session whose CLI publishes it: the last tool
+                    // result already scheduled a fresh one.
+                    if (shouldClearThinking && !this.gitStatusPublished(updateData.body.sid)) {
                         gitStatusSync.invalidate(updateData.body.sid);
                     }
 
@@ -2968,9 +4497,20 @@ class Sync {
             }
 
             // Fast path already applied the message and updated sessionLastSeq —
-            // no need to trigger a redundant fetchMessages via onSessionVisible.
-            if (!didFastPath) {
-                this.onSessionVisible(updateData.body.sid);
+            // nothing more to read.
+            //
+            // A push says this session changed, not that anyone is looking at it. Calling
+            // onSessionVisible here made every pushed message of every active session claim to be
+            // the screen: it moved the scheduler's poll, re-ran the voice focus announcement
+            // ("Session became focused" for conversations not on screen, several times a second),
+            // refreshed git status and the session list. On a device with two agents running that
+            // was a continuous stream of work on a thread the screen was waiting for.
+            // Only the server channel needs a read here. On a daemon channel the push itself was
+            // applied above and the daemon sends its own `log-grew` hint for a frame the socket
+            // missed — reading on every push cost a full page per message (measured: a read per
+            // 300ms per active session, each one a store write and a re-render of the list).
+            if (!didFastPath && this.preferredChannel(updateData.body.sid) === 'server') {
+                this.readScheduler.wake(updateData.body.sid, 'push');
             }
 
         } else if (updateData.body.t === 'new-session') {
@@ -3025,11 +4565,15 @@ class Sync {
             this.sendSync.delete(sessionId);
             this.pendingOutbox.delete(sessionId);
             this.sessionLastSeq.delete(sessionId);
+            this.serverNewestSeq.delete(sessionId);
+            this.serverSessionSeq.delete(sessionId);
             this.sentMessageLocalIds.delete(sessionId);
             // claimedServerMessageIds is keyed by serverId not sessionId, so we can't easily
             // bulk-delete by session. It's small and self-limiting (only live claims), so just
             // leave entries to expire naturally (they'll never match again after session deletion).
             this.sessionMessageLocks.delete(sessionId);
+            this.hydratedSessions.delete(sessionId);
+            this.hydratingSessions.delete(sessionId);
             this.sessionMessageQueue.delete(sessionId);
             this.sessionQueueProcessing.delete(sessionId);
 
@@ -3043,7 +4587,11 @@ class Sync {
                 // Get session encryption
                 const sessionEncryption = this.encryption.getSessionEncryption(updateData.body.id);
                 if (!sessionEncryption) {
-                    console.error(`Session encryption not found for ${updateData.body.id} - this should never happen`);
+                    // Encryption key not yet initialised for this session — the cache may
+                    // have been missing the key or a previous fetch may have been cooldown-blocked.
+                    // Force-fetch sessions to recover rather than silently dropping the update.
+                    log.log(`Session encryption not found for ${updateData.body.id} — force-fetching sessions to recover`);
+                    this.fetchSessions(true);
                     return;
                 }
 
@@ -3054,9 +4602,18 @@ class Sync {
                     ? await sessionEncryption.decryptMetadata(updateData.body.metadata.version, updateData.body.metadata.value)
                     : session.metadata;
 
+                // What the machine may say about a session, which no amount of the session's own
+                // state can express: everything else here is ciphertext from the session process,
+                // and during a restart there is no session process to send any. Absent means this
+                // update says nothing about restarting — only an explicit null calls one off.
+                const restartingAt = updateData.body.restartingAt !== undefined
+                    ? updateData.body.restartingAt ?? null
+                    : session.restartingAt;
+
                 // Do not set seq from updateData.seq (global); keep session.seq as session-internal so it matches GET /v1/sessions
                 this.applySessions([{
                     ...session,
+                    restartingAt,
                     agentState,
                     agentStateVersion: updateData.body.agentState
                         ? updateData.body.agentState.version
@@ -3067,6 +4624,12 @@ class Sync {
                         : session.metadataVersion,
                     updatedAt: updateData.createdAt
                 }]);
+
+                // A working tree the session published is the badge, as soon as it says so — no
+                // round trip, and no waiting for a turn boundary.
+                if (metadata?.gitStatus) {
+                    this.applyPublishedGitStatus([{ id: updateData.body.id, metadata }]);
+                }
 
                 // Git status is refreshed on ready/turn-end only (see new-message), not on every agentState push
                 if (updateData.body.agentState) {
@@ -3084,7 +4647,7 @@ class Sync {
                     const isNowControlledByUser = agentState?.controlledByUser;
                     if (!wasControlledByUser && isNowControlledByUser) {
                         log.log(`🔄 Control returned to mobile for session ${updateData.body.id}, re-fetching messages`);
-                        this.onSessionVisible(updateData.body.id);
+                        this.readScheduler.wake(updateData.body.id, 'control returned');
                     }
                 }
             }
@@ -3180,6 +4743,8 @@ class Sync {
                 }
             }
 
+            storage.getState().applyRelayEndpoint(machineId, parseRelayEndpoint(machineId, updatedMachine.daemonState));
+            storage.getState().applyLanEndpoint(machineId, parseLanEndpoints(machineId, updatedMachine.daemonState));
             // Update storage using applyMachines which rebuilds sessionListViewData
             storage.getState().applyMachines([updatedMachine]);
         } else if (updateData.body.t === 'relationship-updated') {
@@ -3356,7 +4921,11 @@ class Sync {
             const session = storage.getState().sessions[sessionId];
             if (session) {
                 let thinking = update.thinking ?? false;
-                let thinkingAt = update.activeAt;
+                // The transition's own time, not the heartbeat's: "thinking since" must not drift
+                // with every activity frame. Old servers omit it, so keep an existing start.
+                let thinkingAt = thinking
+                    ? (update.thinkingAt ?? (session.thinking ? session.thinkingAt : update.activeAt))
+                    : 0;
                 const turnStartAt = this.sessionTurnStartAt.get(sessionId);
                 if (
                     thinking === false
@@ -3365,6 +4934,15 @@ class Sync {
                 ) {
                     thinking = session.thinking;
                     thinkingAt = session.thinkingAt;
+                }
+                // A duplicate that survived the accumulator must not rebuild the list.
+                if (
+                    session.active === update.active
+                    && session.activeAt === update.activeAt
+                    && session.thinking === thinking
+                    && session.thinkingAt === thinkingAt
+                ) {
+                    continue;
                 }
                 sessions.push({
                     ...session,
@@ -3418,8 +4996,2193 @@ class Sync {
     }
 
     //
+    // LAN channel
+    //
+
+    /**
+     * Reads a session over the local network and merges what it finds into the store.
+     *
+     * The App is a reader on both channels and nothing here writes. This exists so a session can
+     * still be read when the server is not answering: the daemon keeps its own log of everything
+     * the session process saw, and serves it over the LAN.
+     *
+     * Dedup happens *here*, not in the reducer. The reducer keys on `msg.id`, but the same message
+     * legitimately carries different ids on the two routes — the CLI logs its own outbound
+     * messages under its local id, while the server hands them back under a server-assigned id.
+     * `localId` is the one field both routes agree on, so messages already in the store are
+     * indexed by it (and by id, for records that carry no localId) and the LAN set is filtered
+     * against that index before it reaches the reducer. Without this, every message the CLI
+     * itself sent would appear twice after a switch.
+     *
+     * Note the LAN log is *not* a complete history: the CLI only records what its process saw
+     * since it started, so this is a supplement to the server's copy, never a replacement.
+     *
+     * Returns null when there is nothing to read over the LAN — see `readSessionOverLan` for the
+     * cases that covers.
+     */
+    /** Every machine this App can reach, with the address it last reached it over and by which route. */
+    /**
+     * Every machine this device could ask something about.
+     *
+     * Ids, not addresses: which address to use is the channel's answer, and this used to be a second
+     * address builder beside the drivers' — one that consulted neither the health of an address nor
+     * the order the machine ranks them in.
+     */
+    private knownMachineIds(): string[] {
+        const state = storage.getState();
+        return [...new Set([
+            ...Object.keys(state.machines),
+            ...Object.keys(state.lanEndpoints),
+            ...Object.keys(state.relayEndpoints),
+            ...Object.keys(state.lanSightings),
+            ...Object.keys(state.relayDirectory),
+        ])];
+    }
+
+    /**
+     * The same set, minus the machines this App is already on a live socket with.
+     *
+     * Those are the ones nothing has told us about lately: a machine the server channel is carrying,
+     * or one whose own socket has dropped. A machine on a live LAN or relay socket is left out, since
+     * that socket coming live is what asked it, and the answer it gave then is the freshest thing
+     * anyone could have.
+     */
+    private machinesWithoutLiveSocket(): string[] {
+        const sockets = Object.entries(storage.getState().daemonSockets);
+        return this.knownMachineIds().filter((machineId) => !sockets.some(
+            ([key, socket]) => key.startsWith(`${machineId}:`) && socket.phase === 'live'
+        ));
+    }
+
+    /**
+     * Asks each machine what build it is running, and records it. Never fatal.
+     *
+     * Asked on occasions, never on a schedule of its own: the caller decides, and each of the three
+     * callers is something that happened — a socket came live, the server could not answer, or the
+     * long server-channel sweep came round. A machine is asked once per occasion, with nothing
+     * remembered about when it last answered, because there is no such thing as holding this answer
+     * too freshly: whoever asks has a reason to.
+     */
+    private async refreshDaemonVersions(machineIds: string[]): Promise<void> {
+        for (const machineId of machineIds) {
+            if (this.daemonVersionChecks.has(machineId)) {
+                continue;
+            }
+            this.daemonVersionChecks.add(machineId);
+            try {
+                const carried = await this.carryAtDaemon<{ running: string; onDisk: string | null; restartRequired: boolean }>({
+                    machineId,
+                    operation: 'identity',
+                    run: async (baseUrl, token) => {
+                        const identity = await fetchIdentity(baseUrl, token) as { versions?: { running: string; onDisk: string | null; restartRequired: boolean } };
+                        return identity.versions ?? null;
+                    },
+                });
+                if (carried.kind === 'done' && carried.value) {
+                    const versions = carried.value;
+                    storage.getState().applyDaemonVersion(machineId, versions);
+                    log.log(`📡 daemon ${machineId.slice(0, 8)} is running ${versions.running}${versions.restartRequired ? ' (restart required)' : ''}`);
+                }
+            } catch {
+                // Best effort: a machine that will not answer is reported by its silence elsewhere.
+            } finally {
+                this.daemonVersionChecks.delete(machineId);
+            }
+        }
+    }
+
+    /** Machines whose version has been asked for, so a burst of reads does not ask repeatedly. */
+    private daemonVersionChecks = new Set<string>();
+
+    /**
+     * One read over whichever daemon route this session is on.
+     *
+     * Null is "this attempt produced no page", for any reason at all. Why is the daemon's own
+     * business — whether it has a log for the session, whether it answered, whether the address was
+     * reachable — and it is answered by looking at the daemon, not by teaching the App's channel
+     * design a taxonomy of daemon states. The caller's only decision is whether it got a page.
+     */
+    async fetchSessionFromDaemon(sessionId: string, forceRoute?: DaemonRoute): Promise<LanSessionRead | null> {
+        const accountPublicKey = this.encryption?.contentDataKey;
+        if (!accountPublicKey) {
+            return null;
+        }
+
+        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        const machineKey = machineId ? this.getMachineKey(machineId) : null;
+        const remembered = this.daemonLinks.get(sessionId);
+        const inMemory = remembered && remembered.machineId === machineId ? remembered : undefined;
+        // What this App holds of the session's log, from this process or the last one. Without it a
+        // restart has no way to tell whether the newest page abuts what it already holds, and a
+        // window and a page that are not adjacent must never be joined.
+        //
+        // The persisted anchor is only usable together with the window it describes: it says "I
+        // hold everything up to here", and a read from it returns only what came after. If the
+        // cache is gone — cleared, never written, a fresh install — that anchor is a claim about
+        // messages that are not there, and reading from it produces a window holding nothing but
+        // whatever was appended since, which is to say a blank conversation with a live socket.
+        const loadedWindow = storage.getState().sessionMessages[sessionId];
+        const hasWindow = !!loadedWindow?.isLoaded && loadedWindow.messages.length > 0;
+        const persisted = hasWindow ? this.lanWindows[sessionId] : undefined;
+        const anchor = inMemory
+            ? { cursor: inMemory.cursor, older: inMemory.older, hasOlder: inMemory.hasOlder }
+            : persisted && persisted.machineId === machineId
+                ? { cursor: persisted.cursor, older: persisted.floor, hasOlder: persisted.hasOlder }
+                : null;
+        const routes = this.readRoutes(sessionId, machineId, forceRoute);
+        // The session's own connection when it has one, otherwise whatever this machine was last
+        // reached over — same machine, so the same address and a token that covers it.
+        const knownConnection = inMemory?.connection ?? (machineId ? this.lanMachineConnections.get(machineId) : undefined);
+        const candidates = this.readCandidates(machineId, routes);
+        /**
+         * One read, with what it learned about the address written down.
+         *
+         * Only "nothing answered there" counts against an address: a daemon with no log for this
+         * session, or one that refused this device, has said something about itself or the session
+         * and nothing about whether the address works.
+         */
+        let lastReadFailure: string | null = null;
+        // What this read already holds: the daemon answers with a whole bounded page, and
+        // entries the store already has are dropped before the decryptor sees them. Without this
+        // a poll re-decrypts and re-normalises hundreds of entries to learn about a handful.
+        const knownIdentities = new Set<string>();
+        for (const message of storage.getState().sessionMessages[sessionId]?.messages ?? []) {
+            knownIdentities.add(message.id);
+            const localId = 'localId' in message ? message.localId : null;
+            if (localId) {
+                knownIdentities.add(localId);
+            }
+        }
+        const readPage = async (page: Parameters<typeof readSessionOverLan>[0]['page'], connection: LanConnection | null | undefined) => {
+            const attempt = await readSessionOverLan({
+                sessionId,
+                machineId,
+                accountPublicKey,
+                machineKey,
+                encryption: this.encryption,
+                page,
+                connection,
+                candidates,
+                isKnown: (id, localId) => knownIdentities.has(id) || (localId !== null && knownIdentities.has(localId)),
+            });
+            if (machineId && attempt.kind === 'unreachable' && attempt.baseUrl) {
+                storage.getState().candidateFailed(machineId, routes.includes('relay') && attempt.baseUrl.includes('/r/') ? 'relay' : 'lan', attempt.baseUrl);
+            } else if (machineId && attempt.kind === 'read') {
+                storage.getState().candidateSucceeded(machineId, attempt.read.connection.route, attempt.read.connection.baseUrl);
+            }
+            if (attempt.kind !== 'read') {
+                lastReadFailure = `${attempt.kind}${'reason' in attempt && typeof attempt.reason === 'string' ? `: ${attempt.reason}` : ''}`;
+            }
+            return attempt.kind === 'read' ? attempt.read : null;
+        };
+
+        // Converge from where this App is, and only fall back to the newest page when the log has
+        // moved further than one page away. Reading forward one page per tick through a backlog is
+        // what leaves a reader minutes behind on a long session; carrying the backlog is not the
+        // point of the channel — seeing the newest is.
+        const plan = planDaemonRead(anchor);
+        let read = await readPage(plan.page, knownConnection);
+        // Whether a window is replaced, re-read from the newest end, or merely extended — and the
+        // refusal to empty a conversation on the strength of an empty page. Both invariants live in
+        // `judgeDaemonPage`, where they are stated once and tested, rather than inline here.
+        let verdict = judgeDaemonPage({
+            planned: plan,
+            hasWindow,
+            read: read ? { hasNewer: read.hasNewer, reset: read.reset } : null,
+        });
+        if (verdict.kind === 'replace-from-tail') {
+            // The page just read is not adjacent to what is held, so the window is not joined to it:
+            // it is re-read from the newest end and *that* page is the window. A tail read that does
+            // not come back leaves the window alone — there is nothing to replace it with, and what
+            // is held is still what the user was looking at.
+            const tail = await readPage({ kind: 'tail' }, read!.connection);
+            if (!tail) {
+                log.log(`📡 fetchSessionFromDaemon: no newest page for ${sessionId}; keeping the window`);
+                return null;
+            }
+            read = tail;
+            verdict = { kind: 'replace' };
+        }
+        const replace = verdict.kind === 'replace';
+        if (read && replace && read.messages.length === 0 && hasWindow) {
+            // A replacement is the whole window, so an empty one would empty the conversation. An
+            // empty page is not evidence that the session has no messages — it is evidence that
+            // this read learned nothing — so it is treated as a failed read instead, which leaves
+            // what is held intact and lets the backoff try again. Only when a window is held: with
+            // nothing to lose, an empty page is simply what the tail is.
+            log.log(`📡 fetchSessionFromDaemon: empty replacement page for ${sessionId}; keeping the window`);
+            return null;
+        }
+        // A replacement page that carries nothing newer than the window would only shrink it —
+        // a fresh daemon with a short log replacing a long server-sourced window, which is the
+        // "switched channels and the conversation got shorter and older" shape. `createdAt`,
+        // not seq: the two channels number messages on different axes. The read still counts as
+        // served below — key registration, cursors and outbox settling all carry on; only the
+        // store's window is left alone.
+        let keepWindow = false;
+        if (read && replace && hasWindow) {
+            const held = storage.getState().sessionMessages[sessionId]?.messages ?? [];
+            const heldNewest = held.length > 0 ? held[held.length - 1].createdAt : 0;
+            const pageNewest = read.messages.length > 0
+                ? Math.max(...read.messages.map((message) => message.createdAt))
+                : 0;
+            if (pageNewest <= heldNewest) {
+                keepWindow = true;
+                log.log(`📡 fetchSessionFromDaemon: replacement page for ${sessionId} is not newer than the window; keeping the window`);
+            }
+        }
+        if (!read) {
+            // Every address was tried and none served this session. What that says about each one has
+            // already been recorded per address, by the read that tried it — a route is no longer
+            // marked down as a whole, which is what used to take a working address out of the
+            // running along with a broken one.
+            log.log(`📡 fetchSessionFromDaemon: no page for ${sessionId} on ${routes.join('>')}${machineId ? ` (${machineId.slice(0, 8)})` : ''}: ${lastReadFailure ?? 'no candidate answered'}`);
+            return null;
+        }
+        this.settleReceivedMessages(read.received);
+        const window = replace
+            ? { cursor: read.cursor, older: read.older, hasOlder: read.hasOlder }
+            : {
+                // A follow read advances the forward anchor only. Its `older` edge belongs to the
+                // page it read, which is newer than the window the user may have scrolled back to:
+                // taking it would point the next "load older" at entries already on screen. The
+                // window's own floor is what stands, wherever it was recovered from.
+                cursor: read.cursor,
+                older: anchor?.older ?? read.older,
+                hasOlder: anchor?.hasOlder ?? read.hasOlder,
+            };
+        this.daemonLinks.set(sessionId, {
+            machineId: read.machineId,
+            ...window,
+            connection: read.connection,
+        });
+        this.lanMachineConnections.set(read.machineId, read.connection);
+        // The machine answered, so bring the live channel up alongside the poll, on the route that
+        // answered. Fire-and-forget: polling is what keeps the session readable, and the socket
+        // only removes the delay between a message being written and being seen.
+        if (machineKey) {
+            this.connections.want({
+                route: read.connection.route,
+                baseUrl: read.connection.baseUrl,
+                machineId: read.machineId,
+                machineKey,
+            });
+        }
+
+        const oldestSeq = minSeqOf(read.messages);
+        const newestSeq = maxSeqOf(read.messages);
+        if (replace && !keepWindow) {
+            // The page becomes the window: everything before it is "older", reachable by scrolling,
+            // and nothing that was held is merged with it — merging is what would hide the range
+            // between them.
+            storage.getState().applyWindow(sessionId, read.messages, oldestSeq, newestSeq, read.hasOlder);
+            this.sessionLastSeq.set(sessionId, Math.max(this.sessionLastSeq.get(sessionId) ?? 0, newestSeq));
+        } else if (!replace) {
+            // Adjacent by construction, so the shared pipeline's append and dedup apply: a repeat
+            // of a page already applied lands as "nothing new". (A kept window takes neither
+            // branch: the page had nothing newer than it.)
+            // of a page already applied lands as "nothing new".
+            this.ingestChannelRead(sessionId, { messages: read.messages, sessionKey: read.sessionKey });
+            if (newestSeq > 0) {
+                storage.getState().setNewestSeq(sessionId, newestSeq);
+            }
+        }
+        // No "still behind" retry here, and none is needed: a page that came back cut short was
+        // answered above by reading the newest one, and that page is the end of the log by
+        // construction. Coming back for more is what walking a backlog means, and walking it is
+        // what left a session opened after a day idle showing the start of the day.
+
+        // The session key has to be registered on both paths: the live socket decrypts each pushed
+        // entry with it, and a replaced window has had no `ingestChannelRead` to do it.
+        if (read.sessionKey) {
+            this.lanSessionKeys.set(sessionId, read.sessionKey);
+            void this.encryption.initializeSessions(new Map([[sessionId, read.sessionKey]]));
+        }
+        // A page with no entries moved neither edge, so there is nothing to persist — and this is
+        // the common case for a session that is simply being watched, where the alternative is
+        // serialising the whole reducer state and rewriting the row every tick to say so.
+        if (read.messages.length > 0) {
+            void this.saveSessionCache(
+                sessionId,
+                { lastSeq: newestSeq, oldestSeq, hasOlderMessages: read.hasOlder },
+                { machineId: read.machineId, cursor: window.cursor, floor: window.older, hasOlder: window.hasOlder },
+            );
+        }
+        log.log(
+            `📡 fetchSessionFromDaemon: ${read.messages.length} read ` +
+            `(${read.decryptedCount}/${read.total} decrypted, tag ${read.tag}` +
+            `${replace ? ', replaced window' : `, since ${inMemory?.cursor ?? anchor?.cursor}`}` +
+            `${read.hasOlder ? ', older available' : ''}${read.reset ? ', anchor reset' : ''})`
+        );
+        return read;
+    }
+
+    /**
+     * Asks a machine to restart one of its sessions, over a channel this App already has to it.
+     *
+     * Null when there is no such channel — no machine key, no address, or an address that did not
+     * answer — and the caller then asks the server, which is what every restart used to do. That
+     * single route is why a restart failed with "socket disconnected" while the machine was sitting
+     * there answering reads on the LAN: what makes a session need restarting is that its machine has
+     * been rebuilt, and at that moment the machine's own channel is the one that is up.
+     *
+     * The address tried first is the one this session was last reached over, because it is the only
+     * address known to work for this machine; the relay is tried after it, for when that address has
+     * moved since. Neither is discovered afresh: a restart is a rare, deliberate act and one that has
+     * already failed is better reported than turned into a browse.
+     */
+    /**
+     * One tool call's full input and result, from whichever channel has it.
+     *
+     * The message stream carries a truncated copy — that is what keeps a session's log, its pages
+     * and its relay traffic small — and the detail view asks for the rest when the user opens it.
+     * The machine keeps that rest beside the session's working tree and serves it to an
+     * account-signed request; the session process serves the same payload over the server RPC.
+     * Asking the machine first is what lets the detail view open when the server is the thing that
+     * is down, which is the case the LAN channel exists for.
+     */
+    async getToolCallFullContent(sessionId: string, callId: string): Promise<GetToolCallFullContentResponse> {
+        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        if (machineId && this.getMachineKey(machineId)) {
+            const carried = await this.carryAtDaemon<{ args?: unknown; result?: unknown }>({
+                machineId,
+                operation: 'read',
+                // The daemon serves this one only to the account: the payload is plaintext, unlike
+                // the ciphertext every other route carries.
+                proofAction: { operation: 'tool-content', target: `${sessionId}:${callId}` },
+                run: (baseUrl, token, proof) => fetchToolContent(baseUrl, token, sessionId, callId, proof),
+            });
+            if (carried.kind === 'done' && carried.value) {
+                return {
+                    success: true,
+                    // The file on disk was written from the tool's arguments, which are an object;
+                    // the daemon passes the JSON through without inspecting it.
+                    args: carried.value.args as Record<string, unknown> | undefined,
+                    result: carried.value.result,
+                };
+            }
+            if (carried.kind === 'refused' && carried.reason === 'no-endpoint') {
+                // The machine answered and said no. The server's copy of this payload is the
+                // truncated one, and standing it in for the full text is what a refusal used to be
+                // silently swapped for — its own words are worth more than a lesser copy.
+                return { success: false, error: `the machine refused (${carried.status ?? 'refused'}): ${carried.body ?? 'it needs the account to authorise it'}` };
+            }
+            if (carried.kind === 'bad-request') {
+                return { success: false, error: `the machine rejected this request (${carried.status}): ${carried.body ?? 'no explanation'}` };
+            }
+        }
+        return getToolCallFullContentFromServer(sessionId, callId);
+    }
+
+    /**
+     * A file from a session's working tree, downloaded over the machine's own channel.
+     *
+     * The same shape as the tool-content read above: the machine answers on its own channel, the
+     * account signs for the plaintext, and the server is not in the path. There is deliberately no
+     * server fallback — the `readFile` RPC that used to carry this is the slow route the App is
+     * trying to stop depending on, and a viewer that waits a minute on it is worse than one that
+     * says the machine could not be reached.
+     *
+     * `onProgress` is per address attempt: a failed LAN attempt may have reported a few kilobytes
+     * before the relay retried from zero. The caller treats it as a hint, which is what a progress
+     * bar is.
+     */
+    async downloadSessionFile(
+        sessionId: string,
+        path: string,
+        options?: { onProgress?: (written: number, total: number) => void },
+    ): Promise<{ ok: true; uri: string; size: number } | { ok: false; error: string }> {
+        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        if (!machineId) {
+            return { ok: false, error: 'This session does not say which machine it is on' };
+        }
+        if (!this.getMachineKey(machineId)) {
+            return { ok: false, error: 'This device holds no key for that machine' };
+        }
+        const carried = await this.carryAtDaemon<{ uri: string; size: number }>({
+            machineId,
+            operation: 'read',
+            // Plaintext file contents: the account signs for this, exactly as it does for a tool
+            // call's full payload.
+            proofAction: { operation: 'file', target: `${sessionId}:${path}` },
+            run: async (baseUrl, token, proof) => {
+                const result = await downloadSessionFileFromDaemon({
+                    baseUrl,
+                    token,
+                    sessionId,
+                    path,
+                    proof,
+                    onProgress: options?.onProgress,
+                });
+                return result.kind === 'done' ? { uri: result.uri, size: result.size } : null;
+            },
+        });
+        if (carried.kind === 'done') {
+            log.log(`📄 file ${sessionId} ${path}: done via ${carried.channel} (${carried.value.size} bytes)`);
+            return { ok: true, uri: carried.value.uri, size: carried.value.size };
+        }
+        log.log(`📄 file ${sessionId} ${path}: ${carried.kind}`);
+        if (carried.kind === 'absent') {
+            return { ok: false, error: 'That file is not on this machine (or its daemon is too old to serve files)' };
+        }
+        if (carried.kind === 'refused') {
+            return {
+                ok: false,
+                error: carried.reason === 'no-endpoint'
+                    ? `The machine refused the file request${carried.status ? ` (${carried.status})` : ''}`
+                    : 'No channel can carry files for this machine',
+            };
+        }
+        if (carried.kind === 'bad-request') {
+            return {
+                ok: false,
+                error: carried.status === 413
+                    ? 'That file is too large to preview'
+                    : `The machine rejected the file request (${carried.status}): ${carried.body ?? 'no explanation'}`,
+            };
+        }
+        return { ok: false, error: 'The machine did not answer over LAN or relay' };
+    }
+
+    /**
+     * Hands a control call to the session over a channel this App already has to its machine.
+     *
+     * `unavailable` — no channel answered, or none had the session — is the one answer that goes
+     * on to the server, which is where every one of these went before. A machine's refusal and a
+     * rejection of the request itself do not: the server would be the same machine by another road,
+     * or a substitution for an action it declined. The reason to prefer the machine's own channel
+     * is the same one restart has: the session is running on that machine, and the channel that is
+     * up is not always the server's.
+     *
+     * `params` is the ciphertext `sessionRPC` would have sent. The daemon forwards it without being
+     * able to read it — which is why this can be offered over a plain-HTTP channel at all.
+     */
+    async sessionControl(
+        sessionId: string,
+        method: 'abort' | 'permission',
+        params: string,
+    ): Promise<SessionControlResult> {
+        const outcome = await this.carrySessionAction<boolean>(sessionId, {
+            operation: 'send',
+            path: `/lan/sessions/${encodeURIComponent(sessionId)}/control`,
+            proof: { operation: 'control', target: sessionId },
+            run: (baseUrl, token, proof) => sessionControlAt(baseUrl, token, sessionId, method, params, proof).then((ok) => (ok ? true : null)),
+        });
+        if (outcome.kind === 'done') {
+            log.log(`🔄 ${method} ${sessionId}: handed to the session`);
+            return { kind: 'done' };
+        }
+        if (outcome.kind === 'bad-request') {
+            return { kind: 'rejected', status: outcome.status, body: outcome.body };
+        }
+        if (outcome.kind === 'refused' && outcome.reason === 'no-endpoint') {
+            return { kind: 'refused', status: outcome.status, body: outcome.body };
+        }
+        // Absent — no channel has this session — or silence from every one of them: the server
+        // is the remaining road, and it is a different one rather than the same request asked twice.
+        return { kind: 'unavailable' };
+    }
+
+    /** Whether this session's CLI publishes its working tree in metadata. */
+    private gitStatusPublished(sessionId: string): boolean {
+        return storage.getState().sessions[sessionId]?.metadata?.gitStatus !== undefined;
+    }
+
+    /**
+     * Takes the working tree a session published and makes it the App's badge.
+     *
+     * The CLI computes it where the tree is; this is the other end of that. Equal values are
+     * skipped rather than rewritten — the metadata arrives again on every reconnect and on every
+     * list refresh, and an unchanged badge is not news.
+     */
+    private applyPublishedGitStatus(sessions: readonly { id: string; metadata?: Metadata | null }[]): void {
+        const store = storage.getState();
+        for (const session of sessions) {
+            const status = session.metadata?.gitStatus;
+            if (!status) {
+                continue;
+            }
+            const current = store.sessionGitStatus[session.id];
+            if (current && this.sameGitStatus(current, status)) {
+                continue;
+            }
+            store.applyGitStatus(session.id, status);
+        }
+    }
+
+    /** Everything the badge draws, without the timestamp that changes on every computation. */
+    private sameGitStatus(a: GitStatus, b: GitStatus): boolean {
+        return a.branch === b.branch
+            && a.isDirty === b.isDirty
+            && a.modifiedCount === b.modifiedCount
+            && a.untrackedCount === b.untrackedCount
+            && a.stagedCount === b.stagedCount
+            && a.stagedLinesAdded === b.stagedLinesAdded
+            && a.stagedLinesRemoved === b.stagedLinesRemoved
+            && a.unstagedLinesAdded === b.unstagedLinesAdded
+            && a.unstagedLinesRemoved === b.unstagedLinesRemoved
+            && a.linesAdded === b.linesAdded
+            && a.linesRemoved === b.linesRemoved
+            && a.linesChanged === b.linesChanged
+            && (a.upstreamBranch ?? null) === (b.upstreamBranch ?? null)
+            && (a.aheadCount ?? 0) === (b.aheadCount ?? 0)
+            && (a.behindCount ?? 0) === (b.behindCount ?? 0)
+            && (a.stashCount ?? 0) === (b.stashCount ?? 0);
+    }
+
+    /**
+     * An action a machine's own channels carry for a session: abort, answer a prompt, restart.
+     *
+     * One method for all of them, because they differ only in what they ask for. The rest is the
+     * same and should not be written once per action: the order the channels are tried in, the
+     * credential per address, the account's proof of *this* request over *this* path, and the rule
+     * that an address which does not answer is a reason to try the machine's next one.
+     *
+     * It used to be written per action — control and restart held the same block twice — and both
+     * took the first address on a route and never the second, so one unreachable address stood for
+     * the whole channel.
+     *
+     * Returns the carry's own outcome, so a caller answers "what did the machine say" from what it
+     * actually said rather than from which bucket the answer was filed in.
+     */
+    private async carrySessionAction<T>(
+        sessionId: string,
+        action: {
+            operation: ChannelOperation;
+            path: string;
+            /** The account's proof names this, not the path: a path changes with the route. */
+            proof?: { operation: string; target: string };
+            run: (baseUrl: string, token: string, proof: Record<string, string> | undefined) => Promise<T | null>;
+            /**
+             * How the *server* channel carries this action, when the server is the channel that
+             * accepts it. Left out by callers whose action only a machine can do — and when it is
+             * left out, the server is not offered the action at all, rather than being asked and
+             * made to answer "cannot" in a form indistinguishable from the machine saying no.
+             */
+            onServer?: () => Promise<T | null>;
+        },
+    ): Promise<CarryOutcome<T>> {
+        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        if (!machineId) {
+            return { kind: 'refused', reason: 'unsupported', channel: null };
+        }
+        const machineKey = this.getMachineKey(machineId);
+        // The same decision the session's messages are read over, so an action goes the way the
+        // session is already being talked to — and the server is one of the channels here, not a
+        // special case bolted on outside: which channel carries it is `accepts` and the order, and
+        // a channel that fails is where the next one starts.
+        const preferred = this.preferredChannel(sessionId);
+        const enabled = this.daemonRoutesEnabled();
+        // Structural, so it is decided before any attempt rather than answered by one: a server
+        // with no way to carry this action, and a machine this device holds no key for, are
+        // channels that were never candidates — and inventing an answer from them is how
+        // "refused via server" once said something no machine ever said.
+        const drivers = this.channelDrivers().filter(
+            (driver): driver is ChannelDriver =>
+                driver.channel === 'server'
+                    ? !!action.onServer
+                    : enabled[driver.channel as DaemonRoute] === true && !!machineKey,
+        );
+        // A real comparison: the preferred channel first, the rest in the order the device lists
+        // them. `sort` needs an answer that does not depend on which side it is asked about.
+        const rank = (channel: SessionChannel): number => (channel === preferred ? 0 : 1);
+        const order = [...drivers].sort((a, b) => rank(a.channel) - rank(b.channel));
+
+        // Which channels this action will actually be offered to, and why — the list's answer and
+        // this one are computed from different facts (reach vs usable addresses), and when they
+        // disagree the action silently goes somewhere the screen never said it would.
+        log.log(
+            `🔄 carry ${action.operation} ${sessionId}: preferred=${preferred}` +
+            ` order=[${order.map((d) => d.channel).join('>')}]` +
+            ` accepts=[${order.filter((d) => d.accepts(action.operation, machineId, Date.now())).map((d) => d.channel).join('>')}]` +
+            ` machineKey=${machineKey ? 'yes' : 'no'}`
+        );
+        const outcome = await carryOperation<T>({
+            drivers: order,
+            operation: action.operation,
+            machineId,
+            attempt: async (endpoint) => {
+                if (endpoint.kind === 'server') {
+                    try {
+                        const value = await action.onServer!();
+                        return value === null ? { kind: 'absent' } : { kind: 'done', value };
+                    } catch (error) {
+                        // Not `refused`: the RPC may well have reached the daemon and started the
+                        // work, and the answer is what did not come back. Calling that a refusal is
+                        // how a restart that *did* happen gets reported as one no channel would do.
+                        return { kind: 'unreachable', error };
+                    }
+                }
+                try {
+                    // The credential and the proof are inside the try for the same reason the run
+                    // is: a handshake the daemon answers is an answer, and it used to escape this
+                    // block as silence — recording a healthy address as failing for saying no.
+                    const { token } = await getLanCredential(endpoint.baseUrl, machineKey!);
+                    const proof = action.proof ? await accountProofHeaders(action.proof) : null;
+                    const value = await action.run(endpoint.baseUrl, token, proof ?? undefined);
+                    return value === null ? { kind: 'absent' } : { kind: 'done', value };
+                } catch (error) {
+                    if (error instanceof LanRequestError) {
+                        // A daemon's answer, sorted by what it is about — a refusal of this device
+                        // or this action, or a statement about the request itself. Where each ends
+                        // the carry is the loop's business, not this closure's.
+                        return attemptFromStatus(error.status, error.body);
+                    }
+                    throw error;
+                }
+            },
+            recorder: this.healthRecorder(),
+        });
+        const detail = outcome.kind === 'refused' || outcome.kind === 'bad-request'
+            ? ` status=${outcome.status ?? '-'} body=${outcome.body ?? '-'}`
+            : outcome.kind === 'unreachable' && outcome.error !== undefined
+                ? ` error=${String(outcome.error).slice(0, 200)}`
+                : '';
+        log.log(`🔄 carry ${action.operation} ${sessionId}: ${outcome.kind} via ${outcome.kind === 'done' || outcome.kind === 'absent' ? outcome.channel : outcome.kind === 'unreachable' ? outcome.channel : ''}${detail}`);
+        return outcome;
+    }
+
+    /**
+     * Asks a machine's own channels for something, without the caller naming a route or an address.
+     *
+     * The credential per address and the classification of a refusal live here rather than at each
+     * call site, because they are the same question everywhere: a daemon that answers and refuses is
+     * refusing *this device*, so every one of its addresses would say the same and the attempt is an
+     * answer rather than an address failure. A thrown anything-else is silence, which is exactly what
+     * the address health is for.
+     *
+     * `proofAction` is for the actions the account has to authorise (restart, control): the proof
+     * names the action and its target, which is what the machine checks and what does not change with
+     * the route the request takes.
+     */
+    private async carryAtDaemon<T>(args: {
+        machineId: string;
+        operation: ChannelOperation;
+        proofAction?: { operation: string; target: string };
+        /** Only these channels, in this order — the caller's policy, e.g. where the session is read. */
+        drivers?: readonly ChannelDriver[];
+        run: (baseUrl: string, token: string, proof: Record<string, string> | undefined) => Promise<T | null>;
+    }): Promise<CarryOutcome<T>> {
+        const machineKey = this.getMachineKey(args.machineId);
+        if (!machineKey) {
+            return { kind: 'refused', reason: 'unsupported', channel: null };
+        }
+        // A machine's own channels only: nothing this is asked to carry has a server answer, and
+        // offering it one is how the server's structural "cannot" came to be recorded as an
+        // answer a machine gave.
+        const drivers = (args.drivers ?? this.channelDrivers()).filter((driver) => driver.channel !== 'server');
+        const outcome = await carryOperation<T>({
+            drivers,
+            operation: args.operation,
+            machineId: args.machineId,
+            attempt: async (endpoint) => {
+                if (endpoint.kind !== 'address') {
+                    // The server is filtered out above, so its nameless endpoint cannot occur.
+                    return { kind: 'unreachable' };
+                }
+                try {
+                    // The credential and proof are inside the try for the same reason the run is:
+                    // a handshake the daemon answers is an answer, and it used to escape this
+                    // block as silence — recording a healthy address as failing for saying no.
+                    const { token } = await getLanCredential(endpoint.baseUrl, machineKey);
+                    const proof = args.proofAction ? await accountProofHeaders(args.proofAction) : null;
+                    const value = await args.run(endpoint.baseUrl, token, proof ?? undefined);
+                    // It answered. Whether the answer is what was wanted is its verdict about the
+                    // request, not something to hold against the address.
+                    return value === null ? { kind: 'absent' } : { kind: 'done', value };
+                } catch (error) {
+                    if (error instanceof LanRequestError) {
+                        return attemptFromStatus(error.status, error.body);
+                    }
+                    throw error;
+                }
+            },
+            recorder: this.healthRecorder(),
+        });
+        return outcome;
+    }
+
+    /**
+     * The addresses one read may try, asked of the channels themselves.
+     *
+     * The channels answer where they would send — ordered, health-filtered, and skipping an address a
+     * read cannot afford to wait on — so the read path holds no address logic of its own any more.
+     */
+    private readCandidates(machineId: string | undefined, routes: readonly DaemonRoute[]): { baseUrl: string; route: 'lan' | 'relay' }[] {
+        if (!machineId) {
+            return [];
+        }
+        const now = Date.now();
+        return this.channelDrivers()
+            .filter((driver) => driver.channel !== 'server' && routes.includes(driver.channel as DaemonRoute))
+            .flatMap((driver) => driver.endpoints(machineId, now, { forRead: true }))
+            .flatMap((endpoint) => (endpoint.kind === 'address' ? [{ baseUrl: endpoint.baseUrl, route: endpoint.route }] : []));
+    }
+
+    /**
+     * Which routes one read may use, asked of the channels rather than worked out here.
+     *
+     * `forceRoute` is the caller saying so outright. Otherwise a session on a channel reads on that
+     * channel and only that one — a session on the relay does not browse for a machine known to be
+     * elsewhere — and a session the server is carrying has no channel of its own, so every daemon
+     * channel that would accept a read is offered, in the device's priority order.
+     *
+     * That order is the point of asking: the list used to be the literal `['lan', 'relay']` here,
+     * so this was the one place a priority change did not reach.
+     */
+    private readRoutes(sessionId: string, machineId: string | undefined, forceRoute?: DaemonRoute): DaemonRoute[] {
+        const drivers = this.channelDrivers().filter((driver) => driver.channel !== 'server');
+        const now = Date.now();
+        const pinned = storage.getState().channelOverride[sessionId];
+        return readRoutes({
+            forced: forceRoute,
+            pinned: pinned && pinned !== 'server' ? (pinned as DaemonRoute) : pinned === 'server' ? 'server' : undefined,
+            chosen: this.preferredChannel(sessionId),
+            accepts: (route) => !machineId
+                ? false
+                : drivers.some((driver) => driver.channel === route && driver.accepts('read', machineId, now)),
+        });
+    }
+
+    /** Where an attempt's outcome is written, so the next caller starts from what this one learned. */
+    private healthRecorder(): HealthRecorder {
+        return {
+            succeeded: (machineId, route, baseUrl) => storage.getState().candidateSucceeded(machineId, route, baseUrl),
+            failed: (machineId, route, baseUrl) => storage.getState().candidateFailed(machineId, route, baseUrl),
+        };
+    }
+
+    /**
+     * The LAN addresses this App is holding a live socket at, per machine.
+     *
+     * One address per machine — the socket's own — and it is verified continuously by its
+     * heartbeat, so it cannot go quietly stale the way "something answered here once" can: when the
+     * address stops answering, the socket drops and takes this entry with it. That is the whole of
+     * what makes these worth asking for a roster where a published address is not, and why a
+     * device on another network holds none and pays nothing here.
+     */
+    private heldLanAddresses(): { machineId: string; baseUrls: string[] }[] {
+        const held = new Map<string, string[]>();
+        for (const socket of Object.values(storage.getState().daemonSockets)) {
+            if (socket.route !== 'lan' || socket.phase !== 'live' || !socket.baseUrl) {
+                continue;
+            }
+            const addresses = held.get(socket.machineId);
+            if (addresses) {
+                if (!addresses.includes(socket.baseUrl)) {
+                    addresses.push(socket.baseUrl);
+                }
+            } else {
+                held.set(socket.machineId, [socket.baseUrl]);
+            }
+        }
+        return [...held].map(([machineId, baseUrls]) => ({ machineId, baseUrls }));
+    }
+
+    /**
+     * Replays what each machine says it has started and archived, from where this App left off.
+     *
+     * The App learns about a session here before the server knows it exists, which is the point:
+     * the machine has it, so the App can be shown it, and the server catching up is a separate
+     * progress. Asked on occasions rather than on a timer — a machine's own socket coming live, and
+     * the hint it sends when its log moves — because the log changes a handful of times a day and a
+     * poll would be all cost.
+     *
+     * Never fatal: an address that has moved is a reason to try again on the next occasion.
+     */
+    async pullMachineLifecycle(): Promise<void> {
+        // One at a time: a machine that is not answering must not hold up the others, and the
+        // requests are cheap enough that overlapping them buys nothing.
+        //
+        // Once per machine, not once per address. The cursor is the machine's, so replaying the same
+        // log through a second address of the same daemon asks the same question twice and pays a
+        // timeout for every address that does not answer.
+        for (const machineId of this.knownMachineIds()) {
+            try {
+                const since = storage.getState().lifecycleCursors[machineId] ?? 0;
+                const carried = await this.carryAtDaemon<{ revision: number; entries: LifecycleEntry[] }>({
+                    machineId,
+                    operation: 'lifecycle',
+                    run: (baseUrl, token) => fetchLifecycle(baseUrl, token, since),
+                });
+                if (carried.kind !== 'done' || !carried.value) {
+                    continue;
+                }
+                const answer = carried.value;
+                if (answer.entries.length > 0) {
+                    log.log(`🔄 lifecycle ${machineId.slice(0, 8)}: ${answer.entries.length} entr${answer.entries.length === 1 ? 'y' : 'ies'} (rev ${since} → ${answer.revision})`);
+                }
+                storage.getState().applyLifecycle(machineId, answer.revision, answer.entries);
+            } catch {
+                // The machine may be unreachable, or its daemon may predate the route.
+            }
+        }
+    }
+
+    async restartSession(sessionId: string, machineId: string, options?: { requiresDesktop?: boolean }): Promise<{ success: boolean; newSessionId?: string; error?: string } | null> {
+        const machineKey = this.getMachineKey(machineId);
+        if (!machineKey) {
+            return null;
+        }
+        // The same ordering that governs where this session's messages are read from: a session
+        // pinned to one channel is restarted on it, and one the App is reading over the LAN is
+        // restarted there. The server carries it too, when no machine channel answered first — an
+        // answer from the machine ends the carry and is reported, not routed around.
+        const outcome = await this.carrySessionAction<LanRestartVerdict>(sessionId, {
+            operation: 'restart',
+            path: `/lan/sessions/${encodeURIComponent(sessionId)}/restart`,
+            proof: { operation: 'restart', target: sessionId },
+            run: (baseUrl, token, proof) => restartSessionAt(baseUrl, token, sessionId, proof ?? undefined, options?.requiresDesktop),
+            // The server carries the same action by asking the daemon on this App's behalf. It is a
+            // channel like the others: tried when its turn comes, and skipped when it cannot.
+            onServer: () => apiSocket.machineRPC<LanRestartVerdict, { sessionId: string; requiresDesktop?: boolean }>(
+                machineId, 'restartSession', options?.requiresDesktop === undefined
+                    ? { sessionId }
+                    : { sessionId, requiresDesktop: options.requiresDesktop },
+            ),
+        });
+        if (outcome.kind === 'done') {
+            log.log(`🔄 restart ${sessionId}: ${outcome.value.success ? 'accepted' : outcome.value.error ?? 'refused'}`);
+            return outcome.value;
+        }
+        if (outcome.kind === 'bad-request') {
+            log.log(`🔄 restart ${sessionId}: the machine rejected the request (${outcome.status})`);
+            return { success: false, error: `the machine rejected this request (${outcome.status}): ${outcome.body ?? 'no explanation'}` };
+        }
+        if (outcome.kind === 'refused' && outcome.reason === 'no-endpoint') {
+            log.log(`🔄 restart ${sessionId}: the machine refused (${outcome.status ?? '-'})`);
+            return { success: false, error: `the machine refused this action (${outcome.status ?? 'refused'}): ${outcome.body ?? 'it needs the account to authorise it'}` };
+        }
+        if (outcome.kind === 'unreachable' || outcome.kind === 'absent') {
+            // Somebody was asked and did not answer. The restart may well be under way — a machine
+            // restarting a session takes longer than a request waits — so this is not a failure and
+            // must not be reported as one.
+            log.log(`🔄 restart ${sessionId}: asked, and the verdict did not come back`);
+            return { success: true };
+        }
+        log.log(`🔄 restart ${sessionId}: no channel could carry it`);
+        return null;
+    }
+
+    /**
+     * Asks the daemons what sessions they have, over the LAN and the relay, and records it.
+     *
+     * Called when the server cannot answer. The LAN summary carries no metadata — that is
+     * encrypted and only travels inside a message payload — so this cannot populate the session
+     * list on its own. What it buys is knowing which sessions exist and are alive on a machine we
+     * can still reach, including one this app has never seen.
+     */
+    async fetchSessionListFromDaemons(): Promise<number> {
+        const accountPublicKey = this.encryption?.contentDataKey;
+        if (!accountPublicKey) {
+            return 0;
+        }
+        const routes = this.daemonRoutesEnabled();
+        const answers = await listSessionsOverLan({
+            accountPublicKey,
+            // Resolved per machine: a key only answers its own machine's challenge.
+            machineKeyFor: (machineId) => this.getMachineKey(machineId),
+            relays: routes.relay ? Object.values(storage.getState().relayEndpoints) : [],
+            browseLan: routes.lan,
+            // Where this App is already holding a machine on this network: a live LAN socket sits at
+            // an address that answered, and that address serves a roster the same way — which is what
+            // frees the list from depending on a browse finding the machine, on a network where
+            // multicast never reaches anyone. Held sockets only, deliberately: a published address
+            // nothing has answered at is a claim, and walking claims here would cost a timeout per
+            // dead one on a device that is not on this network at all — claims are what the socket
+            // layer spends its backoff proving, not what a list read pays for.
+            lanAddresses: routes.lan ? this.heldLanAddresses() : [],
+            recorder: this.healthRecorder(),
+        });
+        if (answers.length === 0) {
+            log.log('📡 fetchSessions: server unreachable, and no daemon answered on the LAN or the relay');
+            return 0;
+        }
+        const sessions = answers.flatMap((answer) => answer.sessions.map((session) => ({ ...session, via: answer.via })));
+        // Daemon-numbered from here until a server answer replaces it: a session's `seq` in this
+        // list is the daemon's own counter, and comparisons against the server's axis must not
+        // read it (see `serverAxisSeq`).
+        this.sessionsListAxis = 'daemon';
+        storage.getState().applyDaemonSessionList(sessions);
+
+        // A session this App has never seen exists the moment a daemon says so — the server's
+        // list is a report from a round trip ago. Show what the roster carries (path, agent,
+        // liveness, machine) instead of leaving the row to a 1.1MB fetch that may take a minute;
+        // the server's record replaces the placeholder by id when it arrives.
+        const known = storage.getState().sessions;
+        const now = Date.now();
+        const placeholders: any[] = [];
+        for (const answer of answers) {
+            for (const summary of answer.sessions) {
+                if (!summary.happySessionId || known[summary.happySessionId]) {
+                    continue;
+                }
+                const at = summary.lastHeartbeat ?? now;
+                // The roster carries the session's own metadata ciphertext and the wrapped key
+                // that opens it. With both, the row shows the real name, project and branch now;
+                // without them (a session the server has not named yet) the path is all there is.
+                let metadata: unknown = {
+                    path: summary.directory,
+                    host: '',
+                    machineId: answer.machineId,
+                };
+                let metadataVersion = 0;
+                if (summary.metadata !== undefined && summary.metadataVersion !== undefined && summary.dataEncryptionKey) {
+                    try {
+                        const sessionId = summary.happySessionId;
+                        let sessionKey = this.lanSessionKeys.get(sessionId) ?? null;
+                        if (!sessionKey) {
+                            sessionKey = await this.encryption.decryptEncryptionKey(summary.dataEncryptionKey);
+                            if (sessionKey) {
+                                this.lanSessionKeys.set(sessionId, sessionKey);
+                            }
+                        }
+                        if (sessionKey) {
+                            await this.encryption.initializeSessions(new Map([[sessionId, sessionKey]]));
+                            const sessionEncryption = this.encryption.getSessionEncryption(sessionId);
+                            const decrypted = sessionEncryption
+                                ? await sessionEncryption.decryptMetadata(summary.metadataVersion, summary.metadata)
+                                : null;
+                            if (decrypted) {
+                                metadata = decrypted;
+                                metadataVersion = summary.metadataVersion;
+                            }
+                        }
+                    } catch {
+                        // Keep the roster fields: a key that will not open is not a row to drop.
+                    }
+                }
+                placeholders.push({
+                    id: summary.happySessionId,
+                    seq: 0,
+                    createdAt: at,
+                    updatedAt: at,
+                    active: summary.isAlive,
+                    activeAt: at,
+                    metadata,
+                    metadataVersion,
+                    agentState: null,
+                    agentStateVersion: 0,
+                    thinking: false,
+                    thinkingAt: 0,
+                    presence: summary.isAlive ? 'online' : at,
+                    ...(summary.restartingSince !== undefined ? { restartingAt: summary.restartingSince } : {}),
+                });
+            }
+        }
+        if (placeholders.length > 0) {
+            storage.getState().applySessions(placeholders);
+            log.log(`📡 fetchSessions: ${placeholders.length} session(s) shown from the daemon roster before the server list`);
+        }
+        for (const answer of answers) {
+            log.log(`📡 roster: daemon ${answer.machineId.slice(0, 8)} reports ${answer.sessions.length} session(s) via ${answer.via}`);
+        }
+        // The same handshake that just read this machine's sessions can tell us what it is running —
+        // the one fact about a machine that the server's copy of it cannot keep current, because a
+        // version is a build id that changes whenever anything is rebuilt. The address is the one
+        // that answered, so a machine reached over its relay is asked there too rather than being
+        // looked for on a network it is not on.
+        void this.refreshDaemonVersions(answers.map((answer) => answer.machineId));
+        return sessions.length;
+    }
+
+    /**
+     * Pin a session to one channel, or return it to automatic with null.
+     *
+     * Invalidates the message sync so the choice takes effect now rather than at the next
+     * scheduled fetch — a control that appears to do nothing for several seconds is worse than
+     * no control.
+     */
+    setSessionChannel(sessionId: string, channel: SessionChannel | null): void {
+        storage.getState().setSessionChannelOverride(sessionId, channel);
+        if (channel === 'server') {
+            // Leaving the daemon channels: a poll started by an earlier fallback must not outlive the choice.
+            this.stopDaemonPolling(sessionId);
+        }
+        log.log(`📡 channel for ${sessionId}: ${channel ?? 'auto'}`);
+        this.getMessagesSync(sessionId).invalidate();
+    }
+
+    /**
+     * Which channel a session should read and write on.
+     *
+     * A manual pin wins outright — that is what makes it a useful debug control, and a pin to
+     * `server` is how you prove the LAN is staying out of the way.
+     *
+     * Otherwise the LAN wins whenever its machine is advertising on this network. It is the same
+     * daemon on the local link with a live push instead of a poll and no round trip through the
+     * server, so when it is there it is simply the better channel. A sighting is only present
+     * while it is fresh, so a machine that leaves the network drops back to the server on the next
+     * tick without anything having to notice the departure.
+     *
+     * Requires the machine key: without it the LAN cannot authenticate, so advertising is not
+     * enough.
+     */
+    private preferredChannel(sessionId: string): SessionChannel {
+        const [channel, reason] = this.resolveChannel(sessionId);
+        if (this.channelReasons.get(sessionId) !== reason) {
+            this.channelReasons.set(sessionId, reason);
+            log.log(`📡 channel for ${sessionId}: ${channel} (${reason})`);
+        }
+        return channel;
+    }
+
+    /**
+     * The channel drivers for the state and priority in hand.
+     *
+     * Rebuilt only when something a driver reads has moved: `resolveChannel` runs on paths that can
+     * be hit per frame — the fast-ack path asks which channel a session is on — and building three
+     * drivers per call would scan the socket map on every one of them.
+     */
+    private channelDrivers(): ChannelDriver[] {
+        const state = storage.getState();
+        const priority = state.localSettings.channelPriority;
+        const key = [
+            state.socketStatus,
+            state.daemonSockets,
+            state.lanSightings,
+            // Read by the LAN driver, and the health is what decides whether it says yes: leaving
+            // either out of the key is a cache that answers with a stale driver every time an
+            // address is proven or demoted, which is the common case this work creates.
+            state.lanEndpoints,
+            state.candidateHealth,
+            state.relayEndpoints,
+            state.relayDirectory,
+            state.relayHubConnected,
+            state.sessions,
+            state.machines,
+            state.daemonSessionList,
+            priority,
+        ];
+        const cached = this.channelDriversCache;
+        if (cached && cached.key.length === key.length && cached.key.every((part, index) => part === key[index])) {
+            return cached.drivers;
+        }
+        const drivers = buildChannelDrivers(state, priority);
+        this.channelDriversCache = { key, drivers };
+        return drivers;
+    }
+
+    private channelDriversCache: { key: unknown[]; drivers: ChannelDriver[] } | null = null;
+
+    private channelReasons = new Map<string, string>();
+
+    /** Which channel a session is on right now, and why. The single source for logic and UI alike. */
+    describeChannel(sessionId: string): { channel: SessionChannel; reason: ChannelReason } {
+        const [channel, reason] = this.resolveChannel(sessionId);
+        return { channel, reason };
+    }
+
+    private resolveChannel(sessionId: string): [SessionChannel, ChannelReason] {
+        const override = storage.getState().channelOverride[sessionId];
+        if (override) {
+            return [override, 'pinned'];
+        }
+        const session = storage.getState().sessions[sessionId];
+        // A session that never declared the capability is running a build that cannot serve the LAN
+        // at all: it keeps no message log for the LAN to read, and it cannot take a message
+        // delivered back over it. Preferring the LAN for one would show an empty session and
+        // swallow sends, so an undeclared session stays on the server until it restarts.
+        if (!session) {
+            return ['server', 'session-not-loaded'];
+        }
+        if (!session.agentState?.lanSocket) {
+            return ['server', 'not-declared'];
+        }
+        const machineId = session.metadata?.machineId;
+        if (!machineId) {
+            return ['server', 'no-machine-id'];
+        }
+        if (!this.getMachineKey(machineId)) {
+            return ['server', 'no-machine-key'];
+        }
+        // The three channels are peers, ordered by the (debug-configurable) priority list; a
+        // channel that is switched off is simply not in it.
+        //
+        // What a channel may be chosen on is *this device's own measurements*, never the session's
+        // claim that it supports one. A session declares the capability when it registers, which
+        // says what its daemon can do in principle — not that this device can reach it, and not
+        // that the daemon has anything to serve. So a daemon route is available only when the
+        // device has seen the machine on it, holds a live socket to it, or has read this session
+        // over it; and a route that has just failed to serve this session is not chosen again
+        // until that failure ages out. Anything else puts a WiFi icon on a device that never
+        // found a daemon on its network.
+        const state = storage.getState();
+        const priority = this.channelPriority();
+        const serverDown = state.socketStatus === 'disconnected' || state.socketStatus === 'error';
+        // Which channels could serve this session, from the same rule the header and the badges are
+        // drawn from — they used to be worked out separately, and disagreed about the same session.
+        const available = channelAvailability({
+            drivers: this.channelDrivers(),
+            machineId,
+        });
+        const { channel, reachable } = pickChannel(priority, available);
+        if (!reachable) {
+            // Nothing on this device has reached the machine. The session is not readable over any
+            // daemon route, so it stays on the server path — which is where the content on screen
+            // came from — rather than being labelled with a channel that was never established.
+            // Unless the server is switched off, in which case that path is not this App's to
+            // take either: the session is simply unreachable, and says so.
+            return [enabledChannels(priority).server ? 'server' : priority[0], 'not-on-network'];
+        }
+        if (channel === 'lan') {
+            return ['lan', 'reachable'];
+        }
+        if (channel === 'relay') {
+            // "Server unreachable" only describes a server that is meant to be there. One switched
+            // off in the setting was not unreachable, it was not used.
+            const serverOff = !enabledChannels(priority).server;
+            return ['relay', serverDown && !serverOff ? 'server-down-relay' : 'by-priority'];
+        }
+        return ['server', priority.length === 1 || available.lan || available.relay ? 'by-priority' : 'not-on-network'];
+    }
+
+    /** Which routes a server-channel read may fall back to: only those switched on. */
+    private fallbackVia(): 'lan' | 'relay' | 'any' {
+        const routes = this.daemonRoutesEnabled();
+        return routes.lan && routes.relay ? 'any' : routes.relay ? 'relay' : 'lan';
+    }
+
+    /** The enabled channels in preference order, from the device-local debug setting. */
+    private channelPriority() {
+        return normalizeChannelPriority(storage.getState().localSettings.channelPriority);
+    }
+
+    /** Whether any daemon route (LAN or relay) is switched on; with neither, the server is the only path. */
+    private daemonRoutesEnabled(): { lan: boolean; relay: boolean } {
+        const enabled = enabledChannels(this.channelPriority());
+        return { lan: enabled.lan, relay: enabled.relay };
+    }
+
+    private daemonSocketWatch: (() => void) | null = null;
+
+    /**
+     * The one relay connection, when the relay is switched on.
+     *
+     * It replaces a per-machine socket, a per-machine address and a 30-second probe of each machine:
+     * the relay holds every daemon that dialled in and publishes what sessions each has, so being
+     * reachable is something the App is told rather than something it works out. `./lan/relayHub`
+     * has the protocol; this owns the lifetime.
+     */
+    private relayHub: RelayHub | null = null;
+    /**
+     * The last directory the relay pushed, before this App has named its machines.
+     *
+     * The two halves arrive independently — the relay says which tags it holds, and the machine
+     * keys say which tag belongs to which machine — and either can be first: a cold start has no
+     * keys until the server answers, and no directory until the hub connects. Keeping the raw answer
+     * is what lets a tag learned later be matched against a directory that has already arrived,
+     * instead of leaving the hub connected and every machine in it unnamed.
+     */
+    private relayDirectoryRaw: HubMachine[] = [];
+    private relayHubWatch: (() => void) | null = null;
+    /** The relay address the current hub was opened for, so a new one is a new connection. */
+    private relayHubEndpoint: string | null = null;
+    /** Each machine's relay tag — the relay's name for it — derived from its key. */
+    private machineTags = new Map<string, string>();
+    /**
+     * Machines whose daemon does not answer heartbeats, so a live socket to them is not proof that
+     * anything is arriving.
+     *
+     * This is what keeps the polling fallback on: `stopDaemonPolling` is a claim that pushes are
+     * arriving, and it can only be made about a connection that has been proven alive since it came
+     * up. An old daemon — one whose CLI predates the heartbeat — is the case that is otherwise
+     * indistinguishable from a dead socket, and it would leave every session on that machine with
+     * neither a push nor a poll.
+     */
+    private unverifiedMachines = new Set<string>();
+
+    /**
+     * Names the machines the relay holds, now that both halves are known.
+     *
+     * Called from both directions — the directory arriving, and a machine key being learned — so a
+     * hub that connected before the keys did is not left with a directory it cannot read.
+     */
+    private mapRelayDirectory(): void {
+        const entries: RelayDirectoryEntry[] = [];
+        const unknownTags: string[] = [];
+        const at = Date.now();
+        for (const machine of this.relayDirectoryRaw) {
+            // The relay names machines by tag — a hash it cannot invert — and this App is the one
+            // that knows which machine a tag belongs to, because it derives the tag from the
+            // machine's own key. A tag nothing matches is reported rather than dropped: it is a
+            // machine that is up and that this device cannot name.
+            const machineId = this.machineIdForTag(machine.tag);
+            if (machineId) {
+                entries.push({
+                    machineId,
+                    tag: machine.tag,
+                    sessions: Array.isArray(machine.sessions) ? (machine.sessions as RelayDirectoryEntry['sessions']) : [],
+                    ...(machine.reachable ? { reachable: machine.reachable } : {}),
+                    at,
+                });
+            } else {
+                unknownTags.push(machine.tag);
+            }
+        }
+        // Where each machine says it can be reached, merged exactly as the server's copy of the same
+        // claim is. This is the relay doing the job the server would otherwise do, and it matters
+        // most when the server is the thing that is gone: without it, a machine on this very network
+        // has no address the App can try.
+        for (const entry of entries) {
+            if (entry.reachable) {
+                const blob = { p2p: entry.reachable };
+                storage.getState().applyLanEndpoint(entry.machineId, parseLanEndpoints(entry.machineId, blob));
+                storage.getState().applyRelayEndpoint(entry.machineId, parseRelayEndpoint(entry.machineId, blob));
+            }
+        }
+        // Worth a line of its own: a machine the relay is holding but this App cannot name has no
+        // relay icon and no relay route, and it looks exactly like a machine that is not on the
+        // relay at all. The count of unnamed tags is the difference, and the reason is always the
+        // same one — the tag is a hash, and only the machine's key turns it back into a machine.
+        const named = entries.map((entry) => entry.machineId.slice(0, 8)).join(' ');
+        log.log(`📡 relay directory: ${this.relayDirectoryRaw.length} machine(s) held by the relay, ${entries.length} named, ${unknownTags.length} unnamed${named ? ` — ${named}` : ''}`);
+        storage.getState().applyRelayDirectory(entries, unknownTags);
+        this.reconcileDaemonSockets();
+    }
+
+    /** Which machine a relay tag belongs to, or null when this device holds no key for it. */
+    private machineIdForTag(tag: string): string | null {
+        for (const [machineId, known] of this.machineTags) {
+            if (known === tag) {
+                return machineId;
+            }
+        }
+        return null;
+    }
+    /**
+     * Fill in each machine's relay route from its machine key.
+     *
+     * A route's usual source is the machine's published `daemonState`, which arrives through the
+     * server — so with the server switched off, which is the one case the relay exists for, the App
+     * has no address to try. It does not need one: the tag is a function of the machine key it has
+     * held since pairing, and the relay's own address is a setting. What the server publishes still
+     * wins where it exists, so this only fills a gap.
+     */
+    async deriveRelayRoutes(): Promise<void> {
+        // Derived regardless of whether the channel is switched on: the routes are what the daemons
+        // published, and switching a channel on later must not need a new read to build them.
+        const relayUrl = relayOriginFrom(storage.getState().relayEndpoints);
+        // The hub is the relay *connection*: it comes up whether or not this device can name a
+        // machine yet, because the relay naming them is the point — and a cold start learns both
+        // halves independently.
+        this.ensureRelayHub();
+        if (this.machineDataKeys.size === 0) {
+            return;
+        }
+        for (const [machineId, machineKey] of this.machineDataKeys) {
+            try {
+                const tag = await relayTagFor(machineKey, {
+                    hmacSha256: hmac_sha256,
+                    sha256: async (data) => new Uint8Array(await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, new Uint8Array(data))),
+                    signKeyPairFromSeed: (seed) => sodium.crypto_sign_seed_keypair(seed),
+                });
+                this.machineTags.set(machineId, tag);
+                // The address is kept for reads, which are plain HTTPS requests to the relay and
+                // need one; the hub does not, since it addresses machines by tag. Marked `derived`
+                // because that is all it is: a route we computed, not one the machine published —
+                // it is worth trying, and it is not evidence the machine runs a relay client.
+                if (storage.getState().relayEndpoints[machineId]?.source !== 'published') {
+                    storage.getState().applyRelayEndpoint(machineId, {
+                        machineId,
+                        baseUrl: relayBaseUrlFor(relayUrl, tag),
+                        source: 'derived',
+                        at: Date.now(),
+                    });
+                    log.log(`🔁 derived the relay route for ${machineId.slice(0, 8)} from its key`);
+                }
+            } catch (error) {
+                log.log(`🔁 could not derive a relay route for ${machineId.slice(0, 8)}: ${String(error)}`);
+            }
+        }
+        this.ensureRelayHub();
+    }
+
+    /**
+     * Opens or closes the one relay connection, to match whether the relay is switched on.
+     *
+     * The hub is the relay channel's whole transport: with it up, a machine the relay is holding is
+     * reachable, and a machine it is not holding is not — no probe, no sighting, no per-machine
+     * address. With it down, the relay channel says so rather than being guessed at.
+     */
+    private ensureRelayHub(): void {
+        // Asked of the channel, not worked out here: the relay driver is in the list only while the
+        // channel is switched on, and its hub target is the same origin every other relay address is
+        // derived from. "Off in the priority" and "no hub target" are therefore one answer, not two
+        // rules that could disagree.
+        const relay = this.channelDrivers().find((driver) => driver.channel === 'relay');
+        const relayUrl = relay?.hubTarget?.() ?? null;
+        const priority = this.channelPriority();
+        // Said out loud at startup, because "the relay is off in the priority" and "the relay cannot
+        // be reached" look identical everywhere else — a section with nothing connected either way.
+        log.log(
+            relayUrl
+                ? `🔁 relay hub: enabled, ${relayUrl} (priority ${priority.join('›')})`
+                : `🔁 relay hub: the relay channel is off in the priority (${priority.join('›')})`,
+        );
+        if (!relayUrl) {
+            this.relayHubWatch?.();
+            this.relayHubWatch = null;
+            this.relayHub?.close();
+            this.relayHub = null;
+            this.relayHubEndpoint = null;
+            // The hub no longer clears the directory when its socket closes (a disconnect is our
+            // interface, not the relay's answer), so switching the relay off has to say so here —
+            // otherwise the last directory keeps machines looking relay-capable with no relay.
+            this.relayDirectoryRaw = [];
+            this.mapRelayDirectory();
+            this.reconcileDaemonSockets();
+            return;
+        }
+        const endpoint = relayHubUrl(relayUrl);
+        if (this.relayHub && this.relayHubEndpoint === endpoint) {
+            return;
+        }
+        // A different relay is a different connection: keeping the old one would leave the App
+        // talking to the relay it was told to stop using.
+        if (this.relayHub) {
+            this.relayHubWatch?.();
+            this.relayHubWatch = null;
+            this.relayHub.close();
+            this.relayHub = null;
+            // A different relay is a different directory: what the old one held is not a claim
+            // about this one. Same reason as the switched-off branch above.
+            this.relayDirectoryRaw = [];
+            this.mapRelayDirectory();
+        }
+        this.relayHubEndpoint = endpoint;
+        const hub = new RelayHub(endpoint, (message) => { log.log(message); });
+        this.relayHub = hub;
+        this.relayHubWatch = hub.onMachines((machines) => {
+            this.relayDirectoryRaw = machines;
+            this.mapRelayDirectory();
+        });
+        const statusWatch = hub.onStatus((connected) => {
+            storage.getState().setRelayHubConnected(connected);
+        });
+        const machinesWatch = this.relayHubWatch;
+        this.relayHubWatch = () => { machinesWatch(); statusWatch(); };
+        hub.connect();
+        log.log(`🔁 relay hub connecting to ${endpoint}`);
+    }
+
+    /**
+     * Say which daemon connections should exist: one per machine this App can reach, per route.
+     *
+     * The App talks to every machine it has, the way it talks to the server — a machine is a daemon
+     * with sessions on it, and a route is only how the bytes get there. So both routes are wanted
+     * for as long as they are switched on and the machine is reachable over them, and neither
+     * depends on how the server is doing this second. The relay socket used to exist only while the
+     * server was down or a session was pinned to it, and there was only ever *one* socket per route,
+     * whose machine was chosen by whichever sighting came first in a map — so the App could talk to
+     * one of its machines at a time, replaced the connection whenever a different machine's session
+     * was read, and any message written in between went to a daemon that had no such session.
+     *
+     * A read is itself evidence that a machine is reachable, so the machines being read are wanted
+     * even between probes and scans: the connection a read established must not be torn down by the
+     * next scan failing to mention it.
+     */
+    private reconcileDaemonSockets(): void {
+        const state = storage.getState();
+        const routes = this.daemonRoutesEnabled();
+        const targets = new Map<string, DaemonTarget>();
+        const add = (machineId: string, route: DaemonRoute, baseUrl: string) => {
+            const machineKey = this.getMachineKey(machineId);
+            if (machineKey) {
+                targets.set(`${machineId}:${route}`, { machineId, route, baseUrl, machineKey });
+            }
+        };
+
+        // What each channel wants a socket at, asked of the channels. This was four sources assembled
+        // here — sightings, the best published address, the relay's directory, and the sessions being
+        // read — each with its own idea of which address wins, and the loop order decided the answer:
+        // a published address overwrote a mDNS sighting for the same machine simply by being added
+        // second.
+        //
+        // Now the ranking is the one the channels already use for a read, so a socket sits where a
+        // read would go. The relay is the case that needed its own guard: every machine with a key
+        // has a derived relay address, and holding a stream open for each of those would be a
+        // connection to a machine that never dialled in.
+        const now = Date.now();
+        for (const driver of this.channelDrivers()) {
+            if (driver.channel === 'server' || routes[driver.channel as DaemonRoute] !== true) {
+                continue;
+            }
+            for (const machineId of this.knownMachineIds()) {
+                const target = driver.socketTarget(machineId, now);
+                const baseUrl = target ? endpointBaseUrl(target) : null;
+                if (baseUrl) {
+                    add(machineId, driver.channel as DaemonRoute, baseUrl);
+                }
+            }
+        }
+
+        // And the sessions being read — but only where a channel named nothing. A read's address is
+        // proof that it answers, and for a machine no sighting or published endpoint covers it is
+        // the only address there is. It is not a better answer than the channel's, though: the
+        // same machine is usually reachable under two equally good addresses (its mDNS name and
+        // its IP), a read may hold either one, and letting it overwrite the ranking moved the live
+        // socket from one to the other every time a scan or a read reconciled. Each move closes a
+        // working socket and reopens it, which is the "connecting" the user watches.
+        for (const link of this.daemonLinks.values()) {
+            if (targets.has(`${link.machineId}:${link.connection.route}`)) {
+                continue;
+            }
+            add(link.machineId, link.connection.route, link.connection.baseUrl);
+        }
+
+        this.connections.wantOnly([...targets.values()]);
+    }
+
+    /**
+     * What a route's connection pushes at us: the daemon's two hints, and everything else straight
+     * to `handleUpdate`, which is the same handler the server socket feeds.
+     */
+    private onDaemonUpdate(route: DaemonRoute, payload: unknown): void {
+        const body = (payload as {
+            body?: { t?: string; id?: string; entry?: LanSessionLogEntry; anchor?: string; head?: string };
+        } | null)?.body;
+        // The machine's own log moved — a session it started, or one it archived. A hint, not the
+        // entry: this asks for what it missed with its own cursor, which is what keeps the replay
+        // per-reader and what makes it an occasion rather than a poll.
+        if (body?.t === 'lifecycle') {
+            void this.pullMachineLifecycle();
+            return;
+        }
+        // The daemon's hint that a session's local log grew. It is not a server update, so it never
+        // reaches handleUpdate: it only means "read now" instead of waiting for the next poll tick.
+        // It stays even though entries are pushed as well — it is what recovers a frame the socket
+        // missed while it was down.
+        if (body?.t === 'log-grew' && body.id) {
+            if (this.preferredChannel(body.id) !== route) {
+                return;
+            }
+            // The hint carries where the log now ends, so a reader that is already there has
+            // nothing to do. Without this the App read the log every time anything was appended —
+            // a round trip, a decrypt and a store write to learn that the entry had already arrived
+            // over this very socket, which is a radio waking up every couple of seconds on a phone.
+            this.lastHintHeads.set(body.id, body.head ?? '(none)');
+            if (this.isAtLogHead(body.id, body.head)) {
+                return;
+            }
+            this.scheduleLogGrewRead(body.id);
+            return;
+        }
+        // An entry the session wrote to its log, pushed as it was appended. Applying it here is what
+        // makes the LAN channel deliver a message rather than announce one: no round trip, and dedup
+        // on `localId` means the overlapping read cannot double it. Only for sessions that resolve
+        // to this route — a session pinned to the server reads the same bytes from there, and
+        // applying both would be the one path the dedup is not set up to cover.
+        if (body?.t === 'log-entry' && body.id && body.entry) {
+            if (this.preferredChannel(body.id) === route) {
+                // An agent streaming output appends entries in bursts; applying and rendering each
+                // one separately re-rendered the whole visible list per entry, which is the
+                // "message page takes seconds to update" shape. Entries are batched into one
+                // store update instead.
+                this.queuePushedEntry(body.id, body.entry, body.anchor);
+            }
+            return;
+        }
+        void this.handleUpdate(payload);
+    }
+
+    /**
+     * Mark everything the session has taken in as delivered.
+     *
+     * The explicit verdict is one frame on a socket that may have been replaced since, so a lost
+     * frame used to look like a lost message: the entry failed after its timeout while the session
+     * had it all along, and the user was told to send it again. The session writes its own record of
+     * what it received — `dir: 'in'` with the same `localId` — and that comes back on every read and
+     * every push, so it is the proof.
+     */
+    private settleReceivedMessages(localIds: string[]): void {
+        if (localIds.length === 0) {
+            return;
+        }
+        const outbox = storage.getState().outbox;
+        for (const localId of localIds) {
+            const entry = outbox[localId];
+            if (entry && entry.status === 'sending') {
+                storage.getState().markOutboxMessageDelivered(localId);
+                const timer = this.lanSendTimeouts.get(localId);
+                if (timer) {
+                    clearTimeout(timer);
+                    this.lanSendTimeouts.delete(localId);
+                }
+            }
+        }
+    }
+
+    /**
+     * Where the App's reading of a session's log has got to, counting what has been pushed as well
+     * as what has been read: an entry delivered over the socket is one the App holds, whether or not
+     * a read was what brought it.
+     */
+    private pushedPositions = new Map<string, string>();
+
+    /** Entries pushed but not yet applied, per session, and the timer that will apply them. */
+    private pushedEntryBatches = new Map<string, { entries: LanSessionLogEntry[]; anchors: (string | undefined)[] }>();
+    private pushedEntryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    /** Long enough to merge a streaming burst, short enough to read as live. */
+    private static readonly PUSH_BATCH_MS = 100;
+
+    private queuePushedEntry(sessionId: string, entry: LanSessionLogEntry, anchor: string | undefined): void {
+        let batch = this.pushedEntryBatches.get(sessionId);
+        if (!batch) {
+            batch = { entries: [], anchors: [] };
+            this.pushedEntryBatches.set(sessionId, batch);
+        }
+        batch.entries.push(entry);
+        batch.anchors.push(anchor);
+        if (this.pushedEntryTimers.has(sessionId)) {
+            return;
+        }
+        const timer = setTimeout(() => {
+            this.pushedEntryTimers.delete(sessionId);
+            const pending = this.pushedEntryBatches.get(sessionId);
+            this.pushedEntryBatches.delete(sessionId);
+            if (pending && pending.entries.length > 0) {
+                void this.applyPushedEntries(sessionId, pending.entries, pending.anchors);
+            }
+        }, Sync.PUSH_BATCH_MS);
+        (timer as unknown as { unref?: () => void }).unref?.();
+        this.pushedEntryTimers.set(sessionId, timer);
+    }
+
+    /** One store update for a burst of pushed entries — see `queuePushedEntry`. */
+    private async applyPushedEntries(sessionId: string, entries: LanSessionLogEntry[], anchors: (string | undefined)[]): Promise<void> {
+        const sessionKey = this.lanSessionKeys.get(sessionId);
+        if (!sessionKey) {
+            // Same rule as a single pushed entry: without the key the position must not move.
+            return;
+        }
+        try {
+            const decrypted = await decryptLanEntries(this.encryption, sessionKey, entries);
+            const messages = toNormalizedMessages(decrypted);
+            if (messages.length > 0) {
+                const fresh = this.ingestChannelRead(sessionId, { messages });
+                log.log(`📡 LAN entries applied for ${sessionId}: ${fresh} new of ${messages.length} (batched)`);
+            }
+            const received: string[] = [];
+            for (const entry of entries) {
+                if (entry.dir === 'in' && entry.localId) {
+                    received.push(entry.localId);
+                }
+            }
+            this.settleReceivedMessages(received);
+            let newest: string | undefined;
+            for (const anchor of anchors) {
+                if (anchor && (!newest || this.compareAnchors(anchor, newest) > 0)) {
+                    newest = anchor;
+                }
+            }
+            this.notePushedPosition(sessionId, newest);
+        } catch (error) {
+            log.log(`📡 LAN entries for ${sessionId} could not be applied: ${String(error)}`);
+        }
+    }
+
+    /** The last head a hint reported, per session: what the positions above are compared against. */
+    private lastHintHeads = new Map<string, string>();
+    /** A pending read for a `log-grew` that may yet be answered by the socket itself. */
+    private logGrewReadTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    /** When this session was last read because of a `log-grew`. */
+    private lastLogGrewReadAt = new Map<string, number>();
+
+    /**
+     * How long a `log-grew` hint waits for the entry it is about to push.
+     *
+     * The hint and the entries travel the same socket, and the hint regularly arrives first. Reading
+     * on the hint alone meant an active session was read — a hundred messages decrypted and applied
+     * — every couple of seconds for messages that had already been pushed, which held the JS thread
+     * and the cache queue and made the session the person was looking at the slowest one. Half a
+     * second is longer than the gap between the two frames and far shorter than a person notices.
+     */
+    private static readonly LOG_GROW_GRACE_MS = 500;
+    /**
+     * The floor between two hint-driven reads of the same session.
+     *
+     * A hint that keeps finding the reader behind despite the socket delivering entries is a
+     * genuine gap (a frame the socket missed), and one read closes it. Repeating the read every
+     * time the daemon appends is not a gap — it is a reader chasing a writer, and the live socket
+     * is what is carrying that traffic.
+     */
+    private static readonly LOG_GROW_READ_MIN_INTERVAL_MS = 5_000;
+
+    private scheduleLogGrewRead(sessionId: string): void {
+        if (this.logGrewReadTimers.has(sessionId)) {
+            return;
+        }
+        const timer = setTimeout(() => {
+            this.logGrewReadTimers.delete(sessionId);
+            // By now the entry the hint was about has almost certainly been pushed and applied.
+            const head = this.lastHintHeads.get(sessionId);
+            if (head && head !== '(none)' && this.isAtLogHead(sessionId, head)) {
+                return;
+            }
+            const last = this.lastLogGrewReadAt.get(sessionId) ?? 0;
+            if (Date.now() - last < Sync.LOG_GROW_READ_MIN_INTERVAL_MS) {
+                return;
+            }
+            this.lastLogGrewReadAt.set(sessionId, Date.now());
+            this.messagesSync.get(sessionId)?.invalidate();
+        }, Sync.LOG_GROW_GRACE_MS);
+        (timer as unknown as { unref?: () => void }).unref?.();
+        this.logGrewReadTimers.set(sessionId, timer);
+    }
+
+    private notePushedPosition(sessionId: string, anchor: string | undefined): void {
+        if (!anchor || this.compareAnchors(anchor, this.pushedPositions.get(sessionId)) <= 0) {
+            return;
+        }
+        this.pushedPositions.set(sessionId, anchor);
+        // Follow forward from here rather than from wherever the last read stopped: the entries
+        // between are already applied, and re-fetching them only to dedup them away is the round
+        // trip this exists to avoid.
+        const link = this.daemonLinks.get(sessionId);
+        if (link && this.compareAnchors(anchor, link.cursor) > 0) {
+            this.daemonLinks.set(sessionId, { ...link, cursor: anchor });
+        }
+    }
+
+    /** `"<segment>:<byte>"`, compared as positions: the segment first, then the byte within it. */
+    private compareAnchors(a: string, b: string | undefined): number {
+        if (b === undefined) {
+            return 1;
+        }
+        const parse = (value: string) => value.split(':').map((part) => Number.parseInt(part, 10));
+        const [aSegment, aByte] = parse(a);
+        const [bSegment, bByte] = parse(b);
+        if (!Number.isFinite(aSegment) || !Number.isFinite(bSegment)) {
+            return 0;
+        }
+        return aSegment === bSegment ? aByte - bByte : aSegment - bSegment;
+    }
+
+    /**
+     * Whether this App already holds everything up to `head`.
+     *
+     * Only true with a window in place: without one there is nothing for a push to be a continuation
+     * of, and the read that establishes it has to happen before "up to date" can mean anything.
+     */
+    private isAtLogHead(sessionId: string, head: string | undefined): boolean {
+        if (!head || !this.daemonLinks.has(sessionId)) {
+            return false;
+        }
+        const position = this.pushedPositions.get(sessionId) ?? this.daemonLinks.get(sessionId)?.cursor;
+        const comparison = position ? this.compareAnchors(head, position) : 1;
+        if (comparison <= 0) {
+            log.log(`📡 log-grew for ${sessionId} is already covered; no read`);
+            return true;
+        }
+        return false;
+    }
+
+    /** The session's verdict on a message sent over its connection. */
+    private async onLanDelivered(result: { sessionId: string; localId: string; delivered: boolean }): Promise<void> {
+        const timer = this.lanSendTimeouts.get(result.localId);
+        if (timer) {
+            clearTimeout(timer);
+            this.lanSendTimeouts.delete(result.localId);
+        }
+        // A write is not a delivery, and the App cannot see whether the session could read the
+        // message — so this verdict is the only thing separating a dropped message from one that
+        // looks sent forever.
+        if (result.delivered) {
+            storage.getState().markOutboxMessageAcked(result.localId);
+            return;
+        }
+        // "No process" is not a failed message. The daemon is up — it is who answered — and starting
+        // the session is something it can do with no other session running. One retry: a process
+        // that still is not there the second time is a refusal, and the message says so.
+        const attempts = this.deliveryWakeAttempts.get(result.localId) ?? 0;
+        if (attempts < 1) {
+            this.deliveryWakeAttempts.set(result.localId, attempts + 1);
+            const wake = await this.wakeSession(result.sessionId);
+            if (wake !== 'failed') {
+                this.getSendSync(result.sessionId).invalidate();
+                return;
+            }
+        }
+        storage.getState().failOutboxEntries(
+            [result.localId],
+            'The session could not read this message.',
+        );
+    }
+
+    /**
+     * Whether the machine that owns this session has said its process is not running.
+     *
+     * Only an explicit "not alive" counts. No report is not a down session — it is a machine this
+     * device has not heard a roster from, and waking on that would restart sessions that are fine.
+     */
+    private sessionReportedDown(sessionId: string): boolean {
+        const state = storage.getState();
+        const listed = state.daemonSessionList[sessionId];
+        if (listed) {
+            return listed.isAlive === false;
+        }
+        const machineId = state.sessions[sessionId]?.metadata?.machineId;
+        const published = machineId
+            ? state.relayDirectory[machineId]?.sessions.find((session) => session.happySessionId === sessionId)
+            : undefined;
+        return published?.isAlive === false;
+    }
+
+    /**
+     * Ask the owning machine to start this session's process.
+     *
+     * The daemon answers this with no session running at all: it is the process that LaunchDaemon
+     * brings back, and the sessions are what it starts. A second ask inside the window is not a
+     * second start — the first one is still the answer.
+     */
+    private async wakeSession(sessionId: string): Promise<'woken' | 'recent' | 'failed'> {
+        const last = this.lastSessionWakeAt.get(sessionId) ?? 0;
+        if (Date.now() - last < Sync.SESSION_WAKE_WINDOW_MS) {
+            return 'recent';
+        }
+        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        if (!machineId) {
+            return 'failed';
+        }
+        this.lastSessionWakeAt.set(sessionId, Date.now());
+        const verdict = await this.restartSession(sessionId, machineId);
+        if (verdict?.success) {
+            log.log(`🔄 wake ${sessionId}: the machine is starting its process`);
+            return 'woken';
+        }
+        log.log(`🔄 wake ${sessionId}: ${verdict?.error ?? 'no channel could start it'}`);
+        return 'failed';
+    }
+
+    /** A connection came up: the sessions on that machine no longer need their polling fallback. */
+    /**
+     * Whether a machine's connection change is one the session on screen is served by.
+     *
+     * Every socket flap used to re-read the visible session — and with several machines' relay
+     * sockets cycling every few seconds, that was a re-read per flap, each one paying a full
+     * channel round (LAN probe timeouts, relay, then the server) while holding the session's read
+     * lock. A flap on a machine that does not own the visible session changes nothing for it.
+     */
+    private markVisibleStaleForMachine(machineId: string): void {
+        const visible = this.readScheduler.visibleSessionId;
+        if (!visible) {
+            return;
+        }
+        if (storage.getState().sessions[visible]?.metadata?.machineId === machineId) {
+            this.readScheduler.markStale();
+        }
+    }
+
+    private onDaemonConnectionReady(target: DaemonTarget): void {
+        // A socket that came up is proof about the address, and the same fact the read path
+        // records: it keeps a working address at the front of the candidate list and clears a run
+        // of failures the socket may have accumulated while the machine was restarting.
+        storage.getState().candidateSucceeded(target.machineId, target.route, target.baseUrl);
+        // The machine's own log, asked the moment its channel comes up: this is the fastest channel
+        // there is, and the sessions it has are the ones the server may not know about yet.
+        void this.pullMachineLifecycle();
+        // A connection that is up is one worth asking again whether it can answer: a daemon that
+        // has been updated since the last attempt will say so, and one that has not is written off
+        // again after a single missed heartbeat.
+        this.unverifiedMachines.delete(target.machineId);
+        // A connection that came up may have missed pushes while it was down. The session on
+        // screen is read once to close the gap; hidden sessions read when opened.
+        this.markVisibleStaleForMachine(target.machineId);
+        // Anything still waiting for a verdict may have been written into the socket this replaced.
+        // The queue still holds it, so a connection coming up is the moment to try it again — this
+        // is what turns "the message you sent while the channel was flapping" into a delay rather
+        // than a loss, without the user having to send a second one to notice.
+        const waiting = new Set<string>();
+        for (const entry of Object.values(storage.getState().outbox)) {
+            if (entry.status === 'sending') {
+                waiting.add(entry.sessionId);
+            }
+        }
+        for (const sessionId of waiting) {
+            this.resendOutbox(sessionId);
+        }
+    }
+
+    /**
+     * The daemon behind a live connection never answered a heartbeat: it is connected, but nothing
+     * proves it is still there, so the polling fallback stays on for its sessions.
+     */
+    private onDaemonHeartbeatUnsupported(target: DaemonTarget): void {
+        this.unverifiedMachines.add(target.machineId);
+        // The daemon cannot push; the visible session's scheduler poll is the fallback. Hidden
+        // sessions on this machine read when opened — a timer each was a fetch storm.
+        this.markVisibleStaleForMachine(target.machineId);
+    }
+
+    /** A connection went away: whatever it was carrying has just lost its push. */
+    private onDaemonConnectionDropped(target: DaemonTarget): void {
+        // Sessions that were being served at this address are told to read again, because the push
+        // they were relying on is gone. The *token* is deliberately not touched: a socket dying
+        // says nothing about a token the daemon still has on its books — the two are authenticated
+        // separately, and the daemon refuses a token only when it no longer knows the nonce behind
+        // it, which is a restart and not a dropped socket. Voiding on a drop made one socket's
+        // death cost a handshake from every reader sharing the address, against a rate limit that
+        // exists precisely to bound that. A token that really has gone stale is handled where it is
+        // discovered: the read that gets a 401 replaces it and retries.
+        // Named by the daemon, not by the address: a machine that dropped is the machine whose
+        // sessions lost their push. The session on screen is re-read now; the others when they are
+        // opened — invalidating every session on the machine was one transport's death becoming a
+        // read of every conversation on it.
+        this.markVisibleStaleForMachine(target.machineId);
+        const known = this.lanMachineConnections.get(target.machineId);
+        if (known && known.route === target.route) {
+            this.lanMachineConnections.delete(target.machineId);
+        }
+    }
+
+    /**
+     * Applies one log entry the daemon pushed over the live socket.
+     *
+     * The frame carries the same entry a history read returns, so it goes through the same two
+     * steps that read does — open it with the session key, normalize it — and then into
+     * `ingestChannelRead`, which is where `localId` dedup lives. That overlap is the point: an
+     * entry pushed while a read is in flight must not land twice.
+     *
+     * A key we do not hold yet is not an error: it arrives with the first read, and until then the
+     * read is the only path that could have applied the entry anyway. A frame that will not open is
+     * likewise a delay rather than a loss — the entry is still in the session's log, so the next
+     * read delivers it.
+     */
+    private async applyPushedDaemonEntry(sessionId: string, entry: LanSessionLogEntry, anchor?: string): Promise<void> {
+        if (entry.dir === 'in' && entry.localId) {
+            this.settleReceivedMessages([entry.localId]);
+        }
+        const sessionKey = this.lanSessionKeys.get(sessionId);
+        if (!sessionKey) {
+            // The key arrives with the first read, and until then this entry cannot be opened — so
+            // the position must not move either. Recording it here would say "I hold this entry"
+            // about one that was dropped, and the hint that follows would then find the reader
+            // already up to date and never fetch it: a message missing for good, which is what a
+            // turn that stops at a tool call looks like from the outside.
+            return;
+        }
+        try {
+            const decrypted = await decryptLanEntries(this.encryption, sessionKey, [entry]);
+            const messages = toNormalizedMessages(decrypted);
+            if (messages.length > 0) {
+                const fresh = this.ingestChannelRead(sessionId, { messages });
+                log.log(`📡 LAN entry applied for ${sessionId}: ${fresh} new of ${messages.length} (over the socket)`);
+            }
+            // Consumed, whether or not it produced a message the reducer keeps: an entry that
+            // normalises to nothing (an event, say) is still one the reader no longer needs.
+            this.notePushedPosition(sessionId, anchor);
+        } catch (error) {
+            log.log(`📡 LAN entry for ${sessionId} could not be applied: ${String(error)}`);
+        }
+    }
+
+    /**
+     * Waits for the session to say whether it could read a message sent over the LAN.
+     *
+     * Bounded on purpose: a verdict that never comes — an older session that cannot read the
+     * frame at all, or a socket that dies mid-flight — would otherwise leave the entry "sending"
+     * indefinitely, which is a spinner the user cannot clear.
+     */
+    private awaitLanDelivery(localId: string): void {
+        if (this.lanSendTimeouts.has(localId)) {
+            return;
+        }
+        this.checkLanDelivery(localId, Sync.LAN_DELIVERY_TIMEOUT_MS, true);
+    }
+
+    /**
+     * The daemon socket this session's messages may be written on — its own machine's, or none.
+     *
+     * A route holds one socket, and that socket belongs to one machine. Writing a session's message
+     * to another machine's daemon is a message handed to a session that does not exist there: the
+     * daemon looks the id up, finds nothing, answers `delivered: false`, and the message is gone
+     * from every point of view except the outbox. That is exactly what the App did whenever its
+     * relay socket was pointed at a different machine than the session's — with several machines
+     * publishing routes, that was most of the time, and it read as "the first message is always
+     * lost, the second one arrives".
+     *
+     * So the route's socket is used only when it is the session's own machine's, and otherwise this
+     * says nothing is available: the caller falls back to the server, or leaves the message queued,
+     * which are both outcomes where the message still exists.
+     *
+     * `trusted` rather than `current`, for the other half of the same problem: a socket that has
+     * missed a heartbeat is one whose peer may be gone, and a write into it is accepted locally and
+     * goes nowhere.
+     */
+    private daemonSendTarget(sessionId: string): { handle: LanSocketHandle; baseUrl: string; machineId: string } | null {
+        const channel = this.preferredChannel(sessionId);
+        if (channel === 'server') {
+            return null;
+        }
+        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        if (!machineId) {
+            return null;
+        }
+        return this.connections.trusted(machineId, channel);
+    }
+
+    /**
+     * Writes the session's unconfirmed messages again over the daemon channel, if one is usable.
+     *
+     * Kept apart from `flushOutbox` on purpose. A flush is a claim about the whole queue — it
+     * records waits, falls back to the server, and can fail the entries — while this is the narrow
+     * repair for one possibility: the earlier write was accepted by a socket whose peer was already
+     * gone. Nothing here may start a wait cycle, or a message that never confirms would keep
+     * extending its own deadline instead of failing at it. Doing nothing when no daemon connection
+     * is usable is correct: the ordinary flush, on its next tick, is what reaches the other
+     * channels.
+     */
+    private resendOutbox(sessionId: string): void {
+        const pending = this.pendingOutbox.get(sessionId);
+        if (!pending || pending.length === 0) {
+            return;
+        }
+        const daemon = this.daemonSendTarget(sessionId);
+        if (!daemon) {
+            return;
+        }
+        for (const msg of pending) {
+            daemon.handle.send({ sessionId, localId: msg.localId, content: msg.content });
+        }
+    }
+
+    /**
+     * Give the message a verdict, then proof, then let it fail.
+     *
+     * `settleReceivedMessages` settles an entry the moment the session's own log or a pushed entry
+     * shows it was received — which is what the echo and the verdict also do. So this timer only has
+     * to decide what to do when nothing has said anything: ask once more (a read brings back the
+     * session's record even when the verdict frame was lost), and only then admit it did not arrive.
+     * Failing on the verdict alone told the user to resend messages the session already had.
+     */
+    private checkLanDelivery(localId: string, waitMs: number, askAgain: boolean): void {
+        const timer = setTimeout(() => {
+            this.lanSendTimeouts.delete(localId);
+            const entry = storage.getState().outbox[localId];
+            if (!entry || entry.status !== 'sending') {
+                return; // settled elsewhere: the verdict, the echo, or a read
+            }
+            if (askAgain) {
+                // Send it again *and* look again. The look is what settles it when the message did
+                // arrive and only the confirmation was lost; the send is what covers the other
+                // case — a write into a socket whose peer was already gone, which reported success
+                // and went nowhere. A repeat is free: the session dedups on `localId`.
+                //
+                // The resend deliberately bypasses the ordinary flush, so it cannot register a wait
+                // cycle of its own: one message has one deadline, and this branch is its middle.
+                this.resendOutbox(entry.sessionId);
+                this.getMessagesSync(entry.sessionId).invalidate();
+                this.checkLanDelivery(localId, Sync.LAN_DELIVERY_PROOF_MS, false);
+                return;
+            }
+            storage.getState().failOutboxEntries(
+                [localId],
+                'No confirmation that the session received this message.',
+            );
+            log.log(`📡 LAN send ${localId} was never confirmed, and the session's log does not show it`);
+        }, waitMs);
+        (timer as unknown as { unref?: () => void }).unref?.();
+        this.lanSendTimeouts.set(localId, timer);
+    }
+
+    /**
+     * One tick of the LAN channel, run inside the same session lock and fetch slot the server path
+     * takes — which polling used to bypass by calling the LAN read directly, so two ticks could
+     * overlap and race each other into the store.
+     *
+     * A session on the LAN bypasses the server entirely — whether the preference put it there or a
+     * pin did. The pin exists so the path can be exercised deliberately: without it the only other
+     * way to reach the LAN is to break the server, so a broken channel stays invisible until the
+     * day it is needed.
+     */
+    /**
+     * Returns whether the daemon served this session — a page came back. False is the caller's
+     * signal that the daemon has nothing for it, which is a different thing from "the conversation
+     * is empty" and is answered by asking the server.
+     */
+    private fetchMessagesViaDaemon = async (sessionId: string): Promise<boolean> => {
+        // Only while this session has nothing to show: the flag is what the view reads to tell
+        // "nothing yet, still loading" from "this session has nothing", and setting it on every tick
+        // made the indicator at the bottom of the list flicker on a two-second poll — a loader that
+        // is on most of the time reads as one that never stops.
+        if (storage.getState().sessionMessages[sessionId]?.messages.length === 0) {
+            storage.getState().setFetching(sessionId, true);
+        }
+        const read = await this.fetchSessionFromDaemon(sessionId);
+        log.log(
+            read
+                ? `📡 fetchMessages: on LAN — read ${read.messages.length} message(s), ${read.decryptedCount}/${read.total} decrypted`
+                : '📡 fetchMessages: on LAN — no page from the daemon this tick'
+        );
+        // Polling is the fallback, not the mechanism. A socket that is up pushes `log-grew` the
+        // moment anything is written to the log, so a tick would only re-ask a question already
+        // answered — that is what made this run a full read twice a second forever.
+        //
+        // It still has to run when there is no socket, which is also the case the read just
+        // reported: "no local history yet" is a 404 the daemon documents as retryable, and
+        // treating it as final would strand the channel, since for a pinned session nothing else
+        // would ever invalidate the sync.
+        if (
+            read
+            && !this.unverifiedMachines.has(read.machineId)
+            && this.connections.current(read.machineId, read.connection.route)?.baseUrl === read.connection.baseUrl
+        ) {
+            this.stopDaemonPolling(sessionId);
+            return true;
+        }
+        if (!read && this.describeChannel(sessionId).reason !== 'pinned') {
+            // The daemon has no log for this session; a two-second poll cannot create one, it
+            // appears when the session writes. With the server down, *every* session the daemon
+            // did not own was polled this way — a fetch storm that held the JS thread and the
+            // cache, measured as repeated `fetchMessages starting` for six or more sessions a
+            // second. A pinned session is the exception: it chose this channel deliberately and
+            // nothing else would retry it.
+            this.stopDaemonPolling(sessionId);
+            return false;
+        }
+        this.startDaemonPolling(sessionId);
+        return read !== null;
+    };
+
+    /**
+     * Whether the visible session's push channel is missing, so its fallback poll is needed.
+     *
+     * This is not "the server is unreachable" — that was the old condition, and it made one
+     * transport's state a reason to read every session. It is a fact about this session: the route
+     * it is on cannot push right now, and its screen is waiting to look current. A live socket, or
+     * a connected server for a server-routed session, means the push exists and no poll is needed.
+     */
+    private visibleNeedsPolling(sessionId: string): boolean {
+        const channel = this.preferredChannel(sessionId);
+        if (channel === 'server') {
+            // There is no second route to poll here: the server socket reconnects on its own, and
+            // repeating an HTTP read every two seconds while it is down only adds timeouts. The
+            // session refreshes when the socket returns, or when the person opens it again.
+            return false;
+        }
+        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        if (!machineId) {
+            return false;
+        }
+        // A daemon that cannot answer heartbeats cannot push either; reads are the only source.
+        if (this.unverifiedMachines.has(machineId)) {
+            return true;
+        }
+        // A live socket pushes; nothing to poll.
+        if (this.connections.current(machineId, channel) !== null) {
+            return false;
+        }
+        // No socket: the only useful poll is of a daemon that has served this session before.
+        // A session the daemon has no log for is answered by the server, which is covered above —
+        // polling the daemon every two seconds cannot create a log that is not there.
+        return this.daemonLinks.get(sessionId)?.connection.route === channel;
+    }
+
+    /**
+     * Kept for the call sites: a channel fallback no longer owns a timer. The scheduler polls the
+     * visible session and nothing else; hidden sessions are read when they are opened.
+     */
+    private startDaemonPolling(_sessionId: string): void {
+        this.readScheduler.markStale();
+    }
+
+    private stopDaemonPolling(_sessionId: string): void {
+        // The scheduler's timer follows visibility, not per-session bookkeeping.
+    }
+
+    //
     // Apply store
     //
+
+    /**
+     * Everything that has to happen to messages a channel just delivered, whichever channel it was.
+     *
+     * A channel moves bytes: discover, authenticate, read. Deciding what those bytes *mean* — that
+     * they are decryptable, that they are not already held, that they belong in the store — is
+     * infrastructure, and it lives here so that a channel cannot forget a step. It could before:
+     * session-key registration and cache persistence sat inside the server path, so the LAN could
+     * deliver messages the App had no key on record for and would never persist, and both showed
+     * up only as "the LAN channel is broken".
+     *
+     * Returns how many messages were actually new, for logging and for deciding whether anything
+     * downstream needs to happen.
+     *
+     * Deliberately not here: persisting to the cache. A channel that only appends can persist
+     * straight away, but a paged server fetch knows the cache window better once its page has
+     * settled, so each channel calls `saveSessionCache` when its own read is complete.
+     */
+    private ingestChannelRead(
+        sessionId: string,
+        read: {
+            messages: NormalizedMessage[];
+            /**
+             * The session key the read unwrapped, when the channel carried one. Registering it is
+             * what lets the rest of the App treat the session as ready to read and write — the
+             * server path does the same with the same key material.
+             */
+            sessionKey?: Uint8Array;
+        },
+    ): number {
+        if (read.sessionKey) {
+            // Kept as well as registered: the encryption object holds a decryptor, not the key, and
+            // the live socket has to open an entry that arrived on its own with no read around it.
+            this.lanSessionKeys.set(sessionId, read.sessionKey);
+            void this.encryption.initializeSessions(new Map([[sessionId, read.sessionKey]]));
+        }
+        // The producer mints the localId and every channel carries it; an echo that arrives without
+        // one is the same message sent earlier from this device, and must not become a second
+        // identity. The server path already re-attaches it — this is the same rule here.
+        const identified = read.messages.map((message) => {
+            if (message.role !== 'user' || message.localId) {
+                return message;
+            }
+            const text = message.content.type === 'text' ? message.content.text : '';
+            const claimed = this.resolveLocalIdForIncoming(sessionId, message.id, text, null);
+            return claimed ? { ...message, localId: claimed } : message;
+        });
+        const fresh = this.withoutStoredDuplicates(sessionId, identified);
+        if (fresh.length === 0) {
+            return 0;
+        }
+        const applyStartedAt = Date.now();
+        this.applyMessages(sessionId, fresh);
+        const applyMs = Date.now() - applyStartedAt;
+        if (applyMs > 30) {
+            log.log(`⏱️ store apply for ${sessionId}: ${applyMs}ms for ${fresh.length} message(s)`);
+        }
+        // Persist because the store changed, not because a request succeeded — see
+        // `scheduleCacheSave`. This is what makes the cache independent of which channel
+        // delivered the messages, and of whether that channel's fetch also went through.
+        this.scheduleCacheSave(sessionId);
+        return fresh.length;
+    }
+
+    /**
+     * Drops messages the store already holds.
+     *
+     * Neither channel can rely on the reducer for this across a switch. The reducer dedups on
+     * `msg.id`, but the same message carries *different* ids on the two channels — the CLI logs
+     * its own outbound messages under its local id, while the server hands them back under a
+     * server-assigned id. `localId` is the one field both routes agree on, so it is the key here.
+     * Without this, reading a session over the LAN and then switching back would duplicate every
+     * message the CLI itself sent — and symmetrically, the LAN read would duplicate everything
+     * the server had already delivered.
+     */
+    private withoutStoredDuplicates(sessionId: string, messages: NormalizedMessage[]): NormalizedMessage[] {
+        const known = new Set<string>();
+        for (const message of storage.getState().sessionMessages[sessionId]?.messages ?? []) {
+            known.add(message.id);
+            // Not every variant carries a localId (mode-switch messages do not), so narrow first.
+            const localId = 'localId' in message ? message.localId : null;
+            if (localId) {
+                known.add(localId);
+            }
+        }
+        return messages.filter(
+            (message) => !known.has(message.id) && !(message.localId && known.has(message.localId))
+        );
+    }
 
     private applyMessages = (sessionId: string, messages: NormalizedMessage[]) => {
         const result = storage.getState().applyMessages(sessionId, messages);
@@ -3467,6 +7230,8 @@ class Sync {
                 // consistent with model/maxMode. CLI now syncs profileId to metadata
                 // via updateMetadata on every message, so the remote value is current.
                 storage.getState().releaseSessionProfileId(sessionId);
+                // Release local sandbox isolation so remote metadata wins next turn.
+                storage.getState().releaseSessionSandboxIsolation(sessionId);
             }
         }
 
@@ -3491,11 +7256,27 @@ class Sync {
 
     private applySessions = (sessions: (Omit<Session, "presence"> & {
         presence?: "online" | number;
-    })[]) => {
+    })[], fullRefresh?: boolean) => {
         const active = storage.getState().getActiveSessions();
-        storage.getState().applySessions(sessions);
+        const channelBefore = new Map(sessions.map((s) => [s.id, this.preferredChannel(s.id)]));
+        // The server's own list: its seqs are the server axis, the freshest such numbers this App
+        // can hold, and the axis flag retires whatever the daemon fallback last wrote.
+        this.sessionsListAxis = 'server';
+        for (const applied of sessions) {
+            this.serverSessionSeq.set(applied.id, applied.seq);
+        }
+        storage.getState().applySessions(sessions, fullRefresh);
+        this.applyPublishedGitStatus(sessions);
         const newActive = storage.getState().getActiveSessions();
         this.applySessionDiff(active, newActive);
+
+        // The channel is only chosen when a read starts, so a session already open on the server
+        // would stay there after its CLI restarts and declares the LAN. Re-read it on the new one.
+        for (const [sessionId, before] of channelBefore) {
+            if (before === 'server' && this.preferredChannel(sessionId) !== 'server') {
+                this.messagesSync.get(sessionId)?.invalidate();
+            }
+        }
     }
 
     private applySessionDiff = (active: Session[], newActive: Session[]) => {
@@ -3515,8 +7296,14 @@ class Sync {
 
 }
 
-// Global singleton instance
+// Global singleton instance. A reload evaluates this module again; the previous instance is
+// stopped first so its timers and listeners do not keep working beside the new one.
+const previousSync = (globalThis as unknown as { __happyActiveSync?: { stop?: () => void } }).__happyActiveSync;
+previousSync?.stop?.();
 export const sync = new Sync();
+(globalThis as unknown as { __happyActiveSync?: { stop?: () => void } }).__happyActiveSync = {
+    stop: () => sync.stopBackgroundWork(),
+};
 
 //
 // Init sequence
@@ -3553,19 +7340,26 @@ async function syncInit(credentials: AuthCredentials, restore: boolean) {
     // Initialize tracking
     initializeTracking(encryption.anonID);
 
-    // Initialize socket connection
-    const API_ENDPOINT = getServerUrl();
-    apiSocket.initialize({ endpoint: API_ENDPOINT, token: credentials.token }, encryption);
+    // Initialize sessions engine FIRST — loads cache, applies cached data,
+    // registers socket message handlers (subscribeToUpdates). Only AFTER the
+    // cache is loaded and handlers are registered do we start the socket.
+    // Otherwise the socket connects before handlers exist, early messages are
+    // dropped, and cached data is invisible until the socket connects.
+    if (restore) {
+        await sync.restore(credentials, encryption);
+    } else {
+        await sync.create(credentials, encryption);
+    }
 
     // Wire socket status to storage
     apiSocket.onStatusChange((status) => {
         storage.getState().setSocketStatus(status);
     });
 
-    // Initialize sessions engine
-    if (restore) {
-        await sync.restore(credentials, encryption);
-    } else {
-        await sync.create(credentials, encryption);
-    }
+    // Start socket connection — handlers are already registered, cache is loaded.
+    const API_ENDPOINT = getServerUrl();
+    // Set before initialising: a server the setting has switched off must not be connected to even
+    // for the instant it takes the first connect to come back.
+    apiSocket.setServerEnabled(channelEnabled(storage.getState().localSettings.channelPriority, 'server'));
+    apiSocket.initialize({ endpoint: API_ENDPOINT, token: credentials.token }, encryption);
 }

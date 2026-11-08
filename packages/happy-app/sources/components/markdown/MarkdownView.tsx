@@ -3,8 +3,9 @@ import { parseMarkdownSpans } from './parseMarkdownSpans';
 import { Link } from 'expo-router';
 import * as React from 'react';
 import { Pressable, ScrollView, View, Platform } from 'react-native';
+import * as Clipboard from 'expo-clipboard';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import { StyleSheet } from 'react-native-unistyles';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Text } from '../StyledText';
 import { ExternalLink } from '../ExternalLink';
 import { Typography } from '@/constants/Typography';
@@ -13,8 +14,12 @@ import { Modal } from '@/modal';
 import { useLocalSetting } from '@/sync/storage';
 import { storeTempText } from '@/sync/persistence';
 import { useRouter } from 'expo-router';
-import * as Clipboard from 'expo-clipboard';
 import { MermaidRenderer } from './MermaidRenderer';
+import { MathRenderer } from './MathRenderer';
+import { SvgRenderer } from './SvgRenderer';
+import { InlineMath } from './InlineMath';
+import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
+import { KATEX_CSS_FULL } from './katex-css-full';
 import { t } from '@/text';
 import { isRunningInTauri } from '@/utils/platform';
 
@@ -33,11 +38,22 @@ async function openMarkdownLink(url: string) {
     }
 }
 
-export const MarkdownView = React.memo((props: { 
+export const MarkdownView = React.memo((props: {
     markdown: string;
     onOptionPress?: (option: Option) => void;
 }) => {
+    const { theme } = useUnistyles();
+    // Inject KaTeX CSS+fonts once on web (runs on first render, before useEffect)
+    if (Platform.OS === 'web' && typeof document !== 'undefined' && !document.getElementById('katex-fonts-css')) {
+        const style = document.createElement('style');
+        style.id = 'katex-fonts-css';
+        const CDN_BASE = 'https://cdn.jsdelivr.net/npm/katex@0.17.0/dist/fonts/';
+        style.textContent = KATEX_CSS_FULL.replace(/url\(fonts\/([^)]+)\)/g, `url(${CDN_BASE}$1)`);
+        document.head.appendChild(style);
+    }
     const blocks = React.useMemo(() => parseMarkdown(props.markdown ?? ''), [props.markdown]);
+    const textColor = theme.colors.text;
+    const codeBg = theme.colors.surfaceHighest;
     
     // Backwards compatibility: The original version just returned the view, wrapping the list of blocks.
     // It made each of the individual text elements selectable. When we enable the markdownCopyV2 feature,
@@ -62,9 +78,9 @@ export const MarkdownView = React.memo((props: {
             <View style={{ width: '100%' }}>
                 {blocks.map((block, index) => {
                     if (block.type === 'text') {
-                        return <RenderTextBlock spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} />;
+                        return <RenderTextBlock spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} textColor={textColor} codeBg={codeBg} />;
                     } else if (block.type === 'header') {
-                        return <RenderHeaderBlock level={block.level} spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} />;
+                        return <RenderHeaderBlock level={block.level} spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} textColor={textColor} codeBg={codeBg} />;
                     } else if (block.type === 'horizontal-rule') {
                         return <View style={style.horizontalRule} key={index} />;
                     } else if (block.type === 'list') {
@@ -75,10 +91,49 @@ export const MarkdownView = React.memo((props: {
                         return <RenderCodeBlock content={block.content} language={block.language} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} />;
                     } else if (block.type === 'mermaid') {
                         return <MermaidRenderer content={block.content} key={index} />;
+                    } else if (block.type === 'svg') {
+                        return <SvgRenderer content={block.content} key={index} />;
                     } else if (block.type === 'options') {
                         return <RenderOptionsBlock items={block.items} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} onOptionPress={props.onOptionPress} />;
                     } else if (block.type === 'table') {
                         return <RenderTableBlock headers={block.headers} rows={block.rows} key={index} first={index === 0} last={index === blocks.length - 1} />;
+                    } else if (block.type === 'math') {
+                        const copyLatex = (text: string) => {
+                            if (Platform.OS === 'web') {
+                                navigator.clipboard.writeText(text).catch(() => {});
+                            } else {
+                                Clipboard.setStringAsync(text);
+                            }
+                        };
+                        // Linux webkitgtk lacks stretchy MathML fonts; use KaTeX HTML fallback.
+                        // macOS/iOS/Android have system math fonts and use native MathML rendering.
+                        const isLinuxWeb = Platform.OS === 'web' && typeof navigator !== 'undefined' && /Linux/.test(navigator.userAgent);
+                        if (isLinuxWeb) {
+                            return (
+                                <View key={index} style={{ position: 'relative' }}
+                                    // @ts-ignore — raw DOM events for hover copy button
+                                    onMouseEnter={(e: any) => { const b = e.currentTarget?.querySelector?.('.math-copy-btn'); if (b) b.style.opacity = '1'; }}
+                                    onMouseLeave={(e: any) => { const b = e.currentTarget?.querySelector?.('.math-copy-btn'); if (b) b.style.opacity = '0'; }}
+                                >
+                                    <MathRenderer content={block.content} />
+                                    {/* @ts-ignore */}
+                                    <button className="math-copy-btn"
+                                        onClick={(e: any) => { e.stopPropagation(); copyLatex(block.content); }}
+                                        style={{ position:'absolute',top:8,right:8,opacity:0,transition:'opacity 0.15s',background:'#333',color:'#fff',border:'none',borderRadius:4,padding:'4px 10px',cursor:'pointer',fontSize:12,zIndex:10 }}
+                                    >Copy LaTeX</button>
+                                </View>
+                            );
+                        }
+                        return (
+                            <Pressable key={index} onLongPress={() => copyLatex(block.content)}>
+                                <EnrichedMarkdownText
+                                    flavor="github" containerStyle={{ marginVertical: 8 }}
+                                    markdown={`$$\n${block.content}\n$$`}
+                                    markdownStyle={{ paragraph: { color: textColor }, strong: { color: textColor }, em: { color: textColor }, code: { color: textColor, backgroundColor: codeBg }, blockquote: { backgroundColor: 'transparent' as any }, math: { color: textColor, backgroundColor: codeBg, fontSize: 14, textAlign: 'center' } }}
+                                    md4cFlags={{ latexMath: true }}
+                                />
+                            </Pressable>
+                        );
                     } else {
                         return null;
                     }
@@ -113,13 +168,49 @@ export const MarkdownView = React.memo((props: {
     );
 });
 
-function RenderTextBlock(props: { spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean }) {
-    return <Text selectable={props.selectable} style={[style.text, props.first && style.first, props.last && style.last]}><RenderSpans spans={props.spans} baseStyle={style.text} /></Text>;
+// Reconstruct raw markdown from parsed spans
+function spansToMarkdown(spans: MarkdownSpan[]): string {
+    return spans.map(s => {
+        if (s.styles.includes('math')) return `$${s.text}$`;
+        if (s.styles.includes('bold')) return `**${s.text}**`;
+        if (s.styles.includes('italic')) return `*${s.text}*`;
+        if (s.styles.includes('code')) return '`' + s.text + '`';
+        if (s.url) return `[${s.text}](${s.url})`;
+        return s.text;
+    }).join('');
+}
+function hasMath(spans: MarkdownSpan[]): boolean {
+    return spans.some(s => s.styles.includes('math'));
 }
 
-function RenderHeaderBlock(props: { level: 1 | 2 | 3 | 4 | 5 | 6, spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean }) {
+function RenderTextBlock(props: { spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, textColor: string, codeBg: string }) {
+    const blockStyle = [style.text, props.first && style.first, props.last && style.last];
+    if (hasMath(props.spans)) {
+        return (
+            <EnrichedMarkdownText
+                flavor="github"
+                containerStyle={style.text as any}
+                markdown={spansToMarkdown(props.spans)}
+                markdownStyle={{ paragraph: { color: props.textColor }, strong: { color: props.textColor }, em: { color: props.textColor }, code: { color: props.textColor, backgroundColor: props.codeBg }, blockquote: { backgroundColor: 'transparent' as any }, inlineMath: { color: props.textColor } }}
+            />
+        );
+    }
+    return <Text selectable={props.selectable} style={blockStyle}><RenderSpans spans={props.spans} baseStyle={style.text} /></Text>;
+}
+
+function RenderHeaderBlock(props: { level: 1 | 2 | 3 | 4 | 5 | 6, spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, textColor: string, codeBg: string }) {
     const s = (style as any)[`header${props.level}`];
     const headerStyle = [style.header, s, props.first && style.first, props.last && style.last];
+    if (hasMath(props.spans)) {
+        return (
+            <EnrichedMarkdownText
+                flavor="github"
+                containerStyle={style.header as any}
+                markdown={spansToMarkdown(props.spans)}
+                markdownStyle={{ paragraph: { color: props.textColor }, strong: { color: props.textColor }, em: { color: props.textColor }, code: { color: props.textColor, backgroundColor: props.codeBg }, blockquote: { backgroundColor: 'transparent' as any }, inlineMath: { color: props.textColor } }}
+            />
+        );
+    }
     return <Text selectable={props.selectable} style={headerStyle}><RenderSpans spans={props.spans} baseStyle={headerStyle} /></Text>;
 }
 
@@ -232,6 +323,11 @@ function RenderOptionsBlock(props: {
 function RenderSpans(props: { spans: MarkdownSpan[], baseStyle?: any }) {
     return (<>
         {props.spans.map((span, index) => {
+            // Inline math: render with KaTeX WebView (iOS Text supports nested native Views inline)
+            if (span.styles.includes('math')) {
+                return <InlineMath key={index} expr={span.text} />;
+            }
+
             if (span.url) {
                 if (isRunningInTauri()) {
                     return (
@@ -239,7 +335,7 @@ function RenderSpans(props: { spans: MarkdownSpan[], baseStyle?: any }) {
                             key={index}
                             selectable
                             onPress={() => void openMarkdownLink(span.url!)}
-                            style={[props.baseStyle, style.link, style.desktopLink, span.styles.map(s => style[s])]}
+                            style={[props.baseStyle, style.link, style.desktopLink, span.styles.map(s => (style as any)[s])]}
                         >
                             {span.text}
                         </Text>
@@ -247,20 +343,21 @@ function RenderSpans(props: { spans: MarkdownSpan[], baseStyle?: any }) {
                 }
 
                 if (Platform.OS === 'web') {
-                    return <Link key={index} href={span.url as any} target="_blank" style={[style.link, span.styles.map(s => style[s])]}>{span.text}</Link>
+                    return <Link key={index} href={span.url as any} target="_blank" style={[style.link, span.styles.map(s => (style as any)[s])]}>{span.text}</Link>
                 }
 
-                return <ExternalLink key={index} href={span.url} style={[style.link, span.styles.map(s => style[s])]}>{span.text}</ExternalLink>
+                return <ExternalLink key={index} href={span.url} style={[style.link, span.styles.map(s => (style as any)[s])]}>{span.text}</ExternalLink>
             } else {
-                return <Text key={index} selectable style={[props.baseStyle, span.styles.map(s => style[s])]}>{span.text}</Text>
+                return <Text key={index} selectable style={[props.baseStyle, span.styles.map(s => (style as any)[s])]}>{span.text}</Text>
             }
         })}
     </>)
 }
 
-// Table rendering uses column-first layout to ensure consistent column widths.
-// Each column is rendered as a vertical container with all its cells (header + data).
-// This ensures that cells in the same column have the same width, determined by the widest content.
+// A table is laid out in rows: each row is a horizontal stack whose cells divide the table's width
+// between them, and the row's cells stretch to the tallest so the lines below stay level. The
+// column-first version gave every column its own vertical rhythm, so once cells wrapped the same
+// row was a different height in every column and the table read as ragged.
 function RenderTableBlock(props: {
     headers: string[],
     rows: string[][],
@@ -271,51 +368,62 @@ function RenderTableBlock(props: {
         parseMarkdownSpans(value && value.length > 0 ? value : '\u00A0', false)
     );
     const columnCount = props.headers.length;
+    // Columns share the width by how much label each holds, within bounds. Equal shares cut a
+    // header longer than its share, and a header is a label: it should neither wrap nor be cut.
+    const shares = props.headers.map((header) => Math.min(3, Math.max(1, Math.ceil((header ?? '').length / 8))));
     const rowCount = props.rows.length;
     const isLastRow = (rowIndex: number) => rowIndex === rowCount - 1;
 
     return (
         <View style={[style.tableContainer, props.first && style.first, props.last && style.last]}>
-            <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={Platform.OS !== 'web'}
-                nestedScrollEnabled={true}
-                style={style.tableScrollView}
-            >
-                <View style={style.tableContent}>
-                    {/* Render each column as a vertical container */}
+            {/* Rows, not columns. A column-first layout gave every column its own vertical
+                rhythm, so once cells wrapped the same row was a different height in each column and
+                the table read as ragged. A row is a horizontal stack whose cells stretch to the
+                tallest one in it, and equal shares of the width keep the columns lined up. */}
+            <View style={style.tableContent}>
+                <View style={style.tableRow}>
                     {props.headers.map((header, colIndex) => (
                         <View
-                            key={`column-${colIndex}`}
+                            key={`header-${colIndex}`}
                             style={[
-                                style.tableColumn,
-                                colIndex === columnCount - 1 && style.tableColumnLast
+                                style.tableCell,
+                                style.tableHeaderCell,
+                                style.tableCellFlexible,
+                                { flexGrow: shares[colIndex] },
+                                colIndex === columnCount - 1 && style.tableCellLast,
                             ]}
                         >
-                            {/* Header cell for this column */}
-                            <View style={[style.tableCell, style.tableHeaderCell, style.tableCellFirst]}>
-                                <Text style={style.tableHeaderText}>
-                                    <RenderSpans spans={renderTableCellSpans(header)} baseStyle={style.tableHeaderText} />
-                                </Text>
-                            </View>
-                            {/* Data cells for this column */}
-                            {props.rows.map((row, rowIndex) => (
-                                <View
-                                    key={`cell-${rowIndex}-${colIndex}`}
-                                    style={[
-                                        style.tableCell,
-                                        isLastRow(rowIndex) && style.tableCellLast
-                                    ]}
-                                >
-                                    <Text style={style.tableCellText}>
-                                        <RenderSpans spans={renderTableCellSpans(row[colIndex])} baseStyle={style.tableCellText} />
-                                    </Text>
-                                </View>
-                            ))}
+                            {/* A header is a label, not prose: one line, and a long one truncates
+                                rather than wrapping the row's height open. */}
+                            {/* Stretched like the cells' own text, so a header uses the column's
+                                whole width before it truncates instead of hanging at its content. */}
+                            <Text style={[style.tableHeaderText, { alignSelf: 'stretch' }]} numberOfLines={2}>
+                                <RenderSpans spans={renderTableCellSpans(header)} baseStyle={style.tableHeaderText} />
+                            </Text>
                         </View>
                     ))}
                 </View>
-            </ScrollView>
+                {props.rows.map((row, rowIndex) => (
+                    <View key={`row-${rowIndex}`} style={style.tableRow}>
+                        {props.headers.map((_header, colIndex) => (
+                            <View
+                                key={`cell-${rowIndex}-${colIndex}`}
+                                style={[
+                                    style.tableCell,
+                                    style.tableCellFlexible,
+                                { flexGrow: shares[colIndex] },
+                                    isLastRow(rowIndex) && style.tableCellLastRow,
+                                    colIndex === columnCount - 1 && style.tableCellLast,
+                                ]}
+                            >
+                                <Text style={style.tableCellText}>
+                                    <RenderSpans spans={renderTableCellSpans(row[colIndex])} baseStyle={style.tableCellText} />
+                                </Text>
+                            </View>
+                        ))}
+                    </View>
+                ))}
+            </View>
         </View>
     );
 }
@@ -335,13 +443,27 @@ const style = StyleSheet.create((theme) => ({
         fontWeight: '400',
     },
 
+    /**
+     * Emphasis needs both the family and the weight, and for different reasons.
+     *
+     * The family is what gives the Latin text a real face — the app registers its fonts per face and
+     * has no bold one, so `bold` has to mean the semiBold family. The weight is what covers the text
+     * the family has no glyphs for: these fonts carry no CJK, so Chinese characters are drawn by a
+     * system fallback, and that fallback is only emphasised if the weight asks for it — iOS does not
+     * synthesise it otherwise, while the desktop webview does. Which is why a phrase like
+     * `**iOS 远端…**` came out with only "iOS" bold on iOS: the Latin took the semiBold face, and the
+     * Chinese fell back to a regular one.
+     */
     italic: {
+        ...Typography.default('italic'),
         fontStyle: 'italic',
     },
     bold: {
-        fontWeight: 'bold',
+        ...Typography.default('semiBold'),
+        fontWeight: '600',
     },
     semibold: {
+        ...Typography.default('semiBold'),
         fontWeight: '600',
     },
     code: {
@@ -540,6 +662,9 @@ const style = StyleSheet.create((theme) => ({
     //
 
     tableContainer: {
+        // `stretch` depends on the parent's alignment; the width does not. A table is as wide as the
+        // message it sits in, whatever the block around it does.
+        width: '100%',
         marginVertical: 8,
         borderWidth: 1,
         borderColor: theme.colors.divider,
@@ -551,7 +676,30 @@ const style = StyleSheet.create((theme) => ({
         flexGrow: 0,
     },
     tableContent: {
+        // A column of rows. This used to be `row` because the table was built as a row of columns;
+        // after the switch to row-first layout the leftover direction stacked every row side by side.
+        flexDirection: 'column',
+        // Stretched, not shrink-to-fit: without this the table was as wide as its widest cell rather
+        // than as wide as the message, so the cells' text ran out of width long before the column did.
+        alignSelf: 'stretch',
+    },
+    /** A row of the table: its cells stretch to the tallest, which is what lines the rows up. */
+    tableRow: {
         flexDirection: 'row',
+        alignItems: 'stretch',
+        // A row stretches to the table's width, so a table with little content is still as wide as
+        // the message instead of shrinking to its cells.
+        alignSelf: 'stretch',
+    },
+    /** A cell takes an equal share of the message width; the text wraps inside it. */
+    /** The last row's cells have no bottom border of their own — the container draws the edge. */
+    tableCellLastRow: {
+        borderBottomWidth: 0,
+    },
+    tableCellFlexible: {
+        flexGrow: 1,
+        flexBasis: 0,
+        minWidth: 72,
     },
     tableColumn: {
         flexDirection: 'column',
@@ -567,6 +715,8 @@ const style = StyleSheet.create((theme) => ({
         borderBottomWidth: 1,
         borderBottomColor: theme.colors.divider,
         alignItems: 'flex-start',
+        // The width comes from the column now, and the text wraps inside it.
+        flexShrink: 1,
     },
     tableCellFirst: {
         borderTopWidth: 0,

@@ -111,9 +111,11 @@ export const it: TranslationStructure = {
         error: 'errore',
         auth_error: 'accedi di nuovo',
         online: 'online',
+        lan: 'LAN',
         offline: 'offline',
         lastSeen: ({ time }: { time: string }) => `visto l'ultima volta ${time}`,
         permissionRequired: 'permesso richiesto',
+        restarting: 'Riavvio…',
         activeNow: 'Attivo ora',
         unknown: 'sconosciuto',
         creating: 'Creazione…',
@@ -123,6 +125,7 @@ export const it: TranslationStructure = {
         justNow: 'proprio ora',
         minutesAgo: ({ count }: { count: number }) => `${count} ${count === 1 ? 'minuto' : 'minuti'} fa`,
         hoursAgo: ({ count }: { count: number }) => `${count} ${count === 1 ? 'ora' : 'ore'} fa`,
+        yesterday: 'ieri',
     },
 
     connect: {
@@ -248,6 +251,7 @@ export const it: TranslationStructure = {
         networkError: 'Si è verificato un errore di rete',
         serverError: 'Si è verificato un errore del server',
         unknownError: 'Si è verificato un errore sconosciuto',
+        channelCannotServeAction: 'Questa azione passa dal server, disattivato nelle impostazioni dei canali',
         connectionTimeout: 'Connessione scaduta',
         authenticationFailed: 'Autenticazione non riuscita',
         permissionDenied: 'Permesso negato',
@@ -322,6 +326,7 @@ export const it: TranslationStructure = {
             success: 'Worktree creata con successo',
         },
         sessionReadyMessage: 'Sessione pronta. Toccala nell\'elenco per aprirla.',
+        sessionCreatedPending: 'La sessione è stata creata sulla macchina; apparirà presto nell’elenco.',
     },
 
     sessionHistory: {
@@ -337,6 +342,14 @@ export const it: TranslationStructure = {
     session: {
         inputPlaceholder: 'Scrivi un messaggio ...',
         encrypting: 'handshaking…',
+        backgroundTasks: 'Attività in background',
+        activityScheduled: 'Programmato',
+        activityOnce: 'una volta',
+        activityAgents: 'Agenti',
+        activityMonitors: 'Monitor',
+        activityGoals: 'Obiettivi',
+        activityShell: 'Comandi in background',
+        activityWorkflows: 'Workflow',
     },
 
     commandPalette: {
@@ -369,6 +382,8 @@ export const it: TranslationStructure = {
         archiveSessionConfirm: 'Sei sicuro di voler archiviare questa sessione?',
         restartSession: 'Riavvia sessione',
         restartSessionSubtitle: 'È disponibile una versione più recente del CLI. Riavvia per aggiornare.',
+        needsDesktop: 'Questa sessione richiede un accesso al desktop su quella macchina. Accedi lì e riprova.',
+        restartInDesktop: 'Riavvia nella sessione desktop',
         restartSessionConfirm: 'La sessione verrà riavviata con la versione più recente del CLI.',
         noMachineId: 'ID macchina non disponibile per questa sessione',
         failedToRestartSession: 'Impossibile riavviare la sessione',
@@ -390,6 +405,17 @@ export const it: TranslationStructure = {
         failedToKillSession: 'Impossibile terminare la sessione',
         failedToArchiveSession: 'Impossibile archiviare la sessione',
         connectionStatus: 'Stato connessione',
+        channelAuto: 'Automatico',
+        channelServer: 'Server',
+        channelRelay: 'Relay',
+        channelWhyServerDownRelay: 'Server non raggiungibile, uso il relay pubblico',
+        channelWhyByPriority: 'Scelto dalla priorità dei canali',
+        channelPinned: 'Fissato manualmente',
+        channelWhyReachable: 'La sessione supporta la LAN e la macchina è su questa rete',
+        channelWhyNotDeclared: 'La sessione non supporta la LAN, riavviala',
+        channelWhyNotOnNetwork: 'Macchina non visibile su questa rete',
+        channelWhyNoKey: 'Nessuna chiave per questa macchina su questo dispositivo',
+        channelWhyUnknown: 'In attesa dei dati della sessione',
         created: 'Creato',
         lastUpdated: 'Ultimo aggiornamento',
         sequence: 'Sequenza',
@@ -439,6 +465,20 @@ export const it: TranslationStructure = {
             scanQrCode: 'Scansiona il codice QR',
             openCamera: 'Apri fotocamera',
         },
+    },
+
+    sandbox: {
+        isolationTitle: 'Sandbox Isolation',
+        isolation: {
+            off: 'Off',
+            strict: 'Strict',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
+        isolationOffDesc: 'No sandbox restrictions',
+        isolationStrictDesc: 'Full filesystem and network isolation',
+        isolationWorkspaceDesc: 'Sandbox limited to workspace directory',
+        isolationCustomDesc: 'Custom sandbox rules',
     },
 
     agentInput: {
@@ -520,6 +560,13 @@ export const it: TranslationStructure = {
             fileLabel: 'FILE',
             folderLabel: 'CARTELLA',
         },
+        sandbox: {
+            isolationTitle: 'Sandbox Isolation',
+            off: 'Off',
+            strict: 'Strict (project only)',
+            workspace: 'Workspace',
+            custom: 'Custom',
+        },
         noMachinesAvailable: 'Nessuna macchina',
     },
 
@@ -540,6 +587,15 @@ export const it: TranslationStructure = {
     },
 
     tools: {
+
+
+        countdown: {
+
+            in: ({ time }: { time: string }) => `tra ${time}`,
+
+            due: 'adesso',
+
+        },
         fullView: {
             description: 'Descrizione',
             inputParams: 'Parametri di input',
@@ -593,6 +649,19 @@ export const it: TranslationStructure = {
             question: 'Domanda',
             agent: 'Agente',
             skill: 'Skill',
+            sendMessage: 'Invia messaggio',
+            listAgents: 'Agenti',
+            taskDetails: 'Attività',
+            enterWorktree: 'Entra nella worktree',
+            exitWorktree: 'Esci dalla worktree',
+            notification: 'Notifica',
+            designSync: 'Sincronizzazione del design',
+        },
+        sendMessage: {
+            to: ({ name }: { name: string }) => `A ${name}`,
+            sending: 'invio',
+            sent: 'inviato',
+            failed: 'errore',
         },
         desc: {
             terminalCmd: ({ cmd }: { cmd: string }) => `Terminale(cmd: ${cmd})`,
@@ -635,6 +704,7 @@ export const it: TranslationStructure = {
         file: 'File',
         fileEmpty: 'File vuoto',
         noChanges: 'Nessuna modifica da mostrare',
+        download: 'Scarica',
     },
 
     settingsVoice: {
@@ -809,6 +879,7 @@ export const it: TranslationStructure = {
         lastKnownHttpPort: 'Ultima porta HTTP nota',
         startedAt: 'Avviato alle',
         cliVersion: 'Versione CLI',
+        restartRequired: 'Riavvio necessario',
         daemonStateVersion: 'Versione stato daemon',
         activeSessions: ({ count }: { count: number }) => `Sessioni attive (${count})`,
         machineGroup: 'Macchina',

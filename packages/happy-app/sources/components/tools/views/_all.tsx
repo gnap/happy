@@ -26,6 +26,9 @@ import { CursorEditView } from './CursorEditView';
 import { CursorWriteView } from './CursorWriteView';
 import { AgentViewFull } from './AgentViewFull';
 import { SkillView } from './SkillView';
+import { SendMessageView } from './SendMessageView';
+import { ListAgentsView } from './ListAgentsView';
+import { ScheduleWakeupView } from './ScheduleWakeupView';
 
 export type ToolViewProps = {
     tool: ToolCall;
@@ -62,6 +65,11 @@ export const toolViewRegistry: Record<string, ToolViewComponent> = {
     TaskUpdate: TaskTrackerView,
     AskUserQuestion: AskUserQuestionView,
     Skill: SkillView,
+    SendMessage: SendMessageView,
+    ListAgents: ListAgentsView,
+    Workflow: TaskView,
+    workflow: TaskView,
+    ScheduleWakeup: ScheduleWakeupView,
     // Gemini tools (lowercase)
     edit: GeminiEditView,
     execute: GeminiExecuteView,
@@ -82,6 +90,12 @@ export const toolFullViewRegistry: Record<string, ToolViewComponent> = {
     Task: TaskView, // Task output is in children (sidechain agent-text), not tool.result
     Agent: AgentViewFull,
     Skill: SkillView,
+    Workflow: TaskView,
+    workflow: TaskView,
+    // A message to another session and the list of sessions it could go to: both are read in full
+    // on the message page, where the card in the transcript has only room for a line.
+    SendMessage: SendMessageView,
+    ListAgents: ListAgentsView,
 };
 
 // Helper function to get the appropriate view component for a tool

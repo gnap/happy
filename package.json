@@ -1,36 +1,46 @@
 {
-    "name": "monorepo",
-    "private": true,
-    "scripts": {
-        "cli": "yarn workspace happy-coder cli",
-        "release": "node ./scripts/release.cjs",
-        "web": "yarn workspace happy-app web",
-        "postinstall": "patch-package && node ./scripts/postinstall.cjs",
-        "install-pre-commit": "sh ./scripts/install-pre-commit.sh"
-    },
-    "workspaces": {
-        "packages": [
-            "packages/happy-app",
-            "packages/happy-agent",
-            "packages/happy-cli",
-            "packages/happy-server",
-            "packages/happy-wire"
-        ],
-        "nohoist": [
-            "**/zod",
-            "**/react",
-            "**/react-dom",
-            "**/react-native",
-            "**/react-native/**",
-            "**/react-native-edge-to-edge/**",
-            "**/react-native-incall-manager/**"
-        ]
-    },
-    "packageManager": "yarn@1.22.22",
-    "devDependencies": {
-        "patch-package": "^8.0.0"
-    },
-    "resolutions": {
-        "@tauri-apps/api": "^2.11"
-    }
+  "name": "monorepo",
+  "private": true,
+  "scripts": {
+    "cli": "yarn workspace happy-coder cli",
+    "release": "node ./scripts/release.cjs",
+    "web": "yarn workspace happy-app web",
+    "postinstall": "patch-package && node ./scripts/postinstall.cjs",
+    "install-pre-commit": "sh ./scripts/install-pre-commit.sh",
+    "android": "yarn workspace happy-app expo run:android",
+    "ios": "yarn workspace happy-app expo run:ios"
+  },
+  "workspaces": {
+    "packages": [
+      "packages/happy-app",
+      "packages/happy-agent",
+      "packages/happy-cli",
+      "packages/happy-server",
+      "packages/happy-wire"
+    ],
+    "nohoist": [
+      "**/zod",
+      "**/react",
+      "**/react-dom",
+      "**/react-native",
+      "**/react-native/**",
+      "**/react-native-edge-to-edge/**",
+      "**/react-native-incall-manager/**"
+    ]
+  },
+  "packageManager": "yarn@1.22.22",
+  "devDependencies": {
+    "patch-package": "^8.0.0"
+  },
+  "resolutions": {
+    "@tauri-apps/api": "^2.11",
+    "whatwg-url": "14.2.0",
+    "parse-path": "7.0.3",
+    "@types/parse-path": "7.0.3",
+    "expo-modules-autolinking": "~57.0.16"
+  },
+  "version": "1.0.0",
+  "dependencies": {
+    "async-limiter": "^2.0.0"
+  }
 }

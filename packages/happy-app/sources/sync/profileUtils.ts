@@ -377,7 +377,10 @@ export const DEFAULT_PROFILES = [
 ];
 
 export function getAllEnvProfiles(customProfiles: AIBackendProfile[]): AIBackendProfile[] {
-    const builtInProfiles = DEFAULT_PROFILES.map((bp) => getBuiltInProfile(bp.id)).filter((p): p is AIBackendProfile => p != null);
+    const profileIds = new Set(customProfiles.map(p => p.id));
+    const builtInProfiles = DEFAULT_PROFILES
+        .map((bp) => getBuiltInProfile(bp.id))
+        .filter((p): p is AIBackendProfile => p != null && profileIds.has(p.id));
     return [...customProfiles, ...builtInProfiles];
 }
 

@@ -1,3 +1,4 @@
+import type { SessionChannel } from '@/sync/lan/types';
 import { Ionicons, Octicons } from '@expo/vector-icons';
 import * as React from 'react';
 import { View, Platform, useWindowDimensions, ViewStyle, Text, ActivityIndicator, TouchableWithoutFeedback, Image as RNImage, Pressable } from 'react-native';
@@ -9,6 +10,10 @@ import { PermissionMode, ModelMode } from './PermissionModeSelector';
 import { hapticsLight, hapticsError } from './haptics';
 import { Shaker, ShakeInstance } from './Shaker';
 import { StatusDot } from './StatusDot';
+import { CHANNEL_ICONS } from '@/sync/machinePresence';
+import type { GoalStatus } from '@/utils/goalUtils';
+import { SessionActivityBadges } from '@/components/SessionActivityBadges';
+import type { ActivityTask } from '@/utils/activityTasks';
 import { useActiveWord } from './autocomplete/useActiveWord';
 import { useActiveSuggestions } from './autocomplete/useActiveSuggestions';
 import { AgentInputAutocomplete } from './AgentInputAutocomplete';
@@ -23,11 +28,17 @@ import { hackMode, hackModes } from '@/sync/modeHacks';
 import { Theme } from '@/theme';
 import { t } from '@/text';
 import { Metadata } from '@/sync/storageTypes';
+
 import { AIBackendProfile, getProfileEnvironmentVariables, validateProfileForAgent } from '@/sync/settings';
 import { getBuiltInProfile, getProfilesForAgent } from '@/sync/profileUtils';
 import { useRouter } from 'expo-router';
 
+/** Sandbox isolation level — controls OS-level file system and network sandboxing per-session. */
+export type SandboxIsolationLevel = 'off' | 'strict' | 'workspace' | 'custom';
+
 interface AgentInputProps {
+    /** Whether this session runs in the desktop session, and whether one is available now. */
+    desktopState?: { required: boolean; available: boolean } | null;
     value: string;
     placeholder: string;
     onChangeText: (text: string) => void;
@@ -54,12 +65,38 @@ interface AgentInputProps {
         color: string;
         dotColor: string;
         isPulsing?: boolean;
+        /**
+         * How the session is being reached; when given, its glyph replaces the plain dot.
+         *
+         * `link` is that channel's own connection to the machine. It can be reconnecting while the
+         * session still reads over the channel — reachable, not linked — and the glyph is coloured
+         * by it so the input bar and the app header cannot say different things about the LAN.
+         */
+        channel?: { kind: SessionChannel; pinned: boolean; link?: 'connected' | 'connecting' | 'off' | null };
         cliStatus?: {
             claude: boolean | null;
             codex: boolean | null;
             cursor?: boolean | null;
             gemini?: boolean | null;
         };
+        /**
+         * Background tasks the CLI is still running, so the turn is still open.
+         *
+         * The status line otherwise says the turn finished, because a result did arrive — the CLI
+         * just cannot end the stream while these are live. Showing them is what separates "waiting
+         * on something" from "stopped answering".
+         *
+         * The full task shape, because the kinds differ in what they carry — a shell task has a
+         * command, a subagent an agent type — and a narrower type here would read as though those
+         * were never sent, when the CLI forwards them.
+         */
+        backgroundTasks?: ActivityTask[] | null;
+        /** Pending scheduled jobs (Claude cron tasks), from agentState. */
+        crons?: Record<string, { schedule: string; recurring: boolean; nextFireAt?: number; prompt?: string }> | null;
+        /** Whether this session runs in the desktop session, and whether one is available now. */
+        desktopState?: { required: boolean; available: boolean } | null;
+        /** Current /goal condition, when the session has one. Shown inside the activity badge. */
+        goal?: { status: GoalStatus; condition: string } | null;
     };
     autocompletePrefixes: string[];
     autocompleteSuggestions: (query: string) => Promise<{ key: string, text: string, component: React.ElementType }[]>;
@@ -100,6 +137,8 @@ interface AgentInputProps {
     minHeight?: number;
     profileId?: string | null;
     onProfileChange?: (profileId: string | null) => void;
+    sandboxIsolation?: SandboxIsolationLevel;
+    onSandboxIsolationChange?: (level: SandboxIsolationLevel) => void;
     onAttach?: () => void;
     attachments?: { name: string; width?: number; height?: number; data: string; mimeType: string; size: number }[];
     onRemoveAttachment?: (index: number) => void;
@@ -356,10 +395,36 @@ const ContextBreakdown = React.memo(({ breakdown }: { breakdown: NonNullable<Age
     );
 });
 
+/** The last summary this logged, so the composer's channel appears once per change. */
+let lastComposerChannelLogged: string | null = null;
+
 export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, AgentInputProps>((props, ref) => {
     const styles = stylesheet;
     const { theme } = useUnistyles();
     const screenWidth = useWindowDimensions().width;
+    /**
+     * The channel glyph's own colour: its link, not the session's state.
+     *
+     * The dot used to be drawn entirely in the session status colour, so a LAN session whose socket
+     * was reconnecting looked exactly like a healthy one — while its messages were going out over
+     * the server. The text beside it still says what the session is doing; the glyph says how the
+     * channel it names is doing.
+     */
+    const channelLink = props.connectionStatus?.channel?.link ?? null;
+    const channelTint = channelLink === 'connected' ? theme.colors.status.connected
+        : channelLink === 'connecting' ? theme.colors.status.connecting
+            : channelLink === 'off' ? theme.colors.status.disconnected
+                : null;
+    // What the glyph beside the composer decided, once per change — the same question the header's
+    // icons answer, asked about the session on screen. "The icon is blue and the LAN works" is only
+    // diagnosable if the glyph says which channel it named and what that channel's link was.
+    const channelSummary = props.connectionStatus?.channel
+        ? `${props.connectionStatus.channel.kind}=${channelLink ?? 'no-link'}${props.connectionStatus.channel.pinned ? ' (pinned)' : ''}`
+        : null;
+    if (channelSummary !== null && channelSummary !== lastComposerChannelLogged) {
+        lastComposerChannelLogged = channelSummary;
+        console.log(`🔌 composer channel: ${channelSummary}`);
+    }
 
     const hasText = props.value.trim().length > 0;
 
@@ -394,8 +459,9 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         if (!isSandboxEnabled) {
             return label;
         }
+        // Blue color on the yolo label itself replaces the "(sandboxed)" suffix
         if (modeKey === 'bypassPermissions' || modeKey === 'yolo') {
-            return `${label} (sandboxed)`;
+            return label;
         }
         return label;
     }, [isSandboxEnabled]);
@@ -515,6 +581,20 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         hapticsLight();
         setShowProfileOverlay(true);
     }, []);
+
+    // Sandbox isolation picker state
+    const [showSandboxIsolation, setShowSandboxIsolation] = React.useState(false);
+
+    const handleSandboxIsolationPress = React.useCallback(() => {
+        hapticsLight();
+        setShowSandboxIsolation(prev => !prev);
+    }, []);
+
+    const handleSandboxIsolationSelect = React.useCallback((level: SandboxIsolationLevel) => {
+        hapticsLight();
+        props.onSandboxIsolationChange?.(level);
+        setShowSandboxIsolation(false);
+    }, [props.onSandboxIsolationChange]);
 
     // Handle settings selection
     const handleSettingsSelect = React.useCallback((mode: PermissionMode) => {
@@ -846,10 +926,14 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                 <>
                                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
                                         <StatusDot
-                                            color={props.connectionStatus.dotColor}
+                                            color={channelTint ?? props.connectionStatus.dotColor}
                                             isPulsing={props.connectionStatus.isPulsing}
-                                            size={6}
+                                            size={props.connectionStatus.channel ? 12 : 6}
+                                            icon={props.connectionStatus.channel ? CHANNEL_ICONS[props.connectionStatus.channel.kind] : undefined}
                                         />
+                                        {props.connectionStatus.channel?.pinned && (
+                                            <Ionicons name="pin" size={9} color={channelTint ?? props.connectionStatus.dotColor} />
+                                        )}
                                         <Text style={{
                                             fontSize: 11,
                                             color: props.connectionStatus.color,
@@ -947,6 +1031,15 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                             )}
                                         </>
                                     )}
+                                    {/* Everything the session has in flight — the goal it is aiming
+                                        at and the work it started — as one count; the details are a
+                                        hover (desktop) or a long press (phone) away. */}
+                                    <SessionActivityBadges
+                                        tasks={props.connectionStatus.backgroundTasks}
+                                        goal={props.connectionStatus.goal}
+                                        crons={props.connectionStatus.crons}
+                                        interactive
+                                    />
                                 </>
                             )}
                             {(contextWarning || props.usageData?.contextSize) && (
@@ -1121,24 +1214,38 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                             alignItems: 'flex-end',
                             minWidth: 150, // Fixed minimum width to prevent layout shift
                         }}>
-                            {displayPermissionMode && (
-                                <Text style={{
-                                    fontSize: 11,
-                                    color: isSandboxedYoloMode ? '#4169E1' :
-                                        permissionModeKey === 'acceptEdits' ? theme.colors.permission.acceptEdits :
-                                            permissionModeKey === 'bypassPermissions' ? theme.colors.permission.bypass :
-                                                permissionModeKey === 'plan' ? theme.colors.permission.plan :
-                                                    permissionModeKey === 'ask' ? theme.colors.permission.ask :
-                                                        permissionModeKey === 'read-only' ? theme.colors.permission.readOnly :
-                                                            permissionModeKey === 'safe-yolo' ? theme.colors.permission.safeYolo :
-                                                                permissionModeKey === 'yolo' ? theme.colors.permission.yolo :
-                                                                    permissionModeKey === 'force' ? theme.colors.permission.force :
-                                                                        theme.colors.textSecondary, // Use secondary text color for default
-                                    ...Typography.default()
-                                }}>
-                                    {withSandboxSuffix(displayPermissionMode.name, permissionModeKey)}
-                                </Text>
-                            )}
+                            {/* Desktop session, sandbox shield and permission mode in one row */}
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
+                                {props.desktopState?.required ? (
+                                    <Ionicons
+                                        name="desktop-outline"
+                                        size={13}
+                                        color={props.desktopState.available ? theme.colors.textSecondary : '#FF9500'}
+                                    />
+                                ) : null}
+                                <SandboxIndicatorButton
+                                    isolation={props.sandboxIsolation ?? 'off'}
+                                    onPress={props.onSandboxIsolationChange ? handleSandboxIsolationPress : undefined}
+                                />
+                                {displayPermissionMode && (
+                                    <Text style={{
+                                        fontSize: 11,
+                                        color: isSandboxedYoloMode ? '#4169E1' :
+                                            permissionModeKey === 'acceptEdits' ? theme.colors.permission.acceptEdits :
+                                                permissionModeKey === 'bypassPermissions' ? theme.colors.permission.bypass :
+                                                    permissionModeKey === 'plan' ? theme.colors.permission.plan :
+                                                        permissionModeKey === 'ask' ? theme.colors.permission.ask :
+                                                            permissionModeKey === 'read-only' ? theme.colors.permission.readOnly :
+                                                                permissionModeKey === 'safe-yolo' ? theme.colors.permission.safeYolo :
+                                                                    permissionModeKey === 'yolo' ? theme.colors.permission.yolo :
+                                                                        permissionModeKey === 'force' ? theme.colors.permission.force :
+                                                                            theme.colors.textSecondary, // Use secondary text color for default
+                                        ...Typography.default()
+                                    }}>
+                                        {withSandboxSuffix(displayPermissionMode.name, permissionModeKey)}
+                                    </Text>
+                                )}
+                            </View>
                             {props.modelMode && (
                                 <Text style={{
                                     fontSize: 11,
@@ -1291,6 +1398,71 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                             {t('agentInput.profile.manage')}
                                         </Text>
                                     </Pressable>
+                                </View>
+                            </FloatingOverlay>
+                        </View>
+                    </>
+                )}
+
+                {/* Sandbox isolation picker overlay */}
+                {showSandboxIsolation && (
+                    <>
+                        <TouchableWithoutFeedback onPress={() => setShowSandboxIsolation(false)}>
+                            <View style={styles.overlayBackdrop} />
+                        </TouchableWithoutFeedback>
+                        <View style={[
+                            styles.settingsOverlay,
+                            { paddingHorizontal: screenWidth > 700 ? 0 : 8 }
+                        ]}>
+                            <FloatingOverlay maxHeight={300} keyboardShouldPersistTaps="always">
+                                <View style={styles.overlaySection}>
+                                    <Text style={styles.overlaySectionTitle}>
+                                        {t('sandbox.isolationTitle') ?? 'Sandbox Isolation'}
+                                    </Text>
+                                    {(Object.entries(SANDBOX_ISOLATION_LABELS) as [SandboxIsolationLevel, string][]).map(([level, label]) => {
+                                        const isSelected = (props.sandboxIsolation ?? 'off') === level;
+                                        return (
+                                            <Pressable
+                                                key={level}
+                                                onPress={() => handleSandboxIsolationSelect(level)}
+                                                style={({ pressed }) => ({
+                                                    flexDirection: 'row',
+                                                    alignItems: 'center',
+                                                    paddingHorizontal: 16,
+                                                    paddingVertical: 10,
+                                                    backgroundColor: pressed ? theme.colors.surfacePressed : 'transparent',
+                                                    borderRadius: 8,
+                                                })}
+                                            >
+                                                <View style={{
+                                                    width: 16,
+                                                    height: 16,
+                                                    borderRadius: 8,
+                                                    borderWidth: 2,
+                                                    borderColor: isSelected ? theme.colors.radio.active : theme.colors.radio.inactive,
+                                                    alignItems: 'center',
+                                                    justifyContent: 'center',
+                                                    marginRight: 12,
+                                                }}>
+                                                    {isSelected && (
+                                                        <View style={{
+                                                            width: 8,
+                                                            height: 8,
+                                                            borderRadius: 4,
+                                                            backgroundColor: theme.colors.radio.active,
+                                                        }} />
+                                                    )}
+                                                </View>
+                                                <Text style={{
+                                                    fontSize: 15,
+                                                    fontWeight: isSelected ? '600' : '400',
+                                                    color: isSelected ? theme.colors.textPrimary : theme.colors.textSecondary,
+                                                }}>
+                                                    {label}
+                                                </Text>
+                                            </Pressable>
+                                        );
+                                    })}
                                 </View>
                             </FloatingOverlay>
                         </View>
@@ -1710,6 +1882,47 @@ function GitStatusButton({ sessionId, onPress }: { sessionId?: string, onPress?:
                     color={theme.colors.button.secondary.tint}
                 />
             )}
+        </Pressable>
+    );
+}
+
+const SANDBOX_ISOLATION_LABELS: Record<SandboxIsolationLevel, string> = {
+    'off': 'Off',
+    'strict': 'Strict (project only)',
+    'workspace': 'Workspace',
+    'custom': 'Custom',
+};
+
+/** Sandbox indicator button — green shield-check when active, grey outline when off.
+ *  In wizard mode (onPress provided), it opens the isolation picker.
+ *  In session view (no onPress), it's a read-only status indicator. */
+function SandboxIndicatorButton({ isolation, onPress }: { isolation: SandboxIsolationLevel; onPress?: () => void }) {
+    const { theme } = useUnistyles();
+    const isActive = isolation !== 'off';
+    const interactive = !!onPress;
+
+    return (
+        <Pressable
+            style={(p) => ({
+                flexDirection: 'row',
+                alignItems: 'center',
+                paddingHorizontal: 2,
+                paddingVertical: 0,
+                height: 14,
+                opacity: p.pressed ? 0.7 : 1,
+            })}
+            hitSlop={{ top: 5, bottom: 5, left: 2, right: 2 }}
+            disabled={!interactive}
+            onPress={interactive ? () => {
+                hapticsLight();
+                onPress();
+            } : undefined}
+        >
+            <Octicons
+                name={isActive ? "shield-check" : "shield"}
+                size={12}
+                color={isActive ? theme.colors.gitAdded : theme.colors.button.secondary.tint}
+            />
         </Pressable>
     );
 }

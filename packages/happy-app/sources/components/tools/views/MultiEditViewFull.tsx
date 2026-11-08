@@ -9,9 +9,9 @@ import { t } from '@/text';
 import { useSetting } from '@/sync/storage';
 import { useLazyToolInput } from './useLazyToolInput';
 
-export const MultiEditViewFull = React.memo<ToolViewProps>(({ tool, metadata, sessionId }) => {
+export const MultiEditViewFull = React.memo<ToolViewProps>(({ tool, metadata, sessionId, messageId }) => {
     const wrapLinesInDiffs = useSetting('wrapLinesInDiffs');
-    const { resolvedInput, loading } = useLazyToolInput(tool, sessionId);
+    const { resolvedInput, loading } = useLazyToolInput(tool, sessionId, messageId);
 
     // Parse the input
     let edits: Array<{ old_string: string; new_string: string; replace_all?: boolean }> = [];
