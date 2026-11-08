@@ -674,6 +674,7 @@ export const pt: TranslationStructure = {
         noChanges: 'Nenhuma alteração para exibir',
         download: 'Baixar',
         allFiles: 'Todos os arquivos',
+        recentFiles: 'Recentes',
     },
 
     settingsVoice: {

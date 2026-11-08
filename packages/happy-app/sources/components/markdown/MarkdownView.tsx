@@ -22,11 +22,21 @@ import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
 import { KATEX_CSS_FULL } from './katex-css-full';
 import { t } from '@/text';
 import { isRunningInTauri } from '@/utils/platform';
+import { filePathFromInlineCode } from './filePathSpans';
 
 // Option type for callback
 export type Option = {
     title: string;
 };
+
+/**
+ * What a press on a file path in the text should do, when the caller has somewhere to send it.
+ *
+ * A context rather than a prop threaded through every block renderer: the handler belongs to the
+ * message (which knows its session), while the spans are several components deep and also render
+ * inside lists, headers and tables.
+ */
+const FilePressContext = React.createContext<((path: string) => void) | null>(null);
 
 async function openMarkdownLink(url: string) {
     try {
@@ -41,6 +51,8 @@ async function openMarkdownLink(url: string) {
 export const MarkdownView = React.memo((props: {
     markdown: string;
     onOptionPress?: (option: Option) => void;
+    /** Called for an inline-code span that names a file, when the caller can open one. */
+    onFilePress?: (path: string) => void;
 }) => {
     const { theme } = useUnistyles();
     // Inject KaTeX CSS+fonts once on web (runs on first render, before useEffect)
@@ -75,6 +87,7 @@ export const MarkdownView = React.memo((props: {
     }, [props.markdown, router]);
     const renderContent = () => {
         return (
+            <FilePressContext.Provider value={props.onFilePress ?? null}>
             <View style={{ width: '100%' }}>
                 {blocks.map((block, index) => {
                     if (block.type === 'text') {
@@ -139,6 +152,7 @@ export const MarkdownView = React.memo((props: {
                     }
                 })}
             </View>
+            </FilePressContext.Provider>
         );
     }
 
@@ -321,11 +335,30 @@ function RenderOptionsBlock(props: {
 }
 
 function RenderSpans(props: { spans: MarkdownSpan[], baseStyle?: any }) {
+    const onFilePress = React.useContext(FilePressContext);
     return (<>
         {props.spans.map((span, index) => {
             // Inline math: render with KaTeX WebView (iOS Text supports nested native Views inline)
             if (span.styles.includes('math')) {
                 return <InlineMath key={index} expr={span.text} />;
+            }
+
+            // A path in inline code becomes something to press: the agent names a file, and the
+            // reader should not have to find it again through the file browser.
+            if (!span.url && onFilePress && span.styles.includes('code')) {
+                const filePath = filePathFromInlineCode(span.text);
+                if (filePath) {
+                    return (
+                        <Text
+                            key={index}
+                            selectable
+                            onPress={() => onFilePress(filePath)}
+                            style={[props.baseStyle, span.styles.map(s => (style as any)[s]), style.filePath]}
+                        >
+                            {span.text}
+                        </Text>
+                    );
+                }
             }
 
             if (span.url) {
@@ -441,6 +474,12 @@ const style = StyleSheet.create((theme) => ({
         marginBottom: 8,
         color: theme.colors.text,
         fontWeight: '400',
+    },
+
+    /** A path in inline code: the code background stays, the underline says it can be pressed. */
+    filePath: {
+        textDecorationLine: 'underline',
+        textDecorationStyle: 'dotted',
     },
 
     /**
