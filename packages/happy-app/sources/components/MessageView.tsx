@@ -13,6 +13,21 @@ import { sync } from '@/sync/sync';
 import { Option } from './markdown/MarkdownView';
 import { useSetting, useOutboxEntry, storage } from "@/sync/storage";
 import { Ionicons } from '@expo/vector-icons';
+import { useRouter } from 'expo-router';
+import { encodeFilePathParam } from '@/utils/filePathParam';
+
+/**
+ * What pressing a file path in a message does: open the file viewer for this session.
+ *
+ * A path the agent names is relative to the session's working tree — the viewer resolves it
+ * against the same directory the daemon pinned — so the message only has to say which file.
+ */
+function useFilePress(sessionId: string) {
+  const router = useRouter();
+  return React.useCallback((path: string) => {
+    router.push(`/session/${sessionId}/file?path=${encodeFilePathParam(path)}`);
+  }, [router, sessionId]);
+}
 
 /**
  * Memoized because the chat list hands every cell a fresh `messages` array on each incoming
@@ -84,6 +99,7 @@ function UserTextBlock(props: {
   sessionId: string;
 }) {
   const outbox = useOutboxEntry(props.message.localId);
+  const onFilePress = useFilePress(props.sessionId);
   const isSending = outbox?.status === 'sending';
   const isAcked = outbox?.status === 'acked';
   const isDelivered = outbox?.status === 'delivered';
@@ -140,7 +156,11 @@ function UserTextBlock(props: {
               ))}
             </View>
           )}
-          <MarkdownView markdown={props.message.displayText || props.message.text || ''} onOptionPress={handleOptionPress} />
+          <MarkdownView
+            markdown={props.message.displayText || props.message.text || ''}
+            onOptionPress={handleOptionPress}
+            onFilePress={onFilePress}
+          />
         </View>
       </View>
     </View>
@@ -173,6 +193,7 @@ function AgentTextBlock(props: {
   sessionId: string;
 }) {
   const experiments = useSetting('experiments');
+  const onFilePress = useFilePress(props.sessionId);
   const handleOptionPress = React.useCallback((option: Option) => {
     sync.sendMessage(props.sessionId, option.title);
   }, [props.sessionId]);
@@ -197,7 +218,7 @@ function AgentTextBlock(props: {
 
   return (
     <View style={[styles.agentMessageContainer, props.message.isThinking && { opacity: 0.3 }]}>
-      <MarkdownView markdown={props.message.text} onOptionPress={handleOptionPress} />
+      <MarkdownView markdown={props.message.text} onOptionPress={handleOptionPress} onFilePress={onFilePress} />
     </View>
   );
 }

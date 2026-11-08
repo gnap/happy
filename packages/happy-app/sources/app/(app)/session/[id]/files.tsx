@@ -11,6 +11,7 @@ import { Typography } from '@/constants/Typography';
 import { GitFileStatus, GitStatusFiles } from '@/sync/gitStatusFiles';
 import { searchFiles, FileItem } from '@/sync/suggestionFile';
 import { sync } from '@/sync/sync';
+import { encodeFilePathParam } from '@/utils/filePathParam';
 import { useSessionGitStatus, useSessionProjectGitStatus } from '@/sync/storage';
 import { useUnistyles, StyleSheet } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
@@ -94,7 +95,7 @@ export default function FilesScreen() {
 
     const handleFilePress = React.useCallback((file: GitFileStatus | FileItem) => {
         // Navigate to file viewer with the file path (base64 encoded for special characters)
-        const encodedPath = btoa(file.fullPath);
+        const encodedPath = encodeFilePathParam(file.fullPath);
         router.push(`/session/${sessionId}/file?path=${encodedPath}`);
     }, [router, sessionId]);
 
