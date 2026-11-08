@@ -766,6 +766,13 @@ export class ClaudeSession {
         for (const cron of crons) displayCrons.set(cron.id, cron);
         emitDisplayCrons();
     }
+
+    // A Claude process is born with none — crons live in its memory and do not survive it — so
+    // whatever the server still carries was written by a process that already died (a restart
+    // skips the SessionEnd hook that would have cleared it, and a respawned process may not see
+    // its first turn end for hours). The empty list is the truth about this process, published
+    // at birth rather than waiting for the first turn end to imply it.
+    emitDisplayCrons();
     /** Which tool each `tool_use` call was, so a task can be attributed to the tool that started it. */
     const toolNamesByCallId = new Map<string, string>();
     /** When each call's task will stop on its own, where the tool said so. */
