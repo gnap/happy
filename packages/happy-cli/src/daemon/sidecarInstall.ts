@@ -53,6 +53,7 @@ export function installSidecar(): string {
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>LimitLoadToSessionType</key><string>Aqua</string>
+  <key>AbandonProcessGroup</key><true/>
   <key>StandardOutPath</key><string>${escapeXml(join(configuration.happyHomeDir, 'logs', 'sidecar.log'))}</string>
   <key>StandardErrorPath</key><string>${escapeXml(join(configuration.happyHomeDir, 'logs', 'sidecar.err'))}</string>
 </dict>

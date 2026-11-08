@@ -85,10 +85,15 @@ export async function runSidecar(): Promise<void> {
             case 'spawn': {
                 try {
                     const [command, ...args] = frame.argv;
+                    // Detached, for the same reason the daemon spawns its own sessions that way:
+                    // the session must outlive this process. Without it the session stays in the
+                    // sidecar's process group and launchd reaps it whenever the job restarts —
+                    // a sidecar update would take every GUI-dependent session down with it.
                     const child = spawn(command, args, {
                         cwd: frame.cwd,
                         stdio: 'ignore',
                         env: process.env,
+                        detached: true,
                     });
                     if (!child.pid) {
                         throw new Error('the process did not start');
