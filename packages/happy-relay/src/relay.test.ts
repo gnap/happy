@@ -48,6 +48,27 @@ describe('relay', () => {
         }
     });
 
+    it('allows the headers an account proof is sent in', async () => {
+        // A control submit through the relay is the same browser POST with the proof headers on it.
+        // A preflight the relay answers without them is a refusal the daemon never sees, so the
+        // submit reads as a machine that will not answer, and falls to a channel that cannot
+        // carry it.
+        relay = startRelay({ port: 0 });
+        const res = await fetch(`http://127.0.0.1:${relay.port}/r/${'a'.repeat(32)}/lan/sessions/s/control`, {
+            method: 'OPTIONS',
+            headers: {
+                origin: 'http://localhost:8081',
+                'access-control-request-method': 'POST',
+                'access-control-request-headers':
+                    'authorization, content-type, x-happy-proof-nonce, x-happy-proof-at, x-happy-proof-signature',
+            },
+        });
+        expect(res.status).toBe(204);
+        for (const header of ['x-happy-proof-nonce', 'x-happy-proof-at', 'x-happy-proof-signature']) {
+            expect(res.headers.get('access-control-allow-headers')).toContain(header);
+        }
+    });
+
     it('carries the CORS headers on the errors it answers itself', async () => {
         relay = startRelay({ port: 0 });
         const res = await fetch(`http://127.0.0.1:${relay.port}/not-a-route`, { headers: { origin: 'http://localhost:8081' } });
