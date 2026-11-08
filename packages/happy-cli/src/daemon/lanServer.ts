@@ -152,6 +152,12 @@ export type LanHistory = {
 import type { VersionState } from './versionState';
 import { accountProofMessage, accountProofMessageV1, verifyAccountProof } from './accountProof';
 
+/** One file from a session's working tree, or why this machine will not send it. */
+export type LanSessionFile =
+  | { bytes: Buffer; name: string; mime: string }
+  /** Larger than this API carries in one response. The App can still open it over the server route. */
+  | { error: 'too-large'; size: number };
+
 export type LanServerOptions = {
   /** The machine key: a 32-byte symmetric secret shared with the App via the machine record. */
   secret: Uint8Array;
@@ -184,6 +190,16 @@ export type LanServerOptions = {
    * working tree. Null when this machine has no such session, or no such call on disk.
    */
   getToolContent?: (args: { sessionId: string; callId: string }) => Promise<{ args?: unknown; result?: unknown } | null> | { args?: unknown; result?: unknown } | null;
+  /**
+   * One file from a session's working tree, for the App's file viewer.
+   *
+   * The bytes are plaintext, like `getToolContent`, so the route that serves them asks for the
+   * account's proof too. The path is resolved against the directory the daemon pinned for the
+   * session; anything outside it is not a file this machine offers. Null means "not here" — the
+   * session is not this machine's, or there is no such file — which the caller may answer from
+   * another channel, where the server still holds the session process.
+   */
+  getSessionFile?: (args: { sessionId: string; path: string }) => Promise<LanSessionFile | null> | LanSessionFile | null;
   /**
    * A user message the App sent over the LAN socket. `content` is the same ciphertext the server
    * route carries, so this stays end-to-end encrypted — the LAN is plain HTTP, which is exactly
@@ -834,6 +850,57 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       `[lan] tool-content ${target} args=${content.args !== undefined} result=${content.result !== undefined} from=${clientAddress(request)}`,
     );
     return reply.send({ v: LAN_PROTOCOL_VERSION, ...content });
+  });
+
+  /**
+   * One file from a session's working tree, as bytes.
+   *
+   * The App's file viewer used to read through the session's `readFile` RPC, which travels to the
+   * server and back — the slowest route in the system, and the one that stops working when the
+   * server does. The machine holding the file is the one answering here, so a preview is a request
+   * to the machine it is on, with a `content-length` a download can report progress against.
+   *
+   * A raw body rather than JSON/base64: a PDF is not text, and base64 would inflate it by a third
+   * for a client that is going to write bytes to disk anyway. Plaintext, so the account still has
+   * to sign for it, exactly like the tool content beside it.
+   */
+  app.get('/lan/sessions/:sessionId/file', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (!opts.getSessionFile) {
+      return reply.code(404).send({ error: 'this daemon does not serve files' });
+    }
+    const { sessionId } = request.params as { sessionId: string };
+    const { path } = request.query as { path?: string };
+    // A path is bounded: this is a filename from a working tree, not a payload.
+    if (!path || path.length > 4096) {
+      logger.debug(`[lan] file refused: path=${path ? `${path.slice(0, 80)}…` : 'missing'}`);
+      return reply.code(400).send({ error: 'a path is required' });
+    }
+    const target = `${sessionId}:${path}`;
+    if (!requireAccountProof(request, { operation: 'file', target })) {
+      return reply.code(403).send({ error: 'account proof required' });
+    }
+    const file = await opts.getSessionFile({ sessionId, path });
+    if (!file) {
+      logger.debug(`[lan] file 404 ${target}`);
+      return reply.code(404).send({ error: 'no such file on this machine' });
+    }
+    if ('error' in file) {
+      logger.debug(`[lan] file too-large ${target} size=${file.size}`);
+      return reply.code(413).send({ error: 'file is too large for this API', size: file.size });
+    }
+    logger.debug(
+      `[lan] file ${target} bytes=${file.bytes.length} from=${clientAddress(request)}`,
+    );
+    return reply
+      .header('content-type', file.mime)
+      .header('content-length', String(file.bytes.length))
+      // Inline: the App writes this to its own cache and hands it to a viewer; a browser opening
+      // the URL directly should show the file rather than offer to save it.
+      .header('content-disposition', `inline; filename="${file.name.replace(/["\\\r\n]/g, '_')}"`)
+      .send(file.bytes);
   });
 
   /**

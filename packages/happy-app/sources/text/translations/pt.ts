@@ -672,6 +672,7 @@ export const pt: TranslationStructure = {
         file: 'Arquivo',
         fileEmpty: 'Arquivo está vazio',
         noChanges: 'Nenhuma alteração para exibir',
+        download: 'Baixar',
     },
 
     settingsVoice: {
