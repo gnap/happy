@@ -11,6 +11,7 @@ import { Typography } from '@/constants/Typography';
 import { GitFileStatus, GitStatusFiles } from '@/sync/gitStatusFiles';
 import { searchFiles, FileItem } from '@/sync/suggestionFile';
 import { sync } from '@/sync/sync';
+import { useRecentFiles } from '@/sync/recentFiles';
 import { encodeFilePathParam } from '@/utils/filePathParam';
 import { useSessionGitStatus, useSessionProjectGitStatus } from '@/sync/storage';
 import { useUnistyles, StyleSheet } from 'react-native-unistyles';
@@ -93,11 +94,23 @@ export default function FilesScreen() {
         };
     }, [searchQuery, sessionId, isLoading]);
 
-    const handleFilePress = React.useCallback((file: GitFileStatus | FileItem) => {
-        // Navigate to file viewer with the file path (base64 encoded for special characters)
-        const encodedPath = encodeFilePathParam(file.fullPath);
-        router.push(`/session/${sessionId}/file?path=${encodedPath}`);
+    const openFile = React.useCallback((fullPath: string) => {
+        router.push(`/session/${sessionId}/file?path=${encodeFilePathParam(fullPath)}`);
     }, [router, sessionId]);
+
+    const handleFilePress = React.useCallback((file: GitFileStatus | FileItem) => {
+        openFile(file.fullPath);
+    }, [openFile]);
+
+    /**
+     * The files opened from this session, newest first — "where was I" beside the tree's
+     * "where is everything". Recorded by the viewer when a file actually loads.
+     */
+    const recentFiles = useRecentFiles();
+    const sessionRecents = React.useMemo(
+        () => recentFiles.filter((file) => file.sessionId === sessionId).slice(0, 8),
+        [recentFiles, sessionId],
+    );
 
     const renderFileIcon = (file: GitFileStatus) => {
         return <FileIcon fileName={file.fileName} size={32} />;
@@ -239,6 +252,23 @@ export default function FilesScreen() {
                     </View>
                 ) : (
                     <>
+                        {/* Where the reader was, before where everything is. */}
+                        {!searchQuery && sessionRecents.length > 0 && (
+                            <>
+                                <SectionLabel color={theme.colors.textSecondary} text={t('files.recentFiles')} />
+                                {sessionRecents.map((file, index) => (
+                                    <Item
+                                        key={`recent-${file.path}`}
+                                        title={file.name}
+                                        subtitle={file.path}
+                                        icon={<FileIcon fileName={file.name} size={29} />}
+                                        onPress={() => openFile(file.path)}
+                                        showDivider={index < sessionRecents.length - 1}
+                                    />
+                                ))}
+                            </>
+                        )}
+
                         {/* Not a repository is a fact about git, not about the files: the browser
                             below still lists the working tree. */}
                         {!gitStatusFiles && (

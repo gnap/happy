@@ -5,6 +5,7 @@ import { Text } from '@/components/StyledText';
 import { SimpleSyntaxHighlighter } from '@/components/SimpleSyntaxHighlighter';
 import { Typography } from '@/constants/Typography';
 import { sync } from '@/sync/sync';
+import { recordRecentFile } from '@/sync/recentFiles';
 import { Modal } from '@/modal';
 import { useUnistyles, StyleSheet } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
@@ -263,6 +264,8 @@ export default function FileScreen() {
                     return;
                 }
                 setLocalUri(download.uri);
+                // Opened, not merely named: the browser's "recent" row is about files that loaded.
+                recordRecentFile({ sessionId: sessionId!, path: filePath });
 
                 const ext = filePath.split('.').pop()?.toLowerCase();
                 if (isImageFile(filePath)) {

@@ -674,6 +674,7 @@ export const es: TranslationStructure = {
         noChanges: 'No hay cambios que mostrar',
         download: 'Descargar',
         allFiles: 'Todos los archivos',
+        recentFiles: 'Recientes',
     },
 
     settingsVoice: {
