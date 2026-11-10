@@ -471,7 +471,14 @@ export async function startDaemon(): Promise<void> {
       }
       const present = new Set(records.map((record) => record.id).filter(Boolean));
       for (const [id, entry] of Object.entries(sessions)) {
-        if (entry.origin === 'server' && !present.has(id) && !archivedSessionIds[id]) {
+        if (archivedSessionIds[id] || present.has(id)) {
+          continue;
+        }
+        // A seed the older bootstrap wrote from the server's changed list, left behind by a build
+        // that had no concept of an import: no tag, no directory, no origin. Nothing can run it or
+        // read it, and the server has stopped naming it.
+        const legacySeed = entry.origin === undefined && !entry.sessionTag && !entry.directory;
+        if (entry.origin === 'server' || legacySeed) {
           delete sessions[id];
         }
       }
