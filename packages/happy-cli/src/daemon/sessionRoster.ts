@@ -80,10 +80,16 @@ export function mergeSessionRoster(
         // list of what changed — an id this machine has merely heard of, with no tag, no directory
         // and no history behind it. Listing those would have the machine claim sessions that live
         // somewhere else entirely, and every one of them would 404 the moment it was read.
-        if (!entry.sessionTag) {
+        //
+        // An *imported* row is the exception, and it is not the same thing: the daemon folded the
+        // server's record into its catalog on purpose (`origin: 'server'`, ciphertext and all), so
+        // a machine's channels can answer for sessions it has never run. It is listed without a
+        // tag because the server's list does not carry one — the record is the answer, not a
+        // process, and it says so.
+        if (!entry.sessionTag && entry.origin !== 'server') {
             continue;
         }
-        if (seenIds.has(entry.sessionId) || seenTags.has(entry.sessionTag)) {
+        if (seenIds.has(entry.sessionId) || (entry.sessionTag && seenTags.has(entry.sessionTag))) {
             continue;
         }
         roster.push({
