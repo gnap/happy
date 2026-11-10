@@ -340,6 +340,150 @@ export async function startDaemon(): Promise<void> {
      *  Persisted to daemon.state.json and restored on restart.
      *  `pidToTrackedSession` is the runtime-only active-process index. */
     let sessions: Record<string, PersistedSession> = {};
+
+    type ServerSessionRecord = {
+      id: string;
+      seq: number;
+      active: boolean;
+      tag?: string;
+      metadata?: string | null;
+      metadataVersion?: number;
+      agentState?: string | null;
+      agentStateVersion?: number;
+      dataEncryptionKey?: string | null;
+      createdAt?: number;
+      updatedAt?: number;
+    };
+
+    /** What the server returns per page. A shorter answer is a complete list; a full one is a prefix. */
+    const SERVER_SESSION_PAGE_SIZE = 200;
+    /**
+     * How often the imported half of the catalog is reconciled against a full server list.
+     *
+     * Deltas cannot express a deletion, so this is the only way an imported row leaves when someone
+     * else deletes the session. Slow on purpose: it is a full page of ciphertext, and a stale import
+     * is a reader's problem only while some reader is looking at the machine's catalog.
+     */
+    const SERVER_CATALOG_RECONCILE_MS = 10 * 60_000;
+    /**
+     * Fold one server session into this machine's durable catalog.
+     *
+     * The daemon is a peer of the server, not a view onto it: a session the daemon never ran still
+     * belongs in its list, because the server may be the only place its record exists and the
+     * machine's channels have to be able to answer for it. The ciphertext is kept verbatim; this
+     * process never decrypts it. A row that has a live process, a tag or a directory from this
+     * machine keeps those — the import fills gaps, it does not overwrite the machine's own facts.
+     */
+    const mergeServerSessionRecord = (
+      record: ServerSessionRecord,
+    ): 'imported' | 'updated' | 'skipped' => {
+      if (!record.id) {
+        return 'skipped';
+      }
+      const existing = sessions[record.id];
+      if (existing) {
+        existing.lastSeq = Math.max(existing.lastSeq ?? 0, record.seq ?? 0);
+        if (!existing.sessionTag && record.tag) existing.sessionTag = record.tag;
+        if (!existing.serverMetadata && record.metadata) {
+          existing.serverMetadata = { version: record.metadataVersion ?? 0, value: record.metadata };
+        }
+        if (existing.serverAgentState === undefined && record.agentState !== undefined) {
+          existing.serverAgentState = { version: record.agentStateVersion ?? 0, value: record.agentState };
+        }
+        if (!existing.dataEncryptionKey && record.dataEncryptionKey) {
+          existing.dataEncryptionKey = record.dataEncryptionKey;
+        }
+        if (existing.createdAt === undefined && record.createdAt !== undefined) existing.createdAt = record.createdAt;
+        if (record.updatedAt !== undefined) existing.updatedAt = record.updatedAt;
+        // A row with no tag and no directory is a seed the older bootstrap wrote from the server's
+        // changed list — not a session this machine has run (registration always writes a tag).
+        // Naming it for what it is makes the catalog honest: an import, listed while the server
+        // names it and pruned when it stops.
+        if (existing.origin === undefined && !existing.sessionTag && !existing.directory) {
+          existing.origin = 'server';
+        }
+        return 'updated';
+      }
+      if (archivedSessionIds[record.id]) {
+        return 'skipped';
+      }
+      sessions[record.id] = {
+        sessionId: record.id,
+        directory: '',
+        sessionTag: record.tag ?? '',
+        agent: '',
+        pid: -1,
+        status: 'stopped',
+        lastSeq: record.seq ?? 0,
+        origin: 'server',
+        ...(record.metadata ? { serverMetadata: { version: record.metadataVersion ?? 0, value: record.metadata } } : {}),
+        ...(record.agentState !== undefined ? { serverAgentState: { version: record.agentStateVersion ?? 0, value: record.agentState } } : {}),
+        ...(record.dataEncryptionKey ? { dataEncryptionKey: record.dataEncryptionKey } : {}),
+        ...(record.createdAt !== undefined ? { createdAt: record.createdAt } : {}),
+        ...(record.updatedAt !== undefined ? { updatedAt: record.updatedAt } : {}),
+      };
+      return 'imported';
+    };
+
+    /** The deletion side of the same catalog: what readers reconcile against, not a second store. */
+    const getTombstones = (): Array<{ sessionId: string; tag?: string; at: number }> =>
+      Object.entries(archivedSessionIds).map(([sessionId, at]) => ({
+        sessionId,
+        ...(sessions[sessionId]?.sessionTag ? { tag: sessions[sessionId].sessionTag } : {}),
+        at,
+      }));
+
+    /**
+     * Fold a *complete* server list into the catalog, and drop imports the server no longer has.
+     *
+     * Used at startup and on a slow interval, because the server's deltas cannot say "deleted": a
+     * session that is gone simply stops appearing in what changed. A machine that only ever
+     * imported a session would otherwise keep offering it to its readers long after the server —
+     * and the machine that deleted it — had forgotten it, and every App reading this machine's
+     * catalog would put the row back.
+     *
+     * A page shorter than the server's limit is a complete set. Anything else is a prefix, and
+     * pruning against a prefix would drop rows that merely sort later.
+     */
+    const applyServerSessionList = (records: readonly ServerSessionRecord[]): void => {
+      let seeded = 0;
+      let imported = 0;
+      for (const record of records) {
+        if (!record.id || record.seq < 0) continue;
+        const result = mergeServerSessionRecord(record);
+        if (result === 'imported') imported++;
+        if (result !== 'skipped') seeded++;
+      }
+      pruneImportedSessions(records);
+      logger.debug(`[DAEMON RUN] Server catalog: ${seeded}/${records.length} session(s) folded in (${imported} imported)`);
+    };
+
+    /**
+     * Drop imported rows a complete server list no longer names.
+     *
+     * Separate from the fold above because this is also the only recurring use: the poll's deltas
+     * already keep `lastSeq` and ciphertext current, and running the fold on a timer would advance
+     * `lastSeq` past a wake the auto-respawn path has not seen yet.
+     */
+    const pruneImportedSessions = (records: readonly ServerSessionRecord[]): void => {
+      if (records.length >= SERVER_SESSION_PAGE_SIZE) {
+        return;
+      }
+      const present = new Set(records.map((record) => record.id).filter(Boolean));
+      for (const [id, entry] of Object.entries(sessions)) {
+        if (archivedSessionIds[id] || present.has(id)) {
+          continue;
+        }
+        // A seed the older bootstrap wrote from the server's changed list, left behind by a build
+        // that had no concept of an import: no tag, no directory, no origin. Nothing can run it or
+        // read it, and the server has stopped naming it.
+        const legacySeed = entry.origin === undefined && !entry.sessionTag && !entry.directory;
+        if (entry.origin === 'server' || legacySeed) {
+          delete sessions[id];
+        }
+      }
+    };
+
     /**
      * Write the full daemon state snapshot to disk. Declared here, ahead of the socket and
      * webhook handlers that call it, because those are registered long before the snapshot
@@ -352,6 +496,8 @@ export async function startDaemon(): Promise<void> {
     const lastSpawnAttemptBySessionId: Record<string, number> = {};
     /** Timestamp used as changedSince for next /v2/sessions poll. */
     let sessionPollSince = Date.now();
+    /** When the imported half of the catalog last saw a full server list (boot counts as one). */
+    let lastCatalogReconcileAt = Date.now();
     /** True after first poll completes; first poll only records seq baselines without spawning. */
     let initialPollDone = false;
     /** Pre-wake seq for restart-session in this daemon lifetime; passed to CLI via spawn args/env. */
@@ -643,6 +789,10 @@ export async function startDaemon(): Promise<void> {
         }
         const existing = sessions[s.happySessionId];
         sessions[s.happySessionId] = {
+          // Spread first so what the server imported for this row — its ciphertext and versions —
+          // is not thrown away by this machine running the session itself. The fields below are
+          // this machine's own facts and win over whatever was recorded.
+          ...existing,
           sessionId: s.happySessionId,
           directory: s.directory ?? existing?.directory ?? '',
           sessionTag: s.sessionTag ?? existing?.sessionTag ?? '',
@@ -653,6 +803,9 @@ export async function startDaemon(): Promise<void> {
           status: 'running',
           lastSeq: existing?.lastSeq ?? -1,
           lastHeartbeat: Date.now(),
+          // A row this machine runs is this machine's own answer, whatever it was before: its
+          // liveness is no longer the server's word.
+          origin: 'daemon',
           ...(s.requiresDesktop || existing?.requiresDesktop ? { requiresDesktop: true } : {}),
         };
       }
@@ -1271,12 +1424,23 @@ export async function startDaemon(): Promise<void> {
     const archiveSession = (sessionId: string): boolean => {
       // Written first: an archived session is a fact every reader has to be able to replay, and the
       // tracking below is what stops being able to tell them.
+      //
+      // A session the server named but this machine never ran is in the durable catalog with
+      // `origin: 'server'`; it has no stopped process and no tracked PID, and deleting it still
+      // has to produce the log entry that the server replay consumes.
+      const stored = sessions[sessionId];
       const archived = stoppedSessions.get(sessionId)
-        ?? [...pidToTrackedSession.values()].find((session) => session.happySessionId === sessionId);
-      if (archived?.sessionTag) {
-        lifecycleLog.record({ op: 'deleted', tag: archived.sessionTag, sessionId });
-        announceLifecycle();
+        ?? [...pidToTrackedSession.values()].find((session) => session.happySessionId === sessionId)
+        ?? stored;
+      if (!archived) {
+        return false;
       }
+      const tag = archived.sessionTag || stored?.sessionTag || '';
+      // An empty tag is allowed here: `replayToServer` addresses the deletion by session id, and
+      // the tag is only how older readers name a row. Recorded even when it is empty, because the
+      // delete is the transaction.
+      lifecycleLog.record({ op: 'deleted', tag, sessionId });
+      announceLifecycle();
       let removed = stoppedSessions.delete(sessionId);
       if (removed) {
         logger.debug(`[DAEMON RUN] Archived session ${sessionId}`);
@@ -1290,11 +1454,23 @@ export async function startDaemon(): Promise<void> {
           break;
         }
       }
-      if (removed) {
-        markSessionArchived(sessionId);
-        persistNow();
-      }
-      return removed;
+      // The tombstone is also what keeps an imported server-only row out of the roster until the
+      // server's copy is gone; it is a state fact, not just a side effect of a live process.
+      markSessionArchived(sessionId);
+      persistNow();
+      return true;
+    };
+
+    /**
+     * What the App means by "delete": stop the process if one is running, then record the removal.
+     *
+     * The same pair the `killSession` RPC performs, because it is the same request arriving over a
+     * different road. Archiving alone would remove the row while leaving the process running, and
+     * a session whose row is gone but whose process is not is the orphan this exists to prevent.
+     */
+    const deleteSessionFromApp = (sessionId: string): boolean => {
+      stopSession(sessionId);
+      return archiveSession(sessionId);
     };
 
     /**
@@ -2042,6 +2218,10 @@ export async function startDaemon(): Promise<void> {
               return frames;
             },
             getSessions: sessionSummaries,
+            getTombstones,
+            // The App's delete lands here: a transaction in this machine's log, replayed to the
+            // server by `replayLifecycleToServer` — not a second, unrecorded removal.
+            archiveSession: deleteSessionFromApp,
             // The same handler the control server and the server route call, so a restart means one
             // thing however it was asked for — including every refusal, which is where the rules
             // about archived sessions and sessions with live processes live.
@@ -2474,6 +2654,9 @@ export async function startDaemon(): Promise<void> {
       for (const [id, s] of stoppedSessions) {
         const existing = sessions[id];
         sessions[id] = {
+          // The server's ciphertext for this row is still worth keeping: a session that stopped
+          // has not stopped having a name, and a reader that opens the catalog should find it.
+          ...existing,
           sessionId: id,
           directory: s.directory ?? existing?.directory ?? '',
           ...(s.requiresDesktop || existing?.requiresDesktop ? { requiresDesktop: true } : {}),
@@ -2487,6 +2670,8 @@ export async function startDaemon(): Promise<void> {
           exitReason: s.exitReason ?? existing?.exitReason,
           exitTime: s.exitTime ?? existing?.exitTime,
           lastHeartbeat: s.lastHeartbeat ?? existing?.lastHeartbeat,
+          // It ran here, so this machine is the one that can answer for it.
+          origin: 'daemon',
         };
       }
     };
@@ -2620,21 +2805,7 @@ export async function startDaemon(): Promise<void> {
 
     try {
       const bootstrapSessions = await api.listChangedSessions(0);
-      let seeded = 0;
-      for (const { id, seq } of bootstrapSessions) {
-        if (!id || seq < 0) continue;
-        const prior = sessions[id]?.lastSeq;
-        if (prior === undefined || seq > prior) {
-          if (!sessions[id]) {
-            sessions[id] = { sessionId: id, directory: '', sessionTag: '', agent: 'cursor', pid: -1, status: 'stopped', lastSeq: seq };
-          } else {
-            sessions[id].lastSeq = seq;
-          }
-          seeded++;
-        }
-      }
-      logger.debug(`[DAEMON RUN] Bootstrapped lastSeq for ${seeded}/${bootstrapSessions.length} session(s) from server`);
-
+      applyServerSessionList(bootstrapSessions);
       persistNow();
     } catch (err) {
       logger.debug('[DAEMON RUN] Failed to bootstrap session seq baselines:', err);
@@ -2658,18 +2829,16 @@ export async function startDaemon(): Promise<void> {
         logger.debug(`[DAEMON RUN] Session poll: ${changedSessions.length} session(s) changed since last poll`);
 
         const now = Date.now();
-        for (const { id, seq, active } of changedSessions) {
+        for (const record of changedSessions) {
+          const { id, seq, active } = record;
           const prevSeq = sessions[id]?.lastSeq ?? -1;
+          // The catalog is fed by the same poll: a session created on another machine, or one
+          // this daemon has never run, becomes visible to its own readers even while the server
+          // and this machine disagree about whether it is active.
+          mergeServerSessionRecord(record);
 
-          if (seq > prevSeq) {
-            if (prevSeq >= 0) {
-              resumeAfterSeqBySessionId[id] = prevSeq;
-            }
-            if (!sessions[id]) {
-              sessions[id] = { sessionId: id, directory: '', sessionTag: '', agent: 'cursor', pid: -1, status: 'stopped', lastSeq: seq };
-            } else {
-              sessions[id].lastSeq = seq;
-            }
+          if (seq > prevSeq && prevSeq >= 0) {
+            resumeAfterSeqBySessionId[id] = prevSeq;
           }
 
           if (!initialPollDone) continue;
@@ -2753,6 +2922,18 @@ export async function startDaemon(): Promise<void> {
         }
 
         initialPollDone = true;
+
+        // The deltas above cannot carry a deletion. Reconciled slowly, because a full list is a
+        // whole page of ciphertext and a stale import only matters to a reader looking at it.
+        if (now - lastCatalogReconcileAt >= SERVER_CATALOG_RECONCILE_MS) {
+          lastCatalogReconcileAt = now;
+          try {
+            pruneImportedSessions(await api.listChangedSessions(0));
+            persistNow();
+          } catch (err) {
+            logger.debug('[DAEMON RUN] Session catalog reconcile failed:', err);
+          }
+        }
       } catch (err) {
         logger.debug('[DAEMON RUN] Session poll error:', err);
       } finally {

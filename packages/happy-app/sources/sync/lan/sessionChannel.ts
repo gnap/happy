@@ -211,8 +211,22 @@ export async function listSessionsOverLan(options: {
     lanAddresses?: { machineId: string; baseUrls: string[] }[];
     /** Where each attempt's outcome is recorded, so the next caller starts from what this one learned. */
     recorder?: HealthRecorder;
-}): Promise<{ machineId: string; via: DaemonRoute; baseUrl: string; sessions: LanSessionSummary[] }[]> {
-    const answers: { machineId: string; via: DaemonRoute; baseUrl: string; sessions: LanSessionSummary[] }[] = [];
+}): Promise<{
+    machineId: string;
+    via: DaemonRoute;
+    baseUrl: string;
+    sessions: LanSessionSummary[];
+    revision?: number;
+    tombstones?: Array<{ sessionId: string; tag?: string; at: number }>;
+}[]> {
+    const answers: {
+        machineId: string;
+        via: DaemonRoute;
+        baseUrl: string;
+        sessions: LanSessionSummary[];
+        revision?: number;
+        tombstones?: Array<{ sessionId: string; tag?: string; at: number }>;
+    }[] = [];
     const answered = new Set<string>();
     const discovered = options.browseLan === false
         ? []
@@ -230,7 +244,8 @@ export async function listSessionsOverLan(options: {
         }
         try {
             const { token } = await getLanCredential(machine.baseUrl, machineKey);
-            answers.push({ machineId: machine.machineId, via: 'lan', baseUrl: machine.baseUrl, sessions: await fetchSessions(machine.baseUrl, token) });
+            const list = await fetchSessions(machine.baseUrl, token);
+            answers.push({ machineId: machine.machineId, via: 'lan', baseUrl: machine.baseUrl, ...list });
             answered.add(machine.machineId);
         } catch {
             // This daemon refused or dropped; the relay (or another machine) may still answer.
@@ -249,7 +264,8 @@ export async function listSessionsOverLan(options: {
         for (const baseUrl of held.baseUrls) {
             try {
                 const { token } = await getLanCredential(baseUrl, machineKey);
-                answers.push({ machineId: held.machineId, via: 'lan', baseUrl, sessions: await fetchSessions(baseUrl, token) });
+                const list = await fetchSessions(baseUrl, token);
+                answers.push({ machineId: held.machineId, via: 'lan', baseUrl, ...list });
                 options.recorder?.succeeded(held.machineId, 'lan', baseUrl);
                 answered.add(held.machineId);
                 return;
@@ -272,7 +288,8 @@ export async function listSessionsOverLan(options: {
         }
         try {
             const { token } = await getLanCredential(relay.baseUrl, machineKey);
-            answers.push({ machineId: relay.machineId, via: 'relay', baseUrl: relay.baseUrl, sessions: await fetchSessions(relay.baseUrl, token) });
+            const list = await fetchSessions(relay.baseUrl, token);
+            answers.push({ machineId: relay.machineId, via: 'relay', baseUrl: relay.baseUrl, ...list });
         } catch {
             // This relay route is down or its daemon is offline.
         }

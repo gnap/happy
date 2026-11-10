@@ -26,8 +26,11 @@ const OTHER = 'http://192.168.6.21:55673';
 const DIRECT = 'http://10.99.0.3:55673';
 const RELAY = 'https://1.2.3.4/r/' + 'b'.repeat(32);
 
-const sessions = (ids: string[]) =>
-    ids.map((happySessionId) => ({ happySessionId, directory: '/tmp', agent: 'claude', startedBy: 'g', isAlive: true }));
+const sessions = (ids: string[]) => ({
+    sessions: ids.map((happySessionId) => ({ happySessionId, directory: '/tmp', agent: 'claude', startedBy: 'g', isAlive: true })),
+    revision: 4,
+    tombstones: [],
+});
 
 const roster = (extra: Partial<Parameters<typeof listSessionsOverLan>[0]> = {}) => listSessionsOverLan({
     accountPublicKey: new Uint8Array(32),
@@ -60,7 +63,7 @@ describe('listSessionsOverLan', () => {
 
         const answers = await roster({ browseLan: true, lanAddresses: [{ machineId: 'm1', baseUrls: [LAN] }] });
 
-        expect(answers).toEqual([{ machineId: 'm1', via: 'lan', baseUrl: LAN, sessions: sessions(['a']) }]);
+        expect(answers).toEqual([{ machineId: 'm1', via: 'lan', baseUrl: LAN, ...sessions(['a']) }]);
     });
 
     it('tries the machine\'s next address when one has gone silent', async () => {
@@ -97,7 +100,7 @@ describe('listSessionsOverLan', () => {
             relays: [{ machineId: 'm1', baseUrl: RELAY }],
         });
 
-        expect(answers).toEqual([{ machineId: 'm1', via: 'relay', baseUrl: RELAY, sessions: sessions(['b']) }]);
+        expect(answers).toEqual([{ machineId: 'm1', via: 'relay', baseUrl: RELAY, ...sessions(['b']) }]);
     });
 
     it('records silence against the address, and never a refusal', async () => {

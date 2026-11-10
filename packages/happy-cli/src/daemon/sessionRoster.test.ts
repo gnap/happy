@@ -91,9 +91,40 @@ describe('mergeSessionRoster', () => {
         }]);
     });
 
-    it('skips a row seeded from the server, which this machine never ran', () => {
-        // `listChangedSessions` seeds an id with no tag and no directory. There is no log behind
-        // one, so listing it would make the machine claim a session that lives elsewhere.
+    it('lists an imported row, which is the server\'s record rather than this machine\'s process', () => {
+        // The catalog is the machine's whole list now: a session it never ran is imported with the
+        // server's ciphertext so its channels can answer for it. The server's list does not carry
+        // the tag, so a tag cannot be what makes an imported row listable.
+        const roster = mergeSessionRoster(
+            [],
+            {
+                'elsewhere-1': {
+                    sessionId: 'elsewhere-1',
+                    sessionTag: '',
+                    origin: 'server',
+                    serverMetadata: { version: 2, value: 'cipher' },
+                    dataEncryptionKey: 'key',
+                },
+            },
+            {},
+        );
+        expect(roster).toEqual([{
+            happySessionId: 'elsewhere-1',
+            origin: 'server',
+            directory: '',
+            agent: '',
+            startedBy: 'daemon',
+            isAlive: false,
+            metadataVersion: 2,
+            metadata: 'cipher',
+            dataEncryptionKey: 'key',
+        }]);
+    });
+
+    it('still hides a legacy seed with nothing behind it', () => {
+        // A row written by the older bootstrap: an id from the server's changed list, with no tag,
+        // no directory, no origin and no record. Listing it would make the machine claim a session
+        // that lives elsewhere, and a read against it would 404.
         const roster = mergeSessionRoster([], { 'elsewhere-1': { sessionId: 'elsewhere-1', sessionTag: '' } }, {});
         expect(roster).toEqual([]);
     });

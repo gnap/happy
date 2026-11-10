@@ -245,8 +245,9 @@ const LanDevScreen = React.memo(function LanDevScreen() {
             push(line('auth', `identity: ${identity.hostname} (${identity.platform}), machine ${identity.machineId}`));
 
             // ── Stage 3: list sessions ───────────────────────────────────────────
-            const sessions = await fetchSessions(target.baseUrl, token);
-            push(line('sessions', `${sessions.length} session(s) reported by the daemon`));
+            const list = await fetchSessions(target.baseUrl, token);
+            const sessions = list.sessions;
+            push(line('sessions', `${sessions.length} session(s) reported by the daemon, rev ${list.revision ?? 0}, ${list.tombstones?.length ?? 0} deletion(s)`));
 
             // ── Stage 4: fetch and decrypt history ───────────────────────────────
             let decryptedAny = false;

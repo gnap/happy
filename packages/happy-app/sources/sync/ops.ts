@@ -653,12 +653,34 @@ export async function getToolCallFullContent(
 }
 
 /**
- * Permanently delete a session from the server
- * This will remove the session and all its associated data (messages, usage reports, access keys)
- * The session should be inactive/archived before deletion
+ * Permanently delete a session.
+ *
+ * Where a machine that owns the session can be reached, the deletion is asked of *it*: it records
+ * the removal in its own log and replays it to the server on its own cursor, which is what makes
+ * the session stay deleted after this App has forgotten it. The server's delete remains for the
+ * sessions no machine channel can take — a machine that is gone, or a build without the route —
+ * and for the row the machine has never heard of.
  */
 export async function sessionDelete(sessionId: string): Promise<{ success: boolean; message?: string }> {
     try {
+        const outcome = await sync.archiveSession(sessionId);
+        if (outcome.kind === 'archived') {
+            // The machine has the durable answer; the App drops the row now rather than waiting for
+            // the server to hear about it, which is minutes away when the server channel is down.
+            storage.getState().deleteSession(sessionId);
+            return { success: true };
+        }
+        if (outcome.kind === 'refused') {
+            // The machine answered and said no. Asking the server would be the same account by
+            // another road, and would report the machine's answer as if no one had given one.
+            return {
+                success: false,
+                message: outcome.body || 'The machine refused to delete this session'
+            };
+        }
+
+        // No machine channel answered, or the machine does not have this session: the server's
+        // delete is the remaining road.
         const response = await apiSocket.request(`/v1/sessions/${sessionId}`, {
             method: 'DELETE'
         });
