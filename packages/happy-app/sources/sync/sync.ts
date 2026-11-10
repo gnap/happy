@@ -445,12 +445,14 @@ class Sync {
         onReady: (target) => { this.onDaemonConnectionReady(target); },
         onDropped: (target) => { this.onDaemonConnectionDropped(target); },
         onAddressUnusable: (target, reason) => {
-            // A relay socket is a stream on the hub, so "could not open" can mean there was no
-            // transport to open it on — the hub is down, or this machine's tag is not known yet.
-            // That is this side's connection, not evidence about the address, and demoting the
-            // address for it would send the next reconcile somewhere else over our own outage.
-            if (target.route === 'relay' && (!this.relayHub || !this.relayHub.isConnected() || !this.machineTags.has(target.machineId))) {
-                log.log(`📡 relay stream for ${target.machineId.slice(0, 8)} had no hub transport: ${reason}`);
+            // A relay socket is a stream on the hub; it is not the relay's HTTP address. The two
+            // fail for different reasons — a stream open can time out while `/r/<tag>/…` answers
+            // a read perfectly — and the address health is shared by both. Recording the stream's
+            // failure here demoted the address for *reads*, emptied the candidate list, and turned
+            // every history read into `absent` while the daemon was answering 200. Reads record
+            // their own address failures in `fetchSessionFromDaemon`; this path must not.
+            if (target.route === 'relay') {
+                log.log(`📡 relay stream for ${target.machineId.slice(0, 8)} did not open: ${reason}`);
                 return;
             }
             // A socket that will not open or stay open is evidence about the *address*, and the
@@ -878,13 +880,16 @@ class Sync {
     /**
      * Desktop (Tauri / browser) lifecycle management.
      *
-     * visibilitychange is the primary signal:
+     * visibilitychange is the suspension signal:
      *   hidden  → pauseReconnection  (window minimised or tab hidden)
      *   visible → resumeReconnection + full sync invalidation
      *
-     * Tauri WINDOW_FOCUS/WINDOW_BLUR fire when the OS window gains or loses focus
-     * without a visibility change (window was visible but behind another app). On
-     * focus we only probe the socket — no full invalidation needed.
+     * Window focus/blur is not suspension. A window can sit behind the terminal and still be
+     * on screen and on the network, and pausing there made the server look down: the server
+     * channel disappeared, sessions fell to the relay, and a machine whose daemon had no local
+     * log for the session could never serve it — messages stayed at the cache. iOS, which has
+     * no desktop blur, kept reading them from the server. So only `hidden` pauses; focus is a
+     * reason to probe and refresh, never to tear the socket down.
      */
     async #setupDesktopLifecycle() {
         const recoverDesktopPendingWork = () => {
@@ -892,37 +897,12 @@ class Sync {
             this.recoverPendingOutbox();
         };
 
-        // In Tauri a DOM blur arrives immediately after the OS window regains focus,
-        // so pausing straight away tears down the socket that the focus handler's
-        // resumeReconnection just created and the connection never leaves 'connecting'.
-        // Defer the pause so a focus arriving within the grace window cancels it.
-        const BLUR_PAUSE_GRACE_MS = 5_000;
-        let blurPauseTimer: ReturnType<typeof setTimeout> | null = null;
-
-        const cancelPendingBlurPause = () => {
-            if (blurPauseTimer !== null) {
-                clearTimeout(blurPauseTimer);
-                blurPauseTimer = null;
-            }
-        };
-
-        const onDesktopBlur = () => {
-            cancelPendingBlurPause();
-            blurPauseTimer = setTimeout(() => {
-                blurPauseTimer = null;
-                log.log('🖥️ Desktop blurred — pausing socket');
-                apiSocket.pauseReconnection();
-            }, BLUR_PAUSE_GRACE_MS);
-        };
-
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
                 log.log('🖥️ Window hidden — pausing reconnection');
-                cancelPendingBlurPause();
                 apiSocket.pauseReconnection();
             } else {
                 log.log('🖥️ Window visible — resuming and invalidating syncs');
-                cancelPendingBlurPause();
                 void apiSocket.resumeReconnection().then(() => {
                     this.#invalidateAllSyncs();
                     // Refresh the currently visible session's messages immediately.
@@ -940,17 +920,13 @@ class Sync {
 
         window.addEventListener('focus', () => {
             if (!isRunningInTauri()) {
-                log.log('🖥️ Window focused — resuming socket and recovering pending sends');
-                cancelPendingBlurPause();
+                log.log('🖥️ Window focused — probing connection and recovering pending sends');
                 void apiSocket.resumeReconnection();
                 recoverDesktopPendingWork();
             }
         });
-        window.addEventListener('blur', () => {
-            // In Tauri the DOM blur doesn't track the OS window; WINDOW_BLUR does.
-            if (isRunningInTauri()) return;
-            onDesktopBlur();
-        });
+        // Deliberately no blur listener: losing focus is not losing the network. The socket's
+        // ping/pong and `visibilitychange` are the facts that decide whether it is paused.
 
         // Track user activity for idle detection on desktop.
         // Skips periodic session refreshes when the user hasn't interacted
@@ -993,7 +969,6 @@ class Sync {
             appWindow.listen(TauriEvent.WINDOW_FOCUS, () => {
                 if (!document.hidden) {
                     log.log('🖥️ Window focused (Tauri) — probing connection');
-                    cancelPendingBlurPause();
                     void apiSocket.resumeReconnection().then((connected) => {
                         if (connected) {
                             this.#refreshSessionsAfterDesktopProbe();
@@ -1003,7 +978,7 @@ class Sync {
                     recoverDesktopPendingWork();
                 }
             });
-            appWindow.listen(TauriEvent.WINDOW_BLUR, onDesktopBlur);
+            // No WINDOW_BLUR pause: a window behind another app is still on the network.
         }
     }
 
@@ -3683,7 +3658,15 @@ class Sync {
                 hasOlderMessages,
                 lastSeq,
             );
-            this.sessionLastSeq.set(sessionId, Math.max(cached.lastSeq, this.sessionLastSeq.get(sessionId) ?? 0));
+            // The watermark describes the window that is actually held, not everything this
+            // process has ever fetched. A truncated cache (the hot window was evicted, or a
+            // web/Tauri cache could not keep the whole window) hydrates with `lastSeq` at 0 or
+            // far behind; keeping an older, higher value made the next server read answer
+            // "already up-to-date" and skip, leaving the conversation at the cached slice.
+            // The server-axis watermark is dropped rather than reused: cache entries may have
+            // been written from a daemon read, whose numbering is not the server's.
+            this.sessionLastSeq.set(sessionId, lastSeq);
+            this.serverNewestSeq.delete(sessionId);
             // Marked only once the window is in the store. Marking first meant a cancelled read
             // disabled the cache for the rest of the process.
             this.hydratedSessions.add(sessionId);
@@ -5193,14 +5176,30 @@ class Sync {
         // point of the channel — seeing the newest is.
         const plan = planDaemonRead(anchor);
         let read = await readPage(plan.page, knownConnection);
+        // A cursor restored from the last process can name a log that has since been pruned,
+        // rotated, or written under another site. The daemon answers a cursor past its end with
+        // an empty page and `reset: false` — indistinguishable from "caught up" — so the saved
+        // window would stay stranded at an anchor that no longer exists. The newest page is the
+        // only truthful answer; re-read it once, when the anchor is the persisted one.
+        let stalePersistedAnchor = false;
+        if (!inMemory && anchor && plan.page.kind === 'follow' && read && read.messages.length === 0) {
+            const tail = await readPage({ kind: 'tail' }, read.connection);
+            if (tail && tail.messages.length > 0) {
+                log.log(`📡 fetchSessionFromDaemon: stale saved cursor for ${sessionId}; re-read the newest page`);
+                read = tail;
+                stalePersistedAnchor = true;
+            }
+        }
         // Whether a window is replaced, re-read from the newest end, or merely extended — and the
         // refusal to empty a conversation on the strength of an empty page. Both invariants live in
         // `judgeDaemonPage`, where they are stated once and tested, rather than inline here.
-        let verdict = judgeDaemonPage({
-            planned: plan,
-            hasWindow,
-            read: read ? { hasNewer: read.hasNewer, reset: read.reset } : null,
-        });
+        let verdict = stalePersistedAnchor
+            ? { kind: 'replace' as const }
+            : judgeDaemonPage({
+                planned: plan,
+                hasWindow,
+                read: read ? { hasNewer: read.hasNewer, reset: read.reset } : null,
+            });
         if (verdict.kind === 'replace-from-tail') {
             // The page just read is not adjacent to what is held, so the window is not joined to it:
             // it is re-read from the newest end and *that* page is the window. A tail read that does
