@@ -28,6 +28,12 @@ export type PersistedSessionEntry = {
     sessionTag?: string;
     agent?: string;
     lastHeartbeat?: number;
+    origin?: 'daemon' | 'server';
+    serverMetadata?: { version: number; value: string } | null;
+    serverAgentState?: { version: number; value: string | null } | null;
+    dataEncryptionKey?: string | null;
+    createdAt?: number;
+    updatedAt?: number;
 };
 
 /**
@@ -90,6 +96,12 @@ export function mergeSessionRoster(
             startedBy: 'daemon',
             isAlive: false,
             ...(entry.lastHeartbeat !== undefined ? { lastHeartbeat: entry.lastHeartbeat } : {}),
+            ...(entry.origin ? { origin: entry.origin } : {}),
+            ...(entry.serverMetadata ? { metadataVersion: entry.serverMetadata.version, metadata: entry.serverMetadata.value } : {}),
+            ...(entry.serverAgentState ? { agentStateVersion: entry.serverAgentState.version, agentState: entry.serverAgentState.value } : {}),
+            ...(entry.dataEncryptionKey ? { dataEncryptionKey: entry.dataEncryptionKey } : {}),
+            ...(entry.createdAt !== undefined ? { createdAt: entry.createdAt } : {}),
+            ...(entry.updatedAt !== undefined ? { updatedAt: entry.updatedAt } : {}),
         });
         seenIds.add(entry.sessionId);
         if (entry.sessionTag) {

@@ -437,7 +437,19 @@ export class ApiClient {
    * Used by daemon heartbeat to detect new messages on stopped sessions.
    * Returns minimal fields needed for auto-respawn decision.
    */
-  async listChangedSessions(changedSince: number): Promise<Array<{ id: string; seq: number; active: boolean }>> {
+  async listChangedSessions(changedSince: number): Promise<Array<{
+    id: string;
+    seq: number;
+    active: boolean;
+    tag?: string;
+    metadata?: string | null;
+    metadataVersion?: number;
+    agentState?: string | null;
+    agentStateVersion?: number;
+    dataEncryptionKey?: string | null;
+    createdAt?: number;
+    updatedAt?: number;
+  }>> {
     try {
       const params: Record<string, string | number> = { limit: 200 };
       if (changedSince > 0) {
@@ -458,6 +470,14 @@ export class ApiClient {
         id: String(s.id ?? ''),
         seq: Number(s.seq ?? 0),
         active: Boolean(s.active),
+        ...(typeof s.tag === 'string' ? { tag: s.tag } : {}),
+        ...(typeof s.metadata === 'string' || s.metadata === null ? { metadata: s.metadata as string | null } : {}),
+        ...(typeof s.metadataVersion === 'number' ? { metadataVersion: s.metadataVersion } : {}),
+        ...(typeof s.agentState === 'string' || s.agentState === null ? { agentState: s.agentState as string | null } : {}),
+        ...(typeof s.agentStateVersion === 'number' ? { agentStateVersion: s.agentStateVersion } : {}),
+        ...(typeof s.dataEncryptionKey === 'string' || s.dataEncryptionKey === null ? { dataEncryptionKey: s.dataEncryptionKey as string | null } : {}),
+        ...(typeof s.createdAt === 'number' ? { createdAt: s.createdAt } : {}),
+        ...(typeof s.updatedAt === 'number' ? { updatedAt: s.updatedAt } : {}),
       }));
     } catch (err) {
       logger.debug('[API] listChangedSessions error:', err);
