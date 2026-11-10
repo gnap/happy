@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // other LAN tests use.
 vi.mock('@/encryption/hmac_sha256', () => ({ hmac_sha256: vi.fn(async () => new Uint8Array(32)) }));
 
-const { restartSessionAt, sessionControlAt } = await import('./client');
+const { archiveSessionAt, restartSessionAt, sessionControlAt } = await import('./client');
 
 const base = 'http://10.0.0.2:55673';
 
@@ -52,8 +52,30 @@ describe('sessionControlAt', () => {
     });
 });
 
-describe('restartSessionAt', () => {
-    it('returns null only for the 404 of nothing to restart', async () => {
+describe('archiveSessionAt', () => {
+    it('posts the deletion to the daemon, with the account proof it was given', async () => {
+        const calls = stub({ status: 200 });
+        expect(await archiveSessionAt(base, 't1', 'sess-1', { 'x-happy-proof-signature': 'sig' })).toBe(true);
+        expect(calls[0].url).toBe(`${base}/lan/sessions/sess-1/archive`);
+        expect(calls[0].init.method).toBe('POST');
+        expect(calls[0].init.headers['x-happy-proof-signature']).toBe('sig');
+    });
+
+    it('says false only for a session this machine has nothing to delete', async () => {
+        // A build without the route, or no session by that id: the server may still hold it, so
+        // this is the one answer that belongs to another channel.
+        stub({ status: 404 });
+        expect(await archiveSessionAt(base, 't1', 'sess-1')).toBe(false);
+    });
+
+    it('throws a proof refusal rather than sending the same delete to the server', async () => {
+        stub({ status: 403, body: { error: 'account proof required' } });
+        await expect(archiveSessionAt(base, 't1', 'sess-1'))
+            .rejects.toMatchObject({ name: 'LanRequestError', status: 403, body: 'account proof required' });
+    });
+});
+
+describe('restartSessionAt', () => {    it('returns null only for the 404 of nothing to restart', async () => {
         stub({ status: 404 });
         expect(await restartSessionAt(base, 't1', 'sess-1')).toBeNull();
     });

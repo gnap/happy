@@ -52,9 +52,11 @@ function signed(path: string, init: { token?: string; body?: unknown } = {}) {
                 ? 'listing'
                 : isToolContent
                     ? 'tool-content'
-                    : path.endsWith('/restart')
-                        ? 'restart'
-                        : 'control';
+                    : path.endsWith('/archive')
+                        ? 'archive'
+                        : path.endsWith('/restart')
+                            ? 'restart'
+                            : 'control';
     const target = isFile || isDiff
         ? `${sessionId}:${queryPath}`
         : isToolContent
@@ -114,6 +116,9 @@ let sessionListingHandler: ((args: { sessionId: string }) => Promise<{ gitRepo: 
 let sessionDiffHandler: ((args: { sessionId: string; path: string }) => Promise<{ diff: string } | null>) | undefined;
 /** Left unset by default, which is how a daemon that predates the route behaves. */
 let restartHandler: ((sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>) | undefined;
+/** Sessions the archive route was asked to delete, in order. Unset by default, like restart. */
+let archived: string[] = [];
+let archiveHandler: ((sessionId: string) => boolean) | undefined;
 
 let server: LanServerHandle | null = null;
 /** What a socket reader should be handed on connect; mutable so one test can set it. */
@@ -136,6 +141,7 @@ async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
         // Only when a test asked for it: a daemon without the handler is a daemon from before the
         // route existed, and the 404 it answers is what sends a caller to the server instead.
         ...(restartHandler ? { restartSession: restartHandler } : {}),
+        ...(archiveHandler ? { archiveSession: archiveHandler } : {}),
         ...(toolContentHandler ? { getToolContent: toolContentHandler } : {}),
         ...(sessionFileHandler ? { getSessionFile: sessionFileHandler } : {}),
         ...(sessionListingHandler ? { getSessionListing: sessionListingHandler } : {}),
@@ -195,10 +201,12 @@ afterEach(async () => {
     await server?.stop();
     server = null;
     restarted = [];
+    archived = [];
     controlled = [];
     liveSessions = new Set(['sess-1']);
     lifecycleEntries = [];
     restartHandler = undefined;
+    archiveHandler = undefined;
     toolContentHandler = undefined;
     sessionFileHandler = undefined;
     sessionListingHandler = undefined;
@@ -448,6 +456,58 @@ describe('lanServer read-only API', () => {
             expect((await fetch(url('/lan/sessions/sess-1/restart'), first)).status).toBe(200);
             expect((await fetch(url('/lan/sessions/sess-1/restart'), first)).status).toBe(403);
             expect(restarted).toEqual(['sess-1']);
+        });
+    });
+
+    describe('archiving a session', () => {
+        it('records the deletion and says so', async () => {
+            archiveHandler = (sessionId) => {
+                archived.push(sessionId);
+                return true;
+            };
+            await start();
+            const token = await getToken();
+
+            const res = await fetch(url('/lan/sessions/sess-1/archive'), signed('/lan/sessions/sess-1/archive', { token }));
+
+            expect(res.status).toBe(200);
+            expect(await res.json()).toEqual({ v: 1 });
+            expect(archived).toEqual(['sess-1']);
+        });
+
+        it('says 404 for a session this machine has nothing to delete', async () => {
+            // The one answer that belongs to another channel: the server may still hold the row,
+            // so the caller's own delete path continues there.
+            archiveHandler = () => false;
+            await start();
+            const token = await getToken();
+
+            const res = await fetch(url('/lan/sessions/sess-1/archive'), signed('/lan/sessions/sess-1/archive', { token }));
+
+            expect(res.status).toBe(404);
+        });
+
+        it('says 404 when the build has no archive route at all', async () => {
+            await start();
+            const token = await getToken();
+
+            const res = await fetch(url('/lan/sessions/sess-1/archive'), signed('/lan/sessions/sess-1/archive', { token }));
+
+            expect(res.status).toBe(404);
+            expect(archived).toEqual([]);
+        });
+
+        it('is not reachable without a token', async () => {
+            archiveHandler = (sessionId) => {
+                archived.push(sessionId);
+                return true;
+            };
+            await start();
+
+            const res = await fetch(url('/lan/sessions/sess-1/archive'), { method: 'POST' });
+
+            expect(res.status).toBe(401);
+            expect(archived).toEqual([]);
         });
     });
 
@@ -717,8 +777,12 @@ describe('the lifecycle log over the LAN', () => {
         const token = await getToken();
 
         const summary = await (await fetch(url('/lan/sessions'), authorized(token))).json() as Record<string, unknown>;
+        // The ordered facts themselves stay on their own route; the summary carries only the
+        // state a reader reconciles against (its revision and the deletion tombstones), never the
+        // entries.
         expect(summary).not.toHaveProperty('entries');
-        expect(summary).not.toHaveProperty('revision');
+        expect(summary).toHaveProperty('revision');
+        expect(summary).toHaveProperty('tombstones');
     });
 
     it('is not reachable without a token', async () => {

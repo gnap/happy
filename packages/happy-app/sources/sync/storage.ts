@@ -10,7 +10,6 @@ import { NormalizedMessage } from "./typesRaw";
 import type { DaemonRoute, LanSighting, RelayEndpoint, SessionChannel } from './lan/types';
 import type { RelayDirectoryEntry } from './lan/relayDirectory';
 import { advanceLanEndpoint, advanceRelayEndpoint, parseLanEndpoints, parseRelayEndpoint } from './lan/relay';
-import type { LifecycleEntry } from './lan/client';
 import type { DaemonConnectionState } from './lan/daemonConnections';
 import { machineBadgeInputs, resolveMachinePresence, type MachineCapability, type MachineLink, type MachinePresence, type MachineReach } from './machinePresence';
 import { channelLinks } from './channelLinks';
@@ -28,7 +27,7 @@ import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
 import { Profile } from "./profile";
 import { UserProfile, RelationshipUpdatedEvent } from "./friendTypes";
-import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionMaxModes, saveSessionMaxModes, loadSessionProfileIds, saveSessionProfileIds, loadSessionSandboxIsolations, saveSessionSandboxIsolations, loadRelayEndpoints, saveRelayEndpoints } from "./persistence";
+import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionMaxModes, saveSessionMaxModes, loadSessionProfileIds, saveSessionProfileIds, loadSessionSandboxIsolations, saveSessionSandboxIsolations, loadRelayEndpoints, saveRelayEndpoints, loadDeletedSessions, saveDeletedSessions } from "./persistence";
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 import type { CustomerInfo } from './revenueCat/types';
 import React from "react";
@@ -230,48 +229,22 @@ interface StorageState {
      * no `metadata` — that is encrypted and only ever travels inside a message payload — so this
      * can confirm which sessions exist and which are alive, but it cannot build a session row.
      */
-    daemonSessionList: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; at: number; restartingSince?: number; desktop?: { required: boolean; available: boolean } }>;
+    daemonSessionList: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; at: number; origin?: 'daemon' | 'server'; restartingSince?: number; desktop?: { required: boolean; available: boolean } }>;
     /**
-     * How far each machine's lifecycle log has been replayed, by machine id.
+     * Sessions this device has deleted, by id.
      *
-     * In memory rather than persisted, and that is a decision rather than an omission: replaying
-     * from the beginning again is an empty operation, because every entry is idempotent — a create
-     * for a session that is already here does nothing, a delete for one that is already gone does
-     * nothing. Persisting the cursor would save a few bytes of bandwidth per launch and add a way
-     * for the stored position and the stored sessions to disagree.
+     * The device's own memory that a person asked for the row to be gone, kept across restarts
+     * because the deletion reaches the parties that still hold the session — a machine's catalog,
+     * then the server through its replay — at their own pace. It is what keeps a list refresh from
+     * putting back a row that has only been *offered* to deletion so far.
      */
-    lifecycleCursors: Record<string, number>;
-    /**
-     * Sessions a machine's own log says are gone, by server id or tag, and when it said so.
-     *
-     * What keeps one from coming back. A delete that a machine announced has not necessarily
-     * reached the server yet — that replay is the server channel's own progress — and until it has,
-     * every server fetch would offer the session again and the row would reappear under a reader
-     * that just watched it go. This is the window, not the record: the durable answer is the server
-     * being told, and this only has to outlive the interval between the two.
-     */
-    lifecycleDeleted: Record<string, number>;
-    /**
-     * Applies what a machine's own log says, for the sessions the server has not told this App
-     * about.
-     *
-     * A session arrives here before the server knows it exists, which is the whole point: the
-     * machine has it, the App can be shown it, and the server catching up is a separate progress.
-     * Keyed by the server's id when the entry carries one and by the tag when it does not — a
-     * session has a tag from the moment it is spawned and an id only once the server has answered —
-     * so an entry that brings the id replaces the row that was standing in on the tag.
-     *
-     * The same walk carries where the machine says it can be reached, because that is a fact from
-     * the same log: one cursor covers both, and a reader that applied an entry never has to be told
-     * it again.
-     */
-    applyLifecycle: (machineId: string, revision: number, entries: LifecycleEntry[]) => void;
+    deletedSessions: Record<string, number>;
     /** What each machine last said it was running, asked over a channel it answered on. */
     daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }>;
     /** Replace the daemons' view. Pass null to clear it (the server answered). */
     /** Records what a machine said it is running. Null forgets it, for a machine that moved. */
     applyDaemonVersion: (machineId: string, versions: { running: string; onDisk: string | null; restartRequired: boolean } | null) => void;
-    applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute; restartingSince?: number; desktop?: { required: boolean; available: boolean } }[] | null) => void;
+    applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute; origin?: 'daemon' | 'server'; restartingSince?: number; desktop?: { required: boolean; available: boolean } }[] | null) => void;
     channelOverride: Record<string, SessionChannel>;
     /** Pass null to return the session to automatic. */
     setSessionChannelOverride: (sessionId: string, channel: SessionChannel | null) => void;
@@ -762,26 +735,6 @@ function reduceRelayEndpoint(
     return { relayEndpoints: next };
 }
 
-/**
- * Folds what a machine published about where it can be reached into the slices that hold addresses.
- *
- * One entry point for all three carriers — the server's copy of the blob, the machine's own log, and
- * the relay's directory — because they are the same claim about the same machine. Which channel it
- * arrived on is not allowed to change what the App believes.
- */
-function withPublishedEndpoints(state: EndpointSlices, machineId: string, blob: unknown): EndpointSlices {
-    // Both reducers read only their own slice, so they are computed against the same state and
-    // merged once — and each answers null when the claim says nothing new.
-    const lan = reduceLanEndpoint(state, machineId, parseLanEndpoints(machineId, blob));
-    const relay = reduceRelayEndpoint(state, machineId, parseRelayEndpoint(machineId, blob));
-    // Nothing to change: the *identity* matters as much as the values, because a caller that gets a
-    // new object back will treat the whole slice as having moved.
-    if (lan === null && relay === null) {
-        return state;
-    }
-    return { ...state, ...(lan ?? {}), ...(relay ?? {}) };
-}
-
 export const storage = create<StorageState>()((set, get) => {
     let { settings, version } = loadSettings();
     let localSettings = loadLocalSettings();
@@ -807,9 +760,8 @@ export const storage = create<StorageState>()((set, get) => {
         relayUnknownTags: [],
         relayHubConnected: false,
         daemonSockets: {},
-        lifecycleCursors: {},
-        lifecycleDeleted: {},
         daemonSessionList: {},
+        deletedSessions: loadDeletedSessions(),
         daemonVersions: {},
         channelOverride: {},
         artifacts: {},  // Initialize artifacts
@@ -965,7 +917,12 @@ export const storage = create<StorageState>()((set, get) => {
             const drivers = channelDrivers(state, state.localSettings.channelPriority);
             return Object.values(state.sessions).filter(s => resolveSessionReach(s.id, s.metadata?.machineId, drivers).online);
         },
-        applySessions: (sessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[], fullRefresh?: boolean) => set((state) => {
+        applySessions: (offered: (Omit<Session, 'presence'> & { presence?: "online" | number })[], fullRefresh?: boolean) => set((state) => {
+            // A session this device deleted is not offered again by any channel. Both sources lag
+            // the deletion while it reaches them — a machine's catalog keeps listing a row until
+            // its own delete is written, and the server keeps serving one until that deletion is
+            // replayed to it — and re-adding the row here would undo what the person asked for.
+            const sessions = offered.filter((session) => state.deletedSessions[session.id] === undefined);
             // A delta that says nothing new must cost nothing: this runs for every list refresh
             // and used to be reached every two seconds by the activity heartbeat. Compare the
             // fields the merge below can change before touching MMKV, the list, or the store.
@@ -993,18 +950,15 @@ export const storage = create<StorageState>()((set, get) => {
             const savedProfileIds = loadSessionProfileIds();
             const savedSandboxIsolations = loadSessionSandboxIsolations();
 
-            // Full refresh: replace, don't merge — purges stale sessions deleted on server.
-            // Delta refresh: merge new sessions into existing ones (current behavior).
-            const mergedSessions: Record<string, Session> = fullRefresh ? {} : { ...state.sessions };
+            // Full refresh: replace server-held rows, but keep the ones a machine owns — a session
+            // this App learned from a daemon is not the server's to drop because the server's page
+            // did not mention it. Delta refresh: merge as before.
+            const mergedSessions: Record<string, Session> = fullRefresh
+                ? Object.fromEntries(Object.entries(state.sessions).filter(([, session]) => session.origin === 'daemon'))
+                : { ...state.sessions };
 
             // Update sessions with calculated presence using centralized resolver
             sessions.forEach(session => {
-                // A machine's log is the closest thing there is to "this session is gone", and a
-                // server that has not been told yet would offer it back on every fetch. Skipped
-                // rather than deleted afterwards, so nothing downstream ever sees it return.
-                if (state.lifecycleDeleted[session.id]) {
-                    return;
-                }
                 // Use centralized resolver for consistent state management
                 const presence = resolveSessionOnlineState(session);
 
@@ -2190,81 +2144,7 @@ export const storage = create<StorageState>()((set, get) => {
                 ),
             };
         }),
-        applyLifecycle: (machineId, revision, entries) => set((state) => {
-            const cursor = { ...state.lifecycleCursors, [machineId]: revision };
-            if (entries.length === 0) {
-                // A cursor that moved without entries is a reader with nothing to do; recording it
-                // keeps the next ask as small as this one was.
-                return state.lifecycleCursors[machineId] === revision ? state : { ...state, lifecycleCursors: cursor };
-            }
-            const sessions = { ...state.sessions };
-            const deleted = { ...state.lifecycleDeleted };
-            // Addresses travel in this log too, so they are applied by the same walk, at the same
-            // point in the sequence, under the same cursor: a machine that moves is one entry, and a
-            // reader that applied it does not need to be told again.
-            let endpoints: EndpointSlices = state;
-            for (const entry of entries) {
-                if (entry.op === 'reachable') {
-                    endpoints = withPublishedEndpoints(endpoints, machineId, { p2p: { endpoints: entry.endpoints, at: entry.at } });
-                    continue;
-                }
-                const key = entry.sessionId ?? entry.tag;
-                if (entry.op === 'deleted') {
-                    // Both names are remembered, not just removed: the tag's placeholder goes with
-                    // the id — an entry that named both is one session under two names — and either
-                    // name coming back from the server is what this refuses to re-add.
-                    delete sessions[key];
-                    delete sessions[entry.tag];
-                    deleted[key] = entry.at;
-                    deleted[entry.tag] = entry.at;
-                    continue;
-                }
-                // The server's copy is richer than anything buildable from a log entry, so it wins
-                // wherever it already exists — this is here for what the server has not said.
-                if (!sessions[key]) {
-                    sessions[key] = {
-                        id: key,
-                        seq: 0,
-                        createdAt: entry.at,
-                        updatedAt: entry.at,
-                        // Not active: nothing has reported it as running. What the machine has said
-                        // is that the session exists, and that is all this row claims.
-                        active: false,
-                        activeAt: entry.at,
-                        metadata: {
-                            // The sentinel this App already renders as a localized "Creating…"
-                            // rather than as a path, for a session that exists but is not ready.
-                            path: '\u200bcreating\u200b',
-                            host: '',
-                            machineId,
-                            ...(entry.directory ? { worktreePath: entry.directory } : {}),
-                        } as any,
-                        metadataVersion: 0,
-                        agentState: null,
-                        agentStateVersion: 0,
-                        thinking: false,
-                        thinkingAt: 0,
-                        presence: entry.at,
-                    };
-                }
-            }
-            return {
-                ...state,
-                ...endpoints,
-                sessions,
-                lifecycleDeleted: deleted,
-                lifecycleCursors: cursor,
-                // The list is built by an action, so a session that arrived without the server has
-                // to be built into it here — the same reason the restart mark rebuilds.
-                sessionListViewData: buildSessionListViewData(
-                    sessions,
-                    state.machines,
-                    state.daemonVersions,
-                    channelDrivers(state, state.localSettings.channelPriority),
-                ),
-            };
-        }),
-        applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute; restartingSince?: number; desktop?: { required: boolean; available: boolean } }[] | null) => set((state) => {
+        applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute; origin?: 'daemon' | 'server'; restartingSince?: number; desktop?: { required: boolean; available: boolean } }[] | null) => set((state) => {
             if (sessions === null) {
                 if (Object.keys(state.daemonSessionList).length === 0) {
                     return state;
@@ -2272,7 +2152,7 @@ export const storage = create<StorageState>()((set, get) => {
                 return { ...state, daemonSessionList: {} };
             }
             const at = Date.now();
-            const next: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; at: number; restartingSince?: number; desktop?: { required: boolean; available: boolean } }> = {};
+            const next: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; at: number; origin?: 'daemon' | 'server'; restartingSince?: number; desktop?: { required: boolean; available: boolean } }> = {};
             // The same fact the daemon pushes, arriving the other way: a device that reads a
             // listing instead of holding a socket has to be told, and a restarting session is
             // listed with no live process — which is why the field travels with the listing at all.
@@ -2284,6 +2164,7 @@ export const storage = create<StorageState>()((set, get) => {
                     directory: session.directory,
                     agent: session.agent,
                     via: session.via,
+                    ...(session.origin ? { origin: session.origin } : {}),
                     at,
                     ...(session.restartingSince !== undefined ? { restartingSince: session.restartingSince } : {}),
                 };
@@ -2296,10 +2177,10 @@ export const storage = create<StorageState>()((set, get) => {
             // seconds (`at`, `lastHeartbeat`), and rewriting the map for that re-ran the channel
             // signature over every session and rebuilt the list each time. What the UI reads is
             // the stable set below; when it is the same, the store does not change at all.
-            const stable = (list: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; restartingSince?: number; desktop?: { required: boolean; available: boolean } }>): string =>
+            const stable = (list: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; origin?: 'daemon' | 'server'; restartingSince?: number; desktop?: { required: boolean; available: boolean } }>): string =>
                 Object.keys(list).sort().map((id) => {
                     const s = list[id];
-                    return [id, s.isAlive ? 1 : 0, s.directory, s.agent, s.via,
+                    return [id, s.isAlive ? 1 : 0, s.directory, s.agent, s.via, s.origin ?? '',
                         s.restartingSince ?? '', s.desktop?.required ? 1 : 0, s.desktop?.available ? 1 : 0].join('\u0000');
                 }).join('\u0001');
             if (stable(state.daemonSessionList) === stable(next)) {
@@ -2367,8 +2248,20 @@ export const storage = create<StorageState>()((set, get) => {
         }),
         deleteSession: (sessionId: string) => set((state) => {
             // Remove session from sessions
-            const { [sessionId]: deletedSession, ...remainingSessions } = state.sessions;
-            
+            const { [sessionId]: _deleted, ...remainingSessions } = state.sessions;
+
+            // The deletion outlives this list. A machine's catalog and the server's sessions page
+            // both keep offering a session until the deletion reaches them, and the row would come
+            // back the next time the App asked one of them — which is what made deletes look like
+            // they did nothing. Remembered by id: session ids are not reused.
+            const deletedSessions = state.deletedSessions[sessionId] !== undefined
+                ? state.deletedSessions
+                : (() => {
+                    const next = { ...state.deletedSessions, [sessionId]: Date.now() };
+                    saveDeletedSessions(next);
+                    return next;
+                })();
+
             // Remove session messages if they exist
             const { [sessionId]: deletedMessages, ...remainingSessionMessages } = state.sessionMessages;
             
@@ -2400,6 +2293,7 @@ export const storage = create<StorageState>()((set, get) => {
                 sessions: remainingSessions,
                 sessionMessages: remainingSessionMessages,
                 sessionGitStatus: remainingGitStatus,
+                deletedSessions,
                 sessionListViewData
             };
         }),
@@ -2829,11 +2723,6 @@ export function useSessionReach(sessionId: string, machineId: string | undefined
 }
 
 /** What each machine last said it is running. Empty until a machine has answered on a channel. */
-/** How far each machine's lifecycle log has been replayed. */
-export function useLifecycleCursors(): Record<string, number> {
-    return storage(useShallow((state) => state.lifecycleCursors));
-}
-
 export function useDaemonVersions(): Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }> {
     return storage(useShallow((state) => state.daemonVersions));
 }

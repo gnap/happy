@@ -343,6 +343,34 @@ export function saveSessionSandboxIsolations(isolations: Record<string, string>)
     saveSessionMap('session-sandbox-isolations', isolations);
 }
 
+/**
+ * Sessions this device has deleted, by id.
+ *
+ * This is the device's own memory that a person asked for the row to be gone, not a cache of what
+ * a channel said. It outlives a restart because a deletion takes time to reach every party: a
+ * machine's replay to the server is a separate progress, and until it lands the session is still
+ * offered by somebody. A deleted session id is never reused, so an entry never becomes wrong.
+ *
+ * The first generation of this memory lived under another name and also keyed entries by the
+ * CLI's session tag. Only ids can name a session here, and the old ids are carried over so that a
+ * row deleted before this build keeps staying deleted; the tag keys are simply inert.
+ */
+export function loadDeletedSessions(): Record<string, number> {
+    const deletions = loadSessionMap<number>('session-deletions', 'deleted sessions');
+    const legacy = loadSessionMap<number>('session-tombstones', 'session tombstones');
+    let merged = deletions;
+    for (const [key, at] of Object.entries(legacy)) {
+        if (merged[key] === undefined && typeof at === 'number') {
+            merged = { ...merged, [key]: at };
+        }
+    }
+    return merged;
+}
+
+export function saveDeletedSessions(deletions: Record<string, number>) {
+    saveSessionMap('session-deletions', deletions);
+}
+
 export function loadProfile(): Profile {
     const profile = mmkv.getString('profile');
     if (profile) {

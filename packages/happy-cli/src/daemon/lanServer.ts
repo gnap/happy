@@ -98,6 +98,13 @@ export type LanSessionSummary = {
    * instead of waiting for the server's session record.
    */
   dataEncryptionKey?: string;
+  /** The server's encrypted agent state, for a reader that can open it. */
+  agentStateVersion?: number;
+  agentState?: string | null;
+  /** Where the row came from: this machine, or an import of the server's session record. */
+  origin?: 'daemon' | 'server';
+  createdAt?: number;
+  updatedAt?: number;
   /**
    * Whether this session must run in the user's desktop session, and whether one is available.
    *
@@ -189,6 +196,10 @@ export type LanServerOptions = {
   /** Stable non-secret fingerprint of the account, so a client can filter before probing. */
   accountFingerprint: string;
   getSessions: () => LanSessionSummary[];
+  /** Sessions this machine has archived, so a reader can apply deletions from the same state. */
+  getTombstones?: () => Array<{ sessionId: string; tag?: string; at: number }>;
+  /** Archive locally and record the delete transaction; the daemon replays it to the server. */
+  archiveSession?: (sessionId: string) => boolean;
   /**
    * What this machine is running against what it has on disk.
    *
@@ -635,7 +646,13 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     if (!requireToken(request)) {
       return reply.code(401).send({ error: 'unauthorized' });
     }
-    return reply.send({ sessions: opts.getSessions() });
+    return reply.send({
+      sessions: opts.getSessions(),
+      // Additive: an older reader ignores both and keeps using `sessions`. A newer one can
+      // reconcile deletions from the same snapshot and hold a revision alongside its cursor.
+      revision: opts.lifecycle?.revision() ?? 0,
+      tombstones: opts.getTombstones?.() ?? [],
+    });
   });
 
   /**
@@ -799,6 +816,33 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     opts.accountProof.rememberNonce(nonce!);
     return true;
   };
+
+  /**
+   * Archive a session on this machine.
+   *
+   * The caller is asking for a deletion, but the fact is recorded here first: the daemon appends
+   * a `deleted` lifecycle entry and replays it to the server at its own pace. A server that is
+   * down therefore delays the server's copy, not the local list. Account-signed for the same
+   * reason as restart — a machine-key holder may read, but only the account may delete.
+   */
+  app.post('/lan/sessions/:sessionId/archive', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (!opts.archiveSession) {
+      return reply.code(404).send({ error: 'this daemon does not archive sessions' });
+    }
+    const { sessionId } = request.params as { sessionId: string };
+    if (!requireAccountProof(request, { operation: 'archive', target: sessionId })) {
+      return reply.code(403).send({ error: 'account proof required' });
+    }
+    const archived = opts.archiveSession(sessionId);
+    logger.debug(`[lan] archive ${sessionId} from=${clientAddress(request)} archived=${archived}`);
+    if (!archived) {
+      return reply.code(404).send({ error: 'no session by that id on this machine' });
+    }
+    return reply.send({ v: LAN_PROTOCOL_VERSION });
+  });
 
   app.post('/lan/sessions/:sessionId/control', { bodyLimit: CONTROL_BODY_LIMIT_BYTES }, async (request, reply) => {
     if (!requireToken(request)) {

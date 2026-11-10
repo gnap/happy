@@ -5,11 +5,13 @@ import { Text } from '@/components/StyledText';
 import { SimpleSyntaxHighlighter } from '@/components/SimpleSyntaxHighlighter';
 import { Typography } from '@/constants/Typography';
 import { sync } from '@/sync/sync';
+import { recordRecentFile } from '@/sync/recentFiles';
 import { Modal } from '@/modal';
 import { useUnistyles, StyleSheet } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
 import { t } from '@/text';
 import { FileIcon } from '@/components/FileIcon';
+import { decodeFilePathParam } from '@/utils/filePathParam';
 import { Ionicons } from '@expo/vector-icons';
 
 interface FileContent {
@@ -117,16 +119,9 @@ export default function FileScreen() {
     const { id: sessionId } = useLocalSearchParams<{ id: string }>();
     const searchParams = useLocalSearchParams();
     const encodedPath = searchParams.path as string;
-    let filePath = '';
-    
-    // Decode base64 path with error handling
-    try {
-        filePath = encodedPath ? atob(encodedPath) : '';
-    } catch (error) {
-        console.error('Failed to decode file path:', error);
-        filePath = encodedPath || ''; // Fallback to original path if decoding fails
-    }
-    
+    // Base64url of the path's UTF-8 bytes; a raw path is accepted too, for links written by hand.
+    const filePath = decodeFilePathParam(encodedPath ?? '');
+
     const [fileContent, setFileContent] = React.useState<FileContent | null>(null);
     const [diffContent, setDiffContent] = React.useState<string | null>(null);
     const [displayMode, setDisplayMode] = React.useState<'file' | 'diff'>('diff');
@@ -269,6 +264,8 @@ export default function FileScreen() {
                     return;
                 }
                 setLocalUri(download.uri);
+                // Opened, not merely named: the browser's "recent" row is about files that loaded.
+                recordRecentFile({ sessionId: sessionId!, path: filePath });
 
                 const ext = filePath.split('.').pop()?.toLowerCase();
                 if (isImageFile(filePath)) {

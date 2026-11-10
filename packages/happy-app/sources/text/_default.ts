@@ -668,6 +668,7 @@ export const en = {
         noChanges: 'No changes to display',
         download: 'Download',
         allFiles: 'All files',
+        recentFiles: 'Recent',
     },
 
     settingsVoice: {

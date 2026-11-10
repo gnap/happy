@@ -709,6 +709,7 @@ export const ja: TranslationStructure = {
         noChanges: '表示する変更はありません',
         download: 'ダウンロード',
         allFiles: 'すべてのファイル',
+        recentFiles: '最近',
     },
 
     settingsVoice: {

@@ -81,8 +81,15 @@ export type LanSessionSummary = {
      */
     metadataVersion?: number;
     metadata?: string;
+    /** The server's agent state, ciphertext and revision, when the daemon has it. */
+    agentStateVersion?: number;
+    agentState?: string | null;
     /** The session key, wrapped to the account box key — opens `metadata` without a history read. */
     dataEncryptionKey?: string;
+    /** Where this row came from: the machine itself, or the daemon's import of the server record. */
+    origin?: 'daemon' | 'server';
+    createdAt?: number;
+    updatedAt?: number;
     /** Whether this session needs the user's desktop session, and whether one is available now. */
     desktop?: { required: boolean; available: boolean };
     directory: string;

@@ -293,6 +293,21 @@ export interface PersistedSession {
   lastHeartbeat?: number;
   /** Started through Happy Sidecar, in the user's desktop session. */
   requiresDesktop?: boolean;
+  /**
+   * Where this row came from: a process this machine started, or a session imported from the
+   * server so that the catalog is complete on a machine that never ran it.
+   */
+  origin?: 'daemon' | 'server';
+  /**
+   * The server's encrypted session record, kept verbatim so a reader can open it with the account
+   * key without asking the server. The daemon never decrypts these.
+   */
+  serverMetadata?: { version: number; value: string } | null;
+  serverAgentState?: { version: number; value: string | null } | null;
+  /** The server's wrapped session key, already addressed to the account's box key. */
+  dataEncryptionKey?: string | null;
+  createdAt?: number;
+  updatedAt?: number;
 }
 
 /**

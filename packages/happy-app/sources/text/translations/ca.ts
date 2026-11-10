@@ -674,6 +674,7 @@ export const ca: TranslationStructure = {
         noChanges: 'No hi ha canvis a mostrar',
         download: 'Descarrega',
         allFiles: 'Tots els fitxers',
+        recentFiles: 'Recents',
     },
 
     settingsVoice: {

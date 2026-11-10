@@ -41,7 +41,7 @@ import { AsyncLock } from '@/utils/lock';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
-import { fetchIdentity, fetchLifecycle, LanRequestError, restartSessionAt, sessionControlAt, type LanRestartVerdict, type LifecycleEntry } from './lan/client';
+import { fetchIdentity, LanRequestError, archiveSessionAt, restartSessionAt, sessionControlAt, type LanRestartVerdict } from './lan/client';
 import { accountProofHeaders } from '@/auth/accountProof';
 import { getLanCredential } from './lan/credentials';
 import { readSessionOverLan, listSessionsOverLan, toNormalizedMessages, type LanConnection, type LanSessionRead } from './lan/sessionChannel';
@@ -67,7 +67,7 @@ import type { ChannelReason } from './channels/types';
 import { FetchSlots } from './fetchSlots';
 import { DaemonConnections, type DaemonTarget } from './lan/daemonConnections';
 import { judgeDaemonPage, pageMovedTheLog, planDaemonRead } from './lan/windowPlan';
-import type { DaemonRoute, LanSessionLogEntry, SessionChannel } from './lan/types';
+import type { DaemonRoute, LanSessionLogEntry, LanSessionSummary, SessionChannel } from './lan/types';
 import { parseLanEndpoints, parseRelayEndpoint } from './lan/relay';
 import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
 import { systemPrompt } from './prompt/systemPrompt';
@@ -166,6 +166,15 @@ export type SessionControlResult =
     /** A machine answered that the request itself cannot be served as sent. */
     | { kind: 'rejected'; status: number; body?: string }
     /** No channel answered, or none had the session: the server is the remaining road. */
+    | { kind: 'unavailable' };
+
+/** What became of asking a machine to delete a session of its own. */
+export type SessionArchiveResult =
+    /** The machine recorded the deletion. It will tell the server on its own cursor. */
+    | { kind: 'archived' }
+    /** A machine answered and said no — with its words, when it sent any. */
+    | { kind: 'refused'; status?: number; body?: string }
+    /** No machine channel could take it: the server is the remaining road. */
     | { kind: 'unavailable' };
 
 class Sync {
@@ -445,12 +454,14 @@ class Sync {
         onReady: (target) => { this.onDaemonConnectionReady(target); },
         onDropped: (target) => { this.onDaemonConnectionDropped(target); },
         onAddressUnusable: (target, reason) => {
-            // A relay socket is a stream on the hub, so "could not open" can mean there was no
-            // transport to open it on — the hub is down, or this machine's tag is not known yet.
-            // That is this side's connection, not evidence about the address, and demoting the
-            // address for it would send the next reconcile somewhere else over our own outage.
-            if (target.route === 'relay' && (!this.relayHub || !this.relayHub.isConnected() || !this.machineTags.has(target.machineId))) {
-                log.log(`📡 relay stream for ${target.machineId.slice(0, 8)} had no hub transport: ${reason}`);
+            // A relay socket is a stream on the hub; it is not the relay's HTTP address. The two
+            // fail for different reasons — a stream open can time out while `/r/<tag>/…` answers
+            // a read perfectly — and the address health is shared by both. Recording the stream's
+            // failure here demoted the address for *reads*, emptied the candidate list, and turned
+            // every history read into `absent` while the daemon was answering 200. Reads record
+            // their own address failures in `fetchSessionFromDaemon`; this path must not.
+            if (target.route === 'relay') {
+                log.log(`📡 relay stream for ${target.machineId.slice(0, 8)} did not open: ${reason}`);
                 return;
             }
             // A socket that will not open or stay open is evidence about the *address*, and the
@@ -878,13 +889,16 @@ class Sync {
     /**
      * Desktop (Tauri / browser) lifecycle management.
      *
-     * visibilitychange is the primary signal:
+     * visibilitychange is the suspension signal:
      *   hidden  → pauseReconnection  (window minimised or tab hidden)
      *   visible → resumeReconnection + full sync invalidation
      *
-     * Tauri WINDOW_FOCUS/WINDOW_BLUR fire when the OS window gains or loses focus
-     * without a visibility change (window was visible but behind another app). On
-     * focus we only probe the socket — no full invalidation needed.
+     * Window focus/blur is not suspension. A window can sit behind the terminal and still be
+     * on screen and on the network, and pausing there made the server look down: the server
+     * channel disappeared, sessions fell to the relay, and a machine whose daemon had no local
+     * log for the session could never serve it — messages stayed at the cache. iOS, which has
+     * no desktop blur, kept reading them from the server. So only `hidden` pauses; focus is a
+     * reason to probe and refresh, never to tear the socket down.
      */
     async #setupDesktopLifecycle() {
         const recoverDesktopPendingWork = () => {
@@ -892,37 +906,12 @@ class Sync {
             this.recoverPendingOutbox();
         };
 
-        // In Tauri a DOM blur arrives immediately after the OS window regains focus,
-        // so pausing straight away tears down the socket that the focus handler's
-        // resumeReconnection just created and the connection never leaves 'connecting'.
-        // Defer the pause so a focus arriving within the grace window cancels it.
-        const BLUR_PAUSE_GRACE_MS = 5_000;
-        let blurPauseTimer: ReturnType<typeof setTimeout> | null = null;
-
-        const cancelPendingBlurPause = () => {
-            if (blurPauseTimer !== null) {
-                clearTimeout(blurPauseTimer);
-                blurPauseTimer = null;
-            }
-        };
-
-        const onDesktopBlur = () => {
-            cancelPendingBlurPause();
-            blurPauseTimer = setTimeout(() => {
-                blurPauseTimer = null;
-                log.log('🖥️ Desktop blurred — pausing socket');
-                apiSocket.pauseReconnection();
-            }, BLUR_PAUSE_GRACE_MS);
-        };
-
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
                 log.log('🖥️ Window hidden — pausing reconnection');
-                cancelPendingBlurPause();
                 apiSocket.pauseReconnection();
             } else {
                 log.log('🖥️ Window visible — resuming and invalidating syncs');
-                cancelPendingBlurPause();
                 void apiSocket.resumeReconnection().then(() => {
                     this.#invalidateAllSyncs();
                     // Refresh the currently visible session's messages immediately.
@@ -940,17 +929,13 @@ class Sync {
 
         window.addEventListener('focus', () => {
             if (!isRunningInTauri()) {
-                log.log('🖥️ Window focused — resuming socket and recovering pending sends');
-                cancelPendingBlurPause();
+                log.log('🖥️ Window focused — probing connection and recovering pending sends');
                 void apiSocket.resumeReconnection();
                 recoverDesktopPendingWork();
             }
         });
-        window.addEventListener('blur', () => {
-            // In Tauri the DOM blur doesn't track the OS window; WINDOW_BLUR does.
-            if (isRunningInTauri()) return;
-            onDesktopBlur();
-        });
+        // Deliberately no blur listener: losing focus is not losing the network. The socket's
+        // ping/pong and `visibilitychange` are the facts that decide whether it is paused.
 
         // Track user activity for idle detection on desktop.
         // Skips periodic session refreshes when the user hasn't interacted
@@ -993,7 +978,6 @@ class Sync {
             appWindow.listen(TauriEvent.WINDOW_FOCUS, () => {
                 if (!document.hidden) {
                     log.log('🖥️ Window focused (Tauri) — probing connection');
-                    cancelPendingBlurPause();
                     void apiSocket.resumeReconnection().then((connected) => {
                         if (connected) {
                             this.#refreshSessionsAfterDesktopProbe();
@@ -1003,7 +987,7 @@ class Sync {
                     recoverDesktopPendingWork();
                 }
             });
-            appWindow.listen(TauriEvent.WINDOW_BLUR, onDesktopBlur);
+            // No WINDOW_BLUR pause: a window behind another app is still on the network.
         }
     }
 
@@ -2187,6 +2171,9 @@ class Sync {
                 const existingThinking = storage.getState().sessions[session.id];
                 const processedSession = {
                     ...session,
+                    // A row first learned from a machine keeps that origin across server refreshes;
+                    // the server did not create it, it merely caught up with it.
+                    origin: existingThinking?.origin ?? 'server',
                     thinking: session.thinking ?? existingThinking?.thinking ?? false,
                     thinkingAt: session.thinkingAt
                         ?? (session.thinking !== undefined
@@ -3447,6 +3434,10 @@ class Sync {
         }
         this.pushedEntryTimers.clear();
         this.pushedEntryBatches.clear();
+        if (this.rosterRefreshTimer) {
+            clearTimeout(this.rosterRefreshTimer);
+            this.rosterRefreshTimer = null;
+        }
         this.reconnectedCleanup?.();
         this.reconnectedCleanup = null;
         this.appStateSubscription?.remove();
@@ -3683,7 +3674,15 @@ class Sync {
                 hasOlderMessages,
                 lastSeq,
             );
-            this.sessionLastSeq.set(sessionId, Math.max(cached.lastSeq, this.sessionLastSeq.get(sessionId) ?? 0));
+            // The watermark describes the window that is actually held, not everything this
+            // process has ever fetched. A truncated cache (the hot window was evicted, or a
+            // web/Tauri cache could not keep the whole window) hydrates with `lastSeq` at 0 or
+            // far behind; keeping an older, higher value made the next server read answer
+            // "already up-to-date" and skip, leaving the conversation at the cached slice.
+            // The server-axis watermark is dropped rather than reused: cache entries may have
+            // been written from a daemon read, whose numbering is not the server's.
+            this.sessionLastSeq.set(sessionId, lastSeq);
+            this.serverNewestSeq.delete(sessionId);
             // Marked only once the window is in the store. Marking first meant a cancelled read
             // disabled the cache for the rest of the process.
             this.hydratedSessions.add(sessionId);
@@ -3784,6 +3783,16 @@ class Sync {
     private lastRosterFetchAt = 0;
     private rosterFetchInFlight = false;
     private static readonly ROSTER_FETCH_INTERVAL_MS = 60_000;
+    /**
+     * A roster read queued because a machine said its log moved.
+     *
+     * The log itself is the daemon's transaction and this App does not replay it — but the moved
+     * log is a statement that the *state* it projects has changed, and reading that state is the
+     * App's business. Debounced because one write can produce several hints (a create and the
+     * session's own reachable entry), and they all want the same answer.
+     */
+    private rosterRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+    private static readonly ROSTER_REFRESH_DEBOUNCE_MS = 2_000;
 
     /**
      * The server-axis position of a session, for guards and fetch anchors.
@@ -5193,14 +5202,30 @@ class Sync {
         // point of the channel — seeing the newest is.
         const plan = planDaemonRead(anchor);
         let read = await readPage(plan.page, knownConnection);
+        // A cursor restored from the last process can name a log that has since been pruned,
+        // rotated, or written under another site. The daemon answers a cursor past its end with
+        // an empty page and `reset: false` — indistinguishable from "caught up" — so the saved
+        // window would stay stranded at an anchor that no longer exists. The newest page is the
+        // only truthful answer; re-read it once, when the anchor is the persisted one.
+        let stalePersistedAnchor = false;
+        if (!inMemory && anchor && plan.page.kind === 'follow' && read && read.messages.length === 0) {
+            const tail = await readPage({ kind: 'tail' }, read.connection);
+            if (tail && tail.messages.length > 0) {
+                log.log(`📡 fetchSessionFromDaemon: stale saved cursor for ${sessionId}; re-read the newest page`);
+                read = tail;
+                stalePersistedAnchor = true;
+            }
+        }
         // Whether a window is replaced, re-read from the newest end, or merely extended — and the
         // refusal to empty a conversation on the strength of an empty page. Both invariants live in
         // `judgeDaemonPage`, where they are stated once and tested, rather than inline here.
-        let verdict = judgeDaemonPage({
-            planned: plan,
-            hasWindow,
-            read: read ? { hasNewer: read.hasNewer, reset: read.reset } : null,
-        });
+        let verdict = stalePersistedAnchor
+            ? { kind: 'replace' as const }
+            : judgeDaemonPage({
+                planned: plan,
+                hasWindow,
+                read: read ? { hasNewer: read.hasNewer, reset: read.reset } : null,
+            });
         if (verdict.kind === 'replace-from-tail') {
             // The page just read is not adjacent to what is held, so the window is not joined to it:
             // it is re-read from the newest end and *that* page is the window. A tail read that does
@@ -5581,6 +5606,38 @@ class Sync {
         return { kind: 'unavailable' };
     }
 
+    /**
+     * Deletes a session by asking the machine that owns it, as a transaction in its own log.
+     *
+     * The App's own removal is local and forgettable; a machine's log survives this App, this
+     * phone and this account's other devices, and the daemon replays it to the server until the
+     * server agrees. So the machine is asked first, even when the row was born on the server: that
+     * is what makes "deleted" a fact rather than a screen that is no longer showing something.
+     *
+     * Only silence — or a machine that does not have the session — sends this to the server, where
+     * deletes came from before. A refusal is about this device and a bad request is about the
+     * request: the server would be the same account by another road, so neither is re-asked there.
+     */
+    async archiveSession(sessionId: string): Promise<SessionArchiveResult> {
+        const outcome = await this.carrySessionAction<boolean>(sessionId, {
+            operation: 'archive',
+            path: `/lan/sessions/${encodeURIComponent(sessionId)}/archive`,
+            proof: { operation: 'archive', target: sessionId },
+            run: (baseUrl, token, proof) => archiveSessionAt(baseUrl, token, sessionId, proof ?? undefined).then((ok) => (ok ? true : null)),
+        });
+        if (outcome.kind === 'done') {
+            log.log(`🗑️ archive ${sessionId}: recorded by the machine`);
+            return { kind: 'archived' };
+        }
+        if (outcome.kind === 'refused' && outcome.reason === 'no-endpoint') {
+            return { kind: 'refused', status: outcome.status, body: outcome.body };
+        }
+        if (outcome.kind === 'bad-request') {
+            return { kind: 'refused', status: outcome.status, body: outcome.body };
+        }
+        return { kind: 'unavailable' };
+    }
+
     /** Whether this session's CLI publishes its working tree in metadata. */
     private gitStatusPublished(sessionId: string): boolean {
         return storage.getState().sessions[sessionId]?.metadata?.gitStatus !== undefined;
@@ -5888,35 +5945,6 @@ class Sync {
      *
      * Never fatal: an address that has moved is a reason to try again on the next occasion.
      */
-    async pullMachineLifecycle(): Promise<void> {
-        // One at a time: a machine that is not answering must not hold up the others, and the
-        // requests are cheap enough that overlapping them buys nothing.
-        //
-        // Once per machine, not once per address. The cursor is the machine's, so replaying the same
-        // log through a second address of the same daemon asks the same question twice and pays a
-        // timeout for every address that does not answer.
-        for (const machineId of this.knownMachineIds()) {
-            try {
-                const since = storage.getState().lifecycleCursors[machineId] ?? 0;
-                const carried = await this.carryAtDaemon<{ revision: number; entries: LifecycleEntry[] }>({
-                    machineId,
-                    operation: 'lifecycle',
-                    run: (baseUrl, token) => fetchLifecycle(baseUrl, token, since),
-                });
-                if (carried.kind !== 'done' || !carried.value) {
-                    continue;
-                }
-                const answer = carried.value;
-                if (answer.entries.length > 0) {
-                    log.log(`🔄 lifecycle ${machineId.slice(0, 8)}: ${answer.entries.length} entr${answer.entries.length === 1 ? 'y' : 'ies'} (rev ${since} → ${answer.revision})`);
-                }
-                storage.getState().applyLifecycle(machineId, answer.revision, answer.entries);
-            } catch {
-                // The machine may be unreachable, or its daemon may predate the route.
-            }
-        }
-    }
-
     async restartSession(sessionId: string, machineId: string, options?: { requiresDesktop?: boolean }): Promise<{ success: boolean; newSessionId?: string; error?: string } | null> {
         const machineKey = this.getMachineKey(machineId);
         if (!machineKey) {
@@ -5963,6 +5991,25 @@ class Sync {
     }
 
     /**
+     * Queues one roster read for a machine's "the log moved" hint.
+     *
+     * Not the entry: the daemon owns that transaction. This is only the signal that the state it
+     * projects is different now — a session created or deleted — and the App's answer is to read
+     * that state, which is the same read every other path uses.
+     */
+    private refreshRosterSoon(): void {
+        if (this.rosterRefreshTimer) {
+            return;
+        }
+        this.rosterRefreshTimer = setTimeout(() => {
+            this.rosterRefreshTimer = null;
+            void this.fetchSessionListFromDaemons().catch((error) => {
+                log.log(`📡 fetchSessions: roster after a machine's log move failed: ${String(error)}`);
+            });
+        }, Sync.ROSTER_REFRESH_DEBOUNCE_MS);
+    }
+
+    /**
      * Asks the daemons what sessions they have, over the LAN and the relay, and records it.
      *
      * Called when the server cannot answer. The LAN summary carries no metadata — that is
@@ -5996,82 +6043,147 @@ class Sync {
             log.log('📡 fetchSessions: server unreachable, and no daemon answered on the LAN or the relay');
             return 0;
         }
-        const sessions = answers.flatMap((answer) => answer.sessions.map((session) => ({ ...session, via: answer.via })));
+        // One answer per session, from the machine that owns it. Every daemon imports every server
+        // session, so the same id arrives from many machines — and an importer's copy says
+        // `origin: 'server'` and `isAlive: false`, because it is not running there. Letting that
+        // overwrite the owner's answer would flip a live session to offline depending on the order
+        // the machines happened to answer in. The owner is the one whose summary matters; an
+        // importer's copy is only a name in a list.
+        const byId = new Map<string, { summary: LanSessionSummary; machineId: string; via: DaemonRoute }>();
+        for (const answer of answers) {
+            for (const summary of answer.sessions) {
+                const id = summary.happySessionId;
+                if (!id) continue;
+                const previous = byId.get(id);
+                if (!previous || (summary.origin !== 'server' && previous.summary.origin === 'server')) {
+                    byId.set(id, { summary, machineId: answer.machineId, via: answer.via });
+                }
+            }
+        }
+        const sessions = [...byId.values()].map(({ summary, via }) => ({ ...summary, via }));
         // Daemon-numbered from here until a server answer replaces it: a session's `seq` in this
         // list is the daemon's own counter, and comparisons against the server's axis must not
         // read it (see `serverAxisSeq`).
         this.sessionsListAxis = 'daemon';
         storage.getState().applyDaemonSessionList(sessions);
 
-        // A session this App has never seen exists the moment a daemon says so — the server's
-        // list is a report from a round trip ago. Show what the roster carries (path, agent,
-        // liveness, machine) instead of leaving the row to a 1.1MB fetch that may take a minute;
-        // the server's record replaces the placeholder by id when it arrives.
-        const known = storage.getState().sessions;
+        // The daemon's state is the complete list, including sessions imported from the server:
+        // rows it names are created here, and rows it says it archived are deleted. The server's
+        // list remains one more source (and the bootstrap when no machine answers), but it is no
+        // longer the only thing that can put a session on screen.
+        const knownSessions = storage.getState().sessions;
+        const catalogIds = new Set<string>();
+        const catalogRows: Session[] = [];
         const now = Date.now();
-        const placeholders: any[] = [];
-        for (const answer of answers) {
-            for (const summary of answer.sessions) {
-                if (!summary.happySessionId || known[summary.happySessionId]) {
-                    continue;
-                }
-                const at = summary.lastHeartbeat ?? now;
-                // The roster carries the session's own metadata ciphertext and the wrapped key
-                // that opens it. With both, the row shows the real name, project and branch now;
-                // without them (a session the server has not named yet) the path is all there is.
-                let metadata: unknown = {
-                    path: summary.directory,
-                    host: '',
-                    machineId: answer.machineId,
-                };
-                let metadataVersion = 0;
-                if (summary.metadata !== undefined && summary.metadataVersion !== undefined && summary.dataEncryptionKey) {
-                    try {
-                        const sessionId = summary.happySessionId;
-                        let sessionKey = this.lanSessionKeys.get(sessionId) ?? null;
-                        if (!sessionKey) {
-                            sessionKey = await this.encryption.decryptEncryptionKey(summary.dataEncryptionKey);
-                            if (sessionKey) {
-                                this.lanSessionKeys.set(sessionId, sessionKey);
-                            }
-                        }
-                        if (sessionKey) {
-                            await this.encryption.initializeSessions(new Map([[sessionId, sessionKey]]));
-                            const sessionEncryption = this.encryption.getSessionEncryption(sessionId);
-                            const decrypted = sessionEncryption
-                                ? await sessionEncryption.decryptMetadata(summary.metadataVersion, summary.metadata)
-                                : null;
-                            if (decrypted) {
-                                metadata = decrypted;
-                                metadataVersion = summary.metadataVersion;
-                            }
-                        }
-                    } catch {
-                        // Keep the roster fields: a key that will not open is not a row to drop.
+        for (const [id, { summary, machineId }] of byId) {
+            catalogIds.add(id);
+            const existing = knownSessions[id];
+            let metadata = existing?.metadata ?? null;
+            let metadataVersion = existing?.metadataVersion ?? 0;
+            let agentState = existing?.agentState ?? null;
+            let agentStateVersion = existing?.agentStateVersion ?? 0;
+            if (summary.metadata !== undefined && summary.metadataVersion !== undefined && summary.dataEncryptionKey) {
+                try {
+                    let sessionKey = this.lanSessionKeys.get(id) ?? null;
+                    if (!sessionKey) {
+                        sessionKey = await this.encryption.decryptEncryptionKey(summary.dataEncryptionKey);
+                        if (sessionKey) this.lanSessionKeys.set(id, sessionKey);
                     }
+                    if (sessionKey) {
+                        await this.encryption.initializeSessions(new Map([[id, sessionKey]]));
+                        const sessionEncryption = this.encryption.getSessionEncryption(id);
+                        if (sessionEncryption) {
+                            if (summary.metadataVersion >= metadataVersion) {
+                                const decrypted = await sessionEncryption.decryptMetadata(summary.metadataVersion, summary.metadata);
+                                if (decrypted) {
+                                    metadata = decrypted;
+                                    metadataVersion = summary.metadataVersion;
+                                }
+                            }
+                            if (summary.agentStateVersion !== undefined && summary.agentStateVersion >= agentStateVersion) {
+                                agentState = summary.agentState === null
+                                    ? null
+                                    : await sessionEncryption.decryptAgentState(summary.agentStateVersion, summary.agentState);
+                                agentStateVersion = summary.agentStateVersion;
+                            }
+                        }
+                    }
+                } catch {
+                    // Keep the row: a key that will not open is not a reason to hide a session.
                 }
-                placeholders.push({
-                    id: summary.happySessionId,
-                    seq: 0,
-                    createdAt: at,
-                    updatedAt: at,
-                    active: summary.isAlive,
-                    activeAt: at,
-                    metadata,
-                    metadataVersion,
-                    agentState: null,
-                    agentStateVersion: 0,
-                    thinking: false,
-                    thinkingAt: 0,
-                    presence: summary.isAlive ? 'online' : at,
-                    ...(summary.restartingSince !== undefined ? { restartingAt: summary.restartingSince } : {}),
-                });
+            }
+            // Only the machine that owns the session can answer for its process. An imported
+            // server-only row says `isAlive: false` because it is not here, not because the
+            // session is down; its liveness comes from the server's list instead.
+            const owner = summary.origin !== 'server';
+            if (!existing && !metadata) {
+                // An imported row this App cannot open has nothing to draw: its directory is the
+                // server's record, not a place this machine runs anything. The server's own list
+                // can still name it, and the row appears once that arrives.
+                if (!owner) continue;
+                metadata = { path: summary.directory, host: '', machineId } as any;
+            }
+            const at = summary.lastHeartbeat ?? now;
+            const active = owner ? summary.isAlive : (existing?.active ?? summary.isAlive);
+            const activeAt = owner ? at : (existing?.activeAt ?? at);
+            if (existing
+                && existing.metadataVersion === metadataVersion
+                && existing.agentStateVersion === agentStateVersion
+                && existing.active === active
+                && existing.activeAt === activeAt) {
+                continue;
+            }
+            catalogRows.push({
+                ...(existing ?? {}),
+                id,
+                seq: existing?.seq ?? 0,
+                createdAt: summary.createdAt ?? existing?.createdAt ?? at,
+                updatedAt: summary.updatedAt ?? existing?.updatedAt ?? at,
+                active,
+                activeAt,
+                metadata,
+                metadataVersion,
+                agentState,
+                agentStateVersion,
+                thinking: existing?.thinking ?? false,
+                thinkingAt: existing?.thinkingAt ?? 0,
+                presence: active ? 'online' : at,
+                origin: owner ? 'daemon' : 'server',
+                ...(summary.restartingSince !== undefined ? { restartingAt: summary.restartingSince } : {}),
+            } as Session);
+        }
+        if (catalogRows.length > 0) {
+            storage.getState().applySessions(catalogRows);
+        }
+
+        // The deletion log, applied as state: the server's copy may lag until the daemon's replay
+        // reaches it, so a tombstone is the local reason the row is gone now.
+        const tombstoned = new Set<string>();
+        for (const answer of answers) {
+            for (const tombstone of answer.tombstones ?? []) {
+                if (storage.getState().sessions[tombstone.sessionId]) {
+                    storage.getState().deleteSession(tombstone.sessionId);
+                    tombstoned.add(tombstone.sessionId);
+                }
             }
         }
-        if (placeholders.length > 0) {
-            storage.getState().applySessions(placeholders);
-            log.log(`📡 fetchSessions: ${placeholders.length} session(s) shown from the daemon roster before the server list`);
+
+        // Rows the old lifecycle/roster paths left behind and no catalog names: drop them once.
+        const stalePlaceholders = Object.values(storage.getState().sessions).filter((session) =>
+            !catalogIds.has(session.id)
+            && session.origin === undefined
+            && session.metadataVersion === 0
+            && session.agentState === null
+            && session.seq === 0
+            && !session.active
+        );
+        for (const session of stalePlaceholders) {
+            storage.getState().deleteSession(session.id);
         }
+        if (catalogRows.length > 0 || tombstoned.size > 0 || stalePlaceholders.length > 0) {
+            log.log(`📡 roster state: ${catalogRows.length} row(s) applied, ${tombstoned.size} tombstone(s), ${stalePlaceholders.length} stale placeholder(s) dropped`);
+        }
+
         for (const answer of answers) {
             log.log(`📡 roster: daemon ${answer.machineId.slice(0, 8)} reports ${answer.sessions.length} session(s) via ${answer.via}`);
         }
@@ -6540,11 +6652,12 @@ class Sync {
         const body = (payload as {
             body?: { t?: string; id?: string; entry?: LanSessionLogEntry; anchor?: string; head?: string };
         } | null)?.body;
-        // The machine's own log moved — a session it started, or one it archived. A hint, not the
-        // entry: this asks for what it missed with its own cursor, which is what keeps the replay
-        // per-reader and what makes it an occasion rather than a poll.
+        // The machine's lifecycle log is its own transaction, replayed by the daemon and the
+        // channels that replicate it. The App reads state (the session list and the machine's
+        // roster) and does not replay the log — but a log that moved means the state projected
+        // from it changed, so the roster is read again rather than the entry applied.
         if (body?.t === 'lifecycle') {
-            void this.pullMachineLifecycle();
+            this.refreshRosterSoon();
             return;
         }
         // The daemon's hint that a session's local log grew. It is not a server update, so it never
@@ -6877,9 +6990,6 @@ class Sync {
         // records: it keeps a working address at the front of the candidate list and clears a run
         // of failures the socket may have accumulated while the machine was restarting.
         storage.getState().candidateSucceeded(target.machineId, target.route, target.baseUrl);
-        // The machine's own log, asked the moment its channel comes up: this is the fastest channel
-        // there is, and the sessions it has are the ones the server may not know about yet.
-        void this.pullMachineLifecycle();
         // A connection that is up is one worth asking again whether it can answer: a daemon that
         // has been updated since the last attempt will say so, and one that has not is written off
         // again after a single missed heartbeat.
