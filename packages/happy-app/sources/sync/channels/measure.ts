@@ -28,7 +28,7 @@ export type ChannelState = {
     sessions: Record<string, { active: boolean; activeAt: number }>;
     machines: Record<string, { active?: boolean } | undefined>;
     daemonSockets: Record<string, DaemonConnectionState>;
-    daemonSessionList: Record<string, { isAlive: boolean; via: string; at: number }>;
+    daemonSessionList: Record<string, { isAlive: boolean; via: string; at: number; origin?: 'daemon' | 'server' }>;
     lanSightings: Record<string, { baseUrl?: string; machineId?: string } | undefined>;
     /** Where machines published themselves on this network, for when discovery cannot find them. */
     lanEndpoints: Record<string, { baseUrls?: string[]; at?: number } | undefined>;
@@ -39,7 +39,7 @@ export type ChannelState = {
      */
     candidateHealth: Record<string, CandidateHealth>;
     relayEndpoints: Record<string, { baseUrl?: string; source?: string } | undefined>;
-    relayDirectory: Record<string, { at: number; sessions: { happySessionId: string; isAlive: boolean }[] }>;
+    relayDirectory: Record<string, { at: number; sessions: { happySessionId: string; isAlive: boolean; origin?: 'daemon' | 'server' }[] }>;
     relayHubConnected: boolean;
 };
 
@@ -57,7 +57,7 @@ const DAEMON_OPERATIONS: ReadonlySet<ChannelOperation> = new Set([
     'restart',
     'identity',
     'listSessions',
-    'lifecycle',
+    'archive',
 ]);
 
 /**
@@ -276,7 +276,10 @@ function lanDriver(state: ChannelState): ChannelDriver {
         supports: (operation) => DAEMON_OPERATIONS.has(operation),
         session: (sessionId, machineId) => {
             const answered = state.daemonSessionList[sessionId];
-            if (answered?.via === 'lan') {
+            // An imported server-only row is in this machine's catalog because the daemon knows
+            // the account's sessions, not because this machine runs it. Its `isAlive: false` says
+            // "not here", which is not the owner's answer about whether the session exists.
+            if (answered?.via === 'lan' && answered.origin !== 'server') {
                 // The machine's own summary of its sessions, so its "not alive" is the fact rather
                 // than this channel's view of it. The socket below is an inference and is not.
                 return { reaching: answered.isAlive, fromOwner: true, seenAt: answered.at };
@@ -383,14 +386,15 @@ function relayDriver(state: ChannelState): ChannelDriver {
         },
         session: (sessionId, machineId) => {
             const answered = state.daemonSessionList[sessionId];
-            if (answered?.via === 'relay') {
+            if (answered?.via === 'relay' && answered.origin !== 'server') {
                 return { reaching: answered.isAlive, fromOwner: true, seenAt: answered.at };
             }
             const entry = machineId ? state.relayDirectory[machineId] : undefined;
             const published = entry?.sessions.find((session) => session.happySessionId === sessionId);
-            if (entry && published) {
+            if (entry && published && published.origin !== 'server') {
                 // The relay republishes the machine's own summary verbatim, so this is the same
-                // answer from the same party, carried rather than inferred.
+                // answer from the same party, carried rather than inferred. An imported row is the
+                // machine's catalog, not its process, and says nothing about the owner.
                 return { reaching: published.isAlive, fromOwner: true, seenAt: entry.at };
             }
             if (machineId && heldSocket(state, machineId, 'relay')) {

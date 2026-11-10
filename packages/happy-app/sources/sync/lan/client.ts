@@ -279,13 +279,46 @@ export async function fetchSessionDiff(
     return typeof body.diff === 'string' ? body.diff : '';
 }
 
-export async function fetchSessions(baseUrl: string, token: string): Promise<LanSessionSummary[]> {
+export type LanSessionList = {
+    sessions: LanSessionSummary[];
+    /**
+     * The daemon's state revision, when it publishes one. Absent on an older daemon, which is what
+     * lets a reader tell "no revision in this protocol" from "revision zero".
+     */
+    revision?: number;
+    /**
+     * Sessions the daemon has archived. A reader applies these as deletions; the server's own
+     * copy may lag until the daemon's replay reaches it.
+     */
+    tombstones?: Array<{ sessionId: string; tag?: string; at: number }>;
+};
+
+export async function fetchSessions(baseUrl: string, token: string): Promise<LanSessionList> {
     const response = await request(`${baseUrl}/lan/sessions`, { token });
     if (!response.ok) {
         return throwAnswer(response, 'sessions request failed');
     }
-    const body = (await response.json()) as { sessions: LanSessionSummary[] };
-    return body.sessions;
+    const body = (await response.json()) as {
+        sessions?: LanSessionSummary[];
+        revision?: unknown;
+        tombstones?: unknown;
+    };
+    return {
+        sessions: Array.isArray(body.sessions) ? body.sessions : [],
+        ...(typeof body.revision === 'number' ? { revision: body.revision } : {}),
+        ...(Array.isArray(body.tombstones)
+            ? {
+                tombstones: (body.tombstones as Array<{ sessionId?: unknown; tag?: unknown; at?: unknown }>)
+                    .filter((tombstone): tombstone is { sessionId: string; tag?: string; at: number } =>
+                        typeof tombstone?.sessionId === 'string' && typeof tombstone.at === 'number')
+                    .map((tombstone) => ({
+                        sessionId: tombstone.sessionId,
+                        ...(typeof tombstone.tag === 'string' ? { tag: tombstone.tag } : {}),
+                        at: tombstone.at,
+                    })),
+            }
+            : {}),
+    };
 }
 
 /**
@@ -421,57 +454,38 @@ export async function sessionControlAt(
     return true;
 }
 
-/** One fact from a machine's own log of what it knows about itself. */
-export type LifecycleEntry =
-    | {
-        /** Position in that machine's log. The cursor a reader sends back is the last one it applied. */
-        rev: number;
-        at: number;
-        op: 'created' | 'deleted';
-        /** The CLI's own name for the session, which exists before the server has issued an id. */
-        tag: string;
-        /** The server's id, once that machine knows it. */
-        sessionId?: string;
-        directory?: string;
-        agent?: string;
-    }
-    | {
-        rev: number;
-        at: number;
-        op: 'reachable';
-        /**
-         * Where that machine could be reached, in the shape it publishes.
-         *
-         * The same statement the server's copy of the blob carries, arriving over whichever channel
-         * is up — which is the point: a machine's LAN address has to be learnable when the server,
-         * the usual carrier of it, is the thing that is missing.
-         */
-        endpoints: unknown[];
-    };
-
 /**
- * What a machine has started and archived, from a reader's cursor.
+ * Asks a daemon to delete one of its sessions, as a transaction in its own log.
  *
- * A different question from `/lan/sessions`, and asked separately on purpose: that is a *snapshot*
- * of what exists now, this is an ordered list of facts. A reader that wants to know what changed
- * asks here, and one that wants to know what there is asks there — and neither may be used to
- * answer the other's question.
+ * This is a deletion, not a request to hide a row: the daemon records it, keeps the fact after a
+ * restart, and replays it to the server on its own cursor. Which is why it is the *machine* that is
+ * asked even when the row came from the server — the machine is the part of the account that can
+ * still remember something happened after this App has forgotten it.
  *
- * `revision` comes back with every answer so a reader can hold it as its next cursor, which is what
- * makes replaying again an empty operation rather than a second application of the same facts.
+ * False only for the 404 of a daemon that has nothing to delete — a build without the route, or no
+ * session by that id — and that answer belongs to another channel, because the server may hold
+ * what this machine does not. Everything else is thrown with the daemon's own words: a refusal is
+ * about this device, and walking it to the server would ask a different party the same question.
  */
-export async function fetchLifecycle(
+export async function archiveSessionAt(
     baseUrl: string,
     token: string,
-    since: number
-): Promise<{ revision: number; entries: LifecycleEntry[] }> {
-    const response = await request(`${baseUrl}/lan/lifecycle?since=${since}`, { token });
-    if (!response.ok) {
-        return throwAnswer(response, 'lifecycle request failed');
+    sessionId: string,
+    /** The account's proof of this request, when this device can make one. */
+    proof?: Record<string, string>
+): Promise<boolean> {
+    const response = await request(`${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/archive`, {
+        method: 'POST',
+        token,
+        headers: { ...(proof ?? {}) },
+        // A log append and a state write, answered as soon as they are durable.
+        timeoutMs: REQUEST_TIMEOUT_MS,
+    });
+    if (response.status === 404) {
+        return false;
     }
-    const body = (await response.json()) as { revision?: unknown; entries?: unknown };
-    return {
-        revision: typeof body.revision === 'number' ? body.revision : since,
-        entries: Array.isArray(body.entries) ? body.entries as LifecycleEntry[] : [],
-    };
+    if (!response.ok) {
+        return throwAnswer(response, 'archive request failed');
+    }
+    return true;
 }
