@@ -395,6 +395,13 @@ export async function startDaemon(): Promise<void> {
         }
         if (existing.createdAt === undefined && record.createdAt !== undefined) existing.createdAt = record.createdAt;
         if (record.updatedAt !== undefined) existing.updatedAt = record.updatedAt;
+        // A row with no tag and no directory is a seed the older bootstrap wrote from the server's
+        // changed list — not a session this machine has run (registration always writes a tag).
+        // Naming it for what it is makes the catalog honest: an import, listed while the server
+        // names it and pruned when it stops.
+        if (existing.origin === undefined && !existing.sessionTag && !existing.directory) {
+          existing.origin = 'server';
+        }
         return 'updated';
       }
       if (archivedSessionIds[record.id]) {
