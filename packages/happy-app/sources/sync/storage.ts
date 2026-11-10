@@ -28,7 +28,7 @@ import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
 import { Profile } from "./profile";
 import { UserProfile, RelationshipUpdatedEvent } from "./friendTypes";
-import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionMaxModes, saveSessionMaxModes, loadSessionProfileIds, saveSessionProfileIds, loadSessionSandboxIsolations, saveSessionSandboxIsolations, loadRelayEndpoints, saveRelayEndpoints } from "./persistence";
+import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionMaxModes, saveSessionMaxModes, loadSessionProfileIds, saveSessionProfileIds, loadSessionSandboxIsolations, saveSessionSandboxIsolations, loadRelayEndpoints, saveRelayEndpoints, loadSessionTombstones, saveSessionTombstones } from "./persistence";
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 import type { CustomerInfo } from './revenueCat/types';
 import React from "react";
@@ -808,7 +808,7 @@ export const storage = create<StorageState>()((set, get) => {
         relayHubConnected: false,
         daemonSockets: {},
         lifecycleCursors: {},
-        lifecycleDeleted: {},
+        lifecycleDeleted: loadSessionTombstones(),
         daemonSessionList: {},
         daemonVersions: {},
         channelOverride: {},
@@ -2219,6 +2219,12 @@ export const storage = create<StorageState>()((set, get) => {
                     deleted[entry.tag] = entry.at;
                     continue;
                 }
+                // A session this device deleted stays deleted. The machine's log is append-only:
+                // it will keep offering `created` for a session the server never held, and without
+                // this every sync would put the row back.
+                if (deleted[key] || (entry.tag && deleted[entry.tag])) {
+                    continue;
+                }
                 // The server's copy is richer than anything buildable from a log entry, so it wins
                 // wherever it already exists — this is here for what the server has not said.
                 if (!sessions[key]) {
@@ -2247,6 +2253,9 @@ export const storage = create<StorageState>()((set, get) => {
                         presence: entry.at,
                     };
                 }
+            }
+            if (entries.some((entry) => entry.op === 'deleted')) {
+                saveSessionTombstones(deleted);
             }
             return {
                 ...state,
@@ -2368,7 +2377,17 @@ export const storage = create<StorageState>()((set, get) => {
         deleteSession: (sessionId: string) => set((state) => {
             // Remove session from sessions
             const { [sessionId]: deletedSession, ...remainingSessions } = state.sessions;
-            
+            // ...and make the deletion outlive this list. A machine's lifecycle log is append-only
+            // and will offer a session the server never held again on the next replay; the
+            // tombstone is what keeps it gone, across restarts too.
+            const sessionTag = (deletedSession?.metadata as { sessionTag?: unknown } | undefined)?.sessionTag;
+            const tombstone = {
+                ...state.lifecycleDeleted,
+                [sessionId]: Date.now(),
+                ...(typeof sessionTag === 'string' && sessionTag ? { [sessionTag]: Date.now() } : {}),
+            };
+            saveSessionTombstones(tombstone);
+
             // Remove session messages if they exist
             const { [sessionId]: deletedMessages, ...remainingSessionMessages } = state.sessionMessages;
             
@@ -2400,6 +2419,7 @@ export const storage = create<StorageState>()((set, get) => {
                 sessions: remainingSessions,
                 sessionMessages: remainingSessionMessages,
                 sessionGitStatus: remainingGitStatus,
+                lifecycleDeleted: tombstone,
                 sessionListViewData
             };
         }),

@@ -343,6 +343,22 @@ export function saveSessionSandboxIsolations(isolations: Record<string, string>)
     saveSessionMap('session-sandbox-isolations', isolations);
 }
 
+/**
+ * Sessions this device has deleted, by id (and by tag where one was known).
+ *
+ * The server's delete is durable for server-held sessions, but a machine's own lifecycle log is
+ * append-only and keeps saying `created` for sessions that never registered. Without a local
+ * tombstone, replaying that log re-adds the row on the next sync and the delete looks like it did
+ * nothing. This is the device's memory that the session is gone.
+ */
+export function loadSessionTombstones(): Record<string, number> {
+    return loadSessionMap('session-tombstones', 'session tombstones');
+}
+
+export function saveSessionTombstones(tombstones: Record<string, number>) {
+    saveSessionMap('session-tombstones', tombstones);
+}
+
 export function loadProfile(): Profile {
     const profile = mmkv.getString('profile');
     if (profile) {
