@@ -833,7 +833,9 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                         ...(m.contextUsage ?? { currentTokens: 0, maxTokens: 0, pct: 0, fetchedAt: Date.now() }),
                                         model: lastRealModel,
                                     },
-                                }));
+                                })).catch((error) => {
+                                    logger.debug('[launcher] Failed to persist context usage model', error);
+                                });
                             }
                         }
                         if (session.claudeTurnActiveRef) {

@@ -333,15 +333,21 @@ export class ApiSessionClient extends EventEmitter {
     private pendingMessageCallback: ((message: UserMessage) => void) | null = null;
     readonly rpcHandlerManager: RpcHandlerManager;
     private agentStateLock = new AsyncLock();
-    private metadataLock = new AsyncLock();
+    /**
+     * Metadata writes the server has not acknowledged yet, replayed on top of the last
+     * acknowledged value whenever the local view or the outgoing write is computed. This is
+     * what lets this session's own metadata move without the server channel — and what lets
+     * a version mismatch merge concurrent edits instead of clobbering them.
+     */
+    private pendingMetadataWrites: Array<(metadata: Metadata) => Metadata> = [];
+    /** The batch currently being written to the server; still part of the local view. */
+    private metadataWriteInFlight: Array<(metadata: Metadata) => Metadata> | null = null;
+    private metadataSyncRunning = false;
     private encryptionKey: Uint8Array;
     private encryptionVariant: 'legacy' | 'dataKey';
     private requestedMetadata: Metadata | null = null;
     /** The AES session key; exposed so callers can persist it after offline reconnection. */
     get sessionEncryptionKey(): Uint8Array { return this.encryptionKey; }
-    /** Resolves when the WebSocket first connects; used by updateMetadata to wait for initial connection. */
-    private socketConnectedPromise: Promise<void>;
-    private socketConnectedResolve: (() => void) | undefined;
     /** True once we have received at least one metadata push from the server after connecting.
      *  Static sync is deferred until then so we don't overwrite server-side fields with a
      *  snapshot that was captured before the server's authoritative metadata arrived. */
@@ -551,7 +557,7 @@ export class ApiSessionClient extends EventEmitter {
     private static readonly RECEIVE_HEALTH_INTERVAL_MS = 120_000;
 
     getMetadata(): Metadata | null {
-        return this.metadata;
+        return this.localMetadataView();
     }
 
     constructor(
@@ -604,9 +610,6 @@ export class ApiSessionClient extends EventEmitter {
         }
         this.sendSync = new InvalidateSync(() => this.flushOutbox());
         this.receiveSync = new InvalidateSync(() => this.fetchMessages());
-        this.socketConnectedPromise = new Promise<void>((resolve) => {
-            this.socketConnectedResolve = resolve;
-        });
 
         // Initialize RPC handler manager
         this.rpcHandlerManager = new RpcHandlerManager({
@@ -698,8 +701,6 @@ export class ApiSessionClient extends EventEmitter {
             // socket was down, and absolute state is what makes that harmless.
             this.sendPresence();
             this.tryPreferWsOutbound('socket_connect');
-            this.socketConnectedResolve?.();
-            this.socketConnectedResolve = undefined;
             this.stopFallbackPoll();
             this.rpcHandlerManager.onSocketConnect(this.socket);
             // Sync CLI version and git info (projectPath, branchName, isWorktree) on every connect.
@@ -2148,43 +2149,136 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     /**
-     * Update session metadata
-     * @param handler - Handler function that returns the updated metadata
-     * @returns Promise that resolves when the server has acked the update (callers can await for kill path)
+     * Update session metadata.
+     *
+     * The session's own view and the daemon mirror move at once; the server write follows in
+     * the background and retries until it lands. The server is one channel, not the gate this
+     * metadata has to pass: making the call wait for its acknowledgment meant that during an
+     * outage it hung or rejected, and every fire-and-forget caller turned the rejection into
+     * an unhandled one that killed the session.
      */
     updateMetadata(handler: (metadata: Metadata) => Metadata): Promise<void> {
-        return this.metadataLock.inLock(async () => {
-            if (!this.socket.connected) {
-                // Wait for initial socket connection (e.g. called at startup before socket connects).
-                // Give up after 15s so a permanently-offline session doesn't block indefinitely.
-                const timeout = new Promise<never>((_, reject) =>
-                    setTimeout(() => reject(new Error('Session real-time disconnected; title update requires WebSocket (check network / HAPPY_SERVER_URL)')), 15_000)
-                );
-                await Promise.race([this.socketConnectedPromise, timeout]);
+        this.pendingMetadataWrites.push(handler);
+        this.publishLocalMetadata();
+        this.syncMetadataInBackground();
+        return Promise.resolve();
+    }
+
+    /** The last acknowledged metadata with every unacknowledged write replayed on top. */
+    private localMetadataView(): Metadata | null {
+        let view = this.metadata;
+        for (const handler of [...(this.metadataWriteInFlight ?? []), ...this.pendingMetadataWrites]) {
+            if (view === null) break;
+            view = sanitizeSessionMetadataForApp(handler(view)) as Metadata;
+        }
+        return view;
+    }
+
+    /**
+     * Publish this session's own view of its metadata on the LAN channel: mirrored to the
+     * daemon, whose readers treat the value as the session's current state, and emitted for
+     * in-process readers. Carries the last version the server acknowledged — the numbered
+     * update that follows supersedes it, which keeps this a mirror rather than an authority.
+     */
+    private publishLocalMetadata(): void {
+        const view = this.localMetadataView();
+        if (!view) return;
+        this.mirrorStateToDaemon({
+            metadata: {
+                version: this.metadataVersion,
+                value: encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, view)),
+            },
+        });
+        this.emit('metadata-updated', view);
+    }
+
+    private syncMetadataInBackground(): void {
+        if (this.metadataSyncRunning || this.closing) return;
+        this.metadataSyncRunning = true;
+        void this.flushMetadataWrites().then((drained) => {
+            this.metadataSyncRunning = false;
+            // A write that arrived while the pass was finishing still needs its turn; a pass
+            // that could not send waits for the next connection or write instead of spinning.
+            if (drained && this.pendingMetadataWrites.length > 0 && !this.closing) {
+                this.syncMetadataInBackground();
             }
-            await backoff(async () => {
-                let updated = sanitizeSessionMetadataForApp(handler(this.metadata!)) as Metadata; // Weird state if metadata is null - should never happen but here we are
-                const answer = await this.socket.emitWithAck('update-metadata', { sid: this.sessionId, expectedVersion: this.metadataVersion, metadata: encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, updated)) });
-                if (answer.result === 'success') {
-                    const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
-                    this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
-                    this.metadataVersion = answer.version;
-                    rememberSessionMetadata(this.sid, answer.metadata, answer.version);
-                    this.mirrorStateToDaemon({ metadata: { version: answer.version, value: answer.metadata } });
-                    this.emit('metadata-updated', this.metadata);
-                } else if (answer.result === 'version-mismatch') {
-                    if (answer.version > this.metadataVersion) {
-                        this.metadataVersion = answer.version;
+        });
+    }
+
+    /**
+     * Write queued metadata to the server, one batch at a time. A version mismatch means
+     * someone else wrote in between — adopt the server's state and replay the batch on top of
+     * it, so concurrent edits merge rather than clobber. A batch that cannot be sent stays
+     * queued for the next connection or the next write.
+     *
+     * @returns whether the queue drained (false when a batch was left pending).
+     */
+    private async flushMetadataWrites(): Promise<boolean> {
+        while (this.pendingMetadataWrites.length > 0 && !this.closing) {
+            if (!this.socket.connected) {
+                await this.waitForSocketReconnect();
+                continue;
+            }
+            const batch = this.pendingMetadataWrites.splice(0);
+            this.metadataWriteInFlight = batch;
+            let acked = false;
+            try {
+                await backoff(async () => {
+                    if (!this.socket.connected) {
+                        await this.waitForSocketReconnect();
+                    }
+                    let updated = this.metadata!; // Weird state if metadata is null - should never happen but here we are
+                    for (const handler of batch) {
+                        updated = sanitizeSessionMetadataForApp(handler(updated)) as Metadata;
+                    }
+                    const answer = await this.socket.emitWithAck('update-metadata', { sid: this.sessionId, expectedVersion: this.metadataVersion, metadata: encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, updated)) });
+                    if (answer.result === 'success') {
                         const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
                         this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
+                        this.metadataVersion = answer.version;
                         rememberSessionMetadata(this.sid, answer.metadata, answer.version);
-                        this.emit('metadata-updated', this.metadata);
+                        this.mirrorStateToDaemon({ metadata: { version: answer.version, value: answer.metadata } });
+                        acked = true;
+                        return;
                     }
-                    throw new Error('Metadata version mismatch');
-                } else if (answer.result === 'error') {
+                    if (answer.result === 'version-mismatch') {
+                        if (answer.version > this.metadataVersion) {
+                            this.metadataVersion = answer.version;
+                            const decrypted = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(answer.metadata));
+                            this.metadata = decrypted ? (sanitizeSessionMetadataForApp(decrypted) as Metadata) : decrypted;
+                            rememberSessionMetadata(this.sid, answer.metadata, answer.version);
+                        }
+                        throw new Error('Metadata version mismatch');
+                    }
                     throw new Error('Server rejected metadata update');
+                });
+            } catch (error) {
+                logger.debug('[API] Metadata write did not reach the server; keeping it pending', error);
+            } finally {
+                this.metadataWriteInFlight = null;
+                if (!acked) {
+                    this.pendingMetadataWrites.unshift(...batch);
                 }
-            });
+            }
+            if (!acked) {
+                return false;
+            }
+            this.emit('metadata-updated', this.localMetadataView() ?? this.metadata);
+        }
+        return true;
+    }
+
+    /** Resolves on the next socket connect, or at once when already connected or closed. */
+    private waitForSocketReconnect(): Promise<void> {
+        if (this.socket.connected || this.closing) {
+            return Promise.resolve();
+        }
+        return new Promise<void>((resolve) => {
+            const done = () => {
+                this.socket.off('connect', done);
+                resolve();
+            };
+            this.socket.on('connect', done);
         });
     }
 

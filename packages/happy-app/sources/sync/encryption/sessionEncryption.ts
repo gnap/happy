@@ -146,7 +146,7 @@ export class SessionEncryption {
      */
     async decryptMetadata(version: number, encrypted: string): Promise<Metadata | null> {
         // Check cache first
-        const cached = this.cache.getCachedMetadata(this.sessionId, version);
+        const cached = this.cache.getCachedMetadata(this.sessionId, version, encrypted);
         if (cached) {
             return cached;
         }
@@ -163,7 +163,7 @@ export class SessionEncryption {
         }
 
         // Cache the result
-        this.cache.setCachedMetadata(this.sessionId, version, parsed.data);
+        this.cache.setCachedMetadata(this.sessionId, version, encrypted, parsed.data);
         return parsed.data;
     }
 
@@ -184,7 +184,7 @@ export class SessionEncryption {
         }
 
         // Check cache first
-        const cached = this.cache.getCachedAgentState(this.sessionId, version);
+        const cached = this.cache.getCachedAgentState(this.sessionId, version, encrypted);
         if (cached) {
             return cached;
         }
@@ -201,7 +201,7 @@ export class SessionEncryption {
         }
 
         // Cache the result
-        this.cache.setCachedAgentState(this.sessionId, version, parsed.data);
+        this.cache.setCachedAgentState(this.sessionId, version, encrypted, parsed.data);
         return parsed.data;
     }
 }
