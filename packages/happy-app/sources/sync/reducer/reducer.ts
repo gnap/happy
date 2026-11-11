@@ -359,6 +359,31 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             // Don't continue - let the event be processed normally to create a message
         }
 
+        // Process permission-request events — a tool call is now blocked waiting on the user.
+        // Attaches pending state directly from the replayable message stream, so it is visible
+        // on every channel that replicates the log, not only where agentState has arrived.
+        if (msg.role === 'event' && msg.content.type === 'permission-request') {
+            state.messageIds.set(msg.id, msg.id);
+            const reqEv = msg.content;
+            const messageId = state.toolIdToMessageId.get(reqEv.call);
+            if (messageId) {
+                const message = state.messages.get(messageId);
+                if (message?.tool && !message.tool.permission) {
+                    message.tool.permission = { id: reqEv.call, status: 'pending' };
+                    changed.add(messageId);
+                }
+            } else {
+                // Tool message not yet arrived — store the request for Phase 2.
+                state.permissions.set(reqEv.call, {
+                    tool: reqEv.tool,
+                    arguments: reqEv.input ?? null,
+                    createdAt: msg.createdAt,
+                    status: 'pending',
+                } satisfies StoredPermission);
+            }
+            continue;
+        }
+
         // Process permission-result events — update tool message permission fields
         // directly from the replayable message stream, no visible message created.
         if (msg.role === 'event' && msg.content.type === 'permission-result') {

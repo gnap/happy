@@ -20,6 +20,8 @@
  * sync owns.
  */
 
+import type { SessionChannel } from '@/sync/lan/types';
+
 /** One message on its way out, already encrypted. */
 export type OutgoingMessage = { localId: string; content: string };
 
@@ -36,7 +38,10 @@ export type SendOutcome =
      * verdict; on the daemon channels that is the only thing that ever proves delivery.
      */
     | { kind: 'unconfirmed'; awaitVerdict: (localId: string) => void }
-    /** This channel cannot take it at all — not connected, or the write was refused. Try another. */
+    /**
+     * This channel cannot take it at all — no socket, or the write was refused. The caller does
+     * not substitute another channel; it keeps the message queued for a new resolution.
+     */
     | { kind: 'unavailable' }
     /** The channel tried and failed in a way worth reporting. */
     | { kind: 'failed'; error: unknown };
@@ -159,26 +164,48 @@ export type SendResult =
     /** Taken, nothing confirms it. The caller waits on the session's own verdict. */
     | { kind: 'unconfirmed' }
     | { kind: 'acked'; over: 'socket' | 'http'; advanceTo?: number }
-    | { kind: 'failed'; error: unknown };
+    | { kind: 'failed'; error: unknown }
+    /**
+     * The channel this device selected has no writable transport right now.
+     *
+     * Not a reason to write somewhere else: the selection is the channel layer's answer, and the
+     * fix is for that answer to change — an availability failure, a reconnect, a new resolution —
+     * not for the send to go around it. The message stays queued until it does.
+     */
+    | { kind: 'channel-unavailable'; channel: SessionChannel };
 
 /**
- * Walks the batch down the transports this App prefers, in order.
+ * Hands the batch to the channel this device selected — one channel, not a preference order.
  *
- * The one part of sending that is a decision rather than bookkeeping — and the part a message is
- * lost to when a rung is misread. An unavailable rung is not a failure (fall through); a daemon
- * write is not a delivery (the caller waits on the session's verdict); the HTTP route is idempotent
- * on `localId`, so a half-written socket batch is safe to repeat there. Kept pure and here, so the
- * order and what each answer means can be pinned down without a device.
+ * The decision was made before this call, by the same resolver that chooses where the session is
+ * read from. This function's job is to use that answer and to say what happened: a daemon write is
+ * not a delivery (the caller waits on the session's verdict); a channel with no writable socket is
+ * its own answer, and the message stays queued for the layer that can change the selection. Only
+ * within the *server* channel is there a second transport, and that is not a second channel: the
+ * HTTP route is idempotent on `localId`, so a half-written socket batch is safe to repeat there.
+ * Kept pure and here, so what each answer means can be pinned down without a device.
  */
 export async function sendBatch(args: {
-    /** The machine's own socket, when one is carrying this session. */
+    /**
+     * The channel this device has selected for the session.
+     *
+     * One channel, because sending and reading must agree: the resolver chose where this session
+     * lives, and a send that quietly walked to another route would put the message somewhere the
+     * session on screen is not being read from. If this channel cannot be written to, the answer
+     * is an availability change and a new resolution — not a substitution made here.
+     */
+    channel: SessionChannel;
+    /** The selected channel's socket, when it is a daemon one and it is writable. */
     daemon?: DaemonSendSocket | null;
     server: ServerSendTransport;
     sessionId: string;
     batch: readonly OutgoingMessage[];
     signal?: AbortSignal;
 }): Promise<SendResult> {
-    if (args.daemon) {
+    if (args.channel !== 'server') {
+        if (!args.daemon) {
+            return { kind: 'channel-unavailable', channel: args.channel };
+        }
         const overDaemon = sendOverDaemonSocket({
             socket: args.daemon,
             sessionId: args.sessionId,
@@ -193,7 +220,9 @@ export async function sendBatch(args: {
         if (overDaemon.kind === 'failed') {
             return { kind: 'failed', error: overDaemon.error };
         }
-        // Unavailable: this socket is not carrying the session. Fall through rather than give up.
+        // The selected channel's socket refused the batch. Falling to another channel would be
+        // this walk overruling the resolver; the message stays queued instead.
+        return { kind: 'channel-unavailable', channel: args.channel };
     }
 
     const overSocket = sendOverServerSocket({

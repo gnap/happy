@@ -376,6 +376,148 @@ describe('reducer', () => {
         });
     });
 
+    describe('permission events from the message stream', () => {
+        it('should attach pending permission to an existing tool message from the stream alone', () => {
+            const state = createReducer();
+            // No agentState: the incident shape, where the state channel has nothing to say.
+            const messages: NormalizedMessage[] = [
+                {
+                    id: 'msg-1',
+                    localId: null,
+                    createdAt: 1000,
+                    role: 'agent',
+                    isSidechain: false,
+                    content: [{
+                        type: 'tool-call',
+                        id: 'tool-1',
+                        name: 'AskUserQuestion',
+                        input: { questions: [] },
+                        description: null,
+                        uuid: 'msg-1-uuid',
+                        parentUUID: null
+                    }]
+                },
+                {
+                    id: 'msg-2',
+                    localId: null,
+                    createdAt: 2000,
+                    role: 'event',
+                    isSidechain: false,
+                    content: {
+                        type: 'permission-request',
+                        call: 'tool-1',
+                        tool: 'AskUserQuestion',
+                        input: { questions: [] }
+                    }
+                }
+            ];
+
+            const result = reducer(state, messages);
+            expect(result.messages).toHaveLength(1);
+            if (result.messages[0].kind === 'tool-call') {
+                expect(result.messages[0].tool.permission).toEqual({ id: 'tool-1', status: 'pending' });
+            }
+        });
+
+        it('should store the request when it arrives before the tool call', () => {
+            const state = createReducer();
+            const request: NormalizedMessage = {
+                id: 'msg-2',
+                localId: null,
+                createdAt: 1000,
+                role: 'event',
+                isSidechain: false,
+                content: {
+                    type: 'permission-request',
+                    call: 'tool-1',
+                    tool: 'Bash',
+                    input: { command: 'ls -la' }
+                }
+            };
+
+            const result1 = reducer(state, [request]);
+            expect(result1.messages).toHaveLength(0);
+
+            const toolCall: NormalizedMessage = {
+                id: 'msg-1',
+                localId: null,
+                createdAt: 2000,
+                role: 'agent',
+                isSidechain: false,
+                content: [{
+                    type: 'tool-call',
+                    id: 'tool-1',
+                    name: 'Bash',
+                    input: { command: 'ls -la' },
+                    description: null,
+                    uuid: 'msg-1-uuid',
+                    parentUUID: null
+                }]
+            };
+
+            const result2 = reducer(state, [request, toolCall]);
+            expect(result2.messages).toHaveLength(1);
+            if (result2.messages[0].kind === 'tool-call') {
+                expect(result2.messages[0].tool.permission).toEqual({ id: 'tool-1', status: 'pending' });
+            }
+        });
+
+        it('should resolve the permission when the result event arrives', () => {
+            const state = createReducer();
+            const toolCall: NormalizedMessage = {
+                id: 'msg-1',
+                localId: null,
+                createdAt: 1000,
+                role: 'agent',
+                isSidechain: false,
+                content: [{
+                    type: 'tool-call',
+                    id: 'tool-1',
+                    name: 'AskUserQuestion',
+                    input: { questions: [] },
+                    description: null,
+                    uuid: 'msg-1-uuid',
+                    parentUUID: null
+                }]
+            };
+            const request: NormalizedMessage = {
+                id: 'msg-2',
+                localId: null,
+                createdAt: 2000,
+                role: 'event',
+                isSidechain: false,
+                content: {
+                    type: 'permission-request',
+                    call: 'tool-1',
+                    tool: 'AskUserQuestion',
+                    input: { questions: [] }
+                }
+            };
+            const resultEv: NormalizedMessage = {
+                id: 'msg-3',
+                localId: null,
+                createdAt: 3000,
+                role: 'event',
+                isSidechain: false,
+                content: {
+                    type: 'permission-result',
+                    call: 'tool-1',
+                    status: 'approved',
+                    updatedInput: { answers: ['Yes'] }
+                }
+            };
+
+            reducer(state, [toolCall, request]);
+
+            const result = reducer(state, [resultEv]);
+            expect(result.messages).toHaveLength(1);
+            if (result.messages[0].kind === 'tool-call') {
+                expect(result.messages[0].tool.permission?.status).toBe('approved');
+                expect(result.messages[0].tool.result).toEqual({ answers: ['Yes'] });
+            }
+        });
+    });
+
     describe('AgentState permissions', () => {
         it('should create tool messages for pending permission requests', () => {
             const state = createReducer();

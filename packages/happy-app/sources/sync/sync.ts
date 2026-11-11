@@ -496,6 +496,15 @@ class Sync {
     /** LAN sends awaiting the session's verdict, so a lost one cannot sit "sending" forever. */
     private lanSendTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
     /**
+     * Sessions whose selected channel had no writable socket, and how many times in a row.
+     *
+     * The send itself does not switch channels; what changes is the channel layer's answer — a
+     * reconnect, an address failure, a new resolution. This keeps looking until it does, with a
+     * backoff, so a queued message is not stranded on a channel that has come back.
+     */
+    private sendRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    private sendRetryAttempts = new Map<string, number>();
+    /**
      * When this App last asked a machine to start a session that had no process.
      *
      * One window, not one attempt forever: a session that exits again has to be wakeable, and two
@@ -1489,16 +1498,49 @@ class Sync {
         });
     }
 
+    /**
+     * Whether any message is still *unsent*, as the outbox itself defines it.
+     *
+     * The queue is not the answer: an entry written over the daemon channel stays queued after the
+     * session confirms it, deliberately, so a lost verdict can be repaired. Counting queue length
+     * made a delivered message look pending, and the background watchdog then failed it after 30
+     * seconds — the clock icon and the "will fail" notification at the same time. `sending` is the
+     * only status that still owes the user a send; `acked` belongs to the server and `delivered` to
+     * the session.
+     */
     private hasPendingOutboxMessages() {
-        if (this.sendAbortControllers.size > 0) {
-            return true;
+        return Object.values(storage.getState().outbox).some((entry) => entry.status === 'sending');
+    }
+
+    /** Drops settled entries from the resend queue; they are nobody's work any more. */
+    private pruneSettledOutbox(sessionId: string): void {
+        const pending = this.pendingOutbox.get(sessionId);
+        if (!pending) {
+            return;
         }
-        for (const messages of this.pendingOutbox.values()) {
-            if (messages.length > 0) {
-                return true;
-            }
+        const outbox = storage.getState().outbox;
+        const outstanding = pending.filter((message) => outbox[message.localId]?.status === 'sending');
+        pending.length = 0;
+        pending.push(...outstanding);
+        if (pending.length === 0) {
+            this.pendingOutbox.delete(sessionId);
         }
-        return false;
+    }
+
+    /**
+     * The last message settled: stop the suspension clock and its warning.
+     *
+     * Backgrounded with a message in flight, the App arms a 30-second deadline and a notification
+     * saying it will fail. Both are about a send still owing an outcome; once nothing does, they
+     * must go, or the warning outlives the fact it warns about.
+     */
+    private afterOutboxSettlement(): void {
+        if (this.hasPendingOutboxMessages()) {
+            return;
+        }
+        this.clearBackgroundSendWatchdog();
+        void this.cancelBackgroundSendTimeoutNotification();
+        this.backgroundSendStartedAt = null;
     }
 
     private async maybeStartBackgroundSendWatchdog() {
@@ -1604,9 +1646,14 @@ class Sync {
         this.sendAbortControllers.clear();
 
         const failedLocalIds: string[] = [];
+        const outbox = storage.getState().outbox;
         for (const [, pending] of this.pendingOutbox) {
             for (const msg of pending) {
-                failedLocalIds.push(msg.localId);
+                // Only what still owes a send. A message the session has confirmed may still be
+                // queued for repair; failing it here would turn a receipt into a red bubble.
+                if (outbox[msg.localId]?.status === 'sending') {
+                    failedLocalIds.push(msg.localId);
+                }
             }
         }
         this.pendingOutbox.clear();
@@ -3164,6 +3211,7 @@ class Sync {
         let result: SendResult;
         try {
             result = await sendBatch({
+                channel: this.preferredChannel(sessionId),
                 daemon: this.daemonSendTarget(sessionId)?.handle ?? null,
                 server: apiSocket,
                 sessionId,
@@ -3174,11 +3222,22 @@ class Sync {
             this.sendAbortControllers.delete(sessionId);
         }
 
+        if (result.kind === 'channel-unavailable') {
+            // The selected channel has no socket that can be written to. The channel layer is the
+            // one that decides what that means — it reconnects, records the address failure and
+            // re-resolves — so the only correct move here is to keep the message queued and look
+            // again shortly. Writing it somewhere else would send on a channel this device did not
+            // choose, which is exactly the send/read disagreement this path must not create.
+            log.log(`📮 send ${sessionId}: the selected ${result.channel} channel has no writable connection; keeping the batch queued`);
+            this.scheduleSendRetry(sessionId);
+            return;
+        }
         if (result.kind === 'unconfirmed') {
             // A write over the machine's own channel is not a delivery. There the server echoes the
             // message back so a fast-ack is a claim it will honour; here nothing confirms the write
             // but the session itself, and treating the write as the delivery is exactly what hides
             // a dropped message. Each entry waits for that verdict, and fails if it never arrives.
+            this.clearSendRetry(sessionId);
             for (const msg of batch) {
                 this.awaitLanDelivery(msg.localId);
             }
@@ -3190,6 +3249,7 @@ class Sync {
         }
 
         pending.splice(0, batch.length);
+        this.clearSendRetry(sessionId);
         // Server confirmed – mark as acked (green check). The echo (fast-ack or text-matched
         // session-protocol echo) will remove it.
         for (const msg of batch) {
@@ -6899,8 +6959,15 @@ class Sync {
         // A write is not a delivery, and the App cannot see whether the session could read the
         // message — so this verdict is the only thing separating a dropped message from one that
         // looks sent forever.
+        //
+        // True is the session saying it decrypted the message and routed it, which is delivery.
+        // This used to stop at `acked` and wait for the session's log entry to repeat the same
+        // fact; when that read lagged or failed, a message the session had actually taken sat on
+        // the orange clock with nothing left watching it.
         if (result.delivered) {
-            storage.getState().markOutboxMessageAcked(result.localId);
+            storage.getState().markOutboxMessageDelivered(result.localId);
+            this.pruneSettledOutbox(result.sessionId);
+            this.afterOutboxSettlement();
             return;
         }
         // "No process" is not a failed message. The daemon is up — it is who answered — and starting
@@ -6919,6 +6986,8 @@ class Sync {
             [result.localId],
             'The session could not read this message.',
         );
+        this.pruneSettledOutbox(result.sessionId);
+        this.afterOutboxSettlement();
     }
 
     /**
@@ -7119,6 +7188,11 @@ class Sync {
      * goes nowhere.
      */
     private daemonSendTarget(sessionId: string): { handle: LanSocketHandle; baseUrl: string; machineId: string } | null {
+        // One channel, the one this device selected for the session. Sending and reading must
+        // agree: a send that quietly walked to another route would put the message somewhere the
+        // session on screen is not being read from. When this channel has no writable socket, that
+        // is a fact for the channel layer to act on — the message stays queued until the selection
+        // changes — not a reason for this method to answer with a different route.
         const channel = this.preferredChannel(sessionId);
         if (channel === 'server') {
             return null;
@@ -7128,6 +7202,38 @@ class Sync {
             return null;
         }
         return this.connections.trusted(machineId, channel);
+    }
+
+    /**
+     * Look again at a send the selected channel could not take.
+     *
+     * Short at first, then backing off: what makes it possible again is usually a socket coming
+     * back or an address being demoted, and both take seconds. The send path itself never changes
+     * the channel — this only asks the same question again, so a new resolution is what answers.
+     */
+    private scheduleSendRetry(sessionId: string): void {
+        if (this.sendRetryTimers.has(sessionId)) {
+            return;
+        }
+        const attempt = (this.sendRetryAttempts.get(sessionId) ?? 0) + 1;
+        this.sendRetryAttempts.set(sessionId, attempt);
+        const delay = Math.min(15_000, 1_000 * 2 ** Math.min(attempt - 1, 4));
+        const timer = setTimeout(() => {
+            this.sendRetryTimers.delete(sessionId);
+            this.getSendSync(sessionId).invalidate();
+        }, delay);
+        (timer as unknown as { unref?: () => void }).unref?.();
+        this.sendRetryTimers.set(sessionId, timer);
+    }
+
+    /** The channel took the batch: the next time it is unavailable, start the backoff over. */
+    private clearSendRetry(sessionId: string): void {
+        const timer = this.sendRetryTimers.get(sessionId);
+        if (timer) {
+            clearTimeout(timer);
+            this.sendRetryTimers.delete(sessionId);
+        }
+        this.sendRetryAttempts.delete(sessionId);
     }
 
     /**
