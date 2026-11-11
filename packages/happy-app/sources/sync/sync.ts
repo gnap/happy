@@ -3164,7 +3164,7 @@ class Sync {
         let result: SendResult;
         try {
             result = await sendBatch({
-                daemon: this.daemonSendTarget(sessionId)?.handle ?? null,
+                daemons: this.daemonSendTargets(sessionId).map((target) => target.handle),
                 server: apiSocket,
                 sessionId,
                 batch,
@@ -6899,8 +6899,13 @@ class Sync {
         // A write is not a delivery, and the App cannot see whether the session could read the
         // message — so this verdict is the only thing separating a dropped message from one that
         // looks sent forever.
+        //
+        // True is the session saying it decrypted the message and routed it, which is delivery.
+        // This used to stop at `acked` and wait for the session's log entry to repeat the same
+        // fact; when that read lagged or failed, a message the session had actually taken sat on
+        // the orange clock with nothing left watching it.
         if (result.delivered) {
-            storage.getState().markOutboxMessageAcked(result.localId);
+            storage.getState().markOutboxMessageDelivered(result.localId);
             return;
         }
         // "No process" is not a failed message. The daemon is up — it is who answered — and starting
@@ -7118,16 +7123,24 @@ class Sync {
      * missed a heartbeat is one whose peer may be gone, and a write into it is accepted locally and
      * goes nowhere.
      */
-    private daemonSendTarget(sessionId: string): { handle: LanSocketHandle; baseUrl: string; machineId: string } | null {
+    private daemonSendTargets(sessionId: string): { handle: LanSocketHandle; baseUrl: string; machineId: string }[] {
         const channel = this.preferredChannel(sessionId);
+        // A session the server is carrying has not declared the daemon channel (or this device
+        // cannot reach it): the machine's socket is not a route to that session, and writing there
+        // would wait for a verdict from a session that never got it.
         if (channel === 'server') {
-            return null;
+            return [];
         }
         const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
         if (!machineId) {
-            return null;
+            return [];
         }
-        return this.connections.trusted(machineId, channel);
+        // Both daemon routes, in this device's order, because they are the same machine: a quiet
+        // LAN socket must not send the message to the server while the relay is up.
+        return this.channelPriority()
+            .filter((candidate): candidate is DaemonRoute => candidate !== 'server')
+            .map((route) => this.connections.trusted(machineId, route))
+            .filter((target): target is { handle: LanSocketHandle; baseUrl: string; machineId: string } => target !== null);
     }
 
     /**
@@ -7146,12 +7159,16 @@ class Sync {
         if (!pending || pending.length === 0) {
             return;
         }
-        const daemon = this.daemonSendTarget(sessionId);
-        if (!daemon) {
+        const targets = this.daemonSendTargets(sessionId);
+        if (targets.length === 0) {
             return;
         }
         for (const msg of pending) {
-            daemon.handle.send({ sessionId, localId: msg.localId, content: msg.content });
+            for (const target of targets) {
+                if (target.handle.send({ sessionId, localId: msg.localId, content: msg.content })) {
+                    break;
+                }
+            }
         }
     }
 

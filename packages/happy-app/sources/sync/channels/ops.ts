@@ -171,16 +171,23 @@ export type SendResult =
  * order and what each answer means can be pinned down without a device.
  */
 export async function sendBatch(args: {
-    /** The machine's own socket, when one is carrying this session. */
-    daemon?: DaemonSendSocket | null;
+    /**
+     * The machine's own sockets, in this device's channel order.
+     *
+     * More than one route can be live to the same daemon — the LAN and the relay are the same
+     * machine by different roads — and a socket that has gone quiet on one road is not a reason to
+     * fall all the way to the server while the other is up. The daemon that receives the message
+     * hands it to the same session either way.
+     */
+    daemons?: readonly DaemonSendSocket[];
     server: ServerSendTransport;
     sessionId: string;
     batch: readonly OutgoingMessage[];
     signal?: AbortSignal;
 }): Promise<SendResult> {
-    if (args.daemon) {
+    for (const daemon of args.daemons ?? []) {
         const overDaemon = sendOverDaemonSocket({
-            socket: args.daemon,
+            socket: daemon,
             sessionId: args.sessionId,
             batch: args.batch,
             // Unused by this walk: the caller registers the wait itself, because how long to wait
@@ -193,7 +200,8 @@ export async function sendBatch(args: {
         if (overDaemon.kind === 'failed') {
             return { kind: 'failed', error: overDaemon.error };
         }
-        // Unavailable: this socket is not carrying the session. Fall through rather than give up.
+        // Unavailable: this route is not carrying the session. Try the next daemon route before
+        // the server, which is the last resort rather than the second one.
     }
 
     const overSocket = sendOverServerSocket({

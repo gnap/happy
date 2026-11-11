@@ -155,7 +155,7 @@ describe('sendBatch', () => {
         // server must not also be handed the message — the two would both deliver it.
         const send = vi.fn();
         const result = await sendBatch({
-            daemon: { send: () => true },
+            daemons: [{ send: () => true }],
             server: transport({ send }),
             sessionId: 'sess-1',
             batch,
@@ -164,11 +164,30 @@ describe('sendBatch', () => {
         expect(send).not.toHaveBeenCalled();
     });
 
-    it('falls through to the server when the machine is not carrying the session', async () => {
+    it('tries the next daemon route before giving up on the machine', async () => {
+        // The LAN and the relay are the same machine by different roads. A LAN socket that is not
+        // carrying the session is not a reason to hand the message to the server while the relay
+        // route to that same daemon is up.
+        const lan = vi.fn(() => false);
+        const relay = vi.fn(() => true);
+        const send = vi.fn();
+        const result = await sendBatch({
+            daemons: [{ send: lan }, { send: relay }],
+            server: transport({ send }),
+            sessionId: 'sess-1',
+            batch,
+        });
+        expect(result).toEqual({ kind: 'unconfirmed' });
+        expect(lan).toHaveBeenCalled();
+        expect(relay).toHaveBeenCalled();
+        expect(send).not.toHaveBeenCalled();
+    });
+
+    it('falls through to the server when no daemon route is carrying the session', async () => {
         // "Unavailable" is not a failure: a socket refusing the batch means somewhere else to go,
         // and the entries stay queued either way.
         const result = await sendBatch({
-            daemon: { send: () => false },
+            daemons: [{ send: () => false }, { send: () => false }],
             server: transport(),
             sessionId: 'sess-1',
             batch,
