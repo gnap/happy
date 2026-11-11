@@ -150,12 +150,13 @@ describe('sendBatch', () => {
         ...over,
     });
 
-    it('stops at the machine when the machine takes it, and never asks the server', async () => {
-        // The order is the decision: a session the machine is carrying is written to there, and the
+    it('writes on the selected channel when that channel takes it, and never asks the server', async () => {
+        // The selection is the decision: a session resolved to the LAN is written to there, and the
         // server must not also be handed the message — the two would both deliver it.
         const send = vi.fn();
         const result = await sendBatch({
-            daemons: [{ send: () => true }],
+            channel: 'lan',
+            daemon: { send: () => true },
             server: transport({ send }),
             sessionId: 'sess-1',
             batch,
@@ -164,39 +165,39 @@ describe('sendBatch', () => {
         expect(send).not.toHaveBeenCalled();
     });
 
-    it('tries the next daemon route before giving up on the machine', async () => {
-        // The LAN and the relay are the same machine by different roads. A LAN socket that is not
-        // carrying the session is not a reason to hand the message to the server while the relay
-        // route to that same daemon is up.
-        const lan = vi.fn(() => false);
-        const relay = vi.fn(() => true);
+    it('keeps the batch queued when the selected channel has no writable socket', async () => {
+        // The channel layer chose this route; a missing socket is an availability answer for that
+        // route, and switching is the resolver's call. Substituting the server here is how send and
+        // read end up on different channels.
         const send = vi.fn();
         const result = await sendBatch({
-            daemons: [{ send: lan }, { send: relay }],
+            channel: 'lan',
+            daemon: null,
             server: transport({ send }),
             sessionId: 'sess-1',
             batch,
         });
-        expect(result).toEqual({ kind: 'unconfirmed' });
-        expect(lan).toHaveBeenCalled();
-        expect(relay).toHaveBeenCalled();
+        expect(result).toEqual({ kind: 'channel-unavailable', channel: 'lan' });
         expect(send).not.toHaveBeenCalled();
     });
 
-    it('falls through to the server when no daemon route is carrying the session', async () => {
-        // "Unavailable" is not a failure: a socket refusing the batch means somewhere else to go,
-        // and the entries stay queued either way.
+    it('keeps the batch on a daemon channel whose socket refused it', async () => {
+        // A refused write is that channel's transport falling over, not an invitation to write
+        // somewhere else. The message stays queued and the next resolution decides where it goes.
+        const send = vi.fn();
         const result = await sendBatch({
-            daemons: [{ send: () => false }, { send: () => false }],
-            server: transport(),
+            channel: 'relay',
+            daemon: { send: () => false },
+            server: transport({ send }),
             sessionId: 'sess-1',
             batch,
         });
-        expect(result).toEqual({ kind: 'acked', over: 'socket' });
+        expect(result).toEqual({ kind: 'channel-unavailable', channel: 'relay' });
+        expect(send).not.toHaveBeenCalled();
     });
 
     it('takes the server socket echo as the answer, with no cursor to move', async () => {
-        const result = await sendBatch({ server: transport(), sessionId: 'sess-1', batch });
+        const result = await sendBatch({ channel: 'server', server: transport(), sessionId: 'sess-1', batch });
         expect(result).toEqual({ kind: 'acked', over: 'socket' });
     });
 
@@ -205,6 +206,7 @@ describe('sendBatch', () => {
         // is safe to repeat there.
         const requested: string[] = [];
         const result = await sendBatch({
+            channel: 'server',
             server: transport({
                 isConnected: false,
                 request: async (path) => {
@@ -221,6 +223,7 @@ describe('sendBatch', () => {
 
     it('carries the server cursor back, because HTTP is the only rung that knows it', async () => {
         const result = await sendBatch({
+            channel: 'server',
             server: transport({
                 isConnected: false,
                 request: async () => ({ ok: true, status: 200, json: async () => ({ messages: [{ seq: 3 }, { seq: 11 }] }) }),
@@ -235,6 +238,7 @@ describe('sendBatch', () => {
         // Nothing below HTTP to fall back to, so this is the walk's own failure and the caller
         // reports it rather than inventing another transport.
         const result = await sendBatch({
+            channel: 'server',
             server: transport({
                 isConnected: false,
                 request: async () => { throw new Error('offline'); },
