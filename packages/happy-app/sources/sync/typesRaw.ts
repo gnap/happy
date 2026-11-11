@@ -83,6 +83,11 @@ const agentEventSchema = z.discriminatedUnion('type', [z.object({
     allowedTools: z.array(z.string()).optional(),
     reason: z.string().optional(),
     updatedInput: z.unknown().optional(),
+}), z.object({
+    type: z.literal('permission-request'),
+    call: z.string(),
+    tool: z.string(),
+    input: z.unknown().optional(),
 })]);
 export type AgentEvent = z.infer<typeof agentEventSchema>;
 
@@ -195,6 +200,20 @@ const sessionPermissionResultEventSchema = z.object({
 });
 
 /**
+ * Permission request event — the ask itself, embedded into the replayable message stream the
+ * moment a tool call blocks on it. With only the result half being an event, the request lived
+ * in agentState alone, whose daemon mirror waits on a server ack — so during a server outage
+ * the question was visible while the pending request was not, and answering it degraded into
+ * a plain message the CLI then held behind the very request being answered.
+ */
+const sessionPermissionRequestEventSchema = z.object({
+    t: z.literal('permission-request'),
+    call: z.string(),
+    tool: z.string(),
+    input: z.unknown().optional(),
+});
+
+/**
  * /goal condition status — emitted when a goal is armed (sentinel) and again when it
  * resolves. Mirrors `sessionGoalStatusEventSchema` in @slopus/happy-wire. The app reads
  * the current status from `agentState.activeGoal`; this schema exists so the envelope
@@ -223,6 +242,7 @@ const sessionEventSchema = z.discriminatedUnion('t', [
     sessionTurnEndEventSchema,
     sessionStopEventSchema,
     sessionPermissionResultEventSchema,
+    sessionPermissionRequestEventSchema,
     sessionGoalStatusEventSchema,
 ]);
 
@@ -734,7 +754,12 @@ function normalizeSessionEnvelope(
 ): NormalizedMessage | null {
     // Session protocol requires turn id on all agent-originated envelopes.
     // Drop malformed agent events without turn to avoid attaching stray messages.
-    if (envelope.role === 'agent' && !envelope.turn) {
+    // Permission lifecycle events are exempt: they attach to tool messages by call id and
+    // never render on their own, and the CLI emits them from the permission handler, which
+    // knows the call but not the turn — dropping them there would leave a request reading as
+    // pending (or a result unseen) on every channel except the server's agentState echo.
+    if (envelope.role === 'agent' && !envelope.turn
+        && envelope.ev.t !== 'permission-request' && envelope.ev.t !== 'permission-result') {
         return null;
     }
 
@@ -971,6 +996,23 @@ function normalizeSessionEnvelope(
                 allowedTools: envelope.ev.allowedTools,
                 reason: envelope.ev.reason,
                 updatedInput: envelope.ev.updatedInput,
+            },
+            meta,
+        } satisfies NormalizedMessage;
+    }
+
+    if (envelope.ev.t === 'permission-request') {
+        return {
+            id: messageId,
+            localId,
+            createdAt: messageCreatedAt,
+            role: 'event',
+            isSidechain,
+            content: {
+                type: 'permission-request',
+                call: envelope.ev.call,
+                tool: envelope.ev.tool,
+                input: envelope.ev.input,
             },
             meta,
         } satisfies NormalizedMessage;

@@ -149,6 +149,23 @@ describe('BasePermissionHandler', () => {
       expect(state?.completedRequests?.[toolCallId].status).toBe('approved');
       expect(state?.completedRequests?.[toolCallId].decision).toBe('approved');
     });
+
+    it('emits a permission-request envelope when a request blocks on the user', async () => {
+      const { session } = createMockSession();
+      const handler = new TestPermissionHandler(session);
+
+      handler.handleToolCall('call-envelope', 'run_terminal_cmd', { command: 'echo hi' });
+
+      expect(session.sendSessionProtocolMessage).toHaveBeenCalledTimes(1);
+      const envelope = vi.mocked(session.sendSessionProtocolMessage).mock.calls[0]?.[0];
+      expect(envelope?.role).toBe('agent');
+      expect(envelope?.ev).toEqual({
+        t: 'permission-request',
+        call: 'call-envelope',
+        tool: 'run_terminal_cmd',
+        input: { command: 'echo hi' },
+      });
+    });
   });
 
   describe('reset', () => {

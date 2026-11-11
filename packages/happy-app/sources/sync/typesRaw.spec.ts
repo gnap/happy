@@ -1766,6 +1766,83 @@ describe('Zod Transform - WOLOG Content Normalization', () => {
             }
         });
 
+        it('normalizes permission-request events without a turn', () => {
+            const normalized = normalizeRawMessage('db-perm-req-1', null, 1, {
+                ...base,
+                content: {
+                    type: 'session',
+                    data: {
+                        id: 'env-perm-req-1',
+                        time: 1,
+                        role: 'agent',
+                        ev: {
+                            t: 'permission-request',
+                            call: 'call-1',
+                            tool: 'AskUserQuestion',
+                            input: { questions: [] }
+                        }
+                    }
+                }
+            });
+
+            expect(normalized).toMatchObject({
+                id: 'env-perm-req-1',
+                role: 'event',
+                content: {
+                    type: 'permission-request',
+                    call: 'call-1',
+                    tool: 'AskUserQuestion',
+                    input: { questions: [] }
+                }
+            });
+        });
+
+        it('normalizes permission-result events without a turn', () => {
+            const normalized = normalizeRawMessage('db-perm-res-1', null, 1, {
+                ...base,
+                content: {
+                    type: 'session',
+                    data: {
+                        id: 'env-perm-res-1',
+                        time: 1,
+                        role: 'agent',
+                        ev: {
+                            t: 'permission-result',
+                            call: 'call-1',
+                            status: 'approved'
+                        }
+                    }
+                }
+            });
+
+            expect(normalized).toMatchObject({
+                id: 'env-perm-res-1',
+                role: 'event',
+                content: {
+                    type: 'permission-result',
+                    call: 'call-1',
+                    status: 'approved'
+                }
+            });
+        });
+
+        it('still drops turnless agent text events', () => {
+            const normalized = normalizeRawMessage('db-noturn-text-1', null, 1, {
+                ...base,
+                content: {
+                    type: 'session',
+                    data: {
+                        id: 'env-noturn-text-1',
+                        time: 1,
+                        role: 'agent',
+                        ev: { t: 'text', text: 'no turn' }
+                    }
+                }
+            });
+
+            expect(normalized).toBeNull();
+        });
+
         it('maps turn-end to ready event and drops turn-start', () => {
             const turnStart = normalizeRawMessage('db-5', null, 1, {
                 ...base,

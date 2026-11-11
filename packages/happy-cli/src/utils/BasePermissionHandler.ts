@@ -157,6 +157,18 @@ export abstract class BasePermissionHandler {
                 }
             }
         }));
+        // The request enters the replayable message stream as well, not only the agentState
+        // mirror: the log is what every channel keeps replicating while the server is
+        // unreachable, so a question asked then is still answerable. agentState above stays
+        // as-is for readers that have not learned this event.
+        this.session.sendSessionProtocolMessage(
+            createEnvelope('agent', {
+                t: 'permission-request',
+                call: toolCallId,
+                tool: toolName,
+                ...(input !== undefined ? { input } : {}),
+            }),
+        );
     }
 
     /**

@@ -13,6 +13,7 @@ const makeSession = () => ({
       registerHandler: vi.fn(),
     },
     updateAgentState: vi.fn(),
+    sendSessionProtocolMessage: vi.fn(),
   },
   queue: {
     unshift: vi.fn(),
@@ -46,5 +47,33 @@ describe('PermissionHandler', () => {
       behavior: 'allow',
       updatedInput: { command: 'echo hello' },
     });
+  });
+
+  it('emits a permission-request envelope when AskUserQuestion blocks on the user', async () => {
+    const session = makeSession();
+    const handler = new PermissionHandler(session);
+
+    const input = { questions: [{ question: 'Proceed?', header: 'Action', options: [] }] };
+    handler.onMessage({
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', id: 'call_ask_1', name: 'AskUserQuestion', input }] },
+    } as any);
+
+    const pending = handler.handleToolCall('AskUserQuestion', input, { permissionMode: 'default' } as any, {
+      signal: new AbortController().signal,
+    });
+
+    expect(session.client.sendSessionProtocolMessage).toHaveBeenCalledTimes(1);
+    const envelope = vi.mocked(session.client.sendSessionProtocolMessage).mock.calls[0]?.[0];
+    expect(envelope?.role).toBe('agent');
+    expect(envelope?.ev).toEqual({
+      t: 'permission-request',
+      call: 'call_ask_1',
+      tool: 'AskUserQuestion',
+      input,
+    });
+
+    handler.reset();
+    await expect(pending).rejects.toThrow('Session reset');
   });
 });
