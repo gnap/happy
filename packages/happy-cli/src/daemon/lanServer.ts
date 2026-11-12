@@ -165,6 +165,13 @@ export type LanSessionFile =
   /** Larger than this API carries in one response. The App can still open it over the server route. */
   | { error: 'too-large'; size: number };
 
+/** One directory, already packed: the bytes are a stream because a tree has no length to promise. */
+export type LanSessionFolder = {
+  stream: NodeJS.ReadableStream;
+  /** What the browser should call the download, e.g. `static.tar.gz`. */
+  name: string;
+};
+
 /**
  * What the file browser needs about a session's working tree, in one answer.
  *
@@ -235,6 +242,14 @@ export type LanServerOptions = {
    * another channel, where the server still holds the session process.
    */
   getSessionFile?: (args: { sessionId: string; path: string }) => Promise<LanSessionFile | null> | LanSessionFile | null;
+  /**
+   * One directory of the session's tree, as a gzip stream — what "download this folder" means.
+   *
+   * The machine that holds the files builds it there, so the App does not have to ask for a file
+   * at a time. Null means this machine does not know the session, or the path is not a directory
+   * inside it; an entry named `.git` is left out.
+   */
+  getSessionFolder?: (args: { sessionId: string; path: string }) => Promise<LanSessionFolder | null> | LanSessionFolder | null;
   /**
    * The listing behind the App's file browser: git status and the project's file paths.
    *
@@ -985,6 +1000,43 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       // the URL directly should show the file rather than offer to save it.
       .header('content-disposition', `inline; filename="${file.name.replace(/["\\\r\n]/g, '_')}"`)
       .send(file.bytes);
+  });
+
+  /**
+   * One directory, packed on the machine that holds it.
+   *
+   * A folder is a download, not a read: the App saves the tar.gz and opens it wherever it likes,
+   * so there is no size to fit into one response and the answer is a stream. Plaintext like the
+   * files inside it, so it asks for the same account proof under its own action name.
+   */
+  app.get('/lan/sessions/:sessionId/folder', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (!opts.getSessionFolder) {
+      return reply.code(404).send({ error: 'this daemon does not archive folders' });
+    }
+    const { sessionId } = request.params as { sessionId: string };
+    const { path } = request.query as { path?: string };
+    // The session's own directory is the whole-tree download, so the empty path is meaningful;
+    // anything longer than a path can be is not.
+    if (path === undefined || path.length > 4096) {
+      return reply.code(400).send({ error: 'a path is required (it may be empty for the root)' });
+    }
+    const target = `${sessionId}:${path}`;
+    if (!requireAccountProof(request, { operation: 'folder', target })) {
+      return reply.code(403).send({ error: 'account proof required' });
+    }
+    const folder = await opts.getSessionFolder({ sessionId, path });
+    if (!folder) {
+      logger.debug(`[lan] folder 404 ${target}`);
+      return reply.code(404).send({ error: 'no such directory on this machine' });
+    }
+    logger.debug(`[lan] folder ${target} from=${clientAddress(request)}`);
+    return reply
+      .header('content-type', 'application/gzip')
+      .header('content-disposition', `attachment; filename="${folder.name.replace(/["\\\r\n]/g, '_')}"`)
+      .send(folder.stream);
   });
 
   /**

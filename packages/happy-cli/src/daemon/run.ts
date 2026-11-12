@@ -44,6 +44,7 @@ import { BUILD_VERSION } from '../version';
 import type { ApiMachineClient } from '@/api/apiMachine';
 import { readSessionKey } from '@/api/sessionKeyPersistence';
 import { validatePath } from '@/modules/common/pathSecurity';
+import { c as createTar } from 'tar';
 import { run as runRipgrep } from '@/modules/ripgrep/index';
 import { collapseSessionLogEntries, readSessionLogPage } from '@/api/sessionLog';
 import { decodeBase64, encodeBase64, libsodiumEncryptForPublicKey } from '@/api/encryption';
@@ -2433,6 +2434,40 @@ export async function startDaemon(): Promise<void> {
                 filesTruncated = true;
               }
               return { gitRepo, gitStatus, gitDiff, files, ...(filesTruncated ? { filesTruncated } : {}) };
+            },
+            getSessionFolder: async ({ sessionId, path }) => {
+              const live = [...pidToTrackedSession.values()]
+                .find((session) => session.happySessionId === sessionId)?.directory;
+              const directory = live || sessions[sessionId]?.directory;
+              if (!directory) {
+                return null;
+              }
+              // The empty path is the session's own directory: "download the whole tree".
+              const validation = validatePath(path, directory);
+              if (!validation.valid) {
+                return null;
+              }
+              const target = resolve(directory, path);
+              try {
+                if (!(await fs.stat(target)).isDirectory()) {
+                  return null;
+                }
+              } catch {
+                return null;
+              }
+              const name = `${(basename(target) || 'project').replace(/[^A-Za-z0-9._-]/g, '_')}.tar.gz`;
+              // Packed here rather than file-by-file on the far side. `.git` is the one entry left
+              // out: it is the repository's own bookkeeping, routinely larger than the tree, and
+              // never what someone asking for a folder means.
+              const stream = createTar({
+                gzip: true,
+                cwd: target,
+                portable: true,
+                filter: (entry: string) => !entry.split('/').includes('.git'),
+              }, ['.']);
+              // `tar`'s pack is a minipass stream: Fastify sends it by its `pipe`, and the route's
+              // type only promises that much.
+              return { stream: stream as unknown as NodeJS.ReadableStream, name };
             },
             getSessionDiff: async ({ sessionId, path }) => {
               const live = [...pidToTrackedSession.values()]

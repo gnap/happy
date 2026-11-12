@@ -315,6 +315,41 @@ export async function fetchSessionFileBytes(
     return { bytes, size: bytes.byteLength };
 }
 
+/**
+ * One directory of the machine's working tree, packed by the machine.
+ *
+ * A reader with a file system streams this to disk; a browser has no file system, so this reads
+ * the archive into memory and lets the caller hand it to a save dialog. Null is the 404 meaning
+ * "no such directory, or a daemon without this route".
+ */
+export async function fetchSessionFolderBytes(
+    baseUrl: string,
+    token: string,
+    sessionId: string,
+    path: string,
+    proof?: Record<string, string>,
+): Promise<{ bytes: Uint8Array; name: string; size: number } | null> {
+    const response = await request(
+        `${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/folder?path=${encodeURIComponent(path)}`,
+        {
+            token,
+            headers: { ...(proof ?? {}) },
+            // A tree can take longer than a listing; the relay's own budget already exists.
+            timeoutMs: historyTimeoutFor(baseUrl),
+        },
+    );
+    if (response.status === 404) {
+        return null;
+    }
+    if (!response.ok) {
+        return throwAnswer(response, 'folder request failed');
+    }
+    const disposition = response.headers.get('content-disposition') ?? '';
+    const named = /filename="([^"]+)"/.exec(disposition)?.[1];
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    return { bytes, name: named || 'folder.tar.gz', size: bytes.byteLength };
+}
+
 export type LanSessionList = {
     sessions: LanSessionSummary[];
     /**

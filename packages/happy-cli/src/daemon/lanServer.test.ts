@@ -6,6 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Readable } from 'node:stream';
 import nacl from 'tweetnacl';
 import { startLanServer, lanProofFor, LAN_PROTOCOL_VERSION, type LanHistory, type LanServerHandle, type LanSessionSummary } from './lanServer';
 import { accountProofMessage } from './accountProof';
@@ -38,33 +39,36 @@ function signed(path: string, init: { token?: string; body?: unknown } = {}) {
     const at = Date.now();
     const isToolContent = path.includes('/tool-content/');
     const isFile = /\/sessions\/[^/?]+\/file(?:\?|$)/.test(path);
+    const isFolder = /\/sessions\/[^/?]+\/folder(?:\?|$)/.test(path);
     const isListing = /\/sessions\/[^/?]+\/listing(?:\?|$)/.test(path);
     const isDiff = /\/sessions\/[^/?]+\/diff(?:\?|$)/.test(path);
     const sessionId = path.split('/sessions/')[1]?.split(/[/?]/)[0] ?? '-';
     // A file's (and a diff's) target is the session and the path it names, which is what the
     // route checks; the path travels in the query string, not the URL path.
-    const queryPath = isFile || isDiff ? new URLSearchParams(path.split('?')[1]).get('path') ?? '' : '';
+    const queryPath = isFile || isDiff || isFolder ? new URLSearchParams(path.split('?')[1]).get('path') ?? '' : '';
     const operation = isFile
         ? 'file'
-        : isDiff
-            ? 'diff'
-            : isListing
-                ? 'listing'
-                : isToolContent
-                    ? 'tool-content'
-                    : path.endsWith('/archive')
-                        ? 'archive'
-                        : path.endsWith('/restart')
-                            ? 'restart'
-                            : 'control';
-    const target = isFile || isDiff
+        : isFolder
+            ? 'folder'
+            : isDiff
+                ? 'diff'
+                : isListing
+                    ? 'listing'
+                    : isToolContent
+                        ? 'tool-content'
+                        : path.endsWith('/archive')
+                            ? 'archive'
+                            : path.endsWith('/restart')
+                                ? 'restart'
+                                : 'control';
+    const target = isFile || isDiff || isFolder
         ? `${sessionId}:${queryPath}`
         : isToolContent
             ? path.split('/tool-content/')[1] ? `${sessionId}:${path.split('/tool-content/')[1]}` : '-'
             : sessionId;
     const message = accountProofMessage({ operation, target, nonce, at, bodyDigest: '' });
     return {
-        method: isToolContent || isFile || isListing || isDiff ? 'GET' : 'POST',
+        method: isToolContent || isFile || isFolder || isListing || isDiff ? 'GET' : 'POST',
         ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
         headers: {
             ...(init.token ? { authorization: `Bearer ${init.token}` } : {}),
@@ -110,6 +114,8 @@ let lifecycleEntries: { rev: number; op: string; tag: string }[] = [];
 let toolContentHandler: ((args: { sessionId: string; callId: string }) => Promise<{ args?: unknown; result?: unknown } | null>) | undefined;
 /** The file this machine can serve; unset by default, like a daemon from before the route. */
 let sessionFileHandler: ((args: { sessionId: string; path: string }) => Promise<{ bytes: Buffer; name: string; mime: string } | { error: 'too-large'; size: number } | null>) | undefined;
+/** A directory packed for download; unset by default, like a daemon from before the route. */
+let sessionFolderHandler: ((args: { sessionId: string; path: string }) => { stream: NodeJS.ReadableStream; name: string } | null) | undefined;
 /** The listing this machine can produce; unset by default, like a daemon from before the route. */
 let sessionListingHandler: ((args: { sessionId: string }) => Promise<{ gitRepo: boolean; gitStatus: string; gitDiff: string; files: string; filesTruncated?: boolean } | null>) | undefined;
 /** One file's diff; unset by default, like a daemon from before the route. */
@@ -144,6 +150,7 @@ async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
         ...(archiveHandler ? { archiveSession: archiveHandler } : {}),
         ...(toolContentHandler ? { getToolContent: toolContentHandler } : {}),
         ...(sessionFileHandler ? { getSessionFile: sessionFileHandler } : {}),
+        ...(sessionFolderHandler ? { getSessionFolder: sessionFolderHandler } : {}),
         ...(sessionListingHandler ? { getSessionListing: sessionListingHandler } : {}),
         ...(sessionDiffHandler ? { getSessionDiff: sessionDiffHandler } : {}),
         lifecycle: {
@@ -209,6 +216,7 @@ afterEach(async () => {
     archiveHandler = undefined;
     toolContentHandler = undefined;
     sessionFileHandler = undefined;
+    sessionFolderHandler = undefined;
     sessionListingHandler = undefined;
     sessionDiffHandler = undefined;
     proofNonces = new Set();
@@ -909,6 +917,72 @@ describe('lanServer file route', () => {
         const res = await fetch(url(noPath), signed(noPath, { token }) as RequestInit);
 
         expect(res.status).toBe(400);
+    });
+});
+
+describe('lanServer folder route', () => {
+    const ARCHIVE = Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x00]);
+    const folderUrl = '/lan/sessions/sess-1/folder?path=' + encodeURIComponent('pkg/web/static');
+
+    beforeEach(() => {
+        sessionFolderHandler = ({ sessionId, path }) =>
+            sessionId === 'sess-1' && path === 'pkg/web/static'
+                ? { stream: Readable.from(ARCHIVE), name: 'static.tar.gz' }
+                : null;
+    });
+
+    it('streams the packed directory to the account, named for the browser', async () => {
+        await start();
+        const token = await getToken();
+
+        const res = await fetch(url(folderUrl), signed(folderUrl, { token }) as RequestInit);
+
+        expect(res.status).toBe(200);
+        expect(res.headers.get('content-type')).toBe('application/gzip');
+        expect(res.headers.get('content-disposition')).toBe('attachment; filename="static.tar.gz"');
+        expect(Buffer.from(await res.arrayBuffer())).toEqual(ARCHIVE);
+    });
+
+    it('serves the session root when the path is empty', async () => {
+        // The empty path is the whole working tree, which is a real download — not a missing one.
+        sessionFolderHandler = ({ path }) =>
+            path === '' ? { stream: Readable.from(ARCHIVE), name: 'project.tar.gz' } : null;
+        await start();
+        const token = await getToken();
+        const rootUrl = '/lan/sessions/sess-1/folder?path=';
+
+        const res = await fetch(url(rootUrl), signed(rootUrl, { token }) as RequestInit);
+
+        expect(res.status).toBe(200);
+    });
+
+    it('refuses the plaintext without the account proof', async () => {
+        await start();
+        const token = await getToken();
+
+        const res = await fetch(url(folderUrl), authorized(token));
+
+        expect(res.status).toBe(403);
+    });
+
+    it('answers 404 for a directory this machine does not have', async () => {
+        await start();
+        const token = await getToken();
+        const missing = '/lan/sessions/sess-1/folder?path=' + encodeURIComponent('nope');
+
+        const res = await fetch(url(missing), signed(missing, { token }) as RequestInit);
+
+        expect(res.status).toBe(404);
+    });
+
+    it('answers 404 when the build has no folder route at all', async () => {
+        sessionFolderHandler = undefined;
+        await start();
+        const token = await getToken();
+
+        const res = await fetch(url(folderUrl), signed(folderUrl, { token }) as RequestInit);
+
+        expect(res.status).toBe(404);
     });
 });
 
