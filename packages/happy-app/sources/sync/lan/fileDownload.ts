@@ -10,11 +10,17 @@
  * inflate a PDF by a third on its way to disk.
  */
 
-import { LanRequestError } from './client';
+import { Platform } from 'react-native';
+import { fetchSessionFileBytes, LanRequestError } from './client';
 
 export type SessionFileDownload =
     /** The file is on this device now, at `uri`. */
     | { kind: 'done'; uri: string; size: number }
+    /**
+     * The bytes themselves, because there is no file system to write them to. A browser has no
+     * download task; the viewer reads the characters and draws the image from these.
+     */
+    | { kind: 'bytes'; bytes: Uint8Array; size: number }
     /** The machine answered and has no such file (or no file route at all). */
     | { kind: 'not-found' };
 
@@ -44,6 +50,24 @@ export async function downloadSessionFileFromDaemon(options: {
     proof?: Record<string, string>;
     onProgress?: (written: number, total: number) => void;
 }): Promise<SessionFileDownload> {
+    // No file system on web/Tauri: the request is the transport. Fetching here rather than
+    // letting the native download throw is what makes a preview reach the machine at all.
+    if (Platform.OS === 'web') {
+        const fetched = await fetchSessionFileBytes(
+            options.baseUrl,
+            options.token,
+            options.sessionId,
+            options.path,
+            options.proof,
+        );
+        if (fetched === null) {
+            return { kind: 'not-found' };
+        }
+        // A fetch has no middle to report: it either has the bytes or the attempt failed, so the
+        // progress bar goes straight to the end instead of hanging at zero.
+        options.onProgress?.(fetched.size, fetched.size);
+        return { kind: 'bytes', bytes: fetched.bytes, size: fetched.size };
+    }
     const fs = await import('expo-file-system');
     const directory = new fs.Directory(fs.Paths.cache, 'happy-files');
     directory.create({ intermediates: true, idempotent: true });

@@ -279,6 +279,42 @@ export async function fetchSessionDiff(
     return typeof body.diff === 'string' ? body.diff : '';
 }
 
+/**
+ * One file's bytes, from the machine that holds the tree — the same route the native viewer
+ * downloads from, read straight into memory instead.
+ *
+ * A browser has no file system to download into, and the native download task is not a thing
+ * there: the App's viewer used to call it unconditionally, so every preview on the web/Tauri
+ * build failed before a request left the device — reported as "the machine did not answer over
+ * LAN or relay", which was the truth about the addresses and a lie about the machine. Null is
+ * the 404 that means "no such file, or a daemon without this route".
+ */
+export async function fetchSessionFileBytes(
+    baseUrl: string,
+    token: string,
+    sessionId: string,
+    path: string,
+    proof?: Record<string, string>,
+): Promise<{ bytes: Uint8Array; size: number } | null> {
+    const response = await request(
+        `${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/file?path=${encodeURIComponent(path)}`,
+        {
+            token,
+            headers: { ...(proof ?? {}) },
+            // A file is not a listing: it may be megabytes and it may travel over the relay.
+            timeoutMs: historyTimeoutFor(baseUrl),
+        },
+    );
+    if (response.status === 404) {
+        return null;
+    }
+    if (!response.ok) {
+        return throwAnswer(response, 'file request failed');
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    return { bytes, size: bytes.byteLength };
+}
+
 export type LanSessionList = {
     sessions: LanSessionSummary[];
     /**
