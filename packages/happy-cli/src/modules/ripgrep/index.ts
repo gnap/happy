@@ -25,7 +25,11 @@ export interface RipgrepOptions {
 export function run(args: string[], options?: RipgrepOptions): Promise<RipgrepResult> {
     const RUNNER_PATH = resolve(join(projectPath(), 'scripts', 'ripgrep_launcher.cjs'));
     return new Promise((resolve, reject) => {
-        const child = spawn('node', [RUNNER_PATH, JSON.stringify(args)], {
+        // The runtime this process already is, not the word `node`: a machine can run the daemon
+        // under bun with no `node` on PATH at all (a Linux deploy does exactly that), and spawning
+        // the launcher by name then failed with ENOENT — so `rg --files` returned nothing and the
+        // file browser listed no files. The launcher is plain CommonJS and bun runs it as-is.
+        const child = spawn(process.execPath, [RUNNER_PATH, JSON.stringify(args)], {
             stdio: ['pipe', 'pipe', 'pipe'],
             cwd: options?.cwd
         });
