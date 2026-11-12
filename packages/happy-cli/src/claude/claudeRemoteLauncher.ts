@@ -827,13 +827,17 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             // the App's session header model display. Always writes, using
                             // zero tokens as placeholder when no /context fetch has run yet.
                             if (lastRealModel) {
-                                void session.client.updateMetadata((m) => ({
+                                // `void` does not catch: an unhandled rejection here would reach
+                                // the process handler and end the session.
+                                session.client.updateMetadata((m) => ({
                                     ...m,
                                     contextUsage: {
                                         ...(m.contextUsage ?? { currentTokens: 0, maxTokens: 0, pct: 0, fetchedAt: Date.now() }),
                                         model: lastRealModel,
                                     },
-                                }));
+                                })).catch((error) => {
+                                    logger.debug('[remote] Failed to persist contextUsage model', error);
+                                });
                             }
                         }
                         if (session.claudeTurnActiveRef) {
