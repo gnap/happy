@@ -112,6 +112,22 @@ export const sessionPermissionResultEventSchema = z.object({
   updatedInput: z.unknown().optional(),
 });
 
+/**
+ * Permission request event — the ask itself, embedded into the replayable message stream the
+ * moment a tool call blocks on it. The result half was already an event; without this half the
+ * request lived only in agentState, whose LAN mirror waits on a server ack — so during a server
+ * outage a reader saw the question but never the pending request, and an answer to it degraded
+ * into a plain message the CLI then held behind the very request it was answering.
+ */
+export const sessionPermissionRequestEventSchema = z.object({
+  t: z.literal('permission-request'),
+  call: z.string(),
+  tool: z.string(),
+  /** The tool's input as the agent received it — renders the request when the tool-call
+   * envelope has not arrived yet. */
+  input: z.unknown().optional(),
+});
+
 /** /goal condition status — emitted when a goal is armed (sentinel) and when it resolves. */
 export const sessionGoalStatusEventSchema = z.object({
   t: z.literal('goal-status'),
@@ -136,6 +152,7 @@ export const sessionEventSchema = z.discriminatedUnion('t', [
   sessionTurnEndEventSchema,
   sessionStopEventSchema,
   sessionPermissionResultEventSchema,
+  sessionPermissionRequestEventSchema,
   sessionGoalStatusEventSchema,
 ]);
 
@@ -183,6 +200,13 @@ export const sessionEnvelopeSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: 'permission-result events must use role "agent"',
+        path: ['role'],
+      });
+    }
+    if (envelope.ev.t === 'permission-request' && envelope.role !== 'agent') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'permission-request events must use role "agent"',
         path: ['role'],
       });
     }

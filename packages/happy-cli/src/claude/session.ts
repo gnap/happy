@@ -121,7 +121,9 @@ export class Session {
         this.client.updateMetadata((metadata) => ({
             ...metadata,
             claudeSessionId: sessionId
-        }));
+        })).catch((error) => {
+            logger.debug('[Session] Failed to persist Claude session ID', error);
+        });
         logger.debug(`[Session] Claude Code session ID ${sessionId} added to metadata`);
 
         // Notify all registered callbacks
@@ -139,7 +141,9 @@ export class Session {
             ...metadata,
             sessionModel: info.model,
             sessionProvider: info.version || undefined,
-        }));
+        })).catch((error) => {
+            logger.debug('[Session] Failed to persist model info', error);
+        });
         logger.debug(`[Session] Model info stored in metadata: ${info.model}${info.version ? ' v' + info.version : ''}`);
     }
     
