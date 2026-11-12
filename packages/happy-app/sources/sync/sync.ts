@@ -57,7 +57,7 @@ import { channelAvailability } from './channels/resolve';
 import { candidateInputsFor, orderedCandidates } from './channels/candidates';
 import { attemptFromStatus, carryOperation, type CarryOutcome, type HealthRecorder } from './channels/execute';
 import { fetchToolContent, fetchSessionListing, fetchSessionDiff, type SessionListing } from './lan/client';
-import { downloadSessionFileFromDaemon } from './lan/fileDownload';
+import { downloadSessionFileFromDaemon, downloadSessionFolderFromDaemon } from './lan/fileDownload';
 import { getGitStatusFiles as getGitStatusFilesViaRpc, parseGitStatusFiles, type GitStatusFiles } from './gitStatusFiles';
 import { getToolCallFullContent as getToolCallFullContentFromServer, sessionBash, type GetToolCallFullContentResponse } from './ops';
 import { readRoutes } from './channels/readRoute';
@@ -5540,6 +5540,68 @@ class Sync {
                 error: carried.status === 413
                     ? 'That file is too large to preview'
                     : `The machine rejected the file request (${carried.status}): ${carried.body ?? 'no explanation'}`,
+            };
+        }
+        return { ok: false, error: 'The machine did not answer over LAN or relay' };
+    }
+
+    /**
+     * One directory of a session's working tree, packed by the machine that holds it.
+     *
+     * The archive is built there rather than by asking for a file at a time: a tree is thousands
+     * of round trips otherwise, and the machine already has the files. Same carry, same
+     * account-signed request; the caller saves the bytes.
+     */
+    async downloadSessionFolder(
+        sessionId: string,
+        path: string,
+    ): Promise<{ ok: true; uri?: string; bytes?: Uint8Array; name: string } | { ok: false; error: string }> {
+        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        if (!machineId) {
+            return { ok: false, error: 'This session does not say which machine it is on' };
+        }
+        if (!this.getMachineKey(machineId)) {
+            return { ok: false, error: 'This device holds no key for that machine' };
+        }
+        const carried = await this.carryAtDaemon<{ uri?: string; bytes?: Uint8Array; name: string }>({
+            machineId,
+            operation: 'read',
+            // A directory's contents are as plaintext as the files in it, so the account signs.
+            proofAction: { operation: 'folder', target: `${sessionId}:${path}` },
+            run: async (baseUrl, token, proof) => {
+                const result = await downloadSessionFolderFromDaemon({
+                    baseUrl,
+                    token,
+                    sessionId,
+                    path,
+                    proof,
+                });
+                if (result.kind === 'done') {
+                    return { uri: result.uri, name: result.name };
+                }
+                return result.kind === 'bytes' ? { bytes: result.bytes, name: result.name } : null;
+            },
+        });
+        if (carried.kind === 'done') {
+            log.log(`🗂️ folder ${sessionId} ${path || '.'}: done via ${carried.channel}`);
+            return { ok: true, ...carried.value };
+        }
+        log.log(`🗂️ folder ${sessionId} ${path || '.'}: ${carried.kind}`);
+        if (carried.kind === 'absent') {
+            return { ok: false, error: 'That folder is not on this machine (or its daemon is too old to pack folders)' };
+        }
+        if (carried.kind === 'refused') {
+            return {
+                ok: false,
+                error: carried.reason === 'no-endpoint'
+                    ? `The machine refused the folder request${carried.status ? ` (${carried.status})` : ''}`
+                    : 'No channel can carry folder downloads for this machine',
+            };
+        }
+        if (carried.kind === 'bad-request') {
+            return {
+                ok: false,
+                error: `The machine rejected the folder request (${carried.status}): ${carried.body ?? 'no explanation'}`,
             };
         }
         return { ok: false, error: 'The machine did not answer over LAN or relay' };

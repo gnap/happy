@@ -203,6 +203,15 @@ class FileSearchCache {
         return cache ? [...cache.files] : [];
     }
 
+    /**
+     * The whole index, built if it is not yet. A directory browser asks this instead of a query:
+     * it wants the tree before anyone has typed anything into search.
+     */
+    async ensureLoaded(sessionId: string): Promise<FileItem[]> {
+        await this.ensureCacheValid(sessionId);
+        return this.getAllFiles(sessionId);
+    }
+
     clearCache(sessionId?: string): void {
         if (sessionId) {
             this.sessions.delete(sessionId);
@@ -222,4 +231,9 @@ export async function searchFiles(
     options: SearchOptions = {}
 ): Promise<FileItem[]> {
     return fileSearchCache.search(sessionId, query, options);
+}
+
+/** Every file and directory the machine listed, for the browser's directory view. */
+export async function loadFileIndex(sessionId: string): Promise<FileItem[]> {
+    return fileSearchCache.ensureLoaded(sessionId);
 }
