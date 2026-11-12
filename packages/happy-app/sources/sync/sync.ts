@@ -3910,7 +3910,11 @@ class Sync {
                     // in the same breath). A failure is reported back to the resolver — the next
                     // tick resolves to the server explicitly, with the reason on record.
                     if (!served) {
-                        log.log(`📡 fetchMessages: daemon could not serve ${sessionId}; the resolver will place it`);
+                        // The channel is the session's — its metadata says it supports it and the
+                        // machine is reachable on it. A daemon with no log for the session is a
+                        // fact about that daemon's own state, not about which channel the session
+                        // is on, and switching here would move a session whose channel is fine.
+                        log.log(`📡 fetchMessages: daemon could not serve ${sessionId}; keeping the session's channel`);
                     }
                     return;
                 }
