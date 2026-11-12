@@ -684,6 +684,7 @@ export const ru: TranslationStructure = {
         noChanges: 'Нет изменений для отображения',
         download: 'Скачать',
         allFiles: 'Все файлы',
+        recentFiles: 'Недавние',
     },
 
     settingsVoice: {

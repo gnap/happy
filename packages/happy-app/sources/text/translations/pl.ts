@@ -684,6 +684,7 @@ export const pl: TranslationStructure = {
         noChanges: 'Brak zmian do wyświetlenia',
         download: 'Pobierz',
         allFiles: 'Wszystkie pliki',
+        recentFiles: 'Ostatnie',
     },
 
     settingsVoice: {

@@ -5,17 +5,34 @@ import { Text } from '@/components/StyledText';
 import { SimpleSyntaxHighlighter } from '@/components/SimpleSyntaxHighlighter';
 import { Typography } from '@/constants/Typography';
 import { sync } from '@/sync/sync';
+import { recordRecentFile } from '@/sync/recentFiles';
 import { Modal } from '@/modal';
 import { useUnistyles, StyleSheet } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
 import { t } from '@/text';
 import { FileIcon } from '@/components/FileIcon';
+import { decodeFilePathParam } from '@/utils/filePathParam';
 import { Ionicons } from '@expo/vector-icons';
 
 interface FileContent {
     content: string;
     encoding: 'utf8' | 'base64';
     isBinary: boolean;
+}
+
+/** How much of a text file the binary test looks at; the answer cannot change later. */
+const BINARY_SNIFF_CHARS = 64 * 1024;
+/**
+ * How much source the tokenizer will take. It builds a nested `<Text>` per token, and a
+ * self-contained HTML page of a few hundred kilobytes produces enough of them to stall the
+ * webview — the screen renders, but as a blank window.
+ */
+const MAX_HIGHLIGHT_CHARS = 200_000;
+
+/** Whether the viewer should draw the page itself rather than its markup. */
+function isHtmlFile(path: string): boolean {
+    const ext = path.split('.').pop()?.toLowerCase();
+    return ext === 'html' || ext === 'htm';
 }
 
 /** Whether the viewer can draw this file itself instead of handing it to the system. */
@@ -39,6 +56,20 @@ function mimeTypeFor(path: string): string {
 }
 
 /** A file the machine served, handed to the system's own viewer or save dialog. */
+/** The file's characters, from whichever transport carried it. */
+async function readDownloadedText(download: { uri?: string; bytes?: Uint8Array }): Promise<string> {
+    if (download.bytes) {
+        return new TextDecoder().decode(download.bytes);
+    }
+    const fs = await import('expo-file-system');
+    return new fs.File(download.uri!).text();
+}
+
+/** A browser URL for bytes, so an `<img>` or a save anchor can use them without a file system. */
+function blobUrlFor(bytes: Uint8Array, type: string): string {
+    return URL.createObjectURL(new Blob([bytes as BlobPart], { type }));
+}
+
 /** A byte count a person can read, for a download in progress. */
 function formatBytes(bytes: number): string {
     if (!Number.isFinite(bytes) || bytes <= 0) {
@@ -117,16 +148,9 @@ export default function FileScreen() {
     const { id: sessionId } = useLocalSearchParams<{ id: string }>();
     const searchParams = useLocalSearchParams();
     const encodedPath = searchParams.path as string;
-    let filePath = '';
-    
-    // Decode base64 path with error handling
-    try {
-        filePath = encodedPath ? atob(encodedPath) : '';
-    } catch (error) {
-        console.error('Failed to decode file path:', error);
-        filePath = encodedPath || ''; // Fallback to original path if decoding fails
-    }
-    
+    // Base64url of the path's UTF-8 bytes; a raw path is accepted too, for links written by hand.
+    const filePath = decodeFilePathParam(encodedPath ?? '');
+
     const [fileContent, setFileContent] = React.useState<FileContent | null>(null);
     const [diffContent, setDiffContent] = React.useState<string | null>(null);
     const [displayMode, setDisplayMode] = React.useState<'file' | 'diff'>('diff');
@@ -135,6 +159,11 @@ export default function FileScreen() {
     const [svgContent, setSvgContent] = React.useState<string | null>(null);
     /** Where the machine's copy landed on this device; the viewer draws from this file. */
     const [localUri, setLocalUri] = React.useState<string | null>(null);
+    /**
+     * The file's bytes, when there was no file system to put them on (web/Tauri). The viewer reads
+     * characters and images from these directly.
+     */
+    const [localBytes, setLocalBytes] = React.useState<Uint8Array | null>(null);
     /** How far the download has got, when the machine sent a length to measure against. */
     const [progress, setProgress] = React.useState<{ written: number; total: number } | null>(null);
     const [isPreparing, setIsPreparing] = React.useState(false);
@@ -236,6 +265,7 @@ export default function FileScreen() {
             setError(null);
             setProgress(null);
             setLocalUri(null);
+            setLocalBytes(null);
             setFileContent(null);
             setSvgContent(null);
             setDiffContent(null);
@@ -268,14 +298,24 @@ export default function FileScreen() {
                     setError(download.error);
                     return;
                 }
-                setLocalUri(download.uri);
+                // The bytes are the whole answer where there is no file system; there, a browser
+                // URL is how the image branch draws them.
+                if (download.bytes) {
+                    setLocalBytes(download.bytes);
+                    if (isImageFile(filePath)) {
+                        setLocalUri(blobUrlFor(download.bytes, mimeTypeFor(filePath)));
+                    }
+                } else {
+                    setLocalUri(download.uri ?? null);
+                }
+                // Opened, not merely named: the browser's "recent" row is about files that loaded.
+                recordRecentFile({ sessionId: sessionId!, path: filePath });
 
                 const ext = filePath.split('.').pop()?.toLowerCase();
                 if (isImageFile(filePath)) {
                     if (ext === 'svg') {
                         // SVG is text; the webview needs the markup itself, not a file URL.
-                        const fs = await import('expo-file-system');
-                        const svg = await new fs.File(download.uri).text();
+                        const svg = await readDownloadedText(download);
                         if (!isCancelled) setSvgContent(svg);
                     }
                     if (!isCancelled) {
@@ -291,18 +331,20 @@ export default function FileScreen() {
                 }
 
                 // Text: the download is the transport, but the viewer needs the characters.
-                const fs = await import('expo-file-system');
-                const decodedContent = await new fs.File(download.uri).text();
+                const decodedContent = await readDownloadedText(download);
                 if (isCancelled) {
                     return;
                 }
-                // Check if content contains binary data (null bytes or too many non-printable chars)
-                const hasNullBytes = decodedContent.includes('\0');
-                const nonPrintableCount = decodedContent.split('').filter(char => {
+                // Sniff a prefix, not the whole file: `split('')` over a megabyte of source builds
+                // a million-element array on the JS thread, and the answer cannot change after the
+                // first few kilobytes of a text file.
+                const sample = decodedContent.slice(0, BINARY_SNIFF_CHARS);
+                const hasNullBytes = sample.includes('\0');
+                const nonPrintableCount = sample.split('').filter(char => {
                     const code = char.charCodeAt(0);
                     return code < 32 && code !== 9 && code !== 10 && code !== 13; // Allow tab, LF, CR
                 }).length;
-                const isBinary = hasNullBytes || (nonPrintableCount / Math.max(1, decodedContent.length) > 0.1);
+                const isBinary = hasNullBytes || (nonPrintableCount / Math.max(1, sample.length) > 0.1);
                 setFileContent({
                     content: isBinary ? '' : decodedContent,
                     encoding: 'utf8',
@@ -356,8 +398,27 @@ export default function FileScreen() {
                 if (!download.ok) {
                     throw new Error(download.error);
                 }
-                uri = download.uri;
-                setLocalUri(uri);
+                uri = download.uri ?? (download.bytes ? blobUrlFor(download.bytes, mimeTypeFor(filePath)) : null);
+                if (uri) {
+                    setLocalUri(uri);
+                }
+            }
+            if (!uri) {
+                throw new Error('Failed to open file');
+            }
+            // The share sheet is a native contract. A browser saves the same bytes through an
+            // anchor, which is the one "keep a copy" this platform has.
+            const browser = Platform.OS === 'web'
+                ? (globalThis as unknown as {
+                    document?: { createElement: (tag: string) => { href: string; download: string; click: () => void } };
+                }).document
+                : undefined;
+            if (browser) {
+                const anchor = browser.createElement('a');
+                anchor.href = uri;
+                anchor.download = fileName;
+                anchor.click();
+                return;
             }
             await presentFile(uri, fileName);
         } catch (downloadError) {
@@ -674,11 +735,19 @@ export default function FileScreen() {
                 {displayMode === 'diff' && diffContent ? (
                     <DiffDisplay diffContent={diffContent} />
                 ) : displayMode === 'file' && fileContent?.content ? (
-                    <SimpleSyntaxHighlighter 
-                        code={fileContent.content}
-                        language={language}
-                        selectable={true}
-                    />
+                    isHtmlFile(filePath) ? (
+                        // The page itself, not its markup: a few hundred kilobytes of source
+                        // tokenizes into enough leaves to leave the webview blank.
+                        <HtmlPagePreview html={fileContent.content} themeBg={theme.colors.surface} />
+                    ) : (
+                        <SimpleSyntaxHighlighter
+                            code={fileContent.content.length > MAX_HIGHLIGHT_CHARS
+                                ? fileContent.content.slice(0, MAX_HIGHLIGHT_CHARS) + '\n…'
+                                : fileContent.content}
+                            language={language}
+                            selectable={true}
+                        />
+                    )
                 ) : displayMode === 'file' && fileContent && !fileContent.content ? (
                     <Text style={{
                         fontSize: 16,
@@ -804,6 +873,57 @@ function NativeFileSvgView({ svgHtml, themeBg }: { svgHtml: string; themeBg: str
         <View style={{ flex: 1, backgroundColor: themeBg }}>
             {WebViewComp
                 ? <WebViewComp source={{ html: svgHtml }} style={{ flex: 1, backgroundColor: themeBg }} scrollEnabled={true} />
+                : null}
+        </View>
+    );
+}
+
+/**
+ * An HTML file drawn as the page it is, instead of as its markup.
+ *
+ * Two reasons this exists rather than feeding the source to the highlighter: a page is meant to
+ * be seen, and a self-contained page of a few hundred kilobytes tokenizes into a leaf per token —
+ * enough nested `<Text>` to leave the webview blank while it lays them out.
+ *
+ * On web/Tauri the frame is the browser's. It runs scripts and forms, but without same-origin, so
+ * the page cannot read this App's storage or reach its DOM. Native has no iframe, so it uses the
+ * same WebView the SVG preview does.
+ */
+function HtmlPagePreview({ html, themeBg }: { html: string; themeBg: string }) {
+    if (Platform.OS !== 'web') {
+        return <NativeFileHtmlView html={html} themeBg={themeBg} />;
+    }
+    return (
+        <View style={{ flex: 1, backgroundColor: themeBg }}>
+            {React.createElement('iframe', {
+                sandbox: 'allow-scripts allow-forms allow-popups allow-modals',
+                srcDoc: html,
+                title: 'HTML preview',
+                style: {
+                    flex: 1,
+                    width: '100%',
+                    height: '100%',
+                    border: 'none',
+                    backgroundColor: themeBg,
+                },
+            })}
+        </View>
+    );
+}
+
+function NativeFileHtmlView({ html, themeBg }: { html: string; themeBg: string }) {
+    const [WebViewComp, setWebViewComp] = React.useState<any>(null);
+    React.useEffect(() => { import('react-native-webview').then(m => setWebViewComp(() => m.WebView)); }, []);
+    return (
+        <View style={{ flex: 1, backgroundColor: themeBg }}>
+            {WebViewComp
+                ? <WebViewComp
+                    source={{ html }}
+                    style={{ flex: 1, backgroundColor: themeBg }}
+                    originWhitelist={['*']}
+                    javaScriptEnabled={true}
+                    scrollEnabled={true}
+                />
                 : null}
         </View>
     );

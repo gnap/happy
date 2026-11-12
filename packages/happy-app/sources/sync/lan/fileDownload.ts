@@ -10,12 +10,24 @@
  * inflate a PDF by a third on its way to disk.
  */
 
-import { LanRequestError } from './client';
+import { Platform } from 'react-native';
+import { fetchSessionFileBytes, fetchSessionFolderBytes, LanRequestError } from './client';
 
 export type SessionFileDownload =
     /** The file is on this device now, at `uri`. */
     | { kind: 'done'; uri: string; size: number }
+    /**
+     * The bytes themselves, because there is no file system to write them to. A browser has no
+     * download task; the viewer reads the characters and draws the image from these.
+     */
+    | { kind: 'bytes'; bytes: Uint8Array; size: number }
     /** The machine answered and has no such file (or no file route at all). */
+    | { kind: 'not-found' };
+
+/** One directory, packed by the machine, on its way to wherever this device keeps downloads. */
+export type SessionFolderDownload =
+    | { kind: 'done'; uri: string; name: string }
+    | { kind: 'bytes'; bytes: Uint8Array; name: string }
     | { kind: 'not-found' };
 
 /** A name from another filesystem is not a path this device should interpret. */
@@ -44,6 +56,24 @@ export async function downloadSessionFileFromDaemon(options: {
     proof?: Record<string, string>;
     onProgress?: (written: number, total: number) => void;
 }): Promise<SessionFileDownload> {
+    // No file system on web/Tauri: the request is the transport. Fetching here rather than
+    // letting the native download throw is what makes a preview reach the machine at all.
+    if (Platform.OS === 'web') {
+        const fetched = await fetchSessionFileBytes(
+            options.baseUrl,
+            options.token,
+            options.sessionId,
+            options.path,
+            options.proof,
+        );
+        if (fetched === null) {
+            return { kind: 'not-found' };
+        }
+        // A fetch has no middle to report: it either has the bytes or the attempt failed, so the
+        // progress bar goes straight to the end instead of hanging at zero.
+        options.onProgress?.(fetched.size, fetched.size);
+        return { kind: 'bytes', bytes: fetched.bytes, size: fetched.size };
+    }
     const fs = await import('expo-file-system');
     const directory = new fs.Directory(fs.Paths.cache, 'happy-files');
     directory.create({ intermediates: true, idempotent: true });
@@ -78,6 +108,68 @@ export async function downloadSessionFileFromDaemon(options: {
             // file; another address would say the same, so the carry must stop here.
             throw new LanRequestError(
                 error instanceof Error ? error.message : 'file request failed',
+                status,
+                error instanceof Error ? error.message : undefined,
+            );
+        }
+        throw error;
+    }
+}
+
+/**
+ * One directory, packed on the machine and brought over the same channel.
+ *
+ * The archive is a download in the ordinary sense — the App saves it and opens it wherever it
+ * likes — so the native path writes it to a cache file and the web path keeps the bytes for a
+ * save anchor. Null/`not-found` is the machine saying it has no such directory, which the carry
+ * reports as `absent` rather than as an address that failed.
+ */
+export async function downloadSessionFolderFromDaemon(options: {
+    baseUrl: string;
+    token: string;
+    sessionId: string;
+    path: string;
+    proof?: Record<string, string>;
+}): Promise<SessionFolderDownload> {
+    const name = safeName(options.path.split('/').filter(Boolean).pop() || 'project') + '.tar.gz';
+    if (Platform.OS === 'web') {
+        const fetched = await fetchSessionFolderBytes(
+            options.baseUrl,
+            options.token,
+            options.sessionId,
+            options.path,
+            options.proof,
+        );
+        return fetched === null
+            ? { kind: 'not-found' }
+            : { kind: 'bytes', bytes: fetched.bytes, name: fetched.name || name };
+    }
+    const fs = await import('expo-file-system');
+    const directory = new fs.Directory(fs.Paths.cache, 'happy-folders');
+    directory.create({ intermediates: true, idempotent: true });
+    const destination = new fs.File(directory, name);
+    if (destination.exists) {
+        destination.delete();
+    }
+    const url = `${options.baseUrl}/lan/sessions/${encodeURIComponent(options.sessionId)}/folder`
+        + `?path=${encodeURIComponent(options.path)}`;
+    const task = fs.File.createDownloadTask(url, destination, {
+        headers: {
+            authorization: `Bearer ${options.token}`,
+            ...(options.proof ?? {}),
+        },
+    });
+    try {
+        await task.downloadAsync();
+        return { kind: 'done', uri: destination.uri, name };
+    } catch (error) {
+        const status = statusOf(error);
+        if (status === 404) {
+            return { kind: 'not-found' };
+        }
+        if (status !== null) {
+            throw new LanRequestError(
+                error instanceof Error ? error.message : 'folder request failed',
                 status,
                 error instanceof Error ? error.message : undefined,
             );

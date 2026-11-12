@@ -156,6 +156,14 @@ class FileSearchCache {
                 });
             });
 
+            // One flat tree, in path order. Directories were appended after every file, so the
+            // "all files" page — which is the first `limit` entries — was files only: in a
+            // repository with more than a page of files, no directory ever appeared. Sorting by
+            // path puts each directory beside the files it holds (`mk/` before `mk/qtest.py`),
+            // which is also the order a reader of a tree expects to scroll through.
+            cache.files.sort((a, b) =>
+                a.fullPath < b.fullPath ? -1 : a.fullPath > b.fullPath ? 1 : 0);
+
             cache.lastRefresh = Date.now();
             this.initializeFuse(cache);
 
@@ -173,7 +181,9 @@ class FileSearchCache {
 
         const { limit = 10, threshold = 0.3 } = options;
 
-        // If query is empty, return most recently modified files
+        // No query: the beginning of the tree, in path order, so directories and the files they
+        // hold both make the page. (This used to claim "most recently modified"; it never sorted
+        // by time, and the array's order put every directory past the limit.)
         if (!query || query.trim().length === 0) {
             return cache.files.slice(0, limit);
         }
@@ -191,6 +201,15 @@ class FileSearchCache {
     getAllFiles(sessionId: string): FileItem[] {
         const cache = this.sessions.get(sessionId);
         return cache ? [...cache.files] : [];
+    }
+
+    /**
+     * The whole index, built if it is not yet. A directory browser asks this instead of a query:
+     * it wants the tree before anyone has typed anything into search.
+     */
+    async ensureLoaded(sessionId: string): Promise<FileItem[]> {
+        await this.ensureCacheValid(sessionId);
+        return this.getAllFiles(sessionId);
     }
 
     clearCache(sessionId?: string): void {
@@ -212,4 +231,9 @@ export async function searchFiles(
     options: SearchOptions = {}
 ): Promise<FileItem[]> {
     return fileSearchCache.search(sessionId, query, options);
+}
+
+/** Every file and directory the machine listed, for the browser's directory view. */
+export async function loadFileIndex(sessionId: string): Promise<FileItem[]> {
+    return fileSearchCache.ensureLoaded(sessionId);
 }

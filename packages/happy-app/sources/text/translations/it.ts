@@ -706,6 +706,7 @@ export const it: TranslationStructure = {
         noChanges: 'Nessuna modifica da mostrare',
         download: 'Scarica',
         allFiles: 'Tutti i file',
+        recentFiles: 'Recenti',
     },
 
     settingsVoice: {

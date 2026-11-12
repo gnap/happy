@@ -211,6 +211,16 @@ export class PermissionHandler {
                     delete requests[id];
                     return { ...currentState, requests };
                 });
+                // Close the lifecycle in the stream too: a request that dies unanswered must not
+                // read as pending forever on a channel that never saw the agentState cleanup.
+                this.session.client.sendSessionProtocolMessage(
+                    createEnvelope('agent', {
+                        t: 'permission-result',
+                        call: id,
+                        status: 'canceled',
+                        reason: 'Permission request aborted',
+                    }),
+                );
                 logger.debug(`Permission request aborted for tool call ${id}`);
                 reject(new Error('Permission request aborted'));
             };
@@ -229,6 +239,19 @@ export class PermissionHandler {
                 toolName,
                 input
             });
+
+            // The request enters the replayable message stream the moment it blocks the SDK,
+            // not only the agentState mirror. The log is what every channel keeps replicating
+            // while the server is unreachable, so a question asked then is still answerable;
+            // agentState below stays as-is for readers that have not learned this event.
+            this.session.client.sendSessionProtocolMessage(
+                createEnvelope('agent', {
+                    t: 'permission-request',
+                    call: id,
+                    tool: toolName,
+                    ...(input !== undefined ? { input } : {}),
+                }),
+            );
 
             // Trigger callback to send delayed messages immediately
             if (this.onPermissionRequestCallback) {

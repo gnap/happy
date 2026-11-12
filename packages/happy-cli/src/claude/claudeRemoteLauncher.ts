@@ -836,7 +836,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                         model: lastRealModel,
                                     },
                                 })).catch((error) => {
-                                    logger.debug('[remote] Failed to persist contextUsage model', error);
+                                    logger.debug('[launcher] Failed to persist context usage model', error);
                                 });
                             }
                         }

@@ -197,6 +197,12 @@ export interface Session {
     thinkingAt: number,
     presence: "online" | number, // "online" when active, timestamp when last seen
     /**
+     * This row exists because a machine said so, not because the server has listed it yet. A full
+     * server refresh merges over these instead of replacing them; the machine's own state is the
+     * complete list, and the server is one more place its records can be read.
+     */
+    origin?: 'daemon' | 'server',
+    /**
      * When the machine began restarting this session, or null once it is not.
      *
      * The session's own state, pushed as a session state change and kept here rather than in a

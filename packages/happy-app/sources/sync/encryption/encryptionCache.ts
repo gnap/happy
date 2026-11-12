@@ -8,8 +8,10 @@ interface CacheEntry<T> {
 
 /**
  * In-memory cache for decrypted session data to avoid expensive re-decryption
- * Uses sessionId + version as keys for agent state and metadata
- * Uses messageId as key for messages (immutable)
+ * Agent state and metadata are keyed by sessionId + version + ciphertext: a session mirrors
+ * its own unacknowledged writes ahead of the server's numbered update, so one version can
+ * carry different content over time and the version alone would return an outdated decrypt.
+ * Messages are keyed by messageId (immutable).
  */
 export class EncryptionCache {
     private agentStateCache = new Map<string, CacheEntry<AgentState>>();
@@ -28,8 +30,8 @@ export class EncryptionCache {
     /**
      * Get cached agent state for a session
      */
-    getCachedAgentState(sessionId: string, version: number): AgentState | null {
-        const key = `${sessionId}:${version}`;
+    getCachedAgentState(sessionId: string, version: number, encrypted: string): AgentState | null {
+        const key = `${sessionId}:${version}:${encrypted}`;
         const entry = this.agentStateCache.get(key);
         if (entry) {
             entry.accessTime = Date.now();
@@ -41,8 +43,8 @@ export class EncryptionCache {
     /**
      * Cache agent state for a session
      */
-    setCachedAgentState(sessionId: string, version: number, data: AgentState): void {
-        const key = `${sessionId}:${version}`;
+    setCachedAgentState(sessionId: string, version: number, encrypted: string, data: AgentState): void {
+        const key = `${sessionId}:${version}:${encrypted}`;
         this.agentStateCache.set(key, {
             data,
             accessTime: Date.now()
@@ -55,8 +57,8 @@ export class EncryptionCache {
     /**
      * Get cached metadata for a session
      */
-    getCachedMetadata(sessionId: string, version: number): Metadata | null {
-        const key = `${sessionId}:${version}`;
+    getCachedMetadata(sessionId: string, version: number, encrypted: string): Metadata | null {
+        const key = `${sessionId}:${version}:${encrypted}`;
         const entry = this.metadataCache.get(key);
         if (entry) {
             entry.accessTime = Date.now();
@@ -68,8 +70,8 @@ export class EncryptionCache {
     /**
      * Cache metadata for a session
      */
-    setCachedMetadata(sessionId: string, version: number, data: Metadata): void {
-        const key = `${sessionId}:${version}`;
+    setCachedMetadata(sessionId: string, version: number, encrypted: string, data: Metadata): void {
+        const key = `${sessionId}:${version}:${encrypted}`;
         this.metadataCache.set(key, {
             data,
             accessTime: Date.now()
