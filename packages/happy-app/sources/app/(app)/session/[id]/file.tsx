@@ -41,6 +41,20 @@ function mimeTypeFor(path: string): string {
 }
 
 /** A file the machine served, handed to the system's own viewer or save dialog. */
+/** The file's characters, from whichever transport carried it. */
+async function readDownloadedText(download: { uri?: string; bytes?: Uint8Array }): Promise<string> {
+    if (download.bytes) {
+        return new TextDecoder().decode(download.bytes);
+    }
+    const fs = await import('expo-file-system');
+    return new fs.File(download.uri!).text();
+}
+
+/** A browser URL for bytes, so an `<img>` or a save anchor can use them without a file system. */
+function blobUrlFor(bytes: Uint8Array, type: string): string {
+    return URL.createObjectURL(new Blob([bytes as BlobPart], { type }));
+}
+
 /** A byte count a person can read, for a download in progress. */
 function formatBytes(bytes: number): string {
     if (!Number.isFinite(bytes) || bytes <= 0) {
@@ -130,6 +144,11 @@ export default function FileScreen() {
     const [svgContent, setSvgContent] = React.useState<string | null>(null);
     /** Where the machine's copy landed on this device; the viewer draws from this file. */
     const [localUri, setLocalUri] = React.useState<string | null>(null);
+    /**
+     * The file's bytes, when there was no file system to put them on (web/Tauri). The viewer reads
+     * characters and images from these directly.
+     */
+    const [localBytes, setLocalBytes] = React.useState<Uint8Array | null>(null);
     /** How far the download has got, when the machine sent a length to measure against. */
     const [progress, setProgress] = React.useState<{ written: number; total: number } | null>(null);
     const [isPreparing, setIsPreparing] = React.useState(false);
@@ -231,6 +250,7 @@ export default function FileScreen() {
             setError(null);
             setProgress(null);
             setLocalUri(null);
+            setLocalBytes(null);
             setFileContent(null);
             setSvgContent(null);
             setDiffContent(null);
@@ -263,7 +283,16 @@ export default function FileScreen() {
                     setError(download.error);
                     return;
                 }
-                setLocalUri(download.uri);
+                // The bytes are the whole answer where there is no file system; there, a browser
+                // URL is how the image branch draws them.
+                if (download.bytes) {
+                    setLocalBytes(download.bytes);
+                    if (isImageFile(filePath)) {
+                        setLocalUri(blobUrlFor(download.bytes, mimeTypeFor(filePath)));
+                    }
+                } else {
+                    setLocalUri(download.uri ?? null);
+                }
                 // Opened, not merely named: the browser's "recent" row is about files that loaded.
                 recordRecentFile({ sessionId: sessionId!, path: filePath });
 
@@ -271,8 +300,7 @@ export default function FileScreen() {
                 if (isImageFile(filePath)) {
                     if (ext === 'svg') {
                         // SVG is text; the webview needs the markup itself, not a file URL.
-                        const fs = await import('expo-file-system');
-                        const svg = await new fs.File(download.uri).text();
+                        const svg = await readDownloadedText(download);
                         if (!isCancelled) setSvgContent(svg);
                     }
                     if (!isCancelled) {
@@ -288,8 +316,7 @@ export default function FileScreen() {
                 }
 
                 // Text: the download is the transport, but the viewer needs the characters.
-                const fs = await import('expo-file-system');
-                const decodedContent = await new fs.File(download.uri).text();
+                const decodedContent = await readDownloadedText(download);
                 if (isCancelled) {
                     return;
                 }
@@ -353,8 +380,27 @@ export default function FileScreen() {
                 if (!download.ok) {
                     throw new Error(download.error);
                 }
-                uri = download.uri;
-                setLocalUri(uri);
+                uri = download.uri ?? (download.bytes ? blobUrlFor(download.bytes, mimeTypeFor(filePath)) : null);
+                if (uri) {
+                    setLocalUri(uri);
+                }
+            }
+            if (!uri) {
+                throw new Error('Failed to open file');
+            }
+            // The share sheet is a native contract. A browser saves the same bytes through an
+            // anchor, which is the one "keep a copy" this platform has.
+            const browser = Platform.OS === 'web'
+                ? (globalThis as unknown as {
+                    document?: { createElement: (tag: string) => { href: string; download: string; click: () => void } };
+                }).document
+                : undefined;
+            if (browser) {
+                const anchor = browser.createElement('a');
+                anchor.href = uri;
+                anchor.download = fileName;
+                anchor.click();
+                return;
             }
             await presentFile(uri, fileName);
         } catch (downloadError) {

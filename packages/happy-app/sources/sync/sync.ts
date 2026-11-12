@@ -5487,7 +5487,7 @@ class Sync {
         sessionId: string,
         path: string,
         options?: { onProgress?: (written: number, total: number) => void },
-    ): Promise<{ ok: true; uri: string; size: number } | { ok: false; error: string }> {
+    ): Promise<{ ok: true; uri?: string; bytes?: Uint8Array; size: number } | { ok: false; error: string }> {
         const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
         if (!machineId) {
             return { ok: false, error: 'This session does not say which machine it is on' };
@@ -5495,7 +5495,7 @@ class Sync {
         if (!this.getMachineKey(machineId)) {
             return { ok: false, error: 'This device holds no key for that machine' };
         }
-        const carried = await this.carryAtDaemon<{ uri: string; size: number }>({
+        const carried = await this.carryAtDaemon<{ uri?: string; bytes?: Uint8Array; size: number }>({
             machineId,
             operation: 'read',
             // Plaintext file contents: the account signs for this, exactly as it does for a tool
@@ -5510,12 +5510,17 @@ class Sync {
                     proof,
                     onProgress: options?.onProgress,
                 });
-                return result.kind === 'done' ? { uri: result.uri, size: result.size } : null;
+                if (result.kind === 'done') {
+                    return { uri: result.uri, size: result.size };
+                }
+                // No file system to write to: the bytes are the answer, and the viewer reads
+                // characters and images straight from them.
+                return result.kind === 'bytes' ? { bytes: result.bytes, size: result.size } : null;
             },
         });
         if (carried.kind === 'done') {
             log.log(`📄 file ${sessionId} ${path}: done via ${carried.channel} (${carried.value.size} bytes)`);
-            return { ok: true, uri: carried.value.uri, size: carried.value.size };
+            return { ok: true, ...carried.value };
         }
         log.log(`📄 file ${sessionId} ${path}: ${carried.kind}`);
         if (carried.kind === 'absent') {
