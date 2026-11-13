@@ -684,6 +684,8 @@ export const pl: TranslationStructure = {
         fileEmpty: 'Plik jest pusty',
         noChanges: 'Brak zmian do wyświetlenia',
         download: 'Pobierz',
+        expand: 'Rozszerz',
+        collapse: 'Zwiń',
         allFiles: 'Wszystkie pliki',
         recentFiles: 'Ostatnie',
     },

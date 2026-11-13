@@ -674,6 +674,8 @@ export const es: TranslationStructure = {
         fileEmpty: 'El archivo está vacío',
         noChanges: 'No hay cambios que mostrar',
         download: 'Descargar',
+        expand: 'Expandir',
+        collapse: 'Contraer',
         allFiles: 'Todos los archivos',
         recentFiles: 'Recientes',
     },
