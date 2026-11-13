@@ -180,7 +180,12 @@ class HubSocket implements SocketLike {
         if (this.readyState !== 1) {
             throw new Error('stream is not open');
         }
-        this.hub.send({ t: 'msg', id: this.id, data });
+        // A hub that cannot take the frame is this write failing. Ignoring the answer made the
+        // caller's socket report a success for bytes nothing carried — and then wait out the whole
+        // delivery deadline to learn what the hub had already said.
+        if (!this.hub.send({ t: 'msg', id: this.id, data })) {
+            throw new Error('the relay hub is not connected');
+        }
     }
 
     close(): void {
