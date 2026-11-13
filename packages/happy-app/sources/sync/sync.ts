@@ -5497,6 +5497,11 @@ class Sync {
         path: string,
         options?: { onProgress?: (written: number, total: number) => void },
     ): Promise<{ ok: true; uri?: string; bytes?: Uint8Array; size: number } | { ok: false; error: string }> {
+        // A folder has no bytes. Asking a machine for one is a directory path and comes back as
+        // "not on this machine (or its daemon is too old)" — true of the request, not of the file.
+        if (path.endsWith('/')) {
+            return { ok: false, error: 'That is a folder, not a file' };
+        }
         const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
         if (!machineId) {
             return { ok: false, error: 'This session does not say which machine it is on' };
