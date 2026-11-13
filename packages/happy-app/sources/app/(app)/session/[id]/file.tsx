@@ -164,6 +164,11 @@ export default function FileScreen() {
      * characters and images from these directly.
      */
     const [localBytes, setLocalBytes] = React.useState<Uint8Array | null>(null);
+    /**
+     * Where an HTML page is loaded from, when the machine can serve its tree. Its own references
+     * resolve against this URL; the bytes-only fallback cannot resolve any of them.
+     */
+    const [previewUrl, setPreviewUrl] = React.useState<string | null>(null);
     /** How far the download has got, when the machine sent a length to measure against. */
     const [progress, setProgress] = React.useState<{ written: number; total: number } | null>(null);
     const [isPreparing, setIsPreparing] = React.useState(false);
@@ -266,6 +271,7 @@ export default function FileScreen() {
             setProgress(null);
             setLocalUri(null);
             setLocalBytes(null);
+            setPreviewUrl(null);
             setFileContent(null);
             setSvgContent(null);
             setDiffContent(null);
@@ -282,6 +288,13 @@ export default function FileScreen() {
                     console.log('Could not fetch git diff:', diffError);
                 });
             }
+
+            // Asked for beside the bytes rather than instead of them: the bytes are what the
+            // source view and the fallback draw from, and a machine that cannot mint (an older
+            // daemon) leaves only that.
+            const previewPromise = isHtmlFile(filePath) && sessionId
+                ? sync.getHtmlPreviewUrl(sessionId, filePath).catch(() => null)
+                : Promise.resolve(null);
 
             try {
                 const download = await sync.downloadSessionFile(sessionId!, filePath, {
@@ -310,6 +323,11 @@ export default function FileScreen() {
                 }
                 // Opened, not merely named: the browser's "recent" row is about files that loaded.
                 recordRecentFile({ sessionId: sessionId!, path: filePath });
+
+                const pageUrl = await previewPromise;
+                if (!isCancelled) {
+                    setPreviewUrl(pageUrl);
+                }
 
                 const ext = filePath.split('.').pop()?.toLowerCase();
                 if (isImageFile(filePath)) {
@@ -737,8 +755,9 @@ export default function FileScreen() {
                 ) : displayMode === 'file' && fileContent?.content ? (
                     isHtmlFile(filePath) ? (
                         // The page itself, not its markup: a few hundred kilobytes of source
-                        // tokenizes into enough leaves to leave the webview blank.
-                        <HtmlPagePreview html={fileContent.content} themeBg={theme.colors.surface} />
+                        // tokenizes into enough leaves to leave the webview blank, and a page's
+                        // stylesheets and scripts only resolve when it is loaded from the tree.
+                        <HtmlPagePreview url={previewUrl} html={fileContent.content} themeBg={theme.colors.surface} />
                     ) : (
                         <SimpleSyntaxHighlighter
                             code={fileContent.content.length > MAX_HIGHLIGHT_CHARS
@@ -889,15 +908,21 @@ function NativeFileSvgView({ svgHtml, themeBg }: { svgHtml: string; themeBg: str
  * the page cannot read this App's storage or reach its DOM. Native has no iframe, so it uses the
  * same WebView the SVG preview does.
  */
-function HtmlPagePreview({ html, themeBg }: { html: string; themeBg: string }) {
+function HtmlPagePreview({ url, html, themeBg }: { url: string | null; html: string; themeBg: string }) {
     if (Platform.OS !== 'web') {
-        return <NativeFileHtmlView html={html} themeBg={themeBg} />;
+        return <NativeFileHtmlView url={url} html={html} themeBg={themeBg} />;
     }
     return (
         <View style={{ flex: 1, backgroundColor: themeBg }}>
             {React.createElement('iframe', {
-                sandbox: 'allow-scripts allow-forms allow-popups allow-modals',
-                srcDoc: html,
+                ...(url ? { src: url } : { srcDoc: html }),
+                // A URL preview is served by the daemon — a different origin from this App — so
+                // `allow-same-origin` only makes the page same-origin with *its own* files, which
+                // a runtime `fetch` and module scripts need. The byte-drawn fallback shares this
+                // App's origin, and there the sandbox must keep that origin opaque.
+                sandbox: url
+                    ? 'allow-scripts allow-same-origin allow-forms allow-popups allow-modals'
+                    : 'allow-scripts allow-forms allow-popups allow-modals',
                 title: 'HTML preview',
                 style: {
                     flex: 1,
@@ -911,14 +936,14 @@ function HtmlPagePreview({ html, themeBg }: { html: string; themeBg: string }) {
     );
 }
 
-function NativeFileHtmlView({ html, themeBg }: { html: string; themeBg: string }) {
+function NativeFileHtmlView({ url, html, themeBg }: { url: string | null; html: string; themeBg: string }) {
     const [WebViewComp, setWebViewComp] = React.useState<any>(null);
     React.useEffect(() => { import('react-native-webview').then(m => setWebViewComp(() => m.WebView)); }, []);
     return (
         <View style={{ flex: 1, backgroundColor: themeBg }}>
             {WebViewComp
                 ? <WebViewComp
-                    source={{ html }}
+                    source={url ? { uri: url } : { html }}
                     style={{ flex: 1, backgroundColor: themeBg }}
                     originWhitelist={['*']}
                     javaScriptEnabled={true}

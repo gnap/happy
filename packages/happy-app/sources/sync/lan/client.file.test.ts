@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // other LAN tests use.
 vi.mock('@/encryption/hmac_sha256', () => ({ hmac_sha256: vi.fn(async () => new Uint8Array(32)) }));
 
-const { fetchSessionFileBytes, fetchSessionFolderBytes } = await import('./client');
+const { fetchSessionFileBytes, fetchSessionFolderBytes, fetchPreviewGrant, previewUrlFor } = await import('./client');
 
 const base = 'http://10.0.0.2:55673';
 
@@ -85,5 +85,43 @@ describe('fetchSessionFolderBytes', () => {
         stub({ status: 403 });
         await expect(fetchSessionFolderBytes(base, 't1', 'sess-1', 'a'))
             .rejects.toMatchObject({ status: 403 });
+    });
+});
+
+describe('fetchPreviewGrant', () => {
+    it('asks for a capability over the tree, signed for this file', async () => {
+        const calls = stub({ status: 200, body: { token: 'tok-1', expiresAt: 1_700_000_000_000 } });
+
+        const grant = await fetchPreviewGrant(base, 't1', 'sess-1', 'pkg/web/static/index.html', {
+            'x-happy-proof-nonce': 'n1',
+        });
+
+        expect(calls[0].url).toBe(`${base}/lan/sessions/sess-1/preview`);
+        expect(calls[0].init.method).toBe('POST');
+        expect(JSON.parse(calls[0].init.body)).toEqual({ path: 'pkg/web/static/index.html' });
+        expect(calls[0].init.headers.authorization).toBe('Bearer t1');
+        expect(calls[0].init.headers['x-happy-proof-nonce']).toBe('n1');
+        expect(grant).toEqual({ token: 'tok-1', expiresAt: 1_700_000_000_000 });
+    });
+
+    it('returns null for a daemon without the route, so the viewer keeps its byte preview', async () => {
+        stub({ status: 404 });
+        expect(await fetchPreviewGrant(base, 't1', 'sess-1', 'a.html')).toBeNull();
+    });
+
+    it('reports a refusal with the machine’s words rather than pretending it cannot preview', async () => {
+        stub({ status: 403, body: { error: 'account proof required' } });
+        await expect(fetchPreviewGrant(base, 't1', 'sess-1', 'a.html'))
+            .rejects.toMatchObject({ status: 403 });
+    });
+});
+
+describe('previewUrlFor', () => {
+    it('mirrors the file path so the page’s own references resolve beside it', () => {
+        expect(previewUrlFor('http://10.0.0.2:55673', 'tok', 'pkg/web/static/index.html'))
+            .toBe('http://10.0.0.2:55673/lan/preview/tok/pkg/web/static/index.html');
+        // A name with spaces is one path segment, not a rewritten tree.
+        expect(previewUrlFor('https://relay/r/x', 'tok', 'a b/c d.html'))
+            .toBe('https://relay/r/x/lan/preview/tok/a%20b/c%20d.html');
     });
 });

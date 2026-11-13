@@ -40,28 +40,37 @@ function signed(path: string, init: { token?: string; body?: unknown } = {}) {
     const isToolContent = path.includes('/tool-content/');
     const isFile = /\/sessions\/[^/?]+\/file(?:\?|$)/.test(path);
     const isFolder = /\/sessions\/[^/?]+\/folder(?:\?|$)/.test(path);
+    const isPreview = /\/sessions\/[^/?]+\/preview(?:\?|$)/.test(path);
     const isListing = /\/sessions\/[^/?]+\/listing(?:\?|$)/.test(path);
     const isDiff = /\/sessions\/[^/?]+\/diff(?:\?|$)/.test(path);
     const sessionId = path.split('/sessions/')[1]?.split(/[/?]/)[0] ?? '-';
     // A file's (and a diff's) target is the session and the path it names, which is what the
-    // route checks; the path travels in the query string, not the URL path.
-    const queryPath = isFile || isDiff || isFolder ? new URLSearchParams(path.split('?')[1]).get('path') ?? '' : '';
+    // route checks; the path travels in the query string, not the URL path. A preview names its
+    // path in the body instead: it is a grant over a tree, and the body is where it is asked for.
+    const bodyPath = isPreview && init.body && typeof (init.body as { path?: unknown }).path === 'string'
+        ? String((init.body as { path: string }).path)
+        : '';
+    const queryPath = isFile || isDiff || isFolder || isPreview
+        ? (isPreview ? bodyPath : new URLSearchParams(path.split('?')[1]).get('path') ?? '')
+        : '';
     const operation = isFile
         ? 'file'
         : isFolder
             ? 'folder'
-            : isDiff
-                ? 'diff'
-                : isListing
-                    ? 'listing'
-                    : isToolContent
-                        ? 'tool-content'
-                        : path.endsWith('/archive')
-                            ? 'archive'
-                            : path.endsWith('/restart')
-                                ? 'restart'
-                                : 'control';
-    const target = isFile || isDiff || isFolder
+            : isPreview
+                ? 'preview'
+                : isDiff
+                    ? 'diff'
+                    : isListing
+                        ? 'listing'
+                        : isToolContent
+                            ? 'tool-content'
+                            : path.endsWith('/archive')
+                                ? 'archive'
+                                : path.endsWith('/restart')
+                                    ? 'restart'
+                                    : 'control';
+    const target = isFile || isDiff || isFolder || isPreview
         ? `${sessionId}:${queryPath}`
         : isToolContent
             ? path.split('/tool-content/')[1] ? `${sessionId}:${path.split('/tool-content/')[1]}` : '-'
@@ -116,6 +125,9 @@ let toolContentHandler: ((args: { sessionId: string; callId: string }) => Promis
 let sessionFileHandler: ((args: { sessionId: string; path: string }) => Promise<{ bytes: Buffer; name: string; mime: string } | { error: 'too-large'; size: number } | null>) | undefined;
 /** A directory packed for download; unset by default, like a daemon from before the route. */
 let sessionFolderHandler: ((args: { sessionId: string; path: string }) => { stream: NodeJS.ReadableStream; name: string } | null) | undefined;
+/** Preview capabilities; unset by default, like a daemon from before the routes. */
+let previewGrantHandler: ((args: { sessionId: string; path: string }) => { token: string; expiresAt: number } | null) | undefined;
+let previewFileHandler: ((args: { token: string; path: string }) => { bytes: Buffer; name: string; mime: string } | null) | undefined;
 /** The listing this machine can produce; unset by default, like a daemon from before the route. */
 let sessionListingHandler: ((args: { sessionId: string }) => Promise<{ gitRepo: boolean; gitStatus: string; gitDiff: string; files: string; filesTruncated?: boolean } | null>) | undefined;
 /** One file's diff; unset by default, like a daemon from before the route. */
@@ -151,6 +163,8 @@ async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
         ...(toolContentHandler ? { getToolContent: toolContentHandler } : {}),
         ...(sessionFileHandler ? { getSessionFile: sessionFileHandler } : {}),
         ...(sessionFolderHandler ? { getSessionFolder: sessionFolderHandler } : {}),
+        ...(previewGrantHandler ? { createPreview: previewGrantHandler } : {}),
+        ...(previewFileHandler ? { readPreviewFile: previewFileHandler } : {}),
         ...(sessionListingHandler ? { getSessionListing: sessionListingHandler } : {}),
         ...(sessionDiffHandler ? { getSessionDiff: sessionDiffHandler } : {}),
         lifecycle: {
@@ -217,6 +231,8 @@ afterEach(async () => {
     toolContentHandler = undefined;
     sessionFileHandler = undefined;
     sessionFolderHandler = undefined;
+    previewGrantHandler = undefined;
+    previewFileHandler = undefined;
     sessionListingHandler = undefined;
     sessionDiffHandler = undefined;
     proofNonces = new Set();
@@ -977,6 +993,8 @@ describe('lanServer folder route', () => {
 
     it('answers 404 when the build has no folder route at all', async () => {
         sessionFolderHandler = undefined;
+    previewGrantHandler = undefined;
+    previewFileHandler = undefined;
         await start();
         const token = await getToken();
 
@@ -1085,5 +1103,72 @@ describe('lanServer session diff', () => {
         const res = await fetch(url(noPath), signed(noPath, { token }) as RequestInit);
 
         expect(res.status).toBe(400);
+    });
+});
+
+describe('lanServer preview capability', () => {
+    const mintUrl = '/lan/sessions/sess-1/preview';
+    const assetUrl = '/lan/preview/tok-1/pkg/web/static/style.css';
+    const CSS = { bytes: Buffer.from('body{color:red}'), name: 'style.css', mime: 'text/css; charset=utf-8' };
+
+    beforeEach(() => {
+        previewGrantHandler = ({ sessionId, path }) =>
+            sessionId === 'sess-1' && path === 'pkg/web/static/index.html'
+                ? { token: 'tok-1', expiresAt: Date.now() + 60_000 }
+                : null;
+        previewFileHandler = ({ token, path }) =>
+            token === 'tok-1' && path === 'pkg/web/static/style.css' ? CSS : null;
+    });
+
+    it('mints a capability the account signed for, over the tree the file lives in', async () => {
+        await start();
+        const token = await getToken();
+
+        const res = await fetch(url(mintUrl), signed(mintUrl, { token, body: { path: 'pkg/web/static/index.html' } }) as RequestInit);
+
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ v: LAN_PROTOCOL_VERSION, token: 'tok-1' });
+    });
+
+    it('refuses to mint for a request without the account proof', async () => {
+        await start();
+        const token = await getToken();
+
+        const res = await fetch(url(mintUrl), {
+            method: 'POST',
+            headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+            body: JSON.stringify({ path: 'pkg/web/static/index.html' }),
+        });
+
+        expect(res.status).toBe(403);
+    });
+
+    it('answers 404 when the build has no preview routes at all', async () => {
+        previewGrantHandler = undefined;
+        await start();
+        const token = await getToken();
+
+        const res = await fetch(url(mintUrl), signed(mintUrl, { token, body: { path: 'x.html' } }) as RequestInit);
+
+        expect(res.status).toBe(404);
+    });
+
+    it('serves an asset by the token alone, with no headers it could not carry', async () => {
+        // What a browser's `<link>` request looks like: no token, no proof — the URL is the grant.
+        await start();
+
+        const res = await fetch(url(assetUrl));
+
+        expect(res.status).toBe(200);
+        expect(res.headers.get('content-type')).toBe('text/css; charset=utf-8');
+        expect(Buffer.from(await res.arrayBuffer())).toEqual(CSS.bytes);
+    });
+
+    it('answers 404 for a token that grants nothing', async () => {
+        await start();
+
+        const res = await fetch(url('/lan/preview/unknown/pkg/web/static/style.css'));
+
+        expect(res.status).toBe(404);
     });
 });

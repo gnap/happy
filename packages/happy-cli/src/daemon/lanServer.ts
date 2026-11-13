@@ -251,6 +251,21 @@ export type LanServerOptions = {
    */
   getSessionFolder?: (args: { sessionId: string; path: string }) => Promise<LanSessionFolder | null> | LanSessionFolder | null;
   /**
+   * A read-only capability over one session's working tree, for a preview a browser loads by URL.
+   *
+   * An iframe's subresource requests (`<link>`, `<script>`, a runtime `fetch`) cannot carry the
+   * account's proof or even an Authorization header, so the URL itself has to be the grant. The
+   * provider mints a random token bound to one directory; null means it will not.
+   */
+  createPreview?: (args: { sessionId: string; path: string }) => Promise<{ token: string; expiresAt: number } | null> | { token: string; expiresAt: number } | null;
+  /**
+   * The file a preview token names, confined to the directory it was minted for.
+   *
+   * The provider owns expiry and containment; this route only forwards the answer. Null is the
+   * 404 a browser understands as "this asset is not there", from a bad token or a missing file.
+   */
+  readPreviewFile?: (args: { token: string; path: string }) => Promise<LanSessionFile | null> | LanSessionFile | null;
+  /**
    * The listing behind the App's file browser: git status and the project's file paths.
    *
    * Plaintext, like `getSessionFile` beside it, so it asks for the same account proof. Null means
@@ -1037,6 +1052,72 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       .header('content-type', 'application/gzip')
       .header('content-disposition', `attachment; filename="${folder.name.replace(/["\\\r\n]/g, '_')}"`)
       .send(folder.stream);
+  });
+
+  /**
+   * Mint a preview capability for one file's directory.
+   *
+   * The account signs for this, once: read this file's tree for the next while. Everything the page
+   * then asks for — its stylesheet, its script, the data it fetches at runtime — arrives as its own
+   * request with no headers to speak of, and the token in the URL is what makes those requests
+   * answerable at all.
+   */
+  app.post('/lan/sessions/:sessionId/preview', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (!opts.createPreview) {
+      return reply.code(404).send({ error: 'this daemon does not preview files' });
+    }
+    const { sessionId } = request.params as { sessionId: string };
+    const body = request.body as { path?: unknown } | null;
+    const path = typeof body?.path === 'string' ? body.path : null;
+    if (path === null || path.length > 4096) {
+      return reply.code(400).send({ error: 'a path is required' });
+    }
+    if (!requireAccountProof(request, { operation: 'preview', target: `${sessionId}:${path}` })) {
+      return reply.code(403).send({ error: 'account proof required' });
+    }
+    const grant = await opts.createPreview({ sessionId, path });
+    if (!grant) {
+      return reply.code(404).send({ error: 'no such file to preview on this machine' });
+    }
+    logger.debug(`[lan] preview grant ${sessionId}:${path} expires=${grant.expiresAt}`);
+    return reply.send({ v: LAN_PROTOCOL_VERSION, token: grant.token, expiresAt: grant.expiresAt });
+  });
+
+  /**
+   * One file under a preview, addressed by the capability rather than by a header.
+   *
+   * Deliberately outside every token check above: these requests come from an iframe's own loader,
+   * which cannot set headers, and they arrive for every stylesheet, image and runtime fetch the
+   * page makes. The path mirrors the working tree so relative references in the page resolve here
+   * without rewriting anything.
+   */
+  app.get('/lan/preview/:token/*', async (request, reply) => {
+    if (!opts.readPreviewFile) {
+      return reply.code(404).send({ error: 'this daemon does not preview files' });
+    }
+    const { token } = request.params as { token: string };
+    const path = (request.params as Record<string, string>)['*'] ?? '';
+    if (!token || token.length > 128 || path.length > 4096) {
+      return reply.code(400).send({ error: 'a token and a path are required' });
+    }
+    const file = await opts.readPreviewFile({ token, path });
+    if (!file) {
+      logger.debug(`[lan] preview 404 token=${token.slice(0, 8)}… path=${path.slice(0, 120)}`);
+      return reply.code(404).send({ error: 'no such file under this preview' });
+    }
+    if ('error' in file) {
+      return reply.code(413).send({ error: 'file is too large for this API', size: file.size });
+    }
+    return reply
+      .header('content-type', file.mime)
+      // A preview is of a working tree, which changes while it is being read.
+      .header('cache-control', 'no-store')
+      // The token is the credential; a page must not hand it to anywhere it links.
+      .header('referrer-policy', 'no-referrer')
+      .send(file.bytes);
   });
 
   /**
