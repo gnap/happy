@@ -319,6 +319,7 @@ export const zhHant: TranslationStructure = {
         activityGoals: '目標',
         activityShell: '後台命令',
         activityWorkflows: '工作流程',
+        activityWakeups: '定時喚醒',
     },
 
     commandPalette: {

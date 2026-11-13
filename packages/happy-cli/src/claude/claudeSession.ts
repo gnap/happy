@@ -128,6 +128,28 @@ export function toolTimeoutMs(toolName: string, input: unknown): number | null {
 }
 
 /**
+ * The wakeup a session scheduled for itself, as one task in the App's activity list.
+ *
+ * Claude Code keeps this timer in its own memory and never lists it in `background_tasks`, so a
+ * session asleep until nine o'clock looked idle: the only sign was one tool card scrolled out of
+ * view, and the activity bubble — which exists to say what a quiet session is waiting on — said
+ * nothing. The tool gives the delay in seconds; the deadline is that from the call.
+ */
+export function scheduledWakeupTask(delaySeconds: number, reason: string, now: number): BackgroundTaskForApp {
+    const description = reason.trim();
+    return {
+        id: 'scheduled-wakeup',
+        type: 'wakeup',
+        status: 'scheduled',
+        // A wakeup with no reason still has to read as something; the App has no name of its own
+        // for a task it only knows by type.
+        description: description.length > 0 ? description : 'Scheduled wakeup',
+        startedAt: now,
+        deadlineAt: now + Math.max(0, delaySeconds) * 1000,
+    };
+}
+
+/**
  * What the App is told about one background task the session has running.
  *
  * `description` is Claude Code's own name for the task — normally a readable title, and the thing
@@ -779,7 +801,47 @@ export class ClaudeSession {
     const toolDeadlineByCallId = new Map<string, number>();
 
     function emitBackgroundTasks(): void {
-        opts.onBackgroundTasks?.([...backgroundTaskSummaries.values()]);
+        opts.onBackgroundTasks?.([
+            ...backgroundTaskSummaries.values(),
+            ...(pendingWakeup ? [pendingWakeup] : []),
+        ]);
+    }
+
+    /**
+     * The wakeup this session scheduled for itself, if one is pending.
+     *
+     * Separate from `backgroundTaskSummaries` because the Stop hook's snapshot replaces that set
+     * wholesale and never mentions a wakeup — it would be erased at the first turn end. One at a
+     * time: the tool schedules the *next* wake, so a newer call replaces the older deadline, and
+     * the entry leaves the list when the timer here reaches the same deadline the session sleeps
+     * until.
+     */
+    let pendingWakeup: BackgroundTaskForApp | null = null;
+    let pendingWakeupDeadline: number | null = null;
+    let wakeupTimer: ReturnType<typeof setTimeout> | null = null;
+    function setPendingWakeup(delaySeconds: number, reason: string): void {
+        if (wakeupTimer) {
+            clearTimeout(wakeupTimer);
+            wakeupTimer = null;
+        }
+        const task = scheduledWakeupTask(delaySeconds, reason, Date.now());
+        pendingWakeup = task;
+        pendingWakeupDeadline = task.deadlineAt ?? null;
+        if (pendingWakeupDeadline !== null) {
+            wakeupTimer = setTimeout(() => {
+                wakeupTimer = null;
+                // Replaced while this timer was waiting: the newer entry owns the state.
+                if (pendingWakeup?.deadlineAt !== pendingWakeupDeadline) {
+                    return;
+                }
+                pendingWakeup = null;
+                pendingWakeupDeadline = null;
+                emitBackgroundTasks();
+            }, Math.max(0, pendingWakeupDeadline - Date.now()) + 1_000);
+            // A pending wake an hour away must not be a reason for the process to stay up.
+            wakeupTimer.unref?.();
+        }
+        emitBackgroundTasks();
     }
 
     /**
@@ -945,6 +1007,10 @@ export class ClaudeSession {
                                     // schedule on screen after it was cancelled.
                                     displayCrons.delete(block.input.id);
                                     emitDisplayCrons();
+                                } else if (block.name === 'ScheduleWakeup' && typeof block.input?.delaySeconds === 'number') {
+                                    // The one pending timer that is the session's own clock rather
+                                    // than a process it started; see `setPendingWakeup`.
+                                    setPendingWakeup(block.input.delaySeconds, typeof block.input.reason === 'string' ? block.input.reason : '');
                                 }
                                 const timeoutMs = toolTimeoutMs(block.name, block.input);
                                 if (timeoutMs !== null) {
@@ -1208,6 +1274,11 @@ export class ClaudeSession {
         await Promise.all([inputLoop(), outputLoop()]);
     } finally {
         logger.debug('[claudeRemote] session loops ended');
+        // The timer belonged to this process's session; a respawned process has its own clock.
+        if (wakeupTimer) {
+            clearTimeout(wakeupTimer);
+            wakeupTimer = null;
+        }
         messages.end();
         updateThinking(false);
         this.alive = false;

@@ -353,6 +353,7 @@ export const ja: TranslationStructure = {
         activityGoals: 'ゴール',
         activityShell: 'バックグラウンドコマンド',
         activityWorkflows: 'ワークフロー',
+        activityWakeups: 'ウェイクアップ',
     },
 
     commandPalette: {

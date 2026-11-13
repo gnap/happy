@@ -705,6 +705,13 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             // those messages are permanently lost.  Defer to the next turn
                             // so they are safely re-processed via the pending path above.
                             if (permissionHandler.hasPendingRequests()) {
+                                // The mode change rides on the message we are about to defer.
+                                // Apply it before waiting: permission mode is session state,
+                                // not turn state, and switching to an auto-approving mode is
+                                // exactly the user's way out of the request blocking the turn.
+                                // Without this the wait below can never end on its own — the
+                                // message that would unblock it stays deferred.
+                                permissionHandler.handleModeChange(msg.mode.permissionMode);
                                 logger.debug('[remote] nextMessage deferring message (permission request pending)');
                                 pending = { message: msg.message, mode: msg.mode, meta: msg.meta, hash: msg.hash };
                                 // Wait for the permission to settle instead of returning null: null
@@ -827,7 +834,9 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             // the App's session header model display. Always writes, using
                             // zero tokens as placeholder when no /context fetch has run yet.
                             if (lastRealModel) {
-                                void session.client.updateMetadata((m) => ({
+                                // `void` does not catch: an unhandled rejection here would reach
+                                // the process handler and end the session.
+                                session.client.updateMetadata((m) => ({
                                     ...m,
                                     contextUsage: {
                                         ...(m.contextUsage ?? { currentTokens: 0, maxTokens: 0, pct: 0, fetchedAt: Date.now() }),

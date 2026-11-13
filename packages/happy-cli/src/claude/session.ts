@@ -117,7 +117,11 @@ export class Session {
     onSessionFound = (sessionId: string) => {
         this.sessionId = sessionId;
 
-        // Update metadata with Claude Code session ID
+        // Update metadata with Claude Code session ID. Not awaited: this runs from a hook and
+        // must not block it — but the rejection has to be handled. `updateMetadata` waits 15s
+        // for the socket and then rejects, and an unhandled rejection here reached the process
+        // handler and took the whole session down: a /compact during a socket outage was enough
+        // to end it, which is exactly how two sessions died on 11-12.
         this.client.updateMetadata((metadata) => ({
             ...metadata,
             claudeSessionId: sessionId

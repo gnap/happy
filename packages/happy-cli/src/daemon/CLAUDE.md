@@ -14,16 +14,15 @@ Control Flow:
 3. New process calls `startDaemon()` from `src/daemon/run.ts`
 4. `startDaemon()` performs startup:
    - Sets up shutdown promise and handlers (SIGINT, SIGTERM, uncaughtException, unhandledRejection)
-   - Version check: `isDaemonRunningSameVersion()` reads daemon.state.json, compares `startedWithCliVersion` with `configuration.currentCliVersion`
-   - If version mismatch: calls `stopDaemon()` to kill old daemon before proceeding
-   - If same version running: exits with "Daemon already running"
+   - Liveness check: `checkIfDaemonRunningAndCleanupStaleState()` reads daemon.state.json and probes the PID — any running daemon (regardless of version) makes this process exit with "Daemon already running"; version is never compared
+   - Restarts are always manual: `systemctl --user restart happy-daemon` (Linux) or the launchd equivalent (macOS). Version mismatches are surfaced to the App via session metadata comparison, not acted on
    - Lock acquisition: `acquireDaemonLock()` creates exclusive lock file to prevent multiple daemons
    - Authentication: `authAndSetupMachineIfNeeded()` ensures credentials exist
    - State persistence: writes PID, version, HTTP port to daemon.state.json
    - HTTP server: starts on random port for local CLI control (list, stop, spawn)
    - WebSocket: establishes persistent connection to backend via `ApiMachineClient`
    - RPC registration: exposes `spawn-happy-session`, `stop-session`, `requestShutdown` handlers
-   - Heartbeat loop: every 60s (or HAPPY_DAEMON_HEARTBEAT_INTERVAL) checks for version updates and prunes dead sessions
+   - Heartbeat loop: every 60s (or HAPPY_DAEMON_HEARTBEAT_INTERVAL) prunes dead sessions and writes state
 5. Awaits shutdown promise which resolves when:
    - OS signal received (SIGINT/SIGTERM)
    - HTTP `/stop` endpoint called
@@ -37,18 +36,6 @@ Control Flow:
    - Deletes daemon.state.json
    - Releases lock file
    - Exits process
-
-### Version Mismatch Auto-Update
-
-The daemon detects when `npm upgrade happy-coder` occurs:
-1. Heartbeat reads package.json from disk
-2. Compares `JSON.parse(package.json).version` with compiled `configuration.currentCliVersion`
-3. If mismatch detected:
-   - Spawns new daemon via `spawnHappyCLI(['daemon', 'start'])`
-   - Hangs and waits to be killed
-4. New daemon starts, sees old daemon.state.json version != its compiled version
-5. New daemon calls `stopDaemon()` which tries HTTP `/stop`, falls back to SIGKILL
-6. New daemon takes over
 
 ### Stopping the Daemon
 
@@ -154,10 +141,8 @@ Local HTTP server (127.0.0.1 only) provides:
 
 ## 7. Integration Testing Challenges
 
-Version mismatch test simulates npm upgrade:
-- Test modifies package.json, rebuilds with new version
-- Daemon's compiled version != package.json on disk
-- Critical timing: heartbeat interval must exceed rebuild time
+The integration suite (`daemon.integration.test.ts`) is gated on the server being reachable (`describe.skipIf`).
+- Tests rebuild the CLI with `yarn build`; the heartbeat interval must exceed rebuild time where timing matters
 - pkgroll doesn't update compiled imports, must use full yarn build
 
 # Improvements
