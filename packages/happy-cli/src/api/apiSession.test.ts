@@ -1528,3 +1528,84 @@ describe('session presence', () => {
         }
     });
 });
+
+describe('metadata without the server channel', () => {
+    let socketHandlers: SocketHandlers;
+    let mockSocket: any;
+    let session: ReturnType<typeof makeSession>;
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        socketHandlers = {};
+        session = makeSession();
+        mockAxiosGet.mockResolvedValue(makeEmptyFetchResponse());
+
+        mockSocket = {
+            connected: false,
+            connect: vi.fn(),
+            on: vi.fn((event: string, handler: SocketHandler) => {
+                if (!socketHandlers[event]) {
+                    socketHandlers[event] = [];
+                }
+                socketHandlers[event].push(handler);
+            }),
+            off: vi.fn(),
+            emit: vi.fn(),
+            emitWithAck: vi.fn(async () => ({ result: 'error' })),
+            volatile: {
+                emit: vi.fn()
+            },
+            close: vi.fn()
+        };
+
+        mockIo.mockReturnValue(mockSocket);
+    });
+
+    it('applies and mirrors a write while the server is unreachable', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        mockForwardToDaemon.mockClear();
+
+        await client.updateMetadata((metadata) => ({ ...metadata, currentModelCode: 'claude-sonnet-5-5' }));
+
+        // The session's own view moves at once; no channel was asked first.
+        expect(client.getMetadata()?.currentModelCode).toBe('claude-sonnet-5-5');
+
+        // And the daemon has it, at the version the server last acknowledged.
+        const mirror = mockForwardToDaemon.mock.calls.find(([event]) => event.t === 'update-session')?.[0];
+        expect(mirror).toMatchObject({ t: 'update-session', id: 'test-session-id' });
+        expect(mirror.metadata.version).toBe(0);
+        const mirrored = decrypt(
+            session.encryptionKey,
+            session.encryptionVariant,
+            decodeBase64(mirror.metadata.value)
+        );
+        expect(mirrored.currentModelCode).toBe('claude-sonnet-5-5');
+    });
+
+    it('mirrors the acknowledged version once the background write lands', async () => {
+        mockSocket.connected = true;
+        const acknowledged = { ...session.metadata, currentModelCode: 'acknowledged' };
+        const acknowledgedCiphertext = encryptContent(session, acknowledged);
+        mockSocket.emitWithAck.mockImplementation(async (event: string) => {
+            if (event === 'update-metadata') {
+                return { result: 'success', version: 7, metadata: acknowledgedCiphertext };
+            }
+            return { result: 'error' };
+        });
+
+        const client = new ApiSessionClient('fake-token', session);
+        mockForwardToDaemon.mockClear();
+
+        await client.updateMetadata((metadata) => ({ ...metadata, currentModelCode: 'acknowledged' }));
+
+        await waitForCheck(() => {
+            expect(mockForwardToDaemon).toHaveBeenCalledWith(expect.objectContaining({
+                t: 'update-session',
+                id: 'test-session-id',
+                metadata: expect.objectContaining({ version: 7 }),
+            }));
+        });
+        expect((client as any).metadataVersion).toBe(7);
+        expect(client.getMetadata()?.currentModelCode).toBe('acknowledged');
+    });
+});

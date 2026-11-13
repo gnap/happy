@@ -21,19 +21,26 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"   # packages/happy-cli — what pro
 
 AGENT="/Users/$TARGET_USER/Library/LaunchAgents/com.happy-cli.daemon.plist"
 DAEMON="/Library/LaunchDaemons/com.happy-cli.daemon.plist"
-GENERATED="/tmp/com.happy-cli.daemon.generated.plist"
+# mktemp, not fixed names: a previous run as root leaves root-owned files that this one
+# (as the user) cannot overwrite.
+GENERATED="$(mktemp /tmp/com.happy-cli.generated.XXXXXX)"
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
 
-if [ ! -f "$AGENT" ]; then
-  echo "No agent plist at $AGENT — nothing to convert. Install the agent first (bin/happy.mjs daemon start)." >&2
+# Re-runnable: the first run moves the agent aside, so a second run has only the installed daemon
+# plist to work from. It carries the same keys the transform touches (user, group, env), so
+# regenerating from it is idempotent — which is what a redeploy after a code change needs.
+SOURCE="$AGENT"
+[ -f "$SOURCE" ] || SOURCE="$DAEMON"
+if [ ! -f "$SOURCE" ]; then
+  echo "Neither $AGENT nor $DAEMON exists — install the agent first (bin/happy.mjs daemon start)." >&2
   exit 1
 fi
 
-echo "1/4 generating the daemon plist from $AGENT"
-AGENT_JSON="/tmp/com.happy-cli.agent.json"
-GENERATED_JSON="/tmp/com.happy-cli.daemon.json"
-plutil -convert json -o "$AGENT_JSON" "$AGENT"
+echo "1/4 generating the daemon plist from $SOURCE"
+AGENT_JSON="$(mktemp /tmp/com.happy-cli.agent.XXXXXX)"
+GENERATED_JSON="$(mktemp /tmp/com.happy-cli.daemon.XXXXXX)"
+plutil -convert json -o "$AGENT_JSON" "$SOURCE"
 
 HAPPY_DAEMON_USER="$TARGET_USER" HAPPY_DAEMON_GROUP="$TARGET_GROUP" \
 HAPPY_PROJECT_ROOT="$PROJECT_ROOT" python3 - "$AGENT_JSON" "$GENERATED_JSON" <<'PY'
@@ -46,6 +53,9 @@ plist = json.load(open(src))
 # sessions it spawns would write root-owned files into the user's worktrees.
 plist['UserName'] = os.environ['HAPPY_DAEMON_USER']
 plist['GroupName'] = os.environ['HAPPY_DAEMON_GROUP']
+# A daemon restart must not take its sessions with it. `detached: true` already separates
+# them into their own process group; this stops launchd from reaping that group anyway.
+plist['AbandonProcessGroup'] = True
 # It spawns sessions and should not be throttled for doing so.
 plist['ProcessType'] = 'Interactive'
 plist['ThrottleInterval'] = 10
@@ -73,7 +83,11 @@ fi
 
 echo "2/4 removing the agent (a daemon and an agent with one label would fight)"
 launchctl bootout "gui/$TARGET_UID/com.happy-cli.daemon" 2>/dev/null || true
-mv "$AGENT" "$AGENT.disabled"
+if [ -f "$AGENT" ]; then
+  mv "$AGENT" "$AGENT.disabled"
+else
+  echo "  agent already removed"
+fi
 
 echo "3/4 installing and starting the daemon"
 install -m 644 -o root -g wheel "$GENERATED" "$DAEMON"

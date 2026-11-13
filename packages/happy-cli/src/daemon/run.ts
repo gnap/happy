@@ -13,7 +13,6 @@ import { logger } from '@/ui/logger';
 import { authAndSetupMachineIfNeeded } from '@/ui/auth';
 import { configuration } from '@/configuration';
 import { startCaffeinate, stopCaffeinate } from '@/utils/caffeinate';
-import packageJson from '../../package.json';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { getHappyCliLaunchSpec, spawnHappyCLI } from '@/utils/spawnHappyCLI';
 import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquireDaemonLock, releaseDaemonLock, readSettings, validateProfileForAgent, getProfileEnvironmentVariables, SandboxConfigSchema, PersistedSession, migrateLegacySessionState } from '@/persistence';
@@ -52,6 +51,7 @@ import { decodeBase64, encodeBase64, libsodiumEncryptForPublicKey } from '@/api/
 import { startLanDiscovery, type LanDiscoveryHandle } from './lanDiscovery';
 import { ENDPOINT_PROTOCOL_VERSION, startEndpointPublisher, type EndpointPublisherHandle, type LanEndpoint } from './lanEndpoints';
 import { startRelayClient, type RelayClientHandle } from './relay/relayClient';
+import { directoryRows, type DirectorySession } from './relay/directory';
 import { buildSessionScopeUnitName, resolveSessionScopeMode, scopeUnitFromProcCgroup, signalSession, spawnHappyCLIInSessionScope } from './linux/sessionScope';
 
 /** Time to wait for a spawned session to report via /session-started webhook before failing the spawn (Cursor cold start can exceed 30s). */
@@ -2160,6 +2160,16 @@ export async function startDaemon(): Promise<void> {
           return summaries;
         };
 
+        /**
+         * The roster as the relay's directory carries it — the four fields it serves, and nothing
+         * else. See `daemon/relay/directory.ts` for why the narrowing happens on this side.
+         *
+         * The LAN's list is deliberately not narrowed the same way: a reader there also gets the
+         * encrypted metadata and the wrapped session key, which is what lets it render a row
+         * without the server.
+         */
+        const sessionDirectory = (): DirectorySession[] => directoryRows(sessionSummaries());
+
         // The sidecar control channel. Started here because this block already establishes the
         // daemon's local identity (account key, home directory); the sidecar itself is not tied to
         // the LAN, and this moves out of this block once the client half exists.
@@ -2596,8 +2606,9 @@ export async function startDaemon(): Promise<void> {
               machineKey: credentials.encryption.machineKey,
               lanPort: started.port,
               // What the relay's directory says about this machine, so an App can list this
-              // machine's sessions without asking it, or holding a connection to it.
-              getSessions: sessionSummaries,
+              // machine's sessions without asking it, or holding a connection to it. Narrowed to
+              // the directory's own fields on this side: see `sessionDirectory`.
+              getSessions: sessionDirectory,
               // And where it can be reached on the LAN, which is the half an App needs when the
               // server is the thing that is missing.
               getReachable: () => {
@@ -2761,7 +2772,7 @@ export async function startDaemon(): Promise<void> {
 
     // Also catch sessions from metadata-only maps that aren't in stoppedSessions
     // This covers the case where daemon was killed before serializing stoppedSessions
-    // (e.g., version self-restart), but metadata maps survived.
+    // (e.g., SIGKILL or OOM), but metadata maps survived.
     {
       let stoppedFallbackCount = 0;
       for (const [id, entry] of Object.entries(sessions)) {
@@ -3087,12 +3098,10 @@ export async function startDaemon(): Promise<void> {
 
     // Every 60 seconds:
     // 1. Prune stale sessions
-    // 2. Check if daemon needs update
-    // 3. If outdated, restart with latest version
-    // 4. Write heartbeat
+    // 2. Write heartbeat
     const heartbeatIntervalMs = parseInt(process.env.HAPPY_DAEMON_HEARTBEAT_INTERVAL || '60000');
     let heartbeatRunning = false
-    const restartOnStaleVersionAndHeartbeat = setInterval(async () => {
+    const heartbeatTimer = setInterval(async () => {
       if (heartbeatRunning) {
         return;
       }
@@ -3130,37 +3139,6 @@ export async function startDaemon(): Promise<void> {
         }
       }
 
-      // Check if daemon needs update
-      // DISABLED: the version-on-disk check kills all active sessions
-      // when package.json changes during dev.
-      const projectVersion = JSON.parse(readFileSync(join(projectPath(), 'package.json'), 'utf-8')).version;
-      if (false && projectVersion !== configuration.currentCliVersion) {
-        logger.debug('[DAEMON RUN] Daemon is outdated, triggering self-restart with latest version, clearing heartbeat interval');
-
-        clearInterval(restartOnStaleVersionAndHeartbeat);
-
-        // Spawn new daemon through the CLI
-        // We do not need to clean ourselves up - we will be killed by
-        // the CLI start command.
-        // 1. It will first check if daemon is running (yes in this case)
-        // 2. If the version is stale (it will read daemon.state.json file and check startedWithCliVersion) & compare it to its own version
-        // 3. Next it will start a new daemon with the latest version with daemon-sync :D
-        // Done!
-        try {
-          spawnHappyCLI(['daemon', 'start'], {
-            detached: true,
-            stdio: 'ignore'
-          });
-        } catch (error) {
-          logger.debug('[DAEMON RUN] Failed to spawn new daemon, this is quite likely to happen during integration tests as we are cleaning out dist/ directory', error);
-        }
-
-        // So we can just hang forever
-        logger.debug('[DAEMON RUN] Hanging for a bit - waiting for CLI to kill us because we are running outdated version of the code');
-        await new Promise(resolve => setTimeout(resolve, 10_000));
-        process.exit(0);
-      }
-
       // Before wrecklessly overriting the daemon state file, we should check if we are the ones who own it
       // Race condition is possible, but thats okay for the time being :D
       const daemonState = await readDaemonState();
@@ -3189,8 +3167,8 @@ export async function startDaemon(): Promise<void> {
       logger.debug(`[DAEMON RUN] Starting proper cleanup (source: ${source}, errorMessage: ${errorMessage})...`);
 
       // Clear health check interval
-      if (restartOnStaleVersionAndHeartbeat) {
-        clearInterval(restartOnStaleVersionAndHeartbeat);
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
         logger.debug('[DAEMON RUN] Health check interval cleared');
       }
 

@@ -15,7 +15,7 @@ import { getToolName } from "./getToolName";
 import { EnhancedMode, PermissionMode } from "../loop";
 import { getToolDescriptor } from "./getToolDescriptor";
 import { delay } from "@/utils/time";
-import { mapToClaudeMode } from "./permissionMode";
+import { ClaudeSdkPermissionMode, mapToClaudeMode } from "./permissionMode";
 import { createEnvelope } from '@slopus/happy-wire';
 
 interface PermissionResponse {
@@ -69,6 +69,78 @@ export class PermissionHandler {
             this.previousMode = this.permissionMode;
         }
         this.permissionMode = mapped;
+        this.settlePendingForMode(mapped);
+    }
+
+    /**
+     * A mode change can make an already-blocked request moot: the same tool
+     * call would have been auto-approved if it started now. Settle those
+     * requests with the new semantics instead of leaving the SDK blocked until
+     * the request is answered by hand or cancelled — the user switched to an
+     * auto-approving mode precisely to stop being asked.
+     *
+     * AskUserQuestion always needs a human answer, so it stays pending.
+     */
+    private settlePendingForMode(mode: ClaudeSdkPermissionMode): void {
+        if (mode !== 'bypassPermissions' && mode !== 'acceptEdits') {
+            return;
+        }
+
+        const settled: string[] = [];
+        for (const [id, pending] of this.pendingRequests) {
+            if (pending.toolName === 'AskUserQuestion' || pending.toolName === 'ask_user_question') {
+                continue;
+            }
+            if (mode === 'acceptEdits' && !getToolDescriptor(pending.toolName).edit) {
+                continue;
+            }
+
+            this.pendingRequests.delete(id);
+            pending.resolve({
+                behavior: 'allow',
+                updatedInput: (pending.input as Record<string, unknown>) || {},
+            });
+            // Close the lifecycle in the message stream as well, so replay
+            // readers drop the prompt exactly like they do after a manual answer.
+            this.session.client.sendSessionProtocolMessage(
+                createEnvelope('agent', {
+                    t: 'permission-result',
+                    call: id,
+                    status: 'approved',
+                    mode,
+                    reason: 'Auto-approved by permission mode change',
+                }),
+            );
+            settled.push(id);
+        }
+
+        if (settled.length === 0) {
+            return;
+        }
+
+        this.session.client.updateAgentState((currentState) => {
+            const requests = { ...(currentState.requests ?? {}) };
+            const completed = { ...currentState.completedRequests };
+            for (const id of settled) {
+                const request = requests[id];
+                if (!request) continue;
+                delete requests[id];
+                completed[id] = {
+                    ...request,
+                    completedAt: Date.now(),
+                    status: 'approved' as const,
+                    reason: 'Auto-approved by permission mode change',
+                    mode,
+                };
+            }
+            return {
+                ...currentState,
+                requests,
+                completedRequests: Object.fromEntries(Object.entries(completed).slice(-20)),
+            };
+        });
+
+        logger.debug(`Auto-approved ${settled.length} pending permission request(s) after mode change to ${mode}`);
     }
 
     /**
@@ -211,6 +283,16 @@ export class PermissionHandler {
                     delete requests[id];
                     return { ...currentState, requests };
                 });
+                // Close the lifecycle in the stream too: a request that dies unanswered must not
+                // read as pending forever on a channel that never saw the agentState cleanup.
+                this.session.client.sendSessionProtocolMessage(
+                    createEnvelope('agent', {
+                        t: 'permission-result',
+                        call: id,
+                        status: 'canceled',
+                        reason: 'Permission request aborted',
+                    }),
+                );
                 logger.debug(`Permission request aborted for tool call ${id}`);
                 reject(new Error('Permission request aborted'));
             };
@@ -229,6 +311,19 @@ export class PermissionHandler {
                 toolName,
                 input
             });
+
+            // The request enters the replayable message stream the moment it blocks the SDK,
+            // not only the agentState mirror. The log is what every channel keeps replicating
+            // while the server is unreachable, so a question asked then is still answerable;
+            // agentState below stays as-is for readers that have not learned this event.
+            this.session.client.sendSessionProtocolMessage(
+                createEnvelope('agent', {
+                    t: 'permission-request',
+                    call: id,
+                    tool: toolName,
+                    ...(input !== undefined ? { input } : {}),
+                }),
+            );
 
             // Trigger callback to send delayed messages immediately
             if (this.onPermissionRequestCallback) {
