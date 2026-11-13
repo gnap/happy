@@ -205,6 +205,46 @@ describe('what the drivers say about a machine', () => {
         expect(machineOf({}, 'relay')).toBeNull();
     });
 
+    it('stops reaching a carried machine whose relay stream this device could not open', () => {
+        // The relay really is holding the machine; the directory is not wrong. But a daemon
+        // channel's send rides the per-machine stream, and this device has just failed to open it —
+        // so the channel cannot take the message, and saying it can is what leaves the outbox
+        // retrying the relay while the server is idle. An open in flight is not a failure yet.
+        const carried = {
+            relayDirectory: { 'machine-1': { at: 0, sessions: [] } },
+            relayEndpoints: { 'machine-1': { baseUrl: RELAY, source: 'published' } },
+            relayHubConnected: true,
+        };
+        expect(machineOf(carried, 'relay')).toEqual({ reachable: true, alive: true });
+        expect(machineOf({ ...carried, daemonSockets: { 'machine-1:relay': socket('relay', 'opening') } }, 'relay'))
+            .toEqual({ reachable: true, alive: true });
+        expect(machineOf({ ...carried, daemonSockets: { 'machine-1:relay': socket('relay', 'retrying') } }, 'relay'))
+            .toEqual({ reachable: false, alive: false });
+    });
+
+    it('hands a machine with a retrying relay stream to the server instead', () => {
+        // The decision itself: the resolver is what a send asks, and the answer must change while
+        // the outbox still has the message. The channel returns once the stream does, because the
+        // health here is the connection manager's own phase rather than a second clock.
+        const carried = {
+            relayDirectory: { 'machine-1': { at: 0, sessions: [] } },
+            relayEndpoints: { 'machine-1': { baseUrl: RELAY, source: 'published' } },
+            relayHubConnected: true,
+        };
+        const relayAvailable = (over: Partial<ChannelState>) =>
+            channelAvailability({
+                drivers: channelDrivers(state({ ...carried, ...over }), ['relay', 'server']),
+                machineId: 'machine-1',
+                now: 0,
+            }).relay;
+        expect(relayAvailable({})).toBe(true);
+        expect(relayAvailable({ daemonSockets: { 'machine-1:relay': socket('relay', 'retrying') } })).toBe(false);
+        expect(pickChannel(['relay', 'server'], {
+            relay: relayAvailable({ daemonSockets: { 'machine-1:relay': socket('relay', 'retrying') } }),
+            server: true,
+        })).toEqual({ channel: 'server', reachable: true });
+    });
+
     it('separates what the server can route from what it knows about the machine', () => {
         // Reachable is the App's own connection being usable: the server holds every session it has
         // been told about, so a machine it has never heard of is still routable through it. Alive
