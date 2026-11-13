@@ -103,6 +103,9 @@ export default function RootLayout() {
                     headerShown: true,
                     headerTitle: t('common.fileViewer'),
                     headerBackTitle: t('common.files'),
+                    // A preview page can own horizontal drags (a chart pans); the stack's
+                    // edge-swipe-back would take some of them. The back button remains.
+                    gestureEnabled: false,
                 }}
             />
             <Stack.Screen
