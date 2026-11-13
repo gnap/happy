@@ -130,6 +130,27 @@ describe('RelayHub', () => {
         expect(socket.frames()[1]).toMatchObject({ id: 2, tag: 'bbbb' });
     });
 
+    it('writes the probe as soon as the stream is routed, so a silent peer still opens it', () => {
+        // A daemon's LAN socket sends its snapshot on upgrade only when it has one: a machine
+        // running no sessions answers an upgrade with nothing at all. Waiting for its first frame
+        // therefore read a perfectly healthy machine as a relay that did not answer. The probe is
+        // the LAN protocol's own question, and the pong is the stream being open.
+        const { hub, socket } = hubWith();
+        socket.accept();
+        const stream = hub.stream('aaaa', '/lan/socket?nonce=n', JSON.stringify({ event: 'ping' })) as SocketLike;
+        expect(socket.frames()).toEqual([
+            { t: 'open', id: 1, tag: 'aaaa', path: '/lan/socket?nonce=n' },
+            { t: 'msg', id: 1, data: JSON.stringify({ event: 'ping' }) },
+        ]);
+        expect(stream.readyState).toBe(0);
+
+        const open = vi.fn();
+        stream.onopen = open;
+        socket.deliver({ t: 'msg', id: 1, data: JSON.stringify({ event: 'pong' }) });
+        expect(open).toHaveBeenCalledTimes(1);
+        expect(stream.readyState).toBe(1);
+    });
+
     it('hands a stream the frames the relay routes to it, and only those', () => {
         const { hub, socket } = hubWith();
         socket.accept();

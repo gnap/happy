@@ -236,11 +236,26 @@ describe('relay', () => {
         expect(answer.machines.find((m: any) => m.tag === d.tag).reachable).toEqual(reachable);
     });
 
-    it('answers for every machine and the sessions they published', async () => {
+    it('answers for every machine, with the session roster narrowed to what a directory is for', async () => {
         relay = startRelay({ port: 0 });
         const d = await connectDaemon(relay.port);
         await until(() => d.frames.some((f) => f.t === 'ok'));
-        const sessions = [{ happySessionId: 's1', directory: '/work', agent: 'claude', startedBy: 'daemon', isAlive: true }];
+        // What a daemon actually publishes: a whole summary, metadata and agent state included,
+        // because the same list serves a LAN reader that opens a session's name from it.
+        const sessions = [{
+            happySessionId: 's1',
+            tag: 't1',
+            directory: '/work',
+            agent: 'claude',
+            startedBy: 'daemon',
+            isAlive: true,
+            metadataVersion: 3,
+            metadata: 'x'.repeat(4096),
+            agentStateVersion: 2,
+            agentState: 'y'.repeat(4096),
+            dataEncryptionKey: 'z'.repeat(1024),
+            origin: 'server',
+        }];
         d.ws.send(JSON.stringify({ t: 'sessions', sessions }));
 
         const hub = await connectHub(relay.port);
@@ -249,7 +264,16 @@ describe('relay', () => {
         const answer = hub.reply('machines').find((f) => f.machines.length === 1);
         // `reachable` rides along in the same entry: the address a machine publishes for itself,
         // which is what an App with no server left needs in order to reach it directly.
-        expect(answer.machines[0]).toEqual({ tag: d.tag, sessions, reachable: null });
+        //
+        // The session rows are the identity and liveness a directory answers — not the encrypted
+        // metadata and agent state, which a read pulls over the session's own channel. Keeping
+        // those here put a megabyte on every hub client's connection each time any machine's list
+        // moved, and a stream's first frame queued behind them is what read as "did not open".
+        expect(answer.machines[0]).toEqual({
+            tag: d.tag,
+            sessions: [{ happySessionId: 's1', tag: 't1', isAlive: true, origin: 'server' }],
+            reachable: null,
+        });
 
         // A machine dialling in is pushed to the client: it is the event the App waits for, and
         // asking for it on a timer is the probing this connection replaces.
@@ -259,6 +283,38 @@ describe('relay', () => {
         await until(() => hub.frames.filter((f) => f.t === 'machines').length > before);
         const latest = hub.frames.filter((f) => f.t === 'machines').at(-1);
         expect(latest.machines.map((m: { tag: string }) => m.tag)).toContain(second.tag);
+    });
+
+    /**
+     * The republishes are not edges.
+     *
+     * Each daemon re-reads its list on a timer and publishes whenever anything in it moved — even a
+     * field the directory does not carry. Broadcasting each one put a burst on the same connection a
+     * stream handshake is waiting on, so a directory that says exactly what was last said is not
+     * sent again.
+     */
+    it('does not push a republished directory that says the same thing', async () => {
+        relay = startRelay({ port: 0 });
+        const d = await connectDaemon(relay.port);
+        await until(() => d.frames.some((f) => f.t === 'ok'));
+        d.ws.send(JSON.stringify({ t: 'sessions', sessions: [{ happySessionId: 's1', isAlive: true, metadata: 'v1' }] }));
+        const hub = await connectHub(relay.port);
+        // The hub's connect frame is not a broadcast; the first republish after it is.
+        d.ws.send(JSON.stringify({ t: 'sessions', sessions: [{ happySessionId: 's1', isAlive: true, metadata: 'v1' }] }));
+        await until(() => hub.frames.filter((f) => f.t === 'machines').length === 1);
+        const afterFirst = hub.frames.filter((f) => f.t === 'machines').length;
+
+        // Only a field the directory does not carry changed: nothing a client can tell apart.
+        d.ws.send(JSON.stringify({ t: 'sessions', sessions: [{ happySessionId: 's1', isAlive: true, metadata: 'v2' }] }));
+        await Bun.sleep(250);
+        expect(hub.frames.filter((f) => f.t === 'machines').length).toBe(afterFirst);
+
+        // A fact it does carry still goes out on the next tick.
+        d.ws.send(JSON.stringify({ t: 'sessions', sessions: [{ happySessionId: 's1', isAlive: false, metadata: 'v2' }] }));
+        await until(() => hub.frames.filter((f) => f.t === 'machines').length === afterFirst + 1);
+        expect(hub.frames.filter((f) => f.t === 'machines').at(-1).machines[0].sessions).toEqual([
+            { happySessionId: 's1', isAlive: false },
+        ]);
     });
 
     it('proxies an http request to the machine the client names', async () => {
