@@ -112,11 +112,14 @@ const LISTING_COMMAND_TIMEOUT_MS = 15_000;
 const execFileAsync = promisify(execFile);
 
 /**
- * A command's stdout, or '' when it failed.
+ * A command's stdout, or '' when it failed without writing any.
  *
  * A listing is best-effort by nature — a directory that is not a repository, a git that is not
  * installed, a file that vanished mid-crawl — and none of those is worth failing the request over.
- * The caller still gets the parts that worked.
+ * The caller still gets the parts that worked, so a non-zero exit is not a reason to discard what
+ * the command did print: `rg --files --follow` exits 2 when *any* path it reached errored (a
+ * dangling symlink is enough) and still writes every path it saw. Treating that as "no files"
+ * turned a tree with thousands of files into an empty project.
  */
 async function captureCommand(command: string, args: string[], cwd: string): Promise<string> {
   try {
@@ -126,8 +129,10 @@ async function captureCommand(command: string, args: string[], cwd: string): Pro
       maxBuffer: 32 * 1024 * 1024,
     });
     return stdout;
-  } catch {
-    return '';
+  } catch (error) {
+    // execFile rejects on a non-zero exit but the error still carries what was written.
+    const partial = (error as { stdout?: unknown }).stdout;
+    return typeof partial === 'string' ? partial : '';
   }
 }
 
@@ -2462,10 +2467,12 @@ export async function startDaemon(): Promise<void> {
                 captureCommand('git', ['status', '--porcelain=v2', '--branch', '--untracked-files=all'], directory),
                 captureCommand('rg', ['--files', '--follow'], directory),
               ]);
+              // Same rule as the system binary: the launcher reports what rg wrote even when rg
+              // reported a partial failure with exit 2. Exit 1 (no matches) writes nothing.
               const crawl = directCrawl.length > 0
                 ? directCrawl
                 : await runRipgrep(['--files', '--follow'], { cwd: directory })
-                  .then((result) => (result.exitCode === 0 ? result.stdout : ''))
+                  .then((result) => result.stdout)
                   .catch(() => '');
               const gitRepo = insideWorkTree.trim() === 'true';
               const gitStatus = gitRepo ? status : '';
