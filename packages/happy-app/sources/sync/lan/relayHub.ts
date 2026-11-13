@@ -22,6 +22,7 @@
  * request that reaches a daemon is authenticated by that daemon exactly as it would be on the LAN.
  * Nothing here is a credential.
  */
+import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
 
 /** A machine the relay is holding, and what it published about itself. */
 export type HubMachine = {
@@ -101,6 +102,17 @@ const RELAY_HUB_OPEN_TIMEOUT_MS = 15_000;
 
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
+/**
+ * How long a burst of "the directory moved" nudges is gathered into one read.
+ *
+ * The relay coalesces its own broadcasts, so this is only the last hop: several changes inside one
+ * turn are one state, and reading it once is the same answer as reading it several times.
+ */
+const DIRECTORY_FETCH_DEBOUNCE_MS = 50;
+/** One directory read, bounded like every other request: a stalled read must fail and retry. */
+const DIRECTORY_READ_TIMEOUT_MS = 5_000;
+/** A read that failed is retried, because the directory is what decides where sessions are read. */
+const DIRECTORY_RETRY_MAX_MS = 15_000;
 
 /**
  * A stream, presented as the socket the LAN channel already knows how to speak.
@@ -236,9 +248,22 @@ export function relayOriginOf(relayBaseUrl: string): string | null {
  */
 export const DEFAULT_RELAY_URL = 'https://47.80.241.214';
 
-/** The relay addresses a machine by tag; this is the one place that turns it into a URL. */
+/**
+ * The relay addresses a machine by tag; this is the one place that turns it into a URL.
+ *
+ * `?dir=http` is this client saying it will read the directory over HTTP. The relay serves the
+ * same directory to clients that do not ask — as a frame on this connection — because a client
+ * that cannot fetch must keep working; asking is how this one stops receiving a state snapshot on
+ * the connection its session streams ride. An older relay ignores the query and sends the
+ * directory anyway, which `RelayHub` still accepts.
+ */
 export function relayHubUrl(relayUrl: string): string {
-    return relayUrl.replace(/\/+$/, '').replace(/^http/, 'ws') + '/client';
+    return relayUrl.replace(/\/+$/, '').replace(/^http/, 'ws') + '/client?dir=http';
+}
+
+/** Where the directory is read from, given the hub URL this App connects to. */
+export function relayMachinesUrl(hubUrl: string): string {
+    return hubUrl.replace(/\?.*$/, '').replace(/^ws/, 'http').replace(/\/client$/, '') + '/machines';
 }
 
 export class RelayHub {
@@ -254,11 +279,25 @@ export class RelayHub {
     private stopped = false;
     private beatTimer: ReturnType<typeof setTimeout> | null = null;
     private awaitingBeatSince: number | null = null;
+    /** Where the directory is read from when the relay serves it over HTTP. */
+    private readonly machinesUrl: string;
+    /** Whether this connection's relay answered with an etag, i.e. it serves the directory over HTTP. */
+    private directoryOverHttp = false;
+    /** The version of the directory this client holds; null when it has to read the body. */
+    private lastEtag: string | null = null;
+    private directoryRequestTimer: ReturnType<typeof setTimeout> | null = null;
+    private directoryRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    private directoryFetching = false;
+    /** A nudge that arrived while a read was in flight; the state it named is not in that answer. */
+    private directoryPending = false;
+    private directoryBackoff = RECONNECT_MIN_MS;
 
     constructor(
         private readonly url: string,
         private readonly log: (message: string) => void = () => {},
-    ) {}
+    ) {
+        this.machinesUrl = relayMachinesUrl(url);
+    }
 
     isConnected(): boolean {
         return this.connected;
@@ -323,7 +362,7 @@ export class RelayHub {
             if (typeof event.data !== 'string') {
                 return;
             }
-            let frame: { t?: string; id?: number; data?: string; machines?: HubMachine[]; code?: number; reason?: string };
+            let frame: { t?: string; id?: number; data?: string; machines?: HubMachine[]; etag?: string; code?: number; reason?: string };
             try {
                 frame = JSON.parse(event.data) as typeof frame;
             } catch {
@@ -343,8 +382,29 @@ export class RelayHub {
                     }
                     this.beatLoop();
                 }
+                if (frame.t === 'ok' && typeof frame.etag === 'string') {
+                    // The relay serves the directory over HTTP. Its etag is only a version: if this
+                    // client holds that version, the copy it has is still the answer and no body
+                    // needs to move. With nothing held, the etag is cleared so the read cannot come
+                    // back 304 to a client that has nothing to keep.
+                    this.directoryOverHttp = true;
+                    if (frame.etag !== this.lastEtag) {
+                        this.requestDirectory();
+                    } else if (this.known.length === 0) {
+                        this.lastEtag = null;
+                        this.requestDirectory();
+                    }
+                }
                 if (frame.machines) {
                     this.setMachines(frame.machines);
+                }
+                return;
+            }
+            if (frame.t === 'dir') {
+                // A machine came or went, or a roster changed. The frame carries only the new
+                // version; the directory itself is a read, so it does not queue behind streams.
+                if (typeof frame.etag === 'string' && frame.etag !== this.lastEtag) {
+                    this.requestDirectory();
                 }
                 return;
             }
@@ -372,6 +432,7 @@ export class RelayHub {
                 this.beatTimer = null;
             }
             this.awaitingBeatSince = null;
+            this.endDirectoryReads();
             if (this.connected) {
                 for (const listener of this.statusListeners) {
                     listener(false);
@@ -408,6 +469,9 @@ export class RelayHub {
         if (!socket || !this.connected) {
             return;
         }
+        // The directory may have moved while the App was suspended, and the nudge for it is exactly
+        // the kind of frame a suspended socket does not keep. Reading it again costs a 304.
+        this.requestDirectory();
         if (this.awaitingBeatSince !== null) {
             // The beat in flight was suspended with the App; its pong is not coming.
             try { socket.close(); } catch { /* gone */ }
@@ -477,6 +541,7 @@ export class RelayHub {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
         }
+        this.endDirectoryReads();
         try { this.socket?.close(); } catch { /* gone */ }
         this.socket = null;
         if (this.connected) {
@@ -519,6 +584,107 @@ export class RelayHub {
             this.beatLoop();
         }, HUB_BEAT_INTERVAL_MS);
         (this.beatTimer as unknown as { unref?: () => void }).unref?.();
+    }
+
+    /**
+     * Asks for the current directory after a burst of nudges.
+     *
+     * The read itself is HTTP because the directory is state: it has one complete answer, it can be
+     * revalidated with an etag, and it does not belong in the ordered connection the session
+     * streams ride — a snapshot queued there delays every frame behind it.
+     */
+    private requestDirectory(): void {
+        if (this.stopped || !this.directoryOverHttp || this.directoryRequestTimer) {
+            return;
+        }
+        this.directoryRequestTimer = setTimeout(() => {
+            this.directoryRequestTimer = null;
+            void this.fetchDirectory();
+        }, DIRECTORY_FETCH_DEBOUNCE_MS);
+        (this.directoryRequestTimer as unknown as { unref?: () => void }).unref?.();
+    }
+
+    private async fetchDirectory(): Promise<void> {
+        if (this.stopped || !this.directoryOverHttp) {
+            return;
+        }
+        if (this.directoryFetching) {
+            // A second read while one is in flight would answer with the same state; remembering
+            // the nudge is enough, and the answer is fetched again once this one lands.
+            this.directoryPending = true;
+            return;
+        }
+        this.directoryFetching = true;
+        try {
+            const headers: Record<string, string> = this.lastEtag ? { 'if-none-match': this.lastEtag } : {};
+            const response = await fetchWithTimeout(this.machinesUrl, { headers }, DIRECTORY_READ_TIMEOUT_MS);
+            const etag = response.headers.get('etag');
+            if (etag) {
+                this.lastEtag = etag;
+            }
+            if (response.status === 304) {
+                // The version this client holds is still current: nothing to apply.
+                this.directoryReadOk();
+                return;
+            }
+            if (!response.ok) {
+                throw new Error(`the relay answered ${response.status}`);
+            }
+            const body = await response.json() as { machines?: HubMachine[] };
+            if (Array.isArray(body.machines)) {
+                this.setMachines(body.machines);
+            }
+            this.directoryReadOk();
+        } catch (error) {
+            if (this.stopped) {
+                return;
+            }
+            // Keep the copy this client has: a failed read says nothing about what the relay holds,
+            // and the last answer is still the best available. Retried, because this directory is
+            // what decides which channel a session is read from.
+            this.log(`🔁 relay directory read failed: ${String(error)}`);
+            this.scheduleDirectoryRetry();
+        } finally {
+            this.directoryFetching = false;
+            if (this.directoryPending) {
+                this.directoryPending = false;
+                this.requestDirectory();
+            }
+        }
+    }
+
+    private scheduleDirectoryRetry(): void {
+        if (this.stopped || !this.directoryOverHttp || this.directoryRetryTimer) {
+            return;
+        }
+        const delay = this.directoryBackoff;
+        this.directoryBackoff = Math.min(this.directoryBackoff * 2, DIRECTORY_RETRY_MAX_MS);
+        this.directoryRetryTimer = setTimeout(() => {
+            this.directoryRetryTimer = null;
+            void this.fetchDirectory();
+        }, delay);
+        (this.directoryRetryTimer as unknown as { unref?: () => void }).unref?.();
+    }
+
+    private directoryReadOk(): void {
+        this.directoryBackoff = RECONNECT_MIN_MS;
+        if (this.directoryRetryTimer) {
+            clearTimeout(this.directoryRetryTimer);
+            this.directoryRetryTimer = null;
+        }
+    }
+
+    /** A connection ended: its directory mode and any read it scheduled do not outlive it. */
+    private endDirectoryReads(): void {
+        if (this.directoryRequestTimer) {
+            clearTimeout(this.directoryRequestTimer);
+            this.directoryRequestTimer = null;
+        }
+        if (this.directoryRetryTimer) {
+            clearTimeout(this.directoryRetryTimer);
+            this.directoryRetryTimer = null;
+        }
+        this.directoryOverHttp = false;
     }
 
     private setMachines(machines: HubMachine[]): void {

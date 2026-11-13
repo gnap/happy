@@ -132,6 +132,14 @@ type SocketData =
           ip: string;
           /** Every stream this client has open, by the id *it* chose: where its frames go. */
           streams: Map<number, { tag: string; daemonId: number }>;
+          /**
+           * This client reads the directory over HTTP; the hub only tells it when that changed.
+           *
+           * A client says so by connecting to `/client?dir=http`. Older clients do not, and keep
+           * receiving the directory as a frame — the hub is one connection for both shapes, and a
+           * client that cannot ask must not be handed a protocol it does not speak.
+           */
+          directory?: 'http';
       };
 
 export function tagOfPublicKey(pub: Uint8Array): string {
@@ -220,9 +228,36 @@ export function startRelay(options: RelayOptions): RelayHandle {
             if (url.pathname === '/health') {
                 return json(200, { ok: true, daemons: daemons.size });
             }
+            /**
+             * The directory, as a plain resource.
+             *
+             * It is state, not an event: an idempotent read that a client may repeat whenever it
+             * likes, whose unchanged answer costs a 304. The hub still pushes the directory to
+             * clients that cannot ask, but a client that can is not made to receive it on the same
+             * ordered connection its session streams ride — a snapshot queued there delays the
+             * frames behind it, which is a delay a read would never impose.
+             */
+            if (url.pathname === '/machines') {
+                if (limited(ip)) return json(429, { error: 'rate' });
+                if (req.method !== 'GET' && req.method !== 'HEAD') return json(405, { error: 'method' });
+                const snapshot = directorySnapshot();
+                const headers = {
+                    'content-type': 'application/json',
+                    // Revalidated, not cached blindly: the etag is the one fact a client needs to
+                    // skip a body it already has.
+                    'cache-control': 'no-cache',
+                    etag: snapshot.etag,
+                    ...CORS,
+                };
+                if (req.headers.get('if-none-match') === snapshot.etag) {
+                    return new Response(null, { status: 304, headers });
+                }
+                return new Response(req.method === 'HEAD' ? null : snapshot.body, { status: 200, headers });
+            }
             if (url.pathname === '/client') {
                 if (limited(ip)) return json(429, { error: 'rate' });
-                const ok = srv.upgrade(req, { data: { kind: 'hub', ip, streams: new Map() } as SocketData });
+                const directory = url.searchParams.get('dir') === 'http' ? 'http' as const : undefined;
+                const ok = srv.upgrade(req, { data: { kind: 'hub', ip, streams: new Map(), directory } as SocketData });
                 return ok ? undefined : json(400, { error: 'upgrade' });
             }
             if (url.pathname === '/daemon') {
@@ -292,7 +327,15 @@ export function startRelay(options: RelayOptions): RelayHandle {
                     // request that reaches them — so there is nothing to prove here and nothing to
                     // wait for. The directory comes first because it is what a client is for.
                     hubClients.add(ws);
-                    ws.send(JSON.stringify({ t: 'ok', machines: directory() }));
+                    const snapshot = directorySnapshot();
+                    if (data.directory === 'http') {
+                        // The etag is the whole handshake: the client fetches the directory over
+                        // HTTP and needs neither a copy here nor a reason to fetch one it already
+                        // has.
+                        ws.send(JSON.stringify({ t: 'ok', etag: snapshot.etag }));
+                    } else {
+                        ws.send(JSON.stringify({ t: 'ok', machines: snapshot.machines, etag: snapshot.etag }));
+                    }
                     return;
                 }
                 const daemon = daemons.get(data.tag);
@@ -460,6 +503,24 @@ export function startRelay(options: RelayOptions): RelayHandle {
     }
 
     /**
+     * The directory as one value: what it says, and the fingerprint that says whether it says the
+     * same thing as before.
+     *
+     * HTTP and the hub serve the same value, so the etag is computed from the HTTP body and reused
+     * on the hub. That is what lets a client that reads the directory over HTTP act on a nudge
+     * without ever receiving a second copy of something it already has.
+     */
+    function directorySnapshot(): {
+        machines: { tag: string; sessions: DirectorySession[]; reachable: unknown | null }[];
+        body: string;
+        etag: string;
+    } {
+        const machines = directory();
+        const body = JSON.stringify({ machines });
+        return { machines, body, etag: `"${createHash('sha256').update(body).digest('hex').slice(0, 16)}"` };
+    }
+
+    /**
      * Tells every hub client the directory changed.
      *
      * Pushed rather than left to be polled: a machine coming online is exactly the event an App
@@ -478,11 +539,19 @@ export function startRelay(options: RelayOptions): RelayHandle {
         directoryBroadcastTimer = setTimeout(() => {
             directoryBroadcastTimer = null;
             if (hubClients.size === 0) return;
-            const frame = JSON.stringify({ t: 'machines', machines: directory() });
+            const snapshot = directorySnapshot();
+            const frame = JSON.stringify({ t: 'machines', machines: snapshot.machines });
             if (frame === lastDirectoryFrame) return;
             lastDirectoryFrame = frame;
             for (const client of hubClients) {
-                try { client.send(frame); } catch { /* gone */ }
+                try {
+                    // Two shapes of the same news. A client that reads the directory over HTTP is
+                    // told only that it moved; one that cannot ask gets the directory itself. The
+                    // state is the same either way, and neither client waits on the other's copy.
+                    client.send(client.data?.directory === 'http'
+                        ? JSON.stringify({ t: 'dir', etag: snapshot.etag })
+                        : frame);
+                } catch { /* gone */ }
             }
         }, DIRECTORY_BROADCAST_DELAY_MS);
         (directoryBroadcastTimer as unknown as { unref?: () => void }).unref?.();
