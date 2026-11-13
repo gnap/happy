@@ -439,6 +439,7 @@ export const ru: TranslationStructure = {
         activityGoals: 'Цели',
         activityShell: 'Фоновые команды',
         activityWorkflows: 'Рабочие процессы',
+        activityWakeups: 'Пробуждения',
     },
 
     commandPalette: {

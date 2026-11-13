@@ -8,6 +8,7 @@ export {
     taskTypeOf,
     mergeTask,
     toolTimeoutMs,
+    scheduledWakeupTask,
     type BackgroundTaskForApp,
     type ClaudeSessionOpts,
 } from './claudeSession';

@@ -56,6 +56,42 @@ type Pending = {
     hub?: { client: any; clientId: number };
 };
 
+/**
+ * What the directory says about one session.
+ *
+ * Deliberately not the daemon's whole summary. A client asks the directory for two facts — that a
+ * session exists on this machine, and whether it is running — and everything larger (the encrypted
+ * metadata and agent state) is what a read pulls over the session's own channel. Carrying those
+ * here bought nothing and cost a megabyte per broadcast, sent to every connected App each time any
+ * daemon's list moved: frames that large delay whatever is queued behind them on the same
+ * connection, including the first frame of a stream being opened. The relay is also not the place
+ * to hold a copy of state it never uses.
+ */
+type DirectorySession = {
+    happySessionId?: string;
+    /** The CLI's own tag, for a session the server has not named yet. */
+    tag?: string;
+    isAlive: boolean;
+    /** Which machine the row is about: this one, or the daemon's import of the server's record. */
+    origin?: 'daemon' | 'server';
+};
+
+/**
+ * Narrows one published summary to a directory row, dropping anything unaddressable.
+ *
+ * A row without either name cannot be asked for by a client, so there is nothing it would add.
+ */
+function directorySession(entry: unknown): DirectorySession | null {
+    if (!entry || typeof entry !== 'object') return null;
+    const session = entry as { happySessionId?: unknown; tag?: unknown; isAlive?: unknown; origin?: unknown };
+    const row: DirectorySession = { isAlive: session.isAlive === true };
+    if (typeof session.happySessionId === 'string') row.happySessionId = session.happySessionId;
+    if (typeof session.tag === 'string') row.tag = session.tag;
+    if (row.happySessionId === undefined && row.tag === undefined) return null;
+    if (session.origin === 'daemon' || session.origin === 'server') row.origin = session.origin;
+    return row;
+}
+
 type Daemon = {
     tag: string;
     ws: any;
@@ -73,8 +109,18 @@ type Daemon = {
      * on the LAN, and connect to it directly.
      */
     reachable: unknown | null;
-    /** The session summary this daemon last published, for the directory. */
-    sessions: unknown[];
+    /**
+     * The session roster this daemon last published, narrowed to what the directory is for.
+     *
+     * The daemon publishes whole summaries — metadata and agent state included, because the same
+     * list serves a LAN reader that opens a session's name from it. The directory serves a
+     * different question: *which* sessions this machine holds and whether they are running. Keeping
+     * the blobs here made the directory a megabyte and every hub client paid for it on each
+     * republish, which is how a stream's first frame ended up queued behind them. See
+     * `directorySession`.
+     */
+    sessions: DirectorySession[];
+
     nextId: number;
 };
 
@@ -86,6 +132,14 @@ type SocketData =
           ip: string;
           /** Every stream this client has open, by the id *it* chose: where its frames go. */
           streams: Map<number, { tag: string; daemonId: number }>;
+          /**
+           * This client reads the directory over HTTP; the hub only tells it when that changed.
+           *
+           * A client says so by connecting to `/client?dir=http`. Older clients do not, and keep
+           * receiving the directory as a frame — the hub is one connection for both shapes, and a
+           * client that cannot ask must not be handed a protocol it does not speak.
+           */
+          directory?: 'http';
       };
 
 export function tagOfPublicKey(pub: Uint8Array): string {
@@ -93,6 +147,14 @@ export function tagOfPublicKey(pub: Uint8Array): string {
 }
 
 const TAG_RE = /^[0-9a-f]{32}$/;
+/**
+ * How long to gather a burst of per-machine republishes into one directory frame.
+ *
+ * The daemons' publish timers are independent, so several land together; 50ms is below anything a
+ * reader could read as stale and above the burst. It is not a rate limit — an unchanged directory
+ * is not sent at all, and a real change still goes out on the first tick after it happens.
+ */
+const DIRECTORY_BROADCAST_DELAY_MS = 50;
 const HOP_HEADERS = new Set(['host', 'connection', 'content-length', 'transfer-encoding', 'upgrade', 'keep-alive']);
 
 export function startRelay(options: RelayOptions): RelayHandle {
@@ -103,6 +165,10 @@ export function startRelay(options: RelayOptions): RelayHandle {
     const daemons = new Map<string, Daemon>();
     /** Hub connections, so the directory can be pushed the moment a machine comes or goes. */
     const hubClients = new Set<any>();
+    /** The directory frame last pushed to hub clients, so a no-op republish sends nothing. */
+    let lastDirectoryFrame: string | null = null;
+    /** The one coalesced broadcast waiting to go out, if any. */
+    let directoryBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
     const hits = new Map<string, { count: number; reset: number }>();
 
     const limited = (ip: string): boolean => {
@@ -162,9 +228,36 @@ export function startRelay(options: RelayOptions): RelayHandle {
             if (url.pathname === '/health') {
                 return json(200, { ok: true, daemons: daemons.size });
             }
+            /**
+             * The directory, as a plain resource.
+             *
+             * It is state, not an event: an idempotent read that a client may repeat whenever it
+             * likes, whose unchanged answer costs a 304. The hub still pushes the directory to
+             * clients that cannot ask, but a client that can is not made to receive it on the same
+             * ordered connection its session streams ride — a snapshot queued there delays the
+             * frames behind it, which is a delay a read would never impose.
+             */
+            if (url.pathname === '/machines') {
+                if (limited(ip)) return json(429, { error: 'rate' });
+                if (req.method !== 'GET' && req.method !== 'HEAD') return json(405, { error: 'method' });
+                const snapshot = directorySnapshot();
+                const headers = {
+                    'content-type': 'application/json',
+                    // Revalidated, not cached blindly: the etag is the one fact a client needs to
+                    // skip a body it already has.
+                    'cache-control': 'no-cache',
+                    etag: snapshot.etag,
+                    ...CORS,
+                };
+                if (req.headers.get('if-none-match') === snapshot.etag) {
+                    return new Response(null, { status: 304, headers });
+                }
+                return new Response(req.method === 'HEAD' ? null : snapshot.body, { status: 200, headers });
+            }
             if (url.pathname === '/client') {
                 if (limited(ip)) return json(429, { error: 'rate' });
-                const ok = srv.upgrade(req, { data: { kind: 'hub', ip, streams: new Map() } as SocketData });
+                const directory = url.searchParams.get('dir') === 'http' ? 'http' as const : undefined;
+                const ok = srv.upgrade(req, { data: { kind: 'hub', ip, streams: new Map(), directory } as SocketData });
                 return ok ? undefined : json(400, { error: 'upgrade' });
             }
             if (url.pathname === '/daemon') {
@@ -234,7 +327,15 @@ export function startRelay(options: RelayOptions): RelayHandle {
                     // request that reaches them — so there is nothing to prove here and nothing to
                     // wait for. The directory comes first because it is what a client is for.
                     hubClients.add(ws);
-                    ws.send(JSON.stringify({ t: 'ok', machines: directory() }));
+                    const snapshot = directorySnapshot();
+                    if (data.directory === 'http') {
+                        // The etag is the whole handshake: the client fetches the directory over
+                        // HTTP and needs neither a copy here nor a reason to fetch one it already
+                        // has.
+                        ws.send(JSON.stringify({ t: 'ok', etag: snapshot.etag }));
+                    } else {
+                        ws.send(JSON.stringify({ t: 'ok', machines: snapshot.machines, etag: snapshot.etag }));
+                    }
                     return;
                 }
                 const daemon = daemons.get(data.tag);
@@ -340,7 +441,11 @@ export function startRelay(options: RelayOptions): RelayHandle {
                     // What the machine publishes for the directory. It is the daemon's own summary of
                     // its sessions — no content, nothing this relay could not already read off the
                     // wire — and it is what lets an App list sessions without asking each machine.
-                    daemon.sessions = Array.isArray(msg.sessions) ? msg.sessions : [];
+                    // Narrowed on the way in: see `DirectorySession` for why the blobs stop here.
+                    const published: unknown[] = Array.isArray(msg.sessions) ? msg.sessions : [];
+                    daemon.sessions = published
+                        .map(directorySession)
+                        .filter((session): session is DirectorySession => session !== null);
                     broadcastDirectory();
                 } else if (msg.t === 'reachable') {
                     // Same deal as the session list: the machine's own claim about itself, carried so
@@ -354,6 +459,11 @@ export function startRelay(options: RelayOptions): RelayHandle {
                 const data = ws.data;
                 if (data.kind === 'hub') {
                     hubClients.delete(ws);
+                    // What was last sent is only a record of what *connected* clients already
+                    // know. With none connected, the directory can move and move back; forgetting
+                    // it means the next client's `ok` is the baseline, and no later change can be
+                    // suppressed for matching a frame that client never saw.
+                    if (hubClients.size === 0) lastDirectoryFrame = null;
                     // Every stream this client opened is a socket on some daemon; the daemon has to be
                     // told, or it keeps a reader that will never be read from again.
                     for (const stream of data.streams.values()) {
@@ -388,8 +498,26 @@ export function startRelay(options: RelayOptions): RelayHandle {
      * What a client can reach: every daemon that is dialled in, with what it published — its
      * sessions, and where it says it can be reached.
      */
-    function directory(): { tag: string; sessions: unknown[]; reachable: unknown | null }[] {
+    function directory(): { tag: string; sessions: DirectorySession[]; reachable: unknown | null }[] {
         return [...daemons.values()].map((daemon) => ({ tag: daemon.tag, sessions: daemon.sessions, reachable: daemon.reachable }));
+    }
+
+    /**
+     * The directory as one value: what it says, and the fingerprint that says whether it says the
+     * same thing as before.
+     *
+     * HTTP and the hub serve the same value, so the etag is computed from the HTTP body and reused
+     * on the hub. That is what lets a client that reads the directory over HTTP act on a nudge
+     * without ever receiving a second copy of something it already has.
+     */
+    function directorySnapshot(): {
+        machines: { tag: string; sessions: DirectorySession[]; reachable: unknown | null }[];
+        body: string;
+        etag: string;
+    } {
+        const machines = directory();
+        const body = JSON.stringify({ machines });
+        return { machines, body, etag: `"${createHash('sha256').update(body).digest('hex').slice(0, 16)}"` };
     }
 
     /**
@@ -398,13 +526,35 @@ export function startRelay(options: RelayOptions): RelayHandle {
      * Pushed rather than left to be polled: a machine coming online is exactly the event an App
      * wants to hear about, and asking for it on a timer is the probing this connection exists to
      * replace.
+     *
+     * Coalesced and deduplicated, because the events are not edges. Every daemon re-reads its list
+     * on a timer and publishes it whenever *anything* in it moved — a heartbeat, a version — so a
+     * six-machine deployment can produce a burst of frames that all say the same thing to a client.
+     * Sending each one would put that burst on the same connection a stream's handshake is waiting
+     * on. One frame per burst, and only when an App could tell the difference, is the same
+     * information without the queue.
      */
     function broadcastDirectory(): void {
-        if (hubClients.size === 0) return;
-        const frame = JSON.stringify({ t: 'machines', machines: directory() });
-        for (const client of hubClients) {
-            try { client.send(frame); } catch { /* gone */ }
-        }
+        if (hubClients.size === 0 || directoryBroadcastTimer) return;
+        directoryBroadcastTimer = setTimeout(() => {
+            directoryBroadcastTimer = null;
+            if (hubClients.size === 0) return;
+            const snapshot = directorySnapshot();
+            const frame = JSON.stringify({ t: 'machines', machines: snapshot.machines });
+            if (frame === lastDirectoryFrame) return;
+            lastDirectoryFrame = frame;
+            for (const client of hubClients) {
+                try {
+                    // Two shapes of the same news. A client that reads the directory over HTTP is
+                    // told only that it moved; one that cannot ask gets the directory itself. The
+                    // state is the same either way, and neither client waits on the other's copy.
+                    client.send(client.data?.directory === 'http'
+                        ? JSON.stringify({ t: 'dir', etag: snapshot.etag })
+                        : frame);
+                } catch { /* gone */ }
+            }
+        }, DIRECTORY_BROADCAST_DELAY_MS);
+        (directoryBroadcastTimer as unknown as { unref?: () => void }).unref?.();
     }
 
     function hubFrame(ws: any, data: { ip: string; streams: Map<number, { tag: string; daemonId: number }> }, frame: any): void {
@@ -511,7 +661,14 @@ export function startRelay(options: RelayOptions): RelayHandle {
         // Bun reports the bound port only once listening; the requested one is what it bound unless
         // it was 0, in which case the OS chose and `server.port` has it.
         port: server.port ?? options.port,
-        stop: () => { clearInterval(sweep); server.stop(true); },
+        stop: () => {
+            clearInterval(sweep);
+            if (directoryBroadcastTimer) {
+                clearTimeout(directoryBroadcastTimer);
+                directoryBroadcastTimer = null;
+            }
+            server.stop(true);
+        },
         daemonCount: () => daemons.size,
     };
 }

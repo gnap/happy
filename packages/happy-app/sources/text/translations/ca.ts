@@ -318,6 +318,7 @@ export const ca: TranslationStructure = {
         activityGoals: 'Objectius',
         activityShell: 'Comandes en segon pla',
         activityWorkflows: 'Fluxos de treball',
+        activityWakeups: 'Reactivacions',
     },
 
     commandPalette: {

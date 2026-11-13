@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { mergeTask, normalizeTaskType, taskTypeOf, toolTimeoutMs, type BackgroundTaskForApp } from './claudeRemote';
+import { mergeTask, normalizeTaskType, scheduledWakeupTask, taskTypeOf, toolTimeoutMs, type BackgroundTaskForApp } from './claudeRemote';
 
 const task = (patch: Partial<BackgroundTaskForApp>): BackgroundTaskForApp => ({
     id: 't1',
@@ -99,5 +99,27 @@ describe('mergeTask deadlines', () => {
     it('prefers a deadline the incoming task carries, when it has one', () => {
         const merged = mergeTask(task({ deadlineAt: 1 }), task({ deadlineAt: 2 }));
         expect(merged.deadlineAt).toBe(2);
+    });
+});
+
+describe('scheduledWakeupTask', () => {
+    it('turns the tool’s delay into a deadline the App can count down', () => {
+        const at = 1_700_000_000_000;
+        const wakeup = scheduledWakeupTask(90, 'check the build again', at);
+        expect(wakeup).toMatchObject({
+            type: 'wakeup',
+            status: 'scheduled',
+            description: 'check the build again',
+            startedAt: at,
+            deadlineAt: at + 90_000,
+        });
+    });
+
+    it('names a wakeup that gave no reason, so the list never shows a bare type', () => {
+        expect(scheduledWakeupTask(5, '   ', 0).description).toBe('Scheduled wakeup');
+    });
+
+    it('never sets a deadline in the past for a zero delay', () => {
+        expect(scheduledWakeupTask(0, 'now', 1_000).deadlineAt).toBe(1_000);
     });
 });
