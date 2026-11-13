@@ -163,6 +163,20 @@ describe('RelayHub', () => {
         expect(stream.readyState).toBe(1);
     });
 
+    it('reports a write the hub cannot take, instead of accepting a frame nothing carries', () => {
+        // The window iOS leaves after a suspension: the hub's socket is dead but has not reported
+        // its close, so the stream still reads as open. A send here used to return success and sit
+        // on the delivery deadline; the failure belongs to this call.
+        const { hub, socket } = hubWith();
+        socket.accept();
+        const stream = hub.stream('aaaa', '/lan/socket') as SocketLike;
+        socket.deliver({ t: 'msg', id: 1, data: 'open me' });
+        expect(stream.readyState).toBe(1);
+
+        socket.readyState = 3;
+        expect(() => stream.send('a frame')).toThrow();
+    });
+
     it('closes a stream the relay reports closed, with the code it gave', () => {
         const { hub, socket } = hubWith();
         socket.accept();
