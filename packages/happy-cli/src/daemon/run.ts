@@ -51,6 +51,7 @@ import { decodeBase64, encodeBase64, libsodiumEncryptForPublicKey } from '@/api/
 import { startLanDiscovery, type LanDiscoveryHandle } from './lanDiscovery';
 import { ENDPOINT_PROTOCOL_VERSION, startEndpointPublisher, type EndpointPublisherHandle, type LanEndpoint } from './lanEndpoints';
 import { startRelayClient, type RelayClientHandle } from './relay/relayClient';
+import { directoryRows, type DirectorySession } from './relay/directory';
 import { buildSessionScopeUnitName, resolveSessionScopeMode, scopeUnitFromProcCgroup, signalSession, spawnHappyCLIInSessionScope } from './linux/sessionScope';
 
 /** Time to wait for a spawned session to report via /session-started webhook before failing the spawn (Cursor cold start can exceed 30s). */
@@ -2159,6 +2160,16 @@ export async function startDaemon(): Promise<void> {
           return summaries;
         };
 
+        /**
+         * The roster as the relay's directory carries it — the four fields it serves, and nothing
+         * else. See `daemon/relay/directory.ts` for why the narrowing happens on this side.
+         *
+         * The LAN's list is deliberately not narrowed the same way: a reader there also gets the
+         * encrypted metadata and the wrapped session key, which is what lets it render a row
+         * without the server.
+         */
+        const sessionDirectory = (): DirectorySession[] => directoryRows(sessionSummaries());
+
         // The sidecar control channel. Started here because this block already establishes the
         // daemon's local identity (account key, home directory); the sidecar itself is not tied to
         // the LAN, and this moves out of this block once the client half exists.
@@ -2595,8 +2606,9 @@ export async function startDaemon(): Promise<void> {
               machineKey: credentials.encryption.machineKey,
               lanPort: started.port,
               // What the relay's directory says about this machine, so an App can list this
-              // machine's sessions without asking it, or holding a connection to it.
-              getSessions: sessionSummaries,
+              // machine's sessions without asking it, or holding a connection to it. Narrowed to
+              // the directory's own fields on this side: see `sessionDirectory`.
+              getSessions: sessionDirectory,
               // And where it can be reached on the LAN, which is the half an App needs when the
               // server is the thing that is missing.
               getReachable: () => {
