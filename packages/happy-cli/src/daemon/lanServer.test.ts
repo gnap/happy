@@ -58,7 +58,7 @@ function signed(path: string, init: { token?: string; body?: unknown } = {}) {
         : isFolder
             ? 'folder'
             : isPreview
-                ? 'preview'
+                    ? 'preview'
                 : isDiff
                     ? 'diff'
                     : isListing
@@ -122,7 +122,7 @@ let lifecycleEntries: { rev: number; op: string; tag: string }[] = [];
 /** The full tool payload this machine can read; unset by default, like a daemon from before the route. */
 let toolContentHandler: ((args: { sessionId: string; callId: string }) => Promise<{ args?: unknown; result?: unknown } | null>) | undefined;
 /** The file this machine can serve; unset by default, like a daemon from before the route. */
-let sessionFileHandler: ((args: { sessionId: string; path: string }) => Promise<{ bytes: Buffer; name: string; mime: string } | { error: 'too-large'; size: number } | null>) | undefined;
+let sessionFileHandler: ((args: { sessionId: string; path: string }) => Promise<{ bytes: Buffer; name: string; mime: string } | { error: 'too-large'; size: number } | { error: 'is-directory' } | null>) | undefined;
 /** A directory packed for download; unset by default, like a daemon from before the route. */
 let sessionFolderHandler: ((args: { sessionId: string; path: string }) => { stream: NodeJS.ReadableStream; name: string } | null) | undefined;
 /** Preview capabilities; unset by default, like a daemon from before the routes. */
@@ -912,6 +912,20 @@ describe('lanServer file route', () => {
         const res = await fetch(url(missing), signed(missing, { token }) as RequestInit);
 
         expect(res.status).toBe(404);
+    });
+
+    it('tells a directory apart from a missing file', async () => {
+        // A folder tap used to arrive here as a file request; answering "not on this machine (or
+        // its daemon is too old)" about a path that exists is the wrong fact.
+        sessionFileHandler = async () => ({ error: 'is-directory' });
+        await start();
+        const token = await getToken();
+        const dirUrl = '/lan/sessions/sess-1/file?path=' + encodeURIComponent('prof/');
+
+        const res = await fetch(url(dirUrl), signed(dirUrl, { token }) as RequestInit);
+
+        expect(res.status).toBe(400);
+        expect(await res.json()).toMatchObject({ error: 'that path is a directory, not a file' });
     });
 
     it('answers 413 with the size when the file is too large to carry', async () => {

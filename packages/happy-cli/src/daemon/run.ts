@@ -2411,6 +2411,11 @@ export async function startDaemon(): Promise<void> {
               const absolute = resolve(directory, path);
               try {
                 const info = await fs.stat(absolute);
+                if (info.isDirectory()) {
+                  // Distinct from "no such file": the path is real, the request is wrong. A client
+                  // that tapped a folder should be told that, not told this machine never had it.
+                  return { error: 'is-directory' as const };
+                }
                 if (!info.isFile()) {
                   return null;
                 }

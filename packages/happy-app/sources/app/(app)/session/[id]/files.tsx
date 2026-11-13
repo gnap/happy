@@ -28,7 +28,7 @@ export default function FilesScreen() {
     const [searchQuery, setSearchQuery] = React.useState('');
     const [searchResults, setSearchResults] = React.useState<FileItem[]>([]);
     const [isSearching, setIsSearching] = React.useState(false);
-    /** The whole tree, flat; the browser slices it by directory. */
+    /** The whole tree, flat — the fallback for a machine without a directory route. */
     const [fileIndex, setFileIndex] = React.useState<FileItem[]>([]);
     const [indexLoading, setIndexLoading] = React.useState(true);
     /** Where the browser is; '' is the session's working tree root. */
@@ -90,14 +90,6 @@ export default function FilesScreen() {
         loadIndex();
     }, [loadIndex]);
 
-    // Refresh when screen is focused
-    useFocusEffect(
-        React.useCallback(() => {
-            loadGitStatusFiles();
-            loadIndex();
-        }, [loadGitStatusFiles, loadIndex])
-    );
-
     /**
      * Search across the whole tree, but only when there is something to search for.
      *
@@ -138,9 +130,25 @@ export default function FilesScreen() {
         router.push(`/session/${sessionId}/file?path=${encodeFilePathParam(fullPath)}`);
     }, [router, sessionId]);
 
+    const openFolder = React.useCallback((folderPath: string) => {
+        setCurrentPath(folderPath.replace(/\/$/, ''));
+    }, []);
+
+    const goUp = React.useCallback(() => {
+        setCurrentPath((path) => (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''));
+    }, []);
+
     const handleFilePress = React.useCallback((file: GitFileStatus | FileItem) => {
+        // A folder has no bytes to open; the browser enters it. Search results carry folders too,
+        // and opening one in the viewer asked the machine for a file at a directory path — which
+        // answered "not on this machine, or its daemon is too old" about a folder that is right
+        // there.
+        if ('fileType' in file && file.fileType === 'folder') {
+            openFolder(file.fullPath);
+            return;
+        }
         openFile(file.fullPath);
-    }, [openFile]);
+    }, [openFile, openFolder]);
 
     /**
      * The files opened from this session, newest first — "where was I" beside the tree's
@@ -184,26 +192,32 @@ export default function FilesScreen() {
         return counts;
     }, [changedFiles]);
 
-    /** The current directory's entries: folders first, then files, each by name. */
-    const browserEntries = React.useMemo(() => {
+    /**
+     * The current directory's entries: folders first, then files, each by name.
+     *
+     * Sliced from the machine's path list, which respects the project's ignore rules — a file the
+     * project chose not to track is not offered for opening here either.
+     */
+    const browserEntries = React.useMemo<Array<{
+        name: string;
+        type: 'file' | 'folder';
+        fullPath: string;
+    }>>(() => {
         const prefix = currentPath ? currentPath + '/' : '';
         return fileIndex
             .filter((item) => item.filePath === prefix)
+            .map((item) => ({
+                name: item.fileType === 'folder' ? item.fileName.replace(/\/$/, '') : item.fileName,
+                type: item.fileType,
+                fullPath: item.fullPath.replace(/\/$/, ''),
+            }))
             .sort((a, b) => {
-                if (a.fileType !== b.fileType) {
-                    return a.fileType === 'folder' ? -1 : 1;
+                if (a.type !== b.type) {
+                    return a.type === 'folder' ? -1 : 1;
                 }
-                return a.fileName.localeCompare(b.fileName);
+                return a.name.localeCompare(b.name);
             });
     }, [fileIndex, currentPath]);
-
-    const openFolder = React.useCallback((folderPath: string) => {
-        setCurrentPath(folderPath.replace(/\/$/, ''));
-    }, []);
-
-    const goUp = React.useCallback(() => {
-        setCurrentPath((path) => (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''));
-    }, []);
 
     /**
      * Save a packed directory where this device keeps downloads.
@@ -236,8 +250,7 @@ export default function FilesScreen() {
         await Sharing.shareAsync(uri, { mimeType: 'application/gzip', dialogTitle: name });
     }, []);
 
-    const downloadFolder = React.useCallback(async (folder: FileItem) => {
-        const path = folder.fullPath.replace(/\/$/, '');
+    const downloadFolder = React.useCallback(async (path: string) => {
         if (!sessionId || downloadingFolder) {
             return;
         }
@@ -254,10 +267,6 @@ export default function FilesScreen() {
             setDownloadingFolder(null);
         }
     }, [sessionId, downloadingFolder, saveArchive]);
-
-    const renderFileIcon = (file: GitFileStatus) => {
-        return <FileIcon fileName={file.fileName} size={32} />;
-    };
 
     const renderStatusIcon = (file: GitFileStatus) => {
         let statusColor: string;
@@ -289,23 +298,6 @@ export default function FilesScreen() {
         }
 
         return <Octicons name={statusIcon as any} size={16} color={statusColor} />;
-    };
-
-    const renderLineChanges = (file: GitFileStatus) => {
-        const parts = [];
-        if (file.linesAdded > 0) {
-            parts.push(`+${file.linesAdded}`);
-        }
-        if (file.linesRemoved > 0) {
-            parts.push(`-${file.linesRemoved}`);
-        }
-        return parts.length > 0 ? parts.join(' ') : '';
-    };
-
-    const renderFileSubtitle = (file: GitFileStatus) => {
-        const lineChanges = renderLineChanges(file);
-        const pathPart = file.filePath || t('files.projectRoot');
-        return lineChanges ? `${pathPart} • ${lineChanges}` : pathPart;
     };
 
     const renderFileIconForSearch = (file: FileItem) => {
@@ -488,48 +480,6 @@ export default function FilesScreen() {
                             </View>
                         )}
 
-                        {/* Changes first, but never instead of the tree — and only at the root; a
-                            folder shows its own count in the browser. */}
-                        {!currentPath && gitStatusFiles && gitStatusFiles.stagedFiles.length > 0 && (
-                            <>
-                                <SectionLabel
-                                    color={theme.colors.success}
-                                    text={t('files.stagedChanges', { count: gitStatusFiles.stagedFiles.length })}
-                                />
-                                {gitStatusFiles.stagedFiles.map((file, index) => (
-                                    <Item
-                                        key={`staged-${file.fullPath}-${index}`}
-                                        title={file.fileName}
-                                        subtitle={renderFileSubtitle(file)}
-                                        icon={renderFileIcon(file)}
-                                        rightElement={renderStatusIcon(file)}
-                                        onPress={() => handleFilePress(file)}
-                                        showDivider={index < gitStatusFiles.stagedFiles.length - 1}
-                                    />
-                                ))}
-                            </>
-                        )}
-
-                        {!currentPath && gitStatusFiles && gitStatusFiles.unstagedFiles.length > 0 && (
-                            <>
-                                <SectionLabel
-                                    color={theme.colors.warning}
-                                    text={t('files.unstagedChanges', { count: gitStatusFiles.unstagedFiles.length })}
-                                />
-                                {gitStatusFiles.unstagedFiles.map((file, index) => (
-                                    <Item
-                                        key={`unstaged-${file.fullPath}-${index}`}
-                                        title={file.fileName}
-                                        subtitle={renderFileSubtitle(file)}
-                                        icon={renderFileIcon(file)}
-                                        rightElement={renderStatusIcon(file)}
-                                        onPress={() => handleFilePress(file)}
-                                        showDivider={index < gitStatusFiles.unstagedFiles.length - 1}
-                                    />
-                                ))}
-                            </>
-                        )}
-
                         <Breadcrumbs path={currentPath} onNavigate={setCurrentPath} onUp={goUp} />
 
                         {indexLoading ? (
@@ -561,14 +511,13 @@ export default function FilesScreen() {
                                     />
                                 ) : null}
                                 {browserEntries.map((entry, index) => {
-                                    if (entry.fileType === 'folder') {
-                                        const entryPath = entry.fullPath.replace(/\/$/, '');
+                                    if (entry.type === 'folder') {
+                                        const entryPath = entry.fullPath;
                                         const changes = changeCounts.get(entryPath) ?? 0;
                                         return (
                                             <Item
                                                 key={`dir-${entry.fullPath}`}
-                                                title={entry.fileName}
-                                                subtitle={entry.filePath ? entry.filePath.replace(/\/$/, '') : t('files.projectRoot')}
+                                                title={`${entry.name}/`}
                                                 icon={<Octicons name="file-directory" size={29} color="#007AFF" />}
                                                 rightElement={(
                                                     <View style={{ flexDirection: 'row', alignItems: 'center' }}>
@@ -582,7 +531,7 @@ export default function FilesScreen() {
                                                                 // The row opens the folder; this button downloads it.
                                                                 // On web the click would otherwise bubble into the row.
                                                                 event.stopPropagation?.();
-                                                                downloadFolder(entry);
+                                                                downloadFolder(entryPath);
                                                             }}
                                                             disabled={downloadingFolder !== null}
                                                             hitSlop={8}
@@ -605,11 +554,10 @@ export default function FilesScreen() {
                                     return (
                                         <Item
                                             key={`entry-${entry.fullPath}`}
-                                            title={entry.fileName}
-                                            subtitle={entry.filePath ? entry.filePath.replace(/\/$/, '') : t('files.projectRoot')}
-                                            icon={<FileIcon fileName={entry.fileName} size={29} />}
+                                            title={entry.name}
+                                            icon={<FileIcon fileName={entry.name} size={29} />}
                                             rightElement={status ? renderStatusIcon(status) : undefined}
-                                            onPress={() => handleFilePress(entry)}
+                                            onPress={() => openFile(entry.fullPath)}
                                             showDivider={index < browserEntries.length - 1}
                                         />
                                     );

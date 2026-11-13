@@ -163,7 +163,13 @@ import { accountProofMessage, accountProofMessageV1, verifyAccountProof } from '
 export type LanSessionFile =
   | { bytes: Buffer; name: string; mime: string }
   /** Larger than this API carries in one response. The App can still open it over the server route. */
-  | { error: 'too-large'; size: number };
+  | { error: 'too-large'; size: number }
+  /**
+   * The path is a directory. A file request for one is a client mistake, not a machine that has
+   * lost the file — saying so keeps "not on this machine, or its daemon is too old" from being the
+   * answer to a folder tap.
+   */
+  | { error: 'is-directory' };
 
 /** One directory, already packed: the bytes are a stream because a tree has no length to promise. */
 export type LanSessionFolder = {
@@ -1002,6 +1008,10 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       return reply.code(404).send({ error: 'no such file on this machine' });
     }
     if ('error' in file) {
+      if (file.error === 'is-directory') {
+        logger.debug(`[lan] file 400 ${target}: is a directory`);
+        return reply.code(400).send({ error: 'that path is a directory, not a file' });
+      }
       logger.debug(`[lan] file too-large ${target} size=${file.size}`);
       return reply.code(413).send({ error: 'file is too large for this API', size: file.size });
     }
@@ -1109,6 +1119,11 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       return reply.code(404).send({ error: 'no such file under this preview' });
     }
     if ('error' in file) {
+      // A browser asking for a directory has nowhere to put it; the answer is the same 404 it
+      // gets for a missing asset.
+      if (file.error === 'is-directory') {
+        return reply.code(404).send({ error: 'no such file under this preview' });
+      }
       return reply.code(413).send({ error: 'file is too large for this API', size: file.size });
     }
     return reply
