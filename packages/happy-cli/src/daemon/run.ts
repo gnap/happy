@@ -51,6 +51,7 @@ import { decodeBase64, encodeBase64, libsodiumEncryptForPublicKey } from '@/api/
 import { startLanDiscovery, type LanDiscoveryHandle } from './lanDiscovery';
 import { ENDPOINT_PROTOCOL_VERSION, startEndpointPublisher, type EndpointPublisherHandle, type LanEndpoint } from './lanEndpoints';
 import { startRelayClient, type RelayClientHandle } from './relay/relayClient';
+import { directoryRows, type DirectorySession } from './relay/directory';
 import { buildSessionScopeUnitName, resolveSessionScopeMode, scopeUnitFromProcCgroup, signalSession, spawnHappyCLIInSessionScope } from './linux/sessionScope';
 
 /** Time to wait for a spawned session to report via /session-started webhook before failing the spawn (Cursor cold start can exceed 30s). */
@@ -111,11 +112,14 @@ const LISTING_COMMAND_TIMEOUT_MS = 15_000;
 const execFileAsync = promisify(execFile);
 
 /**
- * A command's stdout, or '' when it failed.
+ * A command's stdout, or '' when it failed without writing any.
  *
  * A listing is best-effort by nature — a directory that is not a repository, a git that is not
  * installed, a file that vanished mid-crawl — and none of those is worth failing the request over.
- * The caller still gets the parts that worked.
+ * The caller still gets the parts that worked, so a non-zero exit is not a reason to discard what
+ * the command did print: `rg --files --follow` exits 2 when *any* path it reached errored (a
+ * dangling symlink is enough) and still writes every path it saw. Treating that as "no files"
+ * turned a tree with thousands of files into an empty project.
  */
 async function captureCommand(command: string, args: string[], cwd: string): Promise<string> {
   try {
@@ -125,8 +129,10 @@ async function captureCommand(command: string, args: string[], cwd: string): Pro
       maxBuffer: 32 * 1024 * 1024,
     });
     return stdout;
-  } catch {
-    return '';
+  } catch (error) {
+    // execFile rejects on a non-zero exit but the error still carries what was written.
+    const partial = (error as { stdout?: unknown }).stdout;
+    return typeof partial === 'string' ? partial : '';
   }
 }
 
@@ -2159,6 +2165,16 @@ export async function startDaemon(): Promise<void> {
           return summaries;
         };
 
+        /**
+         * The roster as the relay's directory carries it — the four fields it serves, and nothing
+         * else. See `daemon/relay/directory.ts` for why the narrowing happens on this side.
+         *
+         * The LAN's list is deliberately not narrowed the same way: a reader there also gets the
+         * encrypted metadata and the wrapped session key, which is what lets it render a row
+         * without the server.
+         */
+        const sessionDirectory = (): DirectorySession[] => directoryRows(sessionSummaries());
+
         // The sidecar control channel. Started here because this block already establishes the
         // daemon's local identity (account key, home directory); the sidecar itself is not tied to
         // the LAN, and this moves out of this block once the client half exists.
@@ -2451,10 +2467,12 @@ export async function startDaemon(): Promise<void> {
                 captureCommand('git', ['status', '--porcelain=v2', '--branch', '--untracked-files=all'], directory),
                 captureCommand('rg', ['--files', '--follow'], directory),
               ]);
+              // Same rule as the system binary: the launcher reports what rg wrote even when rg
+              // reported a partial failure with exit 2. Exit 1 (no matches) writes nothing.
               const crawl = directCrawl.length > 0
                 ? directCrawl
                 : await runRipgrep(['--files', '--follow'], { cwd: directory })
-                  .then((result) => (result.exitCode === 0 ? result.stdout : ''))
+                  .then((result) => result.stdout)
                   .catch(() => '');
               const gitRepo = insideWorkTree.trim() === 'true';
               const gitStatus = gitRepo ? status : '';
@@ -2595,8 +2613,9 @@ export async function startDaemon(): Promise<void> {
               machineKey: credentials.encryption.machineKey,
               lanPort: started.port,
               // What the relay's directory says about this machine, so an App can list this
-              // machine's sessions without asking it, or holding a connection to it.
-              getSessions: sessionSummaries,
+              // machine's sessions without asking it, or holding a connection to it. Narrowed to
+              // the directory's own fields on this side: see `sessionDirectory`.
+              getSessions: sessionDirectory,
               // And where it can be reached on the LAN, which is the half an App needs when the
               // server is the thing that is missing.
               getReachable: () => {
