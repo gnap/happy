@@ -958,6 +958,50 @@ function HtmlPagePreview({ url, html, themeBg }: { url: string | null; html: str
     );
 }
 
+
+/**
+ * Pinch-to-zoom for pages that only listen for the wheel.
+ *
+ * These generated reports implement zoom as a `wheel` handler — a desktop gesture iOS never
+ * produces — so on a phone a pinch does nothing at all. Their canvases also set
+ * `touch-action: none` for their own pointer drags, which is exactly the surface a pinch lands
+ * on. This turns two-finger moves into wheel events at the pinch centre, in steps of 1.2×: the
+ * exponential handlers and the stepped ones read the same sign, so a step lets each page zoom at
+ * its own rate. A page that handled the pinch itself has already called `preventDefault` by the
+ * time this listener runs, and is left alone.
+ */
+const PINCH_TO_WHEEL_JS = `
+(function () {
+  if (window.__happyPinchToWheel) return;
+  window.__happyPinchToWheel = true;
+  var last = null;
+  var step = Math.log(1.2);
+  document.addEventListener('touchmove', function (e) {
+    if (e.touches.length !== 2 || e.defaultPrevented) { last = null; return; }
+    var a = e.touches[0], b = e.touches[1];
+    var d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    if (!last) { last = d; return; }
+    if (d <= 0 || last <= 0) { last = d; return; }
+    var log = Math.log(d / last);
+    last = d;
+    var cx = (a.clientX + b.clientX) / 2;
+    var cy = (a.clientY + b.clientY) / 2;
+    var target = document.elementFromPoint(cx, cy) || document.body;
+    while (Math.abs(log) >= step) {
+      // A pinch out (scale > 1) zooms in, which every one of these pages reads as deltaY < 0.
+      var deltaY = (log > 0 ? -1 : 1) * 114;
+      target.dispatchEvent(new WheelEvent('wheel', {
+        deltaY: deltaY, clientX: cx, clientY: cy, bubbles: true, cancelable: true,
+      }));
+      log -= (log > 0 ? step : -step);
+    }
+    e.preventDefault();
+  }, { passive: false });
+  document.addEventListener('touchend', function () { last = null; }, { passive: true });
+  document.addEventListener('touchcancel', function () { last = null; }, { passive: true });
+})();
+`;
+
 function NativeFileHtmlView({ url, html, themeBg }: { url: string | null; html: string; themeBg: string }) {
     const [WebViewComp, setWebViewComp] = React.useState<any>(null);
     React.useEffect(() => { import('react-native-webview').then(m => setWebViewComp(() => m.WebView)); }, []);
@@ -970,6 +1014,7 @@ function NativeFileHtmlView({ url, html, themeBg }: { url: string | null; html: 
                     originWhitelist={['*']}
                     javaScriptEnabled={true}
                     scrollEnabled={true}
+                    injectedJavaScript={PINCH_TO_WHEEL_JS}
                 />
                 : null}
         </View>
