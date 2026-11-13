@@ -56,7 +56,7 @@ import { channelDrivers as buildChannelDrivers, relayOriginFrom } from './channe
 import { channelAvailability } from './channels/resolve';
 import { candidateInputsFor, orderedCandidates } from './channels/candidates';
 import { attemptFromStatus, carryOperation, type CarryOutcome, type HealthRecorder } from './channels/execute';
-import { fetchToolContent, fetchSessionListing, fetchSessionDiff, type SessionListing } from './lan/client';
+import { fetchToolContent, fetchSessionListing, fetchSessionDiff, fetchPreviewGrant, previewUrlFor, type SessionListing } from './lan/client';
 import { downloadSessionFileFromDaemon, downloadSessionFolderFromDaemon } from './lan/fileDownload';
 import { getGitStatusFiles as getGitStatusFilesViaRpc, parseGitStatusFiles, type GitStatusFiles } from './gitStatusFiles';
 import { getToolCallFullContent as getToolCallFullContentFromServer, sessionBash, type GetToolCallFullContentResponse } from './ops';
@@ -5614,6 +5614,39 @@ class Sync {
             };
         }
         return { ok: false, error: 'The machine did not answer over LAN or relay' };
+    }
+
+    /**
+     * A URL an HTML file can be loaded from, so its own references work.
+     *
+     * Drawing the page from its bytes cannot resolve a stylesheet, a script or a runtime `fetch`:
+     * the document has no origin the rest of the tree lives on. The machine mints a read-only
+     * capability for the tree after the account signs for it, and the URL carries that capability
+     * — which is the only credential an iframe's subresource requests can send. Null means a
+     * machine that cannot mint (an older daemon, no reachable channel), and the caller keeps the
+     * bytes-only preview it had.
+     */
+    async getHtmlPreviewUrl(sessionId: string, path: string): Promise<string | null> {
+        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        if (!machineId || !this.getMachineKey(machineId)) {
+            return null;
+        }
+        const carried = await this.carryAtDaemon<{ url: string }>({
+            machineId,
+            operation: 'read',
+            // The account signs for reading the tree; the token it mints is scoped and short-lived.
+            proofAction: { operation: 'preview', target: `${sessionId}:${path}` },
+            run: async (baseUrl, token, proof) => {
+                const grant = await fetchPreviewGrant(baseUrl, token, sessionId, path, proof);
+                return grant ? { url: previewUrlFor(baseUrl, grant.token, path) } : null;
+            },
+        });
+        if (carried.kind === 'done') {
+            log.log(`🖼️ preview ${sessionId} ${path}: served via ${carried.channel}`);
+            return carried.value.url;
+        }
+        log.log(`🖼️ preview ${sessionId} ${path}: ${carried.kind}; drawing from bytes`);
+        return null;
     }
 
     /**

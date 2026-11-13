@@ -21,6 +21,7 @@ import { cleanupDaemonState, checkIfDaemonRunningAndCleanupStaleState } from './
 import { startDaemonControlServer } from './controlServer';
 import { startUnixSocketServer } from './unixSocketServer';
 import { readFileSync, writeFileSync } from 'fs';
+import { randomBytes } from 'node:crypto';
 import { basename, dirname, extname, join, resolve } from 'path';
 import { projectPath } from '@/projectPath';
 import { getTmuxUtilities, isTmuxAvailable, parseTmuxSessionIdentifier, formatTmuxSessionIdentifier } from '@/utils/tmux';
@@ -78,6 +79,19 @@ const SESSION_FILE_MIME: Record<string, string> = {
   md: 'text/markdown; charset=utf-8',
   json: 'application/json',
   csv: 'text/csv; charset=utf-8',
+  html: 'text/html; charset=utf-8',
+  htm: 'text/html; charset=utf-8',
+  css: 'text/css; charset=utf-8',
+  js: 'text/javascript; charset=utf-8',
+  mjs: 'text/javascript; charset=utf-8',
+  map: 'application/json',
+  xml: 'application/xml; charset=utf-8',
+  ico: 'image/x-icon',
+  avif: 'image/avif',
+  woff: 'font/woff',
+  woff2: 'font/woff2',
+  ttf: 'font/ttf',
+  wasm: 'application/wasm',
   zip: 'application/zip',
   mp4: 'video/mp4',
   mov: 'video/quicktime',
@@ -2169,6 +2183,22 @@ export async function startDaemon(): Promise<void> {
         });
         sidecarHub.start();
 
+        /**
+         * Read-only grants for HTML previews, by token.
+         *
+         * The URL an iframe loads carries one: its subresource requests cannot carry the account's
+         * proof, so the grant is the URL. Bound to the session's working tree, read-only, and
+         * short-lived — a copied URL stops working, and a token past its window buys nothing.
+         */
+        const PREVIEW_TOKEN_TTL_MS = 30 * 60_000;
+        const PREVIEW_TOKEN_LIMIT = 8;
+        const previewTokens = new Map<string, { sessionId: string; directory: string; expiresAt: number }>();
+        const directoryOfSession = (sessionId: string): string | null => {
+          const live = [...pidToTrackedSession.values()]
+            .find((session) => session.happySessionId === sessionId)?.directory;
+          return live || sessions[sessionId]?.directory || null;
+        };
+
         const started = await startLanServer({
             secret: credentials.encryption.machineKey,
             machineId,
@@ -2467,6 +2497,71 @@ export async function startDaemon(): Promise<void> {
               // `tar`'s pack is a minipass stream: Fastify sends it by its `pipe`, and the route's
               // type only promises that much.
               return { stream: stream as unknown as NodeJS.ReadableStream, name };
+            },
+            createPreview: async ({ sessionId, path }) => {
+              const directory = directoryOfSession(sessionId);
+              if (!directory) {
+                return null;
+              }
+              // The grant is for the *tree*, not one file: a page's references reach siblings and
+              // parents, and the path here is only what the reader asked to open.
+              const validation = validatePath(path, directory);
+              if (!validation.valid) {
+                return null;
+              }
+              const absolute = resolve(directory, path);
+              try {
+                if (!(await fs.stat(absolute)).isFile()) {
+                  return null;
+                }
+              } catch {
+                return null;
+              }
+              const now = Date.now();
+              for (const [token, grant] of previewTokens) {
+                if (grant.expiresAt <= now) previewTokens.delete(token);
+              }
+              // Bounded: opening and closing previews repeatedly must not accumulate grants.
+              if (previewTokens.size >= PREVIEW_TOKEN_LIMIT) {
+                const oldest = [...previewTokens.entries()].sort((a, b) => a[1].expiresAt - b[1].expiresAt)[0];
+                if (oldest) previewTokens.delete(oldest[0]);
+              }
+              const token = randomBytes(24).toString('hex');
+              const expiresAt = now + PREVIEW_TOKEN_TTL_MS;
+              previewTokens.set(token, { sessionId, directory, expiresAt });
+              logger.debug(`[lan] preview grant ${sessionId}:${path} ttl=${Math.round(PREVIEW_TOKEN_TTL_MS / 60000)}m`);
+              return { token, expiresAt };
+            },
+            readPreviewFile: async ({ token, path }) => {
+              const grant = previewTokens.get(token);
+              if (!grant) {
+                return null;
+              }
+              if (grant.expiresAt <= Date.now()) {
+                previewTokens.delete(token);
+                return null;
+              }
+              // The same confinement the file route applies, against the directory the grant
+              // names: `..`, symlink-free resolution, and absolute paths all end at this check.
+              const validation = validatePath(path, grant.directory);
+              if (!validation.valid) {
+                return null;
+              }
+              const absolute = resolve(grant.directory, path);
+              try {
+                const info = await fs.stat(absolute);
+                if (!info.isFile() || info.size > MAX_SESSION_FILE_BYTES) {
+                  return null;
+                }
+                const bytes = await fs.readFile(absolute);
+                return {
+                  bytes,
+                  name: basename(absolute),
+                  mime: SESSION_FILE_MIME[extname(absolute).slice(1).toLowerCase()] ?? 'application/octet-stream',
+                };
+              } catch {
+                return null;
+              }
             },
             getSessionDiff: async ({ sessionId, path }) => {
               const live = [...pidToTrackedSession.values()]
