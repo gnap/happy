@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { RelayHub, relayHubUrl, relayOriginOf, type SocketLike } from './relayHub';
+import { RelayHub, relayHubUrl, relayMachinesUrl, relayOriginOf, type SocketLike } from './relayHub';
 
 /**
  * A WebSocket the test drives by hand.
@@ -32,11 +32,18 @@ class FakeSocket {
         this.onclose?.({ code: 1000 });
     }
 
-    /** The relay accepted the connection. */
+    /** The relay accepted the connection, with the directory as a frame (the older shape). */
     accept(machines: { tag: string; sessions: unknown[] }[] = []): void {
         this.readyState = 1;
         this.onopen?.();
         this.onmessage?.({ data: JSON.stringify({ t: 'ok', machines }) });
+    }
+
+    /** The relay accepted the connection and serves the directory over HTTP (the newer shape). */
+    acceptHttp(etag: string): void {
+        this.readyState = 1;
+        this.onopen?.();
+        this.onmessage?.({ data: JSON.stringify({ t: 'ok', etag }) });
     }
 
     /** A frame from the relay. */
@@ -96,10 +103,17 @@ describe('relay hub handshake', () => {
 });
 
 describe('relayHubUrl', () => {
-    it('turns the relay base URL into the hub endpoint', () => {
-        expect(relayHubUrl('https://relay.example')).toBe('wss://relay.example/client');
-        expect(relayHubUrl('https://relay.example/')).toBe('wss://relay.example/client');
-        expect(relayHubUrl('http://127.0.0.1:8080')).toBe('ws://127.0.0.1:8080/client');
+    it('turns the relay base URL into the hub endpoint, asking for the directory over HTTP', () => {
+        // A relay that predates `dir=http` ignores the query and sends the directory as a frame;
+        // one that understands it answers with only an etag, and the body is read over HTTP.
+        expect(relayHubUrl('https://relay.example')).toBe('wss://relay.example/client?dir=http');
+        expect(relayHubUrl('https://relay.example/')).toBe('wss://relay.example/client?dir=http');
+        expect(relayHubUrl('http://127.0.0.1:8080')).toBe('ws://127.0.0.1:8080/client?dir=http');
+    });
+
+    it('derives the directory read from the hub URL', () => {
+        expect(relayMachinesUrl(relayHubUrl('https://relay.example'))).toBe('https://relay.example/machines');
+        expect(relayMachinesUrl(relayHubUrl('http://127.0.0.1:8080'))).toBe('http://127.0.0.1:8080/machines');
     });
 });
 
@@ -115,6 +129,89 @@ describe('relayOriginOf', () => {
         expect(relayOriginOf('https://relay.example')).toBeNull();
         expect(relayOriginOf(`https://relay.example/r/${'a'.repeat(31)}`)).toBeNull();
         expect(relayOriginOf('not a url')).toBeNull();
+    });
+});
+
+describe('RelayHub directory', () => {
+    const directory = (body: unknown, etag: string) =>
+        new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json', etag } });
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 120));
+
+    it('reads the directory over HTTP when the relay answers with an etag', async () => {
+        // A relay that understands `dir=http` sends no directory body on the socket: the version
+        // is the handshake, and the state is a read like any other.
+        const fetchMock = vi.fn(async (..._args: unknown[]) => directory({ machines: [{ tag: 'aaaa', sessions: [] }] }, '"e1"'));
+        vi.stubGlobal('fetch', fetchMock);
+        const { hub, socket } = hubWith();
+        socket.acceptHttp('"e1"');
+        await settle();
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(fetchMock.mock.calls[0][0]).toBe('https://relay.example/machines');
+        expect(hub.machines()).toEqual([{ tag: 'aaaa', sessions: [] }]);
+    });
+
+    it('re-reads only when the relay says the directory moved', async () => {
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(directory({ machines: [{ tag: 'aaaa', sessions: [] }] }, '"e1"'))
+            .mockResolvedValueOnce(directory({ machines: [{ tag: 'aaaa', sessions: [] }, { tag: 'bbbb', sessions: [] }] }, '"e2"'));
+        vi.stubGlobal('fetch', fetchMock);
+        const { hub, socket } = hubWith();
+        socket.acceptHttp('"e1"');
+        await settle();
+        expect(hub.machines().map((m) => m.tag)).toEqual(['aaaa']);
+
+        // The version this client already holds is not news.
+        socket.deliver({ t: 'dir', etag: '"e1"' });
+        await settle();
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+
+        socket.deliver({ t: 'dir', etag: '"e2"' });
+        await settle();
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(fetchMock.mock.calls[1][1]).toMatchObject({ headers: { 'if-none-match': '"e1"' } });
+        expect(hub.machines().map((m) => m.tag)).toEqual(['aaaa', 'bbbb']);
+    });
+
+    it('keeps the directory it has when the read says nothing changed', async () => {
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(directory({ machines: [{ tag: 'aaaa', sessions: [] }] }, '"e1"'))
+            .mockResolvedValueOnce(new Response(null, { status: 304, headers: { etag: '"e2"' } }));
+        vi.stubGlobal('fetch', fetchMock);
+        const { hub, socket } = hubWith();
+        socket.acceptHttp('"e1"');
+        await settle();
+
+        socket.deliver({ t: 'dir', etag: '"e2"' });
+        await settle();
+        expect(hub.machines().map((m) => m.tag)).toEqual(['aaaa']);
+    });
+
+    it('keeps the copy it has when the read fails, rather than pretending the relay is empty', async () => {
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(directory({ machines: [{ tag: 'aaaa', sessions: [] }] }, '"e1"'))
+            .mockRejectedValueOnce(new Error('offline'));
+        vi.stubGlobal('fetch', fetchMock);
+        const { hub, socket } = hubWith();
+        socket.acceptHttp('"e1"');
+        await settle();
+
+        socket.deliver({ t: 'dir', etag: '"e2"' });
+        await settle();
+        expect(hub.machines().map((m) => m.tag)).toEqual(['aaaa']);
+    });
+
+    it('still takes the directory as a frame from a relay that does not serve it over HTTP', async () => {
+        // The older shape: no etag in `ok`, no read. This is what keeps a new App working against a
+        // relay that predates the HTTP route.
+        const fetchMock = vi.fn();
+        vi.stubGlobal('fetch', fetchMock);
+        const { hub, socket } = hubWith();
+        socket.accept([{ tag: 'aaaa', sessions: [] }]);
+        socket.deliver({ t: 'machines', machines: [{ tag: 'aaaa', sessions: [] }, { tag: 'bbbb', sessions: [] }] });
+        await settle();
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(hub.machines().map((m) => m.tag)).toEqual(['aaaa', 'bbbb']);
     });
 });
 

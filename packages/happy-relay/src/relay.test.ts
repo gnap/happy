@@ -154,8 +154,8 @@ describe('relay', () => {
      * find out whether it is up, or derive an address per machine — the relay knows which daemons
      * are dialled in and what sessions they published, so it can answer for all of them at once.
      */
-    async function connectHub(port: number) {
-        const ws = new WebSocket(`ws://127.0.0.1:${port}/client`);
+    async function connectHub(port: number, mode: 'legacy' | 'http' = 'legacy') {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}/client${mode === 'http' ? '?dir=http' : ''}`);
         const frames: any[] = [];
         ws.onmessage = (e) => frames.push(JSON.parse(String(e.data)));
         await until(() => frames.some((f) => f.t === 'ok'));
@@ -315,6 +315,56 @@ describe('relay', () => {
         expect(hub.frames.filter((f) => f.t === 'machines').at(-1).machines[0].sessions).toEqual([
             { happySessionId: 's1', isAlive: false },
         ]);
+    });
+
+    /**
+     * The directory is state, and a client that can fetch it over HTTP should not also be handed it
+     * on the connection its streams ride: an idempotent read can be revalidated with a 304, while a
+     * snapshot pushed into an ordered stream delays whatever is queued behind it.
+     *
+     * Both shapes stay, because a client that does not ask for the HTTP one must keep working.
+     */
+    it('serves the directory over HTTP, marked with an etag that makes an unchanged read free', async () => {
+        relay = startRelay({ port: 0 });
+        const d = await connectDaemon(relay.port);
+        await until(() => d.frames.some((f) => f.t === 'ok'));
+        d.ws.send(JSON.stringify({ t: 'sessions', sessions: [{ happySessionId: 's1', isAlive: true }] }));
+        // A separate connection: the publish has to have been handled on the daemon's socket first.
+        await Bun.sleep(50);
+
+        const res = await fetch(`http://127.0.0.1:${relay.port}/machines`);
+        expect(res.status).toBe(200);
+        const etag = res.headers.get('etag');
+        expect(etag).toBeTruthy();
+        expect(await res.json()).toEqual({ machines: [{ tag: d.tag, sessions: [{ happySessionId: 's1', isAlive: true }], reachable: null }] });
+
+        const again = await fetch(`http://127.0.0.1:${relay.port}/machines`, { headers: { 'if-none-match': etag! } });
+        expect(again.status).toBe(304);
+        expect(await again.text()).toBe('');
+    });
+
+    it('tells an HTTP-directory client that the directory moved, and leaves the copy with the rest', async () => {
+        relay = startRelay({ port: 0 });
+        const d = await connectDaemon(relay.port);
+        await until(() => d.frames.some((f) => f.t === 'ok'));
+        const httpClient = await connectHub(relay.port, 'http');
+        const legacy = await connectHub(relay.port, 'legacy');
+
+        // The HTTP client was told the directory's fingerprint at connect, not its contents.
+        const ok = httpClient.reply('ok')[0];
+        expect(ok.machines).toBeUndefined();
+        expect(typeof ok.etag).toBe('string');
+
+        d.ws.send(JSON.stringify({ t: 'sessions', sessions: [{ happySessionId: 's1', isAlive: true }] }));
+        await until(() => httpClient.reply('dir').length === 1 && legacy.reply('machines').length === 1);
+
+        const nudge = httpClient.reply('dir')[0];
+        // The nudge names the same representation the HTTP route would answer with, so a client
+        // that already has it fetches nothing.
+        const fetched = await fetch(`http://127.0.0.1:${relay.port}/machines`);
+        expect(nudge.etag).toBe(fetched.headers.get('etag'));
+        // The legacy client is not left behind: same fact, carried the way it can read it.
+        expect(legacy.reply('machines')[0].machines[0].sessions).toEqual([{ happySessionId: 's1', isAlive: true }]);
     });
 
     it('proxies an http request to the machine the client names', async () => {
