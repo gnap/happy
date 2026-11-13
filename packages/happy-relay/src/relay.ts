@@ -24,6 +24,7 @@
  */
 import nacl from 'tweetnacl';
 import { createHash, randomBytes } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
 
 export const REGISTER_CONTEXT = 'happy-relay-v1.register.';
 
@@ -54,7 +55,46 @@ type Pending = {
     resolve?: (res: Response) => void;
     /** The hub path answers by sending the daemon's own response object back to its client. */
     hub?: { client: any; clientId: number };
+    /** What was asked, so the answer can be reported without the caller having to log anything. */
+    request?: { tag: string; method: string; path: string };
 };
+
+/**
+ * One line per read of a session's own routes, written when the daemon answers.
+ *
+ * The App's reads leave no trace anywhere an operator can see: they travel a socket to the machine
+ * and the answer comes back the same way. When a screen that reads from a session is empty, the
+ * question is always the same — did the request go out, and what did the machine say — and this is
+ * the only place the whole exchange is visible. Session routes only, and never the body itself:
+ * a listing's file count is enough to tell an empty directory from an unanswered request.
+ */
+function logSessionRead(request: Pending['request'], status: number, bodyBase64: string | null): void {
+    if (!request || !request.path.includes('/lan/sessions/')) return;
+    const body = bodyBase64 ? Buffer.from(bodyBase64, 'base64') : null;
+    const bytes = body?.length ?? 0;
+    let detail = '';
+    if (body && status === 200 && request.path.includes('/listing')) {
+        const sessionId = request.path.split('/lan/sessions/')[1]?.split('/')[0] ?? 'session';
+        try {
+            const parsed = JSON.parse(body.toString('utf8')) as {
+                files?: unknown; gitRepo?: unknown; gitStatus?: unknown; gitDiff?: unknown; filesTruncated?: unknown;
+            };
+            const files = typeof parsed.files === 'string' ? parsed.files.split('\n').filter(Boolean).length : -1;
+            const gitStatus = typeof parsed.gitStatus === 'string' ? parsed.gitStatus : '';
+            const gitDiff = typeof parsed.gitDiff === 'string' ? parsed.gitDiff : '';
+            detail = ` files=${files} fileBytes=${typeof parsed.files === 'string' ? parsed.files.length : -1}`
+                + ` statusBytes=${gitStatus.length} diffBytes=${gitDiff.length}`
+                + ` repo=${parsed.gitRepo === true} truncated=${parsed.filesTruncated === true}`
+                // The paths in `git status` name the working tree the daemon actually answered for.
+                + ` tree=${gitStatus.replace(/\n/g, ' | ').slice(0, 300)}`;
+            mkdirSync('/tmp/relay-listings', { recursive: true });
+            writeFileSync(`/tmp/relay-listings/${sessionId}.json`, body);
+        } catch {
+            // Not the listing's JSON — the status and size still say what happened.
+        }
+    }
+    console.log(`[read] ${request.tag.slice(0, 8)} ${request.method} ${request.path.split('?')[0]} -> ${status} ${bytes}B${detail}`);
+}
 
 /**
  * What the directory says about one session.
@@ -297,7 +337,7 @@ export function startRelay(options: RelayOptions): RelayHandle {
                     daemon.pending.delete(id);
                     resolve(json(504, { error: 'timeout' }));
                 }, httpTimeout);
-                daemon.pending.set(id, { resolve, timer });
+                daemon.pending.set(id, { resolve, timer, request: { tag, method: req.method, path: rest } });
                 try {
                     daemon.ws.send(JSON.stringify({
                         t: 'http', id, method: req.method, path: rest, headers, ip,
@@ -403,6 +443,7 @@ export function startRelay(options: RelayOptions): RelayHandle {
                     if (!p) return;
                     clearTimeout(p.timer);
                     daemon.pending.delete(msg.id);
+                    logSessionRead(p.request, Number(msg.status) || 502, msg.body ? String(msg.body) : null);
                     if (p.hub) {
                         try {
                             p.hub.client.send(JSON.stringify({
@@ -618,7 +659,11 @@ export function startRelay(options: RelayOptions): RelayHandle {
                 daemon.pending.delete(daemonId);
                 reply({ t: 'http-res', id: frame.id, status: 504, headers: {}, body: null });
             }, httpTimeout);
-            daemon.pending.set(daemonId, { timer, hub: { client: ws, clientId: frame.id } });
+            daemon.pending.set(daemonId, {
+                timer,
+                hub: { client: ws, clientId: frame.id },
+                request: { tag: frame.tag, method: String(frame.method ?? 'GET'), path: frame.path },
+            });
             try {
                 daemon.ws.send(JSON.stringify({
                     t: 'http',
