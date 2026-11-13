@@ -15,7 +15,7 @@ import { getToolName } from "./getToolName";
 import { EnhancedMode, PermissionMode } from "../loop";
 import { getToolDescriptor } from "./getToolDescriptor";
 import { delay } from "@/utils/time";
-import { mapToClaudeMode } from "./permissionMode";
+import { ClaudeSdkPermissionMode, mapToClaudeMode } from "./permissionMode";
 import { createEnvelope } from '@slopus/happy-wire';
 
 interface PermissionResponse {
@@ -69,6 +69,78 @@ export class PermissionHandler {
             this.previousMode = this.permissionMode;
         }
         this.permissionMode = mapped;
+        this.settlePendingForMode(mapped);
+    }
+
+    /**
+     * A mode change can make an already-blocked request moot: the same tool
+     * call would have been auto-approved if it started now. Settle those
+     * requests with the new semantics instead of leaving the SDK blocked until
+     * the request is answered by hand or cancelled — the user switched to an
+     * auto-approving mode precisely to stop being asked.
+     *
+     * AskUserQuestion always needs a human answer, so it stays pending.
+     */
+    private settlePendingForMode(mode: ClaudeSdkPermissionMode): void {
+        if (mode !== 'bypassPermissions' && mode !== 'acceptEdits') {
+            return;
+        }
+
+        const settled: string[] = [];
+        for (const [id, pending] of this.pendingRequests) {
+            if (pending.toolName === 'AskUserQuestion' || pending.toolName === 'ask_user_question') {
+                continue;
+            }
+            if (mode === 'acceptEdits' && !getToolDescriptor(pending.toolName).edit) {
+                continue;
+            }
+
+            this.pendingRequests.delete(id);
+            pending.resolve({
+                behavior: 'allow',
+                updatedInput: (pending.input as Record<string, unknown>) || {},
+            });
+            // Close the lifecycle in the message stream as well, so replay
+            // readers drop the prompt exactly like they do after a manual answer.
+            this.session.client.sendSessionProtocolMessage(
+                createEnvelope('agent', {
+                    t: 'permission-result',
+                    call: id,
+                    status: 'approved',
+                    mode,
+                    reason: 'Auto-approved by permission mode change',
+                }),
+            );
+            settled.push(id);
+        }
+
+        if (settled.length === 0) {
+            return;
+        }
+
+        this.session.client.updateAgentState((currentState) => {
+            const requests = { ...(currentState.requests ?? {}) };
+            const completed = { ...currentState.completedRequests };
+            for (const id of settled) {
+                const request = requests[id];
+                if (!request) continue;
+                delete requests[id];
+                completed[id] = {
+                    ...request,
+                    completedAt: Date.now(),
+                    status: 'approved' as const,
+                    reason: 'Auto-approved by permission mode change',
+                    mode,
+                };
+            }
+            return {
+                ...currentState,
+                requests,
+                completedRequests: Object.fromEntries(Object.entries(completed).slice(-20)),
+            };
+        });
+
+        logger.debug(`Auto-approved ${settled.length} pending permission request(s) after mode change to ${mode}`);
     }
 
     /**
