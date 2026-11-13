@@ -350,6 +350,53 @@ export async function fetchSessionFolderBytes(
     return { bytes, name: named || 'folder.tar.gz', size: bytes.byteLength };
 }
 
+/**
+ * A read-only grant over one session's working tree, for a page a browser loads by URL.
+ *
+ * Minting is account-signed like every other plaintext read. What comes back is the only thing an
+ * iframe's own requests can carry: subresource loads send no headers, so the token in the URL is
+ * the credential. Null is the 404 of a daemon without the route, where the viewer falls back to
+ * drawing the page from the bytes it fetched.
+ */
+export async function fetchPreviewGrant(
+    baseUrl: string,
+    token: string,
+    sessionId: string,
+    path: string,
+    proof?: Record<string, string>,
+): Promise<{ token: string; expiresAt: number } | null> {
+    const response = await request(`${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/preview`, {
+        method: 'POST',
+        token,
+        headers: { 'content-type': 'application/json', ...(proof ?? {}) },
+        body: JSON.stringify({ path }),
+        timeoutMs: REQUEST_TIMEOUT_MS,
+    });
+    if (response.status === 404) {
+        return null;
+    }
+    if (!response.ok) {
+        return throwAnswer(response, 'preview request failed');
+    }
+    const body = (await response.json()) as { token?: unknown; expiresAt?: unknown };
+    if (typeof body.token !== 'string' || typeof body.expiresAt !== 'number') {
+        return null;
+    }
+    return { token: body.token, expiresAt: body.expiresAt };
+}
+
+/**
+ * Where a preview is loaded from, mirroring the file's own path.
+ *
+ * The path is the point: a page's `./style.css` resolves against the URL it was loaded from, so
+ * the URL has to end in the same directory the file lives in. The daemon serves that path under
+ * the session's working tree, and the token is what each of those requests carries.
+ */
+export function previewUrlFor(baseUrl: string, token: string, path: string): string {
+    const encodedPath = path.split('/').map((segment) => encodeURIComponent(segment)).join('/');
+    return `${baseUrl}/lan/preview/${encodeURIComponent(token)}/${encodedPath}`;
+}
+
 export type LanSessionList = {
     sessions: LanSessionSummary[];
     /**
