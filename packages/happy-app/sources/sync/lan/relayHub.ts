@@ -58,8 +58,17 @@ export type RelayHubHandle = {
     onMachines: (listener: (machines: HubMachine[]) => void) => () => void;
     /** Called when the connection comes up or goes down, so a reader can tell "no machines" from "no relay". */
     onStatus: (listener: (connected: boolean) => void) => () => void;
-    /** The tag of the machine whose key derives this tag, for opening a stream to it. */
-    stream: (tag: string, path: string) => SocketLike;
+    /**
+     * The tag of the machine whose key derives this tag, for opening a stream to it.
+     *
+     * `probe`, when given, is written on the stream the moment the relay routes it. A daemon's LAN
+     * socket answers an upgrade with its snapshot, but only when it has one — a machine with no
+     * sessions says nothing at all, and a stream's openness is decided by its first frame. The LAN
+     * protocol already has the right question for that (`{event:'ping'}`), and asking it is what
+     * makes the stream open on a pong instead of waiting out the timeout on a peer that is, in
+     * fact, answering.
+     */
+    stream: (tag: string, path: string, probe?: string) => SocketLike;
     /** Whether the hub connection is up; false means nothing behind it can be reached. */
     isConnected: () => boolean;
     close: () => void;
@@ -98,7 +107,9 @@ const RECONNECT_MAX_MS = 30_000;
  *
  * The relay answers `open` only implicitly — a frame arrives for that id, or a close does — so
  * "opened" here means "the first frame or close arrived", and a stream that produces neither is
- * closed rather than left as a socket that never resolves.
+ * closed rather than left as a socket that never resolves. A peer that stays silent is therefore
+ * indistinguishable from a stream that was never routed; `stream()`'s probe is how the LAN channel
+ * makes the daemon answer, so silence only means failure.
  */
 class HubSocket implements SocketLike {
     readyState = 0;
@@ -421,7 +432,7 @@ export class RelayHub {
      * Opens a stream to one machine. The socket it returns is not usable until the daemon answers,
      * exactly like a WebSocket, so the caller's handshake logic does not change.
      */
-    stream(tag: string, path: string): SocketLike {
+    stream(tag: string, path: string, probe?: string): SocketLike {
         const id = this.nextId++;
         const socket = new HubSocket(this, id, tag);
         this.streams.set(id, socket);
@@ -431,6 +442,14 @@ export class RelayHub {
             // socket in hand is a failure nobody hears, which is exactly how a socket ends up
             // waiting forever for a connection that was never made.
             void Promise.resolve().then(() => socket.fail(4502, 'relay hub is not connected'));
+            return socket;
+        }
+        // The relay registers the stream while handling `open`, and this connection is ordered, so
+        // the probe is routed to the same daemon. It may arrive before that daemon's local socket
+        // has finished opening; the daemon's relay client queues frames until it has, which is why
+        // this can be written without waiting for a handshake the relay never reports.
+        if (probe !== undefined) {
+            this.send({ t: 'msg', id, data: probe });
         }
         return socket;
     }

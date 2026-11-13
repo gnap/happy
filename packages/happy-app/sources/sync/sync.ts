@@ -421,7 +421,12 @@ class Sync {
             if (!hub || !tag) {
                 return null;
             }
-            return hub.stream(tag, `${path}${query}`);
+            // The LAN socket answers an upgrade with its snapshot frames only when it has any. A
+            // machine running no sessions sends nothing, so a stream opened to it would look like
+            // one the daemon never accepted, and this App would report the relay as unavailable
+            // for a machine that is answering perfectly well. The ping is the LAN protocol's own
+            // liveness question; the pong that comes back is the stream being open.
+            return hub.stream(tag, `${path}${query}`, JSON.stringify({ event: 'ping' }));
         };
     }
 
