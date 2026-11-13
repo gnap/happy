@@ -674,6 +674,8 @@ export const ca: TranslationStructure = {
         fileEmpty: 'El fitxer està buit',
         noChanges: 'No hi ha canvis a mostrar',
         download: 'Descarrega',
+        expand: 'Amplia',
+        collapse: 'Redueix',
         allFiles: 'Tots els fitxers',
         recentFiles: 'Recents',
     },

@@ -706,6 +706,8 @@ export const it: TranslationStructure = {
         fileEmpty: 'File vuoto',
         noChanges: 'Nessuna modifica da mostrare',
         download: 'Scarica',
+        expand: 'Espandi',
+        collapse: 'Riduci',
         allFiles: 'Tutti i file',
         recentFiles: 'Recenti',
     },

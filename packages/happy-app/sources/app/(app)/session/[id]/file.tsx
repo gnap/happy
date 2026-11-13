@@ -12,7 +12,7 @@ import { layout } from '@/components/layout';
 import { t } from '@/text';
 import { FileIcon } from '@/components/FileIcon';
 import { decodeFilePathParam } from '@/utils/filePathParam';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, Octicons } from '@expo/vector-icons';
 
 interface FileContent {
     content: string;
@@ -176,6 +176,15 @@ export default function FileScreen() {
     const [reloadToken, setReloadToken] = React.useState(0);
     const { width: screenWidth } = useWindowDimensions();
     const fileName = filePath.split('/').pop() || filePath;
+    /** Use the whole content area instead of the reading column. */
+    const [expanded, setExpanded] = React.useState(false);
+
+    // A page is a window, not a column: an HTML preview starts full-width — the session list
+    // stays where it is, this view just stops leaving the margins a wall of text wants — and the
+    // button only takes it back to the reading width.
+    React.useEffect(() => {
+        setExpanded(isHtmlFile(filePath));
+    }, [filePath]);
 
     // Determine file language from extension
     const getFileLanguage = React.useCallback((path: string): string | null => {
@@ -670,7 +679,7 @@ export default function FileScreen() {
     }
 
     return (
-        <View style={[styles.container, { backgroundColor: theme.colors.surface }]}>
+        <View style={[expanded ? styles.containerExpanded : styles.container, { backgroundColor: theme.colors.surface }]}>
             
             {/* File path header */}
             <View style={{
@@ -691,6 +700,19 @@ export default function FileScreen() {
                 }}>
                     {filePath}
                 </Text>
+                <Pressable
+                    onPress={() => setExpanded((value) => !value)}
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel={expanded ? t('files.collapse') : t('files.expand')}
+                    style={{ marginLeft: 8 }}
+                >
+                    <Octicons
+                        name={expanded ? 'screen-normal' : 'screen-full'}
+                        size={16}
+                        color={theme.colors.textSecondary}
+                    />
+                </Pressable>
             </View>
 
             {/* Toggle buttons for File/Diff view */}
@@ -745,20 +767,20 @@ export default function FileScreen() {
             )}
             
             {/* Content display */}
-            <ScrollView 
-                style={{ flex: 1 }}
-                contentContainerStyle={{ padding: 16 }}
-                showsVerticalScrollIndicator={true}
-            >
-                {displayMode === 'diff' && diffContent ? (
-                    <DiffDisplay diffContent={diffContent} />
-                ) : displayMode === 'file' && fileContent?.content ? (
-                    isHtmlFile(filePath) ? (
-                        // The page itself, not its markup: a few hundred kilobytes of source
-                        // tokenizes into enough leaves to leave the webview blank, and a page's
-                        // stylesheets and scripts only resolve when it is loaded from the tree.
-                        <HtmlPagePreview url={previewUrl} html={fileContent.content} themeBg={theme.colors.surface} />
-                    ) : (
+            {displayMode === 'file' && isHtmlFile(filePath) && fileContent?.content ? (
+                // A page needs a viewport, not scroll content. Inside the ScrollView below its
+                // height is unbounded, and an iframe asking for 100% resolves to nothing: the
+                // page loads with nowhere to draw, which reads as "it never finished loading".
+                <HtmlPagePreview url={previewUrl} html={fileContent.content} themeBg={theme.colors.surface} />
+            ) : (
+                <ScrollView
+                    style={{ flex: 1 }}
+                    contentContainerStyle={{ padding: 16 }}
+                    showsVerticalScrollIndicator={true}
+                >
+                    {displayMode === 'diff' && diffContent ? (
+                        <DiffDisplay diffContent={diffContent} />
+                    ) : displayMode === 'file' && fileContent?.content ? (
                         <SimpleSyntaxHighlighter
                             code={fileContent.content.length > MAX_HIGHLIGHT_CHARS
                                 ? fileContent.content.slice(0, MAX_HIGHLIGHT_CHARS) + '\n…'
@@ -766,27 +788,27 @@ export default function FileScreen() {
                             language={language}
                             selectable={true}
                         />
-                    )
-                ) : displayMode === 'file' && fileContent && !fileContent.content ? (
-                    <Text style={{
-                        fontSize: 16,
-                        color: theme.colors.textSecondary,
-                        fontStyle: 'italic',
-                        ...Typography.default()
-                    }}>
-                        {t('files.fileEmpty')}
-                    </Text>
-                ) : !diffContent && !fileContent?.content ? (
-                    <Text style={{
-                        fontSize: 16,
-                        color: theme.colors.textSecondary,
-                        fontStyle: 'italic',
-                        ...Typography.default()
-                    }}>
-                        {t('files.noChanges')}
-                    </Text>
-                ) : null}
-            </ScrollView>
+                    ) : displayMode === 'file' && fileContent && !fileContent.content ? (
+                        <Text style={{
+                            fontSize: 16,
+                            color: theme.colors.textSecondary,
+                            fontStyle: 'italic',
+                            ...Typography.default()
+                        }}>
+                            {t('files.fileEmpty')}
+                        </Text>
+                    ) : !diffContent && !fileContent?.content ? (
+                        <Text style={{
+                            fontSize: 16,
+                            color: theme.colors.textSecondary,
+                            fontStyle: 'italic',
+                            ...Typography.default()
+                        }}>
+                            {t('files.noChanges')}
+                        </Text>
+                    ) : null}
+                </ScrollView>
+            )}
         </View>
     );
 }
@@ -959,6 +981,11 @@ const styles = StyleSheet.create((theme) => ({
         flex: 1,
         maxWidth: layout.maxWidth,
         alignSelf: 'center',
+        width: '100%',
+    },
+    /** The reading column, removed: a preview that is a page uses the whole content area. */
+    containerExpanded: {
+        flex: 1,
         width: '100%',
     },
     /** What a preview shows when it has nothing to draw — centred under the shared header. */
