@@ -320,6 +320,7 @@ export const zhHans: TranslationStructure = {
         activityGoals: '目标',
         activityShell: '后台命令',
         activityWorkflows: '工作流',
+        activityWakeups: '定时唤醒',
     },
 
     commandPalette: {

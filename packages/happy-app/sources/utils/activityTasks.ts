@@ -124,7 +124,7 @@ export function canonicalActivityType(type: string): string {
  * Fixed rather than derived from the data so a badge does not move when a task of another kind
  * starts: what a reader scans down the session list is badges that stay put.
  */
-const TYPE_ORDER = ['subagent', 'monitor', 'shell', 'workflow'] as const;
+const TYPE_ORDER = ['subagent', 'monitor', 'wakeup', 'shell', 'workflow'] as const;
 
 const orderOf = (type: string): number => {
     const at = (TYPE_ORDER as readonly string[]).indexOf(type);

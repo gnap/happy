@@ -350,6 +350,7 @@ export const it: TranslationStructure = {
         activityGoals: 'Obiettivi',
         activityShell: 'Comandi in background',
         activityWorkflows: 'Workflow',
+        activityWakeups: 'Risvegli',
     },
 
     commandPalette: {

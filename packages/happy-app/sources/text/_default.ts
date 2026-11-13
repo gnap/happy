@@ -317,6 +317,7 @@ export const en = {
         activityGoals: 'Goals',
         activityShell: 'Background commands',
         activityWorkflows: 'Workflows',
+        activityWakeups: 'Wakeups',
     },
 
     commandPalette: {

@@ -318,6 +318,7 @@ export const pt: TranslationStructure = {
         activityGoals: 'Objetivos',
         activityShell: 'Comandos em segundo plano',
         activityWorkflows: 'Fluxos de trabalho',
+        activityWakeups: 'Reativações',
     },
 
     commandPalette: {

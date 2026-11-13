@@ -333,6 +333,7 @@ export const en: TranslationStructure = {
         activityGoals: 'Goals',
         activityShell: 'Background commands',
         activityWorkflows: 'Workflows',
+        activityWakeups: 'Wakeups',
     },
 
     commandPalette: {

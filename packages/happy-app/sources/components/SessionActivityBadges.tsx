@@ -54,6 +54,9 @@ const KIND_LABELS: Record<string, () => string> = {
     monitor: () => t('session.activityMonitors'),
     shell: () => t('session.activityShell'),
     workflow: () => t('session.activityWorkflows'),
+    // A wakeup is not work running now, but it is what the session is waiting on — the same
+    // question the bubble answers for a monitor.
+    wakeup: () => t('session.activityWakeups'),
 };
 
 const taskSections = (groups: ActivityGroup[]): ActivityDetailSection[] =>
