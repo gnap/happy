@@ -7114,7 +7114,12 @@ class Sync {
         const state = storage.getState();
         const listed = state.daemonSessionList[sessionId];
         if (listed) {
-            return listed.isAlive === false;
+            // A roster row this App holds may come from a machine that merely catalogues the
+            // session — every daemon folds the server's list in, and its copy says `origin:
+            // 'server'` and not alive, because nothing is running there. That row exists for the
+            // rounds the owner did not answer, and treating it as the owner's verdict is what
+            // restarted live sessions whenever a message was sent into one of those gaps.
+            return listed.origin !== 'server' && listed.isAlive === false;
         }
         const machineId = state.sessions[sessionId]?.metadata?.machineId;
         const published = machineId
