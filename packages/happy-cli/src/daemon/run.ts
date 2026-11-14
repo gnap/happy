@@ -31,7 +31,7 @@ import { fetchSessionProfileMeta, PROFILE_META_DEADLINE_MS } from './fetchSessio
 import { delay } from '@/utils/time';
 import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSessionSummary } from './lanServer';
 import { SidecarHub } from './sidecarHub';
-import { RESTARTING_TTL_MS, expiredRestarting } from './restartTracker';
+import { RESTARTING_TTL_MS, RESTART_REPEAT_WINDOW_MS, expiredRestarting } from './restartTracker';
 import { LifecycleLog } from './lifecycleLog';
 import { replayToServer } from './lifecycleServerReplay';
 import { ACCOUNT_PROOF_WINDOW_MS } from './accountProof';
@@ -112,11 +112,14 @@ const LISTING_COMMAND_TIMEOUT_MS = 15_000;
 const execFileAsync = promisify(execFile);
 
 /**
- * A command's stdout, or '' when it failed.
+ * A command's stdout, or '' when it failed without writing any.
  *
  * A listing is best-effort by nature — a directory that is not a repository, a git that is not
  * installed, a file that vanished mid-crawl — and none of those is worth failing the request over.
- * The caller still gets the parts that worked.
+ * The caller still gets the parts that worked, so a non-zero exit is not a reason to discard what
+ * the command did print: `rg --files --follow` exits 2 when *any* path it reached errored (a
+ * dangling symlink is enough) and still writes every path it saw. Treating that as "no files"
+ * turned a tree with thousands of files into an empty project.
  */
 async function captureCommand(command: string, args: string[], cwd: string): Promise<string> {
   try {
@@ -126,8 +129,10 @@ async function captureCommand(command: string, args: string[], cwd: string): Pro
       maxBuffer: 32 * 1024 * 1024,
     });
     return stdout;
-  } catch {
-    return '';
+  } catch (error) {
+    // execFile rejects on a non-zero exit but the error still carries what was written.
+    const partial = (error as { stdout?: unknown }).stdout;
+    return typeof partial === 'string' ? partial : '';
   }
 }
 
@@ -1620,6 +1625,16 @@ export async function startDaemon(): Promise<void> {
     const restartingStartedAt = new Map<string, number>();
 
     /**
+     * When each session's last restart finished, successful or not.
+     *
+     * A repeat ask shortly after is the same restart come back, not a new one: the asker's first
+     * answer can be lost on a flapping route, and its next channel then asks again — which used
+     * to terminate the process the first restart had just started. The window below is how long a
+     * finished restart keeps answering repeats on its own.
+     */
+    const lastRestartFinishedAt = new Map<string, number>();
+
+    /**
      * The LAN/relay fan-out. Declared here, above the restart path that pushes through it: a
      * `let` read before its declaration throws, and a restart can be asked for from the moment the
      * control server is up, which is earlier than the LAN listener is.
@@ -1672,11 +1687,33 @@ export async function startDaemon(): Promise<void> {
      * mid-restart and so never gets to say it finished.
      */
     const restartSession = async (sessionId: string, sandboxConfig?: any, requiresDesktop?: boolean): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
+      // The idempotent read of a restart this machine already performed or is performing: one
+      // that is in flight, or finished inside the window, answers the repeat as done. Restarting
+      // again here would kill the process the first restart just started — a kill the asker never
+      // meant, because from its side the first one never answered.
+      if (restartingStartedAt.has(sessionId)) {
+        logger.debug(`[DAEMON RUN] Restart already in flight: ${sessionId}`);
+        return { success: true };
+      }
+      const finished = lastRestartFinishedAt.get(sessionId);
+      if (finished !== undefined) {
+        if (Date.now() - finished < RESTART_REPEAT_WINDOW_MS) {
+          logger.debug(`[DAEMON RUN] Restart finished ${Date.now() - finished}ms ago, answering as done: ${sessionId}`);
+          return { success: true };
+        }
+        lastRestartFinishedAt.delete(sessionId);
+      }
       const startedAt = Date.now();
       restartingStartedAt.set(sessionId, startedAt);
       announceRestarting(sessionId, startedAt);
       try {
-        return await performRestart(sessionId, sandboxConfig, requiresDesktop);
+        const result = await performRestart(sessionId, sandboxConfig, requiresDesktop);
+        // Only a restart that happened arms the repeat window: one that failed has nothing for a
+        // repeat ask to be a repeat of, and answering it as done would hide the failure.
+        if (result.success) {
+          lastRestartFinishedAt.set(sessionId, Date.now());
+        }
+        return result;
       } finally {
         // Called off once there is an answer, whatever the answer was: the new process is up and
         // has registered, or the restart did not happen. Either way nothing is in flight.
@@ -2462,10 +2499,12 @@ export async function startDaemon(): Promise<void> {
                 captureCommand('git', ['status', '--porcelain=v2', '--branch', '--untracked-files=all'], directory),
                 captureCommand('rg', ['--files', '--follow'], directory),
               ]);
+              // Same rule as the system binary: the launcher reports what rg wrote even when rg
+              // reported a partial failure with exit 2. Exit 1 (no matches) writes nothing.
               const crawl = directCrawl.length > 0
                 ? directCrawl
                 : await runRipgrep(['--files', '--follow'], { cwd: directory })
-                  .then((result) => (result.exitCode === 0 ? result.stdout : ''))
+                  .then((result) => result.stdout)
                   .catch(() => '');
               const gitRepo = insideWorkTree.trim() === 'true';
               const gitStatus = gitRepo ? status : '';

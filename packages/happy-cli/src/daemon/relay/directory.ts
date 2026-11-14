@@ -28,7 +28,7 @@
 import type { LanSessionSummary } from '../lanServer';
 
 /** One session as the directory describes it. */
-export type DirectorySession = Pick<LanSessionSummary, 'happySessionId' | 'tag' | 'isAlive' | 'origin'>;
+export type DirectorySession = Pick<LanSessionSummary, 'happySessionId' | 'tag' | 'isAlive' | 'origin' | 'restartingSince'>;
 
 /**
  * The directory rows for a roster, dropping everything the relay would not serve.
@@ -47,6 +47,7 @@ export function directoryRows(summaries: readonly LanSessionSummary[]): Director
       ...(summary.tag === undefined ? {} : { tag: summary.tag }),
       isAlive: summary.isAlive,
       ...(summary.origin === undefined ? {} : { origin: summary.origin }),
+      ...(summary.restartingSince === undefined ? {} : { restartingSince: summary.restartingSince }),
     });
   }
   return rows;

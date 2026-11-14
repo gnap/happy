@@ -52,3 +52,17 @@ describe('directoryRows', () => {
     expect(directoryRows([full({ isAlive: false })])[0].isAlive).toBe(false);
   });
 });
+
+describe('directoryRows: restartingSince', () => {
+  it('carries when the machine is restarting the session, so a reader can tell it from a crash', () => {
+    expect(directoryRows([full({ isAlive: false, restartingSince: 1_234 })])).toEqual([
+      { happySessionId: 'session-1', tag: 'tag-1', isAlive: false, restartingSince: 1_234 },
+    ]);
+  });
+
+  it('is absent when nothing is restarting, so the publisher stays quiet while idle', () => {
+    expect(directoryRows([full()])).toEqual([
+      { happySessionId: 'session-1', tag: 'tag-1', isAlive: true },
+    ]);
+  });
+});
