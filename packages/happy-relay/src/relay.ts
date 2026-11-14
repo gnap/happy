@@ -74,6 +74,14 @@ type DirectorySession = {
     isAlive: boolean;
     /** Which machine the row is about: this one, or the daemon's import of the server's record. */
     origin?: 'daemon' | 'server';
+    /**
+     * When the owning daemon began restarting this session, if it is mid-restart right now.
+     *
+     * A restart reads as `isAlive: false` in the directory, and without this field the reader
+     * cannot tell a restart from a crash — so it draws the session offline for the duration
+     * instead of saying it is coming back.
+     */
+    restartingSince?: number;
 };
 
 /**
@@ -83,12 +91,13 @@ type DirectorySession = {
  */
 function directorySession(entry: unknown): DirectorySession | null {
     if (!entry || typeof entry !== 'object') return null;
-    const session = entry as { happySessionId?: unknown; tag?: unknown; isAlive?: unknown; origin?: unknown };
+    const session = entry as { happySessionId?: unknown; tag?: unknown; isAlive?: unknown; origin?: unknown; restartingSince?: unknown };
     const row: DirectorySession = { isAlive: session.isAlive === true };
     if (typeof session.happySessionId === 'string') row.happySessionId = session.happySessionId;
     if (typeof session.tag === 'string') row.tag = session.tag;
     if (row.happySessionId === undefined && row.tag === undefined) return null;
     if (session.origin === 'daemon' || session.origin === 'server') row.origin = session.origin;
+    if (typeof session.restartingSince === 'number') row.restartingSince = session.restartingSince;
     return row;
 }
 
