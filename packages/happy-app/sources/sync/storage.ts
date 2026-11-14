@@ -2070,7 +2070,28 @@ export const storage = create<StorageState>()((set, get) => {
             for (const entry of entries) {
                 next[entry.machineId] = entry;
             }
-            return { ...state, relayDirectory: next, relayUnknownTags: unknownTags };
+            // The same fact the listing applies, arriving on the relay's carrier: a machine that
+            // is restarting a session publishes it not alive, and the reader cannot tell that from
+            // a crash unless the start time travels with the row. Only set, never cleared — the
+            // directory lags the machine's own channels by up to one publish, so "this row no
+            // longer says restarting" is not yet the machine saying it is over; the grace period
+            // is what retires a marker nothing refreshed.
+            const withRestarts = { ...state.sessions };
+            let changed = false;
+            for (const entry of entries) {
+                for (const row of entry.sessions) {
+                    if (row.restartingSince === undefined || !row.happySessionId) continue;
+                    const known = withRestarts[row.happySessionId];
+                    if (known && known.restartingAt !== row.restartingSince) {
+                        withRestarts[row.happySessionId] = { ...known, restartingAt: row.restartingSince };
+                        changed = true;
+                    }
+                }
+            }
+            if (!changed) {
+                return { ...state, relayDirectory: next, relayUnknownTags: unknownTags };
+            }
+            return { ...state, sessions: withRestarts, relayDirectory: next, relayUnknownTags: unknownTags };
         }),
         setRelayHubConnected: (connected) => set((state) => (
             state.relayHubConnected === connected ? state : { ...state, relayHubConnected: connected }
