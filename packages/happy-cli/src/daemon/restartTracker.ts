@@ -14,6 +14,18 @@
 export const RESTARTING_TTL_MS = 90_000;
 
 /**
+ * How long a finished restart keeps answering repeat asks on its own.
+ *
+ * A repeat inside this window is the same restart come back: the asker's first answer was lost on
+ * a flapping route, and the next channel it tries asks again. Restarting for real would terminate
+ * the process the first restart just started, so the window is how long the machine keeps saying
+ * "done" without doing it twice.
+ *
+ * Longer than a channel walk's per-attempt timeout, so the repeat always lands inside it.
+ */
+export const RESTART_REPEAT_WINDOW_MS = 15_000;
+
+/**
  * The sessions whose grace has run out, removed from `entries` as they are handed back.
  *
  * What the caller does with them is call the restart off: the daemon has stopped believing it, and

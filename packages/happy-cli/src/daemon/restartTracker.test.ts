@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RESTARTING_TTL_MS, expiredRestarting, isRestarting } from './restartTracker';
+import { RESTARTING_TTL_MS, RESTART_REPEAT_WINDOW_MS, expiredRestarting, isRestarting } from './restartTracker';
 
 const T0 = 1_000_000;
 
@@ -49,5 +49,14 @@ describe('expiredRestarting', () => {
     it('finds nothing when nothing has run out', () => {
         expect(expiredRestarting(new Map(), T0)).toEqual([]);
         expect(expiredRestarting(new Map([['sess-1', T0]]), T0 + 1)).toEqual([]);
+    });
+});
+
+describe('RESTART_REPEAT_WINDOW_MS', () => {
+    it('outlasts a channel walk attempt, so a lost answer\'s repeat lands inside it', () => {
+        // The walk that asks for a restart waits out a per-attempt timeout before its next
+        // channel asks again; the repeat is that next ask. A window shorter than the wait would
+        // let it through, and the machine would kill the process the first restart just started.
+        expect(RESTART_REPEAT_WINDOW_MS).toBeGreaterThanOrEqual(10_000);
     });
 });
