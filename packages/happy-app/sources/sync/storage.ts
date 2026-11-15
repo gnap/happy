@@ -19,6 +19,7 @@ import { channelDrivers, type ChannelState } from './channels/measure';
 import { candidateFailed as candidateFailedAt, candidateKey, candidateSucceeded, rearmAll, type CandidateHealth } from './channels/health';
 import type { ChannelDriver, ChannelLinkState, SessionReach } from './channels/types';
 import { resolveSessionReach } from './channels/resolve';
+import { KeyedStore, shallowEqual, useKeyedSelector, useKeyedValue } from './live';
 
 export { channelLinks, type ChannelLink } from './channelLinks';
 export type { ChannelLinkState } from './channels/types';
@@ -69,7 +70,7 @@ export interface OutboxEntry {
     createdAt: number;
 }
 
-interface SessionMessages {
+export interface SessionMessages {
     messages: Message[];
     /** Highest seq actually loaded into memory; 0 means unknown */
     newestSeq: number;
@@ -116,9 +117,6 @@ export type SessionListViewItem =
         online?: boolean;
     };
 
-// Legacy type for backward compatibility - to be removed
-export type SessionListItem = string | Session;
-
 /**
  * How long a LAN sighting stays valid after the scan that produced it. Long enough to ride out a
  * missed mDNS announcement (and the gap between periodic scans), short enough that a machine which
@@ -133,7 +131,6 @@ interface StorageState {
     purchases: Purchases;
     profile: Profile;
     sessions: Record<string, Session>;
-    sessionsData: SessionListItem[] | null;  // Legacy - to be removed
     sessionListViewData: SessionListViewItem[] | null;
     sessionMessages: Record<string, SessionMessages>;
     outbox: Record<string, OutboxEntry>;
@@ -272,7 +269,6 @@ interface StorageState {
     applyLanEndpoint: (machineId: string, endpoint: { baseUrls: string[]; at: number } | null) => void;
     /** Record the live LAN socket, or null once it is gone. */
     setDaemonSocketStatus: (id: string, status: DaemonConnectionState) => void;
-    applyLoaded: () => void;
     applyReady: () => void;
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => { changed: string[], hasReadyEvent: boolean };
     applyMessagesLoaded: (sessionId: string) => void;
@@ -909,6 +905,28 @@ function reduceRelayEndpoint(
     return { relayEndpoints: next };
 }
 
+/**
+ * The facts a channel can change about a session.
+ *
+ * If two answers agree on all of them, the session did not move: its presence is derived from
+ * `active`/`activeAt` alone, and every other field of the stored object is a merge of this answer
+ * with local choices that did not change either. That is the test used both to skip a whole
+ * refresh and to keep the per-session object when only one session in the batch changed.
+ */
+type WireSession = Omit<Session, 'presence'> & { presence?: "online" | number };
+
+function sameWireSession(a: WireSession, b: WireSession): boolean {
+    return a.active === b.active
+        && a.activeAt === b.activeAt
+        && a.thinking === b.thinking
+        && a.thinkingAt === b.thinkingAt
+        && a.metadataVersion === b.metadataVersion
+        && a.agentStateVersion === b.agentStateVersion
+        && a.updatedAt === b.updatedAt
+        && a.seq === b.seq
+        && (a.restartingAt ?? null) === (b.restartingAt ?? null);
+}
+
 export const storage = create<StorageState>()((set, get) => {
     let { settings, version } = loadSettings();
     let localSettings = loadLocalSettings();
@@ -947,7 +965,6 @@ export const storage = create<StorageState>()((set, get) => {
         feedHasMore: false,
         feedLoaded: false,  // Initialize as false
         friendsLoaded: false,  // Initialize as false
-        sessionsData: null,  // Legacy - to be removed
         sessionListViewData: null,
         sessionMessages: {},
         outbox: {},
@@ -1102,16 +1119,7 @@ export const storage = create<StorageState>()((set, get) => {
             // fields the merge below can change before touching MMKV, the list, or the store.
             if (!fullRefresh && sessions.every((session) => {
                 const existing = state.sessions[session.id];
-                return existing !== undefined
-                    && existing.active === session.active
-                    && existing.activeAt === session.activeAt
-                    && existing.thinking === session.thinking
-                    && existing.thinkingAt === session.thinkingAt
-                    && existing.metadataVersion === session.metadataVersion
-                    && existing.agentStateVersion === session.agentStateVersion
-                    && existing.updatedAt === session.updatedAt
-                    && existing.seq === session.seq
-                    && (existing.restartingAt ?? null) === (session.restartingAt ?? null);
+                return existing !== undefined && sameWireSession(existing, session);
             })) {
                 return state;
             }
@@ -1133,6 +1141,15 @@ export const storage = create<StorageState>()((set, get) => {
 
             // Update sessions with calculated presence using centralized resolver
             sessions.forEach(session => {
+                // One changed session used to rebuild every offered session's object, because the
+                // batch only gets here when *something* in it moved. Keeping the untouched ones
+                // is what lets a write wake the row and the chat of the session it is about, and
+                // nothing else: identity is what the per-key stores below watch.
+                const current = fullRefresh ? undefined : state.sessions[session.id];
+                if (current && sameWireSession(current, session)) {
+                    return;
+                }
+
                 // Use centralized resolver for consistent state management
                 const presence = resolveSessionOnlineState(session);
 
@@ -1216,54 +1233,11 @@ export const storage = create<StorageState>()((set, get) => {
                 };
             });
 
-            // Build active set from all sessions (including existing ones), by the same answer the
-            // rows are drawn from: this is what puts a session above the "offline" divider in the
-            // list, and the server's flag alone put one there while the LAN was serving it.
-            const drivers = channelDrivers(state, state.localSettings.channelPriority);
-            const activeSet = new Set<string>();
-            Object.values(mergedSessions).forEach(session => {
-                if (resolveSessionReach(session.id, session.metadata?.machineId, drivers).online) {
-                    activeSet.add(session.id);
-                }
-            });
-
-            // Separate active and inactive sessions
-            const activeSessions: Session[] = [];
-            const inactiveSessions: Session[] = [];
-
-            // Process all sessions from merged set
-            Object.values(mergedSessions).forEach(session => {
-                if (activeSet.has(session.id)) {
-                    activeSessions.push(session);
-                } else {
-                    inactiveSessions.push(session);
-                }
-            });
-
-            // Sort both arrays by creation date for stable ordering
-            activeSessions.sort((a, b) => b.createdAt - a.createdAt);
-            inactiveSessions.sort((a, b) => b.createdAt - a.createdAt);
-
-            // Build flat list data for FlashList
-            const listData: SessionListItem[] = [];
-
-            if (activeSessions.length > 0) {
-                listData.push('online');
-                listData.push(...activeSessions);
-            }
-
-            // Legacy sessionsData - to be removed
-            // Machines are now integrated into sessionListViewData
-
-            if (inactiveSessions.length > 0) {
-                listData.push('offline');
-                listData.push(...inactiveSessions);
-            }
-
-            // console.log(`📊 Storage: applySessions called with ${sessions.length} sessions, active: ${activeSessions.length}, inactive: ${inactiveSessions.length}`);
-
-            // Process AgentState updates for sessions that already have messages loaded
-            const updatedSessionMessages = { ...state.sessionMessages };
+            // Process AgentState updates for sessions that already have messages loaded. The map
+            // is copied only when one of them actually produces a new entry: on a plain list
+            // refresh nothing here changes, and a new outer map would wake every subscriber that
+            // compares it.
+            let updatedSessionMessages = state.sessionMessages;
 
             sessions.forEach(session => {
                 // On full refresh, old state doesn't exist; skip AgentState diff.
@@ -1332,6 +1306,9 @@ export const storage = create<StorageState>()((set, get) => {
                     const messagesArray = Object.values(mergedMessagesMap)
                         .sort((a, b) => b.createdAt - a.createdAt);
 
+                    if (updatedSessionMessages === state.sessionMessages) {
+                        updatedSessionMessages = { ...state.sessionMessages };
+                    }
                     updatedSessionMessages[session.id] = {
                         messages: messagesArray,
                         messagesMap: mergedMessagesMap,
@@ -1375,17 +1352,9 @@ export const storage = create<StorageState>()((set, get) => {
             return {
                 ...state,
                 sessions: mergedSessions,
-                sessionsData: listData,  // Legacy - to be removed
                 sessionListViewData,
                 sessionMessages: updatedSessionMessages
             };
-        }),
-        applyLoaded: () => set((state) => {
-            const result = {
-                ...state,
-                sessionsData: []
-            };
-            return result;
         }),
         applyReady: () => set((state) => ({
             ...state,
@@ -2776,34 +2745,77 @@ storage.subscribe((state) => {
     });
 });
 
-export function useSessions() {
-    return storage(useShallow((state) => state.isDataReady ? state.sessionsData : null));
+/**
+ * Per-key projections of the two hot maps.
+ *
+ * These are fed from the store above rather than owning the data yet: every writer still writes
+ * `sessions` / `sessionMessages`, and the subscription below copies what moved into the keyed
+ * stores. That keeps the migration additive — a hook moved onto these stops being evaluated, and
+ * stops rendering, for writes that touch another key — while everything still on `storage(...)`
+ * keeps seeing exactly what it saw before.
+ *
+ * Once the last React subscriber of `state.sessions` / `state.sessionMessages` has moved, the
+ * direction flips: these become the source of truth and the whole-map rebuild disappears.
+ */
+export const sessionLive = new KeyedStore<Session>();
+export const sessionMessagesLive = new KeyedStore<SessionMessages>();
+
+sessionLive.replaceAll(storage.getState().sessions);
+sessionMessagesLive.replaceAll(storage.getState().sessionMessages);
+
+let mirroredSessions = storage.getState().sessions;
+let mirroredMessages = storage.getState().sessionMessages;
+
+storage.subscribe((state) => {
+    // Identity is the signal: `applySessions` and `applyMessages` build a new map on every write,
+    // and every unchanged entry inside it keeps its object. So this walks the map but only marks
+    // the keys that actually moved.
+    if (state.sessions !== mirroredSessions) {
+        mirroredSessions = state.sessions;
+        sessionLive.replaceAll(mirroredSessions);
+    }
+    if (state.sessionMessages !== mirroredMessages) {
+        mirroredMessages = state.sessionMessages;
+        sessionMessagesLive.replaceAll(mirroredMessages);
+    }
+});
+
+/**
+ * Every session, as a flat list. Not reactive to a single session: callers pick through it to
+ * build a path list, so `useShallow` on the values means a write re-renders them only when some
+ * session object actually changed — and every caller here sorts by its own timestamp, so the
+ * order of this array is not a contract.
+ */
+export function useSessions(): Session[] {
+    return storage(useShallow((state) => Object.values(state.sessions)));
 }
 
 export function useSession(id: string): Session | null {
-    return storage(useShallow((state) => state.sessions[id] ?? null));
+    return useKeyedValue(sessionLive, id) ?? null;
 }
-
-const emptyArray: unknown[] = [];
 
 export function useOutboxEntry(localId: string | null | undefined): OutboxEntry | null {
     return storage((state) => (localId ? state.outbox[localId] ?? null : null));
 }
 
 export function useSessionMessages(sessionId: string): { messages: Message[], isLoaded: boolean, hasOlderMessages: boolean, isLoadingOlder: boolean, isFetching: boolean, oldestSeq: number, newestSeq: number, cachedBitmap: number } {
-    return storage(useShallow((state) => {
-        const session = state.sessionMessages[sessionId];
-        return {
-            messages: session?.messages ?? emptyArray as Message[],
-            isLoaded: session?.isLoaded ?? false,
-            hasOlderMessages: session?.hasOlderMessages ?? false,
-            isLoadingOlder: session?.isLoadingOlder ?? false,
-            isFetching: session?.isFetching ?? false,
-            oldestSeq: session?.oldestSeq ?? 0,
-            newestSeq: session?.newestSeq ?? 0,
-            cachedBitmap: session?.cachedBitmap ?? 0,
-        };
-    }));
+    return useKeyedSelector(sessionMessagesLive, sessionId, selectSessionMessages, shallowEqual);
+}
+
+const noMessages: Message[] = [];
+
+/** Only what the chat screen draws; most writes replace `messages` and leave the rest alone. */
+function selectSessionMessages(entry: SessionMessages | undefined) {
+    return {
+        messages: entry?.messages ?? noMessages,
+        isLoaded: entry?.isLoaded ?? false,
+        hasOlderMessages: entry?.hasOlderMessages ?? false,
+        isLoadingOlder: entry?.isLoadingOlder ?? false,
+        isFetching: entry?.isFetching ?? false,
+        oldestSeq: entry?.oldestSeq ?? 0,
+        newestSeq: entry?.newestSeq ?? 0,
+        cachedBitmap: entry?.cachedBitmap ?? 0,
+    };
 }
 
 /** Whether a session needs a desktop session, and whether one is available right now. */
@@ -2812,21 +2824,15 @@ export function useSessionDesktop(sessionId: string): { required: boolean; avail
 }
 
 export function useSessionIsFetching(sessionId: string): boolean {
-    return storage(state => state.sessionMessages[sessionId]?.isFetching ?? false);
+    return useKeyedSelector(sessionMessagesLive, sessionId, (entry) => entry?.isFetching ?? false);
 }
 
 export function useMessage(sessionId: string, messageId: string): Message | null {
-    return storage(useShallow((state) => {
-        const session = state.sessionMessages[sessionId];
-        return session?.messagesMap[messageId] ?? null;
-    }));
+    return useKeyedSelector(sessionMessagesLive, sessionId, (entry) => entry?.messagesMap[messageId] ?? null);
 }
 
 export function useSessionUsage(sessionId: string) {
-    return storage(useShallow((state) => {
-        const session = state.sessionMessages[sessionId];
-        return session?.reducerState?.latestUsage ?? null;
-    }));
+    return useKeyedSelector(sessionMessagesLive, sessionId, (entry) => entry?.reducerState?.latestUsage ?? null);
 }
 
 export function useSettings(): Settings {
