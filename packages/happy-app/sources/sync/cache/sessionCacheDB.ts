@@ -688,13 +688,16 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
      */
     private static readonly STATEMENT_DEADLINE_MS = 10_000;
     /**
-     * After two statements in a row run past their deadline, the database is written off for a
-     * while: everything rejects immediately instead of queueing behind a connection that is not
-     * answering, and the cache degrades to the hot window until the cooldown ends.
+     * How many statements in a row have run past their deadline.
+     *
+     * Nothing is refused on account of it. Writing the whole cache off for five minutes was tried,
+     * and it was worse than the problem: the statements that tripped it right after a reload were
+     * slow because the JS thread was busy — the queue's own report said `beats 0/10`, not one
+     * heartbeat in 2.5 s — while the connection had nothing wrong with it. Refusing cache work then
+     * sent every session open to the network. The count only keeps a burst of deadline rejections
+     * from filling the log.
      */
-    private static readonly CACHE_COOLDOWN_MS = 300_000;
-    private statementStalls = 0;
-    private cacheCoolingUntil = 0;
+    private deadlineStrikes = 0;
 
     private enqueue<T>(work: () => Promise<T>, urgent = false): Promise<T> {
         // A job that never finishes must not take the cache with it. But the previous answer —
@@ -710,7 +713,6 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
             );
             return Promise.reject(new Error('cache busy: a statement has been running too long'));
         }
-        const startedAt = Date.now();
         const queued = this.statements.run(async () => {
             try {
                 return await work();
@@ -734,31 +736,23 @@ class ExpoSQLiteSessionCacheDB implements ISessionCacheDB {
         // The race abandons the wait, not the statement — nothing here can cancel a native call —
         // but the caller gets an answer now, and the next statement re-tests the connection.
         let deadline: ReturnType<typeof setTimeout> | null = null;
+        let abandoned = false;
         const capped = Promise.race([
             queued.then((value) => {
-                // A second or more on a statement that is not doing much is the connection
-                // stalling, which holds the JS thread with it. Counting those lets the cache cool
-                // down long before the 10s abandonment threshold would ever fire.
-                const elapsed = Date.now() - startedAt;
-                if (elapsed > 1500) {
-                    this.statementStalls += 1;
-                    if (this.statementStalls >= 2) {
-                        this.cacheCoolingUntil = Date.now() + ExpoSQLiteSessionCacheDB.CACHE_COOLDOWN_MS;
-                        this.statementStalls = 0;
-                        log.log('📦 sessionCacheDB: statements are running seconds long; cache cooling down for 5 minutes (hot window only)');
-                    }
-                } else {
-                    this.statementStalls = 0;
+                // The statement answered inside its deadline; whatever ran before it is no longer
+                // consecutive. A statement that was abandoned still resolves later (nothing can
+                // cancel a native call), and that must not reset the count.
+                if (!abandoned) {
+                    this.deadlineStrikes = 0;
                 }
                 return value;
             }),
             new Promise<never>((_, reject) => {
                 deadline = setTimeout(() => {
-                    this.statementStalls += 1;
-                    if (this.statementStalls >= 2) {
-                        this.cacheCoolingUntil = Date.now() + ExpoSQLiteSessionCacheDB.CACHE_COOLDOWN_MS;
-                        this.statementStalls = 0;
-                        log.log('📦 sessionCacheDB: statements are not answering; cache cooling down for 5 minutes (hot window only)');
+                    abandoned = true;
+                    this.deadlineStrikes += 1;
+                    if (this.deadlineStrikes === 2) {
+                        log.log('📦 sessionCacheDB: two statements passed the 10s deadline; their callers fall back to the hot window and the channel');
                     }
                     reject(new Error('statement deadline passed'));
                 }, ExpoSQLiteSessionCacheDB.STATEMENT_DEADLINE_MS);
