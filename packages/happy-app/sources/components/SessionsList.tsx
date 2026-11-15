@@ -497,6 +497,12 @@ export function SessionsList() {
      * pathname), and each of those renders used to reconcile the whole `SectionList` subtree —
      * measured at 100–140 ms per commit. Returning the same element lets React skip that subtree
      * when the data and handlers are unchanged.
+     *
+     * The window is deliberately small. The default (21 viewports) mounted every one of the ~170
+     * items — 15k of the app's 18k fibers — so each daily list update reconciled the entire list
+     * even though a screen shows a dozen rows. These are the numbers the chat list already runs
+     * with; rows here vary in height, so there is no `getItemLayout` and the window is the only
+     * bound on how much a data commit touches.
      */
     const list = React.useMemo(() => (
         <SectionList
@@ -507,6 +513,10 @@ export function SessionsList() {
             contentContainerStyle={{ paddingBottom: safeArea.bottom + 128, maxWidth: layout.maxWidth }}
             ListHeaderComponent={HeaderComponent}
             stickySectionHeadersEnabled={true}
+            initialNumToRender={12}
+            maxToRenderPerBatch={8}
+            updateCellsBatchingPeriod={50}
+            windowSize={7}
             refreshControl={
                 <RefreshControl refreshing={isRefreshing} onRefresh={handleRefresh} />
             }
